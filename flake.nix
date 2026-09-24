@@ -74,7 +74,7 @@
             src = self;
           } ''
             cd "$src"
-            actionlint
+            actionlint .github/workflows/*.yaml
             touch "$out"
           '';
         };
