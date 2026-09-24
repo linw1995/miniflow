@@ -1,0 +1,8 @@
+[package]
+name = "miniflow"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "miniflow"
+path = "src/main.rs"

@@ -1,0 +1,100 @@
+name: CD
+
+on:
+  push:
+    branches:
+      - 'release/*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        run: rustup show active-toolchain
+      - name: Validate release version
+        shell: bash
+        env:
+          RELEASE_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "miniflow") | .version')
+          test "$RELEASE_BRANCH" = "release/$version"
+          echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
+      - name: Test and build
+        run: |
+          cargo test --locked --all-targets --all-features
+          cargo build --locked --release
+      - name: Package archive
+        shell: bash
+        env:
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          tar -C target/release -czf "dist/miniflow-${RELEASE_TAG}-${RELEASE_TARGET}.tar.gz" miniflow
+      - uses: actions/upload-artifact@v7
+        with:
+          name: miniflow-${{ matrix.target }}
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Validate release tag
+        shell: bash
+        env:
+          RELEASE_BRANCH: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          release_tag="v${RELEASE_BRANCH#release/}"
+          if git show-ref --verify --quiet "refs/tags/$release_tag"; then
+            tag_commit=$(git rev-parse "refs/tags/$release_tag^{commit}")
+            test "$tag_commit" = "$GITHUB_SHA"
+          fi
+          echo "RELEASE_TAG=$release_tag" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: miniflow-*
+          merge-multiple: true
+          path: dist
+      - name: Publish release
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          sha256sum ./*.tar.gz > SHA256SUMS
+          flags=()
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            flags+=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" ./*.tar.gz SHA256SUMS \
+            --target "$GITHUB_SHA" --generate-notes --title "$RELEASE_TAG" "${flags[@]}"
