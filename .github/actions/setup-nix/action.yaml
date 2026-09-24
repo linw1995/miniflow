@@ -1,0 +1,15 @@
+name: Setup Nix
+description: Install Nix and cache the store for flake checks.
+inputs:
+  cache-key-name:
+    description: Cache key namespace.
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - uses: nixbuild/nix-quick-install-action@v33
+    - uses: nix-community/cache-nix-action@v7
+      with:
+        primary-key: nix-store-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-name || github.job }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', 'src/**', '.github/**/*.yaml') }}
+        gc-max-store-size-linux: 8G
