@@ -2,3 +2,14 @@
 members = ["crates/mf-*", "crates/builtin-nodes/*"]
 default-members = ["crates/mf-cli"]
 resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+mf-bundle = { path = "crates/mf-bundle", version = "0.1.0" }
+mf-compiler = { path = "crates/mf-compiler", version = "0.1.0" }
+mf-runtime = { path = "crates/mf-runtime", version = "0.1.0" }
+mfn-constant = { path = "crates/builtin-nodes/constant", version = "0.1.0" }
+mfn-identity = { path = "crates/builtin-nodes/identity", version = "0.1.0" }

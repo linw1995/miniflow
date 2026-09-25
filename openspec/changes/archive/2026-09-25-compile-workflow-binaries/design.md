@@ -55,7 +55,7 @@ Domain errors across the project use SNAFU-derived error types organized by stag
 ### 5. Use crate boundaries to support artifact builds
 
 `mf-runtime` owns shared definition types, node contracts, registration, in-process Flow execution, and generated-runner helpers. `mf-compiler` owns validation and code generation. `mf-cli` owns the `mf` binary and its command handling.
-`crates/builtin-nodes` is a container directory, with one `mf-node-*` crate per built-in node. `mf-bundle` anchors those crates and verifies their kinds are visible through `inventory`. Both the compiler and generated runner depend on that bundle.
+`crates/builtin-nodes` is a container directory, with one `mfn-*` crate per built-in node. `mf-bundle` anchors those crates and verifies their kinds are visible through `inventory`. Both the compiler and generated runner depend on that bundle.
 Initially, the generated project depends on workspace path versions; crates.io or vendored offline distribution can be defined later.
 
 ## Risks / Trade-offs
