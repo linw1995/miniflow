@@ -55,6 +55,8 @@
             toolchain
             pkgs.rust-analyzer
             pkgs.actionlint
+            pkgs.cargo-nextest
+            pkgs.grcov
             pkgs.prek
           ];
         };

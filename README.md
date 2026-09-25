@@ -57,6 +57,14 @@ prek -a
 nix flake check -L
 ```
 
+To run the workspace tests under nextest and generate coverage reports locally:
+
+```sh
+nix develop --command bash scripts/run-cov.sh
+```
+
+The reports are written to `target/coverage/result/`, including `lcov.info` for Codecov.
+
 The Nix package also exposes the CLI as `./result/bin/mf` after `nix build .#miniflow`.
 
 Push a `release/<version>` branch to build native archives for Linux and macOS. The branch version must match `crates/mf-cli/Cargo.toml`. The CD workflow publishes a GitHub release tagged `v<version>` after all archives have been built.
