@@ -28,14 +28,14 @@
           sha256 = "sha256-p8h3Sl/YRByZfZTAKXdsvF6xEenXKrXSVvpphmZENH4=";
         };
         craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
-        cargoArgs = {
+        cargoArgs = (craneLib.crateNameFromCargoToml { cargoToml = ./crates/mf-cli/Cargo.toml; }) // {
           src = craneLib.cleanCargoSource self;
           strictDeps = true;
         };
         cargoArtifacts = craneLib.buildDepsOnly cargoArgs;
         miniflow = craneLib.buildPackage (cargoArgs // {
           inherit cargoArtifacts;
-          meta.mainProgram = "miniflow";
+          meta.mainProgram = "mf";
         });
       in
       {
@@ -46,7 +46,7 @@
 
         apps.default = {
           type = "app";
-          program = "${miniflow}/bin/miniflow";
+          program = "${miniflow}/bin/mf";
           meta.description = "miniflow CLI";
         };
 
@@ -55,6 +55,7 @@
             toolchain
             pkgs.rust-analyzer
             pkgs.actionlint
+            pkgs.prek
           ];
         };
 
@@ -63,11 +64,11 @@
           fmt = craneLib.cargoFmt cargoArgs;
           clippy = craneLib.cargoClippy (cargoArgs // {
             inherit cargoArtifacts;
-            cargoClippyExtraArgs = "--all-targets --all-features -- --deny warnings";
+            cargoClippyExtraArgs = "--workspace --all-targets --all-features -- --deny warnings";
           });
           test = craneLib.cargoTest (cargoArgs // {
             inherit cargoArtifacts;
-            cargoTestExtraArgs = "--all-targets --all-features";
+            cargoTestExtraArgs = "--workspace --all-targets --all-features";
           });
           workflows = pkgs.runCommand "check-workflows" {
             nativeBuildInputs = [ pkgs.actionlint ];

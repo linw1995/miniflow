@@ -37,12 +37,12 @@ jobs:
           RELEASE_BRANCH: ${{ github.ref_name }}
         run: |
           set -euo pipefail
-          version=$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "miniflow") | .version')
+          version=$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "mf-cli") | .version')
           test "$RELEASE_BRANCH" = "release/$version"
           echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
       - name: Test and build
         run: |
-          cargo test --locked --all-targets --all-features
+          cargo test --locked --workspace --all-targets --all-features
           cargo build --locked --release
       - name: Package archive
         shell: bash
@@ -51,7 +51,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          tar -C target/release -czf "dist/miniflow-${RELEASE_TAG}-${RELEASE_TARGET}.tar.gz" miniflow
+          tar -C target/release -czf "dist/miniflow-${RELEASE_TAG}-${RELEASE_TARGET}.tar.gz" mf
       - uses: actions/upload-artifact@v7
         with:
           name: miniflow-${{ matrix.target }}

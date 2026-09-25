@@ -1,0 +1,13 @@
+[package]
+name = "mf-bundle"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+mf-node-constant = { path = "../builtin-nodes/constant" }
+mf-node-identity = { path = "../builtin-nodes/identity" }
+mf-runtime = { path = "../mf-runtime" }
+
+[dev-dependencies]
+inventory = "0.3.24"
+serde_json = "1.0.151"

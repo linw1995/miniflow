@@ -11,5 +11,5 @@ runs:
     - uses: nixbuild/nix-quick-install-action@v33
     - uses: nix-community/cache-nix-action@v7
       with:
-        primary-key: nix-store-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-name || github.job }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', 'src/**', '.github/**/*.yaml') }}
+        primary-key: nix-store-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-name || github.job }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '.pre-commit-config.yaml', '.markdownlint.yaml', 'src/**', 'crates/**', '.github/**/*.yaml') }}
         gc-max-store-size-linux: 8G

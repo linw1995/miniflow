@@ -1,8 +1,4 @@
-[package]
-name = "miniflow"
-version = "0.1.0"
-edition = "2024"
-
-[[bin]]
-name = "miniflow"
-path = "src/main.rs"
+[workspace]
+members = ["crates/mf-*", "crates/builtin-nodes/*"]
+default-members = ["crates/mf-cli"]
+resolver = "3"

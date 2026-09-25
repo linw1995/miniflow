@@ -1,0 +1,42 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-merge-conflict
+      - id: check-case-conflict
+
+  - repo: https://github.com/doublify/pre-commit-rust
+    rev: v1.0
+    hooks:
+      - id: fmt
+        args: ["--all", "--verbose", "--"]
+      - id: clippy
+        args: ["--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"]
+      - id: cargo-check
+        args: ["--workspace", "--all-targets", "--all-features"]
+
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.18.1
+    hooks:
+      - id: markdownlint-cli2
+
+  - repo: local
+    hooks:
+      - id: rust-analyzer
+        name: rust-analyzer
+        entry: rust-analyzer diagnostics .
+        language: system
+        pass_filenames: false
+        files: '(^|/)(Cargo\.toml|Cargo\.lock|src/.*\.rs|tests/.*\.rs)$'
+      - id: actionlint
+        name: actionlint
+        entry: actionlint
+        language: system
+        files: '^\.github/workflows/.*\.ya?ml$'
+
+default_stages: [pre-commit]
+fail_fast: false
