@@ -74,12 +74,6 @@ nix develop --command bash scripts/run-cov.sh
 
 The reports are written to `target/coverage/result/`, including `lcov.info` for Codecov.
 
-Workspace crates share their version in the root `Cargo.toml`. Internal dependencies
-declare both a local path and a registry version there, so Cargo can package the
-workspace for crates.io. With Cargo 1.90 or newer, `cargo publish --workspace`
-publishes the crates in dependency order. Run `cargo publish --workspace --dry-run`
-to check the packages before a release.
-
 The Nix package also exposes the CLI as `./result/bin/mf` after `nix build .#miniflow`.
 
-Push a `release/<version>` branch to build native archives for Linux and macOS. The branch version must match `crates/mf-cli/Cargo.toml`. The CD workflow publishes a GitHub release tagged `v<version>` after all archives have been built.
+Push a `release/<version>` branch to build native archives for Linux and macOS. The branch version must match the workspace version in `Cargo.toml`. The CD workflow publishes a GitHub release tagged `v<version>` after all archives have been built.
