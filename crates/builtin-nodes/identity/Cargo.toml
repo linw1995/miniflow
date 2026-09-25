@@ -1,0 +1,9 @@
+[package]
+name = "mf-node-identity"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+inventory = "0.3.24"
+mf-runtime = { path = "../../mf-runtime" }
+serde_json = "1.0.151"

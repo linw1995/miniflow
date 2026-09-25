@@ -1,0 +1,31 @@
+{
+  "version": "2026-09-24",
+  "nodes": [
+    {
+      "id": "answer",
+      "kind": "builtin.constant",
+      "config": { "value": 42 }
+    },
+    {
+      "id": "message",
+      "kind": "builtin.constant",
+      "config": { "value": "hello" }
+    },
+    {
+      "id": "echo",
+      "kind": "builtin.identity"
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "message",
+      "from_output": "value",
+      "to_node": "echo",
+      "to_input": "input"
+    }
+  ],
+  "outputs": [
+    { "name": "answer", "node": "answer", "port": "value" },
+    { "name": "greeting", "node": "echo", "port": "value" }
+  ]
+}

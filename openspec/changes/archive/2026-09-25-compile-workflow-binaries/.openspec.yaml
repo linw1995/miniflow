@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-24
+goal: Define a reliable path from plugin registration and workflow definition
+  through validation, code generation, and native executable packaging.
