@@ -26,6 +26,11 @@ repos:
 
   - repo: local
     hooks:
+      - id: semantic-commit-message
+        name: semantic commit message
+        entry: python3 scripts/check_semantic_title.py
+        language: system
+        stages: [commit-msg]
       - id: rust-analyzer
         name: rust-analyzer
         entry: rust-analyzer diagnostics .
@@ -39,4 +44,5 @@ repos:
         files: '^\.github/workflows/.*\.ya?ml$'
 
 default_stages: [pre-commit]
+default_install_hook_types: [pre-commit, commit-msg]
 fail_fast: false

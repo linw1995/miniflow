@@ -58,6 +58,14 @@ prek -a
 nix flake check -L
 ```
 
+Commit messages and PR titles use the Conventional Commits header format:
+`<type>(<scope>)[!]: <description>`. Supported types are `build`, `chore`,
+`ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, and `test`.
+The required scope must be one of `cli`, `runtime`, `compiler`, `bundle`,
+`nodes`, `ci`, or `docs`. For example, `feat(compiler): validate graph inputs`
+and `fix(runtime)!: reject incompatible workflows` are valid. `prek install`
+installs both the pre-commit and commit-msg hooks.
+
 To run the workspace tests under nextest and generate coverage reports locally:
 
 ```sh

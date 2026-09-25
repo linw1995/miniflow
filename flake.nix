@@ -58,6 +58,7 @@
             pkgs.cargo-nextest
             pkgs.grcov
             pkgs.prek
+            pkgs.python3
           ];
         };
 
