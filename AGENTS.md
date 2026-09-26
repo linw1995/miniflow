@@ -12,6 +12,7 @@
 - Use `<type>(<scope>)[!]: <description>` for commit messages and PR titles.
 - Allowed types: `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, `test`.
 - Allowed scopes: `cli`, `runtime`, `compiler`, `bundle`, `nodes`, `ci`, `docs`.
+- Use `.github/pull_request_template.md` for every pull request and complete its AI Disclosure section.
 
 ## Releases
 
