@@ -1,8 +1,10 @@
+use crate::Node;
 use crate::definition::{DefinitionId, EdgeDefinition, WorkflowOutputDefinition};
-use crate::{Inputs, Node, Outputs};
+#[cfg(test)]
+use crate::{Inputs, Outputs};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::{ResultExt, Snafu};
+use snafu::Snafu;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A compact runtime node index into a `Flow`'s node vector.
@@ -139,6 +141,8 @@ pub enum FlowBuildError {
     },
     #[snafu(display("node definition ID `{definition_id}` is used more than once"))]
     DuplicateDefinitionId { definition_id: DefinitionId },
+    #[snafu(display("invalid control connection: {message}"))]
+    InvalidControlConnection { message: String },
     #[snafu(display("workflow output name `{name}` is selected more than once"))]
     DuplicateOutputName { name: String },
     #[snafu(display("workflow output `{name}` references unknown node `{definition_id}`"))]
@@ -151,6 +155,8 @@ pub enum FlowBuildError {
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum FlowExecutionError {
+    #[snafu(display("{source}"))]
+    WorkflowRun { source: crate::WorkflowRunError },
     #[snafu(display(
         "node `{target_definition_id}` input `{target_input}` depends on missing output `{source_output}` from node `{source_definition_id}`"
     ))]
@@ -181,6 +187,7 @@ pub struct Flow {
     incoming_connections: BTreeMap<NodeId, Vec<usize>>,
     execution_order: Vec<NodeId>,
     outputs: Vec<FlowOutput>,
+    controls: Vec<crate::ControlEdgeDefinition>,
 }
 
 impl Flow {
@@ -300,7 +307,40 @@ impl Flow {
             incoming_connections,
             execution_order: resolved_order,
             outputs: resolved_outputs,
+            controls: Vec::new(),
         })
+    }
+
+    pub fn with_control_edges(
+        mut self,
+        controls: Vec<crate::ControlEdgeDefinition>,
+    ) -> Result<Self, FlowBuildError> {
+        let positions: BTreeMap<_, _> = self
+            .execution_order
+            .iter()
+            .enumerate()
+            .map(|(position, id)| (self.nodes[id.index()].definition_id.clone(), position))
+            .collect();
+        let mut unique = BTreeSet::new();
+        for edge in &controls {
+            let invalid = || FlowBuildError::InvalidControlConnection {
+                message: format!(
+                    "`{}`.`{}` -> `{}` must have valid endpoints, precede its target, and be unique",
+                    edge.from_node, edge.from_output, edge.to_node
+                ),
+            };
+            let Some(from) = positions.get(&edge.from_node) else {
+                return Err(invalid());
+            };
+            let Some(to) = positions.get(&edge.to_node) else {
+                return Err(invalid());
+            };
+            if from >= to || !unique.insert(edge) {
+                return Err(invalid());
+            }
+        }
+        self.controls = controls;
+        Ok(self)
     }
 
     pub fn node(&self, id: &NodeId) -> Option<&dyn Node> {
@@ -326,34 +366,60 @@ impl Flow {
     }
 
     pub fn execute(&self) -> Result<FlowOutputs, FlowExecutionError> {
-        let mut outputs_by_node = BTreeMap::new();
+        let convert = |source| match source {
+            crate::WorkflowRunError::NodeExecution {
+                definition_id,
+                source,
+            } => FlowExecutionError::NodeExecution {
+                definition_id,
+                source,
+            },
+            source => FlowExecutionError::WorkflowRun { source },
+        };
+        let mut state = crate::ExecutionState::new();
+        for node in &self.nodes {
+            state.register(node).map_err(&convert)?;
+        }
         for node_id in &self.execution_order {
             let node = &self.nodes[node_id.index()];
-            let inputs = self.inputs_for(*node_id, &outputs_by_node)?;
-            let outputs = node.node.execute(inputs).context(NodeExecutionSnafu {
-                definition_id: node.definition_id.clone(),
-            })?;
-            outputs_by_node.insert(*node_id, outputs);
+            let mut dependencies = Vec::new();
+            if let Some(incoming) = self.incoming_connections.get(node_id) {
+                for index in incoming {
+                    let connection = &self.connections[*index];
+                    dependencies.push(crate::ExecutionDependency {
+                        input: Some(&connection.to_input),
+                        source_node: self.nodes[connection.from_node.index()]
+                            .definition_id
+                            .as_str(),
+                        source_output: &connection.from_output,
+                    });
+                }
+            }
+            for edge in self
+                .controls
+                .iter()
+                .filter(|edge| edge.to_node == node.definition_id)
+            {
+                dependencies.push(crate::ExecutionDependency {
+                    input: None,
+                    source_node: edge.from_node.as_str(),
+                    source_output: &edge.from_output,
+                });
+            }
+            crate::execute_node_in_context(node, &dependencies, &mut state).map_err(&convert)?;
         }
-
         let mut workflow_outputs = FlowOutputs::new();
         for output in &self.outputs {
-            let node = &self.nodes[output.node_id.index()];
-            let value = outputs_by_node
-                .get(&output.node_id)
-                .and_then(|node_outputs| node_outputs.get(&output.port))
-                .ok_or_else(|| FlowExecutionError::MissingWorkflowOutput {
-                    name: output.name.clone(),
-                    definition_id: node.definition_id.clone(),
-                    port: output.port.clone(),
-                })?;
-
-            workflow_outputs.insert(output.name.clone(), value.clone());
+            let id = self.nodes[output.node_id.index()].definition_id.as_str();
+            workflow_outputs.insert(
+                output.name.clone(),
+                crate::required_context_output(&state, id, &output.port).map_err(&convert)?,
+            );
         }
-
         Ok(workflow_outputs)
     }
 
+    #[cfg(test)]
     fn inputs_for(
         &self,
         node_id: NodeId,

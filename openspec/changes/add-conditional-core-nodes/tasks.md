@@ -16,11 +16,11 @@
 
 ## 3. Implement execution context and conditional states
 
-- [ ] 3.1 Add a fresh per-run context with flat qualified output IDs, declared read-only views, and atomic publication; verify single runtime prefixing, same-name outputs from different nodes, branch activation/skip identities, transitive reads, pending/missing/null states, and run isolation.
-- [ ] 3.2 Add the default context-aware execution adapter and disjoint produced/skipped result; verify old nodes execute once, context-free router calls fail clearly, and invalid skip markers, overlaps, and plugin errors remain failures.
-- [ ] 3.3 Implement shared data/control dependency resolution and skip propagation with canonical order and missing-output precedence; verify produced false/null controls activate, optional inputs, mixed states, fan-out, nested skips, independent nodes, and ordinary joins.
-- [ ] 3.4 Integrate shared helpers and context publication into `Flow::execute` and generated direct orchestration; verify actual binaries match in-memory values, errors, traces, and context visibility without interpreting a graph at runtime.
-- [ ] 3.5 Document qualified output IDs, local plugin names, collision rules, context lifetime, reference declarations, and factory constraints; verify a third-party fixture reads qualified context outputs and reports skips without compiler kind-name handling.
+- [x] 3.1 Add a fresh per-run context with flat qualified output IDs, declared read-only views, and atomic publication; verify single runtime prefixing, same-name outputs from different nodes, branch activation/skip identities, transitive reads, pending/missing/null states, and run isolation.
+- [x] 3.2 Add the default context-aware execution adapter and disjoint produced/skipped result; verify old nodes execute once, context-free router calls fail clearly, and invalid skip markers, overlaps, and plugin errors remain failures.
+- [x] 3.3 Implement shared data/control dependency resolution and skip propagation with canonical order and missing-output precedence; verify produced false/null controls activate, optional inputs, mixed states, fan-out, nested skips, independent nodes, and ordinary joins.
+- [x] 3.4 Integrate shared helpers and context publication into `Flow::execute` and generated direct orchestration; verify actual binaries match in-memory values, errors, traces, and context visibility without interpreting a graph at runtime.
+- [x] 3.5 Document qualified output IDs, local plugin names, collision rules, context lifetime, reference declarations, and factory constraints; verify a third-party fixture reads qualified context outputs and reports skips without compiler kind-name handling.
 
 ## 4. Add optional workflow output selections
 

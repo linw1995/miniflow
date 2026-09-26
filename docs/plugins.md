@@ -29,3 +29,9 @@ See the [contribution guide](../CONTRIBUTING.md) for local checks and [dependenc
 Nodes with configurable ports can override `Node::ports()` with owned `NodePorts`; this replaces both static port lists for that instance. Ordinary registrations remain unchanged. Names must be nonempty and unique within each direction. Metadata must depend only on configuration.
 
 Declare context reads with `Node::context_references()`. Each `ContextReference` contains a qualified output ID and a diagnostic label, such as a branch ID. Validation resolves exact `${node_id}.${output_name}` keys and requires the producer to be a strict ancestor through explicit dependencies. References do not add edges. Ambiguous qualified IDs are rejected with both source pairs.
+
+## Context-aware execution
+
+Override `Node::execute_with_context` to read declared outputs through `ctx.output("source.value")` and return `NodeResult`. The default adapter calls ordinary `execute` once. `ContextValue` distinguishes a produced JSON value from `Skipped`; pending, unknown, undeclared, and unexpectedly missing reads are errors. The runtime publishes results only after successful execution and starts with fresh context for each run.
+
+Keep output names local in node results. Runtime publication qualifies them with the instance ID. Explicit skipped names must be declared non-required outputs and cannot also be produced. A scheduler-skipped node propagates skipping through every output, including required ones. Context references alone never activate or skip a node.

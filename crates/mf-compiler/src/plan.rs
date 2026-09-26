@@ -102,59 +102,43 @@ impl CompiledWorkflow {
             }
         }
 
-        let mut node_statements: Vec<TokenStream> = Vec::with_capacity(self.execution_order.len());
+        let mut preparations: Vec<TokenStream> = Vec::new();
+        let mut node_statements: Vec<TokenStream> = Vec::new();
         for (index, definition_id) in self.execution_order.iter().enumerate() {
             let node = nodes_by_id[definition_id];
             let config_json = serde_json::to_string(&node.config).context(SerializeSnafu)?;
             let config_lit = LitStr::new(&config_json, Span::call_site());
-
             let node_ident = format_ident!("node_{index}");
-            let inputs_ident = format_ident!("inputs_{index}");
-            let outputs_ident = format_ident!("_outputs_{index}");
-            let definition_id_lit = LitStr::new(node.id.as_str(), Span::call_site());
+            let id_lit = LitStr::new(node.id.as_str(), Span::call_site());
             let kind_lit = LitStr::new(&node.kind, Span::call_site());
-
-            let incoming: Vec<_> = self
+            preparations.push(quote! {
+                let #node_ident = mf_runtime::instantiate_node_with_metadata(registry, #id_lit, #kind_lit, #config_lit)?;
+                state.register(&#node_ident)?;
+            });
+            let mut bindings: Vec<TokenStream> = Vec::new();
+            for edge in self
                 .definition
                 .edges
                 .iter()
                 .filter(|edge| edge.to_node == *definition_id)
-                .collect();
-            let inputs_binding = if incoming.is_empty() {
-                quote! { let #inputs_ident = mf_runtime::Inputs::new(); }
-            } else {
-                quote! { let mut #inputs_ident = mf_runtime::Inputs::new(); }
-            };
-            let input_statements: Vec<TokenStream> = incoming
-                .into_iter()
-                .map(|edge| {
-                    let source_index = indices[&edge.from_node];
-                    let source_outputs = format_ident!("_outputs_{source_index}");
-                    let input_name = LitStr::new(&edge.to_input, Span::call_site());
-                    let source_id = LitStr::new(edge.from_node.as_str(), Span::call_site());
-                    let source_port = LitStr::new(&edge.from_output, Span::call_site());
-                    quote! {
-                        #inputs_ident.insert(
-                            #input_name.to_owned(),
-                            mf_runtime::required_output(&#source_outputs, #source_id, #source_port)?,
-                        );
-                    }
-                })
-                .collect();
+            {
+                let source = LitStr::new(edge.from_node.as_str(), Span::call_site());
+                let port = LitStr::new(&edge.from_output, Span::call_site());
+                let input = LitStr::new(&edge.to_input, Span::call_site());
+                bindings.push(quote! { mf_runtime::ExecutionDependency { input: Some(#input), source_node: #source, source_output: #port } });
+            }
+            for edge in self
+                .definition
+                .control_edges
+                .iter()
+                .filter(|edge| edge.to_node == *definition_id)
+            {
+                let source = LitStr::new(edge.from_node.as_str(), Span::call_site());
+                let port = LitStr::new(&edge.from_output, Span::call_site());
+                bindings.push(quote! { mf_runtime::ExecutionDependency { input: None, source_node: #source, source_output: #port } });
+            }
             node_statements.push(quote! {
-                let #node_ident = mf_runtime::instantiate_node(
-                    registry,
-                    #definition_id_lit,
-                    #kind_lit,
-                    #config_lit,
-                )?;
-                #inputs_binding
-                #(#input_statements)*
-                let #outputs_ident = mf_runtime::execute_node(
-                    #node_ident.as_ref(),
-                    #inputs_ident,
-                    #definition_id_lit,
-                )?;
+                mf_runtime::execute_node_in_context(&#node_ident, &[#(#bindings),*], &mut state)?;
             });
         }
 
@@ -178,14 +162,14 @@ impl CompiledWorkflow {
                 }
                 .fail();
             };
-            let node_outputs = format_ident!("_outputs_{node_index}");
+            let _ = node_index;
             let output_name = LitStr::new(&output.name, Span::call_site());
             let node_id = LitStr::new(output.node.as_str(), Span::call_site());
             let port = LitStr::new(&output.port, Span::call_site());
             output_statements.push(quote! {
                 workflow_outputs.insert(
                     #output_name.to_owned(),
-                    mf_runtime::required_output(&#node_outputs, #node_id, #port)?,
+                    mf_runtime::required_context_output(&state, #node_id, #port)?,
                 );
             });
         }
@@ -194,6 +178,8 @@ impl CompiledWorkflow {
             pub fn run_workflow(
                 registry: &mf_runtime::NodeRegistry,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
+                let mut state = mf_runtime::ExecutionState::new();
+                #(#preparations)*
                 #(#node_statements)*
                 #outputs_binding
                 #(#output_statements)*

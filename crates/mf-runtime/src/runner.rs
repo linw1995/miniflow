@@ -6,6 +6,11 @@ use snafu::{ResultExt, Snafu};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum WorkflowRunError {
+    #[snafu(display("node `{definition_id}`: {message}"))]
+    Context {
+        definition_id: DefinitionId,
+        message: String,
+    },
     #[snafu(display("node `{definition_id}` references unavailable kind `{kind}`"))]
     UnknownKind {
         definition_id: DefinitionId,
@@ -31,6 +36,17 @@ pub enum WorkflowRunError {
         definition_id: DefinitionId,
         port: String,
     },
+}
+
+pub fn instantiate_node_with_metadata(
+    registry: &NodeRegistry,
+    definition_id: &str,
+    kind: &str,
+    config_json: &str,
+) -> Result<crate::FlowNode, WorkflowRunError> {
+    let node = instantiate_node(registry, definition_id, kind, config_json)?;
+    let ports = registry.get(kind).unwrap().effective_ports(node.as_ref());
+    Ok(crate::FlowNode::new(definition_id, node).with_ports(ports))
 }
 
 pub fn instantiate_node(

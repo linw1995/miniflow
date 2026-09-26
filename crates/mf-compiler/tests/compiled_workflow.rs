@@ -102,7 +102,7 @@ fn generated_plan_round_trips_and_preserves_definition_semantics() {
     assert!(
         generated
             .rust_source
-            .contains("mf_runtime::required_output")
+            .contains("mf_runtime::required_context_output")
     );
     assert!(!generated.rust_source.contains("Flow::new"));
     assert!(!generated.rust_source.contains("WORKFLOW_PLAN_JSON"));

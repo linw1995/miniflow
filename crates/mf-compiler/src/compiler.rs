@@ -499,6 +499,7 @@ pub fn compile_definition(
         execution_order.clone(),
         definition.outputs.clone(),
     )
+    .and_then(|flow| flow.with_control_edges(definition.control_edges.clone()))
     .context(FlowConstructionSnafu)?;
 
     normalize_plan(definition, execution_order)
@@ -573,6 +574,7 @@ pub fn instantiate_compiled(
         plan.execution_order.clone(),
         plan.definition.outputs.clone(),
     )
+    .and_then(|flow| flow.with_control_edges(plan.definition.control_edges.clone()))
     .context(FlowConstructionSnafu)
 }
 

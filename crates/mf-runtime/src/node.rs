@@ -137,6 +137,14 @@ where
 pub trait Node: Send + Sync {
     fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError>;
 
+    fn execute_with_context(
+        &self,
+        inputs: Inputs,
+        _ctx: &crate::ExecutionContext<'_>,
+    ) -> Result<crate::NodeResult, NodeExecutionError> {
+        self.execute(inputs).map(Into::into)
+    }
+
     fn ports(&self) -> Option<NodePorts> {
         None
     }
