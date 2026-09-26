@@ -165,7 +165,7 @@ fn compiled_branches_match_memory_and_rebuild_when_precedence_changes() {
             "{}",
             String::from_utf8_lossy(&build.stderr)
         );
-        let executable = project.join("target/debug/mf-generated-workflow");
+        let executable = common::runner_executable(&project, "debug");
         let validation = Command::new(&executable)
             .arg("--validate")
             .output()

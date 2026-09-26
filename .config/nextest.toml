@@ -1,3 +1,55 @@
+nextest-version = { required = "0.9.133" }
+experimental = ["setup-scripts"]
+
+[test-groups.shared-cargo]
+max-threads = 1
+
+[scripts.setup.build-cache]
+command = ["python3", "scripts/nextest-build-cache.py"]
+capture-stdout = true
+capture-stderr = true
+
+[[profile.default.scripts]]
+platform = 'cfg(unix)'
+# Keep this selection identical to the shared-cargo override below.
+filter = '''
+(binary_id(=mf-cli::compile) & (
+    test(=compiled_binary_replaces_target_and_runs_without_the_definition) |
+    test(=failed_validation_preserves_prior_lock_and_executable) |
+    test(=install_failure_reports_persisted_lock_and_preserves_existing_directory) |
+    test(=invalid_input_port_reports_both_edge_endpoints) |
+    test(=invalid_output_port_reports_both_edge_endpoints) |
+    test(=repairs_partial_projects_and_updates_configuration) |
+    test(=unknown_plugin_reports_node_and_kind)
+)) |
+(binary_id(=mf-compiler::runner_validation) &
+    test(=one_runner_validates_without_execution_and_reports_plugin_errors)) |
+(binary_id(=mf-compiler::if_else) &
+    test(=compiled_branches_match_memory_and_rebuild_when_precedence_changes))
+'''
+setup = "build-cache"
+
+[[profile.default.overrides]]
+platform = 'cfg(unix)'
+# Keep cold rebuilds, cache invalidation, and packaged acceptance isolated.
+filter = '''
+(binary_id(=mf-cli::compile) & (
+    test(=compiled_binary_replaces_target_and_runs_without_the_definition) |
+    test(=failed_validation_preserves_prior_lock_and_executable) |
+    test(=install_failure_reports_persisted_lock_and_preserves_existing_directory) |
+    test(=invalid_input_port_reports_both_edge_endpoints) |
+    test(=invalid_output_port_reports_both_edge_endpoints) |
+    test(=repairs_partial_projects_and_updates_configuration) |
+    test(=unknown_plugin_reports_node_and_kind)
+)) |
+(binary_id(=mf-compiler::runner_validation) &
+    test(=one_runner_validates_without_execution_and_reports_plugin_errors)) |
+(binary_id(=mf-compiler::if_else) &
+    test(=compiled_branches_match_memory_and_rebuild_when_precedence_changes))
+'''
+# Protect the shared runner until validation, installation, and execution finish.
+test-group = "shared-cargo"
+
 [[profile.default.overrides]]
 filter = 'test(=packaged_cli_acceptance)'
 # The acceptance test performs several Cargo builds in isolated directories.
