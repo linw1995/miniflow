@@ -50,4 +50,4 @@
 - [x] 7.2 Remove obsolete runner helpers, the flow error wrapper, optional execution metadata, and duplicate port descriptors; verify the common behavior suite after each change.
 - [x] 7.3 Replace runtime registration, reverse indexing, and read whitelists with a flat completed-output context; retain compiler ordering checks and workflow error behavior.
 - [x] 7.4 Merge overlapping generated-binary tests and remove tests coupled only to deleted low-level APIs; verify retained fault detection through a controlled code-generation mutation.
-- [x] 7.5 Run full workspace and Nix checks and record the final experiment evidence.
+- [x] 7.5 Run full workspace and Nix checks.

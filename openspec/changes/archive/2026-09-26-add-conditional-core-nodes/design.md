@@ -4,7 +4,7 @@
 
 Flows compile into direct Rust calls in deterministic topological order. Ordinary nodes receive named JSON inputs and return named JSON outputs. Configuration-dependent branches need dynamic ports, explicit skip propagation, and access to earlier outputs independently of incoming activation edges.
 
-The ablation results in [review.md](review.md) replace the earlier compatibility and runtime registration design. Configuration and graph invariants belong to compilation; the execution context stores completed values and explicit skips.
+Configuration and graph invariants belong to compilation; the execution context stores completed values and explicit skips.
 
 ## Goals / Non-Goals
 
@@ -96,7 +96,7 @@ Validate every predicate's syntax and reference during compilation, including un
 
 JSON Pointer supports root, nested fields, array indices, and escaped keys. Distinguish present null, absent fields, and skipped outputs. Existence checks can inspect absent fields or explicit skips; missing context entries always fail. Other reached comparisons require an available scalar of the appropriate type. Diagnostics include consumer, branch, qualified source, path, and operator.
 
-Retain decimal normalization for numeric comparisons. Converting all values to `f64` loses adjacent 64-bit integers; the ablation reproduces that failure. Numeric forms such as `1` and `1.0` compare equal without changing the parser's precision limits.
+Retain decimal normalization for numeric comparisons. Converting all values to `f64` loses distinctions between adjacent 64-bit integers. Numeric forms such as `1` and `1.0` compare equal without changing the parser's precision limits.
 
 ### 6. Keep selected results explicit
 
@@ -112,4 +112,4 @@ Rust callers constructing `FlowNode` directly must now supply resolved ports. Dy
 
 ## Validation
 
-Retain separate compiler validation, runtime behavior, numeric boundary, and packaged CLI tests. One generated-binary matrix covers third-party skips, null, all branches, execution traces, validation without execution, and precedence edits. The duplicated binary harness and tests tied solely to removed registration/compatibility APIs are deleted. Fault injection confirms that the retained matrix detects omitted control edges.
+Retain separate compiler validation, runtime behavior, numeric boundary, and packaged CLI tests. One generated-binary matrix covers third-party skips, null, all branches, execution traces, validation without execution, and precedence edits.
