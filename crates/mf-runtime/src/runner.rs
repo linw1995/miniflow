@@ -4,7 +4,6 @@ use serde_json::Value;
 use snafu::{ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
 pub enum WorkflowRunError {
     #[snafu(display("node `{definition_id}`: {message}"))]
     Context {

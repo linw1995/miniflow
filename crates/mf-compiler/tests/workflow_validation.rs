@@ -1,4 +1,4 @@
-use mf_compiler::definition::WorkflowDefinition;
+use mf_compiler::WorkflowDefinition;
 use mf_compiler::{
     Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry, Outputs,
     PortSpec, ValueType, WorkflowCompileError, validate_definition,

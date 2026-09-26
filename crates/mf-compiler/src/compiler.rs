@@ -1,7 +1,7 @@
-use crate::definition::{DefinitionId, WorkflowDefinition};
 use crate::{
     CompiledWorkflow, Flow, FlowBuildError, FlowNode, NodeBuildError, NodeRegistry, ValueType,
 };
+use crate::{DefinitionId, WorkflowDefinition};
 use snafu::{ResultExt, Snafu};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -28,7 +28,6 @@ impl fmt::Display for CyclePath {
 }
 
 #[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
 pub enum WorkflowCompileError {
     #[snafu(display("node at position {position} has a blank definition ID"))]
     InvalidNodeId { position: usize },

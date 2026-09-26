@@ -1,4 +1,4 @@
-use crate::definition::{DefinitionId, WorkflowDefinition};
+use crate::{DefinitionId, WorkflowDefinition};
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,6 @@ pub struct GeneratedWorkflowArtifacts {
 }
 
 #[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
 pub enum PlanError {
     #[snafu(display("could not serialize compiled workflow: {source}"))]
     Serialize { source: serde_json::Error },
