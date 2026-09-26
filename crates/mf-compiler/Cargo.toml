@@ -1,11 +1,11 @@
 [package]
 name = "mf-compiler"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-mf-bundle = { path = "../mf-bundle" }
-mf-runtime = { path = "../mf-runtime" }
+mf-bundle.workspace = true
+mf-runtime.workspace = true
 prettyplease = "0.3.0"
 proc-macro2 = "1.0.107"
 quote = "1.0.47"

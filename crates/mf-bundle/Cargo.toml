@@ -1,12 +1,12 @@
 [package]
 name = "mf-bundle"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
-mf-node-constant = { path = "../builtin-nodes/constant" }
-mf-node-identity = { path = "../builtin-nodes/identity" }
-mf-runtime = { path = "../mf-runtime" }
+mfn-constant.workspace = true
+mfn-identity.workspace = true
+mf-runtime.workspace = true
 
 [dev-dependencies]
 inventory = "0.3.24"

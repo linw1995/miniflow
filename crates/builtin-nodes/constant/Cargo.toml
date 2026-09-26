@@ -1,10 +1,10 @@
 [package]
-name = "mf-node-constant"
-version = "0.1.0"
-edition = "2024"
+name = "mfn-constant"
+version.workspace = true
+edition.workspace = true
 
 [dependencies]
 inventory = "0.3.24"
-mf-runtime = { path = "../../mf-runtime" }
+mf-runtime.workspace = true
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"

@@ -1,7 +1,7 @@
 use mf_runtime::{NodeRegistry, NodeRegistryError};
 
 pub fn registered_kinds() -> Vec<&'static str> {
-    vec![mf_node_constant::kind(), mf_node_identity::kind()]
+    vec![mfn_constant::kind(), mfn_identity::kind()]
 }
 
 pub fn registry() -> Result<NodeRegistry, NodeRegistryError> {

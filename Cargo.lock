@@ -34,9 +34,9 @@ name = "mf-bundle"
 version = "0.1.0"
 dependencies = [
  "inventory",
- "mf-node-constant",
- "mf-node-identity",
  "mf-runtime",
+ "mfn-constant",
+ "mfn-identity",
  "serde_json",
 ]
 
@@ -66,25 +66,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mf-node-constant"
-version = "0.1.0"
-dependencies = [
- "inventory",
- "mf-runtime",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "mf-node-identity"
-version = "0.1.0"
-dependencies = [
- "inventory",
- "mf-runtime",
- "serde_json",
-]
-
-[[package]]
 name = "mf-runtime"
 version = "0.1.0"
 dependencies = [
@@ -92,6 +73,25 @@ dependencies = [
  "serde",
  "serde_json",
  "snafu",
+]
+
+[[package]]
+name = "mfn-constant"
+version = "0.1.0"
+dependencies = [
+ "inventory",
+ "mf-runtime",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mfn-identity"
+version = "0.1.0"
+dependencies = [
+ "inventory",
+ "mf-runtime",
+ "serde_json",
 ]
 
 [[package]]

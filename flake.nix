@@ -28,7 +28,9 @@
           sha256 = "sha256-p8h3Sl/YRByZfZTAKXdsvF6xEenXKrXSVvpphmZENH4=";
         };
         craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
-        cargoArgs = (craneLib.crateNameFromCargoToml { cargoToml = ./crates/mf-cli/Cargo.toml; }) // {
+        cargoArgs = {
+          pname = (builtins.fromTOML (builtins.readFile ./crates/mf-cli/Cargo.toml)).package.name;
+          version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
           src = craneLib.cleanCargoSource self;
           strictDeps = true;
         };
