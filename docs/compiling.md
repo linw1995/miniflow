@@ -59,6 +59,10 @@ mf compile flow.json --output ./flow --build-dir /tmp/order-build --locked
 
 The CLI reports whether it created or reused the directory. It retains the generated Cargo project and `target` artifacts after success and failure. Identical generated files keep their modification times. Cargo decides which artifacts remain fresh; each invocation still runs validation before installation. Graph, configuration, dependency, feature, local source, and compiler changes are checked on every build.
 
-An explicit directory must be absent, empty, or owned by the same Flow and compatible CLI/layout version. Concurrent use reports a retry diagnostic. Definitions, dependency locks, and final output paths cannot be inside the managed directory. Do not edit generated files as project inputs; the next build resynchronizes them from the Flow.
+An explicit directory must be absent, empty, or owned by the same Flow and compatible CLI/layout version. Concurrent use
+reports a retry diagnostic. Definitions, dependency locks, and final output paths cannot be inside the managed
+directory. Generated `src` and `target` directories must not be symbolic links. Cached generated files and working locks
+are materialized independently of symbolic links or Unix hard links before reuse. Do not edit generated files as project
+inputs; the next build resynchronizes them from the Flow.
 
 Retained directories contain embedded configuration and diagnostics and are created with user-private permissions. To reclaim space, delete an inactive build directory using its reported path; never remove a directory while a build is running. A later invocation recreates it from the definition and lock. Automatic eviction and sharing compiled targets across different Flows are not provided.

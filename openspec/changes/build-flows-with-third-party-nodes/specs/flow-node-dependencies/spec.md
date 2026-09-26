@@ -131,3 +131,8 @@ The system SHALL prevent concurrent builds sharing a dependency lock from overwr
 
 - **WHEN** the derived dependency lock path aliases the definition itself
 - **THEN** compilation fails before lock persistence and leaves the definition unchanged
+
+#### Scenario: Isolate cached working lock aliases
+
+- **WHEN** the cached working lock is a symbolic link or Unix hard link to the authoritative Flow lock
+- **THEN** compilation materializes an independent working file before dependency resolution so a failed attempt cannot mutate the authoritative lock through that alias

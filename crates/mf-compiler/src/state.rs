@@ -21,6 +21,22 @@ pub struct BuildGuard {
 }
 impl BuildGuard {
     pub fn acquire(path: &Path) -> Result<Self, StateError> {
+        match fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(StateError::Lock {
+                    path: path.to_owned(),
+                    message: "lock guard must not be a symbolic link".into(),
+                });
+            }
+            Ok(_) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(StateError::Io {
+                    path: path.to_owned(),
+                    source,
+                });
+            }
+        }
         let mut options = OpenOptions::new();
         options.read(true).write(true).create(true).truncate(false);
         #[cfg(unix)]
@@ -106,6 +122,17 @@ pub fn atomic_copy(source: &Path, destination: &Path) -> Result<(), StateError> 
 }
 
 pub fn write_if_changed(destination: &Path, contents: &[u8]) -> Result<(), StateError> {
+    match fs::symlink_metadata(destination) {
+        Ok(metadata) if shares_file(&metadata) => return atomic_write(destination, contents),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(StateError::Io {
+                path: destination.to_owned(),
+                source,
+            });
+        }
+    }
     match fs::read(destination) {
         Ok(existing) if existing == contents => return Ok(()),
         Ok(_) => {}
@@ -118,4 +145,19 @@ pub fn write_if_changed(destination: &Path, contents: &[u8]) -> Result<(), State
         }
     }
     atomic_write(destination, contents)
+}
+
+fn shares_file(metadata: &fs::Metadata) -> bool {
+    if metadata.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        // A cached working lock must not share writes with the authoritative Flow lock.
+        if metadata.is_file() && metadata.nlink() > 1 {
+            return true;
+        }
+    }
+    false
 }

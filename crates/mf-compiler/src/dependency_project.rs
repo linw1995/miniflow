@@ -14,6 +14,10 @@ pub enum SupportPackages {
 
 #[derive(Debug, Snafu)]
 pub enum DependencyProjectError {
+    #[snafu(display(
+        "generated project directory {path:?} must not be a symbolic link; use a fresh build directory"
+    ))]
+    LinkedDirectory { path: PathBuf },
     #[snafu(display("could not synchronize generated file: {source}"))]
     State { source: crate::StateError },
     #[snafu(display("invalid dependency {alias}: {message}"))]
@@ -186,6 +190,17 @@ pub fn write_dependency_project(
                 alias: name.display().to_string(),
                 message: "invalid generated project path".into(),
             });
+        }
+    }
+    for name in ["src", "target"] {
+        let path = project.join(name);
+        match fs::symlink_metadata(&path) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return LinkedDirectorySnafu { path }.fail();
+            }
+            Ok(_) => {}
+            Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+            Err(source) => return Err(DependencyProjectError::Write { path, source }),
         }
     }
     fs::create_dir_all(project.join("src")).context(WriteSnafu {

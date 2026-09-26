@@ -45,3 +45,37 @@ fn rejects_incomplete_artifacts_before_mutating_the_project() {
     assert!(write_dependency_project(&root.0, &files).is_err());
     assert_eq!(std::fs::read(root.0.join("src/main.rs")).unwrap(), original);
 }
+
+#[cfg(unix)]
+#[test]
+fn rejects_linked_project_directories_before_writing_outside_the_build() {
+    use std::{fs, os::unix::fs::symlink};
+    for name in ["src", "target"] {
+        let root = common::Directory::new();
+        let project = root.0.join("build");
+        let outside = root.0.join("inputs");
+        fs::create_dir(&project).unwrap();
+        fs::create_dir(&outside).unwrap();
+        let plan = common::fixture_plan();
+        let original = serde_json::to_string(&plan.definition).unwrap();
+        fs::write(outside.join("workflow.rs"), &original).unwrap();
+        symlink(&outside, project.join(name)).unwrap();
+        let files = dependency_project_files(
+            &plan.definition,
+            &plan.generate_artifacts().unwrap(),
+            &SupportPackages::Local {
+                crates_dir: common::crates_dir(),
+            },
+        )
+        .unwrap();
+        assert!(
+            write_dependency_project(&project, &files).is_err(),
+            "linked {name} was accepted"
+        );
+        assert_eq!(
+            fs::read_to_string(outside.join("workflow.rs")).unwrap(),
+            original
+        );
+        assert!(!project.join("Cargo.toml").exists());
+    }
+}

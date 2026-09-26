@@ -539,3 +539,27 @@ fn cargo_invalidates_features_local_sources_versions_and_flags() {
         assert!(!String::from_utf8_lossy(&changed.stderr).contains("reused compiled runner"));
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn rejects_redirected_cache_directories_without_mutating_inputs() {
+    for name in ["src", "target"] {
+        let temporary = TemporaryDirectory::new();
+        let definition = temporary.path().join("workflow.rs");
+        let target = temporary.path().join("flow");
+        let original = definition_json();
+        fs::write(&definition, &original).unwrap();
+        fs::write(&target, "previous executable").unwrap();
+        let directory = temporary.path().join(".mf-build-test");
+        let canonical = fs::canonicalize(&definition).unwrap();
+        drop(mf_compiler::BuildDirectory::open(&canonical, Some(&directory)).unwrap());
+        std::os::unix::fs::symlink(temporary.path(), directory.join(name)).unwrap();
+        let result = compile(&definition, &target, None);
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("must not be a symbolic link"));
+        assert_eq!(fs::read_to_string(&definition).unwrap(), original);
+        assert_eq!(fs::read(&target).unwrap(), b"previous executable");
+        assert!(!definition.with_extension("lock").exists());
+        assert!(!directory.join("Cargo.toml").exists());
+    }
+}

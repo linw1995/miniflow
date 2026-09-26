@@ -48,3 +48,43 @@ fn atomically_replaces_state_and_cleans_up_failed_staging() {
     assert_eq!(fs::read(&lock).unwrap(), b"new");
     assert_eq!(fs::read_dir(&root.0).unwrap().count(), 2);
 }
+
+#[cfg(unix)]
+#[test]
+fn materializes_working_locks_without_aliasing_the_authoritative_lock() {
+    let root = common::Directory::new();
+    let authoritative = root.0.join("flow.lock");
+    fs::write(&authoritative, "locked resolution").unwrap();
+    for symbolic in [true, false] {
+        let working = root.0.join(if symbolic {
+            "symbolic.lock"
+        } else {
+            "hard.lock"
+        });
+        if symbolic {
+            std::os::unix::fs::symlink(&authoritative, &working).unwrap();
+        } else {
+            fs::hard_link(&authoritative, &working).unwrap();
+        }
+        mf_compiler::state::write_if_changed(&working, b"locked resolution").unwrap();
+        fs::write(&working, "failed build resolution").unwrap();
+        assert_eq!(fs::read(&authoritative).unwrap(), b"locked resolution");
+        assert!(
+            !fs::symlink_metadata(&working)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_symbolic_guards_without_creating_their_targets() {
+    let root = common::Directory::new();
+    let missing_lock = root.0.join("flow.lock");
+    let guard = root.0.join("flow.lock.guard");
+    std::os::unix::fs::symlink(&missing_lock, &guard).unwrap();
+    assert!(BuildGuard::acquire(&guard).is_err());
+    assert!(!missing_lock.exists());
+}

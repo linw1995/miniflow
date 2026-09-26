@@ -192,7 +192,7 @@ The system SHALL serialize access to a selected build directory and report conte
 build. Reuse SHALL require ownership and compatibility metadata matching the definition, CLI, and project layout.
 A nonempty unrecognized or incompatible explicit directory MUST be rejected without clearing its contents. A recognized
 partial directory SHALL be recoverable by regenerating owned inputs. Definitions, dependency locks, and final outputs
-MUST NOT reside inside the managed build directory, including through canonical path aliases.
+MUST NOT reside inside the managed build directory, including through canonical path aliases. Generated source and Cargo target directories MUST NOT be symbolic links.
 
 #### Scenario: Reject another Flow's directory
 
@@ -213,6 +213,11 @@ MUST NOT reside inside the managed build directory, including through canonical 
 
 - **WHEN** the selected build directory contains the Flow definition, dependency lock, or requested final output path
 - **THEN** compilation fails before modifying those files
+
+#### Scenario: Reject redirected generated directories
+
+- **WHEN** a reused build directory has a symbolic link at its generated source or Cargo target directory
+- **THEN** compilation fails before generating files or invoking Cargo and preserves the linked contents and existing user inputs
 
 ### Requirement: Validate the same binary that is installed
 
