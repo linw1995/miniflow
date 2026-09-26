@@ -91,6 +91,10 @@ def check(prepared=None):
         shutil.copy2(output, standalone)
         shutil.rmtree(project)
         shutil.rmtree(build)
+        validation = subprocess.run([str(standalone), "--validate"], cwd=runtime_dir, env={"PATH": ""}, capture_output=True, text=True, check=True)
+        assert validation.stdout == ""
+        invalid = subprocess.run([str(standalone), "--unknown"], cwd=runtime_dir, env={"PATH": ""}, capture_output=True, text=True)
+        assert invalid.returncode != 0 and "usage:" in invalid.stderr
         result = subprocess.run([str(standalone)], cwd=runtime_dir, env={"PATH": ""}, capture_output=True, text=True, check=True)
         assert json.loads(result.stdout) == {"result": 14}
         print("Packaged CLI acceptance passed: registry/Git/path packages, independent locks, warm reuse, standalone execution")

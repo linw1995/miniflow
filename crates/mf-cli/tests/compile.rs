@@ -122,7 +122,17 @@ fn compiled_binary_replaces_target_and_runs_without_the_definition() {
     assert_ne!(fs::read(&target).unwrap(), b"previous executable");
 
     fs::remove_file(&definition).unwrap();
+    fs::remove_file(definition.with_extension("lock")).unwrap();
+    fs::remove_dir_all(temporary.path().join(".mf-build-test")).unwrap();
+    let validation = Command::new(&target)
+        .arg("--validate")
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    assert!(validation.status.success());
+    assert!(validation.stdout.is_empty());
     let output = Command::new(&target)
+        .env("PATH", "")
         .current_dir(temporary.path())
         .output()
         .unwrap();
