@@ -38,6 +38,8 @@
               ./examples
               ./scripts/prepare-support-packages.py
               ./scripts/test-packaged-cli.py
+              ./scripts/check-release-support.py
+              ./scripts/test-release-support.py
               ./LICENSE
               ./about.hbs
               ./about.toml
@@ -99,6 +101,7 @@
             cargoTestExtraArgs = "--workspace --all-targets --all-features";
             nativeBuildInputs = [ pkgs.python3 ];
             postCheck = ''
+              python3 scripts/test-release-support.py
               python3 scripts/test-packaged-cli.py
             '';
           });

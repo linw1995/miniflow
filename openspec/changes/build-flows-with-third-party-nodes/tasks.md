@@ -42,7 +42,7 @@
 - [x] 6.1 Prepare exact-version runtime/compiler package dependencies and selectable built-in packages; verify packaged contents have no production bundle dependency or implicit checkout paths using Cargo package verification in an isolated registry.
 - [x] 6.2 Make release CLI builds resolve support packages by exact version and provide an explicit internal source override for development tests; verify release behavior has no automatic checkout fallback.
 - [x] 6.3 Add an isolated-registry acceptance fixture that uses packaged support and third-party crates with an installed CLI outside the checkout; verify it compiles and executes without the internal source override.
-- [ ] 6.4 Define and document the support-package-before-CLI release gate, including registry ownership and availability checks; verify release preparation fails clearly for unavailable support versions without publishing packages as part of tests.
+- [x] 6.4 Define and document the support-package-before-CLI release gate, including registry ownership and availability checks; verify release preparation fails clearly for unavailable support versions without publishing packages as part of tests.
 - [ ] 6.5 Remove the obsolete fixed bundle after migrating its tests and examples; update README and plugin instructions, then verify the documented built-in example and third-party example through the new CLI path.
 
 ## 7. End-to-end acceptance
