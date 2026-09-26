@@ -52,7 +52,7 @@ impl Decimal {
     }
 }
 
-pub(crate) fn compare(left: &Number, right: &Number) -> Ordering {
+pub fn compare(left: &Number, right: &Number) -> Ordering {
     // Decimal normalization preserves integer distinctions that f64 conversion would erase.
     let left = Decimal::from_number(left);
     let right = Decimal::from_number(right);

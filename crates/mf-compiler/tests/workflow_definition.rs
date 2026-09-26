@@ -1,6 +1,4 @@
-use mf_compiler::definition::{
-    DefinitionParseError, WorkflowDefinition, WorkflowDefinitionVersion,
-};
+use mf_compiler::{DefinitionParseError, WorkflowDefinition, WorkflowDefinitionVersion};
 
 #[test]
 fn parses_a_versioned_workflow_definition() {

@@ -690,7 +690,7 @@ fn main() {
 }
 "#).unwrap();
         mf_compiler::resolve_project(&project, &root.path().join("flow.lock"), false).unwrap();
-        let build = mf_compiler::pipeline::cargo_command(&project)
+        let build = mf_compiler::cargo_command(&project)
             .args(["build", "--offline", "--locked"])
             .output()
             .unwrap();

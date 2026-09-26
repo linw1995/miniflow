@@ -1,9 +1,9 @@
-use mf_compiler::definition::{DefinitionId, WorkflowDefinition};
 use mf_compiler::{
     CompiledWorkflow, Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistration,
     NodeRegistry, Outputs, PortSpec, ValueType, WorkflowCompileError, compile_definition,
     deserialize_config, instantiate_compiled,
 };
+use mf_compiler::{DefinitionId, WorkflowDefinition};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
