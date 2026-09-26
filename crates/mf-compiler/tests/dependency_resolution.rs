@@ -28,6 +28,7 @@ fn reuses_authoritative_lock_and_rejects_missing_or_incompatible_locked_inputs()
             .iter()
             .any(|p| p["name"] == "fixture-multi-nodes")
     );
+    mf_compiler::validate_runtime_identity(&metadata).unwrap();
     fs::copy(project.join("Cargo.lock"), &lock).unwrap();
     let original = fs::read(&lock).unwrap();
     fs::write(project.join("Cargo.lock"), "stale invalid working lock").unwrap();

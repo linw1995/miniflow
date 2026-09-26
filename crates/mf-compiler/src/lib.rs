@@ -22,3 +22,6 @@ pub use dependency_project::{
 
 pub mod cargo_build;
 pub use cargo_build::{CargoBuildError, resolve_project};
+
+pub mod compatibility;
+pub use compatibility::{RuntimeCompatibilityError, validate_runtime_identity};
