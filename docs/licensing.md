@@ -10,4 +10,4 @@ The report is written to `target/THIRD_PARTY_NOTICES.html`. `cargo-about` checks
 
 `nix develop --command prek -a` runs the audit in local checks and CI. Nix builds generate the report offline using vendored dependencies. Release archives include `LICENSE` and `THIRD_PARTY_NOTICES.html`; Nix packages install both under `share/licenses/miniflow/`.
 
-Generated workflow executables use the built-in bundle. When distributing them, include the applicable dependency notices; adding external plugins requires auditing their dependencies as well.
+Generated workflow executables link the node packages selected by their Flow definition and the support packages used for validation and execution. Audit the generated Cargo project retained in the build directory and include the applicable dependency notices when distributing its executable. The repository audit alone does not cover third-party Nodes selected by another Flow.

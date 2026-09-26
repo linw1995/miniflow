@@ -35,7 +35,7 @@ Definitions with version `2026-09-24` are rejected with a migration diagnostic. 
 
 ## Built-in nodes
 
-The built-in bundle currently provides:
+The repository provides these built-in node packages:
 
 | Kind | Configuration | Input ports | Output ports |
 | --- | --- | --- | --- |
@@ -44,7 +44,7 @@ The built-in bundle currently provides:
 
 ## Validation
 
-The compiler rejects unknown kinds, invalid configuration, missing nodes or ports, incompatible port types, missing required inputs, multiply connected inputs, repeated output names, and cycles before generating a runner.
+The CLI checks node IDs, edge endpoints, selected output names, and cycles before generating runner code. The compiled runner validates registered kinds, configuration, ports, type compatibility, and required input connections before installation. Every failure returns a nonzero status and preserves an existing output executable.
 
 See [compiling workflows](compiling.md) to build and run a definition, or [plugin development](plugins.md) to add node kinds.
 

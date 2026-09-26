@@ -187,4 +187,4 @@ Building third-party Rust code executes build scripts, procedural macros, and co
 4. Upgrade existing examples to schema `2026-09-26` with embedded dependencies and update workflow/compile/plugin documentation.
 5. Replace fixed-bundle integration assertions with externally declared node fixtures, including a crate registering multiple kinds.
 
-Rollback consists of retaining the previous CLI release and its source-checkout workflow. Retain old definitions for rollback, or downgrade their version and remove `dependencies` when using the previous CLI and its fixed bundle. The new lock can remain unused; runtime output format is unchanged. This proposal does not itself publish packages or change release infrastructure.
+Rollback consists of retaining the previous CLI release and its source-checkout workflow. Retain old definitions for rollback, or downgrade their version and remove `dependencies` when using the previous CLI and its fixed bundle. The new lock can remain unused; runtime output format is unchanged. Package publication remains a separate maintainer action; the release workflow checks ownership and package availability before distributing the CLI.
