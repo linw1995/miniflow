@@ -28,3 +28,6 @@ pub use compatibility::{RuntimeCompatibilityError, validate_runtime_identity};
 
 pub mod state;
 pub use state::{BuildGuard, StateError, atomic_copy, atomic_write};
+
+pub mod pipeline;
+pub use pipeline::{CompileRequest, PipelineError, compile_project};

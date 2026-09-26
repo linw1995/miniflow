@@ -24,7 +24,14 @@ pub enum DependencyProjectError {
 
 const MAIN: &str = r#"mod workflow;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => { eprintln!("{error}"); std::process::ExitCode::FAILURE }
+    }
+}
+
+fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let registry = mf_runtime::NodeRegistry::from_inventory()?;
     if args.len() == 1 && args[0] == "--validate" {

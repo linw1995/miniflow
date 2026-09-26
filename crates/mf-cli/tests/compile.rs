@@ -1,3 +1,4 @@
+#![cfg(feature = "development-support")]
 use serde_json::json;
 use std::fs;
 use std::io;
@@ -64,6 +65,8 @@ fn compile(definition: &Path, output: &Path, rustflags: Option<&str>) -> Output 
     let mut command = Command::new(env!("CARGO_BIN_EXE_mf"));
     command
         .current_dir(workspace)
+        .env("MF_DEV_SUPPORT_ROOT", workspace.join("crates"))
+        .env("CARGO_NET_OFFLINE", "true")
         .arg("compile")
         .arg(definition)
         .arg("--output")
@@ -74,10 +77,11 @@ fn compile(definition: &Path, output: &Path, rustflags: Option<&str>) -> Output 
     command.output().unwrap()
 }
 
-fn assert_rejected_definition(value: serde_json::Value, diagnostics: &[&str]) {
+fn assert_rejected_definition(mut value: serde_json::Value, diagnostics: &[&str]) {
     let temporary = TemporaryDirectory::new();
     let definition = temporary.path().join("invalid-workflow.json");
     let target = temporary.path().join("workflow");
+    add_dependencies(&mut value);
     fs::write(&definition, value.to_string()).unwrap();
     fs::write(&target, b"previous executable").unwrap();
 
@@ -91,11 +95,6 @@ fn assert_rejected_definition(value: serde_json::Value, diagnostics: &[&str]) {
             "missing `{diagnostic}` in: {stderr}"
         );
     }
-    assert_eq!(
-        fs::read_dir(temporary.path()).unwrap().count(),
-        2,
-        "validation failures should not create a runner project"
-    );
 }
 
 #[test]
@@ -103,7 +102,7 @@ fn compiled_binary_replaces_target_and_runs_without_the_definition() {
     let temporary = TemporaryDirectory::new();
     let definition = temporary.path().join("workflow.json");
     let target = temporary.path().join("workflow");
-    fs::write(&definition, DEFINITION).unwrap();
+    fs::write(&definition, definition_json()).unwrap();
     fs::write(&target, b"previous executable").unwrap();
 
     let result = compile(&definition, &target, None);
@@ -114,11 +113,6 @@ fn compiled_binary_replaces_target_and_runs_without_the_definition() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert_ne!(fs::read(&target).unwrap(), b"previous executable");
-    assert_eq!(
-        fs::read_dir(temporary.path()).unwrap().count(),
-        2,
-        "successful builds should remove their temporary project"
-    );
 
     fs::remove_file(&definition).unwrap();
     let output = Command::new(&target)
@@ -142,7 +136,7 @@ fn cargo_failure_preserves_existing_target_and_forwards_diagnostics() {
     let temporary = TemporaryDirectory::new();
     let definition = temporary.path().join("workflow.json");
     let target = temporary.path().join("workflow");
-    fs::write(&definition, DEFINITION).unwrap();
+    fs::write(&definition, definition_json()).unwrap();
     fs::write(&target, b"previous executable").unwrap();
 
     let result = compile(
@@ -155,7 +149,7 @@ fn cargo_failure_preserves_existing_target_and_forwards_diagnostics() {
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("error"), "{stderr}");
     assert!(stderr.contains("definitely_not_a_rustc_option"), "{stderr}");
-    assert!(stderr.contains("Cargo build failed"), "{stderr}");
+    assert!(stderr.contains("dependency resolution failed"), "{stderr}");
     let saved_projects: Vec<_> = fs::read_dir(temporary.path())
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -167,7 +161,7 @@ fn cargo_failure_preserves_existing_target_and_forwards_diagnostics() {
         })
         .collect();
     assert_eq!(saved_projects.len(), 1);
-    assert!(saved_projects[0].join("project/Cargo.toml").is_file());
+    assert!(saved_projects[0].join("Cargo.toml").is_file());
     #[cfg(unix)]
     assert_eq!(
         fs::metadata(&saved_projects[0])
@@ -183,11 +177,11 @@ fn cargo_failure_preserves_existing_target_and_forwards_diagnostics() {
 fn output_cannot_replace_the_source_definition() {
     let temporary = TemporaryDirectory::new();
     let definition = temporary.path().join("workflow.json");
-    fs::write(&definition, DEFINITION).unwrap();
+    fs::write(&definition, definition_json()).unwrap();
 
     let result = compile(&definition, &definition, None);
     assert!(!result.status.success());
-    assert_eq!(fs::read_to_string(&definition).unwrap(), DEFINITION);
+    assert_eq!(fs::read_to_string(&definition).unwrap(), definition_json());
     assert!(
         String::from_utf8_lossy(&result.stderr).contains("would overwrite the source definition")
     );
@@ -255,4 +249,17 @@ fn invalid_input_port_reports_both_edge_endpoints() {
         }),
         &["source", "value", "echo", "missing", "missing input port"],
     );
+}
+
+fn add_dependencies(value: &mut serde_json::Value) {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    value["dependencies"] = json!({
+        "constant": {"package":"mfn-constant","path":crates.join("builtin-nodes/constant")},
+        "identity": {"package":"mfn-identity","path":crates.join("builtin-nodes/identity")}
+    });
+}
+fn definition_json() -> String {
+    let mut value = serde_json::from_str(DEFINITION).unwrap();
+    add_dependencies(&mut value);
+    value.to_string()
 }

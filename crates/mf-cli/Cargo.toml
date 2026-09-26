@@ -8,8 +8,10 @@ license.workspace = true
 name = "mf"
 path = "src/main.rs"
 
+[features]
+development-support = []
+
 [dependencies]
-mf-bundle.workspace = true
 mf-compiler.workspace = true
 snafu = "0.9.2"
 
