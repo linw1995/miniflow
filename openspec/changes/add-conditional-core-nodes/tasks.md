@@ -2,9 +2,9 @@
 
 ## 1. Consolidate basic node packages
 
-- [ ] 1.1 Create `mfn-core` with constant and identity modules, remove the old workspace crates, and update workspace/dev dependencies and the Cargo lock; verify existing constant/identity execution and registry tests pass unchanged in behavior.
-- [ ] 1.2 Migrate examples, fixtures, packaged CLI tests, and release support package lists to `mfn-core`; verify explicit linkage retains both kinds and conflicting providers still fail registry validation.
-- [ ] 1.3 Update workflow, plugin, and release documentation with package boundaries and dependency/lock migration; verify the migrated hello workflow compiles and returns its previous output.
+- [x] 1.1 Create `mfn-core` with constant and identity modules, remove the old workspace crates, and update workspace/dev dependencies and the Cargo lock; verify existing constant/identity execution and registry tests pass unchanged in behavior.
+- [x] 1.2 Migrate examples, fixtures, packaged CLI tests, and release support package lists to `mfn-core`; verify explicit linkage retains both kinds and conflicting providers still fail registry validation.
+- [x] 1.3 Update workflow, plugin, and release documentation with package boundaries and dependency/lock migration; verify the migrated hello workflow compiles and returns its previous output.
 
 ## 2. Plan explicit dependencies and resolve instance metadata
 

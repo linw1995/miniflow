@@ -1,13 +1,9 @@
 {
   "version": "2026-09-26",
   "dependencies": {
-    "constant": {
-      "package": "mfn-constant",
-      "path": "../crates/builtin-nodes/constant"
-    },
-    "identity": {
-      "package": "mfn-identity",
-      "path": "../crates/builtin-nodes/identity"
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
     }
   },
   "nodes": [

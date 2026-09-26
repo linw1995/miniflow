@@ -44,8 +44,7 @@ fn packaged_cli_acceptance() {
     let mut flow = json!({
         "version":"2026-09-26",
         "dependencies":{
-            "constant":{"package":"mfn-constant","version":format!("={}", env!("CARGO_PKG_VERSION"))},
-            "identity":{"package":"mfn-identity","version":format!("={}", env!("CARGO_PKG_VERSION"))},
+            "core":{"package":"mfn-core","version":format!("={}", env!("CARGO_PKG_VERSION"))},
             "external":{"package":"fixture-multi-nodes","version":format!("={}", fixture.fixture_version),"features":["double"]}},
         "nodes":[{"id":"source","kind":"fixture.source"},{"id":"echo","kind":"fixture.echo"}],
         "edges":[{"from_node":"source","from_output":"value","to_node":"echo","to_input":"input"}],

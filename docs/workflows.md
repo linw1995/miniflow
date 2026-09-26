@@ -35,7 +35,7 @@ Definitions with version `2026-09-24` are rejected with a migration diagnostic. 
 
 ## Built-in nodes
 
-The repository provides these built-in node packages:
+Declare `mfn-core` once to use the basic built-in nodes below. To migrate older definitions, replace `mfn-constant` and `mfn-identity` dependencies with `mfn-core`, retaining node kinds and edges, then rebuild without `--locked` to update the adjacent lock. Subsequent builds can use `--locked` again.
 
 | Kind | Configuration | Input ports | Output ports |
 | --- | --- | --- | --- |

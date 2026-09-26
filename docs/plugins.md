@@ -2,7 +2,9 @@
 
 ## Implement a node
 
-Each built-in node lives in its own crate under `crates/builtin-nodes/`. A plugin crate depends on `mf-runtime`, implements `Node::execute`, provides a factory, and submits a `NodeRegistration` through `inventory::submit!`. The registration declares a unique `kind` and its input and output `PortSpec` values. See [constant](../crates/builtin-nodes/constant/src/lib.rs) and [identity](../crates/builtin-nodes/identity/src/lib.rs) for working registrations.
+Basic nodes share the `mfn-core` crate under `crates/builtin-nodes/core/`. Nodes with service-specific dependencies belong in separate packages.
+
+A plugin crate depends on `mf-runtime`, implements `Node::execute`, provides a factory, and submits a `NodeRegistration` through `inventory::submit!`. The registration declares a unique `kind` and its input and output `PortSpec` values. See [constant](../crates/builtin-nodes/core/src/constant.rs) and [identity](../crates/builtin-nodes/core/src/identity.rs) for working registrations.
 
 ## Registration contract
 

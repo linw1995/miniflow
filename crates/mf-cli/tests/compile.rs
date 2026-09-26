@@ -245,8 +245,7 @@ fn invalid_input_port_reports_both_edge_endpoints() {
 fn add_dependencies(value: &mut serde_json::Value) {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     value["dependencies"] = json!({
-        "constant": {"package":"mfn-constant","path":crates.join("builtin-nodes/constant")},
-        "identity": {"package":"mfn-identity","path":crates.join("builtin-nodes/identity")}
+        "core": {"package":"mfn-core","path":crates.join("builtin-nodes/core")}
     });
 }
 fn definition_json() -> String {

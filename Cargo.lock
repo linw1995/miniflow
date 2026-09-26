@@ -209,21 +209,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "mfn-constant"
+name = "mfn-core"
 version = "0.1.0"
 dependencies = [
  "inventory",
  "mf-runtime",
  "serde",
- "serde_json",
-]
-
-[[package]]
-name = "mfn-identity"
-version = "0.1.0"
-dependencies = [
- "inventory",
- "mf-runtime",
  "serde_json",
 ]
 
