@@ -7,7 +7,6 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
-import tomllib
 
 ROOT = Path(__file__).resolve().parent.parent
 PACKAGES = ("mf-runtime", "mf-compiler", "mfn-constant", "mfn-identity")
@@ -46,8 +45,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--owner", required=True)
     args = parser.parse_args()
-    version = tomllib.loads((ROOT / "Cargo.toml").read_text())["workspace"]["package"]["version"]
     try:
+        workspace = json.loads(cargo_output(["metadata", "--no-deps", "--format-version", "1"], ROOT))
+        version = next(package["version"] for package in workspace["packages"] if package["name"] == "mf-cli")
         check(args.owner, version)
     except RuntimeError as error:
         raise SystemExit(str(error)) from error
