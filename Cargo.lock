@@ -188,6 +188,7 @@ version = "0.1.0"
 dependencies = [
  "inventory",
  "mf-runtime",
+ "mfn-core",
  "prettyplease",
  "proc-macro2",
  "quote",

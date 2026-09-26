@@ -41,6 +41,7 @@ Declare `mfn-core` once to use the basic built-in nodes below. To migrate older 
 | --- | --- | --- | --- |
 | `builtin.constant` | Required `value`: any JSON value | None | `value`: any value |
 | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input |
+| `builtin.if_else` | Nonempty ordered `branches` | None; activated by control edges | One boolean activation output per branch, plus `else` |
 
 ## Validation
 
@@ -69,3 +70,46 @@ A produced control output activates its target regardless of whether its JSON va
 A selection such as `{"name":"result","node":"branch","port":"value","optional":true}` omits its key when the source port or node is explicitly skipped. A produced null remains `"result": null`. Missing outputs without a skip marker remain errors. Output selections are required by default, so selecting a skipped required output fails with its name and source ID. All omitted selections produce `{}`.
 
 The optional field requires updated support packages. Existing `2026-09-26` definitions retain strict defaults; default-false selections and empty control-edge arrays are omitted when serialized. Old runtimes reject new fields rather than silently changing behavior.
+
+## If, else-if, and else
+
+The [single-condition example](../examples/if-else.json) returns `{"accepted":{"amount":150}}`. The [else-if example](../examples/else-if.json) returns `{"medium":{"amount":500}}`. Both use `audit` to trigger routing while conditions read the earlier `load_order.value` output from context. Incoming dependencies determine activation; condition references do not add dependencies.
+
+Configure one or more ordered branches:
+
+```json
+{
+  "branches": [
+    {
+      "id": "large",
+      "condition": {
+        "source": { "output": "load_order.value", "path": "/amount" },
+        "operator": "gte",
+        "value": 1000
+      }
+    },
+    {
+      "id": "medium",
+      "condition": {
+        "source": { "output": "load_order.value", "path": "/amount" },
+        "operator": "gte",
+        "value": 100
+      }
+    }
+  ]
+}
+```
+
+The first matching branch produces true; all other outputs are explicitly skipped. If no condition matches, `else` produces true. Later predicates are not evaluated after a match, but every predicate's syntax and output reference is validated during compilation. Branch IDs match `[A-Za-z_][A-Za-z0-9_-]*`, must be unique, and cannot be `else`. Changing array order changes precedence without changing port names.
+
+`source.output` is an exact `${node_id}.${output_name}` context key. `source.path` is a JSON Pointer within that value: empty selects the root, `/items/0/price` selects a nested value, and `~0` / `~1` encode `~` / `/` in keys. Business values remain in context; router outputs are activation signals. Downstream nodes can bind the original data separately from their control dependencies.
+
+| Operators | Literal | Behavior |
+| --- | --- | --- |
+| `eq`, `ne` | Required scalar `value` | Typed equality; strings are case-sensitive, numeric forms compare numerically |
+| `gt`, `gte`, `lt`, `lte` | Required numeric `value` | Numeric ordering without rounding 64-bit integers through floating-point conversion |
+| `exists`, `not_exists` | No `value` field | Test field or output availability |
+
+No implicit conversion occurs. A present null exists and can be compared with an explicit null literal. Missing fields or explicitly skipped outputs are unavailable to existence checks; comparing them is an execution error. Unexpectedly omitted outputs and pending producers are errors even for existence checks. Objects and arrays cannot be compared in this version. Reached condition errors include the branch, qualified source, path, and operator.
+
+A selected output can fan out to multiple downstream nodes; all eligible consumers execute. Only one branch output is active per router invocation. Execution is sequential in topological order, and a node gated by mutually exclusive outputs is skipped rather than acting as a merge. Compound boolean expressions and field-to-field comparisons are deferred.

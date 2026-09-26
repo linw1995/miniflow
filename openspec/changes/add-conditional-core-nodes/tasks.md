@@ -30,12 +30,12 @@
 
 ## 5. Add ordered if-else routing
 
-- [ ] 5.1 Implement strict branch/predicate/source parsing and dynamic outputs in `mfn-core`; verify no data inputs, at least one condition, exactly one more output than conditions, missing/empty branches, invalid IDs, unknown fields, and stable output names after reordering.
-- [ ] 5.2 Resolve qualified `source.output` and `source.path` through context for `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `exists`, and `not_exists`; verify pointer syntax, exact output keys, operator/literal validation, availability states, scalar rules, and qualified source/branch/path diagnostics.
-- [ ] 5.3 Implement numeric comparison using normalized runtime number representations; verify numeric equality across forms, adjacent integers above 2^53, signed/unsigned boundaries, decimals, exponent forms, and no numeric-string coercion.
-- [ ] 5.4 Implement ordered short-circuit evaluation through context-aware execution; verify first match wins, else-if, fallback, reached errors, unreachable data errors, validation of every static reference, selected true activation, and unchanged source outputs.
-- [ ] 5.5 Add runnable one-condition and multi-condition examples where the immediate control predecessor differs from the condition's source node; verify explicit ancestor paths, predicates reading different producers, optional branch results, and downstream business data bindings.
-- [ ] 5.6 Extend actual-binary acceptance fixtures with inactive side-effect/failure nodes, nested branches, multiple instances, and branch-order edits in a reused build directory; verify predicate results, selected execution only, and matching in-memory traces.
+- [x] 5.1 Implement strict branch/predicate/source parsing and dynamic outputs in `mfn-core`; verify no data inputs, at least one condition, exactly one more output than conditions, missing/empty branches, invalid IDs, unknown fields, and stable output names after reordering.
+- [x] 5.2 Resolve qualified `source.output` and `source.path` through context for `eq`, `ne`, `gt`, `gte`, `lt`, `lte`, `exists`, and `not_exists`; verify pointer syntax, exact output keys, operator/literal validation, availability states, scalar rules, and qualified source/branch/path diagnostics.
+- [x] 5.3 Implement numeric comparison using normalized runtime number representations; verify numeric equality across forms, adjacent integers above 2^53, signed/unsigned boundaries, decimals, exponent forms, and no numeric-string coercion.
+- [x] 5.4 Implement ordered short-circuit evaluation through context-aware execution; verify first match wins, else-if, fallback, reached errors, unreachable data errors, validation of every static reference, selected true activation, and unchanged source outputs.
+- [x] 5.5 Add runnable one-condition and multi-condition examples where the immediate control predecessor differs from the condition's source node; verify explicit ancestor paths, predicates reading different producers, optional branch results, and downstream business data bindings.
+- [x] 5.6 Extend actual-binary acceptance fixtures with inactive side-effect/failure nodes, nested branches, multiple instances, and branch-order edits in a reused build directory; verify predicate results, selected execution only, and matching in-memory traces.
 
 ## 6. Validate integration and release readiness
 

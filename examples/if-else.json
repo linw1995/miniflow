@@ -1,0 +1,104 @@
+{
+  "version": "2026-09-26",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    }
+  },
+  "nodes": [
+    {
+      "id": "load_order",
+      "kind": "builtin.constant",
+      "config": {
+        "value": {
+          "amount": 150
+        }
+      }
+    },
+    {
+      "id": "audit",
+      "kind": "builtin.constant",
+      "config": {
+        "value": false
+      }
+    },
+    {
+      "id": "route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "accepted",
+            "condition": {
+              "source": {
+                "output": "load_order.value",
+                "path": "/amount"
+              },
+              "operator": "gte",
+              "value": 100
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "handle_accepted",
+      "kind": "builtin.identity"
+    },
+    {
+      "id": "handle_else",
+      "kind": "builtin.identity"
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "load_order",
+      "from_output": "value",
+      "to_node": "handle_accepted",
+      "to_input": "input"
+    },
+    {
+      "from_node": "load_order",
+      "from_output": "value",
+      "to_node": "handle_else",
+      "to_input": "input"
+    }
+  ],
+  "control_edges": [
+    {
+      "from_node": "load_order",
+      "from_output": "value",
+      "to_node": "audit"
+    },
+    {
+      "from_node": "audit",
+      "from_output": "value",
+      "to_node": "route"
+    },
+    {
+      "from_node": "route",
+      "from_output": "accepted",
+      "to_node": "handle_accepted"
+    },
+    {
+      "from_node": "route",
+      "from_output": "else",
+      "to_node": "handle_else"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "accepted",
+      "node": "handle_accepted",
+      "port": "value",
+      "optional": true
+    },
+    {
+      "name": "else",
+      "node": "handle_else",
+      "port": "value",
+      "optional": true
+    }
+  ]
+}
