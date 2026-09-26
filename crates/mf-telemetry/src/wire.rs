@@ -1,0 +1,235 @@
+//! Logical OTel field mapping. JSON fixtures are not OTLP/HTTP request envelopes.
+
+use crate::{
+    ContractError, EVENT_SCHEMA_VERSION, INSTRUMENTATION_SCOPE,
+    event::{Event, LifecycleEvent},
+    require,
+};
+use opentelemetry::{
+    SpanId, TraceFlags, TraceId,
+    logs::{AnyValue, LogRecord},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+use std::time::{Duration, UNIX_EPOCH};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TraceContext {
+    pub trace_id: String,
+    pub span_id: String,
+    pub trace_flags: u8,
+}
+
+impl TraceContext {
+    fn ids(&self) -> Result<(TraceId, SpanId), ContractError> {
+        let trace = TraceId::from_hex(&self.trace_id).map_err(|e| crate::invalid(e.to_string()))?;
+        let span = SpanId::from_hex(&self.span_id).map_err(|e| crate::invalid(e.to_string()))?;
+        require(
+            trace != TraceId::INVALID
+                && span != SpanId::INVALID
+                && trace.to_string() == self.trace_id
+                && span.to_string() == self.span_id,
+            "trace context must contain nonzero canonical lowercase IDs",
+        )?;
+        Ok((trace, span))
+    }
+}
+
+/// A transport-independent view of the OTel fields owned by the lifecycle schema.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WireRecord {
+    pub scope: String,
+    pub event_name: String,
+    pub time_unix_nano: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_context: Option<TraceContext>,
+    pub attributes: Map<String, Value>,
+    pub body: Value,
+}
+
+impl WireRecord {
+    pub fn from_event(
+        event: &LifecycleEvent,
+        time_unix_nano: u64,
+        trace_context: Option<TraceContext>,
+    ) -> Result<Self, ContractError> {
+        event.validate()?;
+        if let Some(context) = &trace_context {
+            context.ids()?;
+        }
+        let mut encoded = serde_json::to_value(&event.event)?;
+        let body = encoded["body"]
+            .as_object_mut()
+            .expect("event bodies are objects");
+        let mut attributes = Map::from_iter([
+            ("mf.schema.version".into(), json!(EVENT_SCHEMA_VERSION)),
+            ("mf.workflow.id".into(), json!(event.workflow_id)),
+            ("mf.run.id".into(), json!(event.run_id)),
+            ("mf.event.sequence".into(), json!(event.sequence)),
+        ]);
+        if let Some(node) = body.remove("node") {
+            attributes.insert("mf.node.id".into(), node["id"].clone());
+            attributes.insert("mf.node.kind".into(), node["kind"].clone());
+        }
+        if let Some(outcome) = body.remove("outcome") {
+            attributes.insert("mf.outcome".into(), outcome);
+        } else if matches!(event.event, Event::NodeSkipped { .. }) {
+            attributes.insert("mf.outcome".into(), json!("skipped"));
+        }
+        if let Some(failure) = body.get_mut("failure") {
+            let phase = failure
+                .as_object_mut()
+                .expect("failure is an object")
+                .remove("phase")
+                .expect("failure has a phase");
+            attributes.insert("mf.failure.phase".into(), phase);
+        }
+        Ok(Self {
+            scope: INSTRUMENTATION_SCOPE.into(),
+            event_name: event.event.name().into(),
+            time_unix_nano,
+            trace_context,
+            attributes,
+            body: Value::Object(body.clone()),
+        })
+    }
+
+    pub fn decode(&self) -> Result<LifecycleEvent, ContractError> {
+        require(
+            self.scope == INSTRUMENTATION_SCOPE,
+            "unexpected instrumentation scope",
+        )?;
+        require(
+            self.attribute("mf.schema.version")?.as_i64() == Some(EVENT_SCHEMA_VERSION),
+            "unsupported event schema version",
+        )?;
+        if let Some(context) = &self.trace_context {
+            context.ids()?;
+        }
+        let mut body = self
+            .body
+            .as_object()
+            .ok_or_else(|| crate::invalid("event body must be a structured map"))?
+            .clone();
+        require(
+            !body.contains_key("node") && !body.contains_key("outcome"),
+            "routing fields belong in attributes",
+        )?;
+        if self.event_name.starts_with("mf.node.") {
+            body.insert(
+                "node".into(),
+                json!({"id":self.attribute("mf.node.id")?, "kind":self.attribute("mf.node.kind")?}),
+            );
+        } else {
+            require(
+                !self.attributes.contains_key("mf.node.id")
+                    && !self.attributes.contains_key("mf.node.kind"),
+                "workflow event contains node routing fields",
+            )?;
+        }
+        match self.event_name.as_str() {
+            "mf.node.skipped" => require(
+                self.attribute("mf.outcome")?.as_str() == Some("skipped"),
+                "skip outcome must be skipped",
+            )?,
+            "mf.node.finished" | "mf.workflow.finished" => {
+                body.insert("outcome".into(), self.attribute("mf.outcome")?.clone());
+            }
+            _ => require(
+                !self.attributes.contains_key("mf.outcome"),
+                "nonterminal event contains an outcome",
+            )?,
+        }
+        if let Some(failure) = body.get_mut("failure") {
+            let failure = failure
+                .as_object_mut()
+                .ok_or_else(|| crate::invalid("failure must be an object"))?;
+            require(
+                !failure.contains_key("phase"),
+                "failure phase belongs in attributes",
+            )?;
+            failure.insert("phase".into(), self.attribute("mf.failure.phase")?.clone());
+            require(
+                matches!(
+                    self.event_name.as_str(),
+                    "mf.node.finished" | "mf.workflow.finished"
+                ),
+                "nonterminal event contains failure context",
+            )?;
+        } else {
+            require(
+                !self.attributes.contains_key("mf.failure.phase"),
+                "failure phase requires context",
+            )?;
+        }
+        let result = LifecycleEvent {
+            workflow_id: serde_json::from_value(self.attribute("mf.workflow.id")?.clone())?,
+            run_id: serde_json::from_value(self.attribute("mf.run.id")?.clone())?,
+            sequence: serde_json::from_value(self.attribute("mf.event.sequence")?.clone())?,
+            event: serde_json::from_value(json!({"event_name":self.event_name,"body":body}))?,
+        };
+        result.validate()?;
+        Ok(result)
+    }
+
+    fn attribute(&self, key: &str) -> Result<&Value, ContractError> {
+        self.attributes
+            .get(key)
+            .ok_or_else(|| crate::invalid(format!("missing attribute {key}")))
+    }
+
+    /// Fills a fresh record created by a logger with the `mf.workflow` scope.
+    /// It does not install a provider or emit, enqueue, or export the record.
+    pub fn write_to(&self, record: &mut impl LogRecord) -> Result<(), ContractError> {
+        let event = self.decode()?;
+        // Normalize known fields; additive fields from a newer producer are not re-emitted.
+        let normalized = Self::from_event(&event, self.time_unix_nano, self.trace_context.clone())?;
+        let timestamp = UNIX_EPOCH
+            .checked_add(Duration::from_nanos(self.time_unix_nano))
+            .ok_or_else(|| crate::invalid("timestamp exceeds platform range"))?;
+        let body = any_value(normalized.body)?;
+        let attributes = normalized
+            .attributes
+            .into_iter()
+            .map(|(key, value)| Ok((key, any_value(value)?)))
+            .collect::<Result<Vec<_>, ContractError>>()?;
+        record.set_event_name(event.event.name());
+        record.set_timestamp(timestamp);
+        record.set_body(body);
+        record.add_attributes(attributes);
+        if let Some(context) = &self.trace_context {
+            let (trace, span) = context.ids()?;
+            record.set_trace_context(trace, span, Some(TraceFlags::new(context.trace_flags)));
+        }
+        Ok(())
+    }
+}
+
+fn any_value(value: Value) -> Result<AnyValue, ContractError> {
+    Ok(match value {
+        Value::String(value) => value.into(),
+        Value::Bool(value) => value.into(),
+        Value::Number(value) => AnyValue::Int(
+            value
+                .as_i64()
+                .ok_or_else(|| crate::invalid("OTel lifecycle numbers must be signed integers"))?,
+        ),
+        Value::Array(values) => AnyValue::ListAny(Box::new(
+            values
+                .into_iter()
+                .map(any_value)
+                .collect::<Result<_, _>>()?,
+        )),
+        Value::Object(values) => AnyValue::Map(Box::new(
+            values
+                .into_iter()
+                .map(|(key, value)| Ok((key.into(), any_value(value)?)))
+                .collect::<Result<_, ContractError>>()?,
+        )),
+        Value::Null => {
+            return Err(crate::invalid(
+                "optional lifecycle values must be absent, not null",
+            ));
+        }
+    })
+}

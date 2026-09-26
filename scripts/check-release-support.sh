@@ -22,7 +22,7 @@ case "$cargo_bin" in
   /*) ;;
   */*) cargo_bin="$PWD/$cargo_bin" ;;
 esac
-packages=(mf-runtime mf-compiler mfn-core)
+packages=(mf-telemetry mf-runtime mf-compiler mfn-core)
 
 workspace_metadata="$("$cargo_bin" metadata --no-deps --format-version 1 --manifest-path "$workspace_root/Cargo.toml")"
 version="$(jq -er '.packages[] | select(.name == "mf-cli") | .version' <<< "$workspace_metadata")"

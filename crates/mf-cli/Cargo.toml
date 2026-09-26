@@ -15,6 +15,7 @@ development-support = []
 
 [dependencies]
 mf-compiler.workspace = true
+mf-tui.workspace = true
 snafu = "0.9.2"
 
 [dev-dependencies]

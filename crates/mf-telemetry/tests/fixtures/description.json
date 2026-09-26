@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "workflow_id": "sha256:67389167c589949c07cb3864dbb0bcca61d38bfaef42649c24042cc35875e2a9",
+  "nodes": [
+    {
+      "id": "load.order",
+      "kind": "fixture.source",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "value.part",
+          "value_type": "number",
+          "required": true
+        }
+      ]
+    }
+  ],
+  "data_edges": [],
+  "control_edges": [],
+  "execution_order": [
+    "load.order"
+  ]
+}

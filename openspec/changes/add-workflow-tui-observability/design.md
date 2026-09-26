@@ -120,7 +120,7 @@ Reject `--tui` when the required interactive terminal is unavailable before star
 
 ## Focused Implementation Plans
 
-The three implementation plans are complete as planning artifacts and are applied in this order. Implementation and acceptance tasks remain unchecked.
+The three implementation plans are complete as planning artifacts and are applied in this order. Implementation progress and remaining acceptance work are tracked in [tasks.md](tasks.md).
 
 1. [Lifecycle events and observable loss](plans/01-events-and-state.md): exact field mapping, lightweight terminal boundary, transition table, detectable gaps versus unverified tails, and loss-injection acceptance cases. Maps to tasks 1.2, 2.3, and 4.2-4.4.
 2. [Runner description and output isolation](plans/02-runner-description.md): versioned graph JSON, early stdout descriptor isolation on Linux/macOS, bounded preflight, and noisy-factory fixtures. Maps to task 3.1.

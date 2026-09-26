@@ -12,4 +12,6 @@ repository = "https://github.com/linw1995/miniflow"
 [workspace.dependencies]
 mf-compiler = { path = "crates/mf-compiler", version = "0.1.0" }
 mf-runtime = { path = "crates/mf-runtime", version = "0.1.0" }
+mf-telemetry = { path = "crates/mf-telemetry", version = "0.1.0", default-features = false }
+mf-tui = { path = "crates/mf-tui", version = "0.1.0" }
 mfn-core = { path = "crates/builtin-nodes/core", version = "0.1.0" }

@@ -2,9 +2,9 @@
 
 ## 1. Define observation contracts and package boundaries
 
-- [ ] 1.1 Add `mf-telemetry` and `mf-tui` workspace packages with instrumentation, optional OTLP export, and CLI-only presentation dependency boundaries; verify minimal instrumentation builds and inspect a generated-project dependency graph for absence of terminal dependencies.
-- [ ] 1.2 Implement the wire contract in [plan 1](plans/01-events-and-state.md): versioned descriptions/events, workflow/run identity, pre-enqueue sequence, one lifecycle per node, outcomes/phases, and lightweight final boundaries; verify canonical digest fixtures, field encodings, opaque names, and unsupported versions.
-- [ ] 1.3 Document event boundaries, field meanings, export configuration, delivery limits, and payload exclusions in an observability guide; verify examples against schema fixtures and include no configuration or business values in generated records.
+- [x] 1.1 Add `mf-telemetry` and `mf-tui` workspace packages with instrumentation, optional OTLP export, and CLI-only presentation dependency boundaries; verify minimal instrumentation builds and inspect a generated-project dependency graph for absence of terminal dependencies.
+- [x] 1.2 Implement the wire contract in [plan 1](plans/01-events-and-state.md): versioned descriptions/events, workflow/run identity, pre-enqueue sequence, one lifecycle per node, outcomes/phases, and lightweight final boundaries; verify canonical digest fixtures, field encodings, opaque names, and unsupported versions.
+- [x] 1.3 Document event boundaries, field meanings, export configuration, delivery limits, and payload exclusions in an observability guide; verify examples against schema fixtures and include no configuration or business values in generated records.
 
 ## 2. Instrument shared workflow execution
 
