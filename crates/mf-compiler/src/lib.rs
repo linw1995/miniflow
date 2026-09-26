@@ -25,3 +25,6 @@ pub use cargo_build::{CargoBuildError, resolve_project};
 
 pub mod compatibility;
 pub use compatibility::{RuntimeCompatibilityError, validate_runtime_identity};
+
+pub mod state;
+pub use state::{BuildGuard, StateError, atomic_copy, atomic_write};

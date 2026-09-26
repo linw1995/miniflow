@@ -18,7 +18,7 @@
 - [x] 3.1 Generate one stable package with one runner target with validation and execution modes, deterministic dependency aliases, and a shared plugin aggregation module; test renamed packages, multi-kind crates, and feature forwarding.
 - [x] 3.2 Seed Cargo resolution from the per-definition lock file and implement `--locked` behavior; test first resolution, compatible reuse, required updates, missing locks, and incompatible locks using isolated dependency fixtures.
 - [x] 3.3 Inspect the resolved runtime identities and report conflicting dependency paths; test mismatched runtime versions and sources before executing runner validation.
-- [ ] 3.4 Implement an OS-backed build lock keyed by the dependency lock path and atomic lock persistence after runner success; test contention, lock release after process exit, prior-lock preservation on failure, and persistence failure before executable installation.
+- [x] 3.4 Implement an OS-backed build lock keyed by the dependency lock path and atomic lock persistence after runner success; test contention, lock release after process exit, prior-lock preservation on failure, and persistence failure before executable installation.
 - [ ] 3.5 Document lock semantics, local-path mutability, and contention behavior; verify the documented repeated-build commands preserve the lock under `--locked`.
 
 ## 4. Single-runner validation and executable construction
