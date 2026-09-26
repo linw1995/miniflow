@@ -10,6 +10,8 @@ use std::{
 
 #[derive(Debug, Snafu)]
 pub enum CargoBuildError {
+    #[snafu(display("could not synchronize working Cargo lock: {source}"))]
+    State { source: crate::StateError },
     #[snafu(display("{stage} failed at {project:?}: {source}"))]
     Io {
         stage: &'static str,
@@ -47,10 +49,7 @@ pub fn resolve_project(
     let working = project.join("Cargo.lock");
     match fs::read(flow_lock) {
         Ok(contents) => {
-            fs::write(&working, contents).context(IoSnafu {
-                stage: "lock synchronization",
-                project: project.to_owned(),
-            })?;
+            crate::state::write_if_changed(&working, &contents).context(StateSnafu)?;
         }
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             if locked {

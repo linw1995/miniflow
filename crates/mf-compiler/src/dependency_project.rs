@@ -14,6 +14,8 @@ pub enum SupportPackages {
 
 #[derive(Debug, Snafu)]
 pub enum DependencyProjectError {
+    #[snafu(display("could not synchronize generated file: {source}"))]
+    State { source: crate::StateError },
     #[snafu(display("invalid dependency {alias}: {message}"))]
     Dependency { alias: String, message: String },
     #[snafu(display("could not serialize runner input: {source}"))]
@@ -157,7 +159,7 @@ pub fn write_dependency_project(
     })?;
     for (name, value) in files {
         let path = project.join(name);
-        fs::write(&path, value).context(WriteSnafu { path })?;
+        crate::state::write_if_changed(&path, value.as_bytes()).context(StateSnafu)?;
     }
     Ok(())
 }

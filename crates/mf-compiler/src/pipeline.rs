@@ -1,5 +1,5 @@
 use crate::{
-    BuildGuard, BuildInputs, SupportPackages, WorkflowDefinition, atomic_copy, atomic_write,
+    BuildGuard, BuildInputs, SupportPackages, WorkflowDefinition, atomic_copy,
     dependency_project_files, plan_definition, resolve_project, validate_runtime_identity,
     write_dependency_project,
 };
@@ -141,7 +141,7 @@ pub fn compile_project(request: &CompileRequest<'_>) -> Result<PathBuf, Pipeline
         at(
             "lock persistence",
             &project,
-            atomic_write(&inputs.lock, &lock),
+            crate::state::write_if_changed(&inputs.lock, &lock),
         )?;
     }
     let stage = if request.locked {
@@ -184,6 +184,9 @@ pub fn build_runner(project: &Path) -> Result<PathBuf, PipelineError> {
                 && value["target"]["name"] == "mf-generated-workflow"
             {
                 executable = value["executable"].as_str().map(PathBuf::from);
+                if value["fresh"] == true {
+                    eprintln!("reused compiled runner");
+                }
             }
             if let Some(rendered) = value["message"]["rendered"].as_str() {
                 eprint!("{rendered}");

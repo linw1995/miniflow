@@ -349,3 +349,53 @@ fn missing_artifact_and_cargo_exit_cannot_install_a_stale_binary() {
         assert!(!definition.with_extension("lock").exists());
     }
 }
+
+#[test]
+fn warm_build_preserves_generated_inputs_and_reuses_compiled_runner() {
+    let temporary = TemporaryDirectory::new();
+    let definition = temporary.path().join("flow.json");
+    let target = temporary.path().join("flow");
+    let source = definition_json();
+    fs::write(&definition, &source).unwrap();
+    let first = compile(&definition, &target, None);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let project = temporary.path().join(".mf-build-test");
+    let names = [
+        "Cargo.toml",
+        "Cargo.lock",
+        "src/main.rs",
+        "src/workflow.rs",
+        "src/config_0.json",
+    ];
+    let times: Vec<_> = names
+        .iter()
+        .map(|name| {
+            fs::metadata(project.join(name))
+                .unwrap()
+                .modified()
+                .unwrap()
+        })
+        .collect();
+    let second = compile(&definition, &temporary.path().join("another-output"), None);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(String::from_utf8_lossy(&second.stderr).contains("reused compiled runner"));
+    for (name, time) in names.iter().zip(times) {
+        assert_eq!(
+            fs::metadata(project.join(name))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            time,
+            "{name} was rewritten"
+        );
+    }
+    assert_eq!(fs::read_to_string(&definition).unwrap(), source);
+}

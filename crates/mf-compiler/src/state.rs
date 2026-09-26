@@ -104,3 +104,18 @@ pub fn atomic_copy(source: &Path, destination: &Path) -> Result<(), StateError> 
     })?;
     staged.install(destination)
 }
+
+pub fn write_if_changed(destination: &Path, contents: &[u8]) -> Result<(), StateError> {
+    match fs::read(destination) {
+        Ok(existing) if existing == contents => return Ok(()),
+        Ok(_) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(StateError::Io {
+                path: destination.to_owned(),
+                source,
+            });
+        }
+    }
+    atomic_write(destination, contents)
+}
