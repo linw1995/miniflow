@@ -42,7 +42,7 @@ inventory::submit! {
 fn resolves_registered_nodes_in_definition_order() {
     let definition = WorkflowDefinition::from_json(
         r#"{
-            "version": "2026-09-24",
+            "version": "2026-09-26", "dependencies": {},
             "nodes": [
                 {"id":"first","kind":"test.constant","config":{"value":7}},
                 {"id":"second","kind":"test.constant","config":{"value":11}}
@@ -69,7 +69,7 @@ fn resolves_registered_nodes_in_definition_order() {
 #[test]
 fn reports_unknown_kind_with_definition_id() {
     let definition = WorkflowDefinition::from_json(
-        r#"{"version":"2026-09-24","nodes":[{"id":"missing-plugin","kind":"test.unknown"}]}"#,
+        r#"{"version": "2026-09-26", "dependencies": {},"nodes":[{"id":"missing-plugin","kind":"test.unknown"}]}"#,
     )
     .unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
@@ -87,7 +87,7 @@ fn reports_unknown_kind_with_definition_id() {
 #[test]
 fn reports_invalid_config_with_definition_id_and_source() {
     let definition = WorkflowDefinition::from_json(
-        r#"{"version":"2026-09-24","nodes":[{"id":"bad-config","kind":"test.constant","config":{"value":"wrong"}}]}"#,
+        r#"{"version": "2026-09-26", "dependencies": {},"nodes":[{"id":"bad-config","kind":"test.constant","config":{"value":"wrong"}}]}"#,
     )
     .unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();

@@ -64,7 +64,7 @@ inventory::submit! {
 fn definition() -> WorkflowDefinition {
     WorkflowDefinition::from_json(
         r#"{
-            "version":"2026-09-24",
+            "version": "2026-09-26", "dependencies": {},
             "nodes":[
                 {"id":"increment-two","kind":"example.increment"},
                 {"id":"increment","kind":"example.increment"},
@@ -224,7 +224,7 @@ fn runner_helpers_keep_definition_context() {
 #[test]
 fn code_generation_escapes_definition_strings() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
-        "version": "2026-09-24",
+        "version": "2026-09-26", "dependencies": {},
         "nodes": [{
             "id": "source\"quoted\n",
             "kind": "example.constant",

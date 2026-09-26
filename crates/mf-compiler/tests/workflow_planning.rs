@@ -49,7 +49,7 @@ inventory::submit! {
 
 fn diamond_definition() -> Value {
     json!({
-        "version": "2026-09-24",
+        "version": "2026-09-26", "dependencies": {},
         "nodes": [
             {"id":"sink","kind":"plan.join"},
             {"id":"right","kind":"plan.pass"},
@@ -98,7 +98,7 @@ fn chooses_a_stable_order_when_multiple_nodes_are_ready() {
 #[test]
 fn reports_only_nodes_on_the_cycle() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
-        "version": "2026-09-24",
+        "version": "2026-09-26", "dependencies": {},
         "nodes": [
             {"id":"a","kind":"plan.pass"},
             {"id":"b","kind":"plan.pass"},
@@ -125,7 +125,7 @@ fn reports_only_nodes_on_the_cycle() {
 #[test]
 fn reports_self_loops() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
-        "version": "2026-09-24",
+        "version": "2026-09-26", "dependencies": {},
         "nodes": [{"id":"self","kind":"plan.pass"}],
         "edges": [{"from_node":"self","from_output":"value","to_node":"self","to_input":"input"}]
     }))

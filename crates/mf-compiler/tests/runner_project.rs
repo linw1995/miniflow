@@ -34,7 +34,7 @@ impl Drop for TemporaryDirectory {
 fn generated_project_builds_and_directly_runs_linked_nodes() {
     let definition = WorkflowDefinition::from_json(
         r#"{
-            "version":"2026-09-24",
+            "version": "2026-09-26", "dependencies": {},
             "nodes":[
                 {"id":"source","kind":"builtin.constant","config":{"value":41}},
                 {"id":"echo","kind":"builtin.identity"}

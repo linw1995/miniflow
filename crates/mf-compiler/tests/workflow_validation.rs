@@ -64,7 +64,7 @@ inventory::submit! {
 
 fn valid_definition() -> Value {
     json!({
-        "version": "2026-09-24",
+        "version": "2026-09-26", "dependencies": {},
         "nodes": [
             {"id": "source", "kind": "source.number"},
             {"id": "sink", "kind": "sink.number"}

@@ -400,6 +400,7 @@ pub fn compile_definition(
     Ok(CompiledWorkflow {
         definition: WorkflowDefinition {
             version: definition.version,
+            dependencies: definition.dependencies.clone(),
             nodes,
             edges,
             outputs,

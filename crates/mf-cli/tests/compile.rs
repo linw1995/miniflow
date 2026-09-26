@@ -8,7 +8,7 @@ use std::process::{Command, Output};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFINITION: &str = r#"{
-    "version":"2026-09-24",
+    "version": "2026-09-26", "dependencies": {},
     "nodes":[
         {"id":"source","kind":"builtin.constant","config":{"value":41}},
         {"id":"echo","kind":"builtin.identity"},
@@ -198,7 +198,7 @@ fn output_cannot_replace_the_source_definition() {
 fn unknown_plugin_reports_node_and_kind() {
     assert_rejected_definition(
         json!({
-            "version": "2026-09-24",
+            "version": "2026-09-26", "dependencies": {},
             "nodes": [{"id": "fetch", "kind": "missing.fetch"}]
         }),
         &["fetch", "missing.fetch", "unknown kind"],
@@ -209,7 +209,7 @@ fn unknown_plugin_reports_node_and_kind() {
 fn cyclic_workflow_reports_the_cycle_path() {
     assert_rejected_definition(
         json!({
-            "version": "2026-09-24",
+            "version": "2026-09-26", "dependencies": {},
             "nodes": [
                 {"id": "a", "kind": "builtin.identity"},
                 {"id": "b", "kind": "builtin.identity"}
@@ -227,7 +227,7 @@ fn cyclic_workflow_reports_the_cycle_path() {
 fn invalid_output_port_reports_both_edge_endpoints() {
     assert_rejected_definition(
         json!({
-            "version": "2026-09-24",
+            "version": "2026-09-26", "dependencies": {},
             "nodes": [
                 {"id": "source", "kind": "builtin.constant", "config": {"value": 1}},
                 {"id": "echo", "kind": "builtin.identity"}
@@ -244,7 +244,7 @@ fn invalid_output_port_reports_both_edge_endpoints() {
 fn invalid_input_port_reports_both_edge_endpoints() {
     assert_rejected_definition(
         json!({
-            "version": "2026-09-24",
+            "version": "2026-09-26", "dependencies": {},
             "nodes": [
                 {"id": "source", "kind": "builtin.constant", "config": {"value": 1}},
                 {"id": "echo", "kind": "builtin.identity"}

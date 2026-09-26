@@ -5,8 +5,8 @@ pub mod registry;
 pub mod runner;
 
 pub use definition::{
-    DefinitionId, DefinitionParseError, EdgeDefinition, NodeDefinition, WorkflowDefinition,
-    WorkflowDefinitionVersion, WorkflowOutputDefinition,
+    DefinitionId, DefinitionParseError, EdgeDefinition, NodeDefinition, NodeDependency,
+    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
 };
 pub use flow::{
     Flow, FlowBuildError, FlowConnection, FlowExecutionError, FlowNode, FlowOutput, FlowOutputs,
