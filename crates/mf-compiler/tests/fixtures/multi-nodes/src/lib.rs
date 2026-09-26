@@ -1,0 +1,52 @@
+use mf_runtime::{
+    Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistration, Outputs, PortSpec,
+    ValueType,
+};
+use serde_json::{Value, json};
+
+struct Source;
+
+impl Node for Source {
+    fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
+        Ok(Outputs::from([(
+            "value".into(),
+            json!(if cfg!(feature = "double") { 14 } else { 7 }),
+        )]))
+    }
+}
+
+struct Echo;
+
+impl Node for Echo {
+    fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
+        Ok(Outputs::from([("value".into(), inputs["input"].clone())]))
+    }
+}
+
+fn source(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+    let _: serde_json::Map<String, Value> = mf_runtime::deserialize_config(config)?;
+    Ok(Box::new(Source))
+}
+
+fn echo(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+    let _: serde_json::Map<String, Value> = mf_runtime::deserialize_config(config)?;
+    Ok(Box::new(Echo))
+}
+
+inventory::submit! {
+    NodeRegistration {
+        kind: "fixture.source",
+        inputs: &[],
+        outputs: &[PortSpec::new("value", ValueType::Number, true)],
+        factory: source,
+    }
+}
+
+inventory::submit! {
+    NodeRegistration {
+        kind: "fixture.echo",
+        inputs: &[PortSpec::new("input", ValueType::Number, true)],
+        outputs: &[PortSpec::new("value", ValueType::Number, true)],
+        factory: echo,
+    }
+}
