@@ -108,6 +108,12 @@ pub struct WorkflowOutputDefinition {
     pub name: String,
     pub node: DefinitionId,
     pub port: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub optional: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Snafu)]

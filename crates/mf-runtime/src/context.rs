@@ -274,14 +274,29 @@ pub fn required_context_output(
     node: &str,
     port: &str,
 ) -> Result<Value, WorkflowRunError> {
+    Ok(select_context_output(state, port, node, port, false)?
+        .expect("required outputs return a value"))
+}
+
+pub fn select_context_output(
+    state: &ExecutionState,
+    name: &str,
+    node: &str,
+    port: &str,
+    optional: bool,
+) -> Result<Option<Value>, WorkflowRunError> {
     match state
         .lookup(node, port)
-        .map_err(|message| state_error(node, message))?
+        .map_err(|message| state_error(node, format!("workflow output `{name}`: {message}")))?
     {
-        ContextValue::Value(value) => Ok(value.clone()),
+        ContextValue::Value(value) => Ok(Some(value.clone())),
+        ContextValue::Skipped if optional => Ok(None),
         ContextValue::Skipped => Err(state_error(
             node,
-            format!("required output `{}` was skipped", output_id(node, port)),
+            format!(
+                "workflow output `{name}` requires skipped output `{}`",
+                output_id(node, port)
+            ),
         )),
     }
 }

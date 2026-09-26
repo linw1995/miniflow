@@ -81,14 +81,21 @@ pub struct FlowOutput {
     pub name: String,
     pub node_id: NodeId,
     pub port: String,
+    pub optional: bool,
 }
 
 impl FlowOutput {
-    fn new(name: impl Into<String>, node_id: impl Into<NodeId>, port: impl Into<String>) -> Self {
+    fn new(
+        name: impl Into<String>,
+        node_id: impl Into<NodeId>,
+        port: impl Into<String>,
+        optional: bool,
+    ) -> Self {
         Self {
             name: name.into(),
             node_id: node_id.into(),
             port: port.into(),
+            optional,
         }
     }
 }
@@ -298,7 +305,12 @@ impl Flow {
             if !output_names.insert(output.name.clone()) {
                 return DuplicateOutputNameSnafu { name: output.name }.fail();
             }
-            resolved_outputs.push(FlowOutput::new(output.name, node_id, output.port));
+            resolved_outputs.push(FlowOutput::new(
+                output.name,
+                node_id,
+                output.port,
+                output.optional,
+            ));
         }
 
         Ok(Self {
@@ -411,10 +423,17 @@ impl Flow {
         let mut workflow_outputs = FlowOutputs::new();
         for output in &self.outputs {
             let id = self.nodes[output.node_id.index()].definition_id.as_str();
-            workflow_outputs.insert(
-                output.name.clone(),
-                crate::required_context_output(&state, id, &output.port).map_err(&convert)?,
-            );
+            if let Some(value) = crate::select_context_output(
+                &state,
+                &output.name,
+                id,
+                &output.port,
+                output.optional,
+            )
+            .map_err(&convert)?
+            {
+                workflow_outputs.insert(output.name.clone(), value);
+            }
         }
         Ok(workflow_outputs)
     }
@@ -543,6 +562,7 @@ mod tests {
             name: name.to_owned(),
             node: node.into(),
             port: port.to_owned(),
+            optional: false,
         }
     }
 

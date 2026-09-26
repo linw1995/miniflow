@@ -24,9 +24,9 @@
 
 ## 4. Add optional workflow output selections
 
-- [ ] 4.1 Add `optional` with a default of false and serialization omission for false, updating Rust struct callers and compiled plan round-trips; verify old schema `2026-09-26` fixtures preserve their semantics and invalid optional values are rejected.
-- [ ] 4.2 Share selected-output extraction across execution paths; verify required skipped errors, optional omission, null preservation, unexpected missing errors, invalid selected ports, duplicate names, and the empty result object.
-- [ ] 4.3 Document optional output syntax and support-package compatibility in `docs/workflows.md`; verify the documented output examples match executable fixtures.
+- [x] 4.1 Add `optional` with a default of false and serialization omission for false, updating Rust struct callers and compiled plan round-trips; verify old schema `2026-09-26` fixtures preserve their semantics and invalid optional values are rejected.
+- [x] 4.2 Share selected-output extraction across execution paths; verify required skipped errors, optional omission, null preservation, unexpected missing errors, invalid selected ports, duplicate names, and the empty result object.
+- [x] 4.3 Document optional output syntax and support-package compatibility in `docs/workflows.md`; verify the documented output examples match executable fixtures.
 
 ## 5. Add ordered if-else routing
 

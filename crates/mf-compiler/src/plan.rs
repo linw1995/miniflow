@@ -166,11 +166,11 @@ impl CompiledWorkflow {
             let output_name = LitStr::new(&output.name, Span::call_site());
             let node_id = LitStr::new(output.node.as_str(), Span::call_site());
             let port = LitStr::new(&output.port, Span::call_site());
+            let optional = output.optional;
             output_statements.push(quote! {
-                workflow_outputs.insert(
-                    #output_name.to_owned(),
-                    mf_runtime::required_context_output(&state, #node_id, #port)?,
-                );
+                if let Some(value) = mf_runtime::select_context_output(&state, #output_name, #node_id, #port, #optional)? {
+                    workflow_outputs.insert(#output_name.to_owned(), value);
+                }
             });
         }
 

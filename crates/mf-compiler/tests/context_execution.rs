@@ -80,6 +80,10 @@ fn generated_binary_matches_context_values_and_execution_trace() {
     let root = tempfile::tempdir().unwrap();
     let trace = root.path().join("trace");
     let mut value = graph();
+    value["outputs"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"inactive","node":"d","port":"value","optional":true}));
     for node in value["nodes"].as_array_mut().unwrap() {
         node["config"]["trace"] = json!(trace);
         node["config"]["name"] = node["id"].clone();
@@ -131,4 +135,56 @@ fn generated_binary_matches_context_values_and_execution_trace() {
         json!(expected)
     );
     assert_eq!(fs::read_to_string(trace).unwrap(), expected_trace);
+}
+
+#[test]
+fn selected_outputs_distinguish_skips_null_and_missing() {
+    let mut value = graph();
+    value["outputs"] = json!([
+        {"name":"null","node":"b","port":"value","optional":true},
+        {"name":"port_skip","node":"a","port":"off","optional":true},
+        {"name":"node_skip","node":"d","port":"value","optional":true}
+    ]);
+    assert_eq!(
+        json!(flow(value.clone()).execute().unwrap()),
+        json!({"null":null})
+    );
+    value["outputs"][1]["optional"] = json!(false);
+    let error = flow(value.clone()).execute().unwrap_err().to_string();
+    assert!(error.contains("port_skip") && error.contains("a.off") && error.contains("skipped"));
+    value["outputs"] = json!([{"name":"only","node":"d","port":"value","optional":true}]);
+    assert!(flow(value.clone()).execute().unwrap().is_empty());
+    value["nodes"][0]["config"]["ports"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("missing"));
+    value["outputs"] = json!([{"name":"broken","node":"a","port":"missing","optional":true}]);
+    let error = flow(value).execute().unwrap_err().to_string();
+    assert!(error.contains("broken") && error.contains("a.missing"));
+}
+
+#[test]
+fn optional_selection_defaults_round_trip_and_remain_strict() {
+    let definition: WorkflowDefinition = serde_json::from_value(graph()).unwrap();
+    assert!(!definition.outputs[0].optional);
+    assert!(
+        serde_json::to_value(&definition).unwrap()["outputs"][0]
+            .get("optional")
+            .is_none()
+    );
+    let mut value = graph();
+    value["outputs"][0]["optional"] = json!("true");
+    assert!(serde_json::from_value::<WorkflowDefinition>(value).is_err());
+    for change in ["unknown", "duplicate"] {
+        let mut value = graph();
+        value["outputs"][0]["optional"] = json!(true);
+        if change == "unknown" {
+            value["outputs"][0]["port"] = json!("unknown");
+        } else {
+            let duplicate = value["outputs"][0].clone();
+            value["outputs"].as_array_mut().unwrap().push(duplicate);
+        }
+        let definition = serde_json::from_value(value).unwrap();
+        assert!(compile_definition(&definition, &NodeRegistry::from_inventory().unwrap()).is_err());
+    }
 }
