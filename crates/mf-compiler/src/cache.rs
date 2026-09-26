@@ -5,8 +5,17 @@ use std::{
     path::{Path, PathBuf},
 };
 
-const LAYOUT_VERSION: u32 = 1;
 const OWNER: &str = ".mf-owner.json";
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+enum BuildLayoutVersion {
+    #[serde(rename = "2026-09-26")]
+    V2026_09_26,
+}
+
+impl BuildLayoutVersion {
+    const CURRENT: Self = Self::V2026_09_26;
+}
 
 #[derive(Debug, Snafu)]
 pub enum CacheError {
@@ -34,7 +43,7 @@ pub enum CacheError {
 struct Owner {
     definition: PathBuf,
     cli_version: String,
-    layout_version: u32,
+    layout_version: BuildLayoutVersion,
 }
 
 pub struct BuildDirectory {
@@ -52,7 +61,10 @@ pub fn default_build_directory(cache_root: &Path, definition: &Path) -> PathBuf 
         .iter()
         .copied()
         .chain(env!("CARGO_PKG_VERSION").bytes())
-        .chain(LAYOUT_VERSION.to_le_bytes())
+        .chain(
+            serde_json::to_vec(&BuildLayoutVersion::CURRENT)
+                .expect("layout version serializes to JSON"),
+        )
     {
         hash = (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3);
     }
@@ -121,7 +133,7 @@ impl BuildDirectory {
         let expected = Owner {
             definition: definition.to_owned(),
             cli_version: env!("CARGO_PKG_VERSION").into(),
-            layout_version: LAYOUT_VERSION,
+            layout_version: BuildLayoutVersion::CURRENT,
         };
         let marker = path.join(OWNER);
         let reused = match fs::read(&marker) {

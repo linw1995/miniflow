@@ -1,25 +1,10 @@
 use mf_compiler::{BuildInputs, WorkflowDefinition};
-use std::{fs, path::PathBuf};
-
-static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-fn temporary() -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "mf-inputs-{}-{}-{}",
-        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    fs::create_dir(&dir).unwrap();
-    dir
-}
+use std::fs;
 
 #[test]
 fn resolves_paths_from_canonical_definition_and_names_locks_per_flow() {
-    let root = temporary();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
     fs::create_dir(root.join("nodes")).unwrap();
     let definition = WorkflowDefinition::from_json(r#"{"version":"2026-09-26","dependencies":{"local":{"package":"local","path":"nodes"}},"nodes":[]}"#).unwrap();
     for name in [
@@ -32,7 +17,7 @@ fn resolves_paths_from_canonical_definition_and_names_locks_per_flow() {
         let inputs = BuildInputs::new(&root.join(name)).unwrap();
         assert_eq!(
             inputs.lock,
-            fs::canonicalize(&root)
+            fs::canonicalize(root)
                 .unwrap()
                 .join(name)
                 .with_extension("lock")
@@ -54,12 +39,12 @@ fn resolves_paths_from_canonical_definition_and_names_locks_per_flow() {
             BuildInputs::new(&root.join("order.json")).unwrap().lock
         );
     }
-    fs::remove_dir_all(root).unwrap();
 }
 
 #[test]
 fn rejects_input_and_lock_aliases_without_mutation() {
-    let root = temporary();
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path();
     let source = root.join("flow.json");
     fs::write(&source, "original definition").unwrap();
     let inputs = BuildInputs::new(&source).unwrap();
@@ -77,5 +62,4 @@ fn rejects_input_and_lock_aliases_without_mutation() {
         fs::read_to_string(root.join("flow.lock")).unwrap(),
         "original lock"
     );
-    fs::remove_dir_all(root).unwrap();
 }

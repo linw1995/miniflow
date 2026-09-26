@@ -43,7 +43,10 @@ fn packaged_cli_acceptance() {
     fs::create_dir(&project).unwrap();
     let mut flow = json!({
         "version":"2026-09-26",
-        "dependencies":{"external":{"package":"fixture-multi-nodes","version":format!("={}", fixture.fixture_version),"features":["double"]}},
+        "dependencies":{
+            "constant":{"package":"mfn-constant","version":format!("={}", env!("CARGO_PKG_VERSION"))},
+            "identity":{"package":"mfn-identity","version":format!("={}", env!("CARGO_PKG_VERSION"))},
+            "external":{"package":"fixture-multi-nodes","version":format!("={}", fixture.fixture_version),"features":["double"]}},
         "nodes":[{"id":"source","kind":"fixture.source"},{"id":"echo","kind":"fixture.echo"}],
         "edges":[{"from_node":"source","from_output":"value","to_node":"echo","to_input":"input"}],
         "outputs":[{"name":"result","node":"echo","port":"value"}]
@@ -59,6 +62,15 @@ fn packaged_cli_acceptance() {
     assert_eq!(fs::read(project.join("flow.lock")).unwrap(), lock);
     let manifest = fs::read_to_string(build.join("Cargo.toml")).unwrap();
     assert!(!manifest.contains("path =") && !manifest.contains("mf-bundle"));
+    for name in ["mf-runtime", "mf-compiler"] {
+        assert!(manifest.contains(&format!(
+            "{name} = {{ version = \"={}\" }}",
+            env!("CARGO_PKG_VERSION")
+        )));
+    }
+    let generated = fs::read_to_string(build.join("src/workflow.rs")).unwrap();
+    assert!(generated.contains("mf_runtime::execute_node"));
+    assert!(!generated.contains("Flow::new"));
 
     let local = project.join("local-nodes");
     let repository = fixture.root().join("git-nodes");

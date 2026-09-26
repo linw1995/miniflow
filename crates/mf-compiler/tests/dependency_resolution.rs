@@ -1,24 +1,21 @@
 mod common;
-use mf_compiler::{
-    SupportPackages, dependency_project_files, resolve_project, write_dependency_project,
-};
+use mf_compiler::{SupportPackages, resolve_project, write_dependency_project};
 use std::fs;
 
 #[test]
 fn reuses_authoritative_lock_and_rejects_missing_or_incompatible_locked_inputs() {
-    let root = common::Directory::new();
-    let project = root.0.join("build");
-    let lock = root.0.join("flow.lock");
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("build");
+    let lock = root.path().join("flow.lock");
     let plan = common::fixture_plan();
-    let files = dependency_project_files(
-        &plan.definition,
-        &plan.generate_artifacts().unwrap(),
+    write_dependency_project(
+        &project,
+        &plan,
         &SupportPackages::Local {
             crates_dir: common::crates_dir(),
         },
     )
     .unwrap();
-    write_dependency_project(&project, &files).unwrap();
     assert!(resolve_project(&project, &lock, true).is_err());
     let metadata = resolve_project(&project, &lock, false).unwrap();
     assert!(

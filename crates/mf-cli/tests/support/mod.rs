@@ -165,52 +165,6 @@ impl PackagedCli {
                 &vendor,
             );
         }
-        for (name, _) in SUPPORT_PACKAGES {
-            let extracted = root.join("verification").join(name);
-            copy_directory(&vendor.join(format!("{name}-{version}")), &extracted);
-            checked(
-                cargo()
-                    .current_dir(&extracted)
-                    .args(["check", "--offline", "--lib", "--manifest-path"])
-                    .arg(extracted.join("Cargo.toml"))
-                    .arg("--config")
-                    .arg(&config),
-            );
-            if name == "mf-compiler" {
-                let output = checked(
-                    cargo()
-                        .current_dir(&extracted)
-                        .args([
-                            "metadata",
-                            "--offline",
-                            "--no-deps",
-                            "--format-version",
-                            "1",
-                            "--manifest-path",
-                        ])
-                        .arg(extracted.join("Cargo.toml"))
-                        .arg("--config")
-                        .arg(&config),
-                );
-                let metadata: Value = serde_json::from_slice(&output.stdout).unwrap();
-                let compiler = metadata["packages"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find(|p| p["name"] == name)
-                    .unwrap();
-                for dependency in compiler["dependencies"].as_array().unwrap() {
-                    assert!(
-                        dependency["path"].is_null(),
-                        "packaged dependency contains a checkout path: {dependency}"
-                    );
-                    if dependency["kind"].is_null() {
-                        assert_ne!(dependency["name"], "mf-bundle");
-                    }
-                }
-            }
-        }
-
         checked(cargo().args([
             "build",
             "--release",

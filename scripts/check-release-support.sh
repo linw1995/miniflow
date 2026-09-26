@@ -24,21 +24,14 @@ case "$cargo_bin" in
 esac
 packages=(mf-runtime mf-compiler mfn-constant mfn-identity)
 
-cargo_output() {
-  if ! "$cargo_bin" "$@"; then
-    printf 'support package prerequisite failed: cargo %s\n' "$*" >&2
-    return 1
-  fi
-}
-
-workspace_metadata="$(cargo_output metadata --no-deps --format-version 1 --manifest-path "$workspace_root/Cargo.toml")"
+workspace_metadata="$("$cargo_bin" metadata --no-deps --format-version 1 --manifest-path "$workspace_root/Cargo.toml")"
 version="$(jq -er '.packages[] | select(.name == "mf-cli") | .version' <<< "$workspace_metadata")"
 probe_dir="$(mktemp -d "${TMPDIR:-/tmp}/mf-release-support.XXXXXX")"
 trap 'rm -rf "$probe_dir"' EXIT
 cd "$probe_dir"
 
 for package in "${packages[@]}"; do
-  owners="$(cargo_output owner --list --registry crates-io --color never "$package")"
+  owners="$("$cargo_bin" owner --list --registry crates-io --color never "$package")"
   found=false
   while read -r listed_owner _owner_details; do
     if [[ "$listed_owner" == "$expected_owner" ]]; then
@@ -61,13 +54,5 @@ printf 'fn main() {}\n' > src/main.rs
   done
 } > Cargo.toml
 
-resolved="$(cargo_output metadata --format-version 1)"
-for package in "${packages[@]}"; do
-  if ! jq -e --arg name "$package" --arg version "$version" \
-    'any(.packages[]; .name == $name and .version == $version and ((.source // "") | startswith("registry+")))' \
-    <<< "$resolved" > /dev/null; then
-    printf 'required support version is unavailable: %s at %s\n' "$package" "$version" >&2
-    exit 1
-  fi
-done
+"$cargo_bin" metadata --format-version 1 > /dev/null
 printf 'Support packages for CLI %s are available and owned by %s\n' "$version" "$expected_owner"

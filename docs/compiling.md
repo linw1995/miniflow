@@ -22,7 +22,7 @@ The output directory must exist. A successful first build creates `flow.lock`. S
 
 The CLI checks graph structure and generates fixed node orchestration, then compiles one runner using `cargo build --release --locked`. It invokes that binary with `--validate` to check registered kinds, configuration, and port contracts without executing node operations. Only the validated binary is installed. Plugin errors can therefore be reported after Rust compilation.
 
-The generated executable embeds the graph metadata and node configuration. Normal execution uses generated node calls and prints selected outputs as JSON. It does not require the definition, lock, plugin sources, or Cargo at runtime. It retains `--validate` for checking its embedded configuration without executing the workflow.
+The generated executable embeds the graph metadata and node configuration. Node configuration is emitted as Rust string literals in the generated workflow source. Normal execution uses generated node calls and prints selected outputs as JSON. It does not require the definition, lock, plugin sources, or Cargo at runtime. It retains `--validate` for checking its embedded configuration without executing the workflow.
 
 ## Repository development
 

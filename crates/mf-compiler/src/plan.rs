@@ -17,7 +17,6 @@ pub struct CompiledWorkflow {
 pub struct GeneratedWorkflowArtifacts {
     pub rust_source: String,
     pub plan_json: String,
-    pub config_files: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Snafu)]
@@ -93,13 +92,10 @@ impl CompiledWorkflow {
         }
 
         let mut node_statements: Vec<TokenStream> = Vec::with_capacity(self.execution_order.len());
-        let mut config_files = BTreeMap::new();
         for (index, definition_id) in self.execution_order.iter().enumerate() {
             let node = nodes_by_id[definition_id];
-            let config_file = format!("config_{index}.json");
             let config_json = serde_json::to_string(&node.config).context(SerializeSnafu)?;
-            let config_file_lit = LitStr::new(&config_file, Span::call_site());
-            config_files.insert(config_file, config_json);
+            let config_lit = LitStr::new(&config_json, Span::call_site());
 
             let node_ident = format_ident!("node_{index}");
             let inputs_ident = format_ident!("inputs_{index}");
@@ -139,7 +135,7 @@ impl CompiledWorkflow {
                     registry,
                     #definition_id_lit,
                     #kind_lit,
-                    include_str!(#config_file_lit),
+                    #config_lit,
                 )?;
                 #inputs_binding
                 #(#input_statements)*
@@ -199,7 +195,6 @@ impl CompiledWorkflow {
         Ok(GeneratedWorkflowArtifacts {
             rust_source,
             plan_json: self.to_json()?,
-            config_files,
         })
     }
 }

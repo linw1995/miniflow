@@ -1,4 +1,3 @@
-mod common;
 use mf_compiler::{BuildGuard, atomic_write};
 use std::{fs, process::Command};
 
@@ -15,8 +14,8 @@ fn lock_child() {
 
 #[test]
 fn locks_are_released_by_process_exit_and_stale_files_do_not_block() {
-    let root = common::Directory::new();
-    let path = root.0.join("flow.lock.guard");
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("flow.lock.guard");
     let guard = BuildGuard::acquire(&path).unwrap();
     let child = || {
         let mut cmd = Command::new(std::env::current_exe().unwrap());
@@ -38,25 +37,25 @@ fn locks_are_released_by_process_exit_and_stale_files_do_not_block() {
 
 #[test]
 fn atomically_replaces_state_and_cleans_up_failed_staging() {
-    let root = common::Directory::new();
-    let lock = root.0.join("flow.lock");
+    let root = tempfile::tempdir().unwrap();
+    let lock = root.path().join("flow.lock");
     fs::write(&lock, "old").unwrap();
     atomic_write(&lock, b"new").unwrap();
     assert_eq!(fs::read(&lock).unwrap(), b"new");
-    fs::create_dir(root.0.join("directory")).unwrap();
-    assert!(atomic_write(&root.0.join("directory"), b"invalid").is_err());
+    fs::create_dir(root.path().join("directory")).unwrap();
+    assert!(atomic_write(&root.path().join("directory"), b"invalid").is_err());
     assert_eq!(fs::read(&lock).unwrap(), b"new");
-    assert_eq!(fs::read_dir(&root.0).unwrap().count(), 2);
+    assert_eq!(fs::read_dir(root.path()).unwrap().count(), 2);
 }
 
 #[cfg(unix)]
 #[test]
 fn materializes_working_locks_without_aliasing_the_authoritative_lock() {
-    let root = common::Directory::new();
-    let authoritative = root.0.join("flow.lock");
+    let root = tempfile::tempdir().unwrap();
+    let authoritative = root.path().join("flow.lock");
     fs::write(&authoritative, "locked resolution").unwrap();
     for symbolic in [true, false] {
-        let working = root.0.join(if symbolic {
+        let working = root.path().join(if symbolic {
             "symbolic.lock"
         } else {
             "hard.lock"
@@ -81,9 +80,9 @@ fn materializes_working_locks_without_aliasing_the_authoritative_lock() {
 #[cfg(unix)]
 #[test]
 fn rejects_symbolic_guards_without_creating_their_targets() {
-    let root = common::Directory::new();
-    let missing_lock = root.0.join("flow.lock");
-    let guard = root.0.join("flow.lock.guard");
+    let root = tempfile::tempdir().unwrap();
+    let missing_lock = root.path().join("flow.lock");
+    let guard = root.path().join("flow.lock.guard");
     std::os::unix::fs::symlink(&missing_lock, &guard).unwrap();
     assert!(BuildGuard::acquire(&guard).is_err());
     assert!(!missing_lock.exists());

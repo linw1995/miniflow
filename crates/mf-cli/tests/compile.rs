@@ -1,12 +1,10 @@
 #![cfg(feature = "development-support")]
 use serde_json::json;
 use std::fs;
-use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFINITION: &str = r#"{
     "version": "2026-09-26", "dependencies": {},
@@ -25,35 +23,11 @@ const DEFINITION: &str = r#"{
     ]
 }"#;
 
-struct TemporaryDirectory(PathBuf);
-
-impl TemporaryDirectory {
-    fn new() -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        for attempt in 0..128 {
-            let path = std::env::temp_dir()
-                .join(format!("mf cli {} {nonce} {attempt}", std::process::id()));
-            match fs::create_dir(&path) {
-                Ok(()) => return Self(path),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => panic!("could not create temporary directory: {error}"),
-            }
-        }
-        panic!("could not allocate a unique temporary directory")
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TemporaryDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
+fn temporary_directory() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("mf cli ")
+        .tempdir()
+        .unwrap()
 }
 
 fn compile_command(definition: &Path, output: &Path) -> Command {
@@ -85,7 +59,7 @@ fn compile(definition: &Path, output: &Path, rustflags: Option<&str>) -> Output 
 }
 
 fn assert_rejected_definition(mut value: serde_json::Value, diagnostics: &[&str]) {
-    let temporary = TemporaryDirectory::new();
+    let temporary = temporary_directory();
     let definition = temporary.path().join("invalid-workflow.json");
     let target = temporary.path().join("workflow");
     add_dependencies(&mut value);
@@ -106,7 +80,7 @@ fn assert_rejected_definition(mut value: serde_json::Value, diagnostics: &[&str]
 
 #[test]
 fn compiled_binary_replaces_target_and_runs_without_the_definition() {
-    let temporary = TemporaryDirectory::new();
+    let temporary = temporary_directory();
     let definition = temporary.path().join("workflow.json");
     let target = temporary.path().join("workflow");
     fs::write(&definition, definition_json()).unwrap();
@@ -150,7 +124,7 @@ fn compiled_binary_replaces_target_and_runs_without_the_definition() {
 
 #[test]
 fn cargo_failure_preserves_existing_target_and_forwards_diagnostics() {
-    let temporary = TemporaryDirectory::new();
+    let temporary = temporary_directory();
     let definition = temporary.path().join("workflow.json");
     let target = temporary.path().join("workflow");
     fs::write(&definition, definition_json()).unwrap();
@@ -192,7 +166,7 @@ fn cargo_failure_preserves_existing_target_and_forwards_diagnostics() {
 
 #[test]
 fn output_cannot_replace_the_source_definition() {
-    let temporary = TemporaryDirectory::new();
+    let temporary = temporary_directory();
     let definition = temporary.path().join("workflow.json");
     fs::write(&definition, definition_json()).unwrap();
 
@@ -283,7 +257,7 @@ fn definition_json() -> String {
 
 #[test]
 fn failed_validation_preserves_prior_lock_and_executable() {
-    let temporary = TemporaryDirectory::new();
+    let temporary = temporary_directory();
     let definition = temporary.path().join("flow.json");
     let target = temporary.path().join("flow");
     fs::write(&definition, definition_json()).unwrap();
@@ -307,7 +281,7 @@ fn failed_validation_preserves_prior_lock_and_executable() {
 
 #[test]
 fn install_failure_reports_persisted_lock_and_preserves_existing_directory() {
-    let temporary = TemporaryDirectory::new();
+    let temporary = temporary_directory();
     let definition = temporary.path().join("flow.json");
     let target = temporary.path().join("output");
     fs::write(&definition, definition_json()).unwrap();
@@ -323,7 +297,7 @@ fn install_failure_reports_persisted_lock_and_preserves_existing_directory() {
 #[cfg(unix)]
 #[test]
 fn missing_artifact_and_cargo_exit_cannot_install_a_stale_binary() {
-    let temporary = TemporaryDirectory::new();
+    let temporary = temporary_directory();
     let definition = temporary.path().join("flow.json");
     let target = temporary.path().join("flow");
     fs::write(&definition, definition_json()).unwrap();
@@ -367,7 +341,7 @@ fn missing_artifact_and_cargo_exit_cannot_install_a_stale_binary() {
 
 #[test]
 fn warm_build_preserves_generated_inputs_and_reuses_compiled_runner() {
-    let temporary = TemporaryDirectory::new();
+    let temporary = temporary_directory();
     let definition = temporary.path().join("flow.json");
     let target = temporary.path().join("flow");
     let source = definition_json();
@@ -379,13 +353,7 @@ fn warm_build_preserves_generated_inputs_and_reuses_compiled_runner() {
         String::from_utf8_lossy(&first.stderr)
     );
     let project = temporary.path().join(".mf-build-test");
-    let names = [
-        "Cargo.toml",
-        "Cargo.lock",
-        "src/main.rs",
-        "src/workflow.rs",
-        "src/config_0.json",
-    ];
+    let names = ["Cargo.toml", "Cargo.lock", "src/main.rs", "src/workflow.rs"];
     let times: Vec<_> = names
         .iter()
         .map(|name| {
@@ -424,14 +392,13 @@ fn warm_build_preserves_generated_inputs_and_reuses_compiled_runner() {
 }
 
 #[test]
-fn repairs_partial_projects_and_removes_obsolete_configuration() {
-    let temporary = TemporaryDirectory::new();
+fn repairs_partial_projects_and_updates_configuration() {
+    let temporary = temporary_directory();
     let definition = temporary.path().join("flow.json");
     let target = temporary.path().join("flow");
     fs::write(&definition, definition_json()).unwrap();
     assert!(compile(&definition, &target, None).status.success());
     let project = temporary.path().join(".mf-build-test");
-    assert!(project.join("src/config_2.json").is_file());
     fs::remove_file(project.join("src/main.rs")).unwrap();
     fs::write(project.join("Cargo.lock"), "interrupted working state").unwrap();
     let mut changed: serde_json::Value = serde_json::from_str(&definition_json()).unwrap();
@@ -446,7 +413,6 @@ fn repairs_partial_projects_and_removes_obsolete_configuration() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(project.join("src/main.rs").is_file());
-    assert!(!project.join("src/config_2.json").exists());
     let output = Command::new(&target).output().unwrap();
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
@@ -456,7 +422,7 @@ fn repairs_partial_projects_and_removes_obsolete_configuration() {
 
 #[test]
 fn cargo_invalidates_features_local_sources_versions_and_flags() {
-    let temporary = TemporaryDirectory::new();
+    let temporary = temporary_directory();
     let definition = temporary.path().join("flow.json");
     let target = temporary.path().join("flow");
     let local = temporary.path().join("nodes");
@@ -544,7 +510,7 @@ fn cargo_invalidates_features_local_sources_versions_and_flags() {
 #[test]
 fn rejects_redirected_cache_directories_without_mutating_inputs() {
     for name in ["src", "target"] {
-        let temporary = TemporaryDirectory::new();
+        let temporary = temporary_directory();
         let definition = temporary.path().join("workflow.rs");
         let target = temporary.path().join("flow");
         let original = definition_json();

@@ -121,21 +121,7 @@ pub fn validate_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<(), WorkflowCompileError> {
-    let mut node_ids = BTreeSet::new();
-    for (index, node) in definition.nodes.iter().enumerate() {
-        if node.id.as_str().trim().is_empty() {
-            return InvalidNodeIdSnafu {
-                position: index + 1,
-            }
-            .fail();
-        }
-        if !node_ids.insert(node.id.clone()) {
-            return DuplicateNodeIdSnafu {
-                definition_id: node.id.clone(),
-            }
-            .fail();
-        }
-    }
+    validate_structure(definition)?;
 
     let mut registrations: BTreeMap<DefinitionId, &'static NodeRegistration> = BTreeMap::new();
     for node in &definition.nodes {
@@ -151,24 +137,8 @@ pub fn validate_definition(
 
     let mut connected_inputs = BTreeSet::new();
     for edge in &definition.edges {
-        let Some(source) = registrations.get(&edge.from_node) else {
-            return UnknownEdgeSourceSnafu {
-                from_node: edge.from_node.clone(),
-                from_output: edge.from_output.clone(),
-                to_node: edge.to_node.clone(),
-                to_input: edge.to_input.clone(),
-            }
-            .fail();
-        };
-        let Some(target) = registrations.get(&edge.to_node) else {
-            return UnknownEdgeTargetSnafu {
-                from_node: edge.from_node.clone(),
-                from_output: edge.from_output.clone(),
-                to_node: edge.to_node.clone(),
-                to_input: edge.to_input.clone(),
-            }
-            .fail();
-        };
+        let source = registrations[&edge.from_node];
+        let target = registrations[&edge.to_node];
         let Some(output_port) = source
             .outputs
             .iter()
@@ -205,13 +175,7 @@ pub fn validate_definition(
             }
             .fail();
         }
-        if !connected_inputs.insert((edge.to_node.clone(), edge.to_input.clone())) {
-            return DuplicateInputConnectionSnafu {
-                node_id: edge.to_node.clone(),
-                port: edge.to_input.clone(),
-            }
-            .fail();
-        }
+        connected_inputs.insert((edge.to_node.clone(), edge.to_input.clone()));
     }
 
     for node in &definition.nodes {
@@ -227,21 +191,8 @@ pub fn validate_definition(
         }
     }
 
-    let mut output_names = BTreeSet::new();
     for output in &definition.outputs {
-        if !output_names.insert(output.name.clone()) {
-            return DuplicateWorkflowOutputNameSnafu {
-                name: output.name.clone(),
-            }
-            .fail();
-        }
-        let Some(registration) = registrations.get(&output.node) else {
-            return UnknownWorkflowOutputNodeSnafu {
-                name: output.name.clone(),
-                node_id: output.node.clone(),
-            }
-            .fail();
-        };
+        let registration = registrations[&output.node];
         if !registration
             .outputs
             .iter()
@@ -268,9 +219,7 @@ pub fn topological_order(
     structural_order(definition)
 }
 
-pub fn structural_order(
-    definition: &WorkflowDefinition,
-) -> Result<Vec<DefinitionId>, WorkflowCompileError> {
+fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCompileError> {
     let mut ids = BTreeSet::new();
     for (index, node) in definition.nodes.iter().enumerate() {
         if node.id.as_str().trim().is_empty() {
@@ -330,6 +279,13 @@ pub fn structural_order(
             .fail();
         }
     }
+    Ok(())
+}
+
+pub fn structural_order(
+    definition: &WorkflowDefinition,
+) -> Result<Vec<DefinitionId>, WorkflowCompileError> {
+    validate_structure(definition)?;
     let mut indegree = BTreeMap::new();
     let mut outgoing: BTreeMap<DefinitionId, Vec<DefinitionId>> = BTreeMap::new();
     let mut incoming: BTreeMap<DefinitionId, Vec<DefinitionId>> = BTreeMap::new();

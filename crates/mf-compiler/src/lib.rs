@@ -12,12 +12,7 @@ pub mod inputs;
 pub use inputs::{BuildInputs, InputError};
 
 pub mod dependency_project;
-pub use dependency_project::{
-    DependencyProjectError, SupportPackages, dependency_project_files, write_dependency_project,
-};
-
-pub mod cargo_build;
-pub use cargo_build::{CargoBuildError, resolve_project};
+pub use dependency_project::{DependencyProjectError, SupportPackages, write_dependency_project};
 
 pub mod compatibility;
 pub use compatibility::{RuntimeCompatibilityError, validate_runtime_identity};
@@ -26,7 +21,7 @@ pub mod state;
 pub use state::{BuildGuard, StateError, atomic_copy, atomic_write};
 
 pub mod pipeline;
-pub use pipeline::{CompileRequest, PipelineError, compile_project};
+pub use pipeline::{CompileRequest, PipelineError, compile_project, resolve_project};
 
 pub mod cache;
 pub use cache::{BuildDirectory, CacheError, default_build_directory};

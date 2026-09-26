@@ -1,14 +1,11 @@
 mod common;
-use mf_compiler::{
-    SupportPackages, dependency_project_files, plan_definition, resolve_project,
-    write_dependency_project,
-};
+use mf_compiler::{SupportPackages, plan_definition, resolve_project, write_dependency_project};
 use std::process::Command;
 
 #[test]
 fn one_runner_validates_without_execution_and_reports_plugin_errors() {
-    let root = common::Directory::new();
-    let project = root.0.join("build");
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("build");
     let mut definition = common::fixture_definition();
     definition.nodes[0].config = serde_json::json!({"print":true});
     definition
@@ -19,17 +16,16 @@ fn one_runner_validates_without_execution_and_reports_plugin_errors() {
         .push("fail-execution".into());
     let build = |definition: &mf_compiler::WorkflowDefinition| {
         let plan = plan_definition(definition).unwrap();
-        let files = dependency_project_files(
-            definition,
-            &plan.generate_artifacts().unwrap(),
+        write_dependency_project(
+            &project,
+            &plan,
             &SupportPackages::Local {
                 crates_dir: common::crates_dir(),
             },
         )
         .unwrap();
-        write_dependency_project(&project, &files).unwrap();
-        resolve_project(&project, &root.0.join("flow.lock"), false).unwrap();
-        let result = mf_compiler::cargo_build::cargo_command(&project)
+        resolve_project(&project, &root.path().join("flow.lock"), false).unwrap();
+        let result = mf_compiler::pipeline::cargo_command(&project)
             .args(["build", "--offline", "--release", "--locked"])
             .output()
             .unwrap();

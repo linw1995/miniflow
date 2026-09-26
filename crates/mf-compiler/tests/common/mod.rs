@@ -1,30 +1,7 @@
 #![allow(dead_code)]
 use mf_compiler::{CompiledWorkflow, WorkflowDefinition};
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 
-static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-pub struct Directory(pub PathBuf);
-impl Directory {
-    pub fn new() -> Self {
-        let path = std::env::temp_dir().join(format!(
-            "mf-project-{}-{}-{}",
-            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir(&path).unwrap();
-        Self(path)
-    }
-}
-impl Drop for Directory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
 pub fn crates_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()

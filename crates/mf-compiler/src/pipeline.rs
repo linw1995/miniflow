@@ -1,11 +1,12 @@
 use crate::{
-    BuildGuard, BuildInputs, SupportPackages, WorkflowDefinition, atomic_copy,
-    dependency_project_files, plan_definition, resolve_project, validate_runtime_identity,
-    write_dependency_project,
+    BuildGuard, BuildInputs, SupportPackages, WorkflowDefinition, atomic_copy, plan_definition,
+    validate_runtime_identity, write_dependency_project,
 };
 use snafu::Snafu;
 use std::{
+    env,
     error::Error,
+    ffi::OsString,
     fs,
     io::{self, BufRead},
     path::{Path, PathBuf},
@@ -78,11 +79,6 @@ pub fn compile_project(request: &CompileRequest<'_>) -> Result<PathBuf, Pipeline
         &inputs.definition,
         plan_definition(&definition),
     )?;
-    let artifacts = at(
-        "code generation",
-        &inputs.definition,
-        plan.generate_artifacts(),
-    )?;
     let guard_path = inputs.lock.with_extension("lock.guard");
     if output == guard_path {
         return Err(failure(
@@ -114,21 +110,12 @@ pub fn compile_project(request: &CompileRequest<'_>) -> Result<PathBuf, Pipeline
             "created"
         }
     );
-    let files = at(
-        "project generation",
-        &project,
-        dependency_project_files(&definition, &artifacts, request.support),
-    )?;
     at(
         "project generation",
         &project,
-        write_dependency_project(&project, &files),
+        write_dependency_project(&project, &plan, request.support),
     )?;
-    let metadata = at(
-        "dependency resolution",
-        &project,
-        resolve_project(&project, &inputs.lock, request.locked),
-    )?;
+    let metadata = resolve_project(&project, &inputs.lock, request.locked)?;
     at(
         "runtime compatibility",
         &project,
@@ -153,11 +140,11 @@ pub fn compile_project(request: &CompileRequest<'_>) -> Result<PathBuf, Pipeline
     Ok(project)
 }
 
-pub fn build_runner(project: &Path) -> Result<PathBuf, PipelineError> {
+fn build_runner(project: &Path) -> Result<PathBuf, PipelineError> {
     let mut child = at(
         "Cargo build",
         project,
-        crate::cargo_build::cargo_command(project)
+        cargo_command(project)
             .args([
                 "build",
                 "--release",
@@ -215,7 +202,7 @@ pub fn build_runner(project: &Path) -> Result<PathBuf, PipelineError> {
     })
 }
 
-pub fn validate_runner(project: &Path, executable: &Path) -> Result<(), PipelineError> {
+fn validate_runner(project: &Path, executable: &Path) -> Result<(), PipelineError> {
     let status = at(
         "runner validation",
         project,
@@ -233,4 +220,61 @@ pub fn validate_runner(project: &Path, executable: &Path) -> Result<(), Pipeline
         ));
     }
     Ok(())
+}
+
+pub fn cargo_command(project: &Path) -> Command {
+    let mut command = Command::new(env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo")));
+    command
+        .current_dir(project)
+        .env("CARGO_TARGET_DIR", project.join("target"));
+    command
+}
+
+pub fn resolve_project(
+    project: &Path,
+    flow_lock: &Path,
+    locked: bool,
+) -> Result<serde_json::Value, PipelineError> {
+    let working = project.join("Cargo.lock");
+    match fs::read(flow_lock) {
+        Ok(contents) => at(
+            "lock synchronization",
+            project,
+            crate::state::write_if_changed(&working, &contents),
+        )?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            if locked {
+                return Err(failure(
+                    "dependency resolution",
+                    project,
+                    format!("--locked requires an existing dependency lock at {flow_lock:?}"),
+                ));
+            }
+            if let Err(error) = fs::remove_file(&working)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                return at("lock synchronization", project, Err(error));
+            }
+        }
+        Err(error) => return at("lock synchronization", project, Err(error)),
+    }
+    let mut command = cargo_command(project);
+    command.args(["metadata", "--format-version", "1"]);
+    if locked {
+        command.arg("--locked");
+    }
+    let output = at("dependency resolution", project, command.output())?;
+    eprint!("{}", String::from_utf8_lossy(&output.stderr));
+    if !output.status.success() {
+        return Err(failure(
+            "dependency resolution",
+            project,
+            format!("Cargo metadata exited with {}", output.status),
+        ));
+    }
+    at(
+        "dependency resolution",
+        project,
+        serde_json::from_slice(&output.stdout),
+    )
 }
