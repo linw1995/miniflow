@@ -1,15 +1,29 @@
 {
-  "version": "2026-09-24",
+  "version": "2026-09-26",
+  "dependencies": {
+    "constant": {
+      "package": "mfn-constant",
+      "path": "../crates/builtin-nodes/constant"
+    },
+    "identity": {
+      "package": "mfn-identity",
+      "path": "../crates/builtin-nodes/identity"
+    }
+  },
   "nodes": [
     {
       "id": "answer",
       "kind": "builtin.constant",
-      "config": { "value": 42 }
+      "config": {
+        "value": 42
+      }
     },
     {
       "id": "message",
       "kind": "builtin.constant",
-      "config": { "value": "hello" }
+      "config": {
+        "value": "hello"
+      }
     },
     {
       "id": "echo",
@@ -25,7 +39,15 @@
     }
   ],
   "outputs": [
-    { "name": "answer", "node": "answer", "port": "value" },
-    { "name": "greeting", "node": "echo", "port": "value" }
+    {
+      "name": "answer",
+      "node": "answer",
+      "port": "value"
+    },
+    {
+      "name": "greeting",
+      "node": "echo",
+      "port": "value"
+    }
   ]
 }

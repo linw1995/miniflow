@@ -12,7 +12,8 @@ From the repository root, enter the pinned development environment and compile t
 ```sh
 nix develop
 output_dir=$(mktemp -d)
-cargo run -p mf-cli -- compile examples/hello-workflow.json --output "$output_dir/hello-workflow"
+MF_DEV_SUPPORT_ROOT="$PWD/crates" cargo run -p mf-cli --features development-support -- \
+  compile examples/hello-workflow.json --output "$output_dir/hello-workflow"
 "$output_dir/hello-workflow"
 ```
 
@@ -22,14 +23,15 @@ Expected output:
 {"answer":42,"greeting":"hello"}
 ```
 
-Compiling workflows currently requires the source checkout and Cargo. The generated executable embeds node configuration and runs without the JSON definition or checkout.
+Flows declare their node dependencies directly in JSON. Installed release CLIs build available registry, Git, or local node packages without a source checkout; Cargo and a compatible Rust toolchain are required. The command above explicitly uses local support crates for repository development. Generated executables run without the definition or build tools.
 
 ## Documentation
 
 - [Compiling workflows](docs/compiling.md): CLI build, usage, and build failures.
 - [Workflow definitions](docs/workflows.md): JSON format, built-in nodes, and validation.
-- [Plugin development](docs/plugins.md): node registration and bundle selection.
+- [Plugin development](docs/plugins.md): node registration and dependency selection.
 - [Contributing](CONTRIBUTING.md): development setup, checks, and submission conventions.
+- [Release prerequisites](docs/releases.md): support package preparation and availability checks.
 - [Dependency license audit](docs/licensing.md): reports and distribution notices.
 
 ## License

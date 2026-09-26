@@ -18,6 +18,31 @@ nix flake check -L
 
 These checks cover formatting, Rust diagnostics, tests, workflow configuration, Markdown, and the [dependency license audit](docs/licensing.md).
 
+## Tests
+
+The standard nextest suite includes packaged CLI acceptance and release prerequisite checks:
+
+```sh
+nix develop --command cargo fetch --locked
+nix develop --command cargo nextest run --workspace --all-targets --all-features
+```
+
+Fetch the complete locked dependency graph before a first test run: offline fixture builds also resolve dependencies for other targets. The coverage and release workflows perform this preparation automatically.
+
+To run only these integration tests:
+
+```sh
+nix develop --command cargo nextest run -p mf-cli --test packaged_cli --test release_support
+```
+
+`packaged_cli_acceptance` builds a default CLI and third-party packages, then verifies registry, pinned local Git, and
+local-path dependencies outside the checkout, locked rebuilds, and standalone execution. It is enabled without a feature
+flag or `--ignored`. A Rust fixture prepares the package archives and isolated Cargo source, and cleans up temporary
+files after the test. Nextest captures subprocess diagnostics and reserves the test worker slots while acceptance runs
+to avoid competing nested Cargo builds. Git, Bash, and jq are provided by the development environment.
+
+Nix uses the same nextest suite. Package builds leave test execution to that check so acceptance runs once. The coverage command below also discovers these tests through nextest; there is no separate post-check invocation to maintain.
+
 ## Coverage
 
 When coverage is relevant, run:
@@ -32,10 +57,9 @@ Reports are written to `target/coverage/result/`, including `lcov.info`.
 
 | Path | Responsibility |
 | --- | --- |
-| `crates/mf-cli/` | The `mf` command and source workspace discovery |
+| `crates/mf-cli/` | The `mf` command and project build orchestration |
 | `crates/mf-compiler/` | Workflow validation, planning, code generation, and executable builds |
 | `crates/mf-runtime/` | Workflow definitions, node interfaces, registry, and execution support |
-| `crates/mf-bundle/` | Plugin selection shared by the compiler and generated runner |
 | `crates/builtin-nodes/` | Built-in node implementations |
 
 See [plugin development](docs/plugins.md) for adding nodes.

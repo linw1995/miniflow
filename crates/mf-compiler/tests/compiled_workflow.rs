@@ -64,7 +64,7 @@ inventory::submit! {
 fn definition() -> WorkflowDefinition {
     WorkflowDefinition::from_json(
         r#"{
-            "version":"2026-09-24",
+            "version": "2026-09-26", "dependencies": {},
             "nodes":[
                 {"id":"increment-two","kind":"example.increment"},
                 {"id":"increment","kind":"example.increment"},
@@ -106,8 +106,6 @@ fn generated_plan_round_trips_and_preserves_definition_semantics() {
     );
     assert!(!generated.rust_source.contains("Flow::new"));
     assert!(!generated.rust_source.contains("WORKFLOW_PLAN_JSON"));
-    assert_eq!(generated.config_files.len(), 3);
-    assert_eq!(generated.config_files["config_0.json"], r#"{"value":41}"#);
 
     let original_nodes: BTreeMap<DefinitionId, (String, Value)> = definition
         .nodes
@@ -187,7 +185,6 @@ fn generated_plan_round_trips_and_preserves_definition_semantics() {
     let reordered_generated = reordered_plan.generate_artifacts().unwrap();
     assert_eq!(reordered_generated.plan_json, generated.plan_json);
     assert_eq!(reordered_generated.rust_source, generated.rust_source);
-    assert_eq!(reordered_generated.config_files, generated.config_files);
 }
 
 #[test]
@@ -224,11 +221,11 @@ fn runner_helpers_keep_definition_context() {
 #[test]
 fn code_generation_escapes_definition_strings() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
-        "version": "2026-09-24",
+        "version": "2026-09-26", "dependencies": {},
         "nodes": [{
             "id": "source\"quoted\n",
             "kind": "example.constant",
-            "config": {"value": 3}
+            "config": {"value": 3, "label": "quoted\"value\nnext line"}
         }],
         "outputs": [{
             "name": "answer\"quoted",

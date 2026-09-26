@@ -12,6 +12,8 @@ export LLVM_PROFILE_FILE="${coverage_dir}/data/mf-%p-%m.profraw"
 rm -rf "${coverage_dir}"
 mkdir -p "${coverage_dir}/data" "${coverage_dir}/result"
 
+# Offline fixture builds resolve the complete lockfile, including other targets.
+cargo fetch --locked
 cargo nextest run --workspace --all-features "$@"
 
 grcov "${coverage_dir}/data" \

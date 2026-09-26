@@ -3,6 +3,8 @@ name = "mfn-constant"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Constant value node for miniflow"
 
 [dependencies]
 inventory = "0.3.24"

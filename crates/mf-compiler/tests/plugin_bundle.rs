@@ -1,9 +1,10 @@
 #[test]
-fn compiler_target_links_the_shared_plugin_bundle() {
-    let kinds: Vec<_> = mf_compiler::plugin_registry()
-        .unwrap()
-        .iter()
-        .map(|entry| entry.kind)
-        .collect();
-    assert_eq!(kinds, mf_bundle::registered_kinds());
+fn compiler_has_no_implicit_node_registrations() {
+    assert_eq!(
+        mf_compiler::NodeRegistry::from_inventory()
+            .unwrap()
+            .iter()
+            .count(),
+        0
+    );
 }

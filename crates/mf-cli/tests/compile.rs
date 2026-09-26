@@ -1,14 +1,13 @@
+#![cfg(feature = "development-support")]
 use serde_json::json;
 use std::fs;
-use std::io;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFINITION: &str = r#"{
-    "version":"2026-09-24",
+    "version": "2026-09-26", "dependencies": {},
     "nodes":[
         {"id":"source","kind":"builtin.constant","config":{"value":41}},
         {"id":"echo","kind":"builtin.identity"},
@@ -24,38 +23,14 @@ const DEFINITION: &str = r#"{
     ]
 }"#;
 
-struct TemporaryDirectory(PathBuf);
-
-impl TemporaryDirectory {
-    fn new() -> Self {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        for attempt in 0..128 {
-            let path = std::env::temp_dir()
-                .join(format!("mf cli {} {nonce} {attempt}", std::process::id()));
-            match fs::create_dir(&path) {
-                Ok(()) => return Self(path),
-                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(error) => panic!("could not create temporary directory: {error}"),
-            }
-        }
-        panic!("could not allocate a unique temporary directory")
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
+fn temporary_directory() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("mf cli ")
+        .tempdir()
+        .unwrap()
 }
 
-impl Drop for TemporaryDirectory {
-    fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.0);
-    }
-}
-
-fn compile(definition: &Path, output: &Path, rustflags: Option<&str>) -> Output {
+fn compile_command(definition: &Path, output: &Path) -> Command {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -64,20 +39,30 @@ fn compile(definition: &Path, output: &Path, rustflags: Option<&str>) -> Output 
     let mut command = Command::new(env!("CARGO_BIN_EXE_mf"));
     command
         .current_dir(workspace)
+        .env("MF_DEV_SUPPORT_ROOT", workspace.join("crates"))
+        .env("CARGO_NET_OFFLINE", "true")
         .arg("compile")
         .arg(definition)
         .arg("--output")
-        .arg(output);
+        .arg(output)
+        .arg("--build-dir")
+        .arg(definition.parent().unwrap().join(".mf-build-test"));
+    command
+}
+
+fn compile(definition: &Path, output: &Path, rustflags: Option<&str>) -> Output {
+    let mut command = compile_command(definition, output);
     if let Some(rustflags) = rustflags {
         command.env("RUSTFLAGS", rustflags);
     }
     command.output().unwrap()
 }
 
-fn assert_rejected_definition(value: serde_json::Value, diagnostics: &[&str]) {
-    let temporary = TemporaryDirectory::new();
+fn assert_rejected_definition(mut value: serde_json::Value, diagnostics: &[&str]) {
+    let temporary = temporary_directory();
     let definition = temporary.path().join("invalid-workflow.json");
     let target = temporary.path().join("workflow");
+    add_dependencies(&mut value);
     fs::write(&definition, value.to_string()).unwrap();
     fs::write(&target, b"previous executable").unwrap();
 
@@ -91,19 +76,14 @@ fn assert_rejected_definition(value: serde_json::Value, diagnostics: &[&str]) {
             "missing `{diagnostic}` in: {stderr}"
         );
     }
-    assert_eq!(
-        fs::read_dir(temporary.path()).unwrap().count(),
-        2,
-        "validation failures should not create a runner project"
-    );
 }
 
 #[test]
 fn compiled_binary_replaces_target_and_runs_without_the_definition() {
-    let temporary = TemporaryDirectory::new();
+    let temporary = temporary_directory();
     let definition = temporary.path().join("workflow.json");
     let target = temporary.path().join("workflow");
-    fs::write(&definition, DEFINITION).unwrap();
+    fs::write(&definition, definition_json()).unwrap();
     fs::write(&target, b"previous executable").unwrap();
 
     let result = compile(&definition, &target, None);
@@ -114,14 +94,19 @@ fn compiled_binary_replaces_target_and_runs_without_the_definition() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert_ne!(fs::read(&target).unwrap(), b"previous executable");
-    assert_eq!(
-        fs::read_dir(temporary.path()).unwrap().count(),
-        2,
-        "successful builds should remove their temporary project"
-    );
 
     fs::remove_file(&definition).unwrap();
+    fs::remove_file(definition.with_extension("lock")).unwrap();
+    fs::remove_dir_all(temporary.path().join(".mf-build-test")).unwrap();
+    let validation = Command::new(&target)
+        .arg("--validate")
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    assert!(validation.status.success());
+    assert!(validation.stdout.is_empty());
     let output = Command::new(&target)
+        .env("PATH", "")
         .current_dir(temporary.path())
         .output()
         .unwrap();
@@ -139,10 +124,10 @@ fn compiled_binary_replaces_target_and_runs_without_the_definition() {
 
 #[test]
 fn cargo_failure_preserves_existing_target_and_forwards_diagnostics() {
-    let temporary = TemporaryDirectory::new();
+    let temporary = temporary_directory();
     let definition = temporary.path().join("workflow.json");
     let target = temporary.path().join("workflow");
-    fs::write(&definition, DEFINITION).unwrap();
+    fs::write(&definition, definition_json()).unwrap();
     fs::write(&target, b"previous executable").unwrap();
 
     let result = compile(
@@ -155,7 +140,7 @@ fn cargo_failure_preserves_existing_target_and_forwards_diagnostics() {
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(stderr.contains("error"), "{stderr}");
     assert!(stderr.contains("definitely_not_a_rustc_option"), "{stderr}");
-    assert!(stderr.contains("Cargo build failed"), "{stderr}");
+    assert!(stderr.contains("dependency resolution failed"), "{stderr}");
     let saved_projects: Vec<_> = fs::read_dir(temporary.path())
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -167,7 +152,7 @@ fn cargo_failure_preserves_existing_target_and_forwards_diagnostics() {
         })
         .collect();
     assert_eq!(saved_projects.len(), 1);
-    assert!(saved_projects[0].join("project/Cargo.toml").is_file());
+    assert!(saved_projects[0].join("Cargo.toml").is_file());
     #[cfg(unix)]
     assert_eq!(
         fs::metadata(&saved_projects[0])
@@ -181,13 +166,13 @@ fn cargo_failure_preserves_existing_target_and_forwards_diagnostics() {
 
 #[test]
 fn output_cannot_replace_the_source_definition() {
-    let temporary = TemporaryDirectory::new();
+    let temporary = temporary_directory();
     let definition = temporary.path().join("workflow.json");
-    fs::write(&definition, DEFINITION).unwrap();
+    fs::write(&definition, definition_json()).unwrap();
 
     let result = compile(&definition, &definition, None);
     assert!(!result.status.success());
-    assert_eq!(fs::read_to_string(&definition).unwrap(), DEFINITION);
+    assert_eq!(fs::read_to_string(&definition).unwrap(), definition_json());
     assert!(
         String::from_utf8_lossy(&result.stderr).contains("would overwrite the source definition")
     );
@@ -198,7 +183,7 @@ fn output_cannot_replace_the_source_definition() {
 fn unknown_plugin_reports_node_and_kind() {
     assert_rejected_definition(
         json!({
-            "version": "2026-09-24",
+            "version": "2026-09-26", "dependencies": {},
             "nodes": [{"id": "fetch", "kind": "missing.fetch"}]
         }),
         &["fetch", "missing.fetch", "unknown kind"],
@@ -209,7 +194,7 @@ fn unknown_plugin_reports_node_and_kind() {
 fn cyclic_workflow_reports_the_cycle_path() {
     assert_rejected_definition(
         json!({
-            "version": "2026-09-24",
+            "version": "2026-09-26", "dependencies": {},
             "nodes": [
                 {"id": "a", "kind": "builtin.identity"},
                 {"id": "b", "kind": "builtin.identity"}
@@ -227,7 +212,7 @@ fn cyclic_workflow_reports_the_cycle_path() {
 fn invalid_output_port_reports_both_edge_endpoints() {
     assert_rejected_definition(
         json!({
-            "version": "2026-09-24",
+            "version": "2026-09-26", "dependencies": {},
             "nodes": [
                 {"id": "source", "kind": "builtin.constant", "config": {"value": 1}},
                 {"id": "echo", "kind": "builtin.identity"}
@@ -244,7 +229,7 @@ fn invalid_output_port_reports_both_edge_endpoints() {
 fn invalid_input_port_reports_both_edge_endpoints() {
     assert_rejected_definition(
         json!({
-            "version": "2026-09-24",
+            "version": "2026-09-26", "dependencies": {},
             "nodes": [
                 {"id": "source", "kind": "builtin.constant", "config": {"value": 1}},
                 {"id": "echo", "kind": "builtin.identity"}
@@ -255,4 +240,292 @@ fn invalid_input_port_reports_both_edge_endpoints() {
         }),
         &["source", "value", "echo", "missing", "missing input port"],
     );
+}
+
+fn add_dependencies(value: &mut serde_json::Value) {
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    value["dependencies"] = json!({
+        "constant": {"package":"mfn-constant","path":crates.join("builtin-nodes/constant")},
+        "identity": {"package":"mfn-identity","path":crates.join("builtin-nodes/identity")}
+    });
+}
+fn definition_json() -> String {
+    let mut value = serde_json::from_str(DEFINITION).unwrap();
+    add_dependencies(&mut value);
+    value.to_string()
+}
+
+#[test]
+fn failed_validation_preserves_prior_lock_and_executable() {
+    let temporary = temporary_directory();
+    let definition = temporary.path().join("flow.json");
+    let target = temporary.path().join("flow");
+    fs::write(&definition, definition_json()).unwrap();
+    let first = compile(&definition, &target, None);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let lock = fs::read(definition.with_extension("lock")).unwrap();
+    let executable = fs::read(&target).unwrap();
+    let mut invalid: serde_json::Value = serde_json::from_str(&definition_json()).unwrap();
+    invalid["nodes"][0]["config"] = json!({});
+    fs::write(&definition, invalid.to_string()).unwrap();
+    let failed = compile(&definition, &target, None);
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("runner validation"));
+    assert_eq!(fs::read(definition.with_extension("lock")).unwrap(), lock);
+    assert_eq!(fs::read(&target).unwrap(), executable);
+}
+
+#[test]
+fn install_failure_reports_persisted_lock_and_preserves_existing_directory() {
+    let temporary = temporary_directory();
+    let definition = temporary.path().join("flow.json");
+    let target = temporary.path().join("output");
+    fs::write(&definition, definition_json()).unwrap();
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("sentinel"), "existing").unwrap();
+    let result = compile(&definition, &target, None);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("dependency lock was updated"));
+    assert!(definition.with_extension("lock").is_file());
+    assert_eq!(fs::read(target.join("sentinel")).unwrap(), b"existing");
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_artifact_and_cargo_exit_cannot_install_a_stale_binary() {
+    let temporary = temporary_directory();
+    let definition = temporary.path().join("flow.json");
+    let target = temporary.path().join("flow");
+    fs::write(&definition, definition_json()).unwrap();
+    fs::write(&target, "previous").unwrap();
+    let wrapper = temporary.path().join("cargo-wrapper");
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    for status in [0, 23] {
+        fs::write(&wrapper, format!("#!/bin/sh\nif [ \"$1\" = metadata ]; then exec \"$MF_REAL_CARGO\" \"$@\"; fi\necho 'fixture Cargo diagnostics' >&2\nexit {status}\n")).unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_mf"))
+            .args(["compile"])
+            .arg(&definition)
+            .arg("--output")
+            .arg(&target)
+            .arg("--build-dir")
+            .arg(temporary.path().join(".mf-build-test"))
+            .env("MF_DEV_SUPPORT_ROOT", crates)
+            .env("CARGO_NET_OFFLINE", "true")
+            .env(
+                "MF_REAL_CARGO",
+                std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
+            )
+            .env("CARGO", &wrapper)
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("fixture Cargo diagnostics"), "{stderr}");
+        assert!(
+            stderr.contains(if status == 0 {
+                "did not produce a runner"
+            } else {
+                "Cargo build failed"
+            }),
+            "{stderr}"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"previous");
+        assert!(!definition.with_extension("lock").exists());
+    }
+}
+
+#[test]
+fn warm_build_preserves_generated_inputs_and_reuses_compiled_runner() {
+    let temporary = temporary_directory();
+    let definition = temporary.path().join("flow.json");
+    let target = temporary.path().join("flow");
+    let source = definition_json();
+    fs::write(&definition, &source).unwrap();
+    let first = compile(&definition, &target, None);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let project = temporary.path().join(".mf-build-test");
+    let names = ["Cargo.toml", "Cargo.lock", "src/main.rs", "src/workflow.rs"];
+    let times: Vec<_> = names
+        .iter()
+        .map(|name| {
+            fs::metadata(project.join(name))
+                .unwrap()
+                .modified()
+                .unwrap()
+        })
+        .collect();
+    let second = compile(&definition, &temporary.path().join("another-output"), None);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(String::from_utf8_lossy(&second.stderr).contains("reused compiled runner"));
+    for (name, time) in names.iter().zip(times) {
+        assert_eq!(
+            fs::metadata(project.join(name))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            time,
+            "{name} was rewritten"
+        );
+    }
+    assert_eq!(fs::read_to_string(&definition).unwrap(), source);
+    fs::remove_dir_all(&project).unwrap();
+    let recreated = compile(&definition, &target, None);
+    assert!(
+        recreated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recreated.stderr)
+    );
+    assert!(String::from_utf8_lossy(&recreated.stderr).contains("created build directory"));
+}
+
+#[test]
+fn repairs_partial_projects_and_updates_configuration() {
+    let temporary = temporary_directory();
+    let definition = temporary.path().join("flow.json");
+    let target = temporary.path().join("flow");
+    fs::write(&definition, definition_json()).unwrap();
+    assert!(compile(&definition, &target, None).status.success());
+    let project = temporary.path().join(".mf-build-test");
+    fs::remove_file(project.join("src/main.rs")).unwrap();
+    fs::write(project.join("Cargo.lock"), "interrupted working state").unwrap();
+    let mut changed: serde_json::Value = serde_json::from_str(&definition_json()).unwrap();
+    changed["nodes"].as_array_mut().unwrap().pop();
+    changed["outputs"].as_array_mut().unwrap().pop();
+    changed["nodes"][0]["config"]["value"] = json!(99);
+    fs::write(&definition, changed.to_string()).unwrap();
+    let result = compile(&definition, &target, None);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(project.join("src/main.rs").is_file());
+    let output = Command::new(&target).output().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        json!({"answer":99,"original":99})
+    );
+}
+
+#[test]
+fn cargo_invalidates_features_local_sources_versions_and_flags() {
+    let temporary = temporary_directory();
+    let definition = temporary.path().join("flow.json");
+    let target = temporary.path().join("flow");
+    let local = temporary.path().join("nodes");
+    fs::create_dir_all(local.join("src")).unwrap();
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let fixture = crates.join("mf-compiler/tests/fixtures/multi-nodes");
+    let manifest = fs::read_to_string(fixture.join("Cargo.toml"))
+        .unwrap()
+        .replace(
+            "../../../../mf-runtime",
+            crates.join("mf-runtime").to_str().unwrap(),
+        );
+    fs::write(local.join("Cargo.toml"), &manifest).unwrap();
+    let plugin = fs::read_to_string(fixture.join("src/lib.rs")).unwrap();
+    fs::write(local.join("src/lib.rs"), &plugin).unwrap();
+    let mut value = json!({"version":"2026-09-26","dependencies":{"local":{"package":"fixture-multi-nodes","path":"nodes","features":["double"]}},"nodes":[{"id":"source","kind":"fixture.source"}],"outputs":[{"name":"value","node":"source","port":"value"}]});
+    let check = |value: &serde_json::Value, expected: i64, flags: Option<&str>| {
+        fs::write(&definition, value.to_string()).unwrap();
+        let result = compile(&definition, &target, flags);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let run = Command::new(&target).output().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&run.stdout).unwrap(),
+            json!({"value":expected})
+        );
+        result
+    };
+    check(&value, 14, None);
+    value["dependencies"]["local"]["features"] = json!([]);
+    assert!(
+        !String::from_utf8_lossy(&check(&value, 7, None).stderr).contains("reused compiled runner")
+    );
+    value["dependencies"]["local"]["features"] = json!(["double"]);
+    fs::write(local.join("src/lib.rs"), plugin.replace("14", "28")).unwrap();
+    let changed = check(&value, 28, None);
+    assert!(!String::from_utf8_lossy(&changed.stderr).contains("Compiling mf-runtime"));
+    fs::write(
+        local.join("Cargo.toml"),
+        manifest.replacen("version = \"0.1.0\"", "version = \"0.2.0\"", 1),
+    )
+    .unwrap();
+    check(&value, 28, None);
+    assert!(
+        fs::read_to_string(definition.with_extension("lock"))
+            .unwrap()
+            .contains("version = \"0.2.0\"")
+    );
+    assert!(
+        !String::from_utf8_lossy(&check(&value, 28, Some("-C debuginfo=1")).stderr)
+            .contains("reused compiled runner")
+    );
+    assert!(
+        String::from_utf8_lossy(&check(&value, 28, Some("-C debuginfo=1")).stderr)
+            .contains("reused compiled runner")
+    );
+    #[cfg(unix)]
+    {
+        let wrapper = temporary.path().join("rustc-wrapper");
+        fs::write(&wrapper, "#!/bin/sh\nif [ \"$1\" = -vV ]; then\n  \"$MF_REAL_RUSTC\" \"$@\" | sed 's/^commit-hash:.*/commit-hash: 1111111111111111111111111111111111111111/'\nelse\n  exec \"$MF_REAL_RUSTC\" \"$@\"\nfi\n").unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+        let changed = compile_command(&definition, &target)
+            .env("RUSTC", &wrapper)
+            .env("RUSTC_WRAPPER", "")
+            .env("RUSTFLAGS", "-C debuginfo=1")
+            .env(
+                "MF_REAL_RUSTC",
+                std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            changed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&changed.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&changed.stderr).contains("reused compiled runner"));
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn rejects_redirected_cache_directories_without_mutating_inputs() {
+    for name in ["src", "target"] {
+        let temporary = temporary_directory();
+        let definition = temporary.path().join("workflow.rs");
+        let target = temporary.path().join("flow");
+        let original = definition_json();
+        fs::write(&definition, &original).unwrap();
+        fs::write(&target, "previous executable").unwrap();
+        let directory = temporary.path().join(".mf-build-test");
+        let canonical = fs::canonicalize(&definition).unwrap();
+        drop(mf_compiler::BuildDirectory::open(&canonical, Some(&directory)).unwrap());
+        std::os::unix::fs::symlink(temporary.path(), directory.join(name)).unwrap();
+        let result = compile(&definition, &target, None);
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("must not be a symbolic link"));
+        assert_eq!(fs::read_to_string(&definition).unwrap(), original);
+        assert_eq!(fs::read(&target).unwrap(), b"previous executable");
+        assert!(!definition.with_extension("lock").exists());
+        assert!(!directory.join("Cargo.toml").exists());
+    }
 }

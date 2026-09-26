@@ -3,9 +3,10 @@ name = "mf-compiler"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Workflow validation and native code generation for miniflow"
 
 [dependencies]
-mf-bundle.workspace = true
 mf-runtime.workspace = true
 prettyplease = "0.3.0"
 proc-macro2 = "1.0.107"
@@ -17,3 +18,4 @@ syn = { version = "3.0.6", default-features = false, features = ["full", "parsin
 
 [dev-dependencies]
 inventory = "0.3.24"
+tempfile = "3.27.0"

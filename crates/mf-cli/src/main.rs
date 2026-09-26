@@ -1,50 +1,26 @@
-use mf_compiler::{
-    BinaryBuildError, DefinitionParseError, NodeRegistryError, PlanError, WorkflowCompileError,
-    WorkflowDefinition, build_executable, compile_definition, plugin_registry,
-};
+use mf_compiler::{CompileRequest, PipelineError, SupportPackages, compile_project};
 use snafu::{ResultExt, Snafu};
 use std::env;
 use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "Usage: mf compile <definition> --output <path>";
+const USAGE: &str =
+    "Usage: mf compile <definition> --output <path> [--locked] [--build-dir <path>]";
 
 #[derive(Debug, Snafu)]
 enum CliError {
     #[snafu(display("{message}\n{USAGE}"))]
     Usage { message: String },
-    #[snafu(display("could not read definition {path:?}: {source}"))]
-    ReadDefinition { path: PathBuf, source: io::Error },
-    #[snafu(display("could not resolve definition path {path:?}: {source}"))]
-    ResolveDefinition { path: PathBuf, source: io::Error },
-    #[snafu(display("could not resolve output path {path:?}: {source}"))]
-    ResolveOutput { path: PathBuf, source: io::Error },
-    #[snafu(display("output path {path:?} would overwrite the source definition"))]
-    OutputOverwritesDefinition { path: PathBuf },
-    #[snafu(display("could not parse definition: {source}"))]
-    ParseDefinition { source: DefinitionParseError },
-    #[snafu(display("could not load plugin registry: {source}"))]
-    Registry { source: NodeRegistryError },
-    #[snafu(display("could not compile workflow: {source}"))]
-    Compile { source: WorkflowCompileError },
-    #[snafu(display("could not generate workflow source: {source}"))]
-    Generate { source: PlanError },
-    #[snafu(display("could not read current directory: {source}"))]
-    CurrentDirectory { source: io::Error },
-    #[snafu(display(
-        "could not find a source workspace for {definition:?}; run from a miniflow source checkout"
-    ))]
-    WorkspaceNotFound { definition: PathBuf },
-    #[snafu(display("could not build workflow executable: {source}"))]
-    Build { source: BinaryBuildError },
+    #[snafu(display("{source}"))]
+    Build { source: PipelineError },
 }
 
 struct CompileOptions {
     definition: PathBuf,
     output: PathBuf,
+    locked: bool,
+    build_dir: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -88,85 +64,83 @@ fn parse_compile_args(
         }
         .fail();
     };
-    if args.next().as_deref() != Some(OsStr::new("--output")) {
-        return UsageSnafu {
-            message: "missing --output option",
+    let mut output = None;
+    let mut locked = false;
+    let mut build_dir = None;
+    while let Some(option) = args.next() {
+        if option == OsStr::new("--locked") && !locked {
+            locked = true;
+        } else if option == OsStr::new("--build-dir") && build_dir.is_none() {
+            build_dir = Some(PathBuf::from(args.next().ok_or_else(|| {
+                CliError::Usage {
+                    message: "missing build directory".into(),
+                }
+            })?));
+        } else if option == OsStr::new("--output") && output.is_none() {
+            output = Some(args.next().ok_or_else(|| CliError::Usage {
+                message: "missing output path".into(),
+            })?);
+        } else {
+            return UsageSnafu {
+                message: "unexpected or repeated argument",
+            }
+            .fail();
         }
-        .fail();
     }
-    let Some(output) = args.next() else {
-        return UsageSnafu {
-            message: "missing output path",
-        }
-        .fail();
-    };
-    if args.next().is_some() {
-        return UsageSnafu {
-            message: "unexpected extra argument",
-        }
-        .fail();
-    }
+    let output = output.ok_or_else(|| CliError::Usage {
+        message: "missing --output option".into(),
+    })?;
     Ok(CompileOptions {
         definition: definition.into(),
         output: output.into(),
+        locked,
+        build_dir,
     })
 }
 
 fn compile(options: CompileOptions) -> Result<(), CliError> {
-    let source = fs::read_to_string(&options.definition).context(ReadDefinitionSnafu {
-        path: options.definition.clone(),
-    })?;
-    let definition = WorkflowDefinition::from_json(&source).context(ParseDefinitionSnafu)?;
-    let registry = plugin_registry().context(RegistrySnafu)?;
-    let compiled = compile_definition(&definition, &registry).context(CompileSnafu)?;
-    let artifacts = compiled.generate_artifacts().context(GenerateSnafu)?;
-
-    let definition_path =
-        fs::canonicalize(&options.definition).context(ResolveDefinitionSnafu {
-            path: options.definition.clone(),
-        })?;
-    match fs::canonicalize(&options.output) {
-        Ok(path) if path == definition_path => {
-            return OutputOverwritesDefinitionSnafu {
-                path: options.output.clone(),
-            }
-            .fail();
-        }
-        Ok(_) => {}
-        Err(source) if source.kind() == io::ErrorKind::NotFound => {}
-        Err(source) => {
-            return Err(CliError::ResolveOutput {
-                path: options.output.clone(),
-                source,
-            });
-        }
-    }
-    let cwd = env::current_dir().context(CurrentDirectorySnafu)?;
-    let workspace = definition_path
-        .parent()
-        .and_then(find_workspace)
-        .or_else(|| find_workspace(&cwd))
-        .ok_or_else(|| CliError::WorkspaceNotFound {
-            definition: definition_path,
-        })?;
-    let crates_dir = workspace.join("crates");
-    build_executable(
-        &artifacts,
-        &options.output,
-        &crates_dir.join("mf-runtime"),
-        &crates_dir.join("mf-bundle"),
-    )
-    .context(BuildSnafu)
+    let support = support_packages();
+    compile_project(&CompileRequest {
+        definition: &options.definition,
+        output: &options.output,
+        locked: options.locked,
+        build_dir: options.build_dir.as_deref(),
+        support: &support,
+    })
+    .context(BuildSnafu)?;
+    Ok(())
 }
 
-fn find_workspace(start: &Path) -> Option<PathBuf> {
-    start.ancestors().find_map(|candidate| {
-        if candidate.join("crates/mf-runtime/Cargo.toml").is_file()
-            && candidate.join("crates/mf-bundle/Cargo.toml").is_file()
-        {
-            Some(candidate.to_path_buf())
-        } else {
-            None
+fn support_packages() -> SupportPackages {
+    #[cfg(feature = "development-support")]
+    if let Some(path) = env::var_os("MF_DEV_SUPPORT_ROOT") {
+        return SupportPackages::Local {
+            crates_dir: path.into(),
+        };
+    }
+    SupportPackages::Registry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parses_locked_in_either_option_order() {
+        for args in [
+            ["flow.json", "--locked", "--output", "flow"],
+            ["flow.json", "--output", "flow", "--locked"],
+        ] {
+            let options = parse_compile_args(args.into_iter().map(OsString::from)).unwrap();
+            assert!(options.locked);
+            assert_eq!(options.output, PathBuf::from("flow"));
         }
-    })
+        assert!(
+            parse_compile_args(
+                ["f", "--locked", "--locked"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .is_err()
+        );
+    }
 }

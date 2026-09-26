@@ -1,17 +1,27 @@
-pub mod build;
 pub mod compiler;
 pub mod plan;
-pub mod project;
 
-pub use build::{BinaryBuildError, build_executable};
 pub use compiler::{
-    CyclePath, WorkflowCompileError, compile_definition, instantiate_compiled, resolve_nodes,
-    topological_order, validate_definition,
+    CyclePath, WorkflowCompileError, compile_definition, instantiate_compiled, plan_definition,
+    resolve_nodes, structural_order, topological_order, validate_definition,
 };
 pub use mf_runtime::*;
 pub use plan::{CompiledWorkflow, GeneratedWorkflowArtifacts, PlanError};
-pub use project::{RunnerProjectError, write_runner_project};
 
-pub fn plugin_registry() -> Result<NodeRegistry, NodeRegistryError> {
-    mf_bundle::registry()
-}
+pub mod inputs;
+pub use inputs::{BuildInputs, InputError};
+
+pub mod dependency_project;
+pub use dependency_project::{DependencyProjectError, SupportPackages, write_dependency_project};
+
+pub mod compatibility;
+pub use compatibility::{RuntimeCompatibilityError, validate_runtime_identity};
+
+pub mod state;
+pub use state::{BuildGuard, StateError, atomic_copy, atomic_write};
+
+pub mod pipeline;
+pub use pipeline::{CompileRequest, PipelineError, compile_project, resolve_project};
+
+pub mod cache;
+pub use cache::{BuildDirectory, CacheError, default_build_directory};

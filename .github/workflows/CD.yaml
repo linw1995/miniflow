@@ -40,8 +40,13 @@ jobs:
           version=$(cargo metadata --no-deps --format-version 1 --locked | jq -r '.packages[] | select(.name == "mf-cli") | .version')
           test "$RELEASE_BRANCH" = "release/$version"
           echo "RELEASE_TAG=v$version" >> "$GITHUB_ENV"
+      - name: Check support package availability and ownership
+        env:
+          RELEASE_CRATE_OWNER: ${{ github.repository_owner }}
+        run: bash scripts/check-release-support.sh --owner "$RELEASE_CRATE_OWNER"
       - name: Test and build
         run: |
+          cargo fetch --locked
           cargo test --locked --workspace --all-targets --all-features
           cargo build --locked --release
       - name: Generate third-party notices
