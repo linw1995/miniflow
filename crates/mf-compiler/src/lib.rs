@@ -19,3 +19,6 @@ pub mod dependency_project;
 pub use dependency_project::{
     DependencyProjectError, SupportPackages, dependency_project_files, write_dependency_project,
 };
+
+pub mod cargo_build;
+pub use cargo_build::{CargoBuildError, resolve_project};
