@@ -265,6 +265,71 @@ pub fn topological_order(
 ) -> Result<Vec<DefinitionId>, WorkflowCompileError> {
     validate_definition(definition, registry)?;
 
+    structural_order(definition)
+}
+
+pub fn structural_order(
+    definition: &WorkflowDefinition,
+) -> Result<Vec<DefinitionId>, WorkflowCompileError> {
+    let mut ids = BTreeSet::new();
+    for (index, node) in definition.nodes.iter().enumerate() {
+        if node.id.as_str().trim().is_empty() {
+            return InvalidNodeIdSnafu {
+                position: index + 1,
+            }
+            .fail();
+        }
+        if !ids.insert(node.id.clone()) {
+            return DuplicateNodeIdSnafu {
+                definition_id: node.id.clone(),
+            }
+            .fail();
+        }
+    }
+    let mut connected = BTreeSet::new();
+    for edge in &definition.edges {
+        if !ids.contains(&edge.from_node) {
+            return UnknownEdgeSourceSnafu {
+                from_node: edge.from_node.clone(),
+                from_output: edge.from_output.clone(),
+                to_node: edge.to_node.clone(),
+                to_input: edge.to_input.clone(),
+            }
+            .fail();
+        }
+        if !ids.contains(&edge.to_node) {
+            return UnknownEdgeTargetSnafu {
+                from_node: edge.from_node.clone(),
+                from_output: edge.from_output.clone(),
+                to_node: edge.to_node.clone(),
+                to_input: edge.to_input.clone(),
+            }
+            .fail();
+        }
+        if !connected.insert((&edge.to_node, &edge.to_input)) {
+            return DuplicateInputConnectionSnafu {
+                node_id: edge.to_node.clone(),
+                port: edge.to_input.clone(),
+            }
+            .fail();
+        }
+    }
+    let mut output_names = BTreeSet::new();
+    for output in &definition.outputs {
+        if !output_names.insert(&output.name) {
+            return DuplicateWorkflowOutputNameSnafu {
+                name: output.name.clone(),
+            }
+            .fail();
+        }
+        if !ids.contains(&output.node) {
+            return UnknownWorkflowOutputNodeSnafu {
+                name: output.name.clone(),
+                node_id: output.node.clone(),
+            }
+            .fail();
+        }
+    }
     let mut indegree = BTreeMap::new();
     let mut outgoing: BTreeMap<DefinitionId, Vec<DefinitionId>> = BTreeMap::new();
     let mut incoming: BTreeMap<DefinitionId, Vec<DefinitionId>> = BTreeMap::new();
@@ -368,6 +433,20 @@ pub fn compile_definition(
     )
     .context(FlowConstructionSnafu)?;
 
+    normalize_plan(definition, execution_order)
+}
+
+/// Plans graph structure without loading plugins. Validate the generated runner before installation.
+pub fn plan_definition(
+    definition: &WorkflowDefinition,
+) -> Result<CompiledWorkflow, WorkflowCompileError> {
+    normalize_plan(definition, structural_order(definition)?)
+}
+
+fn normalize_plan(
+    definition: &WorkflowDefinition,
+    execution_order: Vec<DefinitionId>,
+) -> Result<CompiledWorkflow, WorkflowCompileError> {
     let nodes_by_id: BTreeMap<DefinitionId, _> = definition
         .nodes
         .iter()

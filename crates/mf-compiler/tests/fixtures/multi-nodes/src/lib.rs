@@ -8,6 +8,11 @@ struct Source;
 
 impl Node for Source {
     fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
+        if cfg!(feature = "fail-execution") {
+            return Err(NodeExecutionError::ExecutionFailed {
+                message: "execution sentinel".into(),
+            });
+        }
         Ok(Outputs::from([(
             "value".into(),
             json!(if cfg!(feature = "double") { 14 } else { 7 }),
@@ -24,6 +29,9 @@ impl Node for Echo {
 }
 
 fn source(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+    if config.get("print").and_then(Value::as_bool) == Some(true) {
+        println!("factory diagnostic");
+    }
     let _: serde_json::Map<String, Value> = mf_runtime::deserialize_config(config)?;
     Ok(Box::new(Source))
 }
@@ -49,4 +57,9 @@ inventory::submit! {
         outputs: &[PortSpec::new("value", ValueType::Number, true)],
         factory: echo,
     }
+}
+
+#[cfg(feature = "duplicate-kind")]
+inventory::submit! {
+    NodeRegistration { kind: "fixture.source", inputs: &[], outputs: &[], factory: source }
 }
