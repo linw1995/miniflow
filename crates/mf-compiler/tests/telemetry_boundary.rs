@@ -16,7 +16,7 @@ fn generated_runner_has_no_ui_and_only_opt_in_export_dependencies() {
     )
     .unwrap();
     let dependency_names = || {
-        let output = mf_compiler::pipeline::cargo_command(&project)
+        let output = mf_compiler::cargo_command(&project)
             .args([
                 "tree",
                 "--offline",

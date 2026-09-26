@@ -1,7 +1,11 @@
-pub mod constant;
-pub mod identity;
-pub mod if_else;
+mod constant;
+mod identity;
+mod if_else;
 mod number;
+
+pub use constant::{KIND as CONSTANT_KIND, kind as constant_kind};
+pub use identity::{KIND as IDENTITY_KIND, kind as identity_kind};
+pub use if_else::KIND as IF_ELSE_KIND;
 
 #[cfg(test)]
 mod tests {
@@ -14,12 +18,12 @@ mod tests {
         let registry = NodeRegistry::from_inventory().unwrap();
         for value in [json!(null), json!({"nested": [true, 42, "text"]})] {
             let constant = registry
-                .get(constant::KIND)
+                .get(CONSTANT_KIND)
                 .unwrap()
                 .instantiate(json!({"value": value}))
                 .unwrap();
             let identity = registry
-                .get(identity::KIND)
+                .get(IDENTITY_KIND)
                 .unwrap()
                 .instantiate(json!({}))
                 .unwrap();

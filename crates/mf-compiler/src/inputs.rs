@@ -57,7 +57,7 @@ impl BuildInputs {
     }
 }
 
-pub fn canonical_destination(path: &Path) -> Result<PathBuf, InputError> {
+fn canonical_destination(path: &Path) -> Result<PathBuf, InputError> {
     match fs::canonicalize(path) {
         Ok(path) => Ok(path),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {

@@ -117,7 +117,6 @@ fn is_false(value: &bool) -> bool {
 }
 
 #[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
 pub enum DefinitionParseError {
     #[snafu(display(
         "workflow schema 2026-09-24 is no longer supported; use 2026-09-26 and declare the packages providing node kinds in dependencies"

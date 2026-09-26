@@ -156,7 +156,7 @@ fn compiled_branches_match_memory_and_rebuild_when_precedence_changes() {
         )
         .unwrap();
         mf_compiler::resolve_project(&project, &root.path().join("flow.lock"), false).unwrap();
-        let build = mf_compiler::pipeline::cargo_command(&project)
+        let build = mf_compiler::cargo_command(&project)
             .args(["build", "--offline", "--locked"])
             .output()
             .unwrap();
@@ -165,7 +165,7 @@ fn compiled_branches_match_memory_and_rebuild_when_precedence_changes() {
             "{}",
             String::from_utf8_lossy(&build.stderr)
         );
-        let executable = project.join("target/debug/mf-generated-workflow");
+        let executable = common::runner_executable(&project, "debug");
         let validation = Command::new(&executable)
             .arg("--validate")
             .output()

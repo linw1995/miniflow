@@ -91,7 +91,6 @@ pub fn output_id(node: &str, port: &str) -> String {
 }
 
 #[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
 pub enum NodeBuildError {
     #[snafu(display("invalid node configuration: {source}"))]
     InvalidConfiguration { source: serde_json::Error },
@@ -102,7 +101,6 @@ pub enum NodeBuildError {
 }
 
 #[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
 pub enum NodeExecutionError {
     #[snafu(display("node execution failed: {message}"))]
     ExecutionFailed { message: String },

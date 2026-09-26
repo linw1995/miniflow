@@ -102,7 +102,6 @@ impl FlowOutput {
 pub type FlowOutputs = BTreeMap<String, Value>;
 
 #[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
 pub enum FlowBuildError {
     #[snafu(display("execution plan entry {position} references unknown node `{definition_id}`"))]
     UnknownNodeInExecutionOrder {

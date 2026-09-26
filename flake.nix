@@ -39,6 +39,8 @@
               ./examples
               ./crates/mf-telemetry/tests/fixtures
               ./scripts/check-release-support.sh
+              ./scripts/nextest-build-cache.py
+              ./scripts/nextest-cargo.sh
               ./LICENSE
               ./about.hbs
               ./about.toml
@@ -102,7 +104,7 @@
           test = craneLib.cargoNextest (cargoArgs // {
             inherit cargoArtifacts;
             cargoNextestExtraArgs = "--locked --workspace --all-targets --all-features";
-            nativeBuildInputs = [ pkgs.git pkgs.jq ];
+            nativeBuildInputs = [ pkgs.git pkgs.jq pkgs.python3 ];
           });
           workflows = pkgs.runCommand "check-workflows" {
             nativeBuildInputs = [ pkgs.actionlint ];
