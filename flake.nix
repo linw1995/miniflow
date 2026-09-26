@@ -35,6 +35,9 @@
             root = ./.;
             fileset = pkgs.lib.fileset.unions [
               (craneLib.fileset.commonCargoSources ./.)
+              ./examples
+              ./scripts/prepare-support-packages.py
+              ./scripts/test-packaged-cli.py
               ./LICENSE
               ./about.hbs
               ./about.toml
@@ -94,6 +97,10 @@
           test = craneLib.cargoTest (cargoArgs // {
             inherit cargoArtifacts;
             cargoTestExtraArgs = "--workspace --all-targets --all-features";
+            nativeBuildInputs = [ pkgs.python3 ];
+            postCheck = ''
+              python3 scripts/test-packaged-cli.py
+            '';
           });
           workflows = pkgs.runCommand "check-workflows" {
             nativeBuildInputs = [ pkgs.actionlint ];
