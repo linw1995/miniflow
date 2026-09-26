@@ -45,3 +45,20 @@ Diagnostics identify the failed stage: input parsing, graph validation, dependen
 A failed build never replaces an existing executable. Runner validation must succeed on every invocation; a previous executable is not evidence of current success. A lock persistence failure prevents installation. If installation fails after an unlocked build persists its dependency lock, the error states that the lock was updated.
 
 Building third-party Rust code executes build scripts, procedural macros, and configuration factories with the user's permissions. Factories should limit themselves to configuration validation and construction; external I/O belongs in `Node::execute`. This is a native build process, not an untrusted-code sandbox.
+
+## Reuse build directories
+
+By default, builds reuse an application-owned directory under the platform's user cache root (`~/Library/Caches` on macOS, `$XDG_CACHE_HOME` or `~/.cache` on Linux, and `%LOCALAPPDATA%` on Windows). Its identity includes the canonical Flow path, CLI version, and generated-project layout. Changing only the output destination does not select another directory.
+
+To control its location, including a reusable temporary directory:
+
+```sh
+mf compile flow.json --output ./flow --build-dir /tmp/order-build
+mf compile flow.json --output ./flow --build-dir /tmp/order-build --locked
+```
+
+The CLI reports whether it created or reused the directory. It retains the generated Cargo project and `target` artifacts after success and failure. Identical generated files keep their modification times. Cargo decides which artifacts remain fresh; each invocation still runs validation before installation. Graph, configuration, dependency, feature, local source, and compiler changes are checked on every build.
+
+An explicit directory must be absent, empty, or owned by the same Flow and compatible CLI/layout version. Concurrent use reports a retry diagnostic. Definitions, dependency locks, and final output paths cannot be inside the managed directory. Do not edit generated files as project inputs; the next build resynchronizes them from the Flow.
+
+Retained directories contain embedded configuration and diagnostics and are created with user-private permissions. To reclaim space, delete an inactive build directory using its reported path; never remove a directory while a build is running. A later invocation recreates it from the definition and lock. Automatic eviction and sharing compiled targets across different Flows are not provided.

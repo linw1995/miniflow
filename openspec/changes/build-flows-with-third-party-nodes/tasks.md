@@ -35,7 +35,7 @@
 - [x] 5.3 Retain generated projects and Cargo artifacts, write only changed files, and resynchronize working locks from Flow locks; test generated-file modification times, Cargo freshness output, and authoritative lock restoration after failed resolution/build attempts.
 - [x] 5.4 Synchronize complete generated artifact sets, remove obsolete generated configurations, and repair recognized partial state; test graph/config changes, removed nodes, validation interruption, and failure after a previous successful build without installing stale output.
 - [x] 5.5 Verify invalidation through dependency, feature, lock, local source, toolchain, and compiler-flag changes; confirm affected outputs rebuild through Cargo and unchanged dependencies remain reusable without timing-based assertions.
-- [ ] 5.6 Document directory selection, reuse, retained local data, and deletion of inactive entries in `docs/compiling.md`; verify documented warm builds, explicit temporary directories, and clean rebuilds after directory deletion.
+- [x] 5.6 Document directory selection, reuse, retained local data, and deletion of inactive entries in `docs/compiling.md`; verify documented warm builds, explicit temporary directories, and clean rebuilds after directory deletion.
 
 ## 6. Support package distribution and migration
 

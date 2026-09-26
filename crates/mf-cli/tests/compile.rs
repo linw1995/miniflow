@@ -403,6 +403,14 @@ fn warm_build_preserves_generated_inputs_and_reuses_compiled_runner() {
         );
     }
     assert_eq!(fs::read_to_string(&definition).unwrap(), source);
+    fs::remove_dir_all(&project).unwrap();
+    let recreated = compile(&definition, &target, None);
+    assert!(
+        recreated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recreated.stderr)
+    );
+    assert!(String::from_utf8_lossy(&recreated.stderr).contains("created build directory"));
 }
 
 #[test]
