@@ -44,12 +44,23 @@ fn packaged_cli_acceptance() {
     let mut flow = json!({
         "version":"2026-09-26",
         "dependencies":{
-            "constant":{"package":"mfn-constant","version":format!("={}", env!("CARGO_PKG_VERSION"))},
-            "identity":{"package":"mfn-identity","version":format!("={}", env!("CARGO_PKG_VERSION"))},
+            "core":{"package":"mfn-core","version":format!("={}", env!("CARGO_PKG_VERSION"))},
             "external":{"package":"fixture-multi-nodes","version":format!("={}", fixture.fixture_version),"features":["double"]}},
-        "nodes":[{"id":"source","kind":"fixture.source"},{"id":"echo","kind":"fixture.echo"}],
+        "nodes":[
+            {"id":"source","kind":"fixture.source"},
+            {"id":"route","kind":"builtin.if_else","config":{"branches":[
+                {"id":"accepted","condition":{"source":{"output":"source.value","path":""},"operator":"gt","value":0}}
+            ]}},
+            {"id":"echo","kind":"fixture.echo"},
+            {"id":"inactive","kind":"fixture.context","config":{"ports":["value"],"fail":true}}
+        ],
+        "control_edges":[
+            {"from_node":"source","from_output":"value","to_node":"route"},
+            {"from_node":"route","from_output":"accepted","to_node":"echo"},
+            {"from_node":"route","from_output":"else","to_node":"inactive"}
+        ],
         "edges":[{"from_node":"source","from_output":"value","to_node":"echo","to_input":"input"}],
-        "outputs":[{"name":"result","node":"echo","port":"value"}]
+        "outputs":[{"name":"result","node":"echo","port":"value"},{"name":"inactive","node":"inactive","port":"value","optional":true}]
     });
     let definition = project.join("flow.json");
     fs::write(&definition, flow.to_string()).unwrap();
@@ -92,7 +103,7 @@ fn packaged_cli_acceptance() {
             14,
         ),
     ] {
-        flow["dependencies"] = json!({name: dependency});
+        flow["dependencies"] = json!({name: dependency, "core":{"package":"mfn-core","version":format!("={}", env!("CARGO_PKG_VERSION"))}});
         let source = project.join(format!("{name}.json"));
         fs::write(&source, flow.to_string()).unwrap();
         let executable = project.join(name);

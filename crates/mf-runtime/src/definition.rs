@@ -46,6 +46,8 @@ pub struct WorkflowDefinition {
     pub nodes: Vec<NodeDefinition>,
     #[serde(default)]
     pub edges: Vec<EdgeDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub control_edges: Vec<ControlEdgeDefinition>,
     #[serde(default)]
     pub outputs: Vec<WorkflowOutputDefinition>,
 }
@@ -92,12 +94,26 @@ pub struct EdgeDefinition {
     pub to_input: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlEdgeDefinition {
+    pub from_node: DefinitionId,
+    pub from_output: String,
+    pub to_node: DefinitionId,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowOutputDefinition {
     pub name: String,
     pub node: DefinitionId,
     pub port: String,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub optional: bool,
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
 }
 
 #[derive(Debug, Snafu)]

@@ -1,8 +1,10 @@
+use crate::Node;
 use crate::definition::{DefinitionId, EdgeDefinition, WorkflowOutputDefinition};
-use crate::{Inputs, Node, Outputs};
+#[cfg(test)]
+use crate::{Inputs, Outputs};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::{ResultExt, Snafu};
+use snafu::Snafu;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// A compact runtime node index into a `Flow`'s node vector.
@@ -30,12 +32,20 @@ pub struct FlowNode {
     /// The definition-facing node ID, retained for diagnostics.
     pub definition_id: DefinitionId,
     pub node: Box<dyn Node>,
+    pub ports: crate::NodePorts,
+    pub references: Vec<crate::ContextReference>,
 }
 
 impl FlowNode {
-    pub fn new(definition_id: impl Into<DefinitionId>, node: Box<dyn Node>) -> Self {
+    pub fn new(
+        definition_id: impl Into<DefinitionId>,
+        node: Box<dyn Node>,
+        ports: crate::NodePorts,
+    ) -> Self {
         Self {
             definition_id: definition_id.into(),
+            ports,
+            references: node.context_references(),
             node,
         }
     }
@@ -70,14 +80,21 @@ pub struct FlowOutput {
     pub name: String,
     pub node_id: NodeId,
     pub port: String,
+    pub optional: bool,
 }
 
 impl FlowOutput {
-    fn new(name: impl Into<String>, node_id: impl Into<NodeId>, port: impl Into<String>) -> Self {
+    fn new(
+        name: impl Into<String>,
+        node_id: impl Into<NodeId>,
+        port: impl Into<String>,
+        optional: bool,
+    ) -> Self {
         Self {
             name: name.into(),
             node_id: node_id.into(),
             port: port.into(),
+            optional,
         }
     }
 }
@@ -130,6 +147,8 @@ pub enum FlowBuildError {
     },
     #[snafu(display("node definition ID `{definition_id}` is used more than once"))]
     DuplicateDefinitionId { definition_id: DefinitionId },
+    #[snafu(display("invalid control connection: {message}"))]
+    InvalidControlConnection { message: String },
     #[snafu(display("workflow output name `{name}` is selected more than once"))]
     DuplicateOutputName { name: String },
     #[snafu(display("workflow output `{name}` references unknown node `{definition_id}`"))]
@@ -139,39 +158,13 @@ pub enum FlowBuildError {
     },
 }
 
-#[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
-pub enum FlowExecutionError {
-    #[snafu(display(
-        "node `{target_definition_id}` input `{target_input}` depends on missing output `{source_output}` from node `{source_definition_id}`"
-    ))]
-    MissingConnectedOutput {
-        source_definition_id: DefinitionId,
-        source_output: String,
-        target_definition_id: DefinitionId,
-        target_input: String,
-    },
-    #[snafu(display("node `{definition_id}` failed: {source}"))]
-    NodeExecution {
-        source: crate::NodeExecutionError,
-        definition_id: DefinitionId,
-    },
-    #[snafu(display(
-        "workflow output `{name}` references missing port `{port}` on node `{definition_id}`"
-    ))]
-    MissingWorkflowOutput {
-        name: String,
-        definition_id: DefinitionId,
-        port: String,
-    },
-}
-
 pub struct Flow {
     nodes: Vec<FlowNode>,
     connections: Vec<FlowConnection>,
     incoming_connections: BTreeMap<NodeId, Vec<usize>>,
     execution_order: Vec<NodeId>,
     outputs: Vec<FlowOutput>,
+    controls: Vec<crate::ControlEdgeDefinition>,
 }
 
 impl Flow {
@@ -282,7 +275,12 @@ impl Flow {
             if !output_names.insert(output.name.clone()) {
                 return DuplicateOutputNameSnafu { name: output.name }.fail();
             }
-            resolved_outputs.push(FlowOutput::new(output.name, node_id, output.port));
+            resolved_outputs.push(FlowOutput::new(
+                output.name,
+                node_id,
+                output.port,
+                output.optional,
+            ));
         }
 
         Ok(Self {
@@ -291,7 +289,40 @@ impl Flow {
             incoming_connections,
             execution_order: resolved_order,
             outputs: resolved_outputs,
+            controls: Vec::new(),
         })
+    }
+
+    pub fn with_control_edges(
+        mut self,
+        controls: Vec<crate::ControlEdgeDefinition>,
+    ) -> Result<Self, FlowBuildError> {
+        let positions: BTreeMap<_, _> = self
+            .execution_order
+            .iter()
+            .enumerate()
+            .map(|(position, id)| (self.nodes[id.index()].definition_id.clone(), position))
+            .collect();
+        let mut unique = BTreeSet::new();
+        for edge in &controls {
+            let invalid = || FlowBuildError::InvalidControlConnection {
+                message: format!(
+                    "`{}`.`{}` -> `{}` must have valid endpoints, precede its target, and be unique",
+                    edge.from_node, edge.from_output, edge.to_node
+                ),
+            };
+            let Some(from) = positions.get(&edge.from_node) else {
+                return Err(invalid());
+            };
+            let Some(to) = positions.get(&edge.to_node) else {
+                return Err(invalid());
+            };
+            if from >= to || !unique.insert(edge) {
+                return Err(invalid());
+            }
+        }
+        self.controls = controls;
+        Ok(self)
     }
 
     pub fn node(&self, id: &NodeId) -> Option<&dyn Node> {
@@ -316,61 +347,50 @@ impl Flow {
         &self.execution_order
     }
 
-    pub fn execute(&self) -> Result<FlowOutputs, FlowExecutionError> {
-        let mut outputs_by_node = BTreeMap::new();
+    pub fn execute(&self) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        let mut state = crate::ExecutionContext::default();
         for node_id in &self.execution_order {
             let node = &self.nodes[node_id.index()];
-            let inputs = self.inputs_for(*node_id, &outputs_by_node)?;
-            let outputs = node.node.execute(inputs).context(NodeExecutionSnafu {
-                definition_id: node.definition_id.clone(),
-            })?;
-            outputs_by_node.insert(*node_id, outputs);
+            let mut dependencies = Vec::new();
+            if let Some(incoming) = self.incoming_connections.get(node_id) {
+                for index in incoming {
+                    let connection = &self.connections[*index];
+                    dependencies.push(crate::ExecutionDependency {
+                        input: Some(&connection.to_input),
+                        source_node: self.nodes[connection.from_node.index()]
+                            .definition_id
+                            .as_str(),
+                        source_output: &connection.from_output,
+                    });
+                }
+            }
+            for edge in self
+                .controls
+                .iter()
+                .filter(|edge| edge.to_node == node.definition_id)
+            {
+                dependencies.push(crate::ExecutionDependency {
+                    input: None,
+                    source_node: edge.from_node.as_str(),
+                    source_output: &edge.from_output,
+                });
+            }
+            crate::execute_node_in_context(node, &dependencies, &mut state)?;
         }
-
         let mut workflow_outputs = FlowOutputs::new();
         for output in &self.outputs {
-            let node = &self.nodes[output.node_id.index()];
-            let value = outputs_by_node
-                .get(&output.node_id)
-                .and_then(|node_outputs| node_outputs.get(&output.port))
-                .ok_or_else(|| FlowExecutionError::MissingWorkflowOutput {
-                    name: output.name.clone(),
-                    definition_id: node.definition_id.clone(),
-                    port: output.port.clone(),
-                })?;
-
-            workflow_outputs.insert(output.name.clone(), value.clone());
-        }
-
-        Ok(workflow_outputs)
-    }
-
-    fn inputs_for(
-        &self,
-        node_id: NodeId,
-        outputs_by_node: &BTreeMap<NodeId, Outputs>,
-    ) -> Result<Inputs, FlowExecutionError> {
-        let mut inputs = Inputs::new();
-        let target_node = &self.nodes[node_id.index()];
-
-        if let Some(connection_indices) = self.incoming_connections.get(&node_id) {
-            for index in connection_indices {
-                let connection = &self.connections[*index];
-                let source_node = &self.nodes[connection.from_node.index()];
-                let value = outputs_by_node
-                    .get(&connection.from_node)
-                    .and_then(|outputs| outputs.get(&connection.from_output))
-                    .ok_or_else(|| FlowExecutionError::MissingConnectedOutput {
-                        source_definition_id: source_node.definition_id.clone(),
-                        source_output: connection.from_output.clone(),
-                        target_definition_id: target_node.definition_id.clone(),
-                        target_input: connection.to_input.clone(),
-                    })?;
-                inputs.insert(connection.to_input.clone(), value.clone());
+            let id = self.nodes[output.node_id.index()].definition_id.as_str();
+            if let Some(value) = crate::select_context_output(
+                &state,
+                &output.name,
+                id,
+                &output.port,
+                output.optional,
+            )? {
+                workflow_outputs.insert(output.name.clone(), value);
             }
         }
-
-        Ok(inputs)
+        Ok(workflow_outputs)
     }
 }
 
@@ -444,6 +464,17 @@ mod tests {
         action: Action,
         trace: &Arc<Mutex<Vec<&'static str>>>,
     ) -> FlowNode {
+        let mut ports = crate::NodePorts::default();
+        match &action {
+            Action::Emit { output, .. }
+            | Action::Increment { output, .. }
+            | Action::Sum { output, .. } => {
+                ports
+                    .outputs
+                    .push(crate::PortSpec::new(output, crate::ValueType::Number, true));
+            }
+            Action::Fail => {}
+        }
         FlowNode::new(
             name,
             Box::new(TestNode {
@@ -451,6 +482,7 @@ mod tests {
                 action,
                 trace: Arc::clone(trace),
             }),
+            ports,
         )
     }
 
@@ -468,6 +500,7 @@ mod tests {
             name: name.to_owned(),
             node: node.into(),
             port: port.to_owned(),
+            optional: false,
         }
     }
 
@@ -477,27 +510,46 @@ mod tests {
 
     #[test]
     fn routes_named_outputs_to_named_inputs() {
+        let trace = Arc::new(Mutex::new(Vec::new()));
         let source_a = NodeId::new(0);
         let source_b = NodeId::new(1);
         let join = NodeId::new(2);
         let flow = Flow::new(
             vec![
-                FlowNode::new("source-a", Box::new(EmptyNode)),
-                FlowNode::new("source-b", Box::new(EmptyNode)),
-                FlowNode::new("join", Box::new(EmptyNode)),
+                test_node(
+                    "source-a",
+                    Action::Emit {
+                        output: "value",
+                        value: 3,
+                    },
+                    &trace,
+                ),
+                test_node(
+                    "source-b",
+                    Action::Emit {
+                        output: "value",
+                        value: 5,
+                    },
+                    &trace,
+                ),
+                test_node(
+                    "join",
+                    Action::Sum {
+                        left: "left",
+                        right: "right",
+                        output: "result",
+                    },
+                    &trace,
+                ),
             ],
             vec![
                 edge("source-a", "value", "join", "left"),
                 edge("source-b", "value", "join", "right"),
             ],
             order(&["source-a", "source-b", "join"]),
-            Vec::new(),
+            vec![selected_output("sum", "join", "result")],
         )
         .unwrap();
-        let outputs_by_node = BTreeMap::from([
-            (source_a, Outputs::from([("value".to_owned(), json!(3))])),
-            (source_b, Outputs::from([("value".to_owned(), json!(5))])),
-        ]);
 
         assert_eq!(flow.execution_order(), [source_a, source_b, join]);
         assert_eq!(flow.connections().len(), 2);
@@ -505,13 +557,8 @@ mod tests {
         assert_eq!(flow.connections()[0].to_node, join);
         assert!(flow.node(&join).is_some());
         assert_eq!(flow.definition_node_id(&join), Some("join"));
-        assert_eq!(
-            flow.inputs_for(join, &outputs_by_node).unwrap(),
-            Inputs::from([
-                ("left".to_owned(), json!(3)),
-                ("right".to_owned(), json!(5)),
-            ])
-        );
+        assert_eq!(flow.execute().unwrap()["sum"], json!(8));
+        assert_eq!(*trace.lock().unwrap(), ["source-a", "source-b", "join"]);
     }
 
     #[test]
@@ -630,7 +677,7 @@ mod tests {
         let error = flow.execute().unwrap_err();
         assert!(matches!(
             &error,
-            FlowExecutionError::NodeExecution { definition_id, .. }
+            crate::WorkflowRunError::NodeExecution { definition_id, .. }
                 if definition_id.as_str() == "broken-step"
         ));
         assert_eq!(
@@ -642,7 +689,11 @@ mod tests {
     #[test]
     fn rejects_unknown_definition_ids_during_construction() {
         let error = Flow::new(
-            vec![FlowNode::new("known", Box::new(EmptyNode))],
+            vec![FlowNode::new(
+                "known",
+                Box::new(EmptyNode),
+                crate::NodePorts::default(),
+            )],
             Vec::new(),
             order(&["missing"]),
             Vec::new(),
@@ -665,8 +716,8 @@ mod tests {
     fn rejects_non_topological_execution_order_during_construction() {
         let error = Flow::new(
             vec![
-                FlowNode::new("source", Box::new(EmptyNode)),
-                FlowNode::new("sink", Box::new(EmptyNode)),
+                FlowNode::new("source", Box::new(EmptyNode), crate::NodePorts::default()),
+                FlowNode::new("sink", Box::new(EmptyNode), crate::NodePorts::default()),
             ],
             vec![edge("source", "value", "sink", "input")],
             order(&["sink", "source"]),
@@ -684,7 +735,11 @@ mod tests {
     #[test]
     fn rejects_missing_connection_and_output_nodes_during_construction() {
         let connection_error = Flow::new(
-            vec![FlowNode::new("known", Box::new(EmptyNode))],
+            vec![FlowNode::new(
+                "known",
+                Box::new(EmptyNode),
+                crate::NodePorts::default(),
+            )],
             vec![edge("missing", "value", "known", "input")],
             order(&["known"]),
             Vec::new(),
@@ -698,7 +753,11 @@ mod tests {
         assert!(connection_error.to_string().contains("`missing`"));
 
         let output_error = Flow::new(
-            vec![FlowNode::new("known", Box::new(EmptyNode))],
+            vec![FlowNode::new(
+                "known",
+                Box::new(EmptyNode),
+                crate::NodePorts::default(),
+            )],
             Vec::new(),
             order(&["known"]),
             vec![selected_output("result", "missing", "value")],

@@ -1,6 +1,7 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
@@ -40,9 +41,9 @@ impl fmt::Display for ValueType {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortSpec {
-    pub name: &'static str,
+    pub name: Cow<'static, str>,
     pub value_type: ValueType,
     pub required: bool,
 }
@@ -50,11 +51,43 @@ pub struct PortSpec {
 impl PortSpec {
     pub const fn new(name: &'static str, value_type: ValueType, required: bool) -> Self {
         Self {
-            name,
+            name: Cow::Borrowed(name),
             value_type,
             required,
         }
     }
+    pub fn owned(name: impl Into<String>, value_type: ValueType, required: bool) -> Self {
+        Self {
+            name: Cow::Owned(name.into()),
+            value_type,
+            required,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct NodePorts {
+    pub inputs: Vec<PortSpec>,
+    pub outputs: Vec<PortSpec>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ContextReference {
+    pub output: String,
+    pub label: String,
+}
+
+impl ContextReference {
+    pub fn new(output: impl Into<String>, label: impl Into<String>) -> Self {
+        Self {
+            output: output.into(),
+            label: label.into(),
+        }
+    }
+}
+
+pub fn output_id(node: &str, port: &str) -> String {
+    format!("{node}.{port}")
 }
 
 #[derive(Debug, Snafu)]
@@ -88,6 +121,22 @@ where
 
 pub trait Node: Send + Sync {
     fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError>;
+
+    fn execute_with_context(
+        &self,
+        inputs: Inputs,
+        _ctx: &crate::ExecutionContext,
+    ) -> Result<crate::NodeResult, NodeExecutionError> {
+        self.execute(inputs).map(Into::into)
+    }
+
+    fn ports(&self) -> Option<NodePorts> {
+        None
+    }
+
+    fn context_references(&self) -> Vec<ContextReference> {
+        Vec::new()
+    }
 }
 
 pub type NodeFactory = fn(Value) -> Result<Box<dyn Node>, NodeBuildError>;
@@ -103,6 +152,13 @@ pub struct NodeRegistration {
 impl NodeRegistration {
     pub fn instantiate(&self, config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
         (self.factory)(config)
+    }
+
+    pub fn effective_ports(&self, node: &dyn Node) -> NodePorts {
+        node.ports().unwrap_or_else(|| NodePorts {
+            inputs: self.inputs.to_vec(),
+            outputs: self.outputs.to_vec(),
+        })
     }
 }
 

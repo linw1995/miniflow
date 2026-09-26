@@ -1,6 +1,6 @@
 # Release prerequisites
 
-A distributed CLI resolves exact-version `mf-runtime` and `mf-compiler` packages from crates.io. The bundled examples also require available `mfn-constant` and `mfn-identity` packages. Prepare and publish these support packages before publishing the matching CLI release.
+A distributed CLI resolves exact-version `mf-runtime` and `mf-compiler` packages from crates.io. The bundled examples also require available `mfn-core` packages. Prepare and publish these support packages before publishing the matching CLI release.
 
 ## Verify packages through nextest
 

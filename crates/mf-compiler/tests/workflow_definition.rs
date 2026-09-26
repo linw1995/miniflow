@@ -124,7 +124,7 @@ fn documented_example_round_trips_with_dependencies() {
     let definition =
         WorkflowDefinition::from_json(include_str!("../../../examples/hello-workflow.json"))
             .unwrap();
-    assert_eq!(definition.dependencies.len(), 2);
+    assert_eq!(definition.dependencies.len(), 1);
     assert_eq!(
         definition,
         WorkflowDefinition::from_json(&serde_json::to_string(&definition).unwrap()).unwrap()

@@ -63,3 +63,5 @@ inventory::submit! {
 inventory::submit! {
     NodeRegistration { kind: "fixture.source", inputs: &[], outputs: &[], factory: source }
 }
+
+mod context_fixture;

@@ -2,7 +2,9 @@
 
 ## Implement a node
 
-Each built-in node lives in its own crate under `crates/builtin-nodes/`. A plugin crate depends on `mf-runtime`, implements `Node::execute`, provides a factory, and submits a `NodeRegistration` through `inventory::submit!`. The registration declares a unique `kind` and its input and output `PortSpec` values. See [constant](../crates/builtin-nodes/constant/src/lib.rs) and [identity](../crates/builtin-nodes/identity/src/lib.rs) for working registrations.
+Basic nodes share the `mfn-core` crate under `crates/builtin-nodes/core/`. Nodes with service-specific dependencies belong in separate packages.
+
+A plugin crate depends on `mf-runtime`, implements `Node::execute`, provides a factory, and submits a `NodeRegistration` through `inventory::submit!`. The registration declares a unique `kind` and its input and output `PortSpec` values. See [constant](../crates/builtin-nodes/core/src/constant.rs) and [identity](../crates/builtin-nodes/core/src/identity.rs) for working registrations.
 
 ## Registration contract
 
@@ -21,3 +23,23 @@ The CLI first checks graph structure, then builds the runner and invokes its `--
 The [multi-node fixture](../crates/mf-compiler/tests/fixtures/multi-nodes/) demonstrates one external crate registering several kinds. The packaged CLI acceptance script in [release prerequisites](releases.md) builds it from a packaged registry source outside the checkout.
 
 See the [contribution guide](../CONTRIBUTING.md) for local checks and [dependency license auditing](licensing.md) before distributing additional plugins.
+
+## Instance metadata
+
+Nodes with configurable ports can override `Node::ports()` with `NodePorts` using `PortSpec::owned` for dynamic names; this replaces both static port lists for that instance. Ordinary registrations remain unchanged. Names must be nonempty and unique within each direction. Metadata must depend only on configuration.
+
+Declare context reads with `Node::context_references()`. Each `ContextReference` contains a qualified output ID and a diagnostic label, such as a branch ID. Validation resolves exact `${node_id}.${output_name}` keys and requires the producer to be a strict ancestor through explicit dependencies. References do not add edges. Ambiguous qualified IDs are rejected with both source pairs.
+
+## Context-aware execution
+
+Override `Node::execute_with_context` to read declared outputs through `ctx.output("source.value")` and return
+`NodeResult`. The default adapter calls ordinary `execute` once. `ContextValue` distinguishes a produced JSON value from
+`Skipped`; unavailable outputs, including reads before production and unexpected omissions, are errors. Reference
+declarations support compile-time dependency checks; the context does not enforce a runtime read whitelist. The runtime
+publishes results only after successful execution and starts with fresh context for each run.
+
+Keep output names local in node results. Runtime publication qualifies them with the instance ID. Explicit skipped names must be declared non-required outputs and cannot also be produced. A scheduler-skipped node propagates skipping through every output, including required ones. Context references alone never activate or skip a node.
+
+## Prepared execution nodes
+
+`FlowNode::new` requires resolved `NodePorts`. Compiler preparation supplies these from the instance or static registration. Both in-memory execution and generated runners return `WorkflowRunError`. Context-aware implementations take `&ExecutionContext`; generated step helpers assume a validated plan and its execution order.

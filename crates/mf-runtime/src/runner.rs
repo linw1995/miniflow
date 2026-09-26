@@ -1,11 +1,16 @@
 use crate::definition::DefinitionId;
-use crate::{Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistry, Outputs};
+use crate::{NodeBuildError, NodeExecutionError, NodeRegistry};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum WorkflowRunError {
+    #[snafu(display("node `{definition_id}`: {message}"))]
+    Context {
+        definition_id: DefinitionId,
+        message: String,
+    },
     #[snafu(display("node `{definition_id}` references unavailable kind `{kind}`"))]
     UnknownKind {
         definition_id: DefinitionId,
@@ -26,19 +31,14 @@ pub enum WorkflowRunError {
         source: NodeExecutionError,
         definition_id: DefinitionId,
     },
-    #[snafu(display("node `{definition_id}` did not produce output `{port}`"))]
-    MissingOutput {
-        definition_id: DefinitionId,
-        port: String,
-    },
 }
 
-pub fn instantiate_node(
+pub fn instantiate_node_with_metadata(
     registry: &NodeRegistry,
     definition_id: &str,
     kind: &str,
     config_json: &str,
-) -> Result<Box<dyn Node>, WorkflowRunError> {
+) -> Result<crate::FlowNode, WorkflowRunError> {
     let Some(registration) = registry.get(kind) else {
         return UnknownKindSnafu {
             definition_id: DefinitionId::from(definition_id),
@@ -49,33 +49,11 @@ pub fn instantiate_node(
     let config: Value = serde_json::from_str(config_json).context(InvalidEmbeddedConfigSnafu {
         definition_id: DefinitionId::from(definition_id),
     })?;
-    registration
+    let node = registration
         .instantiate(config)
         .context(NodeConstructionSnafu {
             definition_id: DefinitionId::from(definition_id),
-        })
-}
-
-pub fn execute_node(
-    node: &dyn Node,
-    inputs: Inputs,
-    definition_id: &str,
-) -> Result<Outputs, WorkflowRunError> {
-    node.execute(inputs).context(NodeExecutionSnafu {
-        definition_id: DefinitionId::from(definition_id),
-    })
-}
-
-pub fn required_output(
-    outputs: &Outputs,
-    definition_id: &str,
-    port: &str,
-) -> Result<Value, WorkflowRunError> {
-    outputs
-        .get(port)
-        .cloned()
-        .ok_or_else(|| WorkflowRunError::MissingOutput {
-            definition_id: DefinitionId::from(definition_id),
-            port: port.to_owned(),
-        })
+        })?;
+    let ports = registration.effective_ports(node.as_ref());
+    Ok(crate::FlowNode::new(definition_id, node, ports))
 }
