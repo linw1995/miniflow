@@ -4,7 +4,7 @@
 
 - [x] 1.1 Remove the production compiler dependency on `mf-bundle` and migrate callers of `plugin_registry()` to explicit registries; verify the compiler production dependency graph contains no built-in node crate (keep a temporary explicit CLI bundle until task 4.2) and existing graph-validation tests pass.
 - [x] 1.2 Add an external fixture crate registering multiple kinds through the existing runtime contract, without a `kind()` export; verify both registrations survive optimized linking through an explicit crate anchor.
-- [ ] 1.3 Document the registration, shared-runtime, and factory side-effect contracts in `docs/plugins.md`; verify the fixture conforms to the documented contract.
+- [x] 1.3 Document the registration, shared-runtime, and factory side-effect contracts in `docs/plugins.md`; verify the fixture conforms to the documented contract.
 
 ## 2. Unified Flow definition and CLI inputs
 
