@@ -60,3 +60,18 @@ fn serializes_reuse_and_rejects_overlapping_inputs() {
         );
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn reports_unencodable_definition_paths_without_panicking_or_writing_partial_metadata() {
+    use std::os::unix::ffi::OsStringExt;
+    let root = common::Directory::new();
+    let definition = root.0.join(std::ffi::OsString::from_vec(vec![b'f', 0xff]));
+    let directory = root.0.join("build");
+    let error = BuildDirectory::open(&definition, Some(&directory))
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("metadata"));
+    assert!(!directory.join(".mf-owner.json").exists());
+    assert_eq!(fs::read_dir(directory).unwrap().count(), 0);
+}

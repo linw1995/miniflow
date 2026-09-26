@@ -10,6 +10,13 @@ const OWNER: &str = ".mf-owner.json";
 
 #[derive(Debug, Snafu)]
 pub enum CacheError {
+    #[snafu(display("could not encode build directory metadata at {path:?}: {source}"))]
+    Metadata {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
+    #[snafu(display("could not persist build directory metadata: {source}"))]
+    State { source: crate::StateError },
     #[snafu(display("could not access build directory {path:?}: {source}"))]
     Io { path: PathBuf, source: io::Error },
     #[snafu(display(
@@ -145,8 +152,10 @@ impl BuildDirectory {
                     }
                     .fail();
                 }
-                fs::write(&marker, serde_json::to_vec(&expected).unwrap())
-                    .context(IoSnafu { path: marker })?;
+                let contents = serde_json::to_vec(&expected).context(MetadataSnafu {
+                    path: marker.clone(),
+                })?;
+                crate::atomic_write(&marker, &contents).context(StateSnafu)?;
                 false
             }
             Err(source) => {
