@@ -3,6 +3,8 @@ name = "mf-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Runtime contracts and execution support for miniflow"
 
 [dependencies]
 inventory = "0.3.24"

@@ -3,6 +3,8 @@ name = "mf-bundle"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Legacy built-in node bundle for miniflow"
 
 [dependencies]
 mfn-constant.workspace = true

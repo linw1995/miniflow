@@ -3,6 +3,8 @@ name = "mf-compiler"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+description = "Workflow validation and native code generation for miniflow"
 
 [dependencies]
 mf-runtime.workspace = true
