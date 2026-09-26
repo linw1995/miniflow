@@ -3,7 +3,6 @@ use snafu::Snafu;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
 pub enum NodeRegistryError {
     #[snafu(display("node kind `{kind}` is registered more than once"))]
     DuplicateKind { kind: String },

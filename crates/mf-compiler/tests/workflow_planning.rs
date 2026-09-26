@@ -1,4 +1,4 @@
-use mf_compiler::definition::{DefinitionId, WorkflowDefinition};
+use mf_compiler::{DefinitionId, WorkflowDefinition};
 use mf_compiler::{
     Flow, Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry,
     Outputs, PortSpec, ValueType, WorkflowCompileError, resolve_nodes, topological_order,

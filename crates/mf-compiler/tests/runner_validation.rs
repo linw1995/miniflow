@@ -25,7 +25,7 @@ fn one_runner_validates_without_execution_and_reports_plugin_errors() {
         )
         .unwrap();
         resolve_project(&project, &root.path().join("flow.lock"), false).unwrap();
-        let result = mf_compiler::pipeline::cargo_command(&project)
+        let result = mf_compiler::cargo_command(&project)
             .args(["build", "--offline", "--release", "--locked"])
             .output()
             .unwrap();

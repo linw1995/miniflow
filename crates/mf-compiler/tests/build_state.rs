@@ -65,7 +65,7 @@ fn materializes_working_locks_without_aliasing_the_authoritative_lock() {
         } else {
             fs::hard_link(&authoritative, &working).unwrap();
         }
-        mf_compiler::state::write_if_changed(&working, b"locked resolution").unwrap();
+        mf_compiler::write_if_changed(&working, b"locked resolution").unwrap();
         fs::write(&working, "failed build resolution").unwrap();
         assert_eq!(fs::read(&authoritative).unwrap(), b"locked resolution");
         assert!(
