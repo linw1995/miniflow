@@ -33,5 +33,5 @@ Flows need ordered `if` / `else-if` / `else` routing that prevents unselected do
 - `mf-runtime`: context-aware execution and instance ports, flat per-run output storage, control edges, shared skip handling, and optional output definitions. Remove optional execution metadata, duplicate port types, and runtime registration/whitelist state.
 - `mf-compiler`: combined dependency planning, instance-aware port/reference validation, construction reuse, and generated execution guards with context publication.
 - Built-in crates, workspace dependencies, fixtures, lockfiles, examples, release package checks, and workflow/plugin documentation.
-- Existing plugins can retain their static ports and `execute` implementations when rebuilt against the matching runtime. New conditional features require matching updated support packages.
+- Existing plugins can retain constructor-based static registrations and ordinary `execute` implementations when rebuilt against the matching runtime. New conditional features require matching updated support packages.
 - No script expression language, compound boolean expression tree, field-to-field comparison, branch merge node, loops, or concurrent scheduler is included.

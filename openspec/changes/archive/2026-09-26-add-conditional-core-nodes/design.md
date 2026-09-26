@@ -108,7 +108,7 @@ Retain schema `2026-09-26` with additive `control_edges` and `optional` fields. 
 
 Replace `mfn-constant` / `mfn-identity` dependencies with `mfn-core`, preserving kind names and edges, then regenerate adjacent locks with an unlocked build. Release matching support packages before distributing the new CLI.
 
-Rust callers constructing `FlowNode` directly must now supply resolved ports. Dynamic descriptors use `PortSpec::owned`, flows return `WorkflowRunError`, and context-aware implementations take `&ExecutionContext` without a lifetime parameter. Application callers should use compiler preparation APIs. Ordinary static registrations and `execute` implementations remain valid.
+Rust callers constructing `FlowNode` directly must now supply resolved ports. Dynamic descriptors use `PortSpec::owned`, flows return `WorkflowRunError`, and context-aware implementations take `&ExecutionContext` without a lifetime parameter. Application callers should use compiler preparation APIs. Static registrations using `PortSpec::new` and ordinary `execute` implementations remain valid. Direct descriptor struct literals must account for the owned-or-borrowed name field.
 
 ## Validation
 

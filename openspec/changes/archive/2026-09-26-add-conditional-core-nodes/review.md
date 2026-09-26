@@ -61,3 +61,12 @@ The generated step helper operates on a validated plan in topological order. It 
 - `context.rs`: 125/125 reported production lines covered. Numeric comparison: 78/78 reported lines covered, including colocated tests. No branch records are emitted by the current LLVM coverage configuration.
 
 The behavior-suite timings decreased from 25.14 seconds at baseline to 7.87 seconds for the final run, but cache and test-matrix differences prevent attributing that change to runtime performance. The supported conclusions are reduced code/API surface and preserved workflow regression detection.
+
+## Specification review before archive
+
+Reviewed the three capability deltas against the implementation, retained regression scenarios, and existing compilation/dependency specifications. No implementation blockers were found.
+
+- Clarified that validated plans establish execution order and at-most-once node resolution; the context does not implement a second registration or read-authorization protocol.
+- Scoped source-compatibility claims to documented static-port constructors and ordinary execution implementations, with migration for changed low-level Rust APIs.
+- Made rejection of undeclared produced outputs explicit, matching the existing publication guard and parameterized runtime test.
+- Confirmed condition/output cardinality, first-match selection, explicit dependency ordering, qualified IDs, null/skip/missing distinctions, optional results, and generated/in-memory parity.

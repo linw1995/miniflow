@@ -1,10 +1,10 @@
-# Spec Delta
+# conditional-flow-execution Specification
 
 ## Purpose
 
 Evaluate ordered conditions from prior node outputs in a per-run context and activate one downstream branch independently of incoming data bindings.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Configure at least one condition and at least two outputs
 
@@ -67,10 +67,14 @@ Condition source references MUST NOT implicitly create dependencies or supply in
 
 ### Requirement: Read prior outputs from an isolated execution context
 
-Each workflow invocation SHALL have a fresh context containing outcomes of previously resolved nodes. Nodes SHALL
-receive read-only access to completed context outputs. Reference declarations SHALL be used for compile-time ordering validation. The runtime MUST publish validated completed or skipped
-outcomes only after a node resolves, MUST NOT expose partial outputs, and MUST NOT retain context values between runs.
-Context reads SHALL distinguish produced values, explicitly skipped outcomes, and unavailable outputs. Reads before production and unexpectedly omitted outputs MUST both fail. A context reference alone MUST NOT activate or skip the consuming node.
+Each workflow invocation SHALL have a fresh context containing outcomes of previously resolved nodes. A workflow run
+SHALL resolve each scheduled node at most once, following its validated execution order. Nodes SHALL receive read-only
+access to completed context outputs. Reference declarations SHALL be used for compile-time ordering validation; runtime
+context access SHALL NOT require an additional node-registration or per-read authorization protocol. The runtime MUST
+publish validated completed or skipped outcomes only after a node resolves, MUST NOT expose partial outputs, and MUST
+NOT retain context values between runs. Context reads SHALL distinguish produced values, explicitly skipped outcomes,
+and unavailable outputs. Reads before production and unexpectedly omitted outputs MUST both fail. A context reference
+alone MUST NOT activate or skip the consuming node.
 
 #### Scenario: Read a transitive predecessor
 
@@ -299,21 +303,29 @@ trigger skipping. Independent nodes SHALL remain eligible to execute in the exis
 
 ### Requirement: Preserve plugin errors and ordinary plugin compatibility
 
-Existing plugins with static ports and ordinary value outputs SHALL retain their execution behavior when rebuilt against
-the updated runtime. Third-party plugins SHALL be able to describe explicit skipped output ports without reserved kind
-names. Explicit skip markers MUST reference declared non-required outputs and MUST NOT overlap produced values. An
-absent output without a skip marker MUST remain a missing-output error when referenced. Node errors MUST remain failures
-and MUST NOT be converted to skip states.
+Plugins using the documented static-port construction and ordinary execution interfaces SHALL retain their execution
+behavior when rebuilt against the updated runtime, provided their produced outputs conform to their declared ports.
+This guarantee covers constructor-based registrations and ordinary node execution implementations; changed descriptor
+structs and low-level execution helpers require the documented Rust API migration. Third-party plugins SHALL be able to
+describe explicit skipped output ports without reserved kind names. Produced output names MUST belong to the node's
+effective declared outputs. Explicit skip markers MUST reference declared non-required outputs and MUST NOT overlap
+produced values. An absent output without a skip marker MUST remain a missing-output error when referenced. Node errors
+MUST remain failures and MUST NOT be converted to skip states.
 
 #### Scenario: Run an unchanged ordinary plugin
 
-- **WHEN** a plugin retains its existing static registration and ordinary execution implementation
+- **WHEN** a plugin retains its constructor-based static registration and ordinary execution implementation and produces declared outputs
 - **THEN** it can run in a conditional workflow and its outputs are treated as produced values
 
 #### Scenario: Reject an invalid skip declaration
 
 - **WHEN** a plugin explicitly skips an unknown or required output, or both produces and skips the same output
 - **THEN** execution fails with the node and output context
+
+#### Scenario: Reject an undeclared produced output
+
+- **WHEN** a plugin returns a value under an output name absent from its effective port declaration
+- **THEN** execution fails with the node and output context before publishing that node's result
 
 #### Scenario: Preserve an optional port omission error
 
