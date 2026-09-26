@@ -10,7 +10,6 @@ license = "Apache-2.0"
 repository = "https://github.com/linw1995/miniflow"
 
 [workspace.dependencies]
-mf-bundle = { path = "crates/mf-bundle", version = "0.1.0" }
 mf-compiler = { path = "crates/mf-compiler", version = "0.1.0" }
 mf-runtime = { path = "crates/mf-runtime", version = "0.1.0" }
 mfn-constant = { path = "crates/builtin-nodes/constant", version = "0.1.0" }

@@ -17,7 +17,6 @@ PACKAGES = [
     ("mf-runtime", ROOT / "crates/mf-runtime"),
     ("mfn-constant", ROOT / "crates/builtin-nodes/constant"),
     ("mfn-identity", ROOT / "crates/builtin-nodes/identity"),
-    ("mf-bundle", ROOT / "crates/mf-bundle"),
     ("mf-compiler", ROOT / "crates/mf-compiler"),
 ]
 

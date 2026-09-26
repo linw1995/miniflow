@@ -1,6 +1,10 @@
 #[test]
-fn caller_selects_the_plugin_registry() {
-    let registry = mf_bundle::registry().unwrap();
-    let kinds: Vec<_> = registry.iter().map(|entry| entry.kind).collect();
-    assert_eq!(kinds, mf_bundle::registered_kinds());
+fn compiler_has_no_implicit_node_registrations() {
+    assert_eq!(
+        mf_compiler::NodeRegistry::from_inventory()
+            .unwrap()
+            .iter()
+            .count(),
+        0
+    );
 }
