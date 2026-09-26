@@ -37,10 +37,7 @@
               (craneLib.fileset.commonCargoSources ./.)
               ./.config/nextest.toml
               ./examples
-              ./scripts/prepare-support-packages.py
-              ./scripts/test-packaged-cli.py
-              ./scripts/check-release-support.py
-              ./scripts/test-release-support.py
+              ./scripts/check-release-support.sh
               ./LICENSE
               ./about.hbs
               ./about.toml
@@ -89,6 +86,7 @@
             pkgs.grcov
             pkgs.prek
             pkgs.git
+            pkgs.jq
             pkgs.python3
           ];
         };
@@ -103,7 +101,7 @@
           test = craneLib.cargoNextest (cargoArgs // {
             inherit cargoArtifacts;
             cargoNextestExtraArgs = "--locked --workspace --all-targets --all-features";
-            nativeBuildInputs = [ pkgs.python3 pkgs.git ];
+            nativeBuildInputs = [ pkgs.git pkgs.jq ];
           });
           workflows = pkgs.runCommand "check-workflows" {
             nativeBuildInputs = [ pkgs.actionlint ];

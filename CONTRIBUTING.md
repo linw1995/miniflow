@@ -32,10 +32,14 @@ Fetch the complete locked dependency graph before a first test run: offline fixt
 To run only these integration tests:
 
 ```sh
-nix develop --command cargo nextest run -p mf-cli --test packaged_cli
+nix develop --command cargo nextest run -p mf-cli --test packaged_cli --test release_support
 ```
 
-`packaged_cli_acceptance` builds a default CLI and third-party packages, then verifies registry, pinned local Git, and local-path dependencies outside the checkout, locked rebuilds, and standalone execution. It is enabled without a feature flag or `--ignored`. Nextest captures its subprocess diagnostics and reserves the test worker slots while it runs to avoid competing nested Cargo builds. Python and Git are included in the development shell.
+`packaged_cli_acceptance` builds a default CLI and third-party packages, then verifies registry, pinned local Git, and
+local-path dependencies outside the checkout, locked rebuilds, and standalone execution. It is enabled without a feature
+flag or `--ignored`. A Rust fixture prepares the package archives and isolated Cargo source, and cleans up temporary
+files after the test. Nextest captures subprocess diagnostics and reserves the test worker slots while acceptance runs
+to avoid competing nested Cargo builds. Git, Bash, and jq are provided by the development environment.
 
 Nix uses the same nextest suite. Package builds leave test execution to that check so acceptance runs once. The coverage command below also discovers these tests through nextest; there is no separate post-check invocation to maintain.
 

@@ -2,34 +2,24 @@
 
 A distributed CLI resolves exact-version `mf-runtime` and `mf-compiler` packages from crates.io. The bundled examples also require available `mfn-constant` and `mfn-identity` packages. Prepare and publish these support packages before publishing the matching CLI release.
 
-## Run acceptance through nextest
+## Verify packages through nextest
 
 ```sh
-nix develop --command cargo nextest run -p mf-cli --test packaged_cli
+nix develop --command cargo nextest run -p mf-cli --test packaged_cli --test release_support
 ```
 
-The integration tests invoke packaged CLI acceptance and the offline release prerequisite tests. They are also included in the full nextest suite, coverage runs, and the Nix test check. The scripts remain available directly for inspecting prepared package artifacts.
+The Rust setup in `crates/mf-cli/tests/support/` packages the support crates, calculates archive checksums, and prepares an isolated Cargo registry source. It compiles extracted packages outside the checkout, then builds a default CLI without development overrides. Acceptance covers registry, pinned Git, and local-path nodes, locked rebuilds, and standalone execution. Temporary artifacts are owned by the fixture and cleaned up after the test.
 
-## Prepare and verify packages locally
-
-```sh
-nix develop
-package_dir=$(mktemp -d)
-python3 scripts/prepare-support-packages.py --output "$package_dir"
-python3 scripts/test-packaged-cli.py --prepared "$package_dir"
-python3 scripts/test-release-support.py
-```
-
-The preparation script uses Cargo source replacement to create an isolated registry source from vendored dependencies and actual `.crate` archives. It compiles extracted packages outside the checkout. Acceptance then builds the default CLI without development overrides, resolves a packaged third-party node, repeats a locked build, and runs the executable without its build inputs. These commands do not publish packages.
+Release prerequisite tests invoke the Bash gate with a stub Cargo executable. They check ownership, exact versions, registry sources, diagnostics, argument handling, and cleanup without contacting a registry or publishing packages. Both test targets are included in the standard nextest suite, coverage runs, and Nix checks.
 
 ## Publish support packages before the CLI
 
-A maintainer must verify ownership of the package names, configure authorized registry credentials, and publish the matching versions in dependency order: runtime first, then compiler and built-in nodes. Package publication is a separate release action; the preparation and acceptance scripts never perform it.
+A maintainer must verify ownership of the package names, configure authorized registry credentials, and publish the matching versions in dependency order: runtime first, then compiler and built-in nodes. Package publication is a separate release action; the test fixture and release check never perform it.
 
 After publication, check public availability and ownership:
 
 ```sh
-python3 scripts/check-release-support.py --owner linw1995
+bash scripts/check-release-support.sh --owner linw1995
 ```
 
 This check lists registry owners and resolves the exact workspace version of every required package. Missing names, wrong ownership, unavailable versions, or resolution failures block the CLI release. The CD workflow runs it with the repository owner's login before building release archives. If ownership is intentionally transferred to a team, update that configured expectation explicitly.
