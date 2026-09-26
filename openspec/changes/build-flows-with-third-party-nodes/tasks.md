@@ -49,4 +49,11 @@
 
 - [x] 7.1 Exercise registry, pinned local Git, and local-path fixtures from unrelated working directories, including two definitions in one directory with different node sets using the same CLI; verify outputs, isolation, and locked rebuild behavior.
 - [x] 7.2 Move a generated executable away from project files and run it without Cargo on PATH; verify selected outputs and existing deterministic DAG, cycle, port, and runtime-error behavior.
-- [ ] 7.3 Run `openspec validate build-flows-with-third-party-nodes --strict`, install hooks with `nix develop --command prek install`, and run `nix develop --command prek -a` plus `nix flake check -L`; resolve failures before submitting the implementation.
+- [x] 7.3 Run `openspec validate build-flows-with-third-party-nodes --strict`, install hooks with `nix develop --command prek install`, and run `nix develop --command prek -a` plus `nix flake check -L`; resolve failures before submitting the implementation.
+
+## Validation record
+
+- OpenSpec strict validation and `nix develop --command prek -a` passed.
+- `nix flake check -L` passed on aarch64-darwin, including packaged CLI acceptance against registry, pinned local Git, and local-path dependencies.
+- `nix develop --command bash scripts/run-cov.sh` passed all 62 tests; reports are available in `target/coverage/result/`, including `lcov.info`.
+- Release prerequisite tests use mocked registry responses; no packages were published and no remote Git operations were performed.
