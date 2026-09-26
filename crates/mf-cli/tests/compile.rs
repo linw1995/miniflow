@@ -70,7 +70,9 @@ fn compile(definition: &Path, output: &Path, rustflags: Option<&str>) -> Output 
         .arg("compile")
         .arg(definition)
         .arg("--output")
-        .arg(output);
+        .arg(output)
+        .arg("--build-dir")
+        .arg(definition.parent().unwrap().join(".mf-build-test"));
     if let Some(rustflags) = rustflags {
         command.env("RUSTFLAGS", rustflags);
     }
@@ -321,6 +323,8 @@ fn missing_artifact_and_cargo_exit_cannot_install_a_stale_binary() {
             .arg(&definition)
             .arg("--output")
             .arg(&target)
+            .arg("--build-dir")
+            .arg(temporary.path().join(".mf-build-test"))
             .env("MF_DEV_SUPPORT_ROOT", crates)
             .env("CARGO_NET_OFFLINE", "true")
             .env(

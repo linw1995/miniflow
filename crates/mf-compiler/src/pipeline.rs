@@ -10,7 +10,6 @@ use std::{
     io::{self, BufRead},
     path::{Path, PathBuf},
     process::{Command, Stdio},
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Debug, Snafu)]
@@ -44,6 +43,7 @@ pub struct CompileRequest<'a> {
     pub definition: &'a Path,
     pub output: &'a Path,
     pub locked: bool,
+    pub build_dir: Option<&'a Path>,
     pub support: &'a SupportPackages,
 }
 
@@ -89,22 +89,20 @@ pub fn compile_project(request: &CompileRequest<'_>) -> Result<PathBuf, Pipeline
         &inputs.definition,
         BuildGuard::acquire(&guard_path),
     )?;
-    let project = output.parent().unwrap().join(format!(
-        ".mf-build-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-    let mut directory = fs::DirBuilder::new();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        directory.mode(0o700);
-    }
-    at("project creation", &project, directory.create(&project))?;
-    eprintln!("created build directory {project:?}");
+    let directory = at(
+        "build directory",
+        &inputs.definition,
+        crate::BuildDirectory::open(&inputs.definition, request.build_dir),
+    )?;
+    let project = directory.path.clone();
+    eprintln!(
+        "{} build directory {project:?}",
+        if directory.reused {
+            "reused"
+        } else {
+            "created"
+        }
+    );
     let files = at(
         "project generation",
         &project,

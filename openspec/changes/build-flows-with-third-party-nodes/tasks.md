@@ -30,7 +30,7 @@
 
 ## 5. Reusable build directories
 
-- [ ] 5.1 Add stable default cache selection, `--build-dir`, ownership metadata, and created/reused diagnostics; test unchanged identity across output-path changes and rejection of foreign or incompatible explicit directories.
+- [x] 5.1 Add stable default cache selection, `--build-dir`, ownership metadata, and created/reused diagnostics; test unchanged identity across output-path changes and rejection of foreign or incompatible explicit directories.
 - [ ] 5.2 Add build-directory locking after dependency-file locking and reject overlapping input/output paths; test concurrent reuse, process-exit lock release, independent Flow directories, and canonical aliases.
 - [ ] 5.3 Retain generated projects and Cargo artifacts, write only changed files, and resynchronize working locks from Flow locks; test generated-file modification times, Cargo freshness output, and authoritative lock restoration after failed resolution/build attempts.
 - [ ] 5.4 Synchronize complete generated artifact sets, remove obsolete generated configurations, and repair recognized partial state; test graph/config changes, removed nodes, validation interruption, and failure after a previous successful build without installing stale output.

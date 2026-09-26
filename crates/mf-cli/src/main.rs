@@ -5,7 +5,8 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "Usage: mf compile <definition> --output <path> [--locked]";
+const USAGE: &str =
+    "Usage: mf compile <definition> --output <path> [--locked] [--build-dir <path>]";
 
 #[derive(Debug, Snafu)]
 enum CliError {
@@ -19,6 +20,7 @@ struct CompileOptions {
     definition: PathBuf,
     output: PathBuf,
     locked: bool,
+    build_dir: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -64,9 +66,16 @@ fn parse_compile_args(
     };
     let mut output = None;
     let mut locked = false;
+    let mut build_dir = None;
     while let Some(option) = args.next() {
         if option == OsStr::new("--locked") && !locked {
             locked = true;
+        } else if option == OsStr::new("--build-dir") && build_dir.is_none() {
+            build_dir = Some(PathBuf::from(args.next().ok_or_else(|| {
+                CliError::Usage {
+                    message: "missing build directory".into(),
+                }
+            })?));
         } else if option == OsStr::new("--output") && output.is_none() {
             output = Some(args.next().ok_or_else(|| CliError::Usage {
                 message: "missing output path".into(),
@@ -85,6 +94,7 @@ fn parse_compile_args(
         definition: definition.into(),
         output: output.into(),
         locked,
+        build_dir,
     })
 }
 
@@ -94,6 +104,7 @@ fn compile(options: CompileOptions) -> Result<(), CliError> {
         definition: &options.definition,
         output: &options.output,
         locked: options.locked,
+        build_dir: options.build_dir.as_deref(),
         support: &support,
     })
     .context(BuildSnafu)?;

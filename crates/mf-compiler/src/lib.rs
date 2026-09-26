@@ -31,3 +31,6 @@ pub use state::{BuildGuard, StateError, atomic_copy, atomic_write};
 
 pub mod pipeline;
 pub use pipeline::{CompileRequest, PipelineError, compile_project};
+
+pub mod cache;
+pub use cache::{BuildDirectory, CacheError, default_build_directory};
