@@ -7,7 +7,7 @@ pub mod runner;
 
 pub use context::{
     ContextValue, ExecutionContext, ExecutionDependency, ExecutionState, NodeResult,
-    execute_node_in_context, required_context_output, select_context_output,
+    execute_node_in_context, select_context_output,
 };
 pub use definition::{
     ControlEdgeDefinition, DefinitionId, DefinitionParseError, EdgeDefinition, NodeDefinition,

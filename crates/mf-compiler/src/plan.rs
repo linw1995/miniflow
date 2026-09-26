@@ -156,13 +156,12 @@ impl CompiledWorkflow {
                 }
                 .fail();
             }
-            let Some(&node_index) = indices.get(&output.node) else {
+            if !indices.contains_key(&output.node) {
                 return UnknownNodeSnafu {
                     definition_id: output.node.clone(),
                 }
                 .fail();
-            };
-            let _ = node_index;
+            }
             let output_name = LitStr::new(&output.name, Span::call_site());
             let node_id = LitStr::new(output.node.as_str(), Span::call_site());
             let port = LitStr::new(&output.port, Span::call_site());

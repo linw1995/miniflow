@@ -180,3 +180,53 @@ fn documented_examples_produce_the_documented_results() {
         );
     }
 }
+
+#[test]
+fn presence_checks_distinguish_skipped_outputs_and_plugin_omissions() {
+    let mut value = graph(json!(1500));
+    value["nodes"][1]["config"]["ports"] = json!(["done", "absent"]);
+    value["nodes"][1]["config"]["skipped"] = json!(["absent"]);
+    value["nodes"][2]["config"]["branches"][0]["condition"] = json!({
+        "source":{"output":"audit.absent","path":""},"operator":"not_exists"
+    });
+    assert!(
+        prepare(value.clone())
+            .unwrap()
+            .execute()
+            .unwrap()
+            .contains_key("large")
+    );
+    value["nodes"][2]["config"]["branches"][0]["condition"]["operator"] = json!("exists");
+    assert!(
+        prepare(value.clone())
+            .unwrap()
+            .execute()
+            .unwrap()
+            .contains_key("medium")
+    );
+    value["nodes"][1]["config"]["skipped"] = json!([]);
+    let error = prepare(value).unwrap().execute().unwrap_err().to_string();
+    assert!(error.contains("audit.absent") && error.contains("missing"));
+}
+
+#[test]
+fn selected_branch_fanout_runs_all_consumers_and_keeps_aliases() {
+    let mut value = graph(json!(1500));
+    value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"copy","kind":"builtin.identity"}));
+    value["edges"] = json!([{"from_node":"load_order","from_output":"value","to_node":"copy","to_input":"input"}]);
+    value["control_edges"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"from_node":"route","from_output":"large","to_node":"copy"}));
+    value["outputs"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"other","node":"copy","port":"value"}));
+    assert_eq!(
+        json!(prepare(value).unwrap().execute().unwrap()),
+        json!({"large":{"amount":1500},"other":{"amount":1500}})
+    );
+}

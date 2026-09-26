@@ -39,7 +39,7 @@
 
 ## 6. Validate integration and release readiness
 
-- [ ] 6.1 Verify packaged core nodes and matching support crates work with the installed CLI outside the checkout, and the resulting conditional binary runs without build inputs, using the packaged acceptance harness.
-- [ ] 6.2 In `nix develop`, run `prek install`, `prek -a`, and `nix flake check -L`; resolve failures and record the final check results.
-- [ ] 6.3 Run `nix develop --command bash scripts/run-cov.sh` and inspect coverage for selection, skip propagation, missing-output precedence, and optional results; add meaningful cases for uncovered control-flow behavior.
-- [ ] 6.4 Run `openspec validate add-conditional-core-nodes --strict` and review every scenario against the delivered tests before marking the implementation complete.
+- [x] 6.1 Verify packaged core nodes and matching support crates work with the installed CLI outside the checkout, and the resulting conditional binary runs without build inputs, using the packaged acceptance harness.
+- [x] 6.2 In `nix develop`, run `prek install`, `prek -a`, and `nix flake check -L`; resolve failures and record the final check results.
+- [x] 6.3 Run `nix develop --command bash scripts/run-cov.sh` and inspect coverage for selection, skip propagation, missing-output precedence, and optional results; add meaningful cases for uncovered control-flow behavior.
+- [x] 6.4 Run `openspec validate add-conditional-core-nodes --strict` and review every scenario against the delivered tests before marking the implementation complete.

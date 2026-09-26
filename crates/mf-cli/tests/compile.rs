@@ -436,7 +436,10 @@ fn cargo_invalidates_features_local_sources_versions_and_flags() {
         );
     fs::write(local.join("Cargo.toml"), &manifest).unwrap();
     let plugin = fs::read_to_string(fixture.join("src/lib.rs")).unwrap();
-    fs::write(local.join("src/lib.rs"), &plugin).unwrap();
+    for entry in fs::read_dir(fixture.join("src")).unwrap() {
+        let entry = entry.unwrap();
+        fs::copy(entry.path(), local.join("src").join(entry.file_name())).unwrap();
+    }
     let mut value = json!({"version":"2026-09-26","dependencies":{"local":{"package":"fixture-multi-nodes","path":"nodes","features":["double"]}},"nodes":[{"id":"source","kind":"fixture.source"}],"outputs":[{"name":"value","node":"source","port":"value"}]});
     let check = |value: &serde_json::Value, expected: i64, flags: Option<&str>| {
         fs::write(&definition, value.to_string()).unwrap();

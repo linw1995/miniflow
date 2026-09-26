@@ -120,6 +120,9 @@ impl ExecutionState {
         }
         match &entry.outcome {
             None => Err(format!("output `{key}` is pending")),
+            Some(Outcome::Skipped) if entry.ports.is_none() => Err(format!(
+                "skipped output `{key}` requires resolved port metadata"
+            )),
             Some(Outcome::Skipped) => Ok(ContextValue::Skipped),
             Some(Outcome::Completed(result)) => {
                 if let Some(value) = result.outputs.get(port) {
@@ -267,15 +270,6 @@ pub fn execute_node_in_context(
         )
     };
     state.publish(id, result)
-}
-
-pub fn required_context_output(
-    state: &ExecutionState,
-    node: &str,
-    port: &str,
-) -> Result<Value, WorkflowRunError> {
-    Ok(select_context_output(state, port, node, port, false)?
-        .expect("required outputs return a value"))
 }
 
 pub fn select_context_output(
@@ -429,5 +423,109 @@ mod tests {
                 .contains("a.b.value")
         );
         assert!(state.register(&node("a.b")).is_err());
+        state
+            .register(&FlowNode::new("legacy", Box::new(Empty)))
+            .unwrap();
+        state.publish("legacy", None).unwrap();
+        assert!(
+            state
+                .lookup("legacy", "unknown")
+                .unwrap_err()
+                .contains("metadata")
+        );
+    }
+    #[test]
+    fn rejects_reexecution_before_calling_business_code() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        struct Counting(Arc<AtomicUsize>);
+        impl Node for Counting {
+            fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(Outputs::new())
+            }
+        }
+        let calls = Arc::new(AtomicUsize::new(0));
+        let node = FlowNode::new("count", Box::new(Counting(calls.clone())));
+        let mut state = ExecutionState::new();
+        assert!(execute_node_in_context(&node, &[], &mut state).is_err());
+        state.register(&node).unwrap();
+        let missing = [ExecutionDependency {
+            input: None,
+            source_node: "unknown",
+            source_output: "value",
+        }];
+        assert!(execute_node_in_context(&node, &missing, &mut state).is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        execute_node_in_context(&node, &[], &mut state).unwrap();
+        assert!(execute_node_in_context(&node, &[], &mut state).is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn rejects_invalid_metadata_and_unexpected_output_publication() {
+        let mut state = ExecutionState::new();
+        for names in [vec![""], vec!["value", "value"]] {
+            let node = node("invalid").with_ports(NodePorts {
+                inputs: vec![],
+                outputs: names
+                    .into_iter()
+                    .map(|name| OwnedPortSpec::new(name, ValueType::Any, false))
+                    .collect(),
+            });
+            assert!(state.register(&node).is_err());
+        }
+        state.register(&node("a.b")).unwrap();
+        let bad: NodeResult = Outputs::from([("undeclared".into(), json!(1))]).into();
+        assert!(state.publish("a.b", Some(bad)).is_err());
+        assert!(
+            state
+                .lookup("a.b", "value")
+                .unwrap_err()
+                .contains("pending")
+        );
+        state
+            .register(&FlowNode::new("a", Box::new(Empty)))
+            .unwrap();
+        let collision = Outputs::from([("b.value".into(), json!(2))]).into();
+        assert!(
+            state
+                .publish("a", Some(collision))
+                .unwrap_err()
+                .to_string()
+                .contains("collides")
+        );
+        assert!(state.publish("absent", None).is_err());
+    }
+
+    #[test]
+    fn low_level_flows_validate_control_order_and_duplicates() {
+        for (from, to, duplicate) in [
+            ("missing", "b", false),
+            ("a", "missing", false),
+            ("b", "a", false),
+            ("a", "b", true),
+        ] {
+            let flow = crate::Flow::new(
+                vec![node("a"), node("b")],
+                vec![],
+                vec!["a".into(), "b".into()],
+                vec![],
+            )
+            .unwrap();
+            let edge = crate::ControlEdgeDefinition {
+                from_node: from.into(),
+                from_output: "value".into(),
+                to_node: to.into(),
+            };
+            let edges = if duplicate {
+                vec![edge.clone(), edge]
+            } else {
+                vec![edge]
+            };
+            assert!(flow.with_control_edges(edges).is_err());
+        }
     }
 }

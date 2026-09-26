@@ -437,35 +437,6 @@ impl Flow {
         }
         Ok(workflow_outputs)
     }
-
-    #[cfg(test)]
-    fn inputs_for(
-        &self,
-        node_id: NodeId,
-        outputs_by_node: &BTreeMap<NodeId, Outputs>,
-    ) -> Result<Inputs, FlowExecutionError> {
-        let mut inputs = Inputs::new();
-        let target_node = &self.nodes[node_id.index()];
-
-        if let Some(connection_indices) = self.incoming_connections.get(&node_id) {
-            for index in connection_indices {
-                let connection = &self.connections[*index];
-                let source_node = &self.nodes[connection.from_node.index()];
-                let value = outputs_by_node
-                    .get(&connection.from_node)
-                    .and_then(|outputs| outputs.get(&connection.from_output))
-                    .ok_or_else(|| FlowExecutionError::MissingConnectedOutput {
-                        source_definition_id: source_node.definition_id.clone(),
-                        source_output: connection.from_output.clone(),
-                        target_definition_id: target_node.definition_id.clone(),
-                        target_input: connection.to_input.clone(),
-                    })?;
-                inputs.insert(connection.to_input.clone(), value.clone());
-            }
-        }
-
-        Ok(inputs)
-    }
 }
 
 #[cfg(test)]
@@ -572,27 +543,46 @@ mod tests {
 
     #[test]
     fn routes_named_outputs_to_named_inputs() {
+        let trace = Arc::new(Mutex::new(Vec::new()));
         let source_a = NodeId::new(0);
         let source_b = NodeId::new(1);
         let join = NodeId::new(2);
         let flow = Flow::new(
             vec![
-                FlowNode::new("source-a", Box::new(EmptyNode)),
-                FlowNode::new("source-b", Box::new(EmptyNode)),
-                FlowNode::new("join", Box::new(EmptyNode)),
+                test_node(
+                    "source-a",
+                    Action::Emit {
+                        output: "value",
+                        value: 3,
+                    },
+                    &trace,
+                ),
+                test_node(
+                    "source-b",
+                    Action::Emit {
+                        output: "value",
+                        value: 5,
+                    },
+                    &trace,
+                ),
+                test_node(
+                    "join",
+                    Action::Sum {
+                        left: "left",
+                        right: "right",
+                        output: "result",
+                    },
+                    &trace,
+                ),
             ],
             vec![
                 edge("source-a", "value", "join", "left"),
                 edge("source-b", "value", "join", "right"),
             ],
             order(&["source-a", "source-b", "join"]),
-            Vec::new(),
+            vec![selected_output("sum", "join", "result")],
         )
         .unwrap();
-        let outputs_by_node = BTreeMap::from([
-            (source_a, Outputs::from([("value".to_owned(), json!(3))])),
-            (source_b, Outputs::from([("value".to_owned(), json!(5))])),
-        ]);
 
         assert_eq!(flow.execution_order(), [source_a, source_b, join]);
         assert_eq!(flow.connections().len(), 2);
@@ -600,13 +590,8 @@ mod tests {
         assert_eq!(flow.connections()[0].to_node, join);
         assert!(flow.node(&join).is_some());
         assert_eq!(flow.definition_node_id(&join), Some("join"));
-        assert_eq!(
-            flow.inputs_for(join, &outputs_by_node).unwrap(),
-            Inputs::from([
-                ("left".to_owned(), json!(3)),
-                ("right".to_owned(), json!(5)),
-            ])
-        );
+        assert_eq!(flow.execute().unwrap()["sum"], json!(8));
+        assert_eq!(*trace.lock().unwrap(), ["source-a", "source-b", "join"]);
     }
 
     #[test]
