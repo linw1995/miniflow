@@ -10,7 +10,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-const USAGE: &str = "Usage: mf compile <definition> --output <path>";
+const USAGE: &str = "Usage: mf compile <definition> --output <path> [--locked]";
 
 #[derive(Debug, Snafu)]
 enum CliError {
@@ -45,6 +45,7 @@ enum CliError {
 struct CompileOptions {
     definition: PathBuf,
     output: PathBuf,
+    locked: bool,
 }
 
 fn main() -> ExitCode {
@@ -88,31 +89,39 @@ fn parse_compile_args(
         }
         .fail();
     };
-    if args.next().as_deref() != Some(OsStr::new("--output")) {
-        return UsageSnafu {
-            message: "missing --output option",
+    let mut output = None;
+    let mut locked = false;
+    while let Some(option) = args.next() {
+        if option == OsStr::new("--locked") && !locked {
+            locked = true;
+        } else if option == OsStr::new("--output") && output.is_none() {
+            output = Some(args.next().ok_or_else(|| CliError::Usage {
+                message: "missing output path".into(),
+            })?);
+        } else {
+            return UsageSnafu {
+                message: "unexpected or repeated argument",
+            }
+            .fail();
         }
-        .fail();
     }
-    let Some(output) = args.next() else {
-        return UsageSnafu {
-            message: "missing output path",
-        }
-        .fail();
-    };
-    if args.next().is_some() {
-        return UsageSnafu {
-            message: "unexpected extra argument",
-        }
-        .fail();
-    }
+    let output = output.ok_or_else(|| CliError::Usage {
+        message: "missing --output option".into(),
+    })?;
     Ok(CompileOptions {
         definition: definition.into(),
         output: output.into(),
+        locked,
     })
 }
 
 fn compile(options: CompileOptions) -> Result<(), CliError> {
+    if options.locked {
+        return UsageSnafu {
+            message: "--locked requires the project dependency build pipeline",
+        }
+        .fail();
+    }
     let source = fs::read_to_string(&options.definition).context(ReadDefinitionSnafu {
         path: options.definition.clone(),
     })?;
@@ -169,4 +178,28 @@ fn find_workspace(start: &Path) -> Option<PathBuf> {
             None
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn parses_locked_in_either_option_order() {
+        for args in [
+            ["flow.json", "--locked", "--output", "flow"],
+            ["flow.json", "--output", "flow", "--locked"],
+        ] {
+            let options = parse_compile_args(args.into_iter().map(OsString::from)).unwrap();
+            assert!(options.locked);
+            assert_eq!(options.output, PathBuf::from("flow"));
+        }
+        assert!(
+            parse_compile_args(
+                ["f", "--locked", "--locked"]
+                    .into_iter()
+                    .map(OsString::from)
+            )
+            .is_err()
+        );
+    }
 }

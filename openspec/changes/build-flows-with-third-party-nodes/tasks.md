@@ -9,7 +9,7 @@
 ## 2. Unified Flow definition and CLI inputs
 
 - [x] 2.1 Add required embedded dependencies in schema `2026-09-26` and source/feature validation; test registry, full-revision Git, local paths, aliases, missing dependencies, unknown fields, conflicting declarations, and migration diagnostics for `2026-09-24`.
-- [ ] 2.2 Add `--locked`, definition-relative dependency paths, and adjacent per-definition lock naming; test unrelated working directories, symlinked definitions, extensionless paths, and two Flows in one directory.
+- [x] 2.2 Add `--locked`, definition-relative dependency paths, and adjacent per-definition lock naming; test unrelated working directories, symlinked definitions, extensionless paths, and two Flows in one directory.
 - [ ] 2.3 Protect the definition and lock from executable output collisions; verify direct paths, derived lock collisions, and symlink aliases cannot overwrite inputs; verify successful compilation leaves the definition byte-for-byte unchanged.
 - [ ] 2.4 Document embedded dependency syntax, explicit built-ins, path behavior, and schema migration in `docs/workflows.md`; upgrade example JSON and verify definitions round-trip with their dependencies intact.
 

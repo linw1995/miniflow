@@ -11,3 +11,6 @@ pub use compiler::{
 pub use mf_runtime::*;
 pub use plan::{CompiledWorkflow, GeneratedWorkflowArtifacts, PlanError};
 pub use project::{RunnerProjectError, write_runner_project};
+
+pub mod inputs;
+pub use inputs::{BuildInputs, InputError};
