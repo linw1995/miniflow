@@ -2,7 +2,7 @@ use mf_compiler::definition::{DefinitionId, WorkflowDefinition};
 use mf_compiler::{
     CompiledWorkflow, Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistration,
     NodeRegistry, Outputs, PortSpec, ValueType, WorkflowCompileError, compile_definition,
-    deserialize_config, execute_node, instantiate_compiled, instantiate_node, required_output,
+    deserialize_config, instantiate_compiled,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -195,27 +195,6 @@ fn rejects_a_plan_with_a_modified_execution_order() {
 
     let error = instantiate_compiled(&plan, &registry).err().unwrap();
     assert!(matches!(error, WorkflowCompileError::NonCanonicalPlanOrder));
-}
-
-#[test]
-fn runner_helpers_keep_definition_context() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let node =
-        instantiate_node(&registry, "source", "example.constant", r#"{"value":41}"#).unwrap();
-    let outputs = execute_node(node.as_ref(), Inputs::new(), "source").unwrap();
-    assert_eq!(
-        required_output(&outputs, "source", "value").unwrap(),
-        json!(41)
-    );
-
-    let missing_output = required_output(&outputs, "source", "absent").unwrap_err();
-    assert!(missing_output.to_string().contains("`source`"));
-    assert!(missing_output.to_string().contains("`absent`"));
-
-    let missing_kind = instantiate_node(&registry, "missing-step", "example.unknown", "{}")
-        .err()
-        .unwrap();
-    assert!(missing_kind.to_string().contains("`missing-step`"));
 }
 
 #[test]

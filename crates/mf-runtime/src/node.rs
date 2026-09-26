@@ -1,6 +1,7 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
@@ -40,9 +41,9 @@ impl fmt::Display for ValueType {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PortSpec {
-    pub name: &'static str,
+    pub name: Cow<'static, str>,
     pub value_type: ValueType,
     pub required: bool,
 }
@@ -50,40 +51,24 @@ pub struct PortSpec {
 impl PortSpec {
     pub const fn new(name: &'static str, value_type: ValueType, required: bool) -> Self {
         Self {
-            name,
+            name: Cow::Borrowed(name),
             value_type,
             required,
         }
     }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OwnedPortSpec {
-    pub name: String,
-    pub value_type: ValueType,
-    pub required: bool,
-}
-
-impl OwnedPortSpec {
-    pub fn new(name: impl Into<String>, value_type: ValueType, required: bool) -> Self {
+    pub fn owned(name: impl Into<String>, value_type: ValueType, required: bool) -> Self {
         Self {
-            name: name.into(),
+            name: Cow::Owned(name.into()),
             value_type,
             required,
         }
-    }
-}
-
-impl From<PortSpec> for OwnedPortSpec {
-    fn from(port: PortSpec) -> Self {
-        Self::new(port.name, port.value_type, port.required)
     }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct NodePorts {
-    pub inputs: Vec<OwnedPortSpec>,
-    pub outputs: Vec<OwnedPortSpec>,
+    pub inputs: Vec<PortSpec>,
+    pub outputs: Vec<PortSpec>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -140,7 +125,7 @@ pub trait Node: Send + Sync {
     fn execute_with_context(
         &self,
         inputs: Inputs,
-        _ctx: &crate::ExecutionContext<'_>,
+        _ctx: &crate::ExecutionContext,
     ) -> Result<crate::NodeResult, NodeExecutionError> {
         self.execute(inputs).map(Into::into)
     }
@@ -171,8 +156,8 @@ impl NodeRegistration {
 
     pub fn effective_ports(&self, node: &dyn Node) -> NodePorts {
         node.ports().unwrap_or_else(|| NodePorts {
-            inputs: self.inputs.iter().copied().map(Into::into).collect(),
-            outputs: self.outputs.iter().copied().map(Into::into).collect(),
+            inputs: self.inputs.to_vec(),
+            outputs: self.outputs.to_vec(),
         })
     }
 }

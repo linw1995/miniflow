@@ -9,18 +9,18 @@
 ## 2. Plan explicit dependencies and resolve instance metadata
 
 - [x] 2.1 Add optional `control_edges` with empty-default serialization and plan the union of data/control dependencies; verify combined cycles, duplicate controls, unknown endpoints, deduplicated node-pair indegrees, deterministic ordering, and old definition round-trips.
-- [x] 2.2 Add owned effective port descriptors, static registration fallback, and instance context-reference declarations; verify an unchanged external plugin builds and dynamic instances expose distinct port sets and source references.
+- [x] 2.2 Use one static/dynamic port descriptor with registration fallback, and instance context-reference declarations; verify an unchanged external plugin builds and dynamic instances expose distinct port sets and source references.
 - [x] 2.3 Refactor compiler validation to construct once per pass and index effective outputs by `${node_id}.${output_name}`; verify local port/type checks, exact reference lookup, dotted names, unknown keys, and collision diagnostics naming both source pairs.
 - [x] 2.4 Validate context producers as strict ancestors through explicit dependencies without adding edges; verify direct/transitive references, unknown/self/descendant/unordered sources, and rejection despite an earlier lexical tie-break.
-- [x] 2.5 Carry resolved descriptors and reference declarations into prepared flow nodes; verify lower-level callers receive contextual metadata errors and document control edges and instance metadata in workflow/plugin guides.
+- [x] 2.5 Carry resolved descriptors and reference declarations into prepared flow nodes; require complete port metadata when constructing execution nodes and document control edges and instance metadata in workflow/plugin guides.
 
 ## 3. Implement execution context and conditional states
 
-- [x] 3.1 Add a fresh per-run context with flat qualified output IDs, declared read-only views, and atomic publication; verify single runtime prefixing, same-name outputs from different nodes, branch activation/skip identities, transitive reads, pending/missing/null states, and run isolation.
+- [x] 3.1 Add a fresh per-run context with flat qualified output IDs, read-only views, and atomic publication; verify single runtime prefixing, same-name outputs from different nodes, branch activation/skip identities, transitive reads, unavailable/null states, and run isolation.
 - [x] 3.2 Add the default context-aware execution adapter and disjoint produced/skipped result; verify old nodes execute once, context-free router calls fail clearly, and invalid skip markers, overlaps, and plugin errors remain failures.
 - [x] 3.3 Implement shared data/control dependency resolution and skip propagation with canonical order and missing-output precedence; verify produced false/null controls activate, optional inputs, mixed states, fan-out, nested skips, independent nodes, and ordinary joins.
 - [x] 3.4 Integrate shared helpers and context publication into `Flow::execute` and generated direct orchestration; verify actual binaries match in-memory values, errors, traces, and context visibility without interpreting a graph at runtime.
-- [x] 3.5 Document qualified output IDs, local plugin names, collision rules, context lifetime, reference declarations, and factory constraints; verify a third-party fixture reads qualified context outputs and reports skips without compiler kind-name handling.
+- [x] 3.5 Document qualified output IDs, local plugin names, collision rules, context lifetime, compile-time reference declarations, and factory constraints; verify a third-party fixture reads qualified context outputs and reports skips without compiler kind-name handling.
 
 ## 4. Add optional workflow output selections
 
@@ -43,3 +43,11 @@
 - [x] 6.2 In `nix develop`, run `prek install`, `prek -a`, and `nix flake check -L`; resolve failures and record the final check results.
 - [x] 6.3 Run `nix develop --command bash scripts/run-cov.sh` and inspect coverage for selection, skip propagation, missing-output precedence, and optional results; add meaningful cases for uncovered control-flow behavior.
 - [x] 6.4 Run `openspec validate add-conditional-core-nodes --strict` and review every scenario against the delivered tests before marking the implementation complete.
+
+## 7. Ablate unnecessary machinery
+
+- [x] 7.1 Establish a common behavior baseline and test removal of numeric precision handling and ancestor checks; retain both after reproducible regressions.
+- [x] 7.2 Remove obsolete runner helpers, the flow error wrapper, optional execution metadata, and duplicate port descriptors; verify the common behavior suite after each change.
+- [x] 7.3 Replace runtime registration, reverse indexing, and read whitelists with a flat completed-output context; retain compiler ordering checks and workflow error behavior.
+- [x] 7.4 Merge overlapping generated-binary tests and remove tests coupled only to deleted low-level APIs; verify retained fault detection through a controlled code-generation mutation.
+- [x] 7.5 Run full workspace and Nix checks and record the final experiment evidence.

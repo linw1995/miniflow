@@ -26,12 +26,20 @@ See the [contribution guide](../CONTRIBUTING.md) for local checks and [dependenc
 
 ## Instance metadata
 
-Nodes with configurable ports can override `Node::ports()` with owned `NodePorts`; this replaces both static port lists for that instance. Ordinary registrations remain unchanged. Names must be nonempty and unique within each direction. Metadata must depend only on configuration.
+Nodes with configurable ports can override `Node::ports()` with `NodePorts` using `PortSpec::owned` for dynamic names; this replaces both static port lists for that instance. Ordinary registrations remain unchanged. Names must be nonempty and unique within each direction. Metadata must depend only on configuration.
 
 Declare context reads with `Node::context_references()`. Each `ContextReference` contains a qualified output ID and a diagnostic label, such as a branch ID. Validation resolves exact `${node_id}.${output_name}` keys and requires the producer to be a strict ancestor through explicit dependencies. References do not add edges. Ambiguous qualified IDs are rejected with both source pairs.
 
 ## Context-aware execution
 
-Override `Node::execute_with_context` to read declared outputs through `ctx.output("source.value")` and return `NodeResult`. The default adapter calls ordinary `execute` once. `ContextValue` distinguishes a produced JSON value from `Skipped`; pending, unknown, undeclared, and unexpectedly missing reads are errors. The runtime publishes results only after successful execution and starts with fresh context for each run.
+Override `Node::execute_with_context` to read declared outputs through `ctx.output("source.value")` and return
+`NodeResult`. The default adapter calls ordinary `execute` once. `ContextValue` distinguishes a produced JSON value from
+`Skipped`; unavailable outputs, including reads before production and unexpected omissions, are errors. Reference
+declarations support compile-time dependency checks; the context does not enforce a runtime read whitelist. The runtime
+publishes results only after successful execution and starts with fresh context for each run.
 
 Keep output names local in node results. Runtime publication qualifies them with the instance ID. Explicit skipped names must be declared non-required outputs and cannot also be produced. A scheduler-skipped node propagates skipping through every output, including required ones. Context references alone never activate or skip a node.
+
+## Prepared execution nodes
+
+`FlowNode::new` requires resolved `NodePorts`. Compiler preparation supplies these from the instance or static registration. Both in-memory execution and generated runners return `WorkflowRunError`. Context-aware implementations take `&ExecutionContext`; generated step helpers assume a validated plan and its execution order.

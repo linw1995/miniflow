@@ -68,10 +68,9 @@ Condition source references MUST NOT implicitly create dependencies or supply in
 ### Requirement: Read prior outputs from an isolated execution context
 
 Each workflow invocation SHALL have a fresh context containing outcomes of previously resolved nodes. Nodes SHALL
-receive read-only access to their declared context references. The runtime MUST publish validated completed or skipped
+receive read-only access to completed context outputs. Reference declarations SHALL be used for compile-time ordering validation. The runtime MUST publish validated completed or skipped
 outcomes only after a node resolves, MUST NOT expose partial outputs, and MUST NOT retain context values between runs.
-Context reads SHALL distinguish produced values, explicitly skipped outcomes, pending producers, and unexpectedly
-missing outputs. A context reference alone MUST NOT activate or skip the consuming node.
+Context reads SHALL distinguish produced values, explicitly skipped outcomes, and unavailable outputs. Reads before production and unexpectedly omitted outputs MUST both fail. A context reference alone MUST NOT activate or skip the consuming node.
 
 #### Scenario: Read a transitive predecessor
 
@@ -83,10 +82,10 @@ missing outputs. A context reference alone MUST NOT activate or skip the consumi
 - **WHEN** the same flow runs twice with different prior node outputs
 - **THEN** the second run's conditions observe only its own context values
 
-#### Scenario: Reject undeclared or pending reads
+#### Scenario: Reject unavailable context reads
 
-- **WHEN** a plugin attempts an undeclared context read or a lower-level execution attempts to read a producer that has not resolved
-- **THEN** execution reports a context-reference error rather than reading stale or partial data
+- **WHEN** a node reads an output that has not been produced or explicitly skipped
+- **THEN** execution reports an unavailable output error rather than reading stale or partial data
 
 ### Requirement: Qualify context outputs with the producing node ID
 

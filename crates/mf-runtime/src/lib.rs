@@ -6,21 +6,18 @@ pub mod registry;
 pub mod runner;
 
 pub use context::{
-    ContextValue, ExecutionContext, ExecutionDependency, ExecutionState, NodeResult,
-    execute_node_in_context, select_context_output,
+    ContextValue, ExecutionContext, ExecutionDependency, NodeResult, execute_node_in_context,
+    select_context_output,
 };
 pub use definition::{
     ControlEdgeDefinition, DefinitionId, DefinitionParseError, EdgeDefinition, NodeDefinition,
     NodeDependency, WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
 };
-pub use flow::{
-    Flow, FlowBuildError, FlowConnection, FlowExecutionError, FlowNode, FlowOutput, FlowOutputs,
-    NodeId,
-};
+pub use flow::{Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowOutputs, NodeId};
 pub use node::{
     ContextReference, Inputs, Node, NodeBuildError, NodeExecutionError, NodeFactory, NodePorts,
-    NodeRegistration, Outputs, OwnedPortSpec, PortSpec, ValueType, deserialize_config, output_id,
+    NodeRegistration, Outputs, PortSpec, ValueType, deserialize_config, output_id,
 };
 pub use registry::{NodeRegistry, NodeRegistryError};
+pub use runner::WorkflowRunError;
 pub use runner::instantiate_node_with_metadata;
-pub use runner::{WorkflowRunError, execute_node, instantiate_node, required_output};

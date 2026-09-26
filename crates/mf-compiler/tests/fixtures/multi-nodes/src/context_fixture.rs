@@ -1,6 +1,6 @@
 use mf_runtime::{
     ContextReference, ContextValue, ExecutionContext, Inputs, Node, NodeBuildError,
-    NodeExecutionError, NodePorts, NodeRegistration, NodeResult, Outputs, OwnedPortSpec, ValueType,
+    NodeExecutionError, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, ValueType,
 };
 use serde_json::Value;
 use std::io::Write;
@@ -21,7 +21,7 @@ impl Node for ContextNode {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|v| OwnedPortSpec::new(v.as_str().unwrap(), ValueType::Any, false))
+                .map(|v| PortSpec::owned(v.as_str().unwrap(), ValueType::Any, false))
                 .collect(),
             outputs: self.0["ports"]
                 .as_array()
@@ -29,7 +29,7 @@ impl Node for ContextNode {
                 .flatten()
                 .map(|v| {
                     let name = v.as_str().unwrap();
-                    OwnedPortSpec::new(name, ValueType::Any, self.0["required"] == name)
+                    PortSpec::owned(name, ValueType::Any, self.0["required"] == name)
                 })
                 .collect(),
         })
@@ -43,7 +43,7 @@ impl Node for ContextNode {
     fn execute_with_context(
         &self,
         _: Inputs,
-        ctx: &ExecutionContext<'_>,
+        ctx: &ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
         if let Some(path) = self.0["trace"].as_str() {
             let mut file = std::fs::OpenOptions::new()
@@ -65,10 +65,7 @@ impl Node for ContextNode {
                 .skipped
                 .extend(skips.iter().map(|v| v.as_str().unwrap().to_owned()));
         }
-        if let Some(reference) = self.0["read"]
-            .as_str()
-            .or(self.0["read_undeclared"].as_str())
-        {
+        if let Some(reference) = self.0["read"].as_str() {
             match ctx.output(reference)? {
                 ContextValue::Value(value) => {
                     result.outputs.insert("value".into(), value.clone());

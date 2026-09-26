@@ -1,7 +1,4 @@
-use crate::{
-    ContextReference, FlowNode, Inputs, NodeExecutionError, NodePorts, Outputs, WorkflowRunError,
-    output_id,
-};
+use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -26,176 +23,82 @@ pub enum ContextValue<'a> {
     Skipped,
 }
 
-#[derive(Debug)]
-enum Outcome {
-    Completed(NodeResult),
-    Skipped,
-}
-
-#[derive(Debug)]
-struct Entry {
-    ports: Option<NodePorts>,
-    outcome: Option<Outcome>,
-}
-
+/// Completed output values for one run. Nodes receive an immutable reference.
 #[derive(Debug, Default)]
-pub struct ExecutionState {
-    nodes: BTreeMap<String, Entry>,
-    output_index: BTreeMap<String, (String, String)>,
+pub struct ExecutionContext {
+    // A present None is an explicit skip; an absent key is a missing output.
+    outputs: BTreeMap<String, Option<Value>>,
 }
 
-pub struct ExecutionContext<'a> {
-    state: &'a ExecutionState,
-    allowed: &'a [ContextReference],
-}
-
-impl ExecutionContext<'_> {
+impl ExecutionContext {
     pub fn output(&self, id: &str) -> Result<ContextValue<'_>, NodeExecutionError> {
-        let error = |message| NodeExecutionError::ExecutionFailed { message };
-        if !self.allowed.iter().any(|reference| reference.output == id) {
-            return Err(error(format!("undeclared context output `{id}`")));
+        match self.outputs.get(id) {
+            Some(Some(value)) => Ok(ContextValue::Value(value)),
+            Some(None) => Ok(ContextValue::Skipped),
+            None => Err(NodeExecutionError::ExecutionFailed {
+                message: format!("missing context output `{id}`"),
+            }),
         }
-        let Some((node, port)) = self.state.output_index.get(id) else {
-            return Err(error(format!("unknown context output `{id}`")));
-        };
-        self.state.lookup(node, port).map_err(error)
-    }
-}
-
-impl ExecutionState {
-    pub fn new() -> Self {
-        Self::default()
     }
 
-    pub fn register(&mut self, node: &FlowNode) -> Result<(), WorkflowRunError> {
+    fn publish(
+        &mut self,
+        node: &FlowNode,
+        result: Option<NodeResult>,
+    ) -> Result<(), WorkflowRunError> {
         let id = node.definition_id.as_str();
-        if self.nodes.contains_key(id) {
-            return Err(state_error(id, "node registered more than once"));
-        }
-        let mut keys = Vec::new();
-        if let Some(ports) = &node.ports {
-            for specs in [&ports.inputs, &ports.outputs] {
-                let mut names = BTreeSet::new();
-                for port in specs {
-                    if port.name.is_empty() || !names.insert(&port.name) {
-                        return Err(state_error(
-                            id,
-                            format!("empty or duplicate port `{}`", port.name),
-                        ));
-                    }
-                }
-            }
-            for port in &ports.outputs {
-                let key = output_id(id, &port.name);
-                if let Some((other, name)) = self.output_index.get(&key) {
-                    return Err(state_error(
-                        id,
-                        format!("output ID `{key}` collides with `{other}`.`{name}`"),
-                    ));
-                }
-                keys.push((key, (id.to_owned(), port.name.clone())));
-            }
-        }
-        self.output_index.extend(keys);
-        self.nodes.insert(
-            id.to_owned(),
-            Entry {
-                ports: node.ports.clone(),
-                outcome: None,
-            },
-        );
-        Ok(())
-    }
-
-    fn lookup(&self, node: &str, port: &str) -> Result<ContextValue<'_>, String> {
-        let key = output_id(node, port);
-        let entry = self
-            .nodes
-            .get(node)
-            .ok_or_else(|| format!("unknown source node `{node}` for `{key}`"))?;
-        if let Some(ports) = &entry.ports
-            && !ports.outputs.iter().any(|spec| spec.name == port)
-        {
-            return Err(format!("unknown output `{key}`"));
-        }
-        match &entry.outcome {
-            None => Err(format!("output `{key}` is pending")),
-            Some(Outcome::Skipped) if entry.ports.is_none() => Err(format!(
-                "skipped output `{key}` requires resolved port metadata"
-            )),
-            Some(Outcome::Skipped) => Ok(ContextValue::Skipped),
-            Some(Outcome::Completed(result)) => {
-                if let Some(value) = result.outputs.get(port) {
-                    Ok(ContextValue::Value(value))
-                } else if result.skipped.contains(port) {
-                    Ok(ContextValue::Skipped)
-                } else {
-                    Err(format!("missing output `{key}`"))
-                }
-            }
-        }
-    }
-
-    fn publish(&mut self, id: &str, result: Option<NodeResult>) -> Result<(), WorkflowRunError> {
-        let entry = self
-            .nodes
-            .get(id)
-            .ok_or_else(|| state_error(id, "node has no execution metadata"))?;
-        if entry.outcome.is_some() {
-            return Err(state_error(id, "node has already resolved"));
-        }
-        let mut keys = Vec::new();
         if let Some(result) = &result {
-            for port in &result.skipped {
-                if result.outputs.contains_key(port) {
+            for name in &result.skipped {
+                if result.outputs.contains_key(name) {
                     return Err(state_error(
                         id,
-                        format!("output `{port}` is both produced and skipped"),
+                        format!("output `{name}` is both produced and skipped"),
                     ));
                 }
-                let Some(ports) = &entry.ports else {
-                    return Err(state_error(
-                        id,
-                        "explicit skips require resolved port metadata",
-                    ));
-                };
-                if !ports
+                if !node
+                    .ports
                     .outputs
                     .iter()
-                    .any(|spec| spec.name == *port && !spec.required)
+                    .any(|port| port.name == *name && !port.required)
                 {
                     return Err(state_error(
                         id,
-                        format!("cannot explicitly skip unknown or required output `{port}`"),
+                        format!("cannot explicitly skip unknown or required output `{name}`"),
                     ));
                 }
             }
-            for port in result.outputs.keys() {
-                if let Some(ports) = &entry.ports
-                    && !ports.outputs.iter().any(|spec| spec.name == *port)
-                {
+            for name in result.outputs.keys() {
+                if !node.ports.outputs.iter().any(|port| port.name == *name) {
                     return Err(state_error(
                         id,
-                        format!("produced undeclared output `{port}`"),
+                        format!("produced undeclared output `{name}`"),
                     ));
                 }
-                let key = output_id(id, port);
-                if let Some((other, name)) = self.output_index.get(&key)
-                    && (other != id || name != port)
-                {
-                    return Err(state_error(
-                        id,
-                        format!("output ID `{key}` collides with `{other}`.`{name}`"),
-                    ));
-                }
-                keys.push((key, (id.to_owned(), port.clone())));
             }
         }
-        self.output_index.extend(keys);
-        self.nodes.get_mut(id).unwrap().outcome = Some(match result {
-            Some(result) => Outcome::Completed(result),
-            None => Outcome::Skipped,
-        });
+        // Validate the complete result before making any values visible.
+        match result {
+            Some(result) => {
+                self.outputs.extend(
+                    result
+                        .outputs
+                        .into_iter()
+                        .map(|(port, value)| (output_id(id, &port), Some(value))),
+                );
+                self.outputs.extend(
+                    result
+                        .skipped
+                        .into_iter()
+                        .map(|port| (output_id(id, &port), None)),
+                );
+            }
+            None => self.outputs.extend(
+                node.ports
+                    .outputs
+                    .iter()
+                    .map(|port| (output_id(id, &port.name), None)),
+            ),
+        }
         Ok(())
     }
 }
@@ -214,33 +117,25 @@ pub struct ExecutionDependency<'a> {
     pub source_output: &'a str,
 }
 
+/// Executes one step of a validated plan, in its topological order.
 pub fn execute_node_in_context(
     node: &FlowNode,
     dependencies: &[ExecutionDependency<'_>],
-    state: &mut ExecutionState,
+    ctx: &mut ExecutionContext,
 ) -> Result<(), WorkflowRunError> {
     let id = node.definition_id.as_str();
-    match state.nodes.get(id) {
-        Some(entry) if entry.outcome.is_none() => {}
-        _ => {
-            return Err(state_error(
-                id,
-                "node must be registered and unresolved before execution",
-            ));
-        }
-    }
     let mut dependencies = dependencies.to_vec();
     dependencies.sort();
     let mut inputs = Inputs::new();
     let mut skipped = false;
     for dependency in dependencies {
-        match state
-            .lookup(dependency.source_node, dependency.source_output)
-            .map_err(|message| {
+        match ctx
+            .output(&output_id(dependency.source_node, dependency.source_output))
+            .map_err(|error| {
                 state_error(
                     id,
                     format!(
-                        "dependency {}: {message}",
+                        "dependency {}: {error}",
                         dependency.input.unwrap_or("<control>")
                     ),
                 )
@@ -256,32 +151,28 @@ pub fn execute_node_in_context(
     let result = if skipped {
         None
     } else {
-        let ctx = ExecutionContext {
-            state,
-            allowed: &node.references,
-        };
         Some(
             node.node
-                .execute_with_context(inputs, &ctx)
+                .execute_with_context(inputs, ctx)
                 .map_err(|source| WorkflowRunError::NodeExecution {
                     definition_id: node.definition_id.clone(),
                     source,
                 })?,
         )
     };
-    state.publish(id, result)
+    ctx.publish(node, result)
 }
 
 pub fn select_context_output(
-    state: &ExecutionState,
+    ctx: &ExecutionContext,
     name: &str,
     node: &str,
     port: &str,
     optional: bool,
 ) -> Result<Option<Value>, WorkflowRunError> {
-    match state
-        .lookup(node, port)
-        .map_err(|message| state_error(node, format!("workflow output `{name}`: {message}")))?
+    match ctx
+        .output(&output_id(node, port))
+        .map_err(|error| state_error(node, format!("workflow output `{name}`: {error}")))?
     {
         ContextValue::Value(value) => Ok(Some(value.clone())),
         ContextValue::Skipped if optional => Ok(None),
@@ -292,240 +183,5 @@ pub fn select_context_output(
                 output_id(node, port)
             ),
         )),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::{Node, OwnedPortSpec, ValueType};
-    use serde_json::json;
-
-    struct Empty;
-    impl Node for Empty {
-        fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-            Ok(Outputs::new())
-        }
-    }
-    fn node(id: &str) -> FlowNode {
-        FlowNode::new(id, Box::new(Empty)).with_ports(NodePorts {
-            inputs: vec![],
-            outputs: vec![OwnedPortSpec::new("value", ValueType::Any, false)],
-        })
-    }
-    #[test]
-    fn separates_pending_skipped_missing_null_and_undeclared_reads() {
-        let mut state = ExecutionState::new();
-        for id in ["pending", "skipped", "missing", "null"] {
-            state.register(&node(id)).unwrap();
-        }
-        state.publish("skipped", None).unwrap();
-        state
-            .publish("missing", Some(NodeResult::default()))
-            .unwrap();
-        state
-            .publish(
-                "null",
-                Some(Outputs::from([("value".into(), json!(null))]).into()),
-            )
-            .unwrap();
-        let references = [
-            "pending.value",
-            "skipped.value",
-            "missing.value",
-            "null.value",
-            "unknown.value",
-        ]
-        .map(|output| ContextReference::new(output, "test"));
-        let ctx = ExecutionContext {
-            state: &state,
-            allowed: &references,
-        };
-        assert!(
-            ctx.output("pending.value")
-                .unwrap_err()
-                .to_string()
-                .contains("pending")
-        );
-        assert!(
-            ctx.output("missing.value")
-                .unwrap_err()
-                .to_string()
-                .contains("missing")
-        );
-        assert!(
-            ctx.output("unknown.value")
-                .unwrap_err()
-                .to_string()
-                .contains("unknown")
-        );
-        assert!(
-            ctx.output("other.value")
-                .unwrap_err()
-                .to_string()
-                .contains("undeclared")
-        );
-        assert_eq!(ctx.output("skipped.value").unwrap(), ContextValue::Skipped);
-        assert_eq!(
-            ctx.output("null.value").unwrap(),
-            ContextValue::Value(&Value::Null)
-        );
-    }
-    #[test]
-    fn publication_is_atomic_and_requires_skip_metadata() {
-        let mut state = ExecutionState::new();
-        state.register(&node("a")).unwrap();
-        let bad = NodeResult {
-            outputs: Outputs::from([("value".into(), json!(3))]),
-            skipped: BTreeSet::from(["value".into()]),
-        };
-        assert!(state.publish("a", Some(bad)).is_err());
-        assert!(state.lookup("a", "value").unwrap_err().contains("pending"));
-        state
-            .publish(
-                "a",
-                Some(Outputs::from([("value".into(), json!(4))]).into()),
-            )
-            .unwrap();
-        assert!(state.publish("a", None).is_err());
-        assert_eq!(
-            state.lookup("a", "value").unwrap(),
-            ContextValue::Value(&json!(4))
-        );
-        state
-            .register(&FlowNode::new("legacy", Box::new(Empty)))
-            .unwrap();
-        let skip = NodeResult {
-            outputs: Outputs::new(),
-            skipped: BTreeSet::from(["value".into()]),
-        };
-        assert!(
-            state
-                .publish("legacy", Some(skip))
-                .unwrap_err()
-                .to_string()
-                .contains("metadata")
-        );
-    }
-    #[test]
-    fn lower_level_registration_rejects_output_collisions() {
-        let mut state = ExecutionState::new();
-        state.register(&node("a.b")).unwrap();
-        let other = FlowNode::new("a", Box::new(Empty)).with_ports(NodePorts {
-            inputs: vec![],
-            outputs: vec![OwnedPortSpec::new("b.value", ValueType::Any, false)],
-        });
-        assert!(
-            state
-                .register(&other)
-                .unwrap_err()
-                .to_string()
-                .contains("a.b.value")
-        );
-        assert!(state.register(&node("a.b")).is_err());
-        state
-            .register(&FlowNode::new("legacy", Box::new(Empty)))
-            .unwrap();
-        state.publish("legacy", None).unwrap();
-        assert!(
-            state
-                .lookup("legacy", "unknown")
-                .unwrap_err()
-                .contains("metadata")
-        );
-    }
-    #[test]
-    fn rejects_reexecution_before_calling_business_code() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
-        struct Counting(Arc<AtomicUsize>);
-        impl Node for Counting {
-            fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-                self.0.fetch_add(1, Ordering::SeqCst);
-                Ok(Outputs::new())
-            }
-        }
-        let calls = Arc::new(AtomicUsize::new(0));
-        let node = FlowNode::new("count", Box::new(Counting(calls.clone())));
-        let mut state = ExecutionState::new();
-        assert!(execute_node_in_context(&node, &[], &mut state).is_err());
-        state.register(&node).unwrap();
-        let missing = [ExecutionDependency {
-            input: None,
-            source_node: "unknown",
-            source_output: "value",
-        }];
-        assert!(execute_node_in_context(&node, &missing, &mut state).is_err());
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-        execute_node_in_context(&node, &[], &mut state).unwrap();
-        assert!(execute_node_in_context(&node, &[], &mut state).is_err());
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn rejects_invalid_metadata_and_unexpected_output_publication() {
-        let mut state = ExecutionState::new();
-        for names in [vec![""], vec!["value", "value"]] {
-            let node = node("invalid").with_ports(NodePorts {
-                inputs: vec![],
-                outputs: names
-                    .into_iter()
-                    .map(|name| OwnedPortSpec::new(name, ValueType::Any, false))
-                    .collect(),
-            });
-            assert!(state.register(&node).is_err());
-        }
-        state.register(&node("a.b")).unwrap();
-        let bad: NodeResult = Outputs::from([("undeclared".into(), json!(1))]).into();
-        assert!(state.publish("a.b", Some(bad)).is_err());
-        assert!(
-            state
-                .lookup("a.b", "value")
-                .unwrap_err()
-                .contains("pending")
-        );
-        state
-            .register(&FlowNode::new("a", Box::new(Empty)))
-            .unwrap();
-        let collision = Outputs::from([("b.value".into(), json!(2))]).into();
-        assert!(
-            state
-                .publish("a", Some(collision))
-                .unwrap_err()
-                .to_string()
-                .contains("collides")
-        );
-        assert!(state.publish("absent", None).is_err());
-    }
-
-    #[test]
-    fn low_level_flows_validate_control_order_and_duplicates() {
-        for (from, to, duplicate) in [
-            ("missing", "b", false),
-            ("a", "missing", false),
-            ("b", "a", false),
-            ("a", "b", true),
-        ] {
-            let flow = crate::Flow::new(
-                vec![node("a"), node("b")],
-                vec![],
-                vec!["a".into(), "b".into()],
-                vec![],
-            )
-            .unwrap();
-            let edge = crate::ControlEdgeDefinition {
-                from_node: from.into(),
-                from_output: "value".into(),
-                to_node: to.into(),
-            };
-            let edges = if duplicate {
-                vec![edge.clone(), edge]
-            } else {
-                vec![edge]
-            };
-            assert!(flow.with_control_edges(edges).is_err());
-        }
     }
 }

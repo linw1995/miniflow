@@ -1,6 +1,6 @@
 use mf_compiler::{
     ContextReference, Inputs, Node, NodeBuildError, NodeExecutionError, NodePorts,
-    NodeRegistration, NodeRegistry, Outputs, OwnedPortSpec, ValueType, WorkflowDefinition,
+    NodeRegistration, NodeRegistry, Outputs, PortSpec, ValueType, WorkflowDefinition,
     compile_definition, instantiate_compiled, plan_definition, validate_definition,
 };
 use serde_json::{Value, json};
@@ -19,7 +19,7 @@ impl Node for Dynamic {
                 .as_array()
                 .unwrap()
                 .iter()
-                .map(|name| OwnedPortSpec::new(name.as_str().unwrap(), ValueType::Any, false))
+                .map(|name| PortSpec::owned(name.as_str().unwrap(), ValueType::Any, false))
                 .collect(),
         })
     }

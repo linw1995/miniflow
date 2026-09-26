@@ -14,7 +14,7 @@ Flows need ordered `if` / `else-if` / `else` routing that prevents unselected do
 - Support configuration-dependent instance ports while preserving static registrations for existing plugins.
 - Add explicit branch and node skip states, shared by in-memory execution and generated Rust orchestration. Preserve errors for unintentionally missing outputs.
 - Add opt-in optional workflow outputs so unselected branch results can be omitted without confusing skips with JSON `null`.
-- **BREAKING**: Replace the workspace's `mfn-constant` and `mfn-identity` packages with `mfn-core`; migrate package declarations and adjacent locks. Existing kind names and ordinary node implementations remain valid.
+- **BREAKING**: Replace the workspace's `mfn-constant` and `mfn-identity` packages with `mfn-core`; migrate package declarations and adjacent locks. Existing kind names and ordinary node implementations remain valid. Raw Rust execution callers must supply complete metadata; legacy execution helpers and the separate flow execution error type are removed.
 - **BREAKING**: Reject workflows whose distinct node/output pairs produce the same qualified output ID, rather than allowing ambiguous context references or overwriting stored values.
 
 ## Capabilities
@@ -30,7 +30,7 @@ Flows need ordered `if` / `else-if` / `else` routing that prevents unselected do
 
 ## Impact
 
-- `mf-runtime`: additive context-aware execution and instance-port APIs, per-run context storage, control edges, shared skip handling, and optional output definitions.
+- `mf-runtime`: context-aware execution and instance ports, flat per-run output storage, control edges, shared skip handling, and optional output definitions. Remove optional execution metadata, duplicate port types, and runtime registration/whitelist state.
 - `mf-compiler`: combined dependency planning, instance-aware port/reference validation, construction reuse, and generated execution guards with context publication.
 - Built-in crates, workspace dependencies, fixtures, lockfiles, examples, release package checks, and workflow/plugin documentation.
 - Existing plugins can retain their static ports and `execute` implementations when rebuilt against the matching runtime. New conditional features require matching updated support packages.

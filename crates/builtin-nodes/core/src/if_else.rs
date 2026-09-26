@@ -1,6 +1,6 @@
 use mf_runtime::{
     ContextReference, ContextValue, ExecutionContext, Inputs, Node, NodeBuildError,
-    NodeExecutionError, NodePorts, NodeRegistration, NodeResult, Outputs, OwnedPortSpec, ValueType,
+    NodeExecutionError, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, ValueType,
     deserialize_config,
 };
 use serde::{Deserialize, Deserializer};
@@ -155,7 +155,7 @@ impl Node for IfElse {
                 .iter()
                 .map(|branch| branch.id.as_str())
                 .chain(["else"])
-                .map(|name| OwnedPortSpec::new(name, ValueType::Boolean, false))
+                .map(|name| PortSpec::owned(name, ValueType::Boolean, false))
                 .collect(),
         })
     }
@@ -168,7 +168,7 @@ impl Node for IfElse {
     fn execute_with_context(
         &self,
         _: Inputs,
-        ctx: &ExecutionContext<'_>,
+        ctx: &ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
         let mut selected = "else";
         for branch in &self.branches {

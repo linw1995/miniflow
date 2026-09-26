@@ -94,8 +94,28 @@ fn compiled_branches_match_memory_and_rebuild_when_precedence_changes() {
     let root = tempfile::tempdir().unwrap();
     let trace = root.path().join("trace");
     let project = root.path().join("build");
-    for (amount, reverse) in [(1500, false), (500, false), (50, false), (1500, true)] {
-        let mut value = graph(json!(amount));
+    for (amount, reverse) in [
+        (json!(1500), false),
+        (json!(500), false),
+        (json!(50), false),
+        (json!(1500), true),
+        (Value::Null, false),
+    ] {
+        let mut value = graph(amount.clone());
+        if amount.is_null() {
+            value["nodes"][0]["config"]["value"] = Value::Null;
+            value["nodes"][2]["config"]["branches"][0]["condition"] = json!({
+                "source":{"output":"load_order.value","path":""}, "operator":"eq", "value":null
+            });
+        }
+        value["nodes"][1]["config"]["ports"] = json!(["done", "unused"]);
+        value["nodes"][1]["config"]["skipped"] = json!(["unused"]);
+        value["nodes"].as_array_mut().unwrap().push(json!({
+            "id":"inactive", "kind":"fixture.context", "config":{"ports":[], "fail":true}
+        }));
+        value["control_edges"].as_array_mut().unwrap().push(json!({
+            "from_node":"audit", "from_output":"unused", "to_node":"inactive"
+        }));
         if reverse {
             value["nodes"][2]["config"]["branches"]
                 .as_array_mut()
@@ -111,6 +131,19 @@ fn compiled_branches_match_memory_and_rebuild_when_precedence_changes() {
         let _ = fs::remove_file(&trace);
         let expected = prepare(value.clone()).unwrap().execute().unwrap();
         let expected_trace = fs::read_to_string(&trace).unwrap();
+        let selected = if reverse {
+            "medium"
+        } else if amount.is_null() || amount.as_i64().unwrap() >= 1000 {
+            "large"
+        } else if amount.as_i64().unwrap() >= 100 {
+            "medium"
+        } else {
+            "fallback"
+        };
+        assert_eq!(expected_trace, format!("audit\n{selected}\n"));
+        if amount.is_null() {
+            assert_eq!(json!(expected), json!({"large":null}));
+        }
         fs::remove_file(&trace).unwrap();
         let definition = serde_json::from_value(value).unwrap();
         let plan = plan_definition(&definition).unwrap();

@@ -32,23 +32,22 @@ pub struct FlowNode {
     /// The definition-facing node ID, retained for diagnostics.
     pub definition_id: DefinitionId,
     pub node: Box<dyn Node>,
-    pub ports: Option<crate::NodePorts>,
+    pub ports: crate::NodePorts,
     pub references: Vec<crate::ContextReference>,
 }
 
 impl FlowNode {
-    pub fn new(definition_id: impl Into<DefinitionId>, node: Box<dyn Node>) -> Self {
+    pub fn new(
+        definition_id: impl Into<DefinitionId>,
+        node: Box<dyn Node>,
+        ports: crate::NodePorts,
+    ) -> Self {
         Self {
             definition_id: definition_id.into(),
-            ports: node.ports(),
+            ports,
             references: node.context_references(),
             node,
         }
-    }
-
-    pub fn with_ports(mut self, ports: crate::NodePorts) -> Self {
-        self.ports = Some(ports);
-        self
     }
 }
 
@@ -156,35 +155,6 @@ pub enum FlowBuildError {
     UnknownOutputNode {
         name: String,
         definition_id: DefinitionId,
-    },
-}
-
-#[derive(Debug, Snafu)]
-#[snafu(visibility(pub))]
-pub enum FlowExecutionError {
-    #[snafu(display("{source}"))]
-    WorkflowRun { source: crate::WorkflowRunError },
-    #[snafu(display(
-        "node `{target_definition_id}` input `{target_input}` depends on missing output `{source_output}` from node `{source_definition_id}`"
-    ))]
-    MissingConnectedOutput {
-        source_definition_id: DefinitionId,
-        source_output: String,
-        target_definition_id: DefinitionId,
-        target_input: String,
-    },
-    #[snafu(display("node `{definition_id}` failed: {source}"))]
-    NodeExecution {
-        source: crate::NodeExecutionError,
-        definition_id: DefinitionId,
-    },
-    #[snafu(display(
-        "workflow output `{name}` references missing port `{port}` on node `{definition_id}`"
-    ))]
-    MissingWorkflowOutput {
-        name: String,
-        definition_id: DefinitionId,
-        port: String,
     },
 }
 
@@ -377,21 +347,8 @@ impl Flow {
         &self.execution_order
     }
 
-    pub fn execute(&self) -> Result<FlowOutputs, FlowExecutionError> {
-        let convert = |source| match source {
-            crate::WorkflowRunError::NodeExecution {
-                definition_id,
-                source,
-            } => FlowExecutionError::NodeExecution {
-                definition_id,
-                source,
-            },
-            source => FlowExecutionError::WorkflowRun { source },
-        };
-        let mut state = crate::ExecutionState::new();
-        for node in &self.nodes {
-            state.register(node).map_err(&convert)?;
-        }
+    pub fn execute(&self) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        let mut state = crate::ExecutionContext::default();
         for node_id in &self.execution_order {
             let node = &self.nodes[node_id.index()];
             let mut dependencies = Vec::new();
@@ -418,7 +375,7 @@ impl Flow {
                     source_output: &edge.from_output,
                 });
             }
-            crate::execute_node_in_context(node, &dependencies, &mut state).map_err(&convert)?;
+            crate::execute_node_in_context(node, &dependencies, &mut state)?;
         }
         let mut workflow_outputs = FlowOutputs::new();
         for output in &self.outputs {
@@ -429,9 +386,7 @@ impl Flow {
                 id,
                 &output.port,
                 output.optional,
-            )
-            .map_err(&convert)?
-            {
+            )? {
                 workflow_outputs.insert(output.name.clone(), value);
             }
         }
@@ -509,6 +464,17 @@ mod tests {
         action: Action,
         trace: &Arc<Mutex<Vec<&'static str>>>,
     ) -> FlowNode {
+        let mut ports = crate::NodePorts::default();
+        match &action {
+            Action::Emit { output, .. }
+            | Action::Increment { output, .. }
+            | Action::Sum { output, .. } => {
+                ports
+                    .outputs
+                    .push(crate::PortSpec::new(output, crate::ValueType::Number, true));
+            }
+            Action::Fail => {}
+        }
         FlowNode::new(
             name,
             Box::new(TestNode {
@@ -516,6 +482,7 @@ mod tests {
                 action,
                 trace: Arc::clone(trace),
             }),
+            ports,
         )
     }
 
@@ -710,7 +677,7 @@ mod tests {
         let error = flow.execute().unwrap_err();
         assert!(matches!(
             &error,
-            FlowExecutionError::NodeExecution { definition_id, .. }
+            crate::WorkflowRunError::NodeExecution { definition_id, .. }
                 if definition_id.as_str() == "broken-step"
         ));
         assert_eq!(
@@ -722,7 +689,11 @@ mod tests {
     #[test]
     fn rejects_unknown_definition_ids_during_construction() {
         let error = Flow::new(
-            vec![FlowNode::new("known", Box::new(EmptyNode))],
+            vec![FlowNode::new(
+                "known",
+                Box::new(EmptyNode),
+                crate::NodePorts::default(),
+            )],
             Vec::new(),
             order(&["missing"]),
             Vec::new(),
@@ -745,8 +716,8 @@ mod tests {
     fn rejects_non_topological_execution_order_during_construction() {
         let error = Flow::new(
             vec![
-                FlowNode::new("source", Box::new(EmptyNode)),
-                FlowNode::new("sink", Box::new(EmptyNode)),
+                FlowNode::new("source", Box::new(EmptyNode), crate::NodePorts::default()),
+                FlowNode::new("sink", Box::new(EmptyNode), crate::NodePorts::default()),
             ],
             vec![edge("source", "value", "sink", "input")],
             order(&["sink", "source"]),
@@ -764,7 +735,11 @@ mod tests {
     #[test]
     fn rejects_missing_connection_and_output_nodes_during_construction() {
         let connection_error = Flow::new(
-            vec![FlowNode::new("known", Box::new(EmptyNode))],
+            vec![FlowNode::new(
+                "known",
+                Box::new(EmptyNode),
+                crate::NodePorts::default(),
+            )],
             vec![edge("missing", "value", "known", "input")],
             order(&["known"]),
             Vec::new(),
@@ -778,7 +753,11 @@ mod tests {
         assert!(connection_error.to_string().contains("`missing`"));
 
         let output_error = Flow::new(
-            vec![FlowNode::new("known", Box::new(EmptyNode))],
+            vec![FlowNode::new(
+                "known",
+                Box::new(EmptyNode),
+                crate::NodePorts::default(),
+            )],
             Vec::new(),
             order(&["known"]),
             vec![selected_output("result", "missing", "value")],

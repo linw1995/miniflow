@@ -113,7 +113,6 @@ impl CompiledWorkflow {
             let kind_lit = LitStr::new(&node.kind, Span::call_site());
             preparations.push(quote! {
                 let #node_ident = mf_runtime::instantiate_node_with_metadata(registry, #id_lit, #kind_lit, #config_lit)?;
-                state.register(&#node_ident)?;
             });
             let mut bindings: Vec<TokenStream> = Vec::new();
             for edge in self
@@ -177,7 +176,7 @@ impl CompiledWorkflow {
             pub fn run_workflow(
                 registry: &mf_runtime::NodeRegistry,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                let mut state = mf_runtime::ExecutionState::new();
+                let mut state = mf_runtime::ExecutionContext::default();
                 #(#preparations)*
                 #(#node_statements)*
                 #outputs_binding

@@ -145,7 +145,7 @@ fn prepare_definition(
     let nodes = resolve_nodes(definition, registry)?;
     let registrations: BTreeMap<_, _> = nodes
         .iter()
-        .map(|node| (node.definition_id.clone(), node.ports.as_ref().unwrap()))
+        .map(|node| (node.definition_id.clone(), &node.ports))
         .collect();
     let invalid = |id: &DefinitionId, message: String| WorkflowCompileError::InvalidNodeMetadata {
         definition_id: id.clone(),
@@ -270,10 +270,10 @@ fn prepare_definition(
     for node in &definition.nodes {
         let registration = registrations[&node.id];
         for port in registration.inputs.iter().filter(|port| port.required) {
-            if !connected_inputs.contains(&(node.id.clone(), port.name.to_owned())) {
+            if !connected_inputs.contains(&(node.id.clone(), port.name.to_string())) {
                 return MissingRequiredInputSnafu {
                     node_id: node.id.clone(),
-                    port: port.name.to_owned(),
+                    port: port.name.to_string(),
                 }
                 .fail();
             }
@@ -601,7 +601,7 @@ pub fn resolve_nodes(
                         kind: node.kind.clone(),
                     })?;
             let ports = registration.effective_ports(instance.as_ref());
-            Ok(FlowNode::new(node.id.clone(), instance).with_ports(ports))
+            Ok(FlowNode::new(node.id.clone(), instance, ports))
         })
         .collect()
 }

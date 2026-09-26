@@ -3,7 +3,6 @@ mod common;
 mod fixture;
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_compiled};
 use serde_json::{Value, json};
-use std::{fs, process::Command};
 
 fn graph() -> Value {
     json!({"version":"2026-09-26","dependencies": common::fixture_definition().dependencies,
@@ -57,86 +56,18 @@ fn skips_fanout_and_checks_missing_data_before_skipping() {
     assert_eq!(flow(definition).execute().unwrap_err().to_string(), error);
 }
 #[test]
-fn validates_explicit_skip_contract_and_declared_reads() {
-    for change in ["overlap", "unknown", "required", "undeclared"] {
+fn validates_explicit_skip_contract() {
+    for change in ["overlap", "unknown", "required", "extra"] {
         let mut definition = graph();
         match change {
             "overlap" => definition["nodes"][0]["config"]["outputs"]["off"] = json!(true),
             "unknown" => definition["nodes"][0]["config"]["skipped"] = json!(["absent"]),
-            "required" => definition["nodes"][0]["config"]["required"] = json!("off"),
-            _ => {
-                definition["nodes"][1]["config"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("read");
-                definition["nodes"][1]["config"]["read_undeclared"] = json!("a.value");
-            }
+            "extra" => definition["nodes"][0]["config"]["outputs"]["extra"] = json!(true),
+            _ => definition["nodes"][0]["config"]["required"] = json!("off"),
         }
         assert!(flow(definition).execute().is_err(), "{change}");
     }
 }
-#[test]
-fn generated_binary_matches_context_values_and_execution_trace() {
-    let root = tempfile::tempdir().unwrap();
-    let trace = root.path().join("trace");
-    let mut value = graph();
-    value["outputs"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({"name":"inactive","node":"d","port":"value","optional":true}));
-    for node in value["nodes"].as_array_mut().unwrap() {
-        node["config"]["trace"] = json!(trace);
-        node["config"]["name"] = node["id"].clone();
-    }
-    let expected = flow(value.clone()).execute().unwrap();
-    let expected_trace = fs::read_to_string(&trace).unwrap();
-    assert_eq!(expected_trace, "a\nb\n");
-    fs::remove_file(&trace).unwrap();
-    let definition = serde_json::from_value(value).unwrap();
-    let plan = mf_compiler::plan_definition(&definition).unwrap();
-    let project = root.path().join("build");
-    mf_compiler::write_dependency_project(
-        &project,
-        &plan,
-        &mf_compiler::SupportPackages::Local {
-            crates_dir: common::crates_dir(),
-        },
-    )
-    .unwrap();
-    mf_compiler::resolve_project(&project, &root.path().join("flow.lock"), false).unwrap();
-    let build = mf_compiler::pipeline::cargo_command(&project)
-        .args(["build", "--offline", "--locked"])
-        .output()
-        .unwrap();
-    assert!(
-        build.status.success(),
-        "{}",
-        String::from_utf8_lossy(&build.stderr)
-    );
-    let executable = project.join("target/debug/mf-generated-workflow");
-    let validate = Command::new(&executable)
-        .arg("--validate")
-        .output()
-        .unwrap();
-    assert!(
-        validate.status.success(),
-        "{}",
-        String::from_utf8_lossy(&validate.stderr)
-    );
-    assert!(!trace.exists());
-    let result = Command::new(&executable).output().unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert_eq!(
-        serde_json::from_slice::<Value>(&result.stdout).unwrap(),
-        json!(expected)
-    );
-    assert_eq!(fs::read_to_string(trace).unwrap(), expected_trace);
-}
-
 #[test]
 fn selected_outputs_distinguish_skips_null_and_missing() {
     let mut value = graph();
