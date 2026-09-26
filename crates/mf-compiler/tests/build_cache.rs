@@ -33,3 +33,30 @@ fn reuses_owned_directories_and_rejects_foreign_or_incompatible_entries() {
     assert!(BuildDirectory::open(&definition, Some(&directory)).is_err());
     assert_eq!(fs::read(directory.join("unrelated")).unwrap(), b"keep");
 }
+
+#[test]
+fn serializes_reuse_and_rejects_overlapping_inputs() {
+    let root = common::Directory::new();
+    let definition = root.0.join("flow.json");
+    let directory = root.0.join("build");
+    let guard = BuildDirectory::open(&definition, Some(&directory)).unwrap();
+    assert!(BuildDirectory::open(&definition, Some(&directory)).is_err());
+    let other = BuildDirectory::open(
+        &root.0.join("other.json"),
+        Some(&root.0.join("other-build")),
+    )
+    .unwrap();
+    drop(other);
+    drop(guard);
+    assert!(BuildDirectory::open(&definition, Some(&directory)).is_ok());
+    let protected = fs::canonicalize(&directory).unwrap().join("output");
+    assert!(BuildDirectory::open_protected(&definition, Some(&directory), &[&protected]).is_err());
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&directory, root.0.join("alias")).unwrap();
+        assert!(
+            BuildDirectory::open_protected(&definition, Some(&root.0.join("alias")), &[&protected])
+                .is_err()
+        );
+    }
+}

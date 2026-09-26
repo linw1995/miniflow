@@ -1,9 +1,12 @@
 use mf_compiler::{BuildInputs, WorkflowDefinition};
 use std::{fs, path::PathBuf};
 
+static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn temporary() -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
-        "mf-inputs-{}-{}",
+        "mf-inputs-{}-{}-{}",
+        NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

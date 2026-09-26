@@ -16,6 +16,8 @@ pub enum CacheError {
         "cannot reuse build directory {path:?}: {reason}; select an empty or compatible directory"
     ))]
     Ownership { path: PathBuf, reason: String },
+    #[snafu(display("could not lock build directory: {source}"))]
+    Lock { source: crate::StateError },
     #[snafu(display("could not determine the per-user cache directory; use --build-dir"))]
     MissingRoot,
 }
@@ -31,6 +33,7 @@ struct Owner {
 pub struct BuildDirectory {
     pub path: PathBuf,
     pub reused: bool,
+    _guard: crate::BuildGuard,
 }
 
 pub fn default_build_directory(cache_root: &Path, definition: &Path) -> PathBuf {
@@ -75,6 +78,14 @@ fn cache_root() -> Result<PathBuf, CacheError> {
 
 impl BuildDirectory {
     pub fn open(definition: &Path, explicit: Option<&Path>) -> Result<Self, CacheError> {
+        Self::open_protected(definition, explicit, &[definition])
+    }
+
+    pub fn open_protected(
+        definition: &Path,
+        explicit: Option<&Path>,
+        protected: &[&Path],
+    ) -> Result<Self, CacheError> {
         let path = match explicit {
             Some(path) => path.to_owned(),
             None => default_build_directory(&cache_root()?, definition),
@@ -90,6 +101,16 @@ impl BuildDirectory {
             .create(&path)
             .context(IoSnafu { path: path.clone() })?;
         let path = fs::canonicalize(&path).context(IoSnafu { path: path.clone() })?;
+        let guard_path = path.with_file_name(format!(
+            ".{}.mf-guard",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+        for input in protected {
+            if input.starts_with(&path) || **input == guard_path {
+                return OwnershipSnafu { path: path.clone(), reason: "managed directory overlaps a definition, dependency lock, or final output" }.fail();
+            }
+        }
+        let guard = crate::BuildGuard::acquire(&guard_path).context(LockSnafu)?;
         let expected = Owner {
             definition: definition.to_owned(),
             cli_version: env!("CARGO_PKG_VERSION").into(),
@@ -135,6 +156,10 @@ impl BuildDirectory {
                 });
             }
         };
-        Ok(Self { path, reused })
+        Ok(Self {
+            path,
+            reused,
+            _guard: guard,
+        })
     }
 }

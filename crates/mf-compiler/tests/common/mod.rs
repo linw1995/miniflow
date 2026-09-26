@@ -2,11 +2,14 @@
 use mf_compiler::{CompiledWorkflow, WorkflowDefinition};
 use std::{fs, path::PathBuf};
 
+static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 pub struct Directory(pub PathBuf);
 impl Directory {
     pub fn new() -> Self {
         let path = std::env::temp_dir().join(format!(
-            "mf-project-{}-{}",
+            "mf-project-{}-{}-{}",
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

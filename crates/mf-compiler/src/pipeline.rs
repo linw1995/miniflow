@@ -84,6 +84,13 @@ pub fn compile_project(request: &CompileRequest<'_>) -> Result<PathBuf, Pipeline
         plan.generate_artifacts(),
     )?;
     let guard_path = inputs.lock.with_extension("lock.guard");
+    if output == guard_path {
+        return Err(failure(
+            "output validation",
+            &inputs.definition,
+            "output would replace the dependency build guard",
+        ));
+    }
     let _guard = at(
         "dependency lock",
         &inputs.definition,
@@ -92,7 +99,11 @@ pub fn compile_project(request: &CompileRequest<'_>) -> Result<PathBuf, Pipeline
     let directory = at(
         "build directory",
         &inputs.definition,
-        crate::BuildDirectory::open(&inputs.definition, request.build_dir),
+        crate::BuildDirectory::open_protected(
+            &inputs.definition,
+            request.build_dir,
+            &[&inputs.definition, &inputs.lock, &output],
+        ),
     )?;
     let project = directory.path.clone();
     eprintln!(
