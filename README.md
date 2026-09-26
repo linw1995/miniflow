@@ -48,3 +48,19 @@ Each built-in node lives in its own crate under `crates/builtin-nodes/`. A plugi
 `inventory` only collects registrations from linked crates. Workspace membership alone does not link a plugin into the compiler or generated executable.
 
 The current plugin set is selected by [mf-bundle](crates/mf-bundle/Cargo.toml): add the node crate as a dependency there and reference its exported `kind()` in [mf-bundle's registry](crates/mf-bundle/src/lib.rs). Rebuild `mf` after changing the bundle. Both the compiler and generated runner use this bundle, so they see the same node kinds. Bundle selection is currently a build-time choice; the CLI has no bundle flag.
+
+## License and dependency audit
+
+miniflow is licensed under [Apache-2.0](LICENSE).
+
+Generate the dependency license report with the pinned development environment:
+
+```sh
+nix develop --command bash scripts/generate-third-party-notices.sh
+```
+
+The report is written to `target/THIRD_PARTY_NOTICES.html`. `cargo-about` checks the license allowlist in [about.toml](about.toml) and fails on unaccepted or unresolved licenses. The audit covers all workspace crates with all features, including build and transitive dependencies, across the four release targets. Development dependencies are excluded.
+
+`nix develop --command prek -a` runs the audit in local checks and CI. Nix builds generate the report offline using vendored dependencies. Release archives include `LICENSE` and `THIRD_PARTY_NOTICES.html`; Nix packages install both under `share/licenses/miniflow/`.
+
+Generated workflow executables use the built-in bundle. When distributing them, include the applicable dependency notices; adding external plugins requires auditing their dependencies as well.

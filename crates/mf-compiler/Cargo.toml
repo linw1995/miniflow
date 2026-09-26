@@ -2,6 +2,7 @@
 name = "mf-compiler"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 mf-bundle.workspace = true

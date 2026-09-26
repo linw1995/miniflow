@@ -42,6 +42,12 @@ repos:
         entry: actionlint
         language: system
         files: '^\.github/workflows/.*\.ya?ml$'
+      - id: third-party-notices
+        name: third-party notices and license audit
+        entry: bash scripts/check-third-party-notices.sh
+        language: system
+        pass_filenames: false
+        always_run: true
 
 default_stages: [pre-commit]
 default_install_hook_types: [pre-commit, commit-msg]

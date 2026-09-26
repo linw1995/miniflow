@@ -31,13 +31,32 @@
         cargoArgs = {
           pname = (builtins.fromTOML (builtins.readFile ./crates/mf-cli/Cargo.toml)).package.name;
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
-          src = craneLib.cleanCargoSource self;
+          src = pkgs.lib.fileset.toSource {
+            root = ./.;
+            fileset = pkgs.lib.fileset.unions [
+              (craneLib.fileset.commonCargoSources ./.)
+              ./LICENSE
+              ./about.hbs
+              ./about.toml
+              ./scripts/generate-third-party-notices.sh
+            ];
+          };
           strictDeps = true;
         };
         cargoArtifacts = craneLib.buildDepsOnly cargoArgs;
         miniflow = craneLib.buildPackage (cargoArgs // {
           inherit cargoArtifacts;
-          meta.mainProgram = "mf";
+          nativeBuildInputs = [ pkgs.cargo-about ];
+          postInstall = ''
+            notices="$TMPDIR/miniflow-third-party-notices.html"
+            CARGO_ABOUT_OFFLINE=1 bash scripts/generate-third-party-notices.sh "$notices"
+            install -Dm644 LICENSE "$out/share/licenses/miniflow/LICENSE"
+            install -Dm644 "$notices" "$out/share/licenses/miniflow/THIRD_PARTY_NOTICES.html"
+          '';
+          meta = {
+            license = pkgs.lib.licenses.asl20;
+            mainProgram = "mf";
+          };
         });
       in
       {
@@ -58,6 +77,7 @@
             pkgs.rust-analyzer
             pkgs.actionlint
             pkgs.cargo-nextest
+            pkgs.cargo-about
             pkgs.grcov
             pkgs.prek
             pkgs.python3
