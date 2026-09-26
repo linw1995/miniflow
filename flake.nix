@@ -35,6 +35,7 @@
             root = ./.;
             fileset = pkgs.lib.fileset.unions [
               (craneLib.fileset.commonCargoSources ./.)
+              ./.config/nextest.toml
               ./examples
               ./scripts/prepare-support-packages.py
               ./scripts/test-packaged-cli.py
@@ -52,6 +53,8 @@
         miniflow = craneLib.buildPackage (cargoArgs // {
           inherit cargoArtifacts;
           nativeBuildInputs = [ pkgs.cargo-about ];
+          # The dedicated nextest check runs the complete suite, including acceptance.
+          doCheck = false;
           postInstall = ''
             notices="$TMPDIR/miniflow-third-party-notices.html"
             CARGO_ABOUT_OFFLINE=1 bash scripts/generate-third-party-notices.sh "$notices"
@@ -85,6 +88,7 @@
             pkgs.cargo-about
             pkgs.grcov
             pkgs.prek
+            pkgs.git
             pkgs.python3
           ];
         };
@@ -96,14 +100,10 @@
             inherit cargoArtifacts;
             cargoClippyExtraArgs = "--workspace --all-targets --all-features -- --deny warnings";
           });
-          test = craneLib.cargoTest (cargoArgs // {
+          test = craneLib.cargoNextest (cargoArgs // {
             inherit cargoArtifacts;
-            cargoTestExtraArgs = "--workspace --all-targets --all-features";
+            cargoNextestExtraArgs = "--locked --workspace --all-targets --all-features";
             nativeBuildInputs = [ pkgs.python3 pkgs.git ];
-            postCheck = ''
-              python3 scripts/test-release-support.py
-              python3 scripts/test-packaged-cli.py
-            '';
           });
           workflows = pkgs.runCommand "check-workflows" {
             nativeBuildInputs = [ pkgs.actionlint ];

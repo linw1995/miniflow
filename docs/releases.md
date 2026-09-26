@@ -2,6 +2,14 @@
 
 A distributed CLI resolves exact-version `mf-runtime` and `mf-compiler` packages from crates.io. The bundled examples also require available `mfn-constant` and `mfn-identity` packages. Prepare and publish these support packages before publishing the matching CLI release.
 
+## Run acceptance through nextest
+
+```sh
+nix develop --command cargo nextest run -p mf-cli --test packaged_cli
+```
+
+The integration tests invoke packaged CLI acceptance and the offline release prerequisite tests. They are also included in the full nextest suite, coverage runs, and the Nix test check. The scripts remain available directly for inspecting prepared package artifacts.
+
 ## Prepare and verify packages locally
 
 ```sh

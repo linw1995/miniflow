@@ -55,5 +55,5 @@
 
 - OpenSpec strict validation and `nix develop --command prek -a` passed.
 - `nix flake check -L` passed on aarch64-darwin, including packaged CLI acceptance against registry, pinned local Git, and local-path dependencies.
-- `nix develop --command bash scripts/run-cov.sh` passed all 62 tests; reports are available in `target/coverage/result/`, including `lcov.info`.
+- `nix develop --command bash scripts/run-cov.sh` passed all 64 tests, including nextest-discovered packaged CLI acceptance and release prerequisite checks; reports are available in `target/coverage/result/`, including `lcov.info`.
 - Release prerequisite tests use mocked registry responses; no packages were published and no remote Git operations were performed.

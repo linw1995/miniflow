@@ -1,0 +1,5 @@
+[[profile.default.overrides]]
+filter = 'test(=packaged_cli_acceptance)'
+# The acceptance test performs several Cargo builds in isolated directories.
+threads-required = "num-test-threads"
+slow-timeout = { period = "60s", terminate-after = 20 }
