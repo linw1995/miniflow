@@ -14,3 +14,8 @@ pub use project::{RunnerProjectError, write_runner_project};
 
 pub mod inputs;
 pub use inputs::{BuildInputs, InputError};
+
+pub mod dependency_project;
+pub use dependency_project::{
+    DependencyProjectError, SupportPackages, dependency_project_files, write_dependency_project,
+};
