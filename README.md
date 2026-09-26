@@ -5,9 +5,9 @@
 
 miniflow compiles a declarative DAG workflow into a standalone executable. Each node is a statically linked Rust plugin. The compiler validates the graph and generates direct node calls in topological order.
 
-## Compile and run the example
+## Quick start
 
-Run these commands from the repository root. `mktemp` provides a clean output directory. Cargo builds the `mf` CLI and the generated workflow runner; the runner prints selected outputs as JSON.
+From the repository root, enter the pinned development environment and compile the [example workflow](examples/hello-workflow.json):
 
 ```sh
 nix develop
@@ -22,33 +22,16 @@ Expected output:
 {"answer":42,"greeting":"hello"}
 ```
 
-The generated executable embeds node configuration and does not need the JSON definition or the source checkout to run.
+Compiling workflows currently requires the source checkout and Cargo. The generated executable embeds node configuration and runs without the JSON definition or checkout.
 
-Build the CLI with `nix build .#miniflow`; the executable is available at `./result/bin/mf`.
+## Documentation
 
-Compiling a new executable currently requires the source checkout because the generated Cargo project uses local path dependencies. Run `mf compile` from the checkout, or keep the definition inside it. The output directory must already exist. Cargo diagnostics are streamed to the terminal. A failed build leaves the existing output file intact and keeps its generated project in an adjacent `.mf-build-*` directory for inspection.
-
-## Workflow definition
-
-The [example definition](examples/hello-workflow.json) uses schema version `2026-09-24`. This is the only accepted version at present. Each node has a unique, nonblank string `id`, a registered `kind`, and an optional JSON `config`. An edge connects a named output port to a named input port. An `outputs` entry selects a node port and gives it a name in the executable's JSON output.
-
-The built-in bundle currently provides:
-
-| Kind | Configuration | Input ports | Output ports |
-| --- | --- | --- | --- |
-| `builtin.constant` | Required `value`: any JSON value | None | `value`: any value |
-| `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input |
-
-The compiler rejects unknown kinds, invalid configuration, missing nodes or ports, incompatible port types, missing required inputs, multiply connected inputs, repeated output names, and cycles before generating a runner.
-
-## Plugins and bundle selection
-
-Each built-in node lives in its own crate under `crates/builtin-nodes/`. A plugin crate depends on `mf-runtime`, implements `Node::execute`, provides a factory, and submits a `NodeRegistration` through `inventory::submit!`. The registration declares a unique `kind` and its input and output `PortSpec` values. See [constant](crates/builtin-nodes/constant/src/lib.rs) and [identity](crates/builtin-nodes/identity/src/lib.rs) for working registrations.
-
-`inventory` only collects registrations from linked crates. Workspace membership alone does not link a plugin into the compiler or generated executable.
-
-The current plugin set is selected by [mf-bundle](crates/mf-bundle/Cargo.toml): add the node crate as a dependency there and reference its exported `kind()` in [mf-bundle's registry](crates/mf-bundle/src/lib.rs). Rebuild `mf` after changing the bundle. Both the compiler and generated runner use this bundle, so they see the same node kinds. Bundle selection is currently a build-time choice; the CLI has no bundle flag.
+- [Compiling workflows](docs/compiling.md): CLI build, usage, and build failures.
+- [Workflow definitions](docs/workflows.md): JSON format, built-in nodes, and validation.
+- [Plugin development](docs/plugins.md): node registration and bundle selection.
+- [Contributing](CONTRIBUTING.md): development setup, checks, and submission conventions.
+- [Dependency license audit](docs/licensing.md): reports and distribution notices.
 
 ## License
 
-miniflow is licensed under [Apache-2.0](LICENSE). See [dependency license auditing](docs/licensing.md) for maintainer guidance.
+miniflow is licensed under [Apache-2.0](LICENSE).
