@@ -40,6 +40,8 @@ enum CliError {
     WorkspaceNotFound { definition: PathBuf },
     #[snafu(display("could not build workflow executable: {source}"))]
     Build { source: BinaryBuildError },
+    #[snafu(display("invalid build input: {source}"))]
+    Input { source: mf_compiler::InputError },
 }
 
 struct CompileOptions {
@@ -122,6 +124,8 @@ fn compile(options: CompileOptions) -> Result<(), CliError> {
         }
         .fail();
     }
+    let inputs = mf_compiler::BuildInputs::new(&options.definition).context(InputSnafu)?;
+    inputs.check_output(&options.output).context(InputSnafu)?;
     let source = fs::read_to_string(&options.definition).context(ReadDefinitionSnafu {
         path: options.definition.clone(),
     })?;
