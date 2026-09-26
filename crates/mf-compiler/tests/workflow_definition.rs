@@ -118,3 +118,15 @@ fn old_schema_explains_migration() {
     assert!(error.to_string().contains("2026-09-26"));
     assert!(error.to_string().contains("dependencies"));
 }
+
+#[test]
+fn documented_example_round_trips_with_dependencies() {
+    let definition =
+        WorkflowDefinition::from_json(include_str!("../../../examples/hello-workflow.json"))
+            .unwrap();
+    assert_eq!(definition.dependencies.len(), 2);
+    assert_eq!(
+        definition,
+        WorkflowDefinition::from_json(&serde_json::to_string(&definition).unwrap()).unwrap()
+    );
+}
