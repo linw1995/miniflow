@@ -48,3 +48,7 @@ Each built-in node lives in its own crate under `crates/builtin-nodes/`. A plugi
 `inventory` only collects registrations from linked crates. Workspace membership alone does not link a plugin into the compiler or generated executable.
 
 The current plugin set is selected by [mf-bundle](crates/mf-bundle/Cargo.toml): add the node crate as a dependency there and reference its exported `kind()` in [mf-bundle's registry](crates/mf-bundle/src/lib.rs). Rebuild `mf` after changing the bundle. Both the compiler and generated runner use this bundle, so they see the same node kinds. Bundle selection is currently a build-time choice; the CLI has no bundle flag.
+
+## License
+
+miniflow is licensed under [Apache-2.0](LICENSE). See [dependency license auditing](docs/licensing.md) for maintainer guidance.
