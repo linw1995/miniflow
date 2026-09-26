@@ -56,7 +56,7 @@ impl Drop for TemporaryDirectory {
     }
 }
 
-fn compile(definition: &Path, output: &Path, rustflags: Option<&str>) -> Output {
+fn compile_command(definition: &Path, output: &Path) -> Command {
     let workspace = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -73,6 +73,11 @@ fn compile(definition: &Path, output: &Path, rustflags: Option<&str>) -> Output 
         .arg(output)
         .arg("--build-dir")
         .arg(definition.parent().unwrap().join(".mf-build-test"));
+    command
+}
+
+fn compile(definition: &Path, output: &Path, rustflags: Option<&str>) -> Output {
+    let mut command = compile_command(definition, output);
     if let Some(rustflags) = rustflags {
         command.env("RUSTFLAGS", rustflags);
     }
@@ -429,4 +434,90 @@ fn repairs_partial_projects_and_removes_obsolete_configuration() {
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
         json!({"answer":99,"original":99})
     );
+}
+
+#[test]
+fn cargo_invalidates_features_local_sources_versions_and_flags() {
+    let temporary = TemporaryDirectory::new();
+    let definition = temporary.path().join("flow.json");
+    let target = temporary.path().join("flow");
+    let local = temporary.path().join("nodes");
+    fs::create_dir_all(local.join("src")).unwrap();
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let fixture = crates.join("mf-compiler/tests/fixtures/multi-nodes");
+    let manifest = fs::read_to_string(fixture.join("Cargo.toml"))
+        .unwrap()
+        .replace(
+            "../../../../mf-runtime",
+            crates.join("mf-runtime").to_str().unwrap(),
+        );
+    fs::write(local.join("Cargo.toml"), &manifest).unwrap();
+    let plugin = fs::read_to_string(fixture.join("src/lib.rs")).unwrap();
+    fs::write(local.join("src/lib.rs"), &plugin).unwrap();
+    let mut value = json!({"version":"2026-09-26","dependencies":{"local":{"package":"fixture-multi-nodes","path":"nodes","features":["double"]}},"nodes":[{"id":"source","kind":"fixture.source"}],"outputs":[{"name":"value","node":"source","port":"value"}]});
+    let check = |value: &serde_json::Value, expected: i64, flags: Option<&str>| {
+        fs::write(&definition, value.to_string()).unwrap();
+        let result = compile(&definition, &target, flags);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let run = Command::new(&target).output().unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&run.stdout).unwrap(),
+            json!({"value":expected})
+        );
+        result
+    };
+    check(&value, 14, None);
+    value["dependencies"]["local"]["features"] = json!([]);
+    assert!(
+        !String::from_utf8_lossy(&check(&value, 7, None).stderr).contains("reused compiled runner")
+    );
+    value["dependencies"]["local"]["features"] = json!(["double"]);
+    fs::write(local.join("src/lib.rs"), plugin.replace("14", "28")).unwrap();
+    let changed = check(&value, 28, None);
+    assert!(!String::from_utf8_lossy(&changed.stderr).contains("Compiling mf-runtime"));
+    fs::write(
+        local.join("Cargo.toml"),
+        manifest.replacen("version = \"0.1.0\"", "version = \"0.2.0\"", 1),
+    )
+    .unwrap();
+    check(&value, 28, None);
+    assert!(
+        fs::read_to_string(definition.with_extension("lock"))
+            .unwrap()
+            .contains("version = \"0.2.0\"")
+    );
+    assert!(
+        !String::from_utf8_lossy(&check(&value, 28, Some("-C debuginfo=1")).stderr)
+            .contains("reused compiled runner")
+    );
+    assert!(
+        String::from_utf8_lossy(&check(&value, 28, Some("-C debuginfo=1")).stderr)
+            .contains("reused compiled runner")
+    );
+    #[cfg(unix)]
+    {
+        let wrapper = temporary.path().join("rustc-wrapper");
+        fs::write(&wrapper, "#!/bin/sh\nif [ \"$1\" = -vV ]; then\n  \"$MF_REAL_RUSTC\" \"$@\" | sed 's/^commit-hash:.*/commit-hash: 1111111111111111111111111111111111111111/'\nelse\n  exec \"$MF_REAL_RUSTC\" \"$@\"\nfi\n").unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+        let changed = compile_command(&definition, &target)
+            .env("RUSTC", &wrapper)
+            .env("RUSTC_WRAPPER", "")
+            .env("RUSTFLAGS", "-C debuginfo=1")
+            .env(
+                "MF_REAL_RUSTC",
+                std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            changed.status.success(),
+            "{}",
+            String::from_utf8_lossy(&changed.stderr)
+        );
+        assert!(!String::from_utf8_lossy(&changed.stderr).contains("reused compiled runner"));
+    }
 }
