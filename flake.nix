@@ -99,7 +99,7 @@
           test = craneLib.cargoTest (cargoArgs // {
             inherit cargoArtifacts;
             cargoTestExtraArgs = "--workspace --all-targets --all-features";
-            nativeBuildInputs = [ pkgs.python3 ];
+            nativeBuildInputs = [ pkgs.python3 pkgs.git ];
             postCheck = ''
               python3 scripts/test-release-support.py
               python3 scripts/test-packaged-cli.py

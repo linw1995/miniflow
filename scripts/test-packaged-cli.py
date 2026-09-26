@@ -55,6 +55,36 @@ def check(prepared=None):
         assert (project / "flow.lock").read_bytes() == locked
         manifest = (build / "Cargo.toml").read_text()
         assert "path =" not in manifest and "mf-bundle" not in manifest
+        packaged_fixture = Path(report["vendor"]) / "fixture-multi-nodes-0.1.0"
+        local_nodes = project / "local-nodes"
+        git_nodes = scratch / "git-nodes"
+        shutil.copytree(packaged_fixture, local_nodes)
+        shutil.copytree(packaged_fixture, git_nodes)
+        git_env = dict(env, GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+        git = ["git", "-c", "core.hooksPath=" + os.devnull, "-c", "commit.gpgsign=false", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid"]
+        for args in [["init", "--quiet"], ["add", "."], ["commit", "--quiet", "-m", "fixture"]]:
+            subprocess.run(git + args, cwd=git_nodes, env=git_env, check=True)
+        revision = subprocess.check_output(git + ["rev-parse", "HEAD"], cwd=git_nodes, env=git_env, text=True).strip()
+        for name, dependency, expected in [
+            ("local", {"package": "fixture-multi-nodes", "path": "local-nodes"}, 7),
+            ("git", {"package": "fixture-multi-nodes", "git": git_nodes.as_uri(), "rev": revision, "features": ["double"]}, 14),
+        ]:
+            flow = json.loads(definition.read_text())
+            flow["dependencies"] = {name: dependency}
+            source = project / f"{name}.json"
+            source.write_text(json.dumps(flow))
+            executable = project / name
+            build_dir = scratch / f"{name}-build"
+            invocation = [str(cli), "compile", str(source), "--output", str(executable), "--build-dir", str(build_dir)]
+            # Cargo's offline mode also prohibits the first checkout of a file:// repository.
+            initial_env = dict(env, CARGO_NET_OFFLINE="false") if name == "git" else env
+            subprocess.run(invocation, cwd=cli.parent, env=initial_env, check=True)
+            saved_lock = source.with_suffix(".lock").read_bytes()
+            subprocess.run(invocation + ["--locked"], cwd=cli.parent, env=env, check=True)
+            assert source.with_suffix(".lock").read_bytes() == saved_lock
+            result = subprocess.run([str(executable)], cwd=scratch, env={"PATH": ""}, capture_output=True, text=True, check=True)
+            assert json.loads(result.stdout) == {"result": expected}
+        assert (project / "local.lock").read_bytes() != (project / "git.lock").read_bytes()
         runtime_dir = scratch / "runtime"
         runtime_dir.mkdir()
         standalone = runtime_dir / "flow"
@@ -63,7 +93,7 @@ def check(prepared=None):
         shutil.rmtree(build)
         result = subprocess.run([str(standalone)], cwd=runtime_dir, env={"PATH": ""}, capture_output=True, text=True, check=True)
         assert json.loads(result.stdout) == {"result": 14}
-        print("Packaged CLI acceptance passed: registry packages, locked reuse, standalone execution")
+        print("Packaged CLI acceptance passed: registry/Git/path packages, independent locks, warm reuse, standalone execution")
 
 
 if __name__ == "__main__":
