@@ -69,23 +69,34 @@ impl CompiledWorkflow {
             }
         }
 
-        for edge in &self.definition.edges {
-            let Some(&source_index) = indices.get(&edge.from_node) else {
+        for (from_node, to_node) in self
+            .definition
+            .edges
+            .iter()
+            .map(|edge| (&edge.from_node, &edge.to_node))
+            .chain(
+                self.definition
+                    .control_edges
+                    .iter()
+                    .map(|edge| (&edge.from_node, &edge.to_node)),
+            )
+        {
+            let Some(&source_index) = indices.get(from_node) else {
                 return UnknownNodeSnafu {
-                    definition_id: edge.from_node.clone(),
+                    definition_id: from_node.clone(),
                 }
                 .fail();
             };
-            let Some(&target_index) = indices.get(&edge.to_node) else {
+            let Some(&target_index) = indices.get(to_node) else {
                 return UnknownNodeSnafu {
-                    definition_id: edge.to_node.clone(),
+                    definition_id: to_node.clone(),
                 }
                 .fail();
             };
             if source_index >= target_index {
                 return InvalidEdgeOrderSnafu {
-                    from_node: edge.from_node.clone(),
-                    to_node: edge.to_node.clone(),
+                    from_node: from_node.clone(),
+                    to_node: to_node.clone(),
                 }
                 .fail();
             }

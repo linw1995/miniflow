@@ -23,3 +23,9 @@ The CLI first checks graph structure, then builds the runner and invokes its `--
 The [multi-node fixture](../crates/mf-compiler/tests/fixtures/multi-nodes/) demonstrates one external crate registering several kinds. The packaged CLI acceptance script in [release prerequisites](releases.md) builds it from a packaged registry source outside the checkout.
 
 See the [contribution guide](../CONTRIBUTING.md) for local checks and [dependency license auditing](licensing.md) before distributing additional plugins.
+
+## Instance metadata
+
+Nodes with configurable ports can override `Node::ports()` with owned `NodePorts`; this replaces both static port lists for that instance. Ordinary registrations remain unchanged. Names must be nonempty and unique within each direction. Metadata must depend only on configuration.
+
+Declare context reads with `Node::context_references()`. Each `ContextReference` contains a qualified output ID and a diagnostic label, such as a branch ID. Validation resolves exact `${node_id}.${output_name}` keys and requires the producer to be a strict ancestor through explicit dependencies. References do not add edges. Ambiguous qualified IDs are rejected with both source pairs.

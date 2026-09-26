@@ -5,16 +5,16 @@ pub mod registry;
 pub mod runner;
 
 pub use definition::{
-    DefinitionId, DefinitionParseError, EdgeDefinition, NodeDefinition, NodeDependency,
-    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
+    ControlEdgeDefinition, DefinitionId, DefinitionParseError, EdgeDefinition, NodeDefinition,
+    NodeDependency, WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
 };
 pub use flow::{
     Flow, FlowBuildError, FlowConnection, FlowExecutionError, FlowNode, FlowOutput, FlowOutputs,
     NodeId,
 };
 pub use node::{
-    Inputs, Node, NodeBuildError, NodeExecutionError, NodeFactory, NodeRegistration, Outputs,
-    PortSpec, ValueType, deserialize_config,
+    ContextReference, Inputs, Node, NodeBuildError, NodeExecutionError, NodeFactory, NodePorts,
+    NodeRegistration, Outputs, OwnedPortSpec, PortSpec, ValueType, deserialize_config, output_id,
 };
 pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::{WorkflowRunError, execute_node, instantiate_node, required_output};

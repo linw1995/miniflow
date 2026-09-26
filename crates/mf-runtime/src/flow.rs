@@ -30,14 +30,23 @@ pub struct FlowNode {
     /// The definition-facing node ID, retained for diagnostics.
     pub definition_id: DefinitionId,
     pub node: Box<dyn Node>,
+    pub ports: Option<crate::NodePorts>,
+    pub references: Vec<crate::ContextReference>,
 }
 
 impl FlowNode {
     pub fn new(definition_id: impl Into<DefinitionId>, node: Box<dyn Node>) -> Self {
         Self {
             definition_id: definition_id.into(),
+            ports: node.ports(),
+            references: node.context_references(),
             node,
         }
+    }
+
+    pub fn with_ports(mut self, ports: crate::NodePorts) -> Self {
+        self.ports = Some(ports);
+        self
     }
 }
 

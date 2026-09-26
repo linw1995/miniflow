@@ -55,3 +55,9 @@ Commit the adjacent Flow lock with the definition. An unlocked build reuses comp
 The lock records the runner and its validation dependencies. It does not freeze local path contents, native libraries, build-script inputs, or the Rust toolchain, and does not promise byte-identical executables.
 
 Only one build can hold a Flow's dependency lock at a time. Contention reports a retry diagnostic. The adjacent guard file can remain after exit; the operating-system lock, not file presence, controls access. Failed compilation or validation leaves the prior Flow lock intact. Successful unlocked builds persist the lock atomically before installing the executable; installation failures report if the lock was already updated.
+
+## Execution dependencies
+
+The optional `control_edges` array contains entries with `from_node`, `from_output`, and `to_node`. A control edge establishes execution order without binding a target data input. Data and control edges together must be acyclic; repeated identical control edges are rejected. Existing `edges` retain their input binding and type rules.
+
+Context references use qualified IDs such as `load_order.value`. A reference must name an output on an explicit predecessor, directly or transitively. Merely sorting earlier by node ID does not establish a dependency. Node IDs and local output names may contain dots if their combined IDs remain unique.

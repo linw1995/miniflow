@@ -8,11 +8,11 @@
 
 ## 2. Plan explicit dependencies and resolve instance metadata
 
-- [ ] 2.1 Add optional `control_edges` with empty-default serialization and plan the union of data/control dependencies; verify combined cycles, duplicate controls, unknown endpoints, deduplicated node-pair indegrees, deterministic ordering, and old definition round-trips.
-- [ ] 2.2 Add owned effective port descriptors, static registration fallback, and instance context-reference declarations; verify an unchanged external plugin builds and dynamic instances expose distinct port sets and source references.
-- [ ] 2.3 Refactor compiler validation to construct once per pass and index effective outputs by `${node_id}.${output_name}`; verify local port/type checks, exact reference lookup, dotted names, unknown keys, and collision diagnostics naming both source pairs.
-- [ ] 2.4 Validate context producers as strict ancestors through explicit dependencies without adding edges; verify direct/transitive references, unknown/self/descendant/unordered sources, and rejection despite an earlier lexical tie-break.
-- [ ] 2.5 Carry resolved descriptors and reference declarations into prepared flow nodes; verify lower-level callers receive contextual metadata errors and document control edges and instance metadata in workflow/plugin guides.
+- [x] 2.1 Add optional `control_edges` with empty-default serialization and plan the union of data/control dependencies; verify combined cycles, duplicate controls, unknown endpoints, deduplicated node-pair indegrees, deterministic ordering, and old definition round-trips.
+- [x] 2.2 Add owned effective port descriptors, static registration fallback, and instance context-reference declarations; verify an unchanged external plugin builds and dynamic instances expose distinct port sets and source references.
+- [x] 2.3 Refactor compiler validation to construct once per pass and index effective outputs by `${node_id}.${output_name}`; verify local port/type checks, exact reference lookup, dotted names, unknown keys, and collision diagnostics naming both source pairs.
+- [x] 2.4 Validate context producers as strict ancestors through explicit dependencies without adding edges; verify direct/transitive references, unknown/self/descendant/unordered sources, and rejection despite an earlier lexical tie-break.
+- [x] 2.5 Carry resolved descriptors and reference declarations into prepared flow nodes; verify lower-level callers receive contextual metadata errors and document control edges and instance metadata in workflow/plugin guides.
 
 ## 3. Implement execution context and conditional states
 

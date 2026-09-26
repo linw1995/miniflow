@@ -1,7 +1,6 @@
 use crate::definition::{DefinitionId, WorkflowDefinition};
 use crate::{
-    CompiledWorkflow, Flow, FlowBuildError, FlowNode, NodeBuildError, NodeRegistration,
-    NodeRegistry, ValueType,
+    CompiledWorkflow, Flow, FlowBuildError, FlowNode, NodeBuildError, NodeRegistry, ValueType,
 };
 use snafu::{ResultExt, Snafu};
 use std::collections::{BTreeMap, BTreeSet};
@@ -115,24 +114,114 @@ pub enum WorkflowCompileError {
     FlowConstruction { source: FlowBuildError },
     #[snafu(display("compiled workflow execution order does not match its definition"))]
     NonCanonicalPlanOrder,
+    #[snafu(display("invalid node metadata for `{definition_id}`: {message}"))]
+    InvalidNodeMetadata {
+        definition_id: DefinitionId,
+        message: String,
+    },
+    #[snafu(display(
+        "invalid control edge `{from_node}`.`{from_output}` -> `{to_node}`: {message}"
+    ))]
+    InvalidControlEdge {
+        from_node: DefinitionId,
+        from_output: String,
+        to_node: DefinitionId,
+        message: String,
+    },
 }
 
 pub fn validate_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<(), WorkflowCompileError> {
-    validate_structure(definition)?;
+    prepare_definition(definition, registry).map(|_| ())
+}
 
-    let mut registrations: BTreeMap<DefinitionId, &'static NodeRegistration> = BTreeMap::new();
-    for node in &definition.nodes {
-        let Some(registration) = registry.get(&node.kind) else {
-            return UnknownNodeKindSnafu {
-                definition_id: node.id.clone(),
-                kind: node.kind.clone(),
+fn prepare_definition(
+    definition: &WorkflowDefinition,
+    registry: &NodeRegistry,
+) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
+    let order = structural_order(definition)?;
+    let nodes = resolve_nodes(definition, registry)?;
+    let registrations: BTreeMap<_, _> = nodes
+        .iter()
+        .map(|node| (node.definition_id.clone(), node.ports.as_ref().unwrap()))
+        .collect();
+    let invalid = |id: &DefinitionId, message: String| WorkflowCompileError::InvalidNodeMetadata {
+        definition_id: id.clone(),
+        message,
+    };
+    let mut output_index = BTreeMap::new();
+    for node in &nodes {
+        let ports = registrations[&node.definition_id];
+        for (direction, specs) in [("input", &ports.inputs), ("output", &ports.outputs)] {
+            let mut names = BTreeSet::new();
+            for port in specs {
+                if port.name.is_empty() || !names.insert(&port.name) {
+                    return Err(invalid(
+                        &node.definition_id,
+                        format!("empty or duplicate {direction} port `{}`", port.name),
+                    ));
+                }
             }
-            .fail();
-        };
-        registrations.insert(node.id.clone(), registration);
+        }
+        for port in &ports.outputs {
+            let key = crate::output_id(node.definition_id.as_str(), &port.name);
+            if let Some((previous_node, previous_port)) =
+                output_index.insert(key.clone(), (&node.definition_id, &port.name))
+            {
+                return Err(invalid(
+                    &node.definition_id,
+                    format!(
+                        "output ID `{key}` collides between `{previous_node}`.`{previous_port}` and `{}`.`{}`",
+                        node.definition_id, port.name
+                    ),
+                ));
+            }
+        }
+    }
+    let pairs = dependency_pairs(definition);
+    let mut ancestors: BTreeMap<DefinitionId, BTreeSet<DefinitionId>> = BTreeMap::new();
+    for id in &order {
+        let mut sources = BTreeSet::new();
+        for (from, to) in &pairs {
+            if to == id {
+                sources.insert(from.clone());
+                sources.extend(ancestors[from].iter().cloned());
+            }
+        }
+        ancestors.insert(id.clone(), sources);
+    }
+    for node in &nodes {
+        for reference in &node.references {
+            let Some((producer, _)) = output_index.get(&reference.output) else {
+                return Err(invalid(
+                    &node.definition_id,
+                    format!(
+                        "reference `{}` ({}) is unknown",
+                        reference.output, reference.label
+                    ),
+                ));
+            };
+            if !ancestors[&node.definition_id].contains(*producer) {
+                return Err(invalid(
+                    &node.definition_id,
+                    format!(
+                        "reference `{}` ({}) requires an explicit dependency on producer `{producer}`",
+                        reference.output, reference.label
+                    ),
+                ));
+            }
+        }
+    }
+    for edge in &definition.control_edges {
+        if !registrations[&edge.from_node]
+            .outputs
+            .iter()
+            .any(|port| port.name == edge.from_output)
+        {
+            return Err(control_error(edge, "unknown source output"));
+        }
     }
 
     let mut connected_inputs = BTreeSet::new();
@@ -207,16 +296,14 @@ pub fn validate_definition(
         }
     }
 
-    Ok(())
+    Ok((nodes, order))
 }
 
 pub fn topological_order(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<Vec<DefinitionId>, WorkflowCompileError> {
-    validate_definition(definition, registry)?;
-
-    structural_order(definition)
+    prepare_definition(definition, registry).map(|(_, order)| order)
 }
 
 fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCompileError> {
@@ -263,6 +350,15 @@ fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCom
             .fail();
         }
     }
+    let mut controls = BTreeSet::new();
+    for edge in &definition.control_edges {
+        if !ids.contains(&edge.from_node) || !ids.contains(&edge.to_node) {
+            return Err(control_error(edge, "unknown source or target node"));
+        }
+        if !controls.insert(edge) {
+            return Err(control_error(edge, "duplicate control edge"));
+        }
+    }
     let mut output_names = BTreeSet::new();
     for output in &definition.outputs {
         if !output_names.insert(&output.name) {
@@ -282,6 +378,29 @@ fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCom
     Ok(())
 }
 
+fn control_error(edge: &crate::ControlEdgeDefinition, message: &str) -> WorkflowCompileError {
+    WorkflowCompileError::InvalidControlEdge {
+        from_node: edge.from_node.clone(),
+        from_output: edge.from_output.clone(),
+        to_node: edge.to_node.clone(),
+        message: message.into(),
+    }
+}
+
+fn dependency_pairs(definition: &WorkflowDefinition) -> BTreeSet<(DefinitionId, DefinitionId)> {
+    definition
+        .edges
+        .iter()
+        .map(|edge| (edge.from_node.clone(), edge.to_node.clone()))
+        .chain(
+            definition
+                .control_edges
+                .iter()
+                .map(|edge| (edge.from_node.clone(), edge.to_node.clone())),
+        )
+        .collect()
+}
+
 pub fn structural_order(
     definition: &WorkflowDefinition,
 ) -> Result<Vec<DefinitionId>, WorkflowCompileError> {
@@ -294,16 +413,10 @@ pub fn structural_order(
         outgoing.insert(node.id.clone(), Vec::new());
         incoming.insert(node.id.clone(), Vec::new());
     }
-    for edge in &definition.edges {
-        *indegree.get_mut(&edge.to_node).unwrap() += 1;
-        outgoing
-            .get_mut(&edge.from_node)
-            .unwrap()
-            .push(edge.to_node.clone());
-        incoming
-            .get_mut(&edge.to_node)
-            .unwrap()
-            .push(edge.from_node.clone());
+    for (from, to) in dependency_pairs(definition) {
+        *indegree.get_mut(&to).unwrap() += 1;
+        outgoing.get_mut(&from).unwrap().push(to.clone());
+        incoming.get_mut(&to).unwrap().push(from);
     }
     for neighbors in outgoing.values_mut() {
         neighbors.sort();
@@ -379,8 +492,7 @@ pub fn compile_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
-    let execution_order = topological_order(definition, registry)?;
-    let nodes = resolve_nodes(definition, registry)?;
+    let (nodes, execution_order) = prepare_definition(definition, registry)?;
     Flow::new(
         nodes,
         definition.edges.clone(),
@@ -427,6 +539,8 @@ fn normalize_plan(
                 &right.to_input,
             ))
     });
+    let mut control_edges = definition.control_edges.clone();
+    control_edges.sort();
     let mut outputs = definition.outputs.clone();
     outputs.sort_by(|left, right| {
         (&left.name, &left.node, &left.port).cmp(&(&right.name, &right.node, &right.port))
@@ -438,6 +552,7 @@ fn normalize_plan(
             dependencies: definition.dependencies.clone(),
             nodes,
             edges,
+            control_edges,
             outputs,
         },
         execution_order,
@@ -448,11 +563,10 @@ pub fn instantiate_compiled(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<Flow, WorkflowCompileError> {
-    let canonical_order = topological_order(&plan.definition, registry)?;
+    let (nodes, canonical_order) = prepare_definition(&plan.definition, registry)?;
     if plan.execution_order != canonical_order {
         return NonCanonicalPlanOrderSnafu.fail();
     }
-    let nodes = resolve_nodes(&plan.definition, registry)?;
     Flow::new(
         nodes,
         plan.definition.edges.clone(),
@@ -484,7 +598,8 @@ pub fn resolve_nodes(
                         definition_id: node.id.clone(),
                         kind: node.kind.clone(),
                     })?;
-            Ok(FlowNode::new(node.id.clone(), instance))
+            let ports = registration.effective_ports(instance.as_ref());
+            Ok(FlowNode::new(node.id.clone(), instance).with_ports(ports))
         })
         .collect()
 }
