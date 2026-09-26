@@ -25,7 +25,7 @@
 
 - [x] 4.1 Separate structural planning from plugin validation and implement the runner validation mode without executing nodes; test unknown and duplicate kinds, invalid configuration, and factories printing diagnostics.
 - [x] 4.2 Connect the CLI to one runner build followed by validation, remove its temporary bundle dependency, and require successful validation before installation; verify feature-sensitive fixture behavior agrees between validation and execution.
-- [ ] 4.3 Integrate stage-specific errors, expected-artifact checks, retained projects, lock persistence, and atomic executable replacement; inject validation exit failures, missing executables, Cargo failures, and installation failures and verify existing outputs survive.
+- [x] 4.3 Integrate stage-specific errors, expected-artifact checks, retained projects, lock persistence, and atomic executable replacement; inject validation exit failures, missing executables, Cargo failures, and installation failures and verify existing outputs survive.
 - [ ] 4.4 Update `docs/compiling.md` for the single-runner build lifecycle, toolchain requirements, diagnostics, and native-code trust model; verify retained-project instructions against an intentional fixture failure.
 
 ## 5. Reusable build directories

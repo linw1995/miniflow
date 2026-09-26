@@ -263,3 +263,85 @@ fn definition_json() -> String {
     add_dependencies(&mut value);
     value.to_string()
 }
+
+#[test]
+fn failed_validation_preserves_prior_lock_and_executable() {
+    let temporary = TemporaryDirectory::new();
+    let definition = temporary.path().join("flow.json");
+    let target = temporary.path().join("flow");
+    fs::write(&definition, definition_json()).unwrap();
+    let first = compile(&definition, &target, None);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let lock = fs::read(definition.with_extension("lock")).unwrap();
+    let executable = fs::read(&target).unwrap();
+    let mut invalid: serde_json::Value = serde_json::from_str(&definition_json()).unwrap();
+    invalid["nodes"][0]["config"] = json!({});
+    fs::write(&definition, invalid.to_string()).unwrap();
+    let failed = compile(&definition, &target, None);
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("runner validation"));
+    assert_eq!(fs::read(definition.with_extension("lock")).unwrap(), lock);
+    assert_eq!(fs::read(&target).unwrap(), executable);
+}
+
+#[test]
+fn install_failure_reports_persisted_lock_and_preserves_existing_directory() {
+    let temporary = TemporaryDirectory::new();
+    let definition = temporary.path().join("flow.json");
+    let target = temporary.path().join("output");
+    fs::write(&definition, definition_json()).unwrap();
+    fs::create_dir(&target).unwrap();
+    fs::write(target.join("sentinel"), "existing").unwrap();
+    let result = compile(&definition, &target, None);
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("dependency lock was updated"));
+    assert!(definition.with_extension("lock").is_file());
+    assert_eq!(fs::read(target.join("sentinel")).unwrap(), b"existing");
+}
+
+#[cfg(unix)]
+#[test]
+fn missing_artifact_and_cargo_exit_cannot_install_a_stale_binary() {
+    let temporary = TemporaryDirectory::new();
+    let definition = temporary.path().join("flow.json");
+    let target = temporary.path().join("flow");
+    fs::write(&definition, definition_json()).unwrap();
+    fs::write(&target, "previous").unwrap();
+    let wrapper = temporary.path().join("cargo-wrapper");
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    for status in [0, 23] {
+        fs::write(&wrapper, format!("#!/bin/sh\nif [ \"$1\" = metadata ]; then exec \"$MF_REAL_CARGO\" \"$@\"; fi\necho 'fixture Cargo diagnostics' >&2\nexit {status}\n")).unwrap();
+        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+        let result = Command::new(env!("CARGO_BIN_EXE_mf"))
+            .args(["compile"])
+            .arg(&definition)
+            .arg("--output")
+            .arg(&target)
+            .env("MF_DEV_SUPPORT_ROOT", crates)
+            .env("CARGO_NET_OFFLINE", "true")
+            .env(
+                "MF_REAL_CARGO",
+                std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()),
+            )
+            .env("CARGO", &wrapper)
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(stderr.contains("fixture Cargo diagnostics"), "{stderr}");
+        assert!(
+            stderr.contains(if status == 0 {
+                "did not produce a runner"
+            } else {
+                "Cargo build failed"
+            }),
+            "{stderr}"
+        );
+        assert_eq!(fs::read(&target).unwrap(), b"previous");
+        assert!(!definition.with_extension("lock").exists());
+    }
+}
