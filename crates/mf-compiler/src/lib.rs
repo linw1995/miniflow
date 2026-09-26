@@ -2,8 +2,9 @@ pub mod compiler;
 pub mod plan;
 
 pub use compiler::{
-    CyclePath, WorkflowCompileError, compile_definition, instantiate_compiled, plan_definition,
-    resolve_nodes, structural_order, topological_order, validate_definition,
+    CyclePath, WorkflowCompileError, WorkflowExecutionError, compile_definition, execute_compiled,
+    instantiate_compiled, plan_definition, resolve_nodes, structural_order, topological_order,
+    validate_definition,
 };
 pub use mf_runtime::*;
 pub use plan::{CompiledWorkflow, GeneratedWorkflowArtifacts, PlanError};

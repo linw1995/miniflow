@@ -14,6 +14,7 @@ pub use definition::{
     NodeDependency, WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
 };
 pub use flow::{Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowOutputs, NodeId};
+pub use mf_telemetry::observation::RunObservation;
 pub use node::{
     ContextReference, Inputs, Node, NodeBuildError, NodeExecutionError, NodeFactory, NodePorts,
     NodeRegistration, Outputs, PortSpec, ValueType, deserialize_config, output_id,

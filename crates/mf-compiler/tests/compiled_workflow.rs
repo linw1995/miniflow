@@ -93,17 +93,9 @@ fn generated_plan_round_trips_and_preserves_definition_semantics() {
 
     assert_eq!(reparsed, plan);
     assert!(generated.rust_source.contains("pub fn run_workflow("));
-    assert!(
-        generated
-            .rust_source
-            .contains("mf_runtime::instantiate_node")
-    );
+    assert!(generated.rust_source.contains("state.prepare_node"));
     assert!(generated.rust_source.contains("mf_runtime::execute_node"));
-    assert!(
-        generated
-            .rust_source
-            .contains("mf_runtime::select_context_output")
-    );
+    assert!(generated.rust_source.contains("state.select_output"));
     assert!(!generated.rust_source.contains("Flow::new"));
     assert!(!generated.rust_source.contains("WORKFLOW_PLAN_JSON"));
 

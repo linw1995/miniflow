@@ -571,7 +571,10 @@ version = "0.1.0"
 dependencies = [
  "inventory",
  "mf-runtime",
+ "mf-telemetry",
  "mfn-core",
+ "opentelemetry",
+ "opentelemetry_sdk",
  "prettyplease",
  "proc-macro2",
  "quote",
@@ -719,6 +722,7 @@ dependencies = [
  "portable-atomic",
  "rand",
  "thiserror",
+ "tokio",
 ]
 
 [[package]]

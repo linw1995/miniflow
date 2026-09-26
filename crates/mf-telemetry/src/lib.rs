@@ -3,6 +3,7 @@
 pub mod description;
 pub mod event;
 pub mod identity;
+pub mod observation;
 pub mod wire;
 
 use snafu::Snafu;

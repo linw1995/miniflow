@@ -578,6 +578,37 @@ pub fn instantiate_compiled(
     .context(FlowConstructionSnafu)
 }
 
+#[derive(Debug, Snafu)]
+pub enum WorkflowExecutionError {
+    #[snafu(display("{source}"))]
+    Preparation { source: WorkflowCompileError },
+    #[snafu(display("{source}"))]
+    Execution {
+        source: mf_runtime::WorkflowRunError,
+    },
+}
+
+/// Observes construction and execution together; validation-only callers keep using instantiate_compiled.
+pub fn execute_compiled(
+    plan: &CompiledWorkflow,
+    registry: &NodeRegistry,
+    observation: Option<mf_runtime::RunObservation>,
+) -> Result<mf_runtime::FlowOutputs, WorkflowExecutionError> {
+    mf_runtime::ExecutionContext::run(observation, |state| {
+        let flow = instantiate_compiled(plan, registry)
+            .inspect_err(|error| {
+                if let WorkflowCompileError::NodeConstruction { definition_id, .. }
+                | WorkflowCompileError::UnknownNodeKind { definition_id, .. }
+                | WorkflowCompileError::InvalidNodeMetadata { definition_id, .. } = error
+                {
+                    state.preparation_failed(definition_id.as_str(), error);
+                }
+            })
+            .context(PreparationSnafu)?;
+        flow.execute_in_context(state).context(ExecutionSnafu)
+    })
+}
+
 pub fn resolve_nodes(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,

@@ -42,6 +42,51 @@ pub enum PlanError {
 }
 
 impl CompiledWorkflow {
+    pub fn start_observation(
+        &self,
+        observer: &mf_telemetry::observation::Observer,
+        run_id: mf_telemetry::identity::RunId,
+    ) -> Result<mf_runtime::RunObservation, mf_telemetry::ContractError> {
+        if self.execution_order.len() != self.definition.nodes.len() {
+            return Err(mf_telemetry::ContractError::Invalid {
+                message: "observation order is incomplete".into(),
+            });
+        }
+        let nodes_by_id: BTreeMap<_, _> = self
+            .definition
+            .nodes
+            .iter()
+            .map(|node| (&node.id, node))
+            .collect();
+        if nodes_by_id.len() != self.definition.nodes.len() {
+            return Err(mf_telemetry::ContractError::Invalid {
+                message: "duplicate observation node ID".into(),
+            });
+        }
+        let order: Vec<String> = self
+            .execution_order
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let id = mf_telemetry::identity::WorkflowId::from_definition(&self.definition, &order)?;
+        let nodes = self
+            .execution_order
+            .iter()
+            .map(|id| {
+                nodes_by_id
+                    .get(id)
+                    .map(|node| mf_telemetry::event::NodeIdentity {
+                        id: id.to_string(),
+                        kind: node.kind.clone(),
+                    })
+                    .ok_or_else(|| mf_telemetry::ContractError::Invalid {
+                        message: format!("unknown observation node {id}"),
+                    })
+            })
+            .collect::<Result<_, _>>()?;
+        observer.start(id, run_id, nodes)
+    }
+
     pub fn to_json(&self) -> Result<String, PlanError> {
         serde_json::to_string(self).context(SerializeSnafu)
     }
@@ -112,7 +157,7 @@ impl CompiledWorkflow {
             let id_lit = LitStr::new(node.id.as_str(), Span::call_site());
             let kind_lit = LitStr::new(&node.kind, Span::call_site());
             preparations.push(quote! {
-                let #node_ident = mf_runtime::instantiate_node_with_metadata(registry, #id_lit, #kind_lit, #config_lit)?;
+                let #node_ident = state.prepare_node(registry, #id_lit, #kind_lit, #config_lit)?;
             });
             let mut bindings: Vec<TokenStream> = Vec::new();
             for edge in self
@@ -137,7 +182,7 @@ impl CompiledWorkflow {
                 bindings.push(quote! { mf_runtime::ExecutionDependency { input: None, source_node: #source, source_output: #port } });
             }
             node_statements.push(quote! {
-                mf_runtime::execute_node_in_context(&#node_ident, &[#(#bindings),*], &mut state)?;
+                mf_runtime::execute_node_in_context(&#node_ident, &[#(#bindings),*], state)?;
             });
         }
 
@@ -166,7 +211,7 @@ impl CompiledWorkflow {
             let port = LitStr::new(&output.port, Span::call_site());
             let optional = output.optional;
             output_statements.push(quote! {
-                if let Some(value) = mf_runtime::select_context_output(&state, #output_name, #node_id, #port, #optional)? {
+                if let Some(value) = state.select_output(#output_name, #node_id, #port, #optional)? {
                     workflow_outputs.insert(#output_name.to_owned(), value);
                 }
             });
@@ -176,7 +221,20 @@ impl CompiledWorkflow {
             pub fn run_workflow(
                 registry: &mf_runtime::NodeRegistry,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                let mut state = mf_runtime::ExecutionContext::default();
+                run_workflow_with_observation(registry, None)
+            }
+
+            pub fn run_workflow_with_observation(
+                registry: &mf_runtime::NodeRegistry,
+                observation: Option<mf_runtime::RunObservation>,
+            ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
+                mf_runtime::ExecutionContext::run(observation, |state| run_workflow_in_context(registry, state))
+            }
+
+            pub fn run_workflow_in_context(
+                registry: &mf_runtime::NodeRegistry,
+                state: &mut mf_runtime::ExecutionContext,
+            ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
                 #(#preparations)*
                 #(#node_statements)*
                 #outputs_binding

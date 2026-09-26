@@ -2,7 +2,7 @@
 
 ## Availability and package boundaries
 
-`mf-telemetry` provides versioned descriptions, lifecycle events, workflow/run identities, sequence reservation, validation, and mapping into OpenTelemetry log records. It installs no provider, opens no connection, and does not modify workflow execution. Runtime instrumentation, runner `--describe`, exporter initialization, OTLP reception, and `mf run --tui` are subsequent implementation steps and are not available yet.
+`mf-telemetry` provides versioned descriptions, lifecycle events, workflow/run identities, sequence reservation, validation, and mapping into OpenTelemetry log records. It installs no provider, opens no connection, and does not modify workflow execution. Shared runtime instrumentation and generated execution accept caller-owned observations. Runner `--describe`, automatic exporter initialization, OTLP reception, and `mf run --tui` remain subsequent implementation steps.
 
 `mf-runtime` depends on the minimal telemetry package. `mf-cli` depends on the separate `mf-tui` package, currently an empty presentation entry point. Neither the compiler nor runtime depends on `mf-tui`. Generated runners resolve telemetry transitively through the runtime, without SDK, HTTP-client, or terminal dependencies by default.
 
@@ -13,6 +13,55 @@ nix develop --command cargo check -p mf-telemetry --no-default-features
 nix develop --command cargo test -p mf-telemetry --all-features
 nix develop --command cargo test -p mf-compiler --test telemetry_boundary
 ```
+
+## Observing execution with caller-owned providers
+
+`Observer::new(&traces, &logs)` obtains workflow instruments from application-owned OTel providers without installing globals. `CompiledWorkflow::start_observation(&observer, run_id)` computes the canonical workflow identity, creates one run scope, and emits `mf.workflow.started`. Keep the providers alive for the entire run and flush/shut them down in the application after either success or handled failure.
+
+Use `execute_compiled(&plan, &registry, Some(observation))` to cover node construction, dependency resolution, invocation, publication, and output selection in memory. `Flow::execute_with_observation(Some(observation))` covers execution of nodes that have already been constructed; it cannot report construction that happened before the run. Existing `Flow::execute()` and generated `run_workflow()` remain unobserved entry points.
+
+Generated source also provides `run_workflow_with_observation(registry, Some(observation))`. For applications that need
+registry initialization inside the run, use `ExecutionContext::run(Some(observation), |state| ...)` and call generated
+`run_workflow_in_context(registry, state)` or `Flow::execute_in_context(state)`. These low-level context entry points
+execute one matching plan per fresh scope; the surrounding scope owns the terminal event. An early error before a node
+is identified becomes a workflow preparation failure.
+
+The runnable example uses in-memory SDK exporters and performs no network export:
+
+```sh
+nix develop --command cargo run -p mf-compiler --example observe
+```
+
+Expected output:
+
+```text
+mf.workflow.started
+mf.node.started
+mf.node.finished
+mf.workflow.finished
+spans: 2
+{"answer":42}
+```
+
+See `crates/mf-compiler/examples/observe.rs` for provider ownership and cleanup. The example's SDK dependencies are development dependencies and do not enter standalone runner dependency graphs.
+
+### Spans, events, and failure boundaries
+
+A workflow span covers its run scope. Each reached node gets a sibling child span under that workflow, including
+dependency failures and conditional skips. `mf.node.started` is emitted immediately before invoking the implementation;
+node success is emitted only after output validation/publication. Construction failure can emit a failed node record
+without a start. Skips have an explicit skipped outcome and do not set error status. Root output-selection failure
+leaves successful node outcomes intact.
+
+Lifecycle LogRecords go directly to the dedicated OTel logger, independently of span sampling and diagnostic
+`event_enabled` checks. They can arrive while node spans remain open. Use an unfiltered lifecycle processor pipeline;
+caller-supplied processors/exporters can still discard data, and those losses remain visible through sequence gaps or a
+missing final boundary. Use background batch processors for network export because instrumentation invokes the
+configured OTel processors synchronously. Custom processors must be nonblocking and must not panic.
+
+The run context is active during preparation/execution and a node context is active during each shared step. A plugin using a caller-provided OTel tracer can start a child span with the ordinary current-context API without changing `Node::execute` or `execute_with_context`. The library does not choose plugin tracers or propagate context into plugin-created threads; plugins must explicitly attach a captured context there. Context guards restore the prior caller context on return or unwind.
+
+No library call shuts down the application's providers. Panic/unwind preserves the original panic and ends held spans without fabricating a workflow finish or successful node outcome. An abandoned scope therefore has no terminal boundary. Handled errors retain the original execution result; dropped or unencodable telemetry never becomes a workflow error. No per-node completion snapshot, retry scheduler, or replay state is introduced.
 
 ## Workflow and run identity
 

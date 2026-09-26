@@ -1,4 +1,8 @@
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
+use mf_telemetry::{
+    event::{FailurePhase, SkipCause},
+    observation::{NodeObservation, RunObservation},
+};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -28,9 +32,66 @@ pub enum ContextValue<'a> {
 pub struct ExecutionContext {
     // A present None is an explicit skip; an absent key is a missing output.
     outputs: BTreeMap<String, Option<Value>>,
+    observation: Option<RunObservation>,
 }
 
 impl ExecutionContext {
+    /// Runs a synchronous execution scope without changing its result or installing providers.
+    pub fn run<T, E: std::fmt::Display>(
+        observation: Option<RunObservation>,
+        execute: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let mut state = Self {
+            observation,
+            outputs: BTreeMap::new(),
+        };
+        let _context = state.observation.as_ref().map(RunObservation::enter);
+        let result = execute(&mut state);
+        if let Some(run) = state.observation.as_mut() {
+            run.finish(
+                result
+                    .as_ref()
+                    .err()
+                    .map(|error| error as &dyn std::fmt::Display),
+            );
+        }
+        result
+    }
+
+    pub fn prepare_node(
+        &mut self,
+        registry: &crate::NodeRegistry,
+        id: &str,
+        kind: &str,
+        config: &str,
+    ) -> Result<FlowNode, WorkflowRunError> {
+        let result = crate::instantiate_node_with_metadata(registry, id, kind, config);
+        if let Err(error) = &result {
+            self.preparation_failed(id, error);
+        }
+        result
+    }
+
+    pub fn preparation_failed(&mut self, id: &str, error: &dyn std::fmt::Display) {
+        if let Some(run) = self.observation.as_mut() {
+            run.preparation_failed(id, error.to_string());
+        }
+    }
+
+    pub fn select_output(
+        &mut self,
+        name: &str,
+        node: &str,
+        port: &str,
+        optional: bool,
+    ) -> Result<Option<Value>, WorkflowRunError> {
+        let result = select_context_output(self, name, node, port, optional);
+        if let (Err(error), Some(run)) = (&result, self.observation.as_mut()) {
+            run.output_selection_failed(error.to_string());
+        }
+        result
+    }
+
     pub fn output(&self, id: &str) -> Result<ContextValue<'_>, NodeExecutionError> {
         match self.outputs.get(id) {
             Some(Some(value)) => Ok(ContextValue::Value(value)),
@@ -124,12 +185,15 @@ pub fn execute_node_in_context(
     ctx: &mut ExecutionContext,
 ) -> Result<(), WorkflowRunError> {
     let id = node.definition_id.as_str();
+    let mut step = ctx.observation.as_mut().and_then(|run| run.begin_node(id));
+    let _context = step.as_ref().map(NodeObservation::enter);
     let mut dependencies = dependencies.to_vec();
     dependencies.sort();
     let mut inputs = Inputs::new();
     let mut skipped = false;
+    let mut causes = BTreeSet::new();
     for dependency in dependencies {
-        match ctx
+        let value = ctx
             .output(&output_id(dependency.source_node, dependency.source_output))
             .map_err(|error| {
                 state_error(
@@ -139,30 +203,81 @@ pub fn execute_node_in_context(
                         dependency.input.unwrap_or("<control>")
                     ),
                 )
-            })? {
+            });
+        let value = match value {
+            Ok(value) => value,
+            Err(error) => {
+                if let (Some(run), Some(step)) = (ctx.observation.as_mut(), step) {
+                    run.node_failed(step, FailurePhase::Dependency, error.to_string());
+                }
+                return Err(error);
+            }
+        };
+        match value {
             ContextValue::Value(value) => {
                 if let Some(input) = dependency.input {
                     inputs.insert(input.to_owned(), value.clone());
                 }
             }
-            ContextValue::Skipped => skipped = true,
+            ContextValue::Skipped => {
+                skipped = true;
+                if step.is_some() {
+                    causes.insert(SkipCause {
+                        source_node: dependency.source_node.into(),
+                        source_output: dependency.source_output.into(),
+                    });
+                }
+            }
         }
     }
     let result = if skipped {
         None
     } else {
-        Some(
-            node.node
-                .execute_with_context(inputs, ctx)
-                .map_err(|source| WorkflowRunError::NodeExecution {
-                    definition_id: node.definition_id.clone(),
-                    source,
-                })?,
-        )
+        if let (Some(run), Some(step)) = (ctx.observation.as_mut(), step.as_mut()) {
+            run.node_started(step);
+        }
+        let result = node
+            .node
+            .execute_with_context(inputs, ctx)
+            .map_err(|source| WorkflowRunError::NodeExecution {
+                definition_id: node.definition_id.clone(),
+                source,
+            });
+        match result {
+            Ok(result) => Some(result),
+            Err(error) => {
+                if let (Some(run), Some(step)) = (ctx.observation.as_mut(), step) {
+                    run.node_failed(step, FailurePhase::Execution, error.to_string());
+                }
+                return Err(error);
+            }
+        }
     };
-    ctx.publish(node, result)
+    let mut produced_ports = Vec::new();
+    let mut skipped_ports = Vec::new();
+    if step.is_some() {
+        if let Some(result) = &result {
+            produced_ports.extend(result.outputs.keys().cloned());
+            skipped_ports.extend(result.skipped.iter().cloned());
+        } else {
+            skipped_ports.extend(node.ports.outputs.iter().map(|port| port.name.to_string()));
+            skipped_ports.sort();
+        }
+    }
+    let result = ctx.publish(node, result);
+    if let (Some(run), Some(step)) = (ctx.observation.as_mut(), step) {
+        match &result {
+            Err(error) => run.node_failed(step, FailurePhase::Publication, error.to_string()),
+            Ok(()) if skipped => {
+                run.node_skipped(step, causes.into_iter().collect(), skipped_ports)
+            }
+            Ok(()) => run.node_succeeded(step, produced_ports, skipped_ports),
+        }
+    }
+    result
 }
 
+/// Reads a selection without instrumentation; observed executors use `ExecutionContext::select_output`.
 pub fn select_context_output(
     ctx: &ExecutionContext,
     name: &str,
