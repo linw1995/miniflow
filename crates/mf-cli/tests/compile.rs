@@ -399,3 +399,34 @@ fn warm_build_preserves_generated_inputs_and_reuses_compiled_runner() {
     }
     assert_eq!(fs::read_to_string(&definition).unwrap(), source);
 }
+
+#[test]
+fn repairs_partial_projects_and_removes_obsolete_configuration() {
+    let temporary = TemporaryDirectory::new();
+    let definition = temporary.path().join("flow.json");
+    let target = temporary.path().join("flow");
+    fs::write(&definition, definition_json()).unwrap();
+    assert!(compile(&definition, &target, None).status.success());
+    let project = temporary.path().join(".mf-build-test");
+    assert!(project.join("src/config_2.json").is_file());
+    fs::remove_file(project.join("src/main.rs")).unwrap();
+    fs::write(project.join("Cargo.lock"), "interrupted working state").unwrap();
+    let mut changed: serde_json::Value = serde_json::from_str(&definition_json()).unwrap();
+    changed["nodes"].as_array_mut().unwrap().pop();
+    changed["outputs"].as_array_mut().unwrap().pop();
+    changed["nodes"][0]["config"]["value"] = json!(99);
+    fs::write(&definition, changed.to_string()).unwrap();
+    let result = compile(&definition, &target, None);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(project.join("src/main.rs").is_file());
+    assert!(!project.join("src/config_2.json").exists());
+    let output = Command::new(&target).output().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        json!({"answer":99,"original":99})
+    );
+}

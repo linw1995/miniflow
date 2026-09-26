@@ -154,6 +154,40 @@ pub fn write_dependency_project(
     project: &Path,
     files: &BTreeMap<PathBuf, String>,
 ) -> Result<(), DependencyProjectError> {
+    for required in [
+        "Cargo.toml",
+        "workflow-plan.json",
+        "src/main.rs",
+        "src/workflow.rs",
+    ] {
+        if !files.contains_key(Path::new(required)) {
+            return Err(DependencyProjectError::Dependency {
+                alias: required.into(),
+                message: "incomplete generated project".into(),
+            });
+        }
+    }
+    for name in files.keys() {
+        let valid = [
+            "Cargo.toml",
+            "workflow-plan.json",
+            "src/main.rs",
+            "src/workflow.rs",
+        ]
+        .iter()
+        .any(|required| name == Path::new(required))
+            || name.parent() == Some(Path::new("src"))
+                && name
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(is_generated_config);
+        if !valid {
+            return Err(DependencyProjectError::Dependency {
+                alias: name.display().to_string(),
+                message: "invalid generated project path".into(),
+            });
+        }
+    }
     fs::create_dir_all(project.join("src")).context(WriteSnafu {
         path: project.to_owned(),
     })?;
@@ -161,5 +195,23 @@ pub fn write_dependency_project(
         let path = project.join(name);
         crate::state::write_if_changed(&path, value.as_bytes()).context(StateSnafu)?;
     }
+    for entry in fs::read_dir(project.join("src")).context(WriteSnafu {
+        path: project.join("src"),
+    })? {
+        let entry = entry.context(WriteSnafu {
+            path: project.join("src"),
+        })?;
+        if entry.file_name().to_str().is_some_and(is_generated_config)
+            && !files.contains_key(&PathBuf::from("src").join(entry.file_name()))
+        {
+            fs::remove_file(entry.path()).context(WriteSnafu { path: entry.path() })?;
+        }
+    }
     Ok(())
+}
+
+fn is_generated_config(name: &str) -> bool {
+    name.strip_prefix("config_")
+        .and_then(|name| name.strip_suffix(".json"))
+        .is_some_and(|index| !index.is_empty() && index.bytes().all(|b| b.is_ascii_digit()))
 }
