@@ -49,6 +49,8 @@ def prepare(output):
     vendor = output / "vendor"
     cargo = os.environ.get("CARGO", "cargo")
     env = dict(os.environ, CARGO_TARGET_DIR=str(output / "target"))
+    # A filtered test run may not have downloaded target-specific dependencies.
+    run([cargo, "fetch", "--locked"], env=env)
     subprocess.run(
         [cargo, "vendor", "--offline", "--locked", "--respect-source-config", "--versioned-dirs", str(vendor)],
         cwd=ROOT, env=env, stdout=subprocess.DEVNULL, check=True,

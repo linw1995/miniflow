@@ -49,6 +49,7 @@ jobs:
         run: python3 scripts/check-release-support.py --owner "$RELEASE_CRATE_OWNER"
       - name: Test and build
         run: |
+          cargo fetch --locked
           cargo test --locked --workspace --all-targets --all-features
           cargo build --locked --release
       - name: Generate third-party notices

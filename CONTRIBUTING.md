@@ -23,8 +23,11 @@ These checks cover formatting, Rust diagnostics, tests, workflow configuration, 
 The standard nextest suite includes packaged CLI acceptance and release prerequisite checks:
 
 ```sh
+nix develop --command cargo fetch --locked
 nix develop --command cargo nextest run --workspace --all-targets --all-features
 ```
+
+Fetch the complete locked dependency graph before a first test run: offline fixture builds also resolve dependencies for other targets. The coverage and release workflows perform this preparation automatically.
 
 To run only these integration tests:
 
