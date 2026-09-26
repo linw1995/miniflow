@@ -34,7 +34,7 @@ fn one_runner_validates_without_execution_and_reports_plugin_errors() {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        project.join("target/release/mf-generated-workflow")
+        common::runner_executable(&project, "release")
     };
     let runner = build(&definition);
     let validation = Command::new(&runner).arg("--validate").output().unwrap();
