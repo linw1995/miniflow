@@ -11,7 +11,3 @@ pub use compiler::{
 pub use mf_runtime::*;
 pub use plan::{CompiledWorkflow, GeneratedWorkflowArtifacts, PlanError};
 pub use project::{RunnerProjectError, write_runner_project};
-
-pub fn plugin_registry() -> Result<NodeRegistry, NodeRegistryError> {
-    mf_bundle::registry()
-}

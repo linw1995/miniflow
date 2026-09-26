@@ -1,6 +1,6 @@
 use mf_compiler::{
     BinaryBuildError, DefinitionParseError, NodeRegistryError, PlanError, WorkflowCompileError,
-    WorkflowDefinition, build_executable, compile_definition, plugin_registry,
+    WorkflowDefinition, build_executable, compile_definition,
 };
 use snafu::{ResultExt, Snafu};
 use std::env;
@@ -117,7 +117,7 @@ fn compile(options: CompileOptions) -> Result<(), CliError> {
         path: options.definition.clone(),
     })?;
     let definition = WorkflowDefinition::from_json(&source).context(ParseDefinitionSnafu)?;
-    let registry = plugin_registry().context(RegistrySnafu)?;
+    let registry = mf_bundle::registry().context(RegistrySnafu)?;
     let compiled = compile_definition(&definition, &registry).context(CompileSnafu)?;
     let artifacts = compiled.generate_artifacts().context(GenerateSnafu)?;
 

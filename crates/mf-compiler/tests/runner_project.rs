@@ -1,4 +1,4 @@
-use mf_compiler::{WorkflowDefinition, compile_definition, plugin_registry, write_runner_project};
+use mf_compiler::{WorkflowDefinition, compile_definition, write_runner_project};
 use serde_json::json;
 use std::ffi::OsString;
 use std::fs;
@@ -46,7 +46,7 @@ fn generated_project_builds_and_directly_runs_linked_nodes() {
         }"#,
     )
     .unwrap();
-    let registry = plugin_registry().unwrap();
+    let registry = mf_bundle::registry().unwrap();
     let artifacts = compile_definition(&definition, &registry)
         .unwrap()
         .generate_artifacts()
