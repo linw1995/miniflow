@@ -2,11 +2,11 @@
 
 ## 1. Extend the shared type model
 
-- [ ] 1.1 Run an isolated CEL engine feasibility spike before changing runtime types; verify inferred scalar/list/map result types, distinguish explicit `dyn(...)` from macro-internal `Dyn`, and verify JSON conversion and execution on the pinned toolchain, recording the result under Git-ignored `target/`.
-- [ ] 1.2 Add `Int64`, `Float64`, recursive `List` and `Map` variants while retaining existing constructors and broad variants; verify static plugin registrations and configuration-derived typed ports compile against the updated runtime.
-- [ ] 1.3 Implement static, runtime-checked, and incompatible structural compatibility; verify a table of scalar, broad, `Any`, nested collection, and empty-collection cases rejects concrete member mismatches without coercion.
-- [ ] 1.4 Implement one recursive JSON value validator with deterministic type names and JSON Pointer paths; verify signed boundaries, floating representation, null, homogeneous nested values, escaped keys, and descriptor-depth errors.
-- [ ] 1.5 Document refined descriptors and the `ValueType` borrow/clone migration in `docs/plugins.md`; verify code examples compile with the updated public API.
+- [x] 1.1 Run an isolated CEL engine feasibility spike before changing runtime types; verify inferred scalar/list/map result types, distinguish explicit `dyn(...)` from macro-internal `Dyn`, and verify JSON conversion and execution on the pinned toolchain, recording the result under Git-ignored `target/`.
+- [x] 1.2 Add `Int64`, `Float64`, recursive `List` and `Map` variants while retaining existing constructors and broad variants; verify static plugin registrations and configuration-derived typed ports compile against the updated runtime.
+- [x] 1.3 Implement static, runtime-checked, and incompatible structural compatibility; verify a table of scalar, broad, `Any`, nested collection, and empty-collection cases rejects concrete member mismatches without coercion.
+- [x] 1.4 Implement one recursive JSON value validator with deterministic type names and JSON Pointer paths; verify signed boundaries, floating representation, null, homogeneous nested values, escaped keys, and descriptor-depth errors.
+- [x] 1.5 Document refined descriptors and the `ValueType` borrow/clone migration in `docs/plugins.md`; verify code examples compile with the updated public API.
 
 ## 2. Enforce declared types during execution
 
