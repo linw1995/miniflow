@@ -1,1 +1,0 @@
-{"definition":{"dependencies":{},"edges":[],"nodes":[{"config":{"a":{"number":9007199254740993,"text":"line\nquoted \"value\""},"z":2},"id":"load.order","kind":"fixture.source"}],"outputs":[],"version":"2026-09-26"},"execution_order":["load.order"],"identity_version":1}

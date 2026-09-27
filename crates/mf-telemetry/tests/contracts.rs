@@ -2,7 +2,7 @@ use mf_telemetry::{
     Count,
     description::WorkflowDescription,
     event::EventSequence,
-    identity::{RunId, WorkflowId, canonical_plan_bytes},
+    identity::{RunId, WorkflowId},
     maximum_event_count,
     wire::{TraceContext, WireRecord},
 };
@@ -37,17 +37,10 @@ fn branch_graph() -> WorkflowDescription {
 }
 
 #[test]
-fn canonical_identity_matches_independent_golden_bytes_and_sha256() {
+fn canonical_identity_matches_independent_golden_sha256() {
     let fixture: Value =
         serde_json::from_str(include_str!("fixtures/identity-input.json")).unwrap();
     let order: Vec<String> = serde_json::from_value(fixture["execution_order"].clone()).unwrap();
-    let bytes = canonical_plan_bytes(&fixture["definition"], &order).unwrap();
-    assert_eq!(
-        bytes,
-        include_str!("fixtures/identity-canonical.json")
-            .trim_end()
-            .as_bytes()
-    );
     let id = WorkflowId::from_definition(&fixture["definition"], &order).unwrap();
     assert_eq!(
         id.as_str(),
@@ -286,6 +279,9 @@ fn graph_relative_event_validation_rejects_wrong_nodes_and_out_of_range_evidence
         .attributes
         .insert("mf.event.sequence".into(), json!(i64::MAX));
     assert!(wrong.decode().unwrap().validate_for(&graph()).is_err());
+    let mut wire = record("success");
+    wire.body["produced_ports"] = json!(["unconnected.dynamic"]);
+    wire.decode().unwrap().validate_for(&graph()).unwrap();
 }
 
 #[test]

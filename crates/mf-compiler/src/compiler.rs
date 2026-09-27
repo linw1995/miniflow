@@ -2,6 +2,7 @@ use crate::{
     CompiledWorkflow, Flow, FlowBuildError, FlowNode, NodeBuildError, NodeRegistry, ValueType,
 };
 use crate::{DefinitionId, WorkflowDefinition};
+use mf_runtime::TypeCompatibility;
 use mf_telemetry::{
     ContractError,
     description::{
@@ -93,10 +94,10 @@ pub enum WorkflowCompileError {
     IncompatiblePortTypes {
         from_node: DefinitionId,
         from_output: String,
-        output_type: ValueType,
+        output_type: Box<ValueType>,
         to_node: DefinitionId,
         to_input: String,
-        input_type: ValueType,
+        input_type: Box<ValueType>,
     },
     #[snafu(display("node `{node_id}` input `{port}` receives multiple connections"))]
     DuplicateInputConnection { node_id: DefinitionId, port: String },
@@ -169,6 +170,12 @@ fn prepare_definition(
                         format!("empty or duplicate {direction} port `{}`", port.name),
                     ));
                 }
+                port.value_type.check_depth().map_err(|error| {
+                    invalid(
+                        &node.definition_id,
+                        format!("{direction} port `{}`: {error}", port.name),
+                    )
+                })?;
             }
         }
         for port in &ports.outputs {
@@ -256,17 +263,18 @@ fn prepare_definition(
             }
             .fail();
         };
-        if !output_port
+        if output_port
             .value_type
-            .is_assignable_to(input_port.value_type)
+            .compatibility_with(&input_port.value_type)
+            == TypeCompatibility::Incompatible
         {
             return IncompatiblePortTypesSnafu {
                 from_node: edge.from_node.clone(),
                 from_output: edge.from_output.clone(),
-                output_type: output_port.value_type,
+                output_type: Box::new(output_port.value_type.clone()),
                 to_node: edge.to_node.clone(),
                 to_input: edge.to_input.clone(),
-                input_type: input_port.value_type,
+                input_type: Box::new(input_port.value_type.clone()),
             }
             .fail();
         }

@@ -21,10 +21,10 @@ pub use mf_runtime::{
     EdgeDefinition, ExecutionContext, ExecutionDependency, Flow, FlowBuildError, FlowConnection,
     FlowNode, FlowOutput, FlowOutputs, Inputs, Node, NodeBuildError, NodeDefinition,
     NodeDependency, NodeExecutionError, NodeFactory, NodeId, NodePorts, NodeRegistration,
-    NodeRegistry, NodeRegistryError, NodeResult, Outputs, PortSpec, RunObservation, ValueType,
-    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition, WorkflowRunError,
-    deserialize_config, execute_node_in_context, instantiate_node_with_metadata, output_id,
-    select_context_output,
+    NodeRegistry, NodeRegistryError, NodeResult, Outputs, PortSpec, RunObservation,
+    TypeCompatibility, TypeDepthError, TypeMismatch, ValueType, WorkflowDefinition,
+    WorkflowDefinitionVersion, WorkflowOutputDefinition, WorkflowRunError, deserialize_config,
+    execute_node_in_context, instantiate_node_with_metadata, output_id, select_context_output,
 };
 pub use pipeline::{
     CompileRequest, PipelineError, cargo_command, compile_project, resolve_project,
