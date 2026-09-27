@@ -7,9 +7,9 @@ See [proposal.md](proposal.md) for motivation and the [Code node specification](
 CEL's [language definition](https://github.com/cel-expr/cel-spec/blob/master/doc/langdef.md) provides expressions,
 declared variable types, and an optional static checking phase. The Rust
 [`cel-core` API](https://docs.rs/cel-core/latest/cel_core/struct.Env.html) offers parsing, type checking, and
-checked-program evaluation. Its compilation produces a checked AST, not native machine code. The package choice needs a
-compatibility spike before implementation because complete static checks and JSON conversion are central to the node
-contract.
+checked-program evaluation. Its compilation produces a checked AST, not native machine code. An isolated spike with
+Rust 1.98.1 and `cel-core` 0.5.1 confirmed scalar, list, and map result inference, JSON conversion, and explicit
+`dyn(...)` detection. The implementation still needs package-level and cross-platform tests.
 
 ## Goals / Non-Goals
 
@@ -54,8 +54,8 @@ declared types recursively; evaluated values must match the types inferred for t
 records and nullable unions can be added later without changing existing descriptors. For example,
 `{"list":{"map":"int"}}` describes a list of objects with integer values.
 
-Implement [extend-workflow-port-types](../extend-workflow-port-types/design.md) first. Map declared CEL input types and
-inferred CEL result types to the shared `ValueType` (`Int64`, `Float64`, `Boolean`, `String`, `Null`, `List(T)`, or
+Use the [shared typed-port contract](../../specs/typed-port-contracts/spec.md). Map declared CEL input types and inferred
+CEL result types to the shared `ValueType` (`Int64`, `Float64`, `Boolean`, `String`, `Null`, `List(T)`, or
 `Map(T)`) and expose them as Code ports. The compiler rejects incompatible concrete edges and accepts broad or `Any`
 sources only through the shared runtime-checked boundary. `builtin.constant` remains `Any` and can feed a typed Code
 input when its actual JSON value conforms. No parallel CEL-only output annotation is needed.
