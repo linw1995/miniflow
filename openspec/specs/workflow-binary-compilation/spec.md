@@ -62,18 +62,11 @@ registered kinds, configuration, existing ports, required input connections, and
 Validation mode MUST NOT call node execution methods. The normal mode SHALL execute statically generated orchestration.
 Compiler validation SHALL accept statically safe assignments from refined types to the same type, compatible refined
 collection types, legacy broad supertypes, or `Any`. It SHALL also accept broad or `Any` outputs feeding a refined input
-when the source value is unknown and the shared runtime validates the actual value before invoking the target.
-Known source values MUST be checked against target port types during validation; a known mismatch MUST fail before
-installation even when its inferred source descriptor is broad. Disjoint concrete types and incompatible collection
-shapes MUST fail validation; no implicit coercion SHALL occur.
+when the shared runtime validates the actual value before invoking the target. Disjoint concrete types and incompatible
+collection shapes MUST fail validation; no implicit coercion SHALL occur.
 Validation failures MUST include diagnostics that identify the relevant definition node, port, output, or edge, and MUST NOT produce a successful binary.
 The system MUST produce a deterministic topological execution order, using ascending definition ID to break ties between ready nodes.
-Port validation SHALL use a node instance's complete configuration-dependent port description when supplied,
-and otherwise its static registration. Port names MUST be nonempty and unique within each direction. Base
-descriptions and output derivations MUST depend only on configuration. Resolved output types MAY additionally
-depend on upstream data bindings and MUST be consistent between validation and execution for the same
-definition and linked plugins. Every node and branch MUST be validated even when it will be skipped during
-execution.
+Port validation SHALL use a node instance's complete configuration-dependent port description when supplied, and otherwise its static registration. Port names MUST be nonempty and unique within each direction. Descriptions MUST depend only on configuration and remain stable between validation and execution. Every node and branch MUST be validated even when it will be skipped during execution.
 Graph structure and topological order SHALL include both existing data edges and explicit control edges. Control edges
 MUST reference an existing source output and target node, MUST NOT create target input bindings, and MUST NOT contain
 duplicate identical entries. Required data-input and type compatibility rules SHALL continue to apply to data edges.
@@ -108,21 +101,6 @@ would place the referenced node first.
 
 - **WHEN** a `List(String)` output feeds a `List(Int64)` input
 - **THEN** compilation rejects the edge with both endpoints and their types
-
-#### Scenario: Reject a known constant conflict
-
-- **WHEN** a constant value `42` feeds a `String` input, directly or through an identity node
-- **THEN** runner validation fails before installation and identifies both edge endpoints and their types
-
-#### Scenario: Reject a nested known conflict
-
-- **WHEN** a constant value `[1, "x"]` feeds a `List(Int64)` input on an inactive branch
-- **THEN** runner validation fails without executing the branch and reports the failing path `/1`
-
-#### Scenario: Keep an unknown broad source checked
-
-- **WHEN** a plugin with no derivation exposes `Any` and feeds an `Int64` input
-- **THEN** validation accepts the edge and execution checks the actual value at the target
 
 #### Scenario: Reject an incomplete or ambiguous input
 
@@ -370,21 +348,3 @@ failure-preservation guarantees SHALL apply to conditional workflows.
 
 - **WHEN** in-memory and generated execution run multiple instances that expose the same local output name
 - **THEN** both publish distinct `${node_id}.${output_name}` entries and resolve the same exact condition references
-
-### Requirement: Use resolved type metadata in generated execution
-
-In-memory execution and generated binaries SHALL use the same resolved port types for output publication and
-input validation. Generated binaries MUST derive graph-dependent metadata from their embedded definition and
-linked plugins without evaluating nodes during validation, rebuilding after validation, changing generated
-execution order or bindings, or reading the source definition at runtime. A generated binary MUST NOT
-recognize built-in kind names to perform inference.
-
-#### Scenario: Match resolved ports across execution paths
-
-- **WHEN** a constant feeds an identity node and both in-memory execution and a generated binary run the workflow
-- **THEN** both enforce the same inferred output types and produce the same selected JSON value
-
-#### Scenario: Preserve a previously installed executable
-
-- **WHEN** a changed constant creates a known type conflict in a reused build directory
-- **THEN** validation rejects the new runner and leaves the previously installed executable intact
