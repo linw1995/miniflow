@@ -1,3 +1,4 @@
+use cel_core::types::{Expr, SpannedExpr};
 use cel_core::{CelType, Env, Program};
 use mf_runtime::{
     Inputs, Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, Outputs,
@@ -97,6 +98,46 @@ fn valid_identifier(name: &str) -> bool {
     matches!(&ast.expr().node, cel_core::types::Expr::Ident(parsed) if parsed == name)
 }
 
+fn uses_explicit_dyn(expression: &SpannedExpr) -> bool {
+    match &expression.node {
+        Expr::Call { expr, args } => {
+            matches!(&expr.node, Expr::Ident(name) | Expr::RootIdent(name) if name == "dyn")
+                || uses_explicit_dyn(expr)
+                || args.iter().any(uses_explicit_dyn)
+        }
+        Expr::Unary { expr, .. } | Expr::Member { expr, .. } => uses_explicit_dyn(expr),
+        Expr::Binary { left, right, .. } => uses_explicit_dyn(left) || uses_explicit_dyn(right),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            uses_explicit_dyn(cond) || uses_explicit_dyn(then_expr) || uses_explicit_dyn(else_expr)
+        }
+        Expr::Index { expr, index, .. } => uses_explicit_dyn(expr) || uses_explicit_dyn(index),
+        Expr::List(items) => items.iter().any(|item| uses_explicit_dyn(&item.expr)),
+        Expr::Map(entries) => entries
+            .iter()
+            .any(|entry| uses_explicit_dyn(&entry.key) || uses_explicit_dyn(&entry.value)),
+        Expr::Struct { type_name, fields } => {
+            uses_explicit_dyn(type_name)
+                || fields.iter().any(|field| uses_explicit_dyn(&field.value))
+        }
+        Expr::Comprehension(data) => [
+            &data.iter_range,
+            &data.accu_init,
+            &data.loop_condition,
+            &data.loop_step,
+            &data.result,
+        ]
+        .into_iter()
+        .any(|part| uses_explicit_dyn(part)),
+        Expr::MemberTestOnly { expr, .. } => uses_explicit_dyn(expr),
+        Expr::Bind { init, body, .. } => uses_explicit_dyn(init) || uses_explicit_dyn(body),
+        _ => false,
+    }
+}
+
 struct CodeNode {
     ports: NodePorts,
     programs: BTreeMap<String, Program>,
@@ -152,6 +193,12 @@ fn factory(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
         let ast = env
             .compile(expression)
             .map_err(|error| invalid(format!("output `{name}`: {error}")))?;
+        // CEL macros can contain internal dynamic types even when the user expression is concrete.
+        if uses_explicit_dyn(ast.expr()) {
+            return Err(invalid(format!(
+                "output `{name}`: explicit dyn(...) is unsupported"
+            )));
+        }
         let inferred = ast
             .result_type()
             .ok_or_else(|| invalid(format!("output `{name}` has no inferred type")))?;
@@ -327,6 +374,61 @@ mod tests {
             .to_string();
             assert!(error.contains("output `result`"), "{expression}: {error}");
         }
+    }
+
+    #[test]
+    fn infers_boolean_and_nested_collection_results() {
+        let node = factory(json!({
+            "language": "cel",
+            "inputs": {"amount": "int"},
+            "code": {
+                "boolean": "amount > 0",
+                "nested": "[{'count': amount}]"
+            }
+        }))
+        .unwrap();
+        let ports = node.ports().unwrap();
+        let types: BTreeMap<_, _> = ports
+            .outputs
+            .iter()
+            .map(|port| (port.name.as_ref(), &port.value_type))
+            .collect();
+        assert_eq!(types["boolean"], &ValueType::Boolean);
+        assert_eq!(
+            types["nested"],
+            &ValueType::List(Box::new(ValueType::Map(Box::new(ValueType::Int64))))
+        );
+    }
+
+    #[test]
+    fn rejects_static_errors_and_explicit_dynamic_calls() {
+        for expression in [
+            "missing + 1",
+            "amount + 'x'",
+            "amount *",
+            "dyn(amount)",
+            "int(dyn(amount))",
+            "[amount, 'x']",
+            "b'bytes'",
+        ] {
+            let error = factory(json!({
+                "language": "cel",
+                "inputs": {"amount": "int"},
+                "code": {"result": expression}
+            }))
+            .err()
+            .unwrap()
+            .to_string();
+            assert!(error.contains("output `result`"), "{expression}: {error}");
+        }
+        assert!(
+            factory(json!({
+                "language": "cel",
+                "inputs": {"items": {"list": "int"}},
+                "code": {"result": "items.map(x, x * 2)"}
+            }))
+            .is_ok()
+        );
     }
 
     #[test]

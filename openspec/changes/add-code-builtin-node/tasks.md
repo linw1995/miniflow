@@ -9,10 +9,10 @@
 
 ## 2. Check expressions before installation
 
-- [ ] 2.1 Build a CEL environment from declared inputs and compile every output expression during node construction; verify unknown variables, invalid operators/functions, syntax errors, and inactive-branch errors fail runner validation without evaluation.
-- [ ] 2.2 Infer each output type from its checked expression and reject explicit `dyn(...)`, dynamic results, or types outside the shared JSON contract; verify scalar, typed list/map, nested collection, heterogeneous literal, and valid macro-internal `Dyn` cases.
-- [ ] 2.3 Expose refined input and inferred output ports through the existing registry and compiler path without a generated-runner kind check; verify concrete mismatches fail graph validation and `builtin.constant` feeds a matching typed input through the shared runtime guard.
-- [ ] 2.4 Document output inference, the build-time checking boundary, and the difference between a checked CEL program and native machine code; verify validation tests show no expression evaluation.
+- [x] 2.1 Build a CEL environment from declared inputs and compile every output expression during node construction; verify unknown variables, invalid operators/functions, syntax errors, and inactive-branch errors fail runner validation without evaluation.
+- [x] 2.2 Infer each output type from its checked expression and reject explicit `dyn(...)`, dynamic results, or types outside the shared JSON contract; verify scalar, typed list/map, nested collection, heterogeneous literal, and valid macro-internal `Dyn` cases.
+- [x] 2.3 Expose refined input and inferred output ports through the existing registry and compiler path without a generated-runner kind check; verify concrete mismatches fail graph validation and a dynamic `builtin.constant` value reaches the shared type guard before Code execution.
+- [x] 2.4 Document output inference, the build-time checking boundary, and the difference between a checked CEL program and native machine code; verify validation tests show no expression evaluation.
 
 ## 3. Evaluate and convert JSON values
 
