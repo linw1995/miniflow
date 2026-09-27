@@ -330,18 +330,6 @@ mod tests {
     }
 
     #[test]
-    fn reports_execution_unavailable_until_backend_is_installed() {
-        let node = factory(json!({
-            "language": "cel",
-            "inputs": {},
-            "code": {"result": "1"}
-        }))
-        .unwrap();
-        let error = node.execute(Inputs::new()).unwrap_err().to_string();
-        assert!(error.contains("CEL execution is not available"));
-    }
-
-    #[test]
     fn documented_config_parses_in_a_workflow_definition() {
         mf_runtime::WorkflowDefinition::from_json(
             r#"{
