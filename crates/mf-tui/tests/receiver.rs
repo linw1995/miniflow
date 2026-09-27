@@ -176,10 +176,19 @@ fn receives_protobuf_logs_and_traces_before_acknowledging() {
         return;
     }
     let mut receiver = LoopbackReceiver::bind(graph(), run_id()).unwrap();
-    let records = logs(vec![
-        record(1, false, &run_id().to_string(), 1),
-        record(2, true, &run_id().to_string(), 1),
-    ]);
+    let mut started = record(1, false, &run_id().to_string(), 1);
+    started.attributes.push(attribute(
+        "future.bytes",
+        AnyValue {
+            value: Some(any_value::Value::BytesValue(vec![1, 2])),
+        },
+    ));
+    for index in 0..70 {
+        started
+            .attributes
+            .push(attribute(&format!("future.{index}"), string("ignored")));
+    }
+    let records = logs(vec![started, record(2, true, &run_id().to_string(), 1)]);
     assert_eq!(
         send(
             receiver.endpoint(),

@@ -39,7 +39,6 @@ pub const MAX_RECORDS_PER_REQUEST: usize = 1024;
 pub const MAX_ACTIVE_CONNECTIONS: usize = 16;
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 pub const CONNECTION_LIFETIME: Duration = Duration::from_secs(5);
-const MAX_ATTRIBUTES: usize = 64;
 const MAX_VALUE_DEPTH: usize = 8;
 const MAX_COLLECTION_ITEMS: usize = 1024;
 
@@ -345,7 +344,7 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), String> {
         note_error(context, "lifecycle record omitted session identity");
         return Err("missing lifecycle session identity".into());
     }
-    let attributes = attributes(&record.attributes).inspect_err(|_| {
+    let attributes = lifecycle_attributes(&record.attributes).inspect_err(|_| {
         note_error(context, "lifecycle record has invalid attributes");
     })?;
     let body = record.body.as_ref().ok_or_else(|| {
@@ -522,22 +521,31 @@ fn string_attribute<'a>(attributes: &'a [KeyValue], name: &str) -> Option<&'a st
         })
 }
 
-fn attributes(attributes: &[KeyValue]) -> Result<Map<String, Value>, String> {
-    if attributes.len() > MAX_ATTRIBUTES {
-        return Err("too many OTLP attributes".into());
-    }
+fn lifecycle_attributes(attributes: &[KeyValue]) -> Result<Map<String, Value>, String> {
     let mut result = Map::new();
     for attribute in attributes {
+        if !matches!(
+            attribute.key.as_str(),
+            "mf.schema.version"
+                | "mf.workflow.id"
+                | "mf.run.id"
+                | "mf.event.sequence"
+                | "mf.node.id"
+                | "mf.node.kind"
+                | "mf.outcome"
+                | "mf.failure.phase"
+        ) {
+            continue;
+        }
         let item = attribute
             .value
             .as_ref()
             .ok_or("missing OTLP attribute value")?;
-        if attribute.key.is_empty()
-            || result
-                .insert(attribute.key.clone(), value(item, 0)?)
-                .is_some()
+        if result
+            .insert(attribute.key.clone(), value(item, 0)?)
+            .is_some()
         {
-            return Err("empty or duplicate OTLP attribute key".into());
+            return Err("duplicate lifecycle attribute key".into());
         }
     }
     Ok(result)
