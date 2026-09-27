@@ -1,8 +1,9 @@
-# Plugin development
+# Node development
 
 ## Implement a node
 
-Basic nodes share the `mfn-core` crate under `crates/builtin-nodes/core/`. Nodes with service-specific dependencies belong in separate packages.
+Basic nodes share the `mfn-core` crate under `crates/builtin-nodes/core/`. Nodes with distinct dependencies belong in separate packages.
+
 The optional [`mfn-code`](../crates/builtin-nodes/code/) package registers `builtin.code` with CEL expressions,
 instance-specific typed inputs, and output types inferred by the CEL checker. A Flow must select the package
 explicitly; `mfn-core` does not register this kind. See the [CEL examples](workflows.md#built-in-nodes).
@@ -30,6 +31,8 @@ See the [contribution guide](../CONTRIBUTING.md) for local checks and [dependenc
 ## Instance metadata
 
 Nodes with configurable ports can override `Node::ports()` with `NodePorts` using `PortSpec::owned` for dynamic names; this replaces both static port lists for that instance. Ordinary registrations remain unchanged. Names must be nonempty and unique within each direction. Metadata must depend only on configuration.
+
+The [Code node](../crates/builtin-nodes/code/src/lib.rs) uses this interface to expose ports from its declared inputs and checked CEL expressions.
 
 Port types include the broad JSON categories `Any`, `Null`, `Boolean`, `Number`, `String`, `Array`, and `Object`, plus `Int64`, `Float64`, and recursive `List(T)` and `Map(T)`. `Map(T)` describes an object with string keys and values of type `T`. Existing `PortSpec::new` registrations remain valid for static broad or scalar ports. Construct typed collection ports from `Node::ports()`:
 

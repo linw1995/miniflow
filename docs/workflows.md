@@ -27,6 +27,19 @@ The required `dependencies` object maps aliases to node packages. Aliases identi
 
 Each entry requires `package` and exactly one source: a crates.io `version`, a `git` URL with a full commit `rev`, or a local `path`. Features default to empty and default features are enabled. Unknown fields and incomplete or conflicting sources are rejected. The package names above are illustrative.
 
+Built-in nodes are packages too. For example, [the CEL scalar Flow](../examples/cel-scalar.json) declares both packages it uses (these paths are relative to the definition in `examples/`):
+
+```json
+{
+  "dependencies": {
+    "core": { "package": "mfn-core", "path": "../crates/builtin-nodes/core" },
+    "code": { "package": "mfn-code", "path": "../crates/builtin-nodes/code" }
+  }
+}
+```
+
+`mfn-core` provides the constant feeding the expression; `mfn-code` registers `builtin.code`. A Flow using only `builtin.code` needs only `mfn-code`. Replace local paths with available registry versions or pinned Git sources when compiling outside this checkout.
+
 Paths resolve relative to the canonical definition's directory, including when the definition is accessed through a symlink. `order.json` uses `order.lock`; `order.flow.json` uses `order.flow.lock`. An extensionless definition has `.lock` appended. Different Flows can use independent dependencies in one directory. Compilation never rewrites the definition.
 
 ## Migrate older definitions
@@ -35,15 +48,16 @@ Definitions with version `2026-09-24` are rejected with a migration diagnostic. 
 
 ## Built-in nodes
 
-Declare `mfn-core` once to use the basic built-in nodes below. To migrate older definitions, replace `mfn-constant` and `mfn-identity` dependencies with `mfn-core`, retaining node kinds and edges, then rebuild without `--locked` to update the adjacent lock. Subsequent builds can use `--locked` again.
+Declare the package for each built-in kind you use. `mfn-core` provides the basic nodes; `mfn-code` provides the optional CEL Code node. To migrate older definitions, replace `mfn-constant` and `mfn-identity` dependencies with `mfn-core`, retaining node kinds and edges, then rebuild without `--locked` to update the adjacent lock. Subsequent builds can use `--locked` again.
 
-| Kind | Configuration | Input ports | Output ports |
-| --- | --- | --- | --- |
-| `builtin.constant` | Required `value`: any JSON value | None | `value`: any value |
-| `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input |
-| `builtin.if_else` | Nonempty ordered `branches` | None; activated by control edges | One boolean activation output per branch, plus `else` |
+| Package | Kind | Configuration | Input ports | Output ports |
+| --- | --- | --- | --- | --- |
+| `mfn-core` | `builtin.constant` | Required `value`: any JSON value | None | `value`: any value |
+| `mfn-core` | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input |
+| `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by control edges | One boolean activation output per branch, plus `else` |
+| `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |
 
-`builtin.code` is provided separately by `mfn-code`. It requires an explicit `language` field; the supported value is
+`builtin.code` requires an explicit `language` field; the supported value is
 `cel`. Input names have concrete type declarations, while output names and expressions live in `code`. The CEL checker
 infers each output port type from its expression:
 
@@ -92,7 +106,7 @@ target: `Any` to `Int64`, `Number` to `Float64`, and `Array` to `List(Int64)` ar
 checked against their declared types before publication, including outputs without consumers. A mismatch reports the
 node, port, and nested JSON Pointer path where applicable.
 
-See [compiling workflows](compiling.md) to build and run a definition, or [plugin development](plugins.md) to add node kinds.
+See [compiling workflows](compiling.md) to build and run a definition, or [node development](node-development.md) to add node kinds.
 
 ## Dependency locks
 
