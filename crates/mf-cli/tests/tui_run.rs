@@ -11,6 +11,7 @@ use nix::{
 use std::{
     fs,
     io::{Read, Write},
+    net::TcpListener,
     os::unix::fs::PermissionsExt,
     process::{Command, Stdio},
     thread,
@@ -19,6 +20,9 @@ use std::{
 
 #[test]
 fn tui_preserves_stdout_and_restores_terminal_after_missing_telemetry() {
+    if !loopback_available() {
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let runner = directory.path().join("fake-runner");
     let json = description_json();
@@ -121,6 +125,9 @@ fn tui_rejects_missing_terminal_before_launching_runner() {
 
 #[test]
 fn tui_restores_terminal_when_execution_spawn_fails_after_preflight() {
+    if !loopback_available() {
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let runner = directory.path().join("vanishing-runner");
     let json = description_json();
@@ -185,6 +192,9 @@ fn tui_restores_terminal_when_execution_spawn_fails_after_preflight() {
 
 #[test]
 fn tui_escalates_ignored_interrupt_and_restores_terminal() {
+    if !loopback_available() {
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let runner = directory.path().join("stubborn-runner");
     let json = description_json();
@@ -275,6 +285,9 @@ fn tui_escalates_ignored_interrupt_and_restores_terminal() {
 
 #[test]
 fn tui_marks_stdout_incomplete_when_descendant_keeps_pipe_open() {
+    if !loopback_available() {
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let runner = directory.path().join("pipe-holding-runner");
     let json = description_json();
@@ -365,6 +378,9 @@ fn tui_marks_stdout_incomplete_when_descendant_keeps_pipe_open() {
 
 #[test]
 fn failed_stdout_delivery_preserves_a_nonzero_child_result() {
+    if !loopback_available() {
+        return;
+    }
     let directory = tempfile::tempdir().unwrap();
     let runner = directory.path().join("failing-runner");
     let json = description_json();
@@ -454,4 +470,15 @@ fn description_json() -> String {
         execution_order: vec!["step".into()],
     };
     String::from_utf8(description.to_json().unwrap()).unwrap()
+}
+
+fn loopback_available() -> bool {
+    match TcpListener::bind("127.0.0.1:0") {
+        Ok(listener) => {
+            drop(listener);
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => false,
+        Err(error) => panic!("could not probe loopback availability: {error}"),
+    }
 }
