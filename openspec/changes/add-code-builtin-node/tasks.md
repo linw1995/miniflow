@@ -16,10 +16,10 @@
 
 ## 3. Evaluate and convert JSON values
 
-- [ ] 3.1 Convert runtime-validated JSON inputs into a CEL activation, retaining direct-call checks for bypassed workflow guards; verify wrong scalar types, missing/extra inputs, integer range, present null, heterogeneous lists/maps, and failing JSON paths.
-- [ ] 3.2 Evaluate each checked output program and recursively convert results to JSON only after all succeed; verify multiple outputs, typed list/map transformations, CEL error values, non-string map keys, non-finite doubles, atomic publication, and skipped nodes.
-- [ ] 3.3 Enforce documented expression, JSON payload, collection-size, and nesting-depth limits; verify over-limit inputs and outputs fail with node/output context and do not publish partial data.
-- [ ] 3.4 Document scalar and recursive collection types, JSON conversion rules, evaluation errors, and the absence of a hard CPU/memory sandbox; verify examples match the implemented behavior.
+- [x] 3.1 Convert runtime-validated JSON inputs into a CEL activation, retaining direct-call checks for bypassed workflow guards; verify wrong scalar types, missing/extra inputs, integer range, present null, heterogeneous lists/maps, and failing JSON paths.
+- [x] 3.2 Evaluate each checked output program and recursively convert results to JSON only after all succeed; verify multiple outputs, typed list/map transformations, CEL error values, non-string map keys, non-finite doubles, atomic publication, and skipped nodes.
+- [x] 3.3 Enforce documented expression, JSON payload, collection-size, and nesting-depth limits; verify over-limit inputs and outputs fail with node/output context and do not publish partial data.
+- [x] 3.4 Document scalar and recursive collection types, JSON conversion rules, evaluation errors, and the absence of a hard CPU/memory sandbox; verify examples match the implemented behavior.
 
 ## 4. Package and integrate
 

@@ -48,6 +48,17 @@ fn checks_inactive_code_and_runtime_input_types() {
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     assert!(flow.execute().unwrap().is_empty());
 
+    let mut active = graph("amount * 2");
+    active["nodes"][0]["config"]["value"] = json!(21);
+    active["nodes"][1]["config"]["branches"][0]["condition"]["value"] = json!(21);
+    let definition: WorkflowDefinition = serde_json::from_value(active).unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let result = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute()
+        .unwrap();
+    assert_eq!(result["result"], json!(42));
+
     let mut active_wrong = graph("amount * 2");
     active_wrong["nodes"][0]["config"]["value"] = json!("bad");
     active_wrong["nodes"][1]["config"]["branches"][0]["condition"]["value"] = json!("bad");
