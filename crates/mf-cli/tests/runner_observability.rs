@@ -163,7 +163,7 @@ fn last_json(stdout: &[u8]) -> Value {
 
 fn read_request(mut stream: TcpStream) -> (String, Vec<u8>) {
     stream
-        .set_read_timeout(Some(Duration::from_secs(2)))
+        .set_read_timeout(Some(Duration::from_secs(8)))
         .unwrap();
     let mut content = Vec::new();
     let mut chunk = [0u8; 8192];
