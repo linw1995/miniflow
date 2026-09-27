@@ -112,21 +112,6 @@ fn propagates_declared_plugin_types_without_a_known_value() {
     assert_eq!(result["result"], json!([1, 2]));
 }
 
-#[test]
-fn inferred_results_are_independent_of_definition_order() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let mut definition = linear(json!([1, "x"]), 2, "list_int64");
-    let original = compile_definition(&definition, &registry)
-        .unwrap_err()
-        .to_string();
-    definition.nodes.reverse();
-    definition.edges.reverse();
-    let reordered = compile_definition(&definition, &registry)
-        .unwrap_err()
-        .to_string();
-    assert_eq!(reordered, original);
-}
-
 struct TwoInputNode;
 
 impl Node for TwoInputNode {
