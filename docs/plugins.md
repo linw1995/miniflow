@@ -49,6 +49,12 @@ publishes results only after successful execution and starts with fresh context 
 
 Keep output names local in node results. Runtime publication qualifies them with the instance ID. Explicit skipped names must be declared non-required outputs and cannot also be produced. A scheduler-skipped node propagates skipping through every output, including required ones. Context references alone never activate or skip a node.
 
+The shared executor checks every produced JSON value against its declared output type before publishing the node's result,
+even when no downstream edge reads that port. It checks each bound input against its declared type before invoking an
+active node. Nested list and map errors include a JSON Pointer path. A skipped node is not type-checked, and an
+unexpectedly missing dependency remains an error before skip or type checks. Use `ValueType::Any` when a port legitimately
+carries multiple JSON types; a specific declaration must match every produced value.
+
 ## Prepared execution nodes
 
 `FlowNode::new` requires resolved `NodePorts`. Compiler preparation supplies these from the instance or static registration. Both in-memory execution and generated runners return `WorkflowRunError`. Context-aware implementations take `&ExecutionContext`; generated step helpers assume a validated plan and its execution order.

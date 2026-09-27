@@ -10,10 +10,10 @@
 
 ## 2. Enforce declared types during execution
 
-- [ ] 2.1 Validate every produced output before context publication; verify wrong types fail even without consumers and no output from a failed node becomes visible.
-- [ ] 2.2 Validate bound inputs after dependency availability and skip resolution but before node execution; verify dynamically narrowed values, optional inputs, skipped targets, and missing-output precedence.
-- [ ] 2.3 Add shared runtime tests for nested path diagnostics and repeated runs; verify no partial or cross-run values survive a type failure.
-- [ ] 2.4 Document runtime-checked edges and stricter plugin output behavior in `docs/workflows.md` and `docs/plugins.md`; verify a constant-to-refined-input example succeeds for a matching value and fails for a mismatch.
+- [x] 2.1 Validate every produced output before context publication; verify wrong types fail even without consumers and no output from a failed node becomes visible.
+- [x] 2.2 Validate bound inputs after dependency availability and skip resolution but before node execution; verify dynamically narrowed values, optional inputs, skipped targets, and missing-output precedence.
+- [x] 2.3 Add shared runtime tests for nested path diagnostics and repeated runs; verify no partial or cross-run values survive a type failure.
+- [x] 2.4 Document shared runtime input/output guards and stricter plugin output behavior in `docs/plugins.md`; verify a direct Flow with an `Any` source feeding a refined input succeeds for a matching value and fails for a mismatch.
 
 ## 3. Apply the model in compilation and generated binaries
 
