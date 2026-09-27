@@ -2,10 +2,10 @@
 
 ## 1. Establish the CEL backend and configuration
 
-- [ ] 1.1 Use the CEL version proven by the type-extension feasibility spike and encode its checked-type, standard-library, JSON conversion, and `Send + Sync` contract in `mfn-code` tests; verify the package builds on supported targets.
-- [ ] 1.2 Add the opt-in `mfn-code` crate and `builtin.code` registration with required `language`, `inputs`, and language-specific `code`; verify inventory resolves the kind only when linked and unsupported languages fail with node context.
-- [ ] 1.3 Parse concrete CEL input scalars and recursive `list`/string-keyed `map` descriptors, requiring one nonblank expression per output name; verify invalid names/types, malformed or excessively nested descriptors, empty code maps, blank expressions, and distinct instance ports.
-- [ ] 1.4 Document the CEL-only tagged configuration and future backend boundary in `docs/workflows.md`; verify the example JSON parses as a `2026-09-26` Flow.
+- [x] 1.1 Use the CEL version proven by the type-extension feasibility spike and encode its checked-type, standard-library, JSON conversion, and `Send + Sync` contract in `mfn-code` tests; verify the package builds on supported targets.
+- [x] 1.2 Add the opt-in `mfn-code` crate and `builtin.code` registration with required `language`, `inputs`, and language-specific `code`; verify inventory resolves the kind only when linked and unsupported languages fail with node context.
+- [x] 1.3 Parse concrete CEL input scalars and recursive `list`/string-keyed `map` descriptors, requiring one nonblank expression per output name; verify invalid names/types, malformed or excessively nested descriptors, empty code maps, blank expressions, and distinct instance ports.
+- [x] 1.4 Document the CEL-only tagged configuration and future backend boundary in `docs/workflows.md`; verify the example JSON parses as a `2026-09-26` Flow.
 
 ## 2. Check expressions before installation
 
