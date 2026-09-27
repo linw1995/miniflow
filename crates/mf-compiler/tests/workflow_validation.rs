@@ -195,10 +195,8 @@ fn rejects_incompatible_or_ambiguous_inputs() {
 
     let mut value = valid_definition();
     value["nodes"][0]["kind"] = json!("source.any");
-    assert!(matches!(
-        validation_error(value),
-        WorkflowCompileError::IncompatiblePortTypes { .. }
-    ));
+    let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
+    validate_definition(&definition, &NodeRegistry::from_inventory().unwrap()).unwrap();
 
     let mut value = valid_definition();
     let duplicate = value["edges"][0].clone();

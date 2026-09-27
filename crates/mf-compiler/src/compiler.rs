@@ -2,6 +2,7 @@ use crate::{
     CompiledWorkflow, Flow, FlowBuildError, FlowNode, NodeBuildError, NodeRegistry, ValueType,
 };
 use crate::{DefinitionId, WorkflowDefinition};
+use mf_runtime::TypeCompatibility;
 use snafu::{ResultExt, Snafu};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -255,9 +256,10 @@ fn prepare_definition(
             }
             .fail();
         };
-        if !output_port
+        if output_port
             .value_type
-            .is_assignable_to(&input_port.value_type)
+            .compatibility_with(&input_port.value_type)
+            == TypeCompatibility::Incompatible
         {
             return IncompatiblePortTypesSnafu {
                 from_node: edge.from_node.clone(),
