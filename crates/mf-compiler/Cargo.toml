@@ -18,5 +18,6 @@ syn = { version = "3.0.6", default-features = false, features = ["full", "parsin
 
 [dev-dependencies]
 mfn-core.workspace = true
+mfn-code.workspace = true
 inventory = "0.3.24"
 tempfile = "3.27.0"
