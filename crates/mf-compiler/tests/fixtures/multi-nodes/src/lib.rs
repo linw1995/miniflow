@@ -65,3 +65,4 @@ inventory::submit! {
 }
 
 mod context_fixture;
+mod typed_fixture;

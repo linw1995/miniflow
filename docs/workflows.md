@@ -47,6 +47,13 @@ Declare `mfn-core` once to use the basic built-in nodes below. To migrate older 
 
 The CLI checks node IDs, edge endpoints, selected output names, and cycles before generating runner code. The compiled runner validates registered kinds, configuration, ports, type compatibility, and required input connections before installation. Every failure returns a nonzero status and preserves an existing output executable.
 
+Port connections are statically safe when the source type fits the target, such as `Int64` to `Number` or `List(Int64)` to
+`Array`. A broad source can feed a refined target when the runtime checks the actual JSON value before invoking that
+target: `Any` to `Int64`, `Number` to `Float64`, and `Array` to `List(Int64)` are examples. Concrete conflicts such as
+`String` to `Int64` or `List(String)` to `List(Int64)` fail compilation. No values are coerced. Produced outputs are
+checked against their declared types before publication, including outputs without consumers. A mismatch reports the
+node, port, and nested JSON Pointer path where applicable.
+
 See [compiling workflows](compiling.md) to build and run a definition, or [plugin development](plugins.md) to add node kinds.
 
 ## Dependency locks
