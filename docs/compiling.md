@@ -26,7 +26,7 @@ The generated executable embeds the graph metadata and node configuration. Node 
 
 ## Repository development
 
-Before support packages are published, repository development uses an explicit source override enabled only by the `development-support` Cargo feature:
+Repository development can use an explicit source override enabled only by the `development-support` Cargo feature:
 
 ```sh
 nix develop
@@ -44,7 +44,7 @@ MF_DEV_SUPPORT_ROOT="$PWD/crates" cargo run -p mf-cli --features development-sup
 "$output_dir/cel-list"
 ```
 
-Normal release builds ignore this environment variable. The example declares local built-in packages; a portable Flow should declare available registry or Git packages instead.
+Normal release builds ignore this environment variable. The hello example declares a local `mfn-core` dependency. Both CEL examples also declare a local `mfn-code` dependency for `builtin.code`; they produce `{"doubled":42}` and `{"doubled":[2,4]}` respectively. A portable Flow should declare available registry or Git packages instead.
 
 ## Build failures
 
