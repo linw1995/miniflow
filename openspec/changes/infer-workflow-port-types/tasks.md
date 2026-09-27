@@ -2,10 +2,10 @@
 
 ## 1. Establish node evidence and literal inference
 
-- [ ] 1.1 Add an optional, declarative output-derivation API to `mf-runtime` with a no-op default; verify existing third-party node fixtures still compile and invalid port references or contradictory literal declarations fail metadata validation with node and port context.
-- [ ] 1.2 Add bounded JSON-to-`ValueType` inference for scalars and homogeneous nested collections; verify signed and unsigned integer boundaries, floating representation, empty and heterogeneous collections, nested maps, and the 16-level descriptor limit in runtime unit tests.
-- [ ] 1.3 Make `builtin.constant` provide its exact configured value and inferred output port type, and make `builtin.identity` declare an unchanged-input derivation; verify scalar, nested collection, null, and skipped-node behavior in core-node tests.
-- [ ] 1.4 Document the derivation contract, soundness requirement, and fallback behavior for ordinary plugins in `docs/node-development.md`; verify the example names the actual public API and retains a working no-derivation registration.
+- [x] 1.1 Add an optional, declarative output-derivation API to `mf-runtime` with a no-op default; verify existing third-party node fixtures still compile and invalid port references or contradictory literal declarations fail metadata validation with node and port context.
+- [x] 1.2 Add bounded JSON-to-`ValueType` inference for scalars and homogeneous nested collections; verify signed and unsigned integer boundaries, floating representation, empty and heterogeneous collections, nested maps, and the 16-level descriptor limit in runtime unit tests.
+- [x] 1.3 Make `builtin.constant` provide its exact configured value and inferred output port type, and make `builtin.identity` declare an unchanged-input derivation; verify scalar, nested collection, null, and skipped-node behavior in core-node tests.
+- [x] 1.4 Document the derivation contract, soundness requirement, and fallback behavior for ordinary plugins in `docs/node-development.md`; verify the example names the actual public API and retains a working no-derivation registration.
 
 ## 2. Resolve and validate graph types
 
