@@ -198,10 +198,7 @@ mod tests {
         let mut activation = MapActivation::new();
         activation.insert("amount", json!(21).as_i64().unwrap());
         let result = env.program(&ast).unwrap().eval(&activation);
-        let CelValue::Int(value) = result else {
-            panic!("expected an integer result");
-        };
-        assert_eq!(json!(value), json!(42));
+        assert!(matches!(result, CelValue::Int(42)));
     }
 
     #[test]
@@ -258,6 +255,90 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn reports_invalid_descriptors_and_names() {
+        for (descriptor, expected) in [
+            (json!({"set": "int"}), "unsupported type constructor"),
+            (json!(["int"]), "type must be"),
+            (json!({"list": "int", "map": "int"}), "type must be"),
+        ] {
+            let error = factory(json!({
+                "language": "cel",
+                "inputs": {"item": descriptor},
+                "code": {"result": "1"}
+            }))
+            .err()
+            .unwrap()
+            .to_string();
+            assert!(error.contains("input `item`") && error.contains(expected));
+        }
+        let error = factory(json!({
+            "language": "cel",
+            "inputs": {"two words": "int"},
+            "code": {"result": "1"}
+        }))
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(error.contains("invalid input name"));
+    }
+
+    #[test]
+    fn maps_each_supported_input_and_output_type() {
+        for (input_type, expression, expected) in [
+            ("null", "value", ValueType::Null),
+            ("bool", "value", ValueType::Boolean),
+            ("int", "value", ValueType::Int64),
+            ("double", "value", ValueType::Float64),
+            ("string", "value", ValueType::String),
+        ] {
+            let node = factory(json!({
+                "language": "cel",
+                "inputs": {"value": input_type},
+                "code": {"result": expression}
+            }))
+            .unwrap();
+            assert_eq!(node.ports().unwrap().outputs[0].value_type, expected);
+        }
+        let node = factory(json!({
+            "language": "cel",
+            "inputs": {},
+            "code": {"result": "{'count': 1}"}
+        }))
+        .unwrap();
+        assert_eq!(
+            node.ports().unwrap().outputs[0].value_type,
+            ValueType::Map(Box::new(ValueType::Int64))
+        );
+    }
+
+    #[test]
+    fn reports_non_json_result_types() {
+        for expression in ["b'bytes'", "{1: 2}", "dyn(1)"] {
+            let error = factory(json!({
+                "language": "cel",
+                "inputs": {},
+                "code": {"result": expression}
+            }))
+            .err()
+            .unwrap()
+            .to_string();
+            assert!(error.contains("output `result`"), "{expression}: {error}");
+        }
+    }
+
+    #[test]
+    fn reports_execution_unavailable_until_backend_is_installed() {
+        let node = factory(json!({
+            "language": "cel",
+            "inputs": {},
+            "code": {"result": "1"}
+        }))
+        .unwrap();
+        let error = node.execute(Inputs::new()).unwrap_err().to_string();
+        assert!(error.contains("CEL execution is not available"));
     }
 
     #[test]
