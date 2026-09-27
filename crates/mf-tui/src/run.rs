@@ -20,9 +20,9 @@ use nix::{
 };
 use process_wrap::std::{ChildWrapper, CommandWrap, ProcessGroup};
 use ratatui::{
-    Terminal,
+    Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
-    layout::{Constraint, Layout},
+    layout::{Constraint, Layout, Rect},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 use signal_hook::{SigId, consts::SIGINT, flag, low_level::unregister};
@@ -73,6 +73,7 @@ pub fn run_executable(path: &Path) -> Result<u8, RunError> {
     if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         return Err(RunError::TerminalRequired);
     }
+    let area = terminal_area().map_err(|source| RunError::Terminal { source })?;
     let description =
         describe_executable(path).map_err(|source| RunError::Description { source })?;
     let layout = GraphLayout::new(&description).map_err(|source| RunError::Graph { source })?;
@@ -85,8 +86,14 @@ pub fn run_executable(path: &Path) -> Result<u8, RunError> {
         .map_err(|source| RunError::Receiver { source })?;
     let signal = SignalGuard::register().map_err(|source| RunError::Terminal { source })?;
     let guard = TerminalGuard::enter().map_err(|source| RunError::Terminal { source })?;
-    let mut terminal = Terminal::new(CrosstermBackend::new(io::stderr()))
-        .map_err(|source| RunError::Terminal { source })?;
+    // The backend's global size lookup can consult redirected stdout without a controlling TTY.
+    let mut terminal = Terminal::with_options(
+        CrosstermBackend::new(io::stderr()),
+        TerminalOptions {
+            viewport: Viewport::Fixed(area),
+        },
+    )
+    .map_err(|source| RunError::Terminal { source })?;
     let result = (|| {
         let mut command = Command::new(path);
         command
@@ -159,6 +166,17 @@ pub fn run_executable(path: &Path) -> Result<u8, RunError> {
     } else {
         Ok(code)
     }
+}
+
+fn terminal_area() -> io::Result<Rect> {
+    let size = rustix::termios::tcgetwinsize(io::stderr()).map_err(io::Error::from)?;
+    if size.ws_col == 0 || size.ws_row == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "terminal has no usable size",
+        ));
+    }
+    Ok(Rect::new(0, 0, size.ws_col, size.ws_row))
 }
 
 fn report(message: &str) {
@@ -537,7 +555,11 @@ fn supervise(
                                 }
                             }
                         }
-                        Event::Resize(_, _) => {}
+                        Event::Resize(width, height) => {
+                            terminal
+                                .resize(Rect::new(0, 0, width, height))
+                                .map_err(|source| RunError::Terminal { source })?;
+                        }
                         _ => continue,
                     }
                     draw(
@@ -587,7 +609,12 @@ fn supervise(
                     }
                     last_frame = Instant::now() - FRAME_INTERVAL;
                 }
-                Event::Resize(_, _) => last_frame = Instant::now() - FRAME_INTERVAL,
+                Event::Resize(width, height) => {
+                    terminal
+                        .resize(Rect::new(0, 0, width, height))
+                        .map_err(|source| RunError::Terminal { source })?;
+                    last_frame = Instant::now() - FRAME_INTERVAL;
+                }
                 _ => {}
             }
         }
