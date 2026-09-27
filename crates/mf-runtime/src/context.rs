@@ -292,6 +292,34 @@ mod tests {
     }
 
     #[test]
+    fn rejects_an_undeclared_direct_flow_input() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let node = FlowNode::new(
+            "consumer",
+            Box::new(CountNode(Arc::clone(&calls))),
+            NodePorts {
+                inputs: vec![],
+                outputs: vec![port("value", ValueType::Boolean, true)],
+            },
+        );
+        let mut context = ExecutionContext::default();
+        context
+            .outputs
+            .insert("source.value".into(), Some(json!(1)));
+        let dependency = ExecutionDependency {
+            input: Some("unexpected"),
+            source_node: "source",
+            source_output: "value",
+        };
+        let error = execute_node_in_context(&node, &[dependency], &mut context)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("consumer") && error.contains("undeclared input `unexpected`"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(context.output("consumer.value").is_err());
+    }
+
+    #[test]
     fn skips_without_type_checks_but_keeps_missing_output_precedence() {
         let calls = Arc::new(AtomicUsize::new(0));
         let node = FlowNode::new(

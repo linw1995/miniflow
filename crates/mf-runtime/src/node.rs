@@ -399,6 +399,13 @@ mod tests {
         assert!(Number.validate_value(&json!(1)).is_ok());
         assert!(Number.validate_value(&json!(1.5)).is_ok());
         assert!(Number.validate_value(&json!(u64::MAX)).is_ok());
+        for (value, actual) in [
+            (json!(null), "null"),
+            (json!([]), "array"),
+            (json!({}), "object"),
+        ] {
+            assert_eq!(Int64.validate_value(&value).unwrap_err().actual, actual);
+        }
     }
 
     #[test]
