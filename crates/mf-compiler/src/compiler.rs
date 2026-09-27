@@ -184,7 +184,9 @@ impl TypeInferenceState {
             })?;
 
         let mut inputs = BTreeMap::new();
-        for dependency in dependencies {
+        let mut dependencies = dependencies.to_vec();
+        dependencies.sort();
+        for dependency in &dependencies {
             let Some(input_name) = dependency.input else {
                 continue;
             };

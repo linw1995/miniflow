@@ -127,6 +127,59 @@ fn inferred_results_are_independent_of_definition_order() {
     assert_eq!(reordered, original);
 }
 
+struct TwoInputNode;
+
+impl Node for TwoInputNode {
+    fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
+        Ok(Outputs::new())
+    }
+}
+
+fn two_input_factory(_config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+    Ok(Box::new(TwoInputNode))
+}
+
+inventory::submit! {
+    NodeRegistration {
+        kind: "fixture.two_inputs",
+        inputs: &[
+            PortSpec::new("a", ValueType::Int64, true),
+            PortSpec::new("b", ValueType::Int64, true),
+        ],
+        outputs: &[],
+        factory: two_input_factory,
+    }
+}
+
+#[test]
+fn reports_the_same_first_conflict_for_reordered_edges() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-09-26",
+        "dependencies":dependencies(),
+        "nodes":[
+            {"id":"source_a","kind":"builtin.constant","config":{"value":"wrong"}},
+            {"id":"source_b","kind":"builtin.constant","config":{"value":false}},
+            {"id":"sink","kind":"fixture.two_inputs"}
+        ],
+        "edges":[
+            {"from_node":"source_b","from_output":"value","to_node":"sink","to_input":"b"},
+            {"from_node":"source_a","from_output":"value","to_node":"sink","to_input":"a"}
+        ]
+    }))
+    .unwrap();
+    let original = compile_definition(&definition, &registry)
+        .unwrap_err()
+        .to_string();
+    definition.edges.reverse();
+    definition.nodes.reverse();
+    let reordered = compile_definition(&definition, &registry)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(reordered, original);
+    assert!(original.contains("source_a") && original.contains("`a`"));
+}
+
 #[test]
 fn control_edges_do_not_propagate_known_data() {
     let registry = NodeRegistry::from_inventory().unwrap();

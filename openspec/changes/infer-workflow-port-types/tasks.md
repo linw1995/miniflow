@@ -16,10 +16,10 @@
 
 ## 3. Match generated runner behavior
 
-- [ ] 3.1 Initialize generated nodes with the same shared evidence resolver and fixed generated bindings used by runner validation; verify the generated source retains direct execution order and contains no built-in kind-name inference.
-- [ ] 3.2 Add generated-runner and packaged-CLI cases for homogeneous inference, identity propagation, inactive-branch conflicts, nested mismatch paths, and unknown plugin outputs; verify results and diagnostics match in-memory preparation and that validation calls no node execution method.
-- [ ] 3.3 Verify a changed constant that conflicts with a typed input rejects the newly built runner, leaves the previous executable intact, and does not require a second build after successful validation; cover reused build directories in compiler integration tests.
-- [ ] 3.4 Update `docs/compiling.md` and any affected examples to explain compile-time conflict diagnostics and executable preservation; verify their commands and expected outputs against the packaged CLI tests.
+- [x] 3.1 Initialize generated nodes with the same shared evidence resolver and fixed generated bindings used by runner validation; verify the generated source retains direct execution order and contains no built-in kind-name inference.
+- [x] 3.2 Add generated-runner and packaged-CLI cases for homogeneous inference, identity propagation, inactive-branch conflicts, nested mismatch paths, and unknown plugin outputs; verify results and diagnostics match in-memory preparation and that validation calls no node execution method.
+- [x] 3.3 Verify a changed constant that conflicts with a typed input rejects the newly built runner, leaves the previous executable intact, and does not require a second build after successful validation; cover reused build directories in compiler integration tests.
+- [x] 3.4 Update `docs/compiling.md` and any affected examples to explain compile-time conflict diagnostics and executable preservation; verify their commands and expected outputs against the packaged CLI tests.
 
 ## 4. Integration checks
 
