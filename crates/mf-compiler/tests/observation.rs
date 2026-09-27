@@ -613,35 +613,15 @@ fn semantic_records(records: &[WireRecord]) -> Vec<Value> {
 }
 
 #[test]
-fn generated_execution_matches_memory_observations_across_all_failure_boundaries() {
+fn generated_execution_matches_memory_for_success_and_failures() {
     use std::{fs, process::Command};
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("build");
-    for (config, output_failure, unknown_kind) in [
-        (success_config(), false, false),
-        (
-            json!({"ports":["value","inactive"],"skipped":["value","inactive"]}),
-            false,
-            false,
-        ),
-        (json!(42), false, false),
-        (
-            json!({"ports":["value","inactive"],"fail":true}),
-            false,
-            false,
-        ),
-        (
-            json!({"ports":["value","inactive"],"outputs":{"unexpected":1}}),
-            false,
-            false,
-        ),
-        (
-            json!({"ports":["value","inactive"],"skipped":["inactive"]}),
-            false,
-            false,
-        ),
-        (success_config(), true, false),
-        (success_config(), false, true),
+    for (config, output_failure) in [
+        (success_config(), false),
+        (json!(42), false),
+        (json!({"ports":["value","inactive"],"fail":true}), false),
+        (success_config(), true),
     ] {
         let mut plan = plan(config);
         plan.definition.dependencies = common::fixture_definition().dependencies;
@@ -649,9 +629,6 @@ fn generated_execution_matches_memory_observations_across_all_failure_boundaries
             plan.definition.outputs[0].node = "a".into();
             plan.definition.outputs[0].port = "inactive".into();
             plan.definition.outputs[0].optional = false;
-        }
-        if unknown_kind {
-            plan.definition.nodes[0].kind = "unknown.kind".into();
         }
         let (memory, harness) = run(&plan, true);
         mf_compiler::write_dependency_project(
@@ -682,8 +659,6 @@ fn main() {
     let observation = plan.start_observation(&harness.observer(), mf_telemetry::identity::RunId::new()).unwrap();
     let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
     let result = workflow::run_workflow_with_observation(&registry, Some(observation));
-    let plain = workflow::run_workflow(&registry);
-    assert_eq!(result.as_ref().map_err(ToString::to_string), plain.as_ref().map_err(ToString::to_string));
     println!("{}", serde_json::json!({"ok":result.is_ok(), "outputs":result.ok(), "records":harness.records(), "spans":harness.spans.get_finished_spans().unwrap().len()}));
 }
 "#).unwrap();

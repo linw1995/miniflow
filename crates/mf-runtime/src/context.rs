@@ -128,13 +128,16 @@ impl ExecutionContext {
                     ));
                 }
             }
-            for name in result.outputs.keys() {
-                if !node.ports.outputs.iter().any(|port| port.name == *name) {
+            for (name, value) in &result.outputs {
+                let Some(port) = node.ports.outputs.iter().find(|port| port.name == *name) else {
                     return Err(state_error(
                         id,
                         format!("produced undeclared output `{name}`"),
                     ));
-                }
+                };
+                port.value_type
+                    .validate_value(value)
+                    .map_err(|error| state_error(id, format!("output `{name}`: {error}")))?;
             }
         }
         // Validate the complete result before making any values visible.
@@ -233,6 +236,25 @@ pub fn execute_node_in_context(
     let result = if skipped {
         None
     } else {
+        for (name, value) in &inputs {
+            let validation = node
+                .ports
+                .inputs
+                .iter()
+                .find(|port| port.name == *name)
+                .ok_or_else(|| state_error(id, format!("received undeclared input `{name}`")))
+                .and_then(|port| {
+                    port.value_type
+                        .validate_value(value)
+                        .map_err(|error| state_error(id, format!("input `{name}`: {error}")))
+                });
+            if let Err(error) = validation {
+                if let (Some(run), Some(step)) = (ctx.observation.as_mut(), step) {
+                    run.node_failed(step, FailurePhase::Dependency, error.to_string());
+                }
+                return Err(error);
+            }
+        }
         if let (Some(run), Some(step)) = (ctx.observation.as_mut(), step.as_mut()) {
             run.node_started(step);
         }
@@ -298,5 +320,255 @@ pub fn select_context_output(
                 output_id(node, port)
             ),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Flow, Node, NodePorts, PortSpec, ValueType, WorkflowOutputDefinition};
+    use serde_json::json;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    struct EmitNode(Outputs);
+
+    impl Node for EmitNode {
+        fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct CountNode(Arc<AtomicUsize>);
+
+    impl Node for CountNode {
+        fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(Outputs::from([("value".into(), json!(true))]))
+        }
+    }
+
+    fn port(name: &str, value_type: ValueType, required: bool) -> PortSpec {
+        PortSpec::owned(name, value_type, required)
+    }
+
+    #[test]
+    fn rejects_a_bad_output_without_publishing_any_result() {
+        let node = FlowNode::new(
+            "producer",
+            Box::new(EmitNode(Outputs::from([
+                ("good".into(), json!(1)),
+                ("bad".into(), json!("wrong")),
+            ]))),
+            NodePorts {
+                inputs: vec![],
+                outputs: vec![
+                    port("good", ValueType::Int64, true),
+                    port("bad", ValueType::Int64, true),
+                ],
+            },
+        );
+        let mut context = ExecutionContext::default();
+        let error = execute_node_in_context(&node, &[], &mut context)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("producer") && error.contains("output `bad`"));
+        assert!(error.contains("expected int64, found string"));
+        assert!(context.output("producer.good").is_err());
+        assert!(context.output("producer.bad").is_err());
+    }
+
+    #[test]
+    fn rejects_a_nested_dynamic_input_before_invoking_the_target() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let node = FlowNode::new(
+            "consumer",
+            Box::new(CountNode(Arc::clone(&calls))),
+            NodePorts {
+                inputs: vec![port(
+                    "payload",
+                    ValueType::List(Box::new(ValueType::Map(Box::new(ValueType::Int64)))),
+                    true,
+                )],
+                outputs: vec![port("value", ValueType::Boolean, true)],
+            },
+        );
+        let mut context = ExecutionContext::default();
+        context.outputs.insert(
+            "source.value".into(),
+            Some(json!([{"count": 1}, {"count": "two"}])),
+        );
+        let dependency = ExecutionDependency {
+            input: Some("payload"),
+            source_node: "source",
+            source_output: "value",
+        };
+        let error = execute_node_in_context(&node, &[dependency], &mut context)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("consumer") && error.contains("input `payload`"));
+        assert!(error.contains("/1/count") && error.contains("expected int64"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(context.output("consumer.value").is_err());
+    }
+
+    #[test]
+    fn rejects_an_undeclared_direct_flow_input() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let node = FlowNode::new(
+            "consumer",
+            Box::new(CountNode(Arc::clone(&calls))),
+            NodePorts {
+                inputs: vec![],
+                outputs: vec![port("value", ValueType::Boolean, true)],
+            },
+        );
+        let mut context = ExecutionContext::default();
+        context
+            .outputs
+            .insert("source.value".into(), Some(json!(1)));
+        let dependency = ExecutionDependency {
+            input: Some("unexpected"),
+            source_node: "source",
+            source_output: "value",
+        };
+        let error = execute_node_in_context(&node, &[dependency], &mut context)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("consumer") && error.contains("undeclared input `unexpected`"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(context.output("consumer.value").is_err());
+    }
+
+    #[test]
+    fn skips_without_type_checks_but_keeps_missing_output_precedence() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let node = FlowNode::new(
+            "consumer",
+            Box::new(CountNode(Arc::clone(&calls))),
+            NodePorts {
+                inputs: vec![port("payload", ValueType::Int64, true)],
+                outputs: vec![port("value", ValueType::Boolean, true)],
+            },
+        );
+        let skipped = ExecutionDependency {
+            input: Some("payload"),
+            source_node: "branch",
+            source_output: "off",
+        };
+        let missing = ExecutionDependency {
+            input: None,
+            source_node: "source",
+            source_output: "missing",
+        };
+        let mut context = ExecutionContext::default();
+        context.outputs.insert("branch.off".into(), None);
+        let error = execute_node_in_context(&node, &[skipped, missing], &mut context)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("source.missing"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(context.output("consumer.value").is_err());
+
+        execute_node_in_context(&node, &[skipped], &mut context).unwrap();
+        assert!(matches!(
+            context.output("consumer.value").unwrap(),
+            ContextValue::Skipped
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    struct AlternatingNode(AtomicUsize);
+
+    impl Node for AlternatingNode {
+        fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
+            let value = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
+                json!("wrong")
+            } else {
+                json!(42)
+            };
+            Ok(Outputs::from([("value".into(), value)]))
+        }
+    }
+
+    #[test]
+    fn a_failed_run_does_not_poison_the_next_run() {
+        let flow = Flow::new(
+            vec![FlowNode::new(
+                "source",
+                Box::new(AlternatingNode(AtomicUsize::new(0))),
+                NodePorts {
+                    inputs: vec![],
+                    outputs: vec![port("value", ValueType::Int64, true)],
+                },
+            )],
+            vec![],
+            vec!["source".into()],
+            vec![WorkflowOutputDefinition {
+                name: "result".into(),
+                node: "source".into(),
+                port: "value".into(),
+                optional: false,
+            }],
+        )
+        .unwrap();
+        assert!(
+            flow.execute()
+                .unwrap_err()
+                .to_string()
+                .contains("expected int64")
+        );
+        assert_eq!(flow.execute().unwrap()["result"], json!(42));
+    }
+
+    #[test]
+    fn checks_any_source_before_a_refined_consumer_runs() {
+        for (value, succeeds) in [(json!(21), true), (json!("21"), false)] {
+            let calls = Arc::new(AtomicUsize::new(0));
+            let flow = Flow::new(
+                vec![
+                    FlowNode::new(
+                        "source",
+                        Box::new(EmitNode(Outputs::from([("value".into(), value)]))),
+                        NodePorts {
+                            inputs: vec![],
+                            outputs: vec![port("value", ValueType::Any, true)],
+                        },
+                    ),
+                    FlowNode::new(
+                        "consumer",
+                        Box::new(CountNode(Arc::clone(&calls))),
+                        NodePorts {
+                            inputs: vec![port("payload", ValueType::Int64, true)],
+                            outputs: vec![port("value", ValueType::Boolean, true)],
+                        },
+                    ),
+                ],
+                vec![crate::EdgeDefinition {
+                    from_node: "source".into(),
+                    from_output: "value".into(),
+                    to_node: "consumer".into(),
+                    to_input: "payload".into(),
+                }],
+                vec!["source".into(), "consumer".into()],
+                vec![WorkflowOutputDefinition {
+                    name: "result".into(),
+                    node: "consumer".into(),
+                    port: "value".into(),
+                    optional: false,
+                }],
+            )
+            .unwrap();
+            if succeeds {
+                assert_eq!(flow.execute().unwrap()["result"], json!(true));
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            } else {
+                let error = flow.execute().unwrap_err().to_string();
+                assert!(error.contains("consumer") && error.contains("input `payload`"));
+                assert_eq!(calls.load(Ordering::SeqCst), 0);
+            }
+        }
     }
 }

@@ -89,6 +89,52 @@ fn packaged_cli_acceptance() {
     assert!(generated.contains("mf_runtime::execute_node"));
     assert!(!generated.contains("Flow::new"));
 
+    let mut typed_flow = json!({
+        "version": "2026-09-26",
+        "dependencies": {
+            "external": {"package": "fixture-multi-nodes", "version": format!("={}", fixture.fixture_version)}
+        },
+        "nodes": [
+            {"id": "source", "kind": "fixture.typed_source", "config": {"type": "any", "value": [1, 2]}},
+            {"id": "sink", "kind": "fixture.typed_echo", "config": {"type": "list_int64"}}
+        ],
+        "edges": [{"from_node": "source", "from_output": "value", "to_node": "sink", "to_input": "input"}],
+        "outputs": [{"name": "result", "node": "sink", "port": "value"}]
+    });
+    let typed_definition = project.join("typed.json");
+    fs::write(&typed_definition, typed_flow.to_string()).unwrap();
+    let typed_executable = project.join("typed");
+    let typed_build = fixture.root().join("typed-build");
+    fixture.compile(
+        &typed_definition,
+        &typed_executable,
+        &typed_build,
+        false,
+        false,
+    );
+    let typed_result = checked(Command::new(&typed_executable).env_clear().env("PATH", ""));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&typed_result.stdout).unwrap(),
+        json!({"result": [1, 2]})
+    );
+    typed_flow["nodes"][0]["config"]["value"] = json!([1, "wrong"]);
+    fs::write(&typed_definition, typed_flow.to_string()).unwrap();
+    fixture.compile(
+        &typed_definition,
+        &typed_executable,
+        &typed_build,
+        false,
+        false,
+    );
+    let typed_failure = Command::new(&typed_executable)
+        .env_clear()
+        .env("PATH", "")
+        .output()
+        .unwrap();
+    assert!(!typed_failure.status.success());
+    let diagnostic = String::from_utf8_lossy(&typed_failure.stderr);
+    assert!(diagnostic.contains("sink") && diagnostic.contains("/1"));
+
     let local = project.join("local-nodes");
     let repository = fixture.root().join("git-nodes");
     copy_directory(&fixture.fixture_source, &local);

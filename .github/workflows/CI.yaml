@@ -31,7 +31,15 @@ jobs:
         with:
           cache-key-name: lint
       - name: Run repository hooks
-        run: nix develop --command prek -a
+        run: |
+          # Flake checks cover Rust formatting, compilation, Clippy, and workflows.
+          # The Nix package build also generates and validates third-party notices.
+          nix develop --command prek -a \
+            --skip fmt \
+            --skip clippy \
+            --skip cargo-check \
+            --skip actionlint \
+            --skip third-party-notices
 
   check:
     needs: lint

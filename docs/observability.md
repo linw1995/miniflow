@@ -71,7 +71,7 @@ serde_json's number and string encoding without a trailing newline. For example,
 retain different encodings. The input is the serialized compiled definition, including configuration and defaults,
 rather than the raw source file's spelling. It does not identify plugin binary contents.
 
-`canonical_plan_bytes` and `WorkflowId::from_definition` implement this contract. Golden input, canonical bytes, and an independently computed SHA-256 digest live in `crates/mf-telemetry/tests/fixtures/identity-*`. Format changes require a new identity format version. A hash of low-entropy configuration is not a confidentiality boundary.
+`WorkflowId::from_definition` implements this contract. Golden input and an independently computed SHA-256 digest live in `crates/mf-telemetry/tests/fixtures/identity-*`. Format changes require a new identity format version. A hash of low-entropy configuration is not a confidentiality boundary.
 
 Each invocation has a fresh canonical lowercase UUID v4 `RunId`, independent of trace identity. A node has one lifecycle per `(run_id, node_id)`; there is no attempt number or workflow retry policy. Definition IDs and port names are opaque strings and are never split on punctuation.
 

@@ -56,8 +56,14 @@ iteration order of the plugin registry MUST NOT affect node resolution or workfl
 
 ### Requirement: Validate workflow structure before code generation
 
-Before generating a runner, the CLI SHALL validate nonblank unique node IDs, existing edge endpoints, selected output node references and names, and acyclicity. Before installing the executable, its validation mode SHALL validate registered kinds, configuration, existing ports, required input connections, and at most one connection per input. Validation mode MUST NOT call node execution methods. The normal mode SHALL execute statically generated orchestration.
-A concrete output type SHALL connect only to an input of the same type or type `Any`; an output of type `Any` SHALL connect only to an `Any` input.
+Before generating a runner, the CLI SHALL validate nonblank unique node IDs, existing edge endpoints, selected output
+node references and names, and acyclicity. Before installing the executable, its validation mode SHALL validate
+registered kinds, configuration, existing ports, required input connections, and at most one connection per input.
+Validation mode MUST NOT call node execution methods. The normal mode SHALL execute statically generated orchestration.
+Compiler validation SHALL accept statically safe assignments from refined types to the same type, compatible refined
+collection types, legacy broad supertypes, or `Any`. It SHALL also accept broad or `Any` outputs feeding a refined input
+when the shared runtime validates the actual value before invoking the target. Disjoint concrete types and incompatible
+collection shapes MUST fail validation; no implicit coercion SHALL occur.
 Validation failures MUST include diagnostics that identify the relevant definition node, port, output, or edge, and MUST NOT produce a successful binary.
 The system MUST produce a deterministic topological execution order, using ascending definition ID to break ties between ready nodes.
 Port validation SHALL use a node instance's complete configuration-dependent port description when supplied, and otherwise its static registration. Port names MUST be nonempty and unique within each direction. Descriptions MUST depend only on configuration and remain stable between validation and execution. Every node and branch MUST be validated even when it will be skipped during execution.
@@ -85,6 +91,16 @@ would place the referenced node first.
 
 - **WHEN** an edge references a missing output or input port, or the connected port types are incompatible
 - **THEN** compilation fails and reports both endpoints and the validation reason
+
+#### Scenario: Validate a runtime-checked connection
+
+- **WHEN** a source port of type `Any` feeds a target port of type `Int64`
+- **THEN** compilation accepts the edge and the runner checks the actual JSON value before invoking the target
+
+#### Scenario: Reject an incompatible refined connection
+
+- **WHEN** a `List(String)` output feeds a `List(Int64)` input
+- **THEN** compilation rejects the edge with both endpoints and their types
 
 #### Scenario: Reject an incomplete or ambiguous input
 

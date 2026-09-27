@@ -28,6 +28,21 @@ See the [contribution guide](../CONTRIBUTING.md) for local checks and [dependenc
 
 Nodes with configurable ports can override `Node::ports()` with `NodePorts` using `PortSpec::owned` for dynamic names; this replaces both static port lists for that instance. Ordinary registrations remain unchanged. Names must be nonempty and unique within each direction. Metadata must depend only on configuration.
 
+Port types include the broad JSON categories `Any`, `Null`, `Boolean`, `Number`, `String`, `Array`, and `Object`, plus `Int64`, `Float64`, and recursive `List(T)` and `Map(T)`. `Map(T)` describes an object with string keys and values of type `T`. Existing `PortSpec::new` registrations remain valid for static broad or scalar ports. Construct typed collection ports from `Node::ports()`:
+
+```rust
+let items = ValueType::List(Box::new(ValueType::Int64));
+let input = PortSpec::owned("items", items, true);
+```
+
+Recursive types make `ValueType` cloneable but no longer `Copy`. Rust callers that previously moved a type from a borrowed port descriptor must borrow it or call `.clone()`.
+
+Connection validation accepts statically safe widening and runtime-checked narrowing from broad or `Any` sources. For
+example, an `Any` output can feed an `Int64` input; the consumer runs only if the actual JSON value is a signed integer.
+Concrete conflicts such as `String` to `Int64` are rejected during compilation. Direct callers matching
+`WorkflowCompileError::IncompatiblePortTypes` now receive boxed `ValueType` fields and can dereference or clone them.
+Rebuild plugins against the matching runtime package and correct declarations that do not describe their produced values.
+
 Declare context reads with `Node::context_references()`. Each `ContextReference` contains a qualified output ID and a diagnostic label, such as a branch ID. Validation resolves exact `${node_id}.${output_name}` keys and requires the producer to be a strict ancestor through explicit dependencies. References do not add edges. Ambiguous qualified IDs are rejected with both source pairs.
 
 ## Context-aware execution
@@ -39,6 +54,12 @@ declarations support compile-time dependency checks; the context does not enforc
 publishes results only after successful execution and starts with fresh context for each run.
 
 Keep output names local in node results. Runtime publication qualifies them with the instance ID. Explicit skipped names must be declared non-required outputs and cannot also be produced. A scheduler-skipped node propagates skipping through every output, including required ones. Context references alone never activate or skip a node.
+
+The shared executor checks every produced JSON value against its declared output type before publishing the node's result,
+even when no downstream edge reads that port. It checks each bound input against its declared type before invoking an
+active node. Nested list and map errors include a JSON Pointer path. A skipped node is not type-checked, and an
+unexpectedly missing dependency remains an error before skip or type checks. Use `ValueType::Any` when a port legitimately
+carries multiple JSON types; a specific declaration must match every produced value.
 
 ## Prepared execution nodes
 
