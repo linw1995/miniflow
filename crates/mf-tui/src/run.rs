@@ -360,8 +360,7 @@ impl Capture {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => {
-                    self.stderr_tail
-                        .extend(format!("\nstderr read failed: {error}").bytes());
+                    self.store_stderr(format!("\nstderr read failed: {error}").as_bytes());
                     self.stderr = None;
                     break;
                 }
