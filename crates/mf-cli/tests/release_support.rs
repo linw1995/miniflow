@@ -66,7 +66,13 @@ fn checks_owners_and_resolves_exact_workspace_versions() {
     );
     let manifest = fs::read_to_string(directory.path().join("probe.toml")).unwrap();
     let owners = fs::read_to_string(directory.path().join("owners-checked")).unwrap();
-    for name in ["mf-telemetry", "mf-runtime", "mf-compiler", "mfn-core"] {
+    for name in [
+        "mf-telemetry",
+        "mf-runtime",
+        "mf-compiler",
+        "mfn-core",
+        "mfn-code",
+    ] {
         assert!(owners.lines().any(|line| line == name), "{name}");
         let expected = if name == "mf-telemetry" {
             "mf-telemetry = { version = \"=1.2.3\", features = [\"otlp\"] }".to_owned()

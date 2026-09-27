@@ -21,6 +21,7 @@ use std::{
     os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Command,
+    sync::mpsc,
     thread,
     time::{Duration, Instant},
 };
@@ -165,15 +166,30 @@ fn last_json(stdout: &[u8]) -> Value {
     serde_json::from_slice(line).unwrap()
 }
 
-fn read_request(mut stream: TcpStream) -> (String, Vec<u8>) {
+fn read_request(mut stream: TcpStream) -> Option<(String, Vec<u8>)> {
     stream
-        .set_read_timeout(Some(Duration::from_secs(8)))
+        .set_read_timeout(Some(Duration::from_secs(2)))
         .unwrap();
     let mut content = Vec::new();
     let mut chunk = [0u8; 8192];
     let boundary = loop {
-        let size = stream.read(&mut chunk).unwrap();
+        let size = match stream.read(&mut chunk) {
+            Ok(0) if content.is_empty() => return None,
+            Err(error)
+                if content.is_empty()
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
+            {
+                return None;
+            }
+            result => result.unwrap(),
+        };
         assert!(size != 0, "request headers ended early");
+        stream
+            .set_read_timeout(Some(Duration::from_secs(8)))
+            .unwrap();
         content.extend_from_slice(&chunk[..size]);
         assert!(
             content.len() <= 8 * 1024 * 1024,
@@ -201,7 +217,7 @@ fn read_request(mut stream: TcpStream) -> (String, Vec<u8>) {
     }
     let body = content[boundary..boundary + len].to_vec();
     stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: application/x-protobuf\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").unwrap();
-    (path, body)
+    Some((path, body))
 }
 
 type CapturedRequests = Vec<(String, Vec<u8>)>;
@@ -213,16 +229,27 @@ fn collector(expected: usize) -> (String, CollectorHandle) {
     listener.set_nonblocking(true).unwrap();
     let worker = thread::spawn(move || {
         let mut requests = Vec::new();
+        let (sender, receiver) = mpsc::channel();
         let deadline = Instant::now() + Duration::from_secs(8);
         while requests.len() < expected && Instant::now() < deadline {
+            requests.extend(receiver.try_iter());
             match listener.accept() {
-                Ok((stream, _)) => requests.push(read_request(stream)),
+                Ok((stream, _)) => {
+                    // An idle connection must not block a concurrent logs or traces request.
+                    let sender = sender.clone();
+                    thread::spawn(move || {
+                        if let Some(request) = read_request(stream) {
+                            let _ = sender.send(request);
+                        }
+                    });
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(5))
                 }
                 Err(error) => panic!("collector accept failed: {error}"),
             }
         }
+        requests.extend(receiver.try_iter());
         assert_eq!(requests.len(), expected, "OTLP requests did not arrive");
         requests
     });

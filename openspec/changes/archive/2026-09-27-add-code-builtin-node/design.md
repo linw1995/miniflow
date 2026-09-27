@@ -54,7 +54,7 @@ declared types recursively; evaluated values must match the types inferred for t
 records and nullable unions can be added later without changing existing descriptors. For example,
 `{"list":{"map":"int"}}` describes a list of objects with integer values.
 
-Use the [shared typed-port contract](../../specs/typed-port-contracts/spec.md). Map declared CEL input types and inferred
+Use the [shared typed-port contract](../../../specs/typed-port-contracts/spec.md). Map declared CEL input types and inferred
 CEL result types to the shared `ValueType` (`Int64`, `Float64`, `Boolean`, `String`, `Null`, `List(T)`, or
 `Map(T)`) and expose them as Code ports. The compiler rejects incompatible concrete edges and accepts broad or `Any`
 sources only through the shared runtime-checked boundary. `builtin.constant` remains `Any` and can feed a typed Code

@@ -3,6 +3,9 @@
 ## Implement a node
 
 Basic nodes share the `mfn-core` crate under `crates/builtin-nodes/core/`. Nodes with service-specific dependencies belong in separate packages.
+The optional [`mfn-code`](../crates/builtin-nodes/code/) package registers `builtin.code` with CEL expressions,
+instance-specific typed inputs, and output types inferred by the CEL checker. A Flow must select the package
+explicitly; `mfn-core` does not register this kind. See the [CEL examples](workflows.md#built-in-nodes).
 
 A plugin crate depends on `mf-runtime`, implements `Node::execute`, provides a factory, and submits a `NodeRegistration` through `inventory::submit!`. The registration declares a unique `kind` and its input and output `PortSpec` values. See [constant](../crates/builtin-nodes/core/src/constant.rs) and [identity](../crates/builtin-nodes/core/src/identity.rs) for working registrations.
 

@@ -135,6 +135,53 @@ fn packaged_cli_acceptance() {
     let diagnostic = String::from_utf8_lossy(&typed_failure.stderr);
     assert!(diagnostic.contains("sink") && diagnostic.contains("/1"));
 
+    for (name, source, expected) in [
+        (
+            "cel-scalar",
+            include_str!("../../../examples/cel-scalar.json"),
+            json!({"doubled": 42}),
+        ),
+        (
+            "cel-list",
+            include_str!("../../../examples/cel-list.json"),
+            json!({"doubled": [2, 4]}),
+        ),
+    ] {
+        let mut cel_flow: Value = serde_json::from_str(source).unwrap();
+        cel_flow["dependencies"] = json!({
+            "core": {"package":"mfn-core","version":format!("={}", env!("CARGO_PKG_VERSION"))},
+            "code": {"package":"mfn-code","version":format!("={}", env!("CARGO_PKG_VERSION"))}
+        });
+        let cel_definition = project.join(format!("{name}.json"));
+        let cel_output = project.join(name);
+        let cel_build = fixture.root().join(format!("{name}-build"));
+        fs::write(&cel_definition, cel_flow.to_string()).unwrap();
+        fixture.compile(&cel_definition, &cel_output, &cel_build, false, false);
+        let manifest = fs::read_to_string(cel_build.join("Cargo.toml")).unwrap();
+        assert!(manifest.contains(&format!(
+            "package = \"mfn-code\", version = \"={}\"",
+            env!("CARGO_PKG_VERSION")
+        )));
+        assert!(!manifest.contains("path ="));
+        let runtime = fixture.root().join(format!("{name}-runtime"));
+        fs::create_dir(&runtime).unwrap();
+        let standalone = runtime.join("flow");
+        fs::rename(&cel_output, &standalone).unwrap();
+        fs::remove_file(&cel_definition).unwrap();
+        fs::remove_file(cel_definition.with_extension("lock")).unwrap();
+        fs::remove_dir_all(&cel_build).unwrap();
+        let result = checked(
+            Command::new(&standalone)
+                .current_dir(&runtime)
+                .env_clear()
+                .env("PATH", ""),
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&result.stdout).unwrap(),
+            expected
+        );
+    }
+
     let local = project.join("local-nodes");
     let repository = fixture.root().join("git-nodes");
     copy_directory(&fixture.fixture_source, &local);
