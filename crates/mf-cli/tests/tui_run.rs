@@ -5,6 +5,7 @@ use mf_telemetry::{
     identity::WorkflowId,
 };
 use nix::{
+    fcntl::{FcntlArg, FdFlag, fcntl},
     pty::{Winsize, openpty},
     sys::termios::{LocalFlags, tcgetattr},
 };
@@ -187,6 +188,84 @@ fn tui_restores_terminal_when_execution_spawn_fails_after_preflight() {
     drop(pty.slave);
     let screen = reader.join().unwrap();
     assert!(String::from_utf8_lossy(&screen).contains("could not launch workflow"));
+    assert_eq!(status.code(), Some(1));
+}
+
+#[test]
+fn tui_stops_the_child_and_restores_input_after_render_failure() {
+    if !loopback_available() {
+        return;
+    }
+    let directory = tempfile::tempdir().unwrap();
+    let runner = directory.path().join("long-runner");
+    let json = description_json();
+    fs::write(&runner, format!(
+        "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  exit 0\nfi\nsleep 5\n"
+    )).unwrap();
+    fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let size = Winsize {
+        ws_row: 30,
+        ws_col: 100,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    let input = openpty(Some(&size), None).unwrap();
+    let display = openpty(Some(&size), None).unwrap();
+    let flags = FdFlag::from_bits_truncate(fcntl(&display.master, FcntlArg::F_GETFD).unwrap());
+    fcntl(
+        &display.master,
+        FcntlArg::F_SETFD(flags | FdFlag::FD_CLOEXEC),
+    )
+    .unwrap();
+    let original = tcgetattr(&input.slave).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_mf"))
+        .arg("run")
+        .arg(&runner)
+        .arg("--tui")
+        .stdin(Stdio::from(input.slave.try_clone().unwrap()))
+        .stderr(Stdio::from(display.slave.try_clone().unwrap()))
+        .stdout(Stdio::null())
+        .spawn()
+        .unwrap();
+    drop(display.slave);
+    let mut master = fs::File::from(display.master);
+    let reader = thread::spawn(move || {
+        let mut output = Vec::new();
+        let mut bytes = [0; 4096];
+        loop {
+            match master.read(&mut bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(len) => {
+                    output.extend_from_slice(&bytes[..len]);
+                    if output
+                        .windows(b"Running".len())
+                        .any(|part| part == b"Running")
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        output
+    });
+    assert!(String::from_utf8_lossy(&reader.join().unwrap()).contains("Running"));
+    let deadline = Instant::now() + Duration::from_secs(4);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break status;
+        }
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            panic!("TUI did not stop its child after rendering failed");
+        }
+        thread::sleep(Duration::from_millis(20));
+    };
+    let restored = tcgetattr(&input.slave).unwrap();
+    assert_eq!(
+        restored.local_flags & (LocalFlags::ICANON | LocalFlags::ECHO),
+        original.local_flags & (LocalFlags::ICANON | LocalFlags::ECHO)
+    );
     assert_eq!(status.code(), Some(1));
 }
 

@@ -132,17 +132,19 @@ pub fn run_executable(path: &Path) -> Result<u8, RunError> {
 
     let mut capture = capture.lock().expect("capture lock was not poisoned");
     if let Some(error) = capture.error.as_deref() {
-        eprintln!("workflow stdout capture incomplete: {error}");
+        report(&format!("workflow stdout capture incomplete: {error}"));
     }
     if capture.stderr_dropped != 0 {
-        eprintln!(
+        report(&format!(
             "workflow stderr history dropped {} bytes",
             capture.stderr_dropped
-        );
+        ));
     }
     let delivery = capture.deliver();
     if let Err(error) = delivery.as_ref() {
-        eprintln!("could not deliver captured workflow stdout: {error}");
+        report(&format!(
+            "could not deliver captured workflow stdout: {error}"
+        ));
     }
     let (status, interrupted, capture_forced) = result?;
     if interrupted {
@@ -157,6 +159,10 @@ pub fn run_executable(path: &Path) -> Result<u8, RunError> {
     } else {
         Ok(code)
     }
+}
+
+fn report(message: &str) {
+    let _ = writeln!(io::stderr().lock(), "{message}");
 }
 
 fn exit_code(status: ExitStatus) -> u8 {
@@ -771,7 +777,7 @@ mod tests {
     fn capture_worker_drains_a_full_pipe_without_rendering() {
         let child = Command::new("sh")
             .arg("-c")
-            .arg("dd if=/dev/zero bs=65536 count=16 2>/dev/null; dd if=/dev/zero bs=65536 count=16 1>&2 2>/dev/null")
+            .arg("dd if=/dev/zero bs=65536 count=16 2>/dev/null; dd if=/dev/zero bs=65536 count=32 1>&2 2>/dev/null")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -797,6 +803,7 @@ mod tests {
         let capture = capture.lock().unwrap();
         assert_eq!(capture.written, 1_048_576);
         assert_eq!(capture.stderr_tail.len(), MAX_STDERR_BYTES);
+        assert_eq!(capture.stderr_dropped, MAX_STDERR_BYTES as u64);
         assert!(capture.error.is_none());
     }
 }

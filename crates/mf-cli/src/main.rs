@@ -2,6 +2,7 @@ use mf_compiler::{CompileRequest, PipelineError, SupportPackages, compile_projec
 use snafu::{ResultExt, Snafu};
 use std::env;
 use std::ffi::{OsStr, OsString};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -29,7 +30,7 @@ fn main() -> ExitCode {
     match run() {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
-            eprintln!("{error}");
+            let _ = writeln!(io::stderr().lock(), "{error}");
             ExitCode::FAILURE
         }
     }
