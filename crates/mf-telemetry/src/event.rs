@@ -313,55 +313,21 @@ impl LifecycleEvent {
                 .find(|node| node.id == identity.id)
                 .expect("validated graph contains ordered node");
             require(node.kind == identity.kind, "node kind mismatch")?;
-            match &self.event {
-                Event::NodeFinished {
-                    produced_ports,
-                    skipped_ports,
-                    ..
-                } => {
+            if let Event::NodeSkipped { causes, .. } = &self.event {
+                for cause in causes {
                     require(
-                        produced_ports
-                            .iter()
-                            .all(|p| node.outputs.iter().any(|out| &out.name == p)),
-                        "unknown produced port",
-                    )?;
-                    require(
-                        skipped_ports.iter().all(|p| {
-                            node.outputs
-                                .iter()
-                                .any(|out| &out.name == p && !out.required)
+                        graph.data_edges.iter().any(|e| {
+                            e.to_node == identity.id
+                                && e.from_node == cause.source_node
+                                && e.from_output == cause.source_output
+                        }) || graph.control_edges.iter().any(|e| {
+                            e.to_node == identity.id
+                                && e.from_node == cause.source_node
+                                && e.from_output == cause.source_output
                         }),
-                        "invalid skipped output",
+                        "skip cause is not an incoming dependency",
                     )?;
                 }
-                Event::NodeSkipped {
-                    causes,
-                    skipped_ports,
-                    ..
-                } => {
-                    require(
-                        skipped_ports.len() == node.outputs.len()
-                            && skipped_ports
-                                .iter()
-                                .all(|p| node.outputs.iter().any(|out| &out.name == p)),
-                        "skipped node must identify all outputs",
-                    )?;
-                    for cause in causes {
-                        require(
-                            graph.data_edges.iter().any(|e| {
-                                e.to_node == identity.id
-                                    && e.from_node == cause.source_node
-                                    && e.from_output == cause.source_output
-                            }) || graph.control_edges.iter().any(|e| {
-                                e.to_node == identity.id
-                                    && e.from_node == cause.source_node
-                                    && e.from_output == cause.source_output
-                            }),
-                            "skip cause is not an incoming dependency",
-                        )?;
-                    }
-                }
-                _ => {}
             }
         }
         match &self.event {

@@ -1,0 +1,14 @@
+[package]
+name = "mfn-code"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Typed expression nodes for miniflow"
+
+[dependencies]
+cel-core = "=0.5.1"
+inventory = "0.3.24"
+mf-runtime.workspace = true
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"

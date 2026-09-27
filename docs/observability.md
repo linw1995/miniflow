@@ -71,15 +71,17 @@ serde_json's number and string encoding without a trailing newline. For example,
 retain different encodings. The input is the serialized compiled definition, including configuration and defaults,
 rather than the raw source file's spelling. It does not identify plugin binary contents.
 
-`canonical_plan_bytes` and `WorkflowId::from_definition` implement this contract. Golden input, canonical bytes, and an independently computed SHA-256 digest live in `crates/mf-telemetry/tests/fixtures/identity-*`. Format changes require a new identity format version. A hash of low-entropy configuration is not a confidentiality boundary.
+`WorkflowId::from_definition` implements this contract. Golden input and an independently computed SHA-256 digest live in `crates/mf-telemetry/tests/fixtures/identity-*`. Format changes require a new identity format version. A hash of low-entropy configuration is not a confidentiality boundary.
 
 Each invocation has a fresh canonical lowercase UUID v4 `RunId`, independent of trace identity. A node has one lifecycle per `(run_id, node_id)`; there is no attempt number or workflow retry policy. Definition IDs and port names are opaque strings and are never split on punctuation.
 
 ## Description schema
 
-Description schema version 1 contains `workflow_id`, `nodes`, `data_edges`, `control_edges`, and `execution_order`. Nodes contain `id`, `kind`, and effective `inputs`/`outputs`; each port has `name`, `value_type`, and `required`. Port types are `any`, `null`, `boolean`, `number`, `string`, `array`, and `object`.
+Description version `2026-09-27` contains `workflow_id`, `nodes`, `data_edges`, `control_edges`, and `execution_order`. Nodes contain `id` and `kind`; edge endpoints carry connected port names. The full effective port table is unavailable in description mode, so unconnected ports, types, and required flags remain unknown to the TUI. Compile validation still checks those contracts by constructing plugin instances.
 
-`WorkflowDescription::from_json` rejects unsupported versions, oversized input (16 MiB), duplicate IDs/ports, incomplete execution order, missing endpoints, backward edges, and duplicate input/control bindings. `to_json` validates before encoding. Public structs can be assembled by callers; validate them before use. Additive unknown fields are accepted within version 1 and omitted when re-encoded. No description field carries node configuration, predicate values, or business inputs/outputs.
+`WorkflowDescription::from_json` rejects unsupported versions, oversized input (16 MiB), duplicate IDs, empty edge port names, incomplete execution order, missing endpoints, backward edges, and duplicate input/control bindings. `to_json` validates before encoding. Public structs can be assembled by callers; validate them before use.
+
+Additive unknown fields are accepted within the current version and omitted when re-encoded. No description field carries node configuration, predicate values, or business inputs/outputs.
 
 ## Lifecycle fields
 

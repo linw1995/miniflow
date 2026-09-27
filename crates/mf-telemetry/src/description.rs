@@ -1,12 +1,22 @@
-use crate::{ContractError, Count, DESCRIPTION_SCHEMA_VERSION, identity::WorkflowId, require};
+use crate::{ContractError, Count, identity::WorkflowId, require};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const MAX_DESCRIPTION_BYTES: usize = 16 * 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkflowDescriptionVersion {
+    #[serde(rename = "2026-09-27")]
+    V2026_09_27,
+}
+
+impl WorkflowDescriptionVersion {
+    pub const CURRENT: Self = Self::V2026_09_27;
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowDescription {
-    pub schema_version: i64,
+    pub version: WorkflowDescriptionVersion,
     pub workflow_id: WorkflowId,
     pub nodes: Vec<NodeDescription>,
     pub data_edges: Vec<DataEdge>,
@@ -18,27 +28,6 @@ pub struct WorkflowDescription {
 pub struct NodeDescription {
     pub id: String,
     pub kind: String,
-    pub inputs: Vec<PortDescription>,
-    pub outputs: Vec<PortDescription>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PortDescription {
-    pub name: String,
-    pub value_type: PortType,
-    pub required: bool,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PortType {
-    Any,
-    Null,
-    Boolean,
-    Number,
-    String,
-    Array,
-    Object,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -84,13 +73,6 @@ impl WorkflowDescription {
     }
 
     pub fn validate(&self) -> Result<(), ContractError> {
-        require(
-            self.schema_version == DESCRIPTION_SCHEMA_VERSION,
-            format!(
-                "unsupported description schema version {}",
-                self.schema_version
-            ),
-        )?;
         crate::maximum_event_count(self.node_count()?)?;
         let mut nodes = BTreeMap::new();
         for node in &self.nodes {
@@ -102,15 +84,6 @@ impl WorkflowDescription {
                 nodes.insert(node.id.as_str(), node).is_none(),
                 "duplicate node ID",
             )?;
-            for ports in [&node.inputs, &node.outputs] {
-                let mut names = BTreeSet::new();
-                for port in ports {
-                    require(
-                        !port.name.is_empty() && names.insert(&port.name),
-                        "empty or duplicate port name",
-                    )?;
-                }
-            }
         }
         let mut positions = BTreeMap::new();
         for (index, id) in self.execution_order.iter().enumerate() {
@@ -124,29 +97,18 @@ impl WorkflowDescription {
             "execution order is incomplete",
         )?;
         let endpoint = |source: &str, port: &str, target: &str| -> Result<(), ContractError> {
-            let from = nodes
-                .get(source)
-                .ok_or_else(|| crate::invalid("unknown source node"))?;
+            require(nodes.contains_key(source), "unknown source node")?;
             require(nodes.contains_key(target), "unknown target node")?;
+            require(!port.is_empty(), "empty source output name")?;
             require(
                 positions[source] < positions[target],
                 "edge violates execution order",
-            )?;
-            require(
-                from.outputs.iter().any(|p| p.name == port),
-                "unknown source output",
             )
         };
         let mut inputs = BTreeSet::new();
         for edge in &self.data_edges {
             endpoint(&edge.from_node, &edge.from_output, &edge.to_node)?;
-            require(
-                nodes[edge.to_node.as_str()]
-                    .inputs
-                    .iter()
-                    .any(|p| p.name == edge.to_input),
-                "unknown target input",
-            )?;
+            require(!edge.to_input.is_empty(), "empty target input name")?;
             require(
                 inputs.insert((&edge.to_node, &edge.to_input)),
                 "duplicate target input binding",

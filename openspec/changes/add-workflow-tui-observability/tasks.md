@@ -16,7 +16,7 @@
 
 ## 3. Generate description and export support
 
-- [ ] 3.1 Implement [plan 2](plans/02-runner-description.md): versioned `--describe`, early descriptor isolation, effective ports, and bounded preflight on the same runner build; verify noisy constructors/destructors, native writes, dynamic instances, partial/oversized output, timeouts, and zero execution calls.
+- [ ] 3.1 Implement [plan 2](plans/02-runner-description.md): date-versioned `--describe` from the embedded graph and bounded preflight on the same runner build; verify no factory or execution calls, connected port names, partial/oversized output, descendant-held pipes, and timeouts.
 - [ ] 3.2 Generate runner export initialization, per-run launch settings, mode separation, and bounded flush on success and handled failure; verify validation/description emit no execution runs and normal unconfigured execution opens no telemetry connection.
 - [ ] 3.3 Configure OTLP/HTTP background export with bounded queues, interactive batch delay, and finite timeouts; verify short-run flushing, unavailable receivers, queue saturation, and identical workflow results when export fails.
 - [ ] 3.4 Add exact-version observation support to generated dependencies and release/package checks; verify an installed CLI compiles against packaged support crates and the generated dependency graph excludes `mf-tui` and its rendering stack.

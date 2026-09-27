@@ -8,7 +8,7 @@ use uuid::Uuid;
 pub const IDENTITY_FORMAT_VERSION: i64 = 1;
 
 /// UTF-8 compact serde_json encoding, recursively sorted keys, original array order.
-pub fn canonical_plan_bytes(
+fn canonical_plan_bytes(
     definition: &impl Serialize,
     execution_order: &[String],
 ) -> Result<Vec<u8>, ContractError> {
