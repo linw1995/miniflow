@@ -1,4 +1,7 @@
-use cel_core::{CelType, Env, Program};
+mod value;
+
+use cel_core::types::{Expr, SpannedExpr};
+use cel_core::{CelType, Env, MapActivation, Program, Value as CelValue};
 use mf_runtime::{
     Inputs, Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, Outputs,
     PortSpec, ValueType, deserialize_config,
@@ -6,8 +9,10 @@ use mf_runtime::{
 use serde::Deserialize;
 use serde_json::Value;
 use std::{collections::BTreeMap, error::Error, fmt};
+use value::{Budget, MAX_JSON_BYTES, cel_to_json, json_to_cel};
 
 pub const KIND: &str = "builtin.code";
+const MAX_EXPRESSION_BYTES: usize = 8 * 1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,6 +36,12 @@ impl Error for InvalidConfig {}
 fn invalid(message: impl Into<String>) -> NodeBuildError {
     NodeBuildError::FactoryFailed {
         source: Box::new(InvalidConfig(message.into())),
+    }
+}
+
+fn execution_error(message: impl Into<String>) -> NodeExecutionError {
+    NodeExecutionError::ExecutionFailed {
+        message: message.into(),
     }
 }
 
@@ -97,17 +108,101 @@ fn valid_identifier(name: &str) -> bool {
     matches!(&ast.expr().node, cel_core::types::Expr::Ident(parsed) if parsed == name)
 }
 
+fn uses_explicit_dyn(expression: &SpannedExpr) -> bool {
+    match &expression.node {
+        Expr::Call { expr, args } => {
+            matches!(&expr.node, Expr::Ident(name) | Expr::RootIdent(name) if name == "dyn")
+                || uses_explicit_dyn(expr)
+                || args.iter().any(uses_explicit_dyn)
+        }
+        Expr::Unary { expr, .. } | Expr::Member { expr, .. } => uses_explicit_dyn(expr),
+        Expr::Binary { left, right, .. } => uses_explicit_dyn(left) || uses_explicit_dyn(right),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            uses_explicit_dyn(cond) || uses_explicit_dyn(then_expr) || uses_explicit_dyn(else_expr)
+        }
+        Expr::Index { expr, index, .. } => uses_explicit_dyn(expr) || uses_explicit_dyn(index),
+        Expr::List(items) => items.iter().any(|item| uses_explicit_dyn(&item.expr)),
+        Expr::Map(entries) => entries
+            .iter()
+            .any(|entry| uses_explicit_dyn(&entry.key) || uses_explicit_dyn(&entry.value)),
+        Expr::Struct { type_name, fields } => {
+            uses_explicit_dyn(type_name)
+                || fields.iter().any(|field| uses_explicit_dyn(&field.value))
+        }
+        Expr::Comprehension(data) => [
+            &data.iter_range,
+            &data.accu_init,
+            &data.loop_condition,
+            &data.loop_step,
+            &data.result,
+        ]
+        .into_iter()
+        .any(|part| uses_explicit_dyn(part)),
+        Expr::MemberTestOnly { expr, .. } => uses_explicit_dyn(expr),
+        Expr::Bind { init, body, .. } => uses_explicit_dyn(init) || uses_explicit_dyn(body),
+        _ => false,
+    }
+}
+
 struct CodeNode {
     ports: NodePorts,
     programs: BTreeMap<String, Program>,
 }
 
 impl Node for CodeNode {
-    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        let _ = &self.programs;
-        Err(NodeExecutionError::ExecutionFailed {
-            message: "CEL execution is not available".into(),
-        })
+    fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
+        let input_size = serde_json::to_vec(&inputs)
+            .map_err(|error| execution_error(format!("could not measure inputs: {error}")))?
+            .len();
+        if input_size > MAX_JSON_BYTES {
+            return Err(execution_error(format!(
+                "inputs exceed the {MAX_JSON_BYTES}-byte JSON limit"
+            )));
+        }
+        for name in inputs.keys() {
+            if !self.ports.inputs.iter().any(|port| port.name == *name) {
+                return Err(execution_error(format!("undeclared input `{name}`")));
+            }
+        }
+        let mut budget = Budget::default();
+        let mut activation = MapActivation::new();
+        for port in &self.ports.inputs {
+            let name = port.name.as_ref();
+            let value = inputs
+                .get(name)
+                .ok_or_else(|| execution_error(format!("missing input `{name}`")))?;
+            let converted = json_to_cel(value, &port.value_type, &mut budget, "", 1)
+                .map_err(|error| execution_error(format!("input `{name}`: {error}")))?;
+            activation.insert(name, converted);
+        }
+        let mut outputs = Outputs::new();
+        let mut output_size = 2usize;
+        for port in &self.ports.outputs {
+            let name = port.name.as_ref();
+            let result = self.programs[name].eval(&activation);
+            if let CelValue::Error(error) = &result {
+                return Err(execution_error(format!("output `{name}`: {error}")));
+            }
+            let converted = cel_to_json(&result, &port.value_type, &mut budget, "", 1)
+                .map_err(|error| execution_error(format!("output `{name}`: {error}")))?;
+            let encoded_name = serde_json::to_vec(name)
+                .map_err(|error| execution_error(format!("output `{name}`: {error}")))?;
+            let encoded_value = serde_json::to_vec(&converted)
+                .map_err(|error| execution_error(format!("output `{name}`: {error}")))?;
+            output_size +=
+                encoded_name.len() + encoded_value.len() + 1 + usize::from(!outputs.is_empty());
+            if output_size > MAX_JSON_BYTES {
+                return Err(execution_error(format!(
+                    "output `{name}`: outputs exceed the {MAX_JSON_BYTES}-byte JSON limit"
+                )));
+            }
+            outputs.insert(name.to_owned(), converted);
+        }
+        Ok(outputs)
     }
 
     fn ports(&self) -> Option<NodePorts> {
@@ -149,9 +244,20 @@ fn factory(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
             .as_str()
             .filter(|expression| !expression.trim().is_empty())
             .ok_or_else(|| invalid(format!("output `{name}` requires a nonblank expression")))?;
+        if expression.len() > MAX_EXPRESSION_BYTES {
+            return Err(invalid(format!(
+                "output `{name}` exceeds the {MAX_EXPRESSION_BYTES}-byte expression limit"
+            )));
+        }
         let ast = env
             .compile(expression)
             .map_err(|error| invalid(format!("output `{name}`: {error}")))?;
+        // CEL macros can contain internal dynamic types even when the user expression is concrete.
+        if uses_explicit_dyn(ast.expr()) {
+            return Err(invalid(format!(
+                "output `{name}`: explicit dyn(...) is unsupported"
+            )));
+        }
         let inferred = ast
             .result_type()
             .ok_or_else(|| invalid(format!("output `{name}` has no inferred type")))?;
@@ -327,6 +433,201 @@ mod tests {
             .to_string();
             assert!(error.contains("output `result`"), "{expression}: {error}");
         }
+    }
+
+    #[test]
+    fn evaluates_scalar_and_collection_outputs_from_one_activation() {
+        let node = factory(json!({
+            "language": "cel",
+            "inputs": {
+                "amount": "int",
+                "items": {"list": "int"},
+                "values": {"map": "int"},
+                "nothing": "null"
+            },
+            "code": {
+                "doubled": "amount * 2",
+                "list": "items.map(x, x * 2)",
+                "map": "values",
+                "empty": "nothing"
+            }
+        }))
+        .unwrap();
+        let outputs = node
+            .execute(Inputs::from([
+                ("amount".into(), json!(21)),
+                ("items".into(), json!([1, 2])),
+                ("values".into(), json!({"a": 3})),
+                ("nothing".into(), Value::Null),
+            ]))
+            .unwrap();
+        assert_eq!(outputs["doubled"], json!(42));
+        assert_eq!(outputs["list"], json!([2, 4]));
+        assert_eq!(outputs["map"], json!({"a": 3}));
+        assert_eq!(outputs["empty"], Value::Null);
+    }
+
+    #[test]
+    fn checks_inputs_even_when_called_without_a_workflow() {
+        let node = factory(json!({
+            "language": "cel",
+            "inputs": {"items": {"list": {"map": "int"}}},
+            "code": {"result": "items"}
+        }))
+        .unwrap();
+        for (inputs, expected) in [
+            (Inputs::new(), "missing input `items`"),
+            (
+                Inputs::from([("extra".into(), json!(1))]),
+                "undeclared input `extra`",
+            ),
+            (
+                Inputs::from([("items".into(), json!(null))]),
+                "expected list",
+            ),
+            (
+                Inputs::from([("items".into(), json!([{"a/b": 1}, {"a~b": false}]))]),
+                "path `/1/a~0b`",
+            ),
+            (
+                Inputs::from([("items".into(), json!([{"a": "wrong"}]))]),
+                "path `/0/a`",
+            ),
+        ] {
+            let error = node.execute(inputs).unwrap_err().to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+        let int_node = factory(json!({
+            "language": "cel",
+            "inputs": {"amount": "int"},
+            "code": {"result": "amount"}
+        }))
+        .unwrap();
+        let error = int_node
+            .execute(Inputs::from([("amount".into(), json!(u64::MAX))]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("input `amount`") && error.contains("expected int64"));
+    }
+
+    #[test]
+    fn reports_evaluation_errors_without_returning_earlier_outputs() {
+        let node = factory(json!({
+            "language": "cel",
+            "inputs": {"divisor": "int"},
+            "code": {"first": "1", "second": "1 / divisor"}
+        }))
+        .unwrap();
+        let error = node
+            .execute(Inputs::from([("divisor".into(), json!(0))]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("output `second`"), "{error}");
+    }
+
+    #[test]
+    fn enforces_expression_payload_and_collection_limits() {
+        let expression = format!("1{}", " ".repeat(MAX_EXPRESSION_BYTES));
+        let error = factory(json!({
+            "language": "cel",
+            "inputs": {},
+            "code": {"result": expression}
+        }))
+        .err()
+        .unwrap()
+        .to_string();
+        assert!(error.contains("expression limit"));
+
+        let node = factory(json!({
+            "language": "cel",
+            "inputs": {"payload": "string"},
+            "code": {"result": "payload + payload"}
+        }))
+        .unwrap();
+        let error = node
+            .execute(Inputs::from([(
+                "payload".into(),
+                json!("x".repeat(MAX_JSON_BYTES + 1)),
+            )]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("inputs exceed"), "{error}");
+        let error = node
+            .execute(Inputs::from([(
+                "payload".into(),
+                json!("x".repeat(600_000)),
+            )]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("output `result`: outputs exceed"), "{error}");
+
+        let node = factory(json!({
+            "language": "cel",
+            "inputs": {"items": {"list": "int"}},
+            "code": {"first": "items", "second": "items"}
+        }))
+        .unwrap();
+        let error = node
+            .execute(Inputs::from([("items".into(), json!(vec![1; 4_000]))]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("output `second`"), "{error}");
+        assert!(error.contains("collection entry limit"), "{error}");
+    }
+
+    #[test]
+    fn infers_boolean_and_nested_collection_results() {
+        let node = factory(json!({
+            "language": "cel",
+            "inputs": {"amount": "int"},
+            "code": {
+                "boolean": "amount > 0",
+                "nested": "[{'count': amount}]"
+            }
+        }))
+        .unwrap();
+        let ports = node.ports().unwrap();
+        let types: BTreeMap<_, _> = ports
+            .outputs
+            .iter()
+            .map(|port| (port.name.as_ref(), &port.value_type))
+            .collect();
+        assert_eq!(types["boolean"], &ValueType::Boolean);
+        assert_eq!(
+            types["nested"],
+            &ValueType::List(Box::new(ValueType::Map(Box::new(ValueType::Int64))))
+        );
+    }
+
+    #[test]
+    fn rejects_static_errors_and_explicit_dynamic_calls() {
+        for expression in [
+            "missing + 1",
+            "amount + 'x'",
+            "amount *",
+            "dyn(amount)",
+            "int(dyn(amount))",
+            "[amount, 'x']",
+            "b'bytes'",
+        ] {
+            let error = factory(json!({
+                "language": "cel",
+                "inputs": {"amount": "int"},
+                "code": {"result": expression}
+            }))
+            .err()
+            .unwrap()
+            .to_string();
+            assert!(error.contains("output `result`"), "{expression}: {error}");
+        }
+        assert!(
+            factory(json!({
+                "language": "cel",
+                "inputs": {"items": {"list": "int"}},
+                "code": {"result": "items.map(x, x * 2)"}
+            }))
+            .is_ok()
+        );
     }
 
     #[test]

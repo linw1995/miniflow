@@ -1,0 +1,40 @@
+{
+  "version": "2026-09-26",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
+    }
+  },
+  "nodes": [
+    {
+      "id": "source",
+      "kind": "builtin.constant",
+      "config": { "value": [1, 2] }
+    },
+    {
+      "id": "transform",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": { "items": { "list": "int" } },
+        "code": { "doubled": "items.map(x, x * 2)" }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "source",
+      "from_output": "value",
+      "to_node": "transform",
+      "to_input": "items"
+    }
+  ],
+  "outputs": [
+    { "name": "doubled", "node": "transform", "port": "doubled" }
+  ]
+}
