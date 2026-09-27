@@ -41,6 +41,7 @@ enum TypeChoice {
     ListNumber,
     ListInt64,
     ListString,
+    ListMapInt64,
     MapInt64,
 }
 
@@ -58,6 +59,9 @@ impl TypeChoice {
             Self::ListNumber => ValueType::List(Box::new(ValueType::Number)),
             Self::ListInt64 => ValueType::List(Box::new(ValueType::Int64)),
             Self::ListString => ValueType::List(Box::new(ValueType::String)),
+            Self::ListMapInt64 => {
+                ValueType::List(Box::new(ValueType::Map(Box::new(ValueType::Int64))))
+            }
             Self::MapInt64 => ValueType::Map(Box::new(ValueType::Int64)),
         }
     }
