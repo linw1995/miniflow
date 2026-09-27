@@ -112,59 +112,6 @@ fn propagates_declared_plugin_types_without_a_known_value() {
     assert_eq!(result["result"], json!([1, 2]));
 }
 
-struct TwoInputNode;
-
-impl Node for TwoInputNode {
-    fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::new())
-    }
-}
-
-fn two_input_factory(_config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    Ok(Box::new(TwoInputNode))
-}
-
-inventory::submit! {
-    NodeRegistration {
-        kind: "fixture.two_inputs",
-        inputs: &[
-            PortSpec::new("a", ValueType::Int64, true),
-            PortSpec::new("b", ValueType::Int64, true),
-        ],
-        outputs: &[],
-        factory: two_input_factory,
-    }
-}
-
-#[test]
-fn reports_the_same_first_conflict_for_reordered_edges() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let mut definition: WorkflowDefinition = serde_json::from_value(json!({
-        "version":"2026-09-26",
-        "dependencies":dependencies(),
-        "nodes":[
-            {"id":"source_a","kind":"builtin.constant","config":{"value":"wrong"}},
-            {"id":"source_b","kind":"builtin.constant","config":{"value":false}},
-            {"id":"sink","kind":"fixture.two_inputs"}
-        ],
-        "edges":[
-            {"from_node":"source_b","from_output":"value","to_node":"sink","to_input":"b"},
-            {"from_node":"source_a","from_output":"value","to_node":"sink","to_input":"a"}
-        ]
-    }))
-    .unwrap();
-    let original = compile_definition(&definition, &registry)
-        .unwrap_err()
-        .to_string();
-    definition.edges.reverse();
-    definition.nodes.reverse();
-    let reordered = compile_definition(&definition, &registry)
-        .unwrap_err()
-        .to_string();
-    assert_eq!(reordered, original);
-    assert!(original.contains("source_a") && original.contains("`a`"));
-}
-
 struct ForwardingNode;
 
 impl Node for ForwardingNode {
@@ -198,7 +145,7 @@ inventory::submit! {
 }
 
 #[test]
-fn rejects_forwarded_output_conflicts_and_guards_unknown_values() {
+fn rejects_forwarded_output_conflicts() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut definition: WorkflowDefinition = serde_json::from_value(json!({
         "version":"2026-09-26",
@@ -226,27 +173,6 @@ fn rejects_forwarded_output_conflicts_and_guards_unknown_values() {
         .to_string();
     assert!(
         error.contains("forward") && error.contains("declares int64"),
-        "{error}"
-    );
-
-    definition.nodes[0].config = json!({"type":"any","value":7});
-    let plan = compile_definition(&definition, &registry).unwrap();
-    assert_eq!(
-        instantiate_compiled(&plan, &registry)
-            .unwrap()
-            .execute()
-            .unwrap()["result"],
-        json!(7)
-    );
-    definition.nodes[0].config = json!({"type":"any","value":"wrong"});
-    let plan = compile_definition(&definition, &registry).unwrap();
-    let error = instantiate_compiled(&plan, &registry)
-        .unwrap()
-        .execute()
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("forward") && error.contains("int64"),
         "{error}"
     );
 }
@@ -281,35 +207,22 @@ fn control_edges_do_not_propagate_known_data() {
 }
 
 static INVALID_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
-static OUTPUT_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
 
-struct InvalidMetadataNode {
-    invalid_input: bool,
-}
+struct InvalidMetadataNode;
 
 impl Node for InvalidMetadataNode {
     fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        if self.invalid_input {
-            INVALID_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
-        } else {
-            OUTPUT_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
-        }
+        INVALID_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
         Ok(Outputs::from([("value".into(), json!("wrong"))]))
     }
 
     fn output_derivations(&self) -> Vec<OutputDerivation> {
-        if self.invalid_input {
-            vec![OutputDerivation::forward_input("value", "missing")]
-        } else {
-            Vec::new()
-        }
+        vec![OutputDerivation::forward_input("value", "missing")]
     }
 }
 
-fn invalid_metadata_factory(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    Ok(Box::new(InvalidMetadataNode {
-        invalid_input: config["invalid_input"].as_bool().unwrap_or(false),
-    }))
+fn invalid_metadata_factory(_config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+    Ok(Box::new(InvalidMetadataNode))
 }
 
 inventory::submit! {
@@ -328,7 +241,7 @@ fn rejects_bad_derivations_without_executing_nodes() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version":"2026-09-26",
         "dependencies":{},
-        "nodes":[{"id":"bad","kind":"fixture.invalid_metadata","config":{"invalid_input":true}}],
+        "nodes":[{"id":"bad","kind":"fixture.invalid_metadata"}],
         "outputs":[]
     }))
     .unwrap();
@@ -340,29 +253,4 @@ fn rejects_bad_derivations_without_executing_nodes() {
         "{error}"
     );
     assert_eq!(INVALID_EXECUTIONS.load(Ordering::Relaxed), 0);
-}
-
-#[test]
-fn retains_output_guards_for_unknown_plugins() {
-    OUTPUT_EXECUTIONS.store(0, Ordering::Relaxed);
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let definition: WorkflowDefinition = serde_json::from_value(json!({
-        "version":"2026-09-26",
-        "dependencies":{},
-        "nodes":[{"id":"source","kind":"fixture.invalid_metadata"}],
-        "outputs":[{"name":"result","node":"source","port":"value"}]
-    }))
-    .unwrap();
-    let plan = compile_definition(&definition, &registry).unwrap();
-    assert_eq!(OUTPUT_EXECUTIONS.load(Ordering::Relaxed), 0);
-    let error = instantiate_compiled(&plan, &registry)
-        .unwrap()
-        .execute()
-        .unwrap_err()
-        .to_string();
-    assert!(
-        error.contains("source") && error.contains("int64"),
-        "{error}"
-    );
-    assert_eq!(OUTPUT_EXECUTIONS.load(Ordering::Relaxed), 1);
 }

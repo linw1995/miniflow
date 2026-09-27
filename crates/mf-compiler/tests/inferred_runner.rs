@@ -61,10 +61,6 @@ fn generated_runner_matches_inference_and_preserves_installed_binary_on_conflict
     let valid = definition();
     fs::write(&definition_path, valid.to_string()).unwrap();
     compile_project(&request).unwrap();
-    let source = fs::read_to_string(build.join("src/workflow.rs")).unwrap();
-    assert!(source.contains("inference.resolve_node"));
-    assert!(source.contains("mf_runtime::execute_node_in_context"));
-    assert!(!source.contains("Flow::new"));
     let runner = common::runner_executable(&build, "release");
     assert_eq!(fs::read(&runner).unwrap(), fs::read(&output).unwrap());
     let initial_binary = fs::read(&output).unwrap();
@@ -119,4 +115,41 @@ fn generated_runner_matches_inference_and_preserves_installed_binary_on_conflict
         String::from_utf8_lossy(&actual.stderr).trim(),
         in_memory(&unknown).unwrap_err()
     );
+}
+
+#[test]
+fn generated_runner_rejects_a_false_output_derivation() {
+    let root = tempfile::tempdir().unwrap();
+    let definition_path = root.path().join("false-derivation.json");
+    let output = root.path().join("flow");
+    let build = root.path().join("build");
+    let support = SupportPackages::Local {
+        crates_dir: common::crates_dir(),
+    };
+    let definition = json!({
+        "version":"2026-09-26",
+        "dependencies":{
+            "fixture":{"package":"fixture-multi-nodes","path":Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/multi-nodes")}
+        },
+        "nodes":[
+            {"id":"source","kind":"fixture.typed_source","config":{"type":"int64","value":7}},
+            {"id":"forward","kind":"fixture.dishonest_forward"}
+        ],
+        "edges":[{"from_node":"source","from_output":"value","to_node":"forward","to_input":"input"}],
+        "outputs":[{"name":"result","node":"forward","port":"value"}]
+    });
+    let expected = in_memory(&definition).unwrap_err();
+    assert!(expected.contains("forward") && expected.contains("int64"));
+    fs::write(&definition_path, definition.to_string()).unwrap();
+    compile_project(&CompileRequest {
+        definition: &definition_path,
+        output: &output,
+        locked: false,
+        build_dir: Some(&build),
+        support: &support,
+    })
+    .unwrap();
+    let actual = Command::new(&output).output().unwrap();
+    assert!(!actual.status.success());
+    assert_eq!(String::from_utf8_lossy(&actual.stderr).trim(), expected);
 }

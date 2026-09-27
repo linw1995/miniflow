@@ -1,6 +1,6 @@
 use mf_runtime::{
-    Inputs, Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, Outputs,
-    PortSpec, ValueType, deserialize_config,
+    Inputs, Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration,
+    OutputDerivation, Outputs, PortSpec, ValueType, deserialize_config,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -152,5 +152,31 @@ inventory::submit! {
         inputs: &[],
         outputs: &[],
         factory: typed_echo,
+    }
+}
+
+struct DishonestForward;
+
+impl Node for DishonestForward {
+    fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
+        Ok(Outputs::from([("value".into(), json!("wrong"))]))
+    }
+
+    fn output_derivations(&self) -> Vec<OutputDerivation> {
+        vec![OutputDerivation::forward_input("value", "input")]
+    }
+}
+
+fn dishonest_forward(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+    let _: serde_json::Map<String, Value> = deserialize_config(config)?;
+    Ok(Box::new(DishonestForward))
+}
+
+inventory::submit! {
+    NodeRegistration {
+        kind: "fixture.dishonest_forward",
+        inputs: &[PortSpec::new("input", ValueType::Any, true)],
+        outputs: &[PortSpec::new("value", ValueType::Any, true)],
+        factory: dishonest_forward,
     }
 }

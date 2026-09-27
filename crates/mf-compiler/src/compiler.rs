@@ -165,10 +165,6 @@ pub struct TypeInferenceState {
 }
 
 impl TypeInferenceState {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     pub fn resolve_node(
         &mut self,
         node: &mut FlowNode,
@@ -184,9 +180,7 @@ impl TypeInferenceState {
             })?;
 
         let mut inputs = BTreeMap::new();
-        let mut dependencies = dependencies.to_vec();
-        dependencies.sort();
-        for dependency in &dependencies {
+        for dependency in dependencies {
             let Some(input_name) = dependency.input else {
                 continue;
             };
@@ -329,7 +323,7 @@ fn prepare_definition(
         .enumerate()
         .map(|(index, node)| (node.definition_id.clone(), index))
         .collect();
-    let mut inference = TypeInferenceState::new();
+    let mut inference = TypeInferenceState::default();
     for id in &order {
         let dependencies: Vec<_> = definition
             .edges

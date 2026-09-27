@@ -177,7 +177,7 @@ impl CompiledWorkflow {
                 registry: &mf_runtime::NodeRegistry,
             ) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
                 let mut state = mf_runtime::ExecutionContext::default();
-                let mut inference = mf_compiler::TypeInferenceState::new();
+                let mut inference = mf_compiler::TypeInferenceState::default();
                 #(#preparations)*
                 #(#node_statements)*
                 #outputs_binding

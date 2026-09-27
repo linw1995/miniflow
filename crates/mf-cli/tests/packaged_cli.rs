@@ -129,44 +129,6 @@ fn packaged_cli_acceptance() {
     let diagnostic = String::from_utf8_lossy(&typed_failure.stderr);
     assert!(diagnostic.contains("sink") && diagnostic.contains("/1"));
 
-    let inferred_flow = json!({
-        "version":"2026-09-26",
-        "dependencies":{
-            "core":{"package":"mfn-core","version":format!("={}", env!("CARGO_PKG_VERSION"))},
-            "external":{"package":"fixture-multi-nodes","version":format!("={}", fixture.fixture_version)}
-        },
-        "nodes":[
-            {"id":"source","kind":"builtin.constant","config":{"value":[{"count":1},{"count":2}]}},
-            {"id":"identity","kind":"builtin.identity"},
-            {"id":"sink","kind":"fixture.typed_echo","config":{"type":"list_map_int64"}}
-        ],
-        "edges":[
-            {"from_node":"source","from_output":"value","to_node":"identity","to_input":"input"},
-            {"from_node":"identity","from_output":"value","to_node":"sink","to_input":"input"}
-        ],
-        "outputs":[{"name":"result","node":"sink","port":"value"}]
-    });
-    let inferred_definition = project.join("inferred.json");
-    let inferred_executable = project.join("inferred");
-    let inferred_build = fixture.root().join("inferred-build");
-    fs::write(&inferred_definition, inferred_flow.to_string()).unwrap();
-    fixture.compile(
-        &inferred_definition,
-        &inferred_executable,
-        &inferred_build,
-        false,
-        false,
-    );
-    let inferred_result = checked(
-        Command::new(&inferred_executable)
-            .env_clear()
-            .env("PATH", ""),
-    );
-    assert_eq!(
-        serde_json::from_slice::<Value>(&inferred_result.stdout).unwrap(),
-        json!({"result":[{"count":1},{"count":2}]})
-    );
-
     for (name, source, expected) in [
         (
             "cel-scalar",
@@ -184,6 +146,16 @@ fn packaged_cli_acceptance() {
             "core": {"package":"mfn-core","version":format!("={}", env!("CARGO_PKG_VERSION"))},
             "code": {"package":"mfn-code","version":format!("={}", env!("CARGO_PKG_VERSION"))}
         });
+        if name == "cel-list" {
+            cel_flow["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id":"identity","kind":"builtin.identity"}));
+            cel_flow["edges"] = json!([
+                {"from_node":"source","from_output":"value","to_node":"identity","to_input":"input"},
+                {"from_node":"identity","from_output":"value","to_node":"transform","to_input":"items"}
+            ]);
+        }
         let cel_definition = project.join(format!("{name}.json"));
         let cel_output = project.join(name);
         let cel_build = fixture.root().join(format!("{name}-build"));

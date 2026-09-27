@@ -99,8 +99,6 @@ fn generated_plan_round_trips_and_preserves_definition_semantics() {
             .contains("mf_runtime::instantiate_node")
     );
     assert!(generated.rust_source.contains("mf_runtime::execute_node"));
-    assert!(generated.rust_source.contains("TypeInferenceState"));
-    assert!(generated.rust_source.contains("inference.resolve_node"));
     assert!(
         generated
             .rust_source

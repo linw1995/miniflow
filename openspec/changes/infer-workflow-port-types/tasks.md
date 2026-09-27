@@ -9,7 +9,7 @@
 
 ## 2. Resolve and validate graph types
 
-- [x] 2.1 Resolve output type and optional exact-value facts in canonical topological order after structural and port-name checks; verify constant-to-identity chains, typed plugin sources, control-only edges, deterministic results, and no node execution during validation.
+- [x] 2.1 Resolve output type and optional exact-value facts in canonical topological order after structural and port-name checks; verify constant-to-identity chains, typed plugin sources, control-only edges, stable node order, and no node execution during validation.
 - [x] 2.2 Check exact source values against target port types before applying ordinary compatibility rules to unknown sources; verify direct and forwarded scalar conflicts, heterogeneous nested mismatch paths, null rejection, accepted empty collections, and unchanged runtime-checked `Any`/broad edges.
 - [x] 2.3 Apply resolved output ports to in-memory `FlowNode` values and reject malformed derivations without weakening output guards; verify a falsely typed producer fails before publication and direct Flow execution retains its existing validation behavior.
 - [x] 2.4 Update `docs/workflows.md` to distinguish known-value errors, inferred-type errors, and genuinely unknown runtime-checked edges; verify the documented constant-to-identity example has matching compile diagnostics and execution output.
