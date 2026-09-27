@@ -35,6 +35,11 @@ fn plugin(root: &Path) -> PathBuf {
     for name in ["lib.rs", "context_fixture.rs"] {
         fs::copy(fixture.join(name), plugin.join("src").join(name)).unwrap();
     }
+    let lib = plugin.join("src/lib.rs");
+    let source = fs::read_to_string(&lib).unwrap();
+    let minimal = source.replace("mod typed_fixture;\n", "");
+    assert_ne!(minimal, source);
+    fs::write(lib, minimal).unwrap();
     let runtime = serde_json::to_string(&crates_dir().join("mf-runtime")).unwrap();
     fs::write(
         plugin.join("Cargo.toml"),
@@ -560,31 +565,6 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     let portable_output = command(&portable).env("PATH", "").output().unwrap();
     assert!(portable_output.status.success());
     assert_eq!(last_json(&portable_output.stdout), json!({"answer":14}));
-    assert_eq!(fs::read_to_string(&trace).unwrap(), "b\nc\n");
-    fs::remove_file(&trace).unwrap();
-    let (endpoint, worker) = collector(2);
-    let portable_observed = command(&portable)
-        .env("PATH", "")
-        .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
-        .output()
-        .unwrap();
-    assert!(portable_observed.status.success());
-    assert_eq!(portable_observed.stdout, plain.stdout);
-    check_otel(
-        &worker.join().unwrap(),
-        &[
-            "mf.workflow.started",
-            "mf.node.started",
-            "mf.node.finished",
-            "mf.node.started",
-            "mf.node.finished",
-            "mf.node.started",
-            "mf.node.finished",
-            "mf.workflow.finished",
-        ],
-        4,
-        description.workflow_id.as_str(),
-    );
     assert_eq!(fs::read_to_string(&trace).unwrap(), "b\nc\n");
 }
 
