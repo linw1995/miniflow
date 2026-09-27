@@ -3,33 +3,11 @@ extern crate mfn_code as _;
 extern crate mfn_core as _;
 
 use mf_compiler::{
-    CompileRequest, Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistration,
-    NodeRegistry, Outputs, PortSpec, SupportPackages, ValueType, WorkflowCompileError,
-    WorkflowDefinition, compile_definition, compile_project, instantiate_compiled,
+    CompileRequest, NodeRegistry, SupportPackages, WorkflowDefinition, compile_definition,
+    compile_project, instantiate_compiled,
 };
 use serde_json::{Value, json};
 use std::{env, fs, process::Command};
-
-struct StringSource;
-
-impl Node for StringSource {
-    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::from([("value".into(), json!("text"))]))
-    }
-}
-
-fn string_source(_: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    Ok(Box::new(StringSource))
-}
-
-inventory::submit! {
-    NodeRegistration {
-        kind: "test.string_source",
-        inputs: &[],
-        outputs: &[PortSpec::new("value", ValueType::String, true)],
-        factory: string_source,
-    }
-}
 
 fn graph(expression: &str) -> Value {
     json!({
@@ -57,17 +35,8 @@ fn graph(expression: &str) -> Value {
 }
 
 #[test]
-fn rejects_concrete_input_conflicts_and_checks_inactive_code() {
+fn checks_inactive_code_and_runtime_input_types() {
     let registry = NodeRegistry::from_inventory().unwrap();
-    let mut mismatch = graph("amount * 2");
-    mismatch["nodes"][0]["kind"] = json!("test.string_source");
-    mismatch["nodes"][0]["config"] = json!({});
-    let definition: WorkflowDefinition = serde_json::from_value(mismatch).unwrap();
-    assert!(matches!(
-        compile_definition(&definition, &registry).unwrap_err(),
-        WorkflowCompileError::IncompatiblePortTypes { .. }
-    ));
-
     let invalid: WorkflowDefinition = serde_json::from_value(graph("missing + 1")).unwrap();
     let error = compile_definition(&invalid, &registry)
         .unwrap_err()
