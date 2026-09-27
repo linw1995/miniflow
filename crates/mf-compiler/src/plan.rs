@@ -110,9 +110,6 @@ impl CompiledWorkflow {
             let node_ident = format_ident!("node_{index}");
             let id_lit = LitStr::new(node.id.as_str(), Span::call_site());
             let kind_lit = LitStr::new(&node.kind, Span::call_site());
-            preparations.push(quote! {
-                let #node_ident = mf_runtime::instantiate_node_with_metadata(registry, #id_lit, #kind_lit, #config_lit)?;
-            });
             let mut bindings: Vec<TokenStream> = Vec::new();
             for edge in self
                 .definition
@@ -135,6 +132,10 @@ impl CompiledWorkflow {
                 let port = LitStr::new(&edge.from_output, Span::call_site());
                 bindings.push(quote! { mf_runtime::ExecutionDependency { input: None, source_node: #source, source_output: #port } });
             }
+            preparations.push(quote! {
+                let mut #node_ident = mf_runtime::instantiate_node_with_metadata(registry, #id_lit, #kind_lit, #config_lit)?;
+                inference.resolve_node(&mut #node_ident, &[#(#bindings),*])?;
+            });
             node_statements.push(quote! {
                 mf_runtime::execute_node_in_context(&#node_ident, &[#(#bindings),*], &mut state)?;
             });
@@ -174,8 +175,9 @@ impl CompiledWorkflow {
         let generated = quote! {
             pub fn run_workflow(
                 registry: &mf_runtime::NodeRegistry,
-            ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
+            ) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
                 let mut state = mf_runtime::ExecutionContext::default();
+                let mut inference = mf_compiler::TypeInferenceState::default();
                 #(#preparations)*
                 #(#node_statements)*
                 #outputs_binding

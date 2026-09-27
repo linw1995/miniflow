@@ -1,6 +1,6 @@
 use mf_runtime::{
-    Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistration, Outputs, PortSpec,
-    ValueType, deserialize_config,
+    Inputs, Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration,
+    OutputDerivation, Outputs, PortSpec, ValueType, deserialize_config,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -23,6 +23,21 @@ struct ConstantNode {
 impl Node for ConstantNode {
     fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
         Ok(Outputs::from([("value".to_owned(), self.value.clone())]))
+    }
+
+    fn ports(&self) -> Option<NodePorts> {
+        Some(NodePorts {
+            inputs: Vec::new(),
+            outputs: vec![PortSpec::new(
+                "value",
+                ValueType::infer_json(&self.value),
+                true,
+            )],
+        })
+    }
+
+    fn output_derivations(&self) -> Vec<OutputDerivation> {
+        vec![OutputDerivation::literal("value", self.value.clone())]
     }
 }
 

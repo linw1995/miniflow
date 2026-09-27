@@ -146,6 +146,16 @@ fn packaged_cli_acceptance() {
             "core": {"package":"mfn-core","version":format!("={}", env!("CARGO_PKG_VERSION"))},
             "code": {"package":"mfn-code","version":format!("={}", env!("CARGO_PKG_VERSION"))}
         });
+        if name == "cel-list" {
+            cel_flow["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({"id":"identity","kind":"builtin.identity"}));
+            cel_flow["edges"] = json!([
+                {"from_node":"source","from_output":"value","to_node":"identity","to_input":"input"},
+                {"from_node":"identity","from_output":"value","to_node":"transform","to_input":"items"}
+            ]);
+        }
         let cel_definition = project.join(format!("{name}.json"));
         let cel_output = project.join(name);
         let cel_build = fixture.root().join(format!("{name}-build"));

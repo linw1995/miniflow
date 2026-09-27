@@ -34,6 +34,21 @@ Nodes with configurable ports can override `Node::ports()` with `NodePorts` usin
 
 The [Code node](../crates/builtin-nodes/code/src/lib.rs) uses this interface to expose ports from its declared inputs and checked CEL expressions.
 
+Nodes whose outputs are fixed or directly copy an input can also override `Node::output_derivations()`. Return
+`OutputDerivation::literal("value", value)` for a configured JSON value, or
+`OutputDerivation::forward_input("value", "input")` when the output always equals that input. The default method returns
+no derivations, so ordinary plugins retain their declared port types. Derivations must depend only on configuration and
+must describe the actual result whenever the output is produced. Validation rejects references to undeclared ports,
+duplicate output derivations, and literal values that conflict with the output's declared type. A plugin that advertises
+an inaccurate derivation can cause an incorrect compile-time decision; runtime port checks still reject values outside
+resolved types.
+
+`ValueType::infer_json(&value)` derives a bounded port type for a configured JSON value. It uses refined scalar,
+homogeneous list, and homogeneous map types when possible, and broad `Number`, `Array`, or `Object` where a precise
+descriptor is unavailable. Known JSON values remain available as separate evidence, so a mixed array can still cause a
+compile-time mismatch on a typed target. The [constant](../crates/builtin-nodes/core/src/constant.rs) and
+[identity](../crates/builtin-nodes/core/src/identity.rs) nodes demonstrate both derivation forms.
+
 Port types include the broad JSON categories `Any`, `Null`, `Boolean`, `Number`, `String`, `Array`, and `Object`, plus `Int64`, `Float64`, and recursive `List(T)` and `Map(T)`. `Map(T)` describes an object with string keys and values of type `T`. Existing `PortSpec::new` registrations remain valid for static broad or scalar ports. Construct typed collection ports from `Node::ports()`:
 
 ```rust
