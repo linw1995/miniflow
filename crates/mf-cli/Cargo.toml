@@ -21,6 +21,7 @@ snafu = "0.9.2"
 [dev-dependencies]
 flate2 = "1.1.10"
 mf-telemetry = { workspace = true, features = ["otlp"] }
+nix = { version = "0.31.3", features = ["term"] }
 opentelemetry-proto = { version = "0.33.0", default-features = false, features = ["gen-tonic-messages", "logs", "trace"] }
 prost = "0.14.4"
 serde_json = "1.0.151"

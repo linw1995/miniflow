@@ -31,11 +31,11 @@
 
 ## 5. Integrate CLI supervision and terminal presentation
 
-- [ ] 5.1 Add `mf run <executable> --tui` using [plan 3](plans/03-process-and-terminal.md), bounded preflight, null child stdin, receiver-before-spawn ordering, and child-only configuration; verify terminal requirements, fresh sessions, unsupported runners, and remote credential isolation.
-- [ ] 5.2 Implement plan 3's concurrent raw-byte drains, private stdout spool, bounded diagnostic tail, capture budgets, and cancellation-aware readers; verify byte-for-byte delivery, pipe saturation, visible truncation, disk failures, and descendant-held pipes.
-- [ ] 5.3 Render graph/data/control relationships, node states, active elapsed time, branch outcomes, selected-node diagnostics, and observation completeness; verify representative states in a terminal harness and visually inspect a long-running conditional workflow.
+- [x] 5.1 Add `mf run <executable> --tui` using [plan 3](plans/03-process-and-terminal.md), bounded preflight, null child stdin, receiver-before-spawn ordering, and child-only configuration; verify terminal requirements, fresh sessions, unsupported runners, and remote credential isolation.
+- [x] 5.2 Implement plan 3's concurrent raw-byte drains, private stdout spool, bounded diagnostic tail, capture budgets, and cancellation-aware readers; verify byte-for-byte delivery, pipe saturation, visible truncation, disk failures, and descendant-held pipes.
+- [x] 5.3 Render graph/data/control relationships, node states, active elapsed time, branch outcomes, selected-node diagnostics, and observation completeness; verify representative states in a terminal harness and visually inspect a long-running conditional workflow.
 - [ ] 5.4 Implement plan 3's process groups, deadlines, final-view keys, exit-result precedence, and terminal guard; verify its failure matrix on Linux/macOS, including ignored SIGINT, failed stdout delivery, and PTY settings after each recoverable exit.
-- [ ] 5.5 Document TUI invocation, keyboard behavior, terminal requirements, stdout handling, and incomplete-observation behavior; verify the documented workflow using only a compiled executable.
+- [x] 5.5 Document TUI invocation, keyboard behavior, terminal requirements, stdout handling, and incomplete-observation behavior; verify the documented workflow using only a compiled executable.
 
 ## 6. Validate integrated delivery
 

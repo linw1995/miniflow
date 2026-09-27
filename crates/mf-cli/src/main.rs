@@ -5,8 +5,7 @@ use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str =
-    "Usage: mf compile <definition> --output <path> [--locked] [--build-dir <path>]";
+const USAGE: &str = "Usage: mf compile <definition> --output <path> [--locked] [--build-dir <path>]\n       mf run <executable> --tui";
 
 #[derive(Debug, Snafu)]
 enum CliError {
@@ -14,6 +13,9 @@ enum CliError {
     Usage { message: String },
     #[snafu(display("{source}"))]
     Build { source: PipelineError },
+    #[cfg(unix)]
+    #[snafu(display("{source}"))]
+    Run { source: mf_tui::run::RunError },
 }
 
 struct CompileOptions {
@@ -25,7 +27,7 @@ struct CompileOptions {
 
 fn main() -> ExitCode {
     match run() {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => ExitCode::from(code),
         Err(error) => {
             eprintln!("{error}");
             ExitCode::FAILURE
@@ -33,7 +35,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<(), CliError> {
+fn run() -> Result<u8, CliError> {
     let mut args = env::args_os().skip(1);
     let Some(command) = args.next() else {
         return UsageSnafu {
@@ -43,7 +45,28 @@ fn run() -> Result<(), CliError> {
     };
     if command == OsStr::new("--help") || command == OsStr::new("-h") {
         println!("{USAGE}");
-        return Ok(());
+        return Ok(0);
+    }
+    if command == OsStr::new("run") {
+        let Some(executable) = args.next() else {
+            return UsageSnafu {
+                message: "missing executable path",
+            }
+            .fail();
+        };
+        if args.next().as_deref() != Some(OsStr::new("--tui")) || args.next().is_some() {
+            return UsageSnafu {
+                message: "expected exactly --tui after the executable",
+            }
+            .fail();
+        }
+        #[cfg(unix)]
+        return mf_tui::run::run_executable(&PathBuf::from(executable)).context(RunSnafu);
+        #[cfg(not(unix))]
+        return UsageSnafu {
+            message: "TUI execution is supported on Linux and macOS",
+        }
+        .fail();
     }
     if command != OsStr::new("compile") {
         return UsageSnafu {
@@ -52,7 +75,8 @@ fn run() -> Result<(), CliError> {
         .fail();
     }
     let options = parse_compile_args(args)?;
-    compile(options)
+    compile(options)?;
+    Ok(0)
 }
 
 fn parse_compile_args(

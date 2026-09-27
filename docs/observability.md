@@ -4,7 +4,7 @@
 
 `mf-telemetry` provides versioned descriptions, lifecycle events, workflow/run identities, sequence reservation, validation, and mapping into OpenTelemetry log records. Shared runtime instrumentation and generated execution accept caller-owned observations. Compiled runners also provide `--describe` and initialize OTel export only when an endpoint is configured.
 
-`mf-tui` contains a local OTLP receiver, state reducer, and graph renderer. The `mf run --tui` entry point is a subsequent implementation step.
+`mf-tui` contains the local OTLP receiver, state reducer, graph renderer, and CLI-only process supervisor used by `mf run <executable> --tui`.
 
 `mf-runtime` depends on the minimal telemetry package. `mf-cli` depends on the separate `mf-tui` package for bounded description preflight and local reception. Neither the compiler nor runtime depends on `mf-tui`. Generated runners resolve telemetry transitively through the runtime, without SDK, HTTP-client, or terminal dependencies by default.
 
@@ -173,8 +173,7 @@ processors. Their shutdown attempts to export remaining records within a finite 
 Validation and description modes do not initialize execution export. `--describe` reads only the embedded plan and
 emits one JSON graph document on stdout; it does not initialize the registry or invoke plugin factories. The CLI-only
 `mf-tui::description::describe_executable` preflight runs a child in an owned process group, applies a 30-second deadline
-and 16 MiB document limit, drains both streams, and rejects malformed or unsupported descriptions. The interactive CLI
-entry point is part of the later UI work.
+and 16 MiB document limit, drains both streams, and rejects malformed or unsupported descriptions.
 
 ## Local reception and state aggregation
 
@@ -210,9 +209,39 @@ proves lifecycle loss. There is no replay, persistence, reconnect, retry schedul
 
 `GraphView` draws data and control edges with distinct line symbols, clips to a caller-owned viewport, and renders node status and elapsed time from a state snapshot. Confirmed produced or skipped output ports change the associated edge style; possible lifecycle loss remains visibly uncertain.
 
-The initial routing is a midpoint orthogonal path between boxes. It does not search around intervening boxes, so crowded graphs can have line crossings or obscured segments. Layout is calculated once from the runner description; a later CLI terminal loop will own panning, status banners, diagnostics, and terminal cleanup.
+The initial routing is a midpoint orthogonal path between boxes. It does not search around intervening boxes, so crowded graphs can have line crossings or obscured segments. Layout is calculated once from the runner description; the CLI terminal loop owns panning, status banners, diagnostics, and terminal cleanup.
 
-Run the local graph preview from an interactive terminal to see simulated node starts, completions, elapsed time, and branch labels:
+## Local TUI execution
+
+Compile a workflow executable, then launch it from an interactive terminal:
+
+```sh
+mf compile examples/if-else.json --output ./if-else
+mf run ./if-else --tui
+```
+
+`mf run` requires terminal stdin and stderr. Stdout can be redirected: the CLI reserves it for the runner's byte-for-byte
+output after the final view closes. The runner receives null stdin, so workflows that prompt for input are unsupported in
+TUI mode. Preflight calls `--describe` before the execution process starts; existing binaries without the current
+description contract must be recompiled. A fresh run ID and loopback OTLP/HTTP receiver are prepared before launch. The
+execution child receives these session settings; inherited `OTEL_EXPORTER_OTLP_*` settings, including remote
+endpoints and headers, are removed from the child environment. The parent environment is unchanged.
+
+The graph shows data and control edges, node status, elapsed time, and confirmed branch outcomes. The header keeps the
+observed workflow outcome separate from the child process result. Arrow keys pan; `f` resets the viewport; Tab, `j`, and
+`k` select a node for details. `q` has no action while the workflow runs. Ctrl-C requests interruption, and a second
+Ctrl-C or the two-second deadline forces termination. After the runner exits, the view stays open until `q`, Enter, Esc,
+or Ctrl-C. The terminal is restored before the captured stdout is copied to CLI stdout.
+
+The CLI keeps at most 256 MiB of stdout in a private temporary spool and 1 MiB of recent stderr. It drains both pipes
+without waiting for a frame. If stdout capture fails or reaches its limit, the CLI stops the process group, displays the
+incomplete output state, and delivers any recoverable prefix after leaving the TUI. A failed final stdout copy is
+reported separately from the child result. Stderr history eviction is counted and shown. Missing OTel records never
+change the runner's exit result: the footer distinguishes known sequence gaps, local drops, and an unverified tail when
+the final lifecycle record is absent. Trace drops and diagnostic truncation are separate indicators.
+
+Run the local graph preview from an interactive terminal to see simulated node starts, completions, elapsed time, and an
+inactive branch:
 
 ```bash
 nix develop --command cargo run -p mf-tui --example graph_preview

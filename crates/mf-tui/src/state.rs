@@ -105,6 +105,8 @@ pub struct TraceAvailability {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StateSnapshot {
     pub nodes: Vec<NodeObservation>,
+    pub workflow_outcome: Option<Outcome>,
+    pub workflow_failure: Option<FailureSummary>,
     pub lifecycle: LifecycleIntegrity,
     pub traces: TraceAvailability,
     pub diagnostic_bytes_dropped: u64,
@@ -156,6 +158,7 @@ pub struct SessionState {
 struct FinalBoundary {
     sequence: Count,
     visited: Count,
+    outcome: Outcome,
     failure_node_id: Option<String>,
     failure: Option<Failure>,
 }
@@ -357,6 +360,15 @@ impl SessionState {
         }
         StateSnapshot {
             nodes,
+            workflow_outcome: self
+                .final_boundary
+                .as_ref()
+                .map(|boundary| boundary.outcome),
+            workflow_failure: self
+                .final_boundary
+                .as_ref()
+                .and_then(|boundary| boundary.failure.as_ref())
+                .map(bounded_failure),
             lifecycle,
             traces: self.traces,
             diagnostic_bytes_dropped: self.diagnostic_bytes_dropped,
@@ -560,6 +572,7 @@ impl SessionState {
             Event::WorkflowFinished {
                 final_sequence,
                 visited_node_count,
+                outcome,
                 failure_node_id,
                 failure,
                 ..
@@ -571,6 +584,7 @@ impl SessionState {
                 self.final_boundary = Some(FinalBoundary {
                     sequence: *final_sequence,
                     visited: *visited_node_count,
+                    outcome: *outcome,
                     failure_node_id: failure_node_id.clone(),
                     failure: failure.clone(),
                 });
