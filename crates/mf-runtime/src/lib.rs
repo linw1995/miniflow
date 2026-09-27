@@ -16,7 +16,8 @@ pub use definition::{
 pub use flow::{Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowOutputs, NodeId};
 pub use node::{
     ContextReference, Inputs, Node, NodeBuildError, NodeExecutionError, NodeFactory, NodePorts,
-    NodeRegistration, Outputs, PortSpec, ValueType, deserialize_config, output_id,
+    NodeRegistration, Outputs, PortSpec, TypeCompatibility, TypeDepthError, TypeMismatch,
+    ValueType, deserialize_config, output_id,
 };
 pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::{WorkflowRunError, instantiate_node_with_metadata};

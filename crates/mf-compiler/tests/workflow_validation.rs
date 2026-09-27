@@ -13,8 +13,40 @@ impl Node for NoopNode {
     }
 }
 
+struct DeepTypeNode;
+
+impl Node for DeepTypeNode {
+    fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
+        Ok(Outputs::new())
+    }
+
+    fn ports(&self) -> Option<mf_compiler::NodePorts> {
+        let mut value_type = ValueType::Int64;
+        for _ in 0..ValueType::MAX_DEPTH {
+            value_type = ValueType::List(Box::new(value_type));
+        }
+        Some(mf_compiler::NodePorts {
+            inputs: vec![],
+            outputs: vec![PortSpec::owned("value", value_type, true)],
+        })
+    }
+}
+
 fn noop_factory(_config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
     Ok(Box::new(NoopNode))
+}
+
+fn deep_type_factory(_config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+    Ok(Box::new(DeepTypeNode))
+}
+
+inventory::submit! {
+    NodeRegistration {
+        kind: "source.deep_type",
+        inputs: &[],
+        outputs: &[],
+        factory: deep_type_factory,
+    }
 }
 
 inventory::submit! {
@@ -207,4 +239,19 @@ fn rejects_invalid_selected_outputs() {
         validation_error(value),
         WorkflowCompileError::DuplicateWorkflowOutputName { .. }
     ));
+}
+
+#[test]
+fn rejects_excessively_nested_instance_port_types() {
+    let mut value = valid_definition();
+    value["nodes"][0]["kind"] = json!("source.deep_type");
+    let error = validation_error(value);
+    assert!(matches!(
+        error,
+        WorkflowCompileError::InvalidNodeMetadata { .. }
+    ));
+    let message = error.to_string();
+    assert!(message.contains("source"));
+    assert!(message.contains("output port `value`"));
+    assert!(message.contains("type nesting depth"));
 }
