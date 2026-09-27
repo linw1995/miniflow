@@ -4,7 +4,7 @@ mod fixture;
 extern crate mfn_core as _;
 
 use mf_compiler::{
-    Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry,
+    Inputs, Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, NodeRegistry,
     OutputDerivation, Outputs, PortSpec, ValueType, WorkflowDefinition, compile_definition,
     instantiate_compiled,
 };
@@ -178,6 +178,92 @@ fn reports_the_same_first_conflict_for_reordered_edges() {
         .to_string();
     assert_eq!(reordered, original);
     assert!(original.contains("source_a") && original.contains("`a`"));
+}
+
+struct ForwardingNode;
+
+impl Node for ForwardingNode {
+    fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
+        Ok(Outputs::from([("value".into(), inputs["input"].clone())]))
+    }
+
+    fn ports(&self) -> Option<NodePorts> {
+        Some(NodePorts {
+            inputs: vec![PortSpec::new("input", ValueType::Any, true)],
+            outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
+        })
+    }
+
+    fn output_derivations(&self) -> Vec<OutputDerivation> {
+        vec![OutputDerivation::forward_input("value", "input")]
+    }
+}
+
+fn forwarding_factory(_config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+    Ok(Box::new(ForwardingNode))
+}
+
+inventory::submit! {
+    NodeRegistration {
+        kind: "fixture.forwarding",
+        inputs: &[],
+        outputs: &[],
+        factory: forwarding_factory,
+    }
+}
+
+#[test]
+fn rejects_forwarded_output_conflicts_and_guards_unknown_values() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-09-26",
+        "dependencies":dependencies(),
+        "nodes":[
+            {"id":"source","kind":"builtin.constant","config":{"value":"wrong"}},
+            {"id":"forward","kind":"fixture.forwarding"}
+        ],
+        "edges":[{"from_node":"source","from_output":"value","to_node":"forward","to_input":"input"}],
+        "outputs":[{"name":"result","node":"forward","port":"value"}]
+    }))
+    .unwrap();
+    let error = compile_definition(&definition, &registry)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("forward") && error.contains("known value"),
+        "{error}"
+    );
+
+    definition.nodes[0].kind = "fixture.typed_source".into();
+    definition.nodes[0].config = json!({"type":"string","value":"wrong"});
+    let error = compile_definition(&definition, &registry)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("forward") && error.contains("declares int64"),
+        "{error}"
+    );
+
+    definition.nodes[0].config = json!({"type":"any","value":7});
+    let plan = compile_definition(&definition, &registry).unwrap();
+    assert_eq!(
+        instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute()
+            .unwrap()["result"],
+        json!(7)
+    );
+    definition.nodes[0].config = json!({"type":"any","value":"wrong"});
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let error = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute()
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("forward") && error.contains("int64"),
+        "{error}"
+    );
 }
 
 #[test]

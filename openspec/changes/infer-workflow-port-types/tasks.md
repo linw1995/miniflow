@@ -23,5 +23,5 @@
 
 ## 4. Integration checks
 
-- [ ] 4.1 Run `nix develop --command bash scripts/run-cov.sh` and inspect coverage for literal inference, fact propagation, known conflicts, and generated-runner parity; add only missing behavior cases.
-- [ ] 4.2 Run `nix develop --command prek install`, `nix develop --command prek -a`, `nix flake check -L`, and `openspec validate infer-workflow-port-types --strict`; verify all required checks pass before submission.
+- [x] 4.1 Run `nix develop --command bash scripts/run-cov.sh` and inspect coverage for literal inference, fact propagation, known conflicts, and generated-runner parity; add only missing behavior cases.
+- [x] 4.2 Run `nix develop --command prek install`, `nix develop --command prek -a`, `nix flake check -L`, and `openspec validate infer-workflow-port-types --strict`; verify all required checks pass before submission.
