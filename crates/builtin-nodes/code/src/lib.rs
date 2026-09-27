@@ -175,9 +175,6 @@ impl Node for CodeNode {
             let value = inputs
                 .get(name)
                 .ok_or_else(|| execution_error(format!("missing input `{name}`")))?;
-            port.value_type
-                .validate_value(value)
-                .map_err(|error| execution_error(format!("input `{name}`: {error}")))?;
             let converted = json_to_cel(value, &port.value_type, &mut budget, "", 1)
                 .map_err(|error| execution_error(format!("input `{name}`: {error}")))?;
             activation.insert(name, converted);
