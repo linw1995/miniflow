@@ -24,10 +24,10 @@
 
 ## 4. Receive telemetry and aggregate execution state
 
-- [ ] 4.1 Implement bounded loopback OTLP/HTTP protobuf logs/traces reception, session identity checks, and schema diagnostics in `mf-tui`; verify actual exporter requests, unrelated runs, malformed requests, and unsupported versions.
-- [ ] 4.2 Implement plan 1's transition table with one state record per node and bounded sequence membership; verify duplicate/conflicting events, finish-before-start, last-known state after gaps, and no terminal regression or retry transitions.
-- [ ] 4.3 Implement Collecting, Complete, Incomplete, and unverified-tail indicators from applied sequence evidence and the final boundary; verify interior/prefix/tail loss, an entirely lost stream, late gap closure, local drops, and correct unknown-count handling.
-- [ ] 4.4 Document loss acceptance and separate lifecycle integrity, trace availability, and diagnostic truncation; verify overlapping loss counters are not summed, missing node outcomes remain unknown, and no replay, reconnect, persistence, or workflow restart is needed.
+- [x] 4.1 Implement bounded loopback OTLP/HTTP protobuf logs/traces reception, session identity checks, and schema diagnostics in `mf-tui`; verify actual exporter requests, unrelated runs, malformed requests, and unsupported versions.
+- [x] 4.2 Implement plan 1's transition table with one state record per node and bounded sequence membership; verify duplicate/conflicting events, finish-before-start, last-known state after gaps, and no terminal regression or retry transitions.
+- [x] 4.3 Implement Collecting, Complete, Incomplete, and unverified-tail indicators from applied sequence evidence and the final boundary; verify interior/prefix/tail loss, an entirely lost stream, late gap closure, local drops, and correct unknown-count handling.
+- [x] 4.4 Document loss acceptance and separate lifecycle integrity, trace availability, and diagnostic truncation; verify overlapping loss counters are not summed, missing node outcomes remain unknown, and no replay, reconnect, persistence, or workflow restart is needed.
 
 ## 5. Integrate CLI supervision and terminal presentation
 

@@ -74,7 +74,7 @@ State aggregation SHALL deduplicate by run identity and sequence, tolerate reord
 from overwriting terminal states. Gaps SHALL be visible while pending and SHALL clear if delayed records close them.
 After bounded draining, unresolved gaps, local lifecycle drops, invalid records, and conflicting observations SHALL
 visibly prevent a completeness claim. Only a valid final boundary and every lifecycle sequence through that boundary,
-with no unresolved integrity fault, SHALL establish a complete lifecycle stream.
+with no unresolved visited-node outcome or integrity fault, SHALL establish a complete lifecycle stream.
 
 Missing terminal evidence SHALL be displayed as an unverified tail with unknown total loss. Known gaps and local-drop counts MUST NOT be summed when they overlap. Node states lacking sufficient evidence SHALL remain unknown or visibly last-known, even when workflow success is known. Diagnostic-history truncation and trace availability SHALL be reported separately from lifecycle completeness. Limits on buffering and retained history MUST bound memory use and expose any resulting loss.
 
@@ -95,7 +95,7 @@ Missing terminal evidence SHALL be displayed as an unverified tail with unknown 
 
 #### Scenario: Expose local loss
 
-- **WHEN** the receiver discards a lifecycle record because its reducer queue is full
+- **WHEN** the receiver rejects a matching lifecycle record because it exceeds an admission limit
 - **THEN** the interface records a local-drop reason even if the record's missing sequence is not yet inferable
 
 #### Scenario: Separate diagnostic truncation
