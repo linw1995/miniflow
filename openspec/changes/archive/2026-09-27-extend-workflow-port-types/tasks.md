@@ -24,5 +24,5 @@
 
 ## 4. Integration checks
 
-- [ ] 4.1 Run `nix develop --command bash scripts/run-cov.sh` and inspect refined compatibility, recursive validation, and skip-precedence coverage; add cases only for uncovered behavior.
-- [ ] 4.2 Run `nix develop --command prek install`, `nix develop --command prek -a`, `nix flake check -L`, and `openspec validate extend-workflow-port-types --strict`; verify all required checks pass before applying the dependent CEL Code change.
+- [x] 4.1 Run `nix develop --command bash scripts/run-cov.sh` and inspect refined compatibility, recursive validation, and skip-precedence coverage; add cases only for uncovered behavior.
+- [x] 4.2 Run `nix develop --command prek install`, `nix develop --command prek -a`, `nix flake check -L`, and `openspec validate extend-workflow-port-types --strict`; verify all required checks pass before applying the dependent CEL Code change.
