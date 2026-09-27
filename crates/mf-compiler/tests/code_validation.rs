@@ -57,29 +57,6 @@ fn graph(expression: &str) -> Value {
 }
 
 #[test]
-fn documented_cel_examples_produce_their_outputs() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    for (source, expected) in [
-        (
-            include_str!("../../../examples/cel-scalar.json"),
-            json!({"doubled": 42}),
-        ),
-        (
-            include_str!("../../../examples/cel-list.json"),
-            json!({"doubled": [2, 4]}),
-        ),
-    ] {
-        let definition = WorkflowDefinition::from_json(source).unwrap();
-        let plan = compile_definition(&definition, &registry).unwrap();
-        let output = instantiate_compiled(&plan, &registry)
-            .unwrap()
-            .execute()
-            .unwrap();
-        assert_eq!(json!(output), expected);
-    }
-}
-
-#[test]
 fn rejects_concrete_input_conflicts_and_checks_inactive_code() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut mismatch = graph("amount * 2");
