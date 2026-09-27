@@ -48,11 +48,12 @@
             ];
           };
           strictDeps = true;
+          nativeBuildInputs = [ pkgs.cmake ];
         };
         cargoArtifacts = craneLib.buildDepsOnly cargoArgs;
         miniflow = craneLib.buildPackage (cargoArgs // {
           inherit cargoArtifacts;
-          nativeBuildInputs = [ pkgs.cargo-about ];
+          nativeBuildInputs = [ pkgs.cmake pkgs.cargo-about ];
           # The dedicated nextest check runs the complete suite, including acceptance.
           doCheck = false;
           postInstall = ''
@@ -82,6 +83,7 @@
         devShells.default = pkgs.mkShell {
           packages = [
             toolchain
+            pkgs.cmake
             pkgs.rust-analyzer
             pkgs.actionlint
             pkgs.cargo-nextest
@@ -104,7 +106,7 @@
           test = craneLib.cargoNextest (cargoArgs // {
             inherit cargoArtifacts;
             cargoNextestExtraArgs = "--locked --workspace --all-targets --all-features";
-            nativeBuildInputs = [ pkgs.git pkgs.jq pkgs.python3 ];
+            nativeBuildInputs = [ pkgs.cmake pkgs.git pkgs.jq pkgs.python3 ];
           });
           workflows = pkgs.runCommand "check-workflows" {
             nativeBuildInputs = [ pkgs.actionlint ];

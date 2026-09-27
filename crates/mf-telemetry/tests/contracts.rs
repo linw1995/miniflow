@@ -28,16 +28,8 @@ fn graph() -> WorkflowDescription {
 
 fn branch_graph() -> WorkflowDescription {
     let mut value = serde_json::to_value(graph()).unwrap();
-    value["nodes"][0]["outputs"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({
-            "name":"branch.false", "value_type":"boolean", "required":false
-        }));
     value["nodes"].as_array_mut().unwrap().push(json!({
-        "id":"branch/target", "kind":"fixture.echo", "inputs":[
-            {"name":"input", "value_type":"any", "required":false}
-        ], "outputs":[{"name":"value", "value_type":"any", "required":true}]
+        "id":"branch/target", "kind":"fixture.echo"
     }));
     value["execution_order"] = json!(["load.order", "branch/target"]);
     value["control_edges"] = json!([{"from_node":"load.order", "from_output":"branch.false", "to_node":"branch/target"}]);
@@ -229,9 +221,12 @@ fn dropped_reservations_leave_gaps_and_finish_closes_the_sequence() {
 }
 
 #[test]
-fn description_validates_order_endpoints_and_opaque_port_names() {
+fn description_validates_order_endpoints_and_opaque_edge_names() {
     let mut value = serde_json::to_value(graph()).unwrap();
-    value["nodes"].as_array_mut().unwrap().push(json!({"id":"target/one", "kind":"fixture.echo", "inputs":[{"name":"input.name", "value_type":"any", "required":true}], "outputs":[]}));
+    value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"target/one", "kind":"fixture.echo"}));
     value["execution_order"] = json!(["load.order", "target/one"]);
     value["data_edges"] = json!([{"from_node":"load.order","from_output":"value.part","to_node":"target/one","to_input":"input.name"}]);
     let decode =
@@ -242,7 +237,7 @@ fn description_validates_order_endpoints_and_opaque_port_names() {
         WorkflowDescription::from_json(&valid.to_json().unwrap()).unwrap()
     );
     for (key, invalid_value) in [
-        ("schema_version", json!(2)),
+        ("version", json!("2026-09-26")),
         ("execution_order", json!(["target/one", "load.order"])),
         ("execution_order", json!(["load.order"])),
         ("execution_order", json!(["load.order", "load.order"])),
@@ -253,7 +248,10 @@ fn description_validates_order_endpoints_and_opaque_port_names() {
         assert!(decode(&invalid).is_err());
     }
     let mut invalid = value.clone();
-    invalid["data_edges"][0]["from_output"] = json!("missing");
+    invalid["data_edges"][0]["from_output"] = json!("");
+    assert!(decode(&invalid).is_err());
+    invalid = value.clone();
+    invalid["data_edges"][0]["to_input"] = json!("");
     assert!(decode(&invalid).is_err());
     invalid = value.clone();
     invalid["data_edges"]
@@ -273,7 +271,6 @@ fn graph_relative_event_validation_rejects_wrong_nodes_and_out_of_range_evidence
         ("start", "node_count", json!(2)),
         ("finish", "visited_node_count", json!(0)),
         ("finish", "visited_node_count", json!(2)),
-        ("success", "produced_ports", json!(["missing"])),
     ] {
         let mut wire = record(name);
         wire.body[field] = value;
@@ -289,6 +286,13 @@ fn graph_relative_event_validation_rejects_wrong_nodes_and_out_of_range_evidence
         .attributes
         .insert("mf.event.sequence".into(), json!(i64::MAX));
     assert!(wrong.decode().unwrap().validate_for(&graph()).is_err());
+}
+
+#[test]
+fn graph_validation_accepts_unconnected_dynamic_port_names() {
+    let mut wire = record("success");
+    wire.body["produced_ports"] = json!(["unconnected.dynamic"]);
+    assert!(wire.decode().unwrap().validate_for(&graph()).is_ok());
 }
 
 #[test]
@@ -321,7 +325,7 @@ fn trace_context_validates_native_ids_without_serializing_them_into_attributes()
 }
 
 #[test]
-fn skip_metadata_matches_real_control_or_data_dependencies_and_effective_ports() {
+fn skip_metadata_matches_real_dependencies_without_a_full_port_table() {
     let graph = branch_graph();
     let skipped = record("skip");
     skipped.decode().unwrap().validate_for(&graph).unwrap();
@@ -330,10 +334,10 @@ fn skip_metadata_matches_real_control_or_data_dependencies_and_effective_ports()
     router.decode().unwrap().validate_for(&graph).unwrap();
     router.body["produced_ports"] = json!([]);
     router.body["skipped_ports"] = json!(["value.part"]);
-    assert!(router.decode().unwrap().validate_for(&graph).is_err());
+    router.decode().unwrap().validate_for(&graph).unwrap();
     let mut wrong = skipped.clone();
     wrong.body["skipped_ports"] = json!([]);
-    assert!(wrong.decode().unwrap().validate_for(&graph).is_err());
+    wrong.decode().unwrap().validate_for(&graph).unwrap();
     wrong = skipped.clone();
     wrong.body["causes"][0]["source_output"] = json!("value.part");
     assert!(wrong.decode().unwrap().validate_for(&graph).is_err());
@@ -412,7 +416,7 @@ fn all_failure_phases_preserve_invocation_and_visited_prefix_boundaries() {
 }
 
 #[test]
-fn descriptions_reject_duplicate_dynamic_metadata_and_control_edges() {
+fn descriptions_reject_duplicate_nodes_and_control_edges() {
     let original = serde_json::to_value(branch_graph()).unwrap();
     for path in ["nodes", "control_edges"] {
         let mut value = original.clone();
@@ -424,7 +428,7 @@ fn descriptions_reject_duplicate_dynamic_metadata_and_control_edges() {
     value["nodes"][0]["id"] = json!(" ");
     assert!(WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).is_err());
     value = original.clone();
-    value["nodes"][0]["outputs"][0]["name"] = json!("branch.false");
+    value["control_edges"][0]["from_output"] = json!("");
     assert!(WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).is_err());
     value = original;
     value["control_edges"][0]["from_node"] = json!("unknown");

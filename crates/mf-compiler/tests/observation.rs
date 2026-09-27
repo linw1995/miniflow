@@ -662,10 +662,8 @@ fn generated_execution_matches_memory_observations_across_all_failure_boundaries
             },
         )
         .unwrap();
-        let path = serde_json::to_string(&common::crates_dir().join("mf-telemetry")).unwrap();
         let manifest = fs::read_to_string(project.join("Cargo.toml")).unwrap();
         fs::write(project.join("Cargo.toml"), format!(r#"{manifest}
-mf-telemetry = {{ path = {path} }}
 opentelemetry = {{ version = "0.33.0", default-features = false, features = ["logs", "trace"] }}
 opentelemetry_sdk = {{ version = "0.33.0", default-features = false, features = ["logs", "trace", "testing"] }}
 "#)).unwrap();

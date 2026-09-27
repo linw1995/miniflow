@@ -4,13 +4,14 @@ pub mod description;
 pub mod event;
 pub mod identity;
 pub mod observation;
+#[cfg(feature = "otlp")]
+pub mod otlp;
 pub mod wire;
 
 use snafu::Snafu;
 
 pub const INSTRUMENTATION_SCOPE: &str = "mf.workflow";
 pub const EVENT_SCHEMA_VERSION: i64 = 1;
-pub const DESCRIPTION_SCHEMA_VERSION: i64 = 1;
 
 #[derive(Debug, Snafu)]
 pub enum ContractError {

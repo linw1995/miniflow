@@ -2,11 +2,11 @@
 
 ## Availability and package boundaries
 
-`mf-telemetry` provides versioned descriptions, lifecycle events, workflow/run identities, sequence reservation, validation, and mapping into OpenTelemetry log records. It installs no provider, opens no connection, and does not modify workflow execution. Shared runtime instrumentation and generated execution accept caller-owned observations. Runner `--describe`, automatic exporter initialization, OTLP reception, and `mf run --tui` remain subsequent implementation steps.
+`mf-telemetry` provides versioned descriptions, lifecycle events, workflow/run identities, sequence reservation, validation, and mapping into OpenTelemetry log records. Shared runtime instrumentation and generated execution accept caller-owned observations. Compiled runners also provide `--describe` and initialize OTel export only when an endpoint is configured. The local OTLP receiver and `mf run --tui` are subsequent implementation steps.
 
-`mf-runtime` depends on the minimal telemetry package. `mf-cli` depends on the separate `mf-tui` package, currently an empty presentation entry point. Neither the compiler nor runtime depends on `mf-tui`. Generated runners resolve telemetry transitively through the runtime, without SDK, HTTP-client, or terminal dependencies by default.
+`mf-runtime` depends on the minimal telemetry package. `mf-cli` depends on the separate `mf-tui` package, currently providing bounded description preflight. Neither the compiler nor runtime depends on `mf-tui`. Generated runners resolve telemetry transitively through the runtime, without SDK, HTTP-client, or terminal dependencies by default.
 
-The `mf-telemetry/otlp` feature selects OTel SDK and OTLP/HTTP protobuf exporter dependencies with a blocking HTTP client. It does not initialize an exporter or enable export by itself. A later runner entry point will own provider initialization, configuration, and bounded shutdown. Libraries must not install global providers for callers.
+The `mf-telemetry/otlp` feature selects the OTel SDK and OTLP/HTTP protobuf exporters with an explicit blocking HTTP client and TLS support. Enabling the feature alone does not initialize an exporter. The generated runner owns provider initialization and bounded shutdown; libraries do not install global providers for callers.
 
 ```sh
 nix develop --command cargo check -p mf-telemetry --no-default-features
@@ -77,9 +77,15 @@ Each invocation has a fresh canonical lowercase UUID v4 `RunId`, independent of 
 
 ## Description schema
 
-Description schema version 1 contains `workflow_id`, `nodes`, `data_edges`, `control_edges`, and `execution_order`. Nodes contain `id`, `kind`, and effective `inputs`/`outputs`; each port has `name`, `value_type`, and `required`. Port types are `any`, `null`, `boolean`, `number`, `string`, `array`, and `object`.
+Description version `2026-09-27` contains `workflow_id`, `nodes`, `data_edges`, `control_edges`, and `execution_order`. Nodes contain `id` and `kind`; edge endpoints carry connected port names. The full effective port table is unavailable in description mode, so unconnected ports, types, and required flags remain unknown to the TUI. Compile validation still checks those contracts by constructing plugin instances.
 
-`WorkflowDescription::from_json` rejects unsupported versions, oversized input (16 MiB), duplicate IDs/ports, incomplete execution order, missing endpoints, backward edges, and duplicate input/control bindings. `to_json` validates before encoding. Public structs can be assembled by callers; validate them before use. Additive unknown fields are accepted within version 1 and omitted when re-encoded. No description field carries node configuration, predicate values, or business inputs/outputs.
+`WorkflowDescription::from_json` rejects unsupported versions, oversized input (16 MiB), duplicate IDs, incomplete
+execution order, missing endpoints, empty edge port names, backward edges, and duplicate input/control bindings.
+`to_json` validates before encoding. Public structs can be assembled by callers; validate them before use. Additive
+unknown fields are accepted within the current version and omitted when re-encoded. No description field carries node
+configuration, predicate values, or business inputs/outputs.
+
+Graph-relative event validation checks workflow/node identity, position, sequence bounds, and skip causes against known edges. It checks reported produced/skipped port names for nonempty uniqueness, but cannot prove that they enumerate every output or match unconnected dynamic ports. The runtime validates its own effective ports before emitting events; the TUI keeps unavailable port metadata distinct from a missing lifecycle record.
 
 ## Lifecycle fields
 
@@ -153,12 +159,19 @@ Observation loss is acceptable. Consumers must expose gaps and local drops, and 
 
 There is no replay, persistent journal, reconnect protocol, node rescheduling, or full-state recovery. Known missing sequences and local drop counts can overlap; do not sum them as distinct losses. Trace availability and diagnostic-history truncation are separate from lifecycle completeness. Missing telemetry must not alter workflow results. Missing business stdout is a separate CLI output error.
 
-## Export configuration boundary
+## Runner export configuration
 
-No runtime export settings are consumed by this implementation step. The planned runner integration will explicitly
-enable OTLP/HTTP protobuf export and honor configured signal endpoints; no endpoint means no connection. TUI launch will
-set child-only loopback endpoints and a fresh run ID, remove inherited remote exporter credentials, and use bounded
-queues/timeouts. Description and validation modes will not initialize execution export. See the OpenSpec change for the
-remaining tasks; setting OTel environment variables alone does not currently enable workflow observation.
+The generated runner initializes exporters only in execution mode when `OTEL_EXPORTER_OTLP_ENDPOINT`,
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set to a nonempty URL. Signal-specific
+endpoints override the generic URL; a missing signal endpoint without a generic URL leaves that signal local.
+`OTEL_EXPORTER_OTLP_HEADERS` and signal-specific headers are interpreted by the official exporter. HTTP protobuf is
+selected explicitly. When configured, both providers share a blocking TLS-capable HTTP client and use bounded background
+processors. Their shutdown attempts to export remaining records within a finite deadline even when execution fails.
 
-Automatically generated metadata excludes configuration and business values. Arbitrary plugin failure messages can contain sensitive text and are not automatically sanitized by this contract.
+Validation and description modes do not initialize execution export. `--describe` reads only the embedded plan and
+emits one JSON graph document on stdout; it does not initialize the registry or invoke plugin factories. The CLI-only
+`mf-tui::description::describe_executable` preflight runs a child in an owned process group, applies a 30-second deadline
+and 16 MiB document limit, drains both streams, and rejects malformed or unsupported descriptions. The interactive CLI
+entry point is part of the later UI work.
+
+See [compiling workflows](compiling.md) for executable commands, endpoint settings, lock migration, and build prerequisites. Automatically generated metadata excludes configuration and business values. Arbitrary plugin failure messages can contain sensitive text and are not automatically sanitized by this contract.

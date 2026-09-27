@@ -6,15 +6,16 @@
 nix build .#miniflow
 ```
 
-The executable is available at `./result/bin/mf`. Distributed CLI builds resolve exact-version `mf-runtime` and `mf-compiler` packages from crates.io. These packages must be available before distributing the corresponding CLI release. No source-checkout discovery is performed.
+The executable is available at `./result/bin/mf`. Distributed CLI builds resolve exact-version `mf-runtime`, `mf-compiler`, and `mf-telemetry` packages from crates.io. These packages must be available before distributing the corresponding CLI release. No source-checkout discovery is performed.
 
 ## Compile and run
 
-With Cargo, a compatible Rust toolchain, and the declared node dependencies available:
+With Cargo, a compatible Rust toolchain, CMake, a C compiler, and the declared node dependencies available:
 
 ```sh
 mf compile flow.json --output ./flow
 ./flow
+./flow --describe
 mf compile flow.json --output ./flow --locked
 ```
 
@@ -22,7 +23,31 @@ The output directory must exist. A successful first build creates `flow.lock`. S
 
 The CLI checks graph structure and generates fixed node orchestration, then compiles one runner using `cargo build --release --locked`. It invokes that binary with `--validate` to check registered kinds, configuration, and port contracts without executing node operations. Only the validated binary is installed. Plugin errors can therefore be reported after Rust compilation.
 
-The generated executable embeds the graph metadata and node configuration. Node configuration is emitted as Rust string literals in the generated workflow source. Normal execution uses generated node calls and prints selected outputs as JSON. It does not require the definition, lock, plugin sources, or Cargo at runtime. It retains `--validate` for checking its embedded configuration without executing the workflow.
+The generated executable embeds the graph metadata and node configuration. Node configuration is emitted as Rust string
+literals in the generated workflow source. Normal execution uses generated node calls and prints selected outputs as
+JSON. It does not require the definition, lock, plugin sources, or Cargo at runtime. It retains `--validate` for
+checking its embedded configuration without executing the workflow. `--describe` prints one date-versioned JSON
+document containing the workflow identity, node IDs/kinds, named data/control edges, and execution order. It reads
+the embedded plan without constructing plugins, and excludes configuration and business values. Edge names identify
+connected ports; the complete list of dynamic or unconnected ports is unavailable in this description.
+
+The runner exports workflow spans and lifecycle events over OTLP/HTTP protobuf when a collector endpoint is configured:
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318 ./flow
+```
+
+`OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` and `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` can select signal-specific URLs. A signal
+without its own URL uses `OTEL_EXPORTER_OTLP_ENDPOINT` when present; otherwise that signal opens no export connection.
+The standard `OTEL_EXPORTER_OTLP_HEADERS` and signal-specific header variables are handled by the OTel exporter. The
+runner uses HTTP protobuf even when an inherited protocol variable requests another transport. `MF_RUN_ID` may supply a
+canonical lowercase UUID v4; otherwise each observed invocation generates one.
+
+Without an endpoint, normal execution opens no telemetry connection. The runner buffers up to 1,024 records per signal,
+uses a 100 ms batch delay with batches of up to 128, and applies a two-second HTTP timeout. On handled success or failure,
+each provider gets a two-second shutdown deadline. Export failures are reported on stderr while workflow output and exit
+status follow the workflow result. Existing compiled binaries must be rebuilt to gain `--describe` and export support.
+Rebuild without `--locked` once to refresh an older adjacent Flow lock for the new support dependencies.
 
 ## Repository development
 

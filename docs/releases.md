@@ -28,4 +28,6 @@ bash scripts/check-release-support.sh --owner linw1995
 
 This check lists registry owners and resolves the exact workspace version of every required package. Missing names, wrong ownership, unavailable versions, or resolution failures block the CLI release. The CD workflow runs it with the repository owner's login before building release archives. If ownership is intentionally transferred to a team, update that configured expectation explicitly.
 
+The registry probe requests the `otlp` feature on `mf-telemetry`, matching generated runner manifests. The published telemetry package must contain the current exporter implementation before the CLI is distributed. Runner compilation needs CMake and a C compiler for the TLS-capable HTTP client; `nix develop` supplies them.
+
 The `release/<version>` branch must match the workspace version. Publishing an archive before its required support packages are available would leave users unable to compile Flows, even though `mf --help` works.

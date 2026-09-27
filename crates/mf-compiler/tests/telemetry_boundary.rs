@@ -1,10 +1,36 @@
 mod common;
 
 use mf_compiler::{SupportPackages, write_dependency_project};
-use std::fs;
+use std::{collections::BTreeSet, fs, path::Path};
+
+fn dependency_names(project: &Path) -> BTreeSet<String> {
+    let output = mf_compiler::cargo_command(project)
+        .args([
+            "tree",
+            "--offline",
+            "--edges",
+            "normal",
+            "--prefix",
+            "none",
+            "--format",
+            "{p}",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| line.split_whitespace().next().unwrap().to_owned())
+        .collect()
+}
 
 #[test]
-fn generated_runner_has_no_ui_and_only_opt_in_export_dependencies() {
+fn generated_runner_exports_otel_without_terminal_dependencies() {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("runner");
     write_dependency_project(
@@ -15,32 +41,14 @@ fn generated_runner_has_no_ui_and_only_opt_in_export_dependencies() {
         },
     )
     .unwrap();
-    let dependency_names = || {
-        let output = mf_compiler::cargo_command(&project)
-            .args([
-                "tree",
-                "--offline",
-                "--edges",
-                "normal",
-                "--prefix",
-                "none",
-                "--format",
-                "{p}",
-            ])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .lines()
-            .map(|line| line.split_whitespace().next().unwrap().to_owned())
-            .collect::<std::collections::BTreeSet<_>>()
-    };
-    let minimal = dependency_names();
+    let minimal_project = root.path().join("minimal");
+    fs::create_dir_all(minimal_project.join("src")).unwrap();
+    fs::write(minimal_project.join("src/lib.rs"), "pub fn minimal() {}\n").unwrap();
+    let path = serde_json::to_string(&common::crates_dir().join("mf-runtime")).unwrap();
+    fs::write(minimal_project.join("Cargo.toml"), format!(
+        "[package]\nname = \"mf-minimal-runtime-check\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\nmf-runtime = {{ path = {path} }}\n"
+    )).unwrap();
+    let minimal = dependency_names(&minimal_project);
     assert!(minimal.contains("mf-telemetry"));
     assert!(minimal.contains("opentelemetry"));
     for name in [
@@ -51,17 +59,10 @@ fn generated_runner_has_no_ui_and_only_opt_in_export_dependencies() {
     ] {
         assert!(!minimal.contains(name), "minimal runner contains {name}");
     }
-    let manifest = project.join("Cargo.toml");
-    let source = fs::read_to_string(&manifest).unwrap();
-    let path = serde_json::to_string(&common::crates_dir().join("mf-telemetry")).unwrap();
-    fs::write(
-        &manifest,
-        format!("{source}\nmf-telemetry = {{ path = {path}, features = [\"otlp\"] }}\n"),
-    )
-    .unwrap();
-    let exporting = dependency_names();
+    let exporting = dependency_names(&project);
     assert!(exporting.contains("opentelemetry_sdk"));
     assert!(exporting.contains("opentelemetry-otlp"));
+    assert!(exporting.contains("reqwest"));
     for name in [
         "mf-tui",
         "ratatui",
@@ -69,6 +70,7 @@ fn generated_runner_has_no_ui_and_only_opt_in_export_dependencies() {
         "ratatui-crossterm",
         "crossterm",
         "termion",
+        "process-wrap",
     ] {
         assert!(
             !minimal.contains(name) && !exporting.contains(name),

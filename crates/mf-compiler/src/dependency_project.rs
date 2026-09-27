@@ -38,18 +38,81 @@ fn main() -> std::process::ExitCode {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    let registry = mf_runtime::NodeRegistry::from_inventory()?;
+    if args.len() == 1 && args[0] == "--describe" {
+        use std::io::Write;
+        let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
+        let description = mf_compiler::describe_compiled(&plan)?;
+        let mut stdout = std::io::stdout().lock();
+        stdout.write_all(&description.to_json()?)?;
+        stdout.write_all(b"\n")?;
+        stdout.flush()?;
+        return Ok(());
+    }
     if args.len() == 1 && args[0] == "--validate" {
+        let registry = mf_runtime::NodeRegistry::from_inventory()?;
         let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
         mf_compiler::instantiate_compiled(&plan, &registry)?;
         return Ok(());
     }
     if !args.is_empty() {
-        return Err("usage: workflow [--validate]".into());
+        return Err("usage: workflow [--validate|--describe]".into());
     }
-    let outputs = workflow::run_workflow(&registry)?;
+    let outputs = execute()?;
     println!("{}", serde_json::to_string(&outputs)?);
     Ok(())
+}
+
+fn run_id() -> mf_telemetry::identity::RunId {
+    match std::env::var("MF_RUN_ID") {
+        Ok(value) => match mf_telemetry::identity::RunId::try_from(value) {
+            Ok(id) => id,
+            Err(error) => {
+                eprintln!("invalid MF_RUN_ID: {error}; using a new run ID");
+                mf_telemetry::identity::RunId::new()
+            }
+        },
+        Err(std::env::VarError::NotPresent) => mf_telemetry::identity::RunId::new(),
+        Err(error) => {
+            eprintln!("invalid MF_RUN_ID: {error}; using a new run ID");
+            mf_telemetry::identity::RunId::new()
+        }
+    }
+}
+
+fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+    let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
+        Ok(providers) => providers,
+        Err(error) => {
+            eprintln!("telemetry export unavailable: {error}");
+            None
+        }
+    };
+    let result: Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> = match providers.as_ref() {
+        Some(providers) => (|| {
+            let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
+            let observation = match plan.start_observation(&providers.observer(), run_id()) {
+                Ok(observation) => Some(observation),
+                Err(error) => {
+                    eprintln!("telemetry observation unavailable: {error}");
+                    None
+                }
+            };
+            mf_runtime::ExecutionContext::run(observation, |state| -> Result<_, Box<dyn std::error::Error>> {
+                let registry = mf_runtime::NodeRegistry::from_inventory()?;
+                Ok(workflow::run_workflow_in_context(&registry, state)?)
+            })
+        })(),
+        None => {
+            let registry = mf_runtime::NodeRegistry::from_inventory()?;
+            Ok(workflow::run_workflow(&registry)?)
+        }
+    };
+    if let Some(providers) = providers {
+        for diagnostic in providers.shutdown() {
+            eprintln!("telemetry export incomplete: {diagnostic}");
+        }
+    }
+    result
 }
 "#;
 
@@ -79,7 +142,7 @@ pub fn write_dependency_project(
     let mut manifest = String::from(
         "[package]\nname = \"mf-generated-workflow\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[dependencies]\nserde_json = \"1.0.151\"\n",
     );
-    for package in ["mf-runtime", "mf-compiler"] {
+    for package in ["mf-runtime", "mf-compiler", "mf-telemetry"] {
         let source = match support {
             SupportPackages::Registry => format!(
                 "version = {}",
@@ -90,7 +153,12 @@ pub fn write_dependency_project(
                 quoted(&path_string(&crates_dir.join(package))?)
             ),
         };
-        manifest.push_str(&format!("{package} = {{ {source} }}\n"));
+        let features = if package == "mf-telemetry" {
+            ", features = [\"otlp\"]"
+        } else {
+            ""
+        };
+        manifest.push_str(&format!("{package} = {{ {source}{features} }}\n"));
     }
     let mut main = String::new();
     for (index, (alias, dependency)) in definition.dependencies.iter().enumerate() {

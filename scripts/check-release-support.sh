@@ -50,7 +50,11 @@ printf 'fn main() {}\n' > src/main.rs
 {
   printf '[package]\nname = "mf-release-support-check"\nversion = "0.0.0"\nedition = "2024"\n[workspace]\n[dependencies]\n'
   for package in "${packages[@]}"; do
-    printf '%s = "=%s"\n' "$package" "$version"
+    if [[ "$package" == mf-telemetry ]]; then
+      printf '%s = { version = "=%s", features = ["otlp"] }\n' "$package" "$version"
+    else
+      printf '%s = "=%s"\n' "$package" "$version"
+    fi
   done
 } > Cargo.toml
 

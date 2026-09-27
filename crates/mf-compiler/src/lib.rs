@@ -10,9 +10,9 @@ mod state;
 pub use cache::{BuildDirectory, CacheError, default_build_directory};
 pub use compatibility::{RuntimeCompatibilityError, validate_runtime_identity};
 pub use compiler::{
-    CyclePath, WorkflowCompileError, WorkflowExecutionError, compile_definition, execute_compiled,
-    instantiate_compiled, plan_definition, resolve_nodes, structural_order, topological_order,
-    validate_definition,
+    CyclePath, DescriptionError, WorkflowCompileError, WorkflowExecutionError, compile_definition,
+    describe_compiled, execute_compiled, instantiate_compiled, plan_definition, resolve_nodes,
+    structural_order, topological_order, validate_definition,
 };
 pub use dependency_project::{DependencyProjectError, SupportPackages, write_dependency_project};
 pub use inputs::{BuildInputs, InputError};
