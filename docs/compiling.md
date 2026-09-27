@@ -59,6 +59,14 @@ output_dir=$(mktemp -d)
 MF_DEV_SUPPORT_ROOT="$PWD/crates" cargo run -p mf-cli --features development-support -- \
   compile examples/hello-workflow.json --output "$output_dir/hello-workflow"
 "$output_dir/hello-workflow"
+
+MF_DEV_SUPPORT_ROOT="$PWD/crates" cargo run -p mf-cli --features development-support -- \
+  compile examples/cel-scalar.json --output "$output_dir/cel-scalar"
+"$output_dir/cel-scalar"
+
+MF_DEV_SUPPORT_ROOT="$PWD/crates" cargo run -p mf-cli --features development-support -- \
+  compile examples/cel-list.json --output "$output_dir/cel-list"
+"$output_dir/cel-list"
 ```
 
 Normal release builds ignore this environment variable. The example declares local built-in packages; a portable Flow should declare available registry or Git packages instead.

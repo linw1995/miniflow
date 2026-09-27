@@ -932,6 +932,7 @@ dependencies = [
  "inventory",
  "mf-runtime",
  "mf-telemetry",
+ "mfn-code",
  "mfn-core",
  "opentelemetry",
  "opentelemetry_sdk",

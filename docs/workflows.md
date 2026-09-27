@@ -59,6 +59,28 @@ The common input and output port contract is language-independent. A future back
 without changing existing CEL definitions. CEL input types include `int`, `double`, `bool`, `string`, `null`, and nested
 `{"list": T}` or `{"map": T}` descriptors; maps have string keys and homogeneous values.
 
+Runner validation parses and type-checks every CEL output expression, including nodes on inactive branches, without
+evaluating it. Output port types are inferred from the checked expression. Unknown names, incompatible operations,
+explicit `dyn(...)` calls, and result types outside the JSON port contract fail before executable installation. CEL
+compilation produces a checked AST for in-process evaluation; it does not generate native machine code.
+
+At execution, Code converts each declared JSON input to its CEL type without coercion. `int` accepts signed 64-bit
+JSON integers, `double` accepts finite JSON floating-point numbers, and `null` requires a present null value. Lists
+and maps are recursive and homogeneous; map keys are strings. Each output expression uses the same input bindings,
+and outputs cannot refer to one another. CEL evaluation errors and values that cannot be represented as the inferred
+JSON type fail the node. Errors identify the Code input or output and a JSON Pointer path for nested values. The
+workflow publishes no Code outputs if any expression fails. A skipped Code node does not evaluate expressions.
+
+Each expression is limited to 8 KiB. The serialized input map and output map are each limited to 1 MiB, with at most
+10,000 collection entries across input conversion and output conversion per execution. Type descriptors and values
+are limited to 16 nesting levels. These bounds limit accidental work; CEL evaluation runs in-process without a hard
+CPU or memory sandbox.
+
+Run the complete [scalar example](../examples/cel-scalar.json) or [typed-list example](../examples/cel-list.json)
+with the [repository development commands](compiling.md#repository-development). They produce `{"doubled":42}`
+and `{"doubled":[2,4]}` respectively. Replace the examples' local package paths with published package versions
+when compiling outside the checkout.
+
 ## Validation
 
 The CLI checks node IDs, edge endpoints, selected output names, and cycles before generating runner code. The compiled runner validates registered kinds, configuration, ports, type compatibility, and required input connections before installation. Every failure returns a nonzero status and preserves an existing output executable.
