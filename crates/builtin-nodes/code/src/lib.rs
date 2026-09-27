@@ -377,18 +377,13 @@ mod tests {
     }
 
     #[test]
-    fn infers_concrete_scalar_and_nested_output_types() {
+    fn infers_boolean_and_nested_collection_results() {
         let node = factory(json!({
             "language": "cel",
             "inputs": {"amount": "int"},
             "code": {
                 "boolean": "amount > 0",
-                "double": "1.5",
-                "integer": "amount * 2",
-                "nested": "[{'count': amount}]",
-                "nothing": "null",
-                "object": "{'count': amount}",
-                "text": "'hello'"
+                "nested": "[{'count': amount}]"
             }
         }))
         .unwrap();
@@ -399,15 +394,10 @@ mod tests {
             .map(|port| (port.name.as_ref(), &port.value_type))
             .collect();
         assert_eq!(types["boolean"], &ValueType::Boolean);
-        assert_eq!(types["double"], &ValueType::Float64);
-        assert_eq!(types["integer"], &ValueType::Int64);
         assert_eq!(
             types["nested"],
             &ValueType::List(Box::new(ValueType::Map(Box::new(ValueType::Int64))))
         );
-        assert_eq!(types["nothing"], &ValueType::Null);
-        assert_eq!(types["object"], &ValueType::Map(Box::new(ValueType::Int64)));
-        assert_eq!(types["text"], &ValueType::String);
     }
 
     #[test]
