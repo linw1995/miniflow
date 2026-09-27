@@ -43,6 +43,22 @@ Declare `mfn-core` once to use the basic built-in nodes below. To migrate older 
 | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input |
 | `builtin.if_else` | Nonempty ordered `branches` | None; activated by control edges | One boolean activation output per branch, plus `else` |
 
+`builtin.code` is provided separately by `mfn-code`. It requires an explicit `language` field; the supported value is
+`cel`. Input names have concrete type declarations, while output names and expressions live in `code`. The CEL checker
+infers each output port type from its expression:
+
+```json
+{
+  "language": "cel",
+  "inputs": {"amount": "int"},
+  "code": {"doubled": "amount * 2"}
+}
+```
+
+The common input and output port contract is language-independent. A future backend can interpret its `code` payload
+without changing existing CEL definitions. CEL input types include `int`, `double`, `bool`, `string`, `null`, and nested
+`{"list": T}` or `{"map": T}` descriptors; maps have string keys and homogeneous values.
+
 ## Validation
 
 The CLI checks node IDs, edge endpoints, selected output names, and cycles before generating runner code. The compiled runner validates registered kinds, configuration, ports, type compatibility, and required input connections before installation. Every failure returns a nonzero status and preserves an existing output executable.
