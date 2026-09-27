@@ -2,6 +2,8 @@
 
 A distributed CLI resolves exact-version `mf-runtime` and `mf-compiler` packages from crates.io. The bundled examples also require available `mfn-core` packages. Prepare and publish these support packages before publishing the matching CLI release.
 
+The refined port-type API changes `ValueType` from `Copy` to `Clone` and enforces declared output types during execution. Publish matching runtime and compiler versions before rebuilding node packages; review plugin port declarations before distributing runners built with the new runtime.
+
 ## Verify packages through nextest
 
 ```sh

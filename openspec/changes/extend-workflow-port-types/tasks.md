@@ -17,10 +17,10 @@
 
 ## 3. Apply the model in compilation and generated binaries
 
-- [ ] 3.1 Replace exact-only compiler edge checking with the three-way compatibility result; verify accepted refined-to-broad and broad-to-refined edges plus rejected concrete and nested mismatches with both endpoints in diagnostics.
-- [ ] 3.2 Exercise the same typed workflow in `Flow::execute` and a generated runner; verify matching values, runtime-checked failures, skip precedence, and no kind-specific generated guards.
-- [ ] 3.3 Update the external plugin and packaged CLI fixtures with refined static and dynamic ports; verify unchanged broad-port plugins still build and matching runtime/compiler package identities remain required.
-- [ ] 3.4 Document the support-package and Rust API migration in plugin and release guides; verify the examples distinguish compatibility at build time from value checking at run time.
+- [x] 3.1 Replace exact-only compiler edge checking with the three-way compatibility result; verify accepted refined-to-broad and broad-to-refined edges plus rejected concrete and nested mismatches with both endpoints in diagnostics.
+- [x] 3.2 Exercise the same typed workflow in `Flow::execute` and a generated runner; verify matching values, runtime-checked failures, skip precedence, and no kind-specific generated guards.
+- [x] 3.3 Update the external plugin and packaged CLI fixtures with refined static and dynamic ports; verify unchanged broad-port plugins still build and matching runtime/compiler package identities remain required.
+- [x] 3.4 Document the support-package and Rust API migration in plugin and release guides; verify the examples distinguish compatibility at build time from value checking at run time.
 
 ## 4. Integration checks
 

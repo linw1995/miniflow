@@ -37,6 +37,12 @@ let input = PortSpec::owned("items", items, true);
 
 Recursive types make `ValueType` cloneable but no longer `Copy`. Rust callers that previously moved a type from a borrowed port descriptor must borrow it or call `.clone()`.
 
+Connection validation accepts statically safe widening and runtime-checked narrowing from broad or `Any` sources. For
+example, an `Any` output can feed an `Int64` input; the consumer runs only if the actual JSON value is a signed integer.
+Concrete conflicts such as `String` to `Int64` are rejected during compilation. Direct callers matching
+`WorkflowCompileError::IncompatiblePortTypes` now receive boxed `ValueType` fields and can dereference or clone them.
+Rebuild plugins against the matching runtime package and correct declarations that do not describe their produced values.
+
 Declare context reads with `Node::context_references()`. Each `ContextReference` contains a qualified output ID and a diagnostic label, such as a branch ID. Validation resolves exact `${node_id}.${output_name}` keys and requires the producer to be a strict ancestor through explicit dependencies. References do not add edges. Ambiguous qualified IDs are rejected with both source pairs.
 
 ## Context-aware execution
