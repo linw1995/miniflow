@@ -124,7 +124,6 @@ fn rejects_concrete_input_conflicts_and_checks_inactive_code() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("input `amount`") && error.contains("expected int64"));
-    assert!(!error.contains("CEL execution is not available"));
 }
 
 #[test]

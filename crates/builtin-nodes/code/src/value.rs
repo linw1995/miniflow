@@ -11,16 +11,13 @@ pub struct Budget {
 }
 
 impl Budget {
-    fn check(&mut self, count: usize, path: &str) -> Result<(), String> {
-        self.entries = self
-            .entries
-            .checked_add(count)
-            .ok_or_else(|| format!("path `{path}` exceeds the collection entry limit"))?;
-        if self.entries > MAX_COLLECTION_ENTRIES {
+    fn consume(&mut self, count: usize, path: &str) -> Result<(), String> {
+        if count > MAX_COLLECTION_ENTRIES - self.entries {
             return Err(format!(
                 "path `{path}` exceeds the collection entry limit of {MAX_COLLECTION_ENTRIES}"
             ));
         }
+        self.entries += count;
         Ok(())
     }
 }
@@ -62,7 +59,7 @@ pub fn json_to_cel(
             .ok_or_else(|| format!("path `{path}`: expected finite float64")),
         (ValueType::String, Value::String(value)) => Ok(CelValue::from(value.clone())),
         (ValueType::List(inner), Value::Array(items)) => {
-            budget.check(items.len(), path)?;
+            budget.consume(items.len(), path)?;
             let values = items
                 .iter()
                 .enumerate()
@@ -79,7 +76,7 @@ pub fn json_to_cel(
             Ok(CelValue::list(values))
         }
         (ValueType::Map(inner), Value::Object(entries)) => {
-            budget.check(entries.len(), path)?;
+            budget.consume(entries.len(), path)?;
             let values = entries
                 .iter()
                 .map(|(key, item)| {
@@ -124,7 +121,7 @@ pub fn cel_to_json(
             .ok_or_else(|| format!("path `{path}`: non-finite float64 result")),
         (ValueType::String, CelValue::String(value)) => Ok(Value::String(value.to_string())),
         (ValueType::List(inner), CelValue::List(items)) => {
-            budget.check(items.len(), path)?;
+            budget.consume(items.len(), path)?;
             items
                 .iter()
                 .enumerate()
@@ -141,7 +138,7 @@ pub fn cel_to_json(
                 .map(Value::Array)
         }
         (ValueType::Map(inner), CelValue::Map(entries)) => {
-            budget.check(entries.len(), path)?;
+            budget.consume(entries.len(), path)?;
             let mut result = Map::new();
             for (key, item) in entries.iter() {
                 let MapKey::String(key) = key else {
