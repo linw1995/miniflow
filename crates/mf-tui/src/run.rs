@@ -2,6 +2,7 @@
 
 use crate::{
     description::{DescriptionError, describe_executable},
+    duration::format_duration_ns,
     graph::{GraphError, GraphLayout, GraphView},
     receiver::{LoopbackReceiver, ReceiverError},
     state::{NodeObservation, StateSnapshot},
@@ -657,7 +658,10 @@ fn details_text(
             node.id, node.kind, node.status
         ));
         if let Some(duration) = node.duration_ns {
-            details.push_str(&format!("Duration: {:.2}s\n", duration.get() as f64 / 1e9));
+            details.push_str(&format!(
+                "Duration: {}\n",
+                format_duration_ns(duration.get().max(0) as u64)
+            ));
         }
         if !node.produced_ports.is_empty() {
             details.push_str(&format!("Produced: {}\n", node.produced_ports.join(", ")));

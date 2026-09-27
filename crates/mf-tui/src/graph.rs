@@ -1,6 +1,9 @@
 //! Fixed terminal projection of a described workflow graph.
 
-use crate::state::{MAX_SESSION_NODES, NodeObservation, NodeStatus, StateSnapshot};
+use crate::{
+    duration::format_duration_ns,
+    state::{MAX_SESSION_NODES, NodeObservation, NodeStatus, StateSnapshot},
+};
 use mf_telemetry::{ContractError, description::WorkflowDescription};
 use ratatui::{
     buffer::Buffer,
@@ -548,7 +551,7 @@ fn node_detail(node: &GraphNode, observed: Option<&NodeObservation>, elapsed_ns:
     };
     duration.map_or_else(
         || node.kind.clone(),
-        |duration| format!("{:.1}s | {}", duration as f64 / 1e9, node.kind),
+        |duration| format!("{} | {}", format_duration_ns(duration), node.kind),
     )
 }
 
