@@ -69,9 +69,9 @@ Sequence numbers start at 1, increase across all lifecycle events within the run
 
 ### 3. Keep graph metadata separate from trace structure
 
-Add `--describe` returning one versioned JSON description with workflow identity, node IDs/kinds, effective port descriptors, data edges, control edges, and deterministic execution order. Exclude embedded configuration and business values. Node IDs and port names are opaque strings.
+Add `--describe` returning one date-versioned JSON description with workflow identity, node IDs/kinds, data edges, control edges, and deterministic execution order. Edge names identify connected ports; the full effective port table is unavailable and must not be inferred from the listed edges. Exclude embedded configuration and business values. Node IDs and port names are opaque strings.
 
-Build the description from the embedded plan and linked registry using the existing configuration-only preparation rules. Constructors can be used to resolve dynamic ports; node execution methods must never run. Factory diagnostics must be isolated from the machine-readable description stream. Description failure is reported before starting a workflow.
+Build the description directly from the embedded plan without accessing the linked registry or constructing nodes. Compilation validation still checks configuration-dependent port contracts. Description failure is reported before starting a workflow; unexpected startup output is rejected as malformed description data.
 
 All node execution spans use the workflow span as their parent. The description represents DAG dependencies, including joins and control ports, rather than forcing a multi-parent graph into a span tree. This also lets the UI display all pending nodes before the first event arrives.
 

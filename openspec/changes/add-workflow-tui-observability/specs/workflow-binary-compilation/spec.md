@@ -4,40 +4,38 @@
 
 ### Requirement: Describe a compiled workflow without executing nodes
 
-Generated runners SHALL support `--describe` and return one versioned JSON graph description containing workflow
-identity, node IDs and kinds, effective input/output ports, data edges, control edges, and deterministic execution
-order. Description SHALL use embedded workflow information and linked plugin metadata without requiring original build
-inputs. Configuration-only construction MAY resolve dynamic ports, but node execution methods MUST NOT run. Description
-output MUST exclude embedded node configuration and business values. Plugin construction diagnostics MUST NOT corrupt
-the machine-readable description.
+Generated runners SHALL support `--describe` and return one date-versioned JSON graph description containing workflow
+identity, node IDs and kinds, named data edges, control edges, and deterministic execution order. Description SHALL use
+the embedded compiled plan without requiring original build inputs or invoking plugin factories. Unconnected or dynamic
+port metadata unavailable from the embedded graph MUST NOT be inferred from its edges. Description output MUST exclude
+embedded node configuration and business values.
 
 #### Scenario: Describe a standalone binary
 
 - **WHEN** a generated runner is invoked with `--describe` after its build inputs are removed
 - **THEN** it returns its supported graph description without executing any node operation
 
-#### Scenario: Describe configuration-dependent ports
+#### Scenario: Describe a graph with configuration-dependent ports
 
 - **WHEN** a compiled workflow contains two instances of a conditional node with different branch names
-- **THEN** its description contains the effective ports for each instance and their correct data/control relationships without including predicate configuration
+- **THEN** its description contains the configured data/control relationships without claiming to enumerate unconnected dynamic ports or including predicate configuration
 
-#### Scenario: Isolate construction diagnostics
+#### Scenario: Avoid construction diagnostics
 
-- **WHEN** a linked plugin prints diagnostics while its description metadata is prepared
-- **THEN** the description remains parseable as one JSON document and the diagnostics are handled separately
+- **WHEN** a linked plugin factory normally prints diagnostics during validation
+- **THEN** description mode does not invoke that factory and its stdout remains one JSON document
 
 ### Requirement: Require complete isolated description output before execution
 
-On supported Linux and macOS targets, description mode SHALL isolate plugin construction and destruction diagnostics
-from its original stdout JSON channel before registry preparation. The CLI SHALL accept the description only after
-successful process exit and parsing exactly one complete supported document within bounded size/time limits. Invalid or
-incomplete graph metadata MUST prevent execution. Description mode MUST retain the existing single-build
-validation/install workflow and MUST NOT require a second runner compilation.
+Description mode SHALL dispatch before registry preparation and write one complete JSON document to stdout. The CLI
+SHALL accept the description only after successful process exit and parsing exactly one complete supported document
+within bounded size/time limits. Invalid or incomplete graph metadata MUST prevent execution. Description mode MUST
+retain the existing single-build validation/install workflow and MUST NOT require a second runner compilation.
 
-#### Scenario: Print during destruction
+#### Scenario: Reject unexpected startup output
 
-- **WHEN** a prepared plugin prints through ordinary stdout while being destroyed in description mode
-- **THEN** the output is handled as diagnostics and does not append bytes to the JSON document
+- **WHEN** linked native startup code writes to stdout before the runner dispatches description mode
+- **THEN** unexpected bytes cause preflight failure rather than heuristic recovery
 
 #### Scenario: Return partial metadata
 
@@ -47,7 +45,7 @@ validation/install workflow and MUST NOT require a second runner compilation.
 #### Scenario: Preserve one runner build
 
 - **WHEN** a workflow is compiled, validated, described, and installed
-- **THEN** validation, description, and installation use the same built runner without recompiling to embed resolved ports
+- **THEN** validation, description, and installation use the same built runner without recompiling to embed metadata
 
 ### Requirement: Generate standalone observable runners
 
