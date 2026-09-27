@@ -23,7 +23,7 @@
 
 ## 4. Package and integrate
 
-- [ ] 4.1 Add runnable scalar and typed-list CEL Flow examples plus packaged CLI acceptance; verify they build outside the checkout, produce `{"doubled":42}` and `[2,4]` results, and run without build inputs or an external CEL service.
-- [ ] 4.2 Verify an expression edit in a reused build directory changes the installed behavior, while an invalid edit preserves the old executable and lock; check both paths in compiled workflow tests.
-- [ ] 4.3 Add `mfn-code` to release-support checks and update plugin, release, and licensing documentation; verify package enumeration and notice generation include the CEL dependency.
-- [ ] 4.4 Run `nix develop --command prek install`, `nix develop --command prek -a`, `nix flake check -L`, and `openspec validate add-code-builtin-node --strict`; verify all required checks pass and each specification scenario has test coverage or a documented boundary.
+- [x] 4.1 Add runnable scalar and typed-list CEL Flow examples plus packaged CLI acceptance; verify they build outside the checkout, produce `{"doubled":42}` and `[2,4]` results, and run without build inputs or an external CEL service.
+- [x] 4.2 Verify an expression edit in a reused build directory changes the installed behavior, while an invalid edit preserves the old executable and lock; check both paths in compiled workflow tests.
+- [x] 4.3 Add `mfn-code` to release-support checks and update plugin, release, and licensing documentation; verify package enumeration and notice generation include the CEL dependency.
+- [x] 4.4 Run `nix develop --command prek install`, `nix develop --command prek -a`, `nix flake check -L`, and `openspec validate add-code-builtin-node --strict`; verify all required checks pass and each specification scenario has test coverage or a documented boundary.
