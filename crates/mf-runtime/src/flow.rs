@@ -474,6 +474,29 @@ mod tests {
             }
             Action::Fail => {}
         }
+        match &action {
+            Action::Increment { input, .. } => {
+                ports
+                    .inputs
+                    .push(crate::PortSpec::new(input, crate::ValueType::Number, true));
+            }
+            Action::Sum { left, right, .. } => {
+                ports
+                    .inputs
+                    .push(crate::PortSpec::new(left, crate::ValueType::Number, true));
+                ports
+                    .inputs
+                    .push(crate::PortSpec::new(right, crate::ValueType::Number, true));
+            }
+            Action::Fail => {
+                ports.inputs.push(crate::PortSpec::new(
+                    "value",
+                    crate::ValueType::Number,
+                    true,
+                ));
+            }
+            Action::Emit { .. } => {}
+        }
         FlowNode::new(
             name,
             Box::new(TestNode {

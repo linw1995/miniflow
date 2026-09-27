@@ -43,9 +43,32 @@ Declare `mfn-core` once to use the basic built-in nodes below. To migrate older 
 | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input |
 | `builtin.if_else` | Nonempty ordered `branches` | None; activated by control edges | One boolean activation output per branch, plus `else` |
 
+`builtin.code` is provided separately by `mfn-code`. It requires an explicit `language` field; the supported value is
+`cel`. Input names have concrete type declarations, while output names and expressions live in `code`. The CEL checker
+infers each output port type from its expression:
+
+```json
+{
+  "language": "cel",
+  "inputs": {"amount": "int"},
+  "code": {"doubled": "amount * 2"}
+}
+```
+
+The common input and output port contract is language-independent. A future backend can interpret its `code` payload
+without changing existing CEL definitions. CEL input types include `int`, `double`, `bool`, `string`, `null`, and nested
+`{"list": T}` or `{"map": T}` descriptors; maps have string keys and homogeneous values.
+
 ## Validation
 
 The CLI checks node IDs, edge endpoints, selected output names, and cycles before generating runner code. The compiled runner validates registered kinds, configuration, ports, type compatibility, and required input connections before installation. Every failure returns a nonzero status and preserves an existing output executable.
+
+Port connections are statically safe when the source type fits the target, such as `Int64` to `Number` or `List(Int64)` to
+`Array`. A broad source can feed a refined target when the runtime checks the actual JSON value before invoking that
+target: `Any` to `Int64`, `Number` to `Float64`, and `Array` to `List(Int64)` are examples. Concrete conflicts such as
+`String` to `Int64` or `List(String)` to `List(Int64)` fail compilation. No values are coerced. Produced outputs are
+checked against their declared types before publication, including outputs without consumers. A mismatch reports the
+node, port, and nested JSON Pointer path where applicable.
 
 See [compiling workflows](compiling.md) to build and run a definition, or [plugin development](plugins.md) to add node kinds.
 
