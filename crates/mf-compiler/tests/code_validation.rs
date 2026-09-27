@@ -57,6 +57,29 @@ fn graph(expression: &str) -> Value {
 }
 
 #[test]
+fn documented_cel_examples_produce_their_outputs() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for (source, expected) in [
+        (
+            include_str!("../../../examples/cel-scalar.json"),
+            json!({"doubled": 42}),
+        ),
+        (
+            include_str!("../../../examples/cel-list.json"),
+            json!({"doubled": [2, 4]}),
+        ),
+    ] {
+        let definition = WorkflowDefinition::from_json(source).unwrap();
+        let plan = compile_definition(&definition, &registry).unwrap();
+        let output = instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute()
+            .unwrap();
+        assert_eq!(json!(output), expected);
+    }
+}
+
+#[test]
 fn rejects_concrete_input_conflicts_and_checks_inactive_code() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut mismatch = graph("amount * 2");
@@ -145,4 +168,35 @@ fn runner_validation_rejects_inactive_code_without_replacing_output() {
         serde_json::from_slice::<Value>(&result.stdout).unwrap(),
         json!({})
     );
+
+    let mut active = graph("amount * 2");
+    active["nodes"][0]["config"]["value"] = json!(21);
+    active["nodes"][1]["config"]["branches"][0]["condition"]["value"] = json!(21);
+    fs::write(&definition, active.to_string()).unwrap();
+    compile_project(&request).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap(),
+        json!({"result": 42})
+    );
+
+    active["nodes"][2]["config"]["code"]["result"] = json!("amount * 3");
+    fs::write(&definition, active.to_string()).unwrap();
+    compile_project(&request).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap(),
+        json!({"result": 63})
+    );
+
+    let installed = fs::read(&output).unwrap();
+    let lock = fs::read(definition.with_extension("lock")).unwrap();
+    active["nodes"][2]["config"]["code"]["result"] = json!("missing + 1");
+    fs::write(&definition, active.to_string()).unwrap();
+    let error = compile_project(&request).unwrap_err();
+    assert_eq!(error.stage, "runner validation");
+    assert_eq!(fs::read(&output).unwrap(), installed);
+    assert_eq!(fs::read(definition.with_extension("lock")).unwrap(), lock);
 }

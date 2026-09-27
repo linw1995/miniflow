@@ -1,6 +1,6 @@
 # Release prerequisites
 
-A distributed CLI resolves exact-version `mf-runtime` and `mf-compiler` packages from crates.io. The bundled examples also require available `mfn-core` packages. Prepare and publish these support packages before publishing the matching CLI release.
+A distributed CLI resolves exact-version `mf-runtime` and `mf-compiler` packages from crates.io. The bundled examples also require available `mfn-core` and `mfn-code` packages. Prepare and publish these support packages before publishing the matching CLI release.
 
 The refined port-type API changes `ValueType` from `Copy` to `Clone` and enforces declared output types during execution. Publish matching runtime and compiler versions before rebuilding node packages; review plugin port declarations before distributing runners built with the new runtime.
 
@@ -13,7 +13,8 @@ nix develop --command cargo nextest run -p mf-cli --test packaged_cli --test rel
 The Rust setup in `crates/mf-cli/tests/support/` packages the support crates, calculates archive checksums, and prepares
 an isolated Cargo registry source. It builds a default CLI without development overrides. The generated registry runner
 compiles all four extracted support packages outside the checkout, so separate package check builds are unnecessary.
-Acceptance covers registry, pinned Git, and local-path nodes, locked rebuilds, and standalone execution. Temporary
+Acceptance covers registry, pinned Git, and local-path nodes, CEL scalar and typed-list examples, locked rebuilds,
+and standalone execution. Temporary
 artifacts are owned by the fixture and cleaned up after the test.
 
 Release prerequisite tests invoke the Bash gate with a stub Cargo executable. They check the requested owners and exact-version manifest, and verify that Cargo resolution failures block release without contacting a registry or publishing packages. Both test targets are included in the standard nextest suite, coverage runs, and Nix checks.

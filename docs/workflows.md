@@ -76,6 +76,11 @@ Each expression is limited to 8 KiB. The serialized input map and output map are
 are limited to 16 nesting levels. These bounds limit accidental work; CEL evaluation runs in-process without a hard
 CPU or memory sandbox.
 
+Run the complete [scalar example](../examples/cel-scalar.json) or [typed-list example](../examples/cel-list.json)
+with the [repository development commands](compiling.md#repository-development). They produce `{"doubled":42}`
+and `{"doubled":[2,4]}` respectively. Replace the examples' local package paths with published package versions
+when compiling outside the checkout.
+
 ## Validation
 
 The CLI checks node IDs, edge endpoints, selected output names, and cycles before generating runner code. The compiled runner validates registered kinds, configuration, ports, type compatibility, and required input connections before installation. Every failure returns a nonzero status and preserves an existing output executable.
