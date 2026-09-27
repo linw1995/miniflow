@@ -456,84 +456,86 @@ fn tui_marks_stdout_incomplete_when_descendant_keeps_pipe_open() {
 }
 
 #[test]
-fn failed_stdout_delivery_preserves_a_nonzero_child_result() {
+fn failed_stdout_delivery_uses_cli_error_or_preserves_child_failure() {
     if !loopback_available() {
         return;
     }
-    let directory = tempfile::tempdir().unwrap();
-    let runner = directory.path().join("failing-runner");
-    let json = description_json();
-    fs::write(&runner, format!(
-        "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  exit 0\nfi\nprintf 'result'\nexit 23\n"
+    for (child_code, expected_code) in [(0, 1), (23, 23)] {
+        let directory = tempfile::tempdir().unwrap();
+        let runner = directory.path().join("failing-runner");
+        let json = description_json();
+        fs::write(&runner, format!(
+        "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  exit 0\nfi\nprintf 'result'\nexit {child_code}\n"
     )).unwrap();
-    fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
 
-    let pty = openpty(
-        Some(&Winsize {
-            ws_row: 30,
-            ws_col: 100,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        }),
-        None,
-    )
-    .unwrap();
-    let original = tcgetattr(&pty.slave).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mf"))
-        .arg("run")
-        .arg(&runner)
-        .arg("--tui")
-        .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
-        .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
-        .stdout(Stdio::piped())
-        .spawn()
+        let pty = openpty(
+            Some(&Winsize {
+                ws_row: 30,
+                ws_col: 100,
+                ws_xpixel: 0,
+                ws_ypixel: 0,
+            }),
+            None,
+        )
         .unwrap();
-    drop(child.stdout.take());
-    let mut master = fs::File::from(pty.master);
-    let reader = thread::spawn(move || {
-        let mut output = Vec::new();
-        let mut bytes = [0; 4096];
-        let mut sent = false;
-        loop {
-            match master.read(&mut bytes) {
-                Ok(0) | Err(_) => break,
-                Ok(len) => {
-                    output.extend_from_slice(&bytes[..len]);
-                    if !sent
-                        && output
-                            .windows(b"Exited:".len())
-                            .any(|part| part == b"Exited:")
-                    {
-                        master.write_all(b"q").unwrap();
-                        sent = true;
+        let original = tcgetattr(&pty.slave).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_mf"))
+            .arg("run")
+            .arg(&runner)
+            .arg("--tui")
+            .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
+            .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stdout.take());
+        let mut master = fs::File::from(pty.master);
+        let reader = thread::spawn(move || {
+            let mut output = Vec::new();
+            let mut bytes = [0; 4096];
+            let mut sent = false;
+            loop {
+                match master.read(&mut bytes) {
+                    Ok(0) | Err(_) => break,
+                    Ok(len) => {
+                        output.extend_from_slice(&bytes[..len]);
+                        if !sent
+                            && output
+                                .windows(b"Exited:".len())
+                                .any(|part| part == b"Exited:")
+                        {
+                            master.write_all(b"q").unwrap();
+                            sent = true;
+                        }
                     }
                 }
             }
-        }
-        output
-    });
-    let deadline = Instant::now() + Duration::from_secs(8);
-    let status = loop {
-        if let Some(status) = child.try_wait().unwrap() {
-            break status;
-        }
-        if Instant::now() >= deadline {
-            child.kill().unwrap();
-            panic!("TUI did not close after stdout delivery failed");
-        }
-        thread::sleep(Duration::from_millis(20));
-    };
-    let restored = tcgetattr(&pty.slave).unwrap();
-    assert_eq!(
-        restored.local_flags & (LocalFlags::ICANON | LocalFlags::ECHO),
-        original.local_flags & (LocalFlags::ICANON | LocalFlags::ECHO)
-    );
-    drop(pty.slave);
-    let screen = reader.join().unwrap();
-    assert!(
-        String::from_utf8_lossy(&screen).contains("could not deliver captured workflow stdout")
-    );
-    assert_eq!(status.code(), Some(23));
+            output
+        });
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                panic!("TUI did not close after stdout delivery failed");
+            }
+            thread::sleep(Duration::from_millis(20));
+        };
+        let restored = tcgetattr(&pty.slave).unwrap();
+        assert_eq!(
+            restored.local_flags & (LocalFlags::ICANON | LocalFlags::ECHO),
+            original.local_flags & (LocalFlags::ICANON | LocalFlags::ECHO)
+        );
+        drop(pty.slave);
+        let screen = reader.join().unwrap();
+        assert!(
+            String::from_utf8_lossy(&screen).contains("could not deliver captured workflow stdout")
+        );
+        assert_eq!(status.code(), Some(expected_code));
+    }
 }
 
 fn description_json() -> String {
