@@ -6,5 +6,6 @@
 
 #[cfg(any(unix, windows))]
 pub mod description;
+pub mod graph;
 pub mod receiver;
 pub mod state;

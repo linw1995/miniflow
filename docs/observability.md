@@ -2,7 +2,9 @@
 
 ## Availability and package boundaries
 
-`mf-telemetry` provides versioned descriptions, lifecycle events, workflow/run identities, sequence reservation, validation, and mapping into OpenTelemetry log records. Shared runtime instrumentation and generated execution accept caller-owned observations. Compiled runners also provide `--describe` and initialize OTel export only when an endpoint is configured. `mf-tui` now contains a local OTLP receiver and state reducer; the `mf run --tui` entry point is a subsequent implementation step.
+`mf-telemetry` provides versioned descriptions, lifecycle events, workflow/run identities, sequence reservation, validation, and mapping into OpenTelemetry log records. Shared runtime instrumentation and generated execution accept caller-owned observations. Compiled runners also provide `--describe` and initialize OTel export only when an endpoint is configured.
+
+`mf-tui` contains a local OTLP receiver, state reducer, and graph renderer. The `mf run --tui` entry point is a subsequent implementation step.
 
 `mf-runtime` depends on the minimal telemetry package. `mf-cli` depends on the separate `mf-tui` package for bounded description preflight and local reception. Neither the compiler nor runtime depends on `mf-tui`. Generated runners resolve telemetry transitively through the runtime, without SDK, HTTP-client, or terminal dependencies by default.
 
@@ -201,5 +203,21 @@ drops after bounded collection are Incomplete. If the final record is absent, th
 missing count is unknown, even when no telemetry arrived. Known missing ranges and local drop counts may overlap and
 must be shown separately. Observed span count, trace drops, and diagnostic truncation are separate indicators; none
 proves lifecycle loss. There is no replay, persistence, reconnect, retry scheduling, or workflow restart.
+
+## Graph presentation
+
+`mf-tui::graph::GraphLayout` uses `rust-sugiyama` to assign layers and sibling order from the complete described graph, including isolated nodes. Data and control edges both contribute to the topology; parallel node pairs are deduplicated only for layout. A fixed-size terminal projection keeps node boxes in place as observations arrive.
+
+`GraphView` draws data and control edges with distinct line symbols, clips to a caller-owned viewport, and renders node status and elapsed time from a state snapshot. Confirmed produced or skipped output ports change the associated edge style; possible lifecycle loss remains visibly uncertain.
+
+The initial routing is a midpoint orthogonal path between boxes. It does not search around intervening boxes, so crowded graphs can have line crossings or obscured segments. Layout is calculated once from the runner description; a later CLI terminal loop will own panning, status banners, diagnostics, and terminal cleanup.
+
+Run the local graph preview from an interactive terminal to see simulated node starts, completions, elapsed time, and branch labels:
+
+```bash
+nix develop --command cargo run -p mf-tui --example graph_preview
+```
+
+Arrow keys pan the graph, `f` returns to the origin, and `q` or Esc closes the preview. The preview uses fixture events and does not launch a compiled runner.
 
 See [compiling workflows](compiling.md) for executable commands, endpoint settings, lock migration, and build prerequisites. Automatically generated metadata excludes configuration and business values. Arbitrary plugin failure messages can contain sensitive text and are not automatically sanitized by this contract.
