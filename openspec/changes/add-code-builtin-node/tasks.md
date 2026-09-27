@@ -3,16 +3,16 @@
 ## 1. Establish the CEL backend and configuration
 
 - [ ] 1.1 Use the CEL version proven by the type-extension feasibility spike and encode its checked-type, standard-library, JSON conversion, and `Send + Sync` contract in `mfn-code` tests; verify the package builds on supported targets.
-- [ ] 1.2 Add the opt-in `mfn-code` crate and `builtin.code` registration with required `language`, `inputs`, `outputs`, and language-specific `code`; verify inventory resolves the kind only when linked and unsupported languages fail with node context.
-- [ ] 1.3 Parse concrete CEL scalars and recursive `list`/string-keyed `map` descriptors into shared refined port types, requiring one nonblank expression per declared output; verify invalid names/types, malformed or excessively nested descriptors, empty outputs, missing/extra expressions, and distinct instance ports.
+- [ ] 1.2 Add the opt-in `mfn-code` crate and `builtin.code` registration with required `language`, `inputs`, and language-specific `code`; verify inventory resolves the kind only when linked and unsupported languages fail with node context.
+- [ ] 1.3 Parse concrete CEL input scalars and recursive `list`/string-keyed `map` descriptors, requiring one nonblank expression per output name; verify invalid names/types, malformed or excessively nested descriptors, empty code maps, blank expressions, and distinct instance ports.
 - [ ] 1.4 Document the CEL-only tagged configuration and future backend boundary in `docs/workflows.md`; verify the example JSON parses as a `2026-09-26` Flow.
 
 ## 2. Check expressions before installation
 
 - [ ] 2.1 Build a CEL environment from declared inputs and compile every output expression during node construction; verify unknown variables, invalid operators/functions, syntax errors, and inactive-branch errors fail runner validation without evaluation.
-- [ ] 2.2 Compare checked expression types with declared outputs and reject unresolved `dyn`; verify scalar, typed list/map, nested collection, heterogeneous literal, result mismatch, and dynamic escape cases.
-- [ ] 2.3 Expose refined instance ports through the existing registry and compiler path without a generated-runner kind check; verify concrete mismatches fail graph validation and `builtin.constant` feeds a matching typed input through the shared runtime guard.
-- [ ] 2.4 Document the build-time checking boundary and the difference between a checked CEL program and native machine code; verify validation tests show no expression evaluation.
+- [ ] 2.2 Infer each output type from its checked expression and reject explicit `dyn(...)`, dynamic results, or types outside the shared JSON contract; verify scalar, typed list/map, nested collection, heterogeneous literal, and valid macro-internal `Dyn` cases.
+- [ ] 2.3 Expose refined input and inferred output ports through the existing registry and compiler path without a generated-runner kind check; verify concrete mismatches fail graph validation and `builtin.constant` feeds a matching typed input through the shared runtime guard.
+- [ ] 2.4 Document output inference, the build-time checking boundary, and the difference between a checked CEL program and native machine code; verify validation tests show no expression evaluation.
 
 ## 3. Evaluate and convert JSON values
 

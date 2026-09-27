@@ -15,7 +15,7 @@ contract.
 
 **Goals:**
 
-- Author transformations as short CEL expressions with declared concrete input and output types.
+- Author transformations as short CEL expressions with declared input types and inferred output types.
 - Fail workflow compilation on expression syntax and type errors before installing an executable.
 - Keep the node kind, ports, and JSON result contract stable when another expression language is added later.
 
@@ -29,39 +29,45 @@ contract.
 
 ### 1. A tagged configuration with a stable port contract
 
-Add `mfn-code` with one `builtin.code` registration. The common fields are `language` , `inputs` , and `outputs` ;
-`code` is parsed by the selected language backend. Require an explicit `language` rather than defaulting to CEL. For
-CEL, `code` maps each output name to one expression. A future backend may accept another `code` shape while preserving
-the same port definitions and execution result contract. The first version accepts only `language: "cel"` .
+Add `mfn-code` with one `builtin.code` registration. The common fields are `language` and `inputs`; the selected backend
+parses `code` and derives output ports. Require an explicit `language` rather than defaulting to CEL. For CEL, `code`
+maps each output name to one expression, and the CEL checker infers each output type. A future backend may accept
+another `code` shape while preserving the same port and JSON result contract. The first version accepts only
+`language: "cel"`.
 
 ```json
 {
   "language": "cel",
   "inputs": {"amount": "int"},
-  "outputs": {"doubled": "int"},
   "code": {"doubled": "amount * 2"}
 }
 ```
 
-A typed collection uses the same shape: `"inputs": {"items": {"list": "int"}}`, `"outputs": {"doubled": {"list": "int"}}`, and `"code": {"doubled": "items.map(x, x * 2)"}`.
+A typed collection uses the same shape: `"inputs": {"items": {"list": "int"}}` and
+`"code": {"doubled": "items.map(x, x * 2)"}`. The output port is inferred as `List(Int64)`.
 
 Use a recursive, language-neutral type descriptor: CEL `int` , `double` , `bool` , `string` , and `null` , plus
 `{"list": T}` and `{"map": T}` for a nested type `T` . A map has string keys and homogeneous values, matching a JSON
 object. Scalars map to signed 64-bit integers, finite 64-bit floating values, booleans, strings, and JSON null. `int`
-does not accept a decimal JSON number, and `double` does not silently convert a JSON integer. Inputs and outputs must
-match their declared types recursively. Heterogeneous records and nullable unions can be added later without changing
-existing descriptors. For example, `{"list":{"map":"int"}}` describes a list of objects with integer values.
+does not accept a decimal JSON number, and `double` does not silently convert a JSON integer. Inputs must match their
+declared types recursively; evaluated values must match the types inferred for their output expressions. Heterogeneous
+records and nullable unions can be added later without changing existing descriptors. For example,
+`{"list":{"map":"int"}}` describes a list of objects with integer values.
 
-Implement [extend-workflow-port-types](../extend-workflow-port-types/design.md) first. Map each CEL type descriptor to
-the shared `ValueType` (`Int64`, `Float64` , `Boolean` , `String` , `Null` , `List(T)` , or `Map(T)` ) and expose it on
-the corresponding Code input and output port. The compiler rejects incompatible concrete edges and accepts broad or
-`Any` sources only through the shared runtime-checked boundary. `builtin.constant` remains `Any` and can feed a typed
-Code input when its actual JSON value conforms. CEL expressions are checked against these same declared types, so no
-parallel CEL-only port schema is needed.
+Implement [extend-workflow-port-types](../extend-workflow-port-types/design.md) first. Map declared CEL input types and
+inferred CEL result types to the shared `ValueType` (`Int64`, `Float64`, `Boolean`, `String`, `Null`, `List(T)`, or
+`Map(T)`) and expose them as Code ports. The compiler rejects incompatible concrete edges and accepts broad or `Any`
+sources only through the shared runtime-checked boundary. `builtin.constant` remains `Any` and can feed a typed Code
+input when its actual JSON value conforms. No parallel CEL-only output annotation is needed.
 
 ### 2. Compile during node construction and runner validation
 
-The `mfn-code` factory strictly validates configuration, builds a CEL environment with exactly the declared inputs, and compiles every output expression. Compare each checked result type with its declared output type and reject any unresolved dynamic type in the checked expression. Use only the CEL standard library in the initial environment. Store the resulting programs in the node instance so execution does not reparse on each call.
+The `mfn-code` factory strictly validates configuration, builds a CEL environment with exactly the declared inputs, and
+compiles every output expression. Infer each output port from the checked root result type; reject a `dyn` result,
+unsupported result types such as bytes or timestamps, and explicit `dyn(...)` calls. Do not reject every internal `Dyn`
+entry in the checker type map: the CEL `map` macro creates such entries even when its result is concretely typed. Use
+only the CEL standard library in the initial environment. Store the resulting programs in the node instance so
+execution does not reparse on each call.
 
 The existing runner's `--validate` path calls this factory for every node, including nodes on inactive branches. It
 therefore catches CEL errors before installation without evaluating any expression. Normal execution constructs nodes
@@ -90,11 +96,11 @@ deployments must treat expression cost as an operational concern.
 
 ### 4. Keep future language support additive
 
-`language` selects the compiler/evaluator backend; `inputs` , `outputs` , port names, graph edges, and JSON result
-behavior stay common. The `code` payload is language-specific, so a later script-oriented backend can use a different
-source representation without reinterpreting existing CEL definitions. Future backends must define how they check
-declared types and report execution errors. They may be feature-gated to avoid linking every language runtime into
-CEL-only workflows.
+`language` selects the compiler/evaluator backend; input declarations, derived output ports, graph edges, and JSON
+result behavior stay common. The `code` payload is language-specific, so a later script-oriented backend can use a
+different source representation and, if needed, its own output contract without reinterpreting existing CEL
+definitions. Future backends must define how they establish output types and report execution errors. They may be
+feature-gated to avoid linking every language runtime into CEL-only workflows.
 
 ### 5. Verification and packaging
 
@@ -106,7 +112,7 @@ Workflow schema `2026-09-26` already supports this node without a version change
 
 ## Risks / Trade-offs
 
-- **CEL is gradually typed when dynamic values enter expressions** -> Declare only concrete types, reject `dyn` in checked programs, and validate every JSON boundary value.
+- **CEL is gradually typed when dynamic values enter expressions** -> Declare only concrete port types, reject explicit `dyn(...)` calls and dynamic result types, and validate every JSON boundary value. Macro-generated internal `Dyn` entries alone are not a rejection reason.
 - **Broad sources remain dynamically typed** -> Require the shared runtime guard from `extend-workflow-port-types` before CEL evaluation and report the Code input port and failing JSON path.
 - **Runner startup recompiles embedded CEL source** -> Compile once per node construction, not per execution; use checked-AST embedding only after a tested round trip is available.
 - **The selected Rust CEL implementation is still evolving** -> Pin a tested version, run a compatibility spike and conformance cases, and keep its API inside `mfn-code`.

@@ -7,9 +7,9 @@ Flows need a concise, typed transformation step for workflow-specific logic. CEL
 ## What Changes
 
 - Add an opt-in `mfn-code` package registering `builtin.code`, separate from `mfn-core`.
-- Require an explicit `language` field, accepting only `cel` in the first version. Each instance declares typed named inputs and output expressions, including homogeneous lists and string-keyed maps.
-- Use the shared refined port types planned in `extend-workflow-port-types` for those declarations, so graph validation and the CEL checker share one type contract.
-- Compile CEL expressions to checked programs during runner validation, rejecting unknown names, invalid operations, dynamic type escapes, and result types that disagree with declared outputs. Evaluate validated programs when the node executes.
+- Require an explicit `language` field, accepting only `cel` in the first version. Each instance declares typed named inputs and names its output expressions; output types are inferred, including homogeneous lists and string-keyed maps.
+- Use the shared refined port types planned in `extend-workflow-port-types` for declared inputs and inferred outputs, so graph validation and the CEL checker share one type contract.
+- Compile CEL expressions to checked programs during runner validation, rejecting unknown names, invalid operations, explicit dynamic conversions, and inferred result types that cannot be represented by the shared port contract. Evaluate validated programs when the node executes.
 - Validate JSON inputs and outputs at the language boundary, preserve existing skip behavior, and keep compiled workflow binaries independent of source files, Cargo, and external services at run time.
 - Keep the port and result contract independent of CEL so a future language backend can use the same Flow edges and node kind without changing existing CEL definitions.
 

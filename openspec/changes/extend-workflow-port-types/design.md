@@ -30,7 +30,7 @@ constructed by a node's `ports()` method with owned `ValueType` values. The recu
 non-`Copy`; callers borrow or clone it. Adding a separate optional schema field to `PortSpec` was rejected because it
 would permit broad and refined declarations to disagree.
 
-The CEL Code change maps `int`, `double`, `bool`, `string`, `null`, `{"list": T}`, and `{"map": T}` into these shared variants and exposes them directly through `Node::ports()`. Implement this type extension before the Code change. The Code backend still checks CEL values when converting from JSON, but the workflow boundary check is owned by `mf-runtime`.
+The CEL Code change maps declared input types and inferred expression result types into these shared variants and exposes them through `Node::ports()`. Implement this type extension before the Code change. The Code backend still checks CEL values when converting from JSON, but the workflow boundary check is owned by `mf-runtime`.
 
 ### 2. Classify compatibility, rather than returning one boolean
 

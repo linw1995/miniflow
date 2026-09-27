@@ -25,53 +25,59 @@ The project SHALL provide an `mfn-code` package that registers `builtin.code`. A
 - **WHEN** a Code node declares a language other than `cel`
 - **THEN** build validation fails with the node ID and unsupported language
 
-### Requirement: Declare typed CEL inputs and outputs
+### Requirement: Declare CEL inputs and infer output ports
 
-A CEL Code configuration SHALL require `language` , `inputs` , `outputs` , and `code` . `inputs` and `outputs` SHALL map
-port names to types. `code` SHALL map each declared output name to one nonblank CEL expression, with no missing or extra
-names. Input maps MAY be empty; output maps MUST be nonempty. Port names MUST be valid CEL identifiers. A type SHALL be
-a concrete scalar `int` , `double` , `bool` , `string` , or `null` ; a recursively typed list such as `{"list":"int"}` ;
-or a JSON object with string keys and one value type such as `{"map":"string"}` . These declarations SHALL become the
-shared refined input and output port types. Dynamic, nullable-union, heterogeneous, and undeclared types MUST be
-rejected. All declared ports SHALL be required. Unknown configuration fields MUST fail validation.
+A CEL Code configuration SHALL require `language`, `inputs`, and `code`. `inputs` SHALL map input names to concrete
+types; `code` SHALL map output names to nonblank CEL expressions. Input maps MAY be empty; code maps MUST be nonempty.
+Port names MUST be valid CEL identifiers. An input type SHALL be a concrete scalar `int`, `double`, `bool`, `string`, or
+`null`; a recursively typed list such as `{"list":"int"}`; or a JSON object with string keys and one value type such
+as `{"map":"string"}`. The CEL checker SHALL infer each output type from its expression. Declared input types and
+inferred output types SHALL become shared refined port types. Dynamic, nullable-union, heterogeneous, and undeclared
+input types MUST be rejected. All ports SHALL be required. Unknown configuration fields MUST fail validation.
 
 #### Scenario: Define an expression
 
-- **WHEN** a Code node declares input `amount` as `int`, output `doubled` as `int`, and code `doubled: "amount * 2"`
-- **THEN** its input and output ports use those names and the expression is checked against the declared types
+- **WHEN** a Code node declares input `amount` as `int` and code `doubled: "amount * 2"`
+- **THEN** it exposes input `amount` as `Int64` and infers output `doubled` as `Int64`
 
 #### Scenario: Resolve instance ports
 
-- **WHEN** two Code nodes declare different input or output names
+- **WHEN** two Code nodes declare different input names or output expression names
 - **THEN** compilation checks each instance's edges and selected workflow outputs against its own refined port declarations
 
 #### Scenario: Declare nested collections
 
-- **WHEN** a port declares `{"list":{"map":"int"}}`
+- **WHEN** an input declares `{"list":{"map":"int"}}`
 - **THEN** validation treats it as a list of JSON objects whose values are signed integers
 
 #### Scenario: Reject incomplete declarations
 
-- **WHEN** configuration has an invalid name or type, no outputs, blank expression, missing code expression, extra code expression, or unknown field
+- **WHEN** configuration has an invalid input name or type, no output expressions, a blank expression, or an unknown field
 - **THEN** build validation fails with the node ID and affected field or output name
 
 ### Requirement: Type-check every expression before installation
 
 The runner's validation mode SHALL parse and type-check every configured CEL expression against an environment
 containing exactly the declared inputs. It MUST reject unknown identifiers, invalid operators or function calls,
-unresolved dynamic types, and expression result types different from their declared output types. Validation MUST check
-expressions on branches that could be skipped and MUST NOT evaluate expressions or execute workflow nodes. The
-executable MUST NOT be installed after a validation failure.
+explicit `dyn(...)` calls, dynamic result types, and inferred result types that the shared JSON port contract cannot
+represent. It SHALL derive output port types from the checked results. Validation MUST check expressions on branches
+that could be skipped and MUST NOT evaluate expressions or execute workflow nodes. The executable MUST NOT be installed
+after a validation failure.
 
 #### Scenario: Reject an unknown input
 
 - **WHEN** an expression uses a variable absent from `inputs`
 - **THEN** compilation fails with the node ID and output expression context
 
-#### Scenario: Reject a type mismatch
+#### Scenario: Reject an invalid operation
 
-- **WHEN** an expression computes a `string` for an output declared `int`
+- **WHEN** an expression adds an `int` input to a string literal
 - **THEN** compilation fails before executable installation
+
+#### Scenario: Reject an unsupported inferred type
+
+- **WHEN** an expression infers `dyn`, bytes, or another type that cannot be represented as a shared JSON port type
+- **THEN** compilation fails with the node ID and output expression name
 
 #### Scenario: Validate an inactive branch
 
@@ -101,8 +107,8 @@ NOT evaluate expressions.
 
 #### Scenario: Transform a typed list
 
-- **WHEN** `items` is declared `{"list":"int"}`, receives `[1, 2]`, and an output declared `{"list":"int"}` evaluates `items.map(x, x * 2)`
-- **THEN** the node produces `[2, 4]` on that output
+- **WHEN** `items` is declared `{"list":"int"}`, receives `[1, 2]`, and `doubled` evaluates `items.map(x, x * 2)`
+- **THEN** the node infers `doubled` as `List(Int64)` and produces `[2, 4]`
 
 #### Scenario: Reject a heterogeneous collection
 
