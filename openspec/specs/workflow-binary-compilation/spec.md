@@ -388,6 +388,7 @@ recognize built-in kind names to perform inference.
 
 - **WHEN** a changed constant creates a known type conflict in a reused build directory
 - **THEN** validation rejects the new runner and leaves the previously installed executable intact
+
 ### Requirement: Describe a compiled workflow without executing nodes
 
 Generated runners SHALL support `--describe` and return one date-versioned JSON graph description containing workflow
