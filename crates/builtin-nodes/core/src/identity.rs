@@ -1,6 +1,6 @@
 use mf_runtime::{
-    Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistration, Outputs, PortSpec,
-    ValueType,
+    Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistration, OutputDerivation, Outputs,
+    PortSpec, ValueType,
 };
 use serde_json::Value;
 
@@ -20,6 +20,10 @@ impl Node for IdentityNode {
             });
         };
         Ok(Outputs::from([("value".to_owned(), value)]))
+    }
+
+    fn output_derivations(&self) -> Vec<OutputDerivation> {
+        vec![OutputDerivation::forward_input("value", "input")]
     }
 }
 
