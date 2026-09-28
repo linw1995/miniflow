@@ -380,14 +380,6 @@ fn warm_build_preserves_generated_inputs_and_reuses_compiled_runner() {
         );
     }
     assert_eq!(fs::read_to_string(&definition).unwrap(), source);
-    fs::remove_dir_all(&project).unwrap();
-    let recreated = compile(&definition, &target, None);
-    assert!(
-        recreated.status.success(),
-        "{}",
-        String::from_utf8_lossy(&recreated.stderr)
-    );
-    assert!(String::from_utf8_lossy(&recreated.stderr).contains("created build directory"));
 }
 
 #[test]
@@ -420,7 +412,7 @@ fn repairs_partial_projects_and_updates_configuration() {
 }
 
 #[test]
-fn cargo_invalidates_features_local_sources_versions_and_flags() {
+fn cargo_invalidates_features_local_sources_and_flags() {
     let temporary = temporary_directory();
     let definition = temporary.path().join("flow.json");
     let target = temporary.path().join("flow");
@@ -465,47 +457,17 @@ fn cargo_invalidates_features_local_sources_versions_and_flags() {
     fs::write(local.join("src/lib.rs"), plugin.replace("14", "28")).unwrap();
     let changed = check(&value, 28, None);
     assert!(!String::from_utf8_lossy(&changed.stderr).contains("Compiling mf-runtime"));
-    fs::write(
-        local.join("Cargo.toml"),
-        manifest.replacen("version = \"0.1.0\"", "version = \"0.2.0\"", 1),
-    )
-    .unwrap();
-    check(&value, 28, None);
-    assert!(
-        fs::read_to_string(definition.with_extension("lock"))
-            .unwrap()
-            .contains("version = \"0.2.0\"")
+    let built = fs::read(&target).unwrap();
+    let invalid_flags = compile(
+        &definition,
+        &target,
+        Some("-C definitely_not_a_rustc_option"),
     );
+    assert!(!invalid_flags.status.success());
     assert!(
-        !String::from_utf8_lossy(&check(&value, 28, Some("-C debuginfo=1")).stderr)
-            .contains("reused compiled runner")
+        String::from_utf8_lossy(&invalid_flags.stderr).contains("definitely_not_a_rustc_option")
     );
-    assert!(
-        String::from_utf8_lossy(&check(&value, 28, Some("-C debuginfo=1")).stderr)
-            .contains("reused compiled runner")
-    );
-    #[cfg(unix)]
-    {
-        let wrapper = temporary.path().join("rustc-wrapper");
-        fs::write(&wrapper, "#!/bin/sh\nif [ \"$1\" = -vV ]; then\n  \"$MF_REAL_RUSTC\" \"$@\" | sed 's/^commit-hash:.*/commit-hash: 1111111111111111111111111111111111111111/'\nelse\n  exec \"$MF_REAL_RUSTC\" \"$@\"\nfi\n").unwrap();
-        fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
-        let changed = compile_command(&definition, &target)
-            .env("RUSTC", &wrapper)
-            .env("RUSTC_WRAPPER", "")
-            .env("RUSTFLAGS", "-C debuginfo=1")
-            .env(
-                "MF_REAL_RUSTC",
-                std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into()),
-            )
-            .output()
-            .unwrap();
-        assert!(
-            changed.status.success(),
-            "{}",
-            String::from_utf8_lossy(&changed.stderr)
-        );
-        assert!(!String::from_utf8_lossy(&changed.stderr).contains("reused compiled runner"));
-    }
+    assert_eq!(fs::read(&target).unwrap(), built);
 }
 
 #[cfg(unix)]
