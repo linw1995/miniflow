@@ -21,11 +21,17 @@ mf compile flow.json --output ./flow --locked
 
 The output directory must exist. A successful first build creates `flow.lock`. See [workflow definitions](workflows.md) for dependency sources, features, and lock behavior. Native libraries required by plugins must be installed separately.
 
-The CLI checks graph structure and generates fixed node orchestration, then compiles one runner using `cargo build --release --locked`. It invokes that binary with `--validate` to check registered kinds, configuration, and port contracts without executing node operations. Only the validated binary is installed. Plugin errors can therefore be reported after Rust compilation.
+The CLI checks graph structure and generates fixed node orchestration, then compiles one runner
+using `cargo build --release --locked`. It invokes that binary with `--validate` to check registered
+kinds, configuration, inferred port types, and port contracts without executing node operations.
+Only the validated binary is installed. A constant such as `[1, "x"]` connected to a `List(Int64)`
+input fails validation at `/1`, even on an inactive branch. Plugin errors can therefore be reported
+after Rust compilation.
 
 The generated executable embeds the graph metadata and node configuration. Node configuration is emitted as Rust string
-literals in the generated workflow source. Normal execution uses generated node calls and prints selected outputs as
-JSON. It does not require the definition, lock, plugin sources, or Cargo at runtime. It retains `--validate` for
+literals in the generated workflow source. Normal execution resolves type metadata along fixed bindings, then uses
+generated node calls and prints selected outputs as JSON. It does not require the definition, lock, plugin sources, or
+Cargo at runtime. It retains `--validate` for
 checking its embedded configuration without executing the workflow. `--describe` prints one date-versioned JSON
 document containing the workflow identity, node IDs/kinds, named data/control edges, and execution order. It reads
 the embedded plan without constructing plugins, and excludes configuration and business values. Edge names identify
@@ -51,7 +57,7 @@ Rebuild without `--locked` once to refresh an older adjacent Flow lock for the n
 
 ## Repository development
 
-Before support packages are published, repository development uses an explicit source override enabled only by the `development-support` Cargo feature:
+Repository development can use an explicit source override enabled only by the `development-support` Cargo feature:
 
 ```sh
 nix develop
@@ -69,13 +75,18 @@ MF_DEV_SUPPORT_ROOT="$PWD/crates" cargo run -p mf-cli --features development-sup
 "$output_dir/cel-list"
 ```
 
-Normal release builds ignore this environment variable. The example declares local built-in packages; a portable Flow should declare available registry or Git packages instead.
+Normal release builds ignore this environment variable. The hello example declares a local `mfn-core` dependency. Both CEL examples also declare a local `mfn-code` dependency for `builtin.code`; they produce `{"doubled":42}` and `{"doubled":[2,4]}` respectively. A portable Flow should declare available registry or Git packages instead.
 
 ## Build failures
 
 Diagnostics identify the failed stage: input parsing, graph validation, dependency resolution, runtime compatibility, compilation, runner validation, lock persistence, or installation. Cargo diagnostics remain visible. Failures after project creation report its retained location for inspection, including `Cargo.toml`, `workflow-plan.json`, generated source, and build artifacts.
 
-A failed build never replaces an existing executable. Runner validation must succeed on every invocation; a previous executable is not evidence of current success. A lock persistence failure prevents installation. If installation fails after an unlocked build persists its dependency lock, the error states that the lock was updated.
+A failed build never replaces an existing executable. If editing a constant introduces a known type
+conflict, runner validation reports the source and target ports, their types, and a nested JSON
+Pointer path where applicable. The previous executable and dependency lock remain intact. Runner
+validation must succeed on every invocation; a previous executable is not evidence of current
+success. A lock persistence failure prevents installation. If installation fails after an unlocked
+build persists its dependency lock, the error states that the lock was updated.
 
 Building third-party Rust code executes build scripts, procedural macros, and configuration factories with the user's permissions. Factories should limit themselves to configuration validation and construction; external I/O belongs in `Node::execute`. This is a native build process, not an untrusted-code sandbox.
 

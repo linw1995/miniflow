@@ -111,9 +111,10 @@ fn build(project: &Path, flow_lock: &Path, definition: &WorkflowDefinition) -> P
     )
     .unwrap();
     resolve_project(project, flow_lock, false).unwrap();
-    let target = project.join("target");
+    let target = std::env::var_os("MF_TEST_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project.join("target"));
     let output = mf_compiler::cargo_command(project)
-        .env("MF_TEST_TARGET_DIR", &target)
         .args(["build", "--offline", "--release", "--locked"])
         .output()
         .unwrap();

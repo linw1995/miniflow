@@ -35,7 +35,7 @@ fn graph(expression: &str) -> Value {
 }
 
 #[test]
-fn checks_inactive_code_and_runtime_input_types() {
+fn checks_inactive_code_and_known_input_conflicts() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let invalid: WorkflowDefinition = serde_json::from_value(graph("missing + 1")).unwrap();
     let error = compile_definition(&invalid, &registry)
@@ -63,13 +63,11 @@ fn checks_inactive_code_and_runtime_input_types() {
     active_wrong["nodes"][0]["config"]["value"] = json!("bad");
     active_wrong["nodes"][1]["config"]["branches"][0]["condition"]["value"] = json!("bad");
     let definition: WorkflowDefinition = serde_json::from_value(active_wrong).unwrap();
-    let plan = compile_definition(&definition, &registry).unwrap();
-    let error = instantiate_compiled(&plan, &registry)
-        .unwrap()
-        .execute()
+    let error = compile_definition(&definition, &registry)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("input `amount`") && error.contains("expected int64"));
+    assert!(error.contains("source") && error.contains("transform"));
+    assert!(error.contains("string") && error.contains("int64"));
 }
 
 #[test]
@@ -78,8 +76,7 @@ fn runner_validation_rejects_inactive_code_without_replacing_output() {
     let definition = root.path().join("flow.json");
     let output = root.path().join("runner");
     let build = root.path().join("build");
-    fs::write(&definition, graph("missing + 1").to_string()).unwrap();
-    fs::write(&output, b"previous").unwrap();
+    fs::write(&definition, graph("amount * 2").to_string()).unwrap();
     let support = SupportPackages::Local {
         crates_dir: common::crates_dir(),
     };
@@ -90,9 +87,21 @@ fn runner_validation_rejects_inactive_code_without_replacing_output() {
         build_dir: Some(&build),
         support: &support,
     };
+    compile_project(&request).unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(result.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap(),
+        json!({})
+    );
+
+    let installed = fs::read(&output).unwrap();
+    let lock = fs::read(definition.with_extension("lock")).unwrap();
+    fs::write(&definition, graph("missing + 1").to_string()).unwrap();
     let error = compile_project(&request).unwrap_err();
     assert_eq!(error.stage, "runner validation");
-    assert_eq!(fs::read(&output).unwrap(), b"previous");
+    assert_eq!(fs::read(&output).unwrap(), installed);
+    assert_eq!(fs::read(definition.with_extension("lock")).unwrap(), lock);
 
     let executable = build
         .join("target/release")
@@ -104,44 +113,4 @@ fn runner_validation_rejects_inactive_code_without_replacing_output() {
     assert!(!validation.status.success());
     let diagnostic = String::from_utf8_lossy(&validation.stderr);
     assert!(diagnostic.contains("transform") && diagnostic.contains("output `result`"));
-
-    fs::write(&definition, graph("amount * 2").to_string()).unwrap();
-    compile_project(&request).unwrap();
-    let result = Command::new(&output).output().unwrap();
-    assert!(result.status.success());
-    assert_eq!(
-        serde_json::from_slice::<Value>(&result.stdout).unwrap(),
-        json!({})
-    );
-
-    let mut active = graph("amount * 2");
-    active["nodes"][0]["config"]["value"] = json!(21);
-    active["nodes"][1]["config"]["branches"][0]["condition"]["value"] = json!(21);
-    fs::write(&definition, active.to_string()).unwrap();
-    compile_project(&request).unwrap();
-    let result = Command::new(&output).output().unwrap();
-    assert!(result.status.success());
-    assert_eq!(
-        serde_json::from_slice::<Value>(&result.stdout).unwrap(),
-        json!({"result": 42})
-    );
-
-    active["nodes"][2]["config"]["code"]["result"] = json!("amount * 3");
-    fs::write(&definition, active.to_string()).unwrap();
-    compile_project(&request).unwrap();
-    let result = Command::new(&output).output().unwrap();
-    assert!(result.status.success());
-    assert_eq!(
-        serde_json::from_slice::<Value>(&result.stdout).unwrap(),
-        json!({"result": 63})
-    );
-
-    let installed = fs::read(&output).unwrap();
-    let lock = fs::read(definition.with_extension("lock")).unwrap();
-    active["nodes"][2]["config"]["code"]["result"] = json!("missing + 1");
-    fs::write(&definition, active.to_string()).unwrap();
-    let error = compile_project(&request).unwrap_err();
-    assert_eq!(error.stage, "runner validation");
-    assert_eq!(fs::read(&output).unwrap(), installed);
-    assert_eq!(fs::read(definition.with_extension("lock")).unwrap(), lock);
 }

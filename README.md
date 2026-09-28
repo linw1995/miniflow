@@ -29,7 +29,7 @@ Flows declare their node dependencies directly in JSON. Installed release CLIs b
 
 - [Compiling workflows](docs/compiling.md): CLI build, usage, and build failures.
 - [Workflow definitions](docs/workflows.md): JSON format, built-in nodes, and validation.
-- [Plugin development](docs/plugins.md): node registration and dependency selection.
+- [Node development](docs/node-development.md): node registration and dependency selection.
 - [Observation contracts](docs/observability.md): lifecycle schema, identity, loss semantics, and package boundaries.
 - [Contributing](CONTRIBUTING.md): development setup, checks, and submission conventions.
 - [Release prerequisites](docs/releases.md): support package preparation and availability checks.

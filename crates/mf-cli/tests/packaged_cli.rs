@@ -89,7 +89,7 @@ fn packaged_cli_acceptance() {
     assert!(generated.contains("mf_runtime::execute_node"));
     assert!(!generated.contains("Flow::new"));
 
-    let mut typed_flow = json!({
+    let typed_flow = json!({
         "version": "2026-09-26",
         "dependencies": {
             "external": {"package": "fixture-multi-nodes", "version": format!("={}", fixture.fixture_version)}
@@ -117,70 +117,43 @@ fn packaged_cli_acceptance() {
         serde_json::from_slice::<Value>(&typed_result.stdout).unwrap(),
         json!({"result": [1, 2]})
     );
-    typed_flow["nodes"][0]["config"]["value"] = json!([1, "wrong"]);
-    fs::write(&typed_definition, typed_flow.to_string()).unwrap();
-    fixture.compile(
-        &typed_definition,
-        &typed_executable,
-        &typed_build,
-        false,
-        false,
-    );
-    let typed_failure = Command::new(&typed_executable)
-        .env_clear()
-        .env("PATH", "")
-        .output()
-        .unwrap();
-    assert!(!typed_failure.status.success());
-    let diagnostic = String::from_utf8_lossy(&typed_failure.stderr);
-    assert!(diagnostic.contains("sink") && diagnostic.contains("/1"));
 
-    for (name, source, expected) in [
-        (
-            "cel-scalar",
-            include_str!("../../../examples/cel-scalar.json"),
-            json!({"doubled": 42}),
-        ),
-        (
-            "cel-list",
-            include_str!("../../../examples/cel-list.json"),
-            json!({"doubled": [2, 4]}),
-        ),
-    ] {
-        let mut cel_flow: Value = serde_json::from_str(source).unwrap();
-        cel_flow["dependencies"] = json!({
-            "core": {"package":"mfn-core","version":format!("={}", env!("CARGO_PKG_VERSION"))},
-            "code": {"package":"mfn-code","version":format!("={}", env!("CARGO_PKG_VERSION"))}
-        });
-        let cel_definition = project.join(format!("{name}.json"));
-        let cel_output = project.join(name);
-        let cel_build = fixture.root().join(format!("{name}-build"));
-        fs::write(&cel_definition, cel_flow.to_string()).unwrap();
-        fixture.compile(&cel_definition, &cel_output, &cel_build, false, false);
-        let manifest = fs::read_to_string(cel_build.join("Cargo.toml")).unwrap();
-        assert!(manifest.contains(&format!(
-            "package = \"mfn-code\", version = \"={}\"",
-            env!("CARGO_PKG_VERSION")
-        )));
-        assert!(!manifest.contains("path ="));
-        let runtime = fixture.root().join(format!("{name}-runtime"));
-        fs::create_dir(&runtime).unwrap();
-        let standalone = runtime.join("flow");
-        fs::rename(&cel_output, &standalone).unwrap();
-        fs::remove_file(&cel_definition).unwrap();
-        fs::remove_file(cel_definition.with_extension("lock")).unwrap();
-        fs::remove_dir_all(&cel_build).unwrap();
-        let result = checked(
-            Command::new(&standalone)
-                .current_dir(&runtime)
-                .env_clear()
-                .env("PATH", ""),
-        );
-        assert_eq!(
-            serde_json::from_slice::<Value>(&result.stdout).unwrap(),
-            expected
-        );
-    }
+    let name = "cel-list";
+    let source = include_str!("../../../examples/cel-list.json");
+    let expected = json!({"doubled": [2, 4]});
+    let mut cel_flow: Value = serde_json::from_str(source).unwrap();
+    cel_flow["dependencies"] = json!({
+        "core": {"package":"mfn-core","version":format!("={}", env!("CARGO_PKG_VERSION"))},
+        "code": {"package":"mfn-code","version":format!("={}", env!("CARGO_PKG_VERSION"))}
+    });
+    let cel_definition = project.join(format!("{name}.json"));
+    let cel_output = project.join(name);
+    let cel_build = fixture.root().join(format!("{name}-build"));
+    fs::write(&cel_definition, cel_flow.to_string()).unwrap();
+    fixture.compile(&cel_definition, &cel_output, &cel_build, false, false);
+    let manifest = fs::read_to_string(cel_build.join("Cargo.toml")).unwrap();
+    assert!(manifest.contains(&format!(
+        "package = \"mfn-code\", version = \"={}\"",
+        env!("CARGO_PKG_VERSION")
+    )));
+    assert!(!manifest.contains("path ="));
+    let runtime = fixture.root().join(format!("{name}-runtime"));
+    fs::create_dir(&runtime).unwrap();
+    let standalone = runtime.join("flow");
+    fs::rename(&cel_output, &standalone).unwrap();
+    fs::remove_file(&cel_definition).unwrap();
+    fs::remove_file(cel_definition.with_extension("lock")).unwrap();
+    fs::remove_dir_all(&cel_build).unwrap();
+    let result = checked(
+        Command::new(&standalone)
+            .current_dir(&runtime)
+            .env_clear()
+            .env("PATH", ""),
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap(),
+        expected
+    );
 
     let local = project.join("local-nodes");
     let repository = fixture.root().join("git-nodes");

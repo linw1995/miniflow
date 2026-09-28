@@ -70,9 +70,10 @@ Reports are written to `target/coverage/result/`, including `lcov.info`.
 | `crates/mf-cli/` | The `mf` command and project build orchestration |
 | `crates/mf-compiler/` | Workflow validation, planning, code generation, and executable builds |
 | `crates/mf-runtime/` | Workflow definitions, node interfaces, registry, and execution support |
-| `crates/builtin-nodes/` | Built-in node implementations |
+| `crates/builtin-nodes/core/` | `mfn-core` basic node implementations |
+| `crates/builtin-nodes/code/` | `mfn-code` CEL node implementation |
 
-See [plugin development](docs/plugins.md) for adding nodes.
+See [node development](docs/node-development.md) for adding nodes.
 
 ## Commits and pull requests
 

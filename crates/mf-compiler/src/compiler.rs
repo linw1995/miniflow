@@ -1,8 +1,9 @@
 use crate::{
-    CompiledWorkflow, Flow, FlowBuildError, FlowNode, NodeBuildError, NodeRegistry, ValueType,
+    CompiledWorkflow, ExecutionDependency, Flow, FlowBuildError, FlowNode, NodeBuildError,
+    NodeRegistry, ValueType,
 };
 use crate::{DefinitionId, WorkflowDefinition};
-use mf_runtime::TypeCompatibility;
+use mf_runtime::{OutputDerivation, TypeCompatibility, TypeMismatch};
 use mf_telemetry::{
     ContractError,
     description::{
@@ -10,6 +11,7 @@ use mf_telemetry::{
     },
     identity::WorkflowId,
 };
+use serde_json::Value;
 use snafu::{ResultExt, Snafu};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -99,6 +101,27 @@ pub enum WorkflowCompileError {
         to_input: String,
         input_type: Box<ValueType>,
     },
+    #[snafu(display(
+        "cannot connect `{from_node}`.`{from_output}` ({output_type}) to `{to_node}`.`{to_input}` ({input_type}): known value {source}"
+    ))]
+    KnownValueTypeConflict {
+        from_node: DefinitionId,
+        from_output: String,
+        output_type: Box<ValueType>,
+        to_node: DefinitionId,
+        to_input: String,
+        input_type: Box<ValueType>,
+        source: Box<TypeMismatch>,
+    },
+    #[snafu(display(
+        "cannot infer `{to_node}`.`{to_input}` before source `{from_node}`.`{from_output}`"
+    ))]
+    UnavailableInferredOutput {
+        from_node: DefinitionId,
+        from_output: String,
+        to_node: DefinitionId,
+        to_input: String,
+    },
     #[snafu(display("node `{node_id}` input `{port}` receives multiple connections"))]
     DuplicateInputConnection { node_id: DefinitionId, port: String },
     #[snafu(display("node `{node_id}` requires input `{port}`"))]
@@ -137,6 +160,156 @@ pub enum WorkflowCompileError {
     },
 }
 
+#[derive(Clone)]
+struct TypeFact {
+    value_type: ValueType,
+    exact: Option<Value>,
+}
+
+#[derive(Default)]
+pub struct TypeInferenceState {
+    outputs: BTreeMap<(DefinitionId, String), TypeFact>,
+}
+
+impl TypeInferenceState {
+    pub fn resolve_node(
+        &mut self,
+        node: &mut FlowNode,
+        dependencies: &[ExecutionDependency<'_>],
+    ) -> Result<(), WorkflowCompileError> {
+        let id = &node.definition_id;
+        let derivations = node.node.output_derivations();
+        node.ports
+            .validate_derivations(id.as_str(), &derivations)
+            .map_err(|error| WorkflowCompileError::InvalidNodeMetadata {
+                definition_id: id.clone(),
+                message: error.to_string(),
+            })?;
+
+        let mut inputs = BTreeMap::new();
+        for dependency in dependencies {
+            let Some(input_name) = dependency.input else {
+                continue;
+            };
+            let input = node
+                .ports
+                .inputs
+                .iter()
+                .find(|port| port.name == input_name)
+                .ok_or_else(|| WorkflowCompileError::InvalidNodeMetadata {
+                    definition_id: id.clone(),
+                    message: format!("unknown input `{input_name}` in type binding"),
+                })?;
+            let source_id = DefinitionId::from(dependency.source_node);
+            let source = self
+                .outputs
+                .get(&(source_id.clone(), dependency.source_output.to_owned()))
+                .ok_or_else(|| WorkflowCompileError::UnavailableInferredOutput {
+                    from_node: source_id.clone(),
+                    from_output: dependency.source_output.to_owned(),
+                    to_node: id.clone(),
+                    to_input: input_name.to_owned(),
+                })?;
+            if let Some(value) = &source.exact {
+                input
+                    .value_type
+                    .validate_value(value)
+                    .map_err(
+                        |source_error| WorkflowCompileError::KnownValueTypeConflict {
+                            from_node: source_id.clone(),
+                            from_output: dependency.source_output.to_owned(),
+                            output_type: Box::new(source.value_type.clone()),
+                            to_node: id.clone(),
+                            to_input: input_name.to_owned(),
+                            input_type: Box::new(input.value_type.clone()),
+                            source: Box::new(source_error),
+                        },
+                    )?;
+            } else if source.value_type.compatibility_with(&input.value_type)
+                == TypeCompatibility::Incompatible
+            {
+                return Err(WorkflowCompileError::IncompatiblePortTypes {
+                    from_node: source_id,
+                    from_output: dependency.source_output.to_owned(),
+                    output_type: Box::new(source.value_type.clone()),
+                    to_node: id.clone(),
+                    to_input: input_name.to_owned(),
+                    input_type: Box::new(input.value_type.clone()),
+                });
+            }
+            let value_type = if source.value_type.is_assignable_to(&input.value_type) {
+                source.value_type.clone()
+            } else {
+                input.value_type.clone()
+            };
+            inputs.insert(
+                input_name,
+                TypeFact {
+                    value_type,
+                    exact: source.exact.clone(),
+                },
+            );
+        }
+
+        let derivations: BTreeMap<_, _> = derivations
+            .into_iter()
+            .map(|derivation| (derivation.output().to_owned(), derivation))
+            .collect();
+        for output in &mut node.ports.outputs {
+            let declared = output.value_type.clone();
+            let mut fact = match derivations.get(output.name.as_ref()) {
+                Some(OutputDerivation::Literal { value, .. }) => TypeFact {
+                    value_type: ValueType::infer_json(value),
+                    exact: Some(value.clone()),
+                },
+                Some(OutputDerivation::ForwardInput { input, .. }) => inputs
+                    .get(input.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| TypeFact {
+                        value_type: node
+                            .ports
+                            .inputs
+                            .iter()
+                            .find(|port| port.name == input.as_str())
+                            .expect("derivation input was validated")
+                            .value_type
+                            .clone(),
+                        exact: None,
+                    }),
+                None => TypeFact {
+                    value_type: declared.clone(),
+                    exact: None,
+                },
+            };
+            if let Some(value) = &fact.exact {
+                declared.validate_value(value).map_err(|error| {
+                    WorkflowCompileError::InvalidNodeMetadata {
+                        definition_id: id.clone(),
+                        message: format!("output `{}` known value: {error}", output.name),
+                    }
+                })?;
+            } else if fact.value_type.compatibility_with(&declared)
+                == TypeCompatibility::Incompatible
+            {
+                return Err(WorkflowCompileError::InvalidNodeMetadata {
+                    definition_id: id.clone(),
+                    message: format!(
+                        "output `{}` forwards {} but declares {declared}",
+                        output.name, fact.value_type
+                    ),
+                });
+            }
+            if !fact.value_type.is_assignable_to(&declared) {
+                fact.value_type = declared;
+            }
+            output.value_type = fact.value_type.clone();
+            self.outputs
+                .insert((id.clone(), output.name.to_string()), fact);
+        }
+        Ok(())
+    }
+}
+
 pub fn validate_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
@@ -149,7 +322,36 @@ fn prepare_definition(
     registry: &NodeRegistry,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
     let order = structural_order(definition)?;
-    let nodes = resolve_nodes(definition, registry)?;
+    let mut nodes = resolve_nodes(definition, registry)?;
+    validate_base_metadata(definition, &nodes, &order)?;
+
+    let indices: BTreeMap<_, _> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.definition_id.clone(), index))
+        .collect();
+    let mut inference = TypeInferenceState::default();
+    for id in &order {
+        let dependencies: Vec<_> = definition
+            .edges
+            .iter()
+            .filter(|edge| &edge.to_node == id)
+            .map(|edge| ExecutionDependency {
+                input: Some(edge.to_input.as_str()),
+                source_node: edge.from_node.as_str(),
+                source_output: &edge.from_output,
+            })
+            .collect();
+        inference.resolve_node(&mut nodes[indices[id]], &dependencies)?;
+    }
+    Ok((nodes, order))
+}
+
+fn validate_base_metadata(
+    definition: &WorkflowDefinition,
+    nodes: &[FlowNode],
+    order: &[DefinitionId],
+) -> Result<(), WorkflowCompileError> {
     let registrations: BTreeMap<_, _> = nodes
         .iter()
         .map(|node| (node.definition_id.clone(), &node.ports))
@@ -159,7 +361,7 @@ fn prepare_definition(
         message,
     };
     let mut output_index = BTreeMap::new();
-    for node in &nodes {
+    for node in nodes {
         let ports = registrations[&node.definition_id];
         for (direction, specs) in [("input", &ports.inputs), ("output", &ports.outputs)] {
             let mut names = BTreeSet::new();
@@ -195,7 +397,7 @@ fn prepare_definition(
     }
     let pairs = dependency_pairs(definition);
     let mut ancestors: BTreeMap<DefinitionId, BTreeSet<DefinitionId>> = BTreeMap::new();
-    for id in &order {
+    for id in order {
         let mut sources = BTreeSet::new();
         for (from, to) in &pairs {
             if to == id {
@@ -205,7 +407,7 @@ fn prepare_definition(
         }
         ancestors.insert(id.clone(), sources);
     }
-    for node in &nodes {
+    for node in nodes {
         for reference in &node.references {
             let Some((producer, _)) = output_index.get(&reference.output) else {
                 return Err(invalid(
@@ -241,7 +443,7 @@ fn prepare_definition(
     for edge in &definition.edges {
         let source = registrations[&edge.from_node];
         let target = registrations[&edge.to_node];
-        let Some(output_port) = source
+        let Some(_) = source
             .outputs
             .iter()
             .find(|port| port.name == edge.from_output)
@@ -254,7 +456,7 @@ fn prepare_definition(
             }
             .fail();
         };
-        let Some(input_port) = target.inputs.iter().find(|port| port.name == edge.to_input) else {
+        let Some(_) = target.inputs.iter().find(|port| port.name == edge.to_input) else {
             return UnknownInputPortSnafu {
                 from_node: edge.from_node.clone(),
                 from_output: edge.from_output.clone(),
@@ -263,21 +465,6 @@ fn prepare_definition(
             }
             .fail();
         };
-        if output_port
-            .value_type
-            .compatibility_with(&input_port.value_type)
-            == TypeCompatibility::Incompatible
-        {
-            return IncompatiblePortTypesSnafu {
-                from_node: edge.from_node.clone(),
-                from_output: edge.from_output.clone(),
-                output_type: Box::new(output_port.value_type.clone()),
-                to_node: edge.to_node.clone(),
-                to_input: edge.to_input.clone(),
-                input_type: Box::new(input_port.value_type.clone()),
-            }
-            .fail();
-        }
         connected_inputs.insert((edge.to_node.clone(), edge.to_input.clone()));
     }
 
@@ -310,7 +497,7 @@ fn prepare_definition(
         }
     }
 
-    Ok((nodes, order))
+    Ok(())
 }
 
 pub fn topological_order(
