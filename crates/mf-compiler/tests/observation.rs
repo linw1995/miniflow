@@ -674,7 +674,7 @@ fn main() {
             "{}",
             String::from_utf8_lossy(&build.stderr)
         );
-        let result = Command::new(project.join("target/debug/mf-generated-workflow"))
+        let result = Command::new(common::runner_executable(&project, "debug"))
             .output()
             .unwrap();
         assert!(

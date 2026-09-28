@@ -15,6 +15,8 @@ platform = 'cfg(unix)'
 filter = '''
 (binary_id(=mf-cli::compile) & (
     test(=compiled_binary_replaces_target_and_runs_without_the_definition) |
+    test(=warm_build_preserves_generated_inputs_and_reuses_compiled_runner) |
+    test(=cargo_invalidates_features_local_sources_and_flags) |
     test(=failed_validation_preserves_prior_lock_and_executable) |
     test(=install_failure_reports_persisted_lock_and_preserves_existing_directory) |
     test(=invalid_input_port_reports_both_edge_endpoints) |
@@ -24,6 +26,16 @@ filter = '''
 )) |
 (binary_id(=mf-compiler::runner_validation) &
     test(=one_runner_validates_without_execution_and_reports_plugin_errors)) |
+(binary_id(=mf-compiler::typed_ports) & (
+    test(=generated_runner_matches_memory_for_checked_connections) |
+    test(=skipped_typed_inputs_match_in_memory_and_generated_execution)
+)) |
+(binary_id(=mf-compiler::inferred_runner) & (
+    test(=generated_runner_matches_inference_and_preserves_installed_binary_on_conflict) |
+    test(=generated_runner_rejects_a_false_output_derivation)
+)) |
+(binary_id(=mf-compiler::observation) &
+    test(=generated_execution_matches_memory_for_success_and_failures)) |
 (binary_id(=mf-compiler::if_else) &
     test(=compiled_branches_match_memory_and_rebuild_when_precedence_changes))
 '''
@@ -31,10 +43,12 @@ setup = "build-cache"
 
 [[profile.default.overrides]]
 platform = 'cfg(unix)'
-# Keep cold rebuilds, cache invalidation, and packaged acceptance isolated.
+# Serialize generated builds that share the prewarmed Cargo target.
 filter = '''
 (binary_id(=mf-cli::compile) & (
     test(=compiled_binary_replaces_target_and_runs_without_the_definition) |
+    test(=warm_build_preserves_generated_inputs_and_reuses_compiled_runner) |
+    test(=cargo_invalidates_features_local_sources_and_flags) |
     test(=failed_validation_preserves_prior_lock_and_executable) |
     test(=install_failure_reports_persisted_lock_and_preserves_existing_directory) |
     test(=invalid_input_port_reports_both_edge_endpoints) |
@@ -44,6 +58,16 @@ filter = '''
 )) |
 (binary_id(=mf-compiler::runner_validation) &
     test(=one_runner_validates_without_execution_and_reports_plugin_errors)) |
+(binary_id(=mf-compiler::typed_ports) & (
+    test(=generated_runner_matches_memory_for_checked_connections) |
+    test(=skipped_typed_inputs_match_in_memory_and_generated_execution)
+)) |
+(binary_id(=mf-compiler::inferred_runner) & (
+    test(=generated_runner_matches_inference_and_preserves_installed_binary_on_conflict) |
+    test(=generated_runner_rejects_a_false_output_derivation)
+)) |
+(binary_id(=mf-compiler::observation) &
+    test(=generated_execution_matches_memory_for_success_and_failures)) |
 (binary_id(=mf-compiler::if_else) &
     test(=compiled_branches_match_memory_and_rebuild_when_precedence_changes))
 '''

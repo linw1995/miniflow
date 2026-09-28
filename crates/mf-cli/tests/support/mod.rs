@@ -1,6 +1,8 @@
 use flate2::read::GzDecoder;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::{
     collections::BTreeMap,
     env,
@@ -118,8 +120,9 @@ impl PackagedCli {
         let target = root.join("setup-target");
         let vendor = root.join("vendor");
         let config = root.join("source.toml");
+        let real_cargo = cargo_binary();
         let cargo = || {
-            let mut command = Command::new(cargo_binary());
+            let mut command = Command::new(&real_cargo);
             command
                 .current_dir(&workspace)
                 .env("CARGO_TARGET_DIR", &target);
@@ -230,6 +233,12 @@ impl PackagedCli {
         let cargo_home = root.join("cargo-home");
         fs::create_dir(&cargo_home).unwrap();
         fs::copy(&config, cargo_home.join("config.toml")).unwrap();
+        #[cfg(unix)]
+        {
+            let path = root.join("cargo-wrapper");
+            fs::copy(workspace.join("scripts/nextest-cargo.sh"), &path).unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
         Self {
             directory,
             cli,
@@ -269,6 +278,12 @@ impl PackagedCli {
                 "CARGO_NET_OFFLINE",
                 if fetch_local_git { "false" } else { "true" },
             );
+        #[cfg(unix)]
+        // The compiler sets a per-project target; the test wrapper redirects it to the shared fixture target.
+        command
+            .env("CARGO", self.root().join("cargo-wrapper"))
+            .env("MF_TEST_REAL_CARGO", cargo_binary())
+            .env("MF_TEST_TARGET_DIR", self.root().join("setup-target"));
         if locked {
             command.arg("--locked");
         }
