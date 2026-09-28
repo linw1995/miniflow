@@ -82,14 +82,19 @@ fn rejects_unsupported_incomplete_and_multiple_documents() {
 
 #[test]
 fn bounds_output_and_diagnostic_history_without_blocking_pipes() {
+    let limits = DescriptionLimits {
+        timeout: Duration::from_secs(5),
+        drain_timeout: Duration::from_secs(1),
+        ..limits()
+    };
     let (_root, runner) = create_runner("yes x | head -c 131072");
     assert!(matches!(
-        describe_executable_with_limits(&runner, limits()),
+        describe_executable_with_limits(&runner, limits),
         Err(DescriptionError::TooLarge { .. })
     ));
     let (_root, runner) =
         create_runner("yes x | head -c 131072 >&2\nprintf '{\"broken\":true}\\n'\nexit 7");
-    let error = describe_executable_with_limits(&runner, limits()).unwrap_err();
+    let error = describe_executable_with_limits(&runner, limits).unwrap_err();
     match error {
         DescriptionError::Exit { diagnostics, .. } => {
             assert!(diagnostics.contains("dropped") && diagnostics.len() < 256)
