@@ -17,8 +17,8 @@ pub use flow::{Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowO
 pub use mf_telemetry::observation::RunObservation;
 pub use node::{
     ContextReference, Inputs, Node, NodeBuildError, NodeExecutionError, NodeFactory, NodePorts,
-    NodeRegistration, Outputs, PortSpec, TypeCompatibility, TypeDepthError, TypeMismatch,
-    ValueType, deserialize_config, output_id,
+    NodeRegistration, OutputDerivation, OutputDerivationError, Outputs, PortSpec,
+    TypeCompatibility, TypeDepthError, TypeMismatch, ValueType, deserialize_config, output_id,
 };
 pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::{WorkflowRunError, instantiate_node_with_metadata};

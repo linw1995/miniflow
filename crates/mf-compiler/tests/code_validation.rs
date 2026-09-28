@@ -35,7 +35,7 @@ fn graph(expression: &str) -> Value {
 }
 
 #[test]
-fn checks_inactive_code_and_runtime_input_types() {
+fn checks_inactive_code_and_known_input_conflicts() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let invalid: WorkflowDefinition = serde_json::from_value(graph("missing + 1")).unwrap();
     let error = compile_definition(&invalid, &registry)
@@ -63,13 +63,11 @@ fn checks_inactive_code_and_runtime_input_types() {
     active_wrong["nodes"][0]["config"]["value"] = json!("bad");
     active_wrong["nodes"][1]["config"]["branches"][0]["condition"]["value"] = json!("bad");
     let definition: WorkflowDefinition = serde_json::from_value(active_wrong).unwrap();
-    let plan = compile_definition(&definition, &registry).unwrap();
-    let error = instantiate_compiled(&plan, &registry)
-        .unwrap()
-        .execute()
+    let error = compile_definition(&definition, &registry)
         .unwrap_err()
         .to_string();
-    assert!(error.contains("input `amount`") && error.contains("expected int64"));
+    assert!(error.contains("source") && error.contains("transform"));
+    assert!(error.contains("string") && error.contains("int64"));
 }
 
 #[test]
