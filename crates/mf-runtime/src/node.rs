@@ -71,6 +71,50 @@ impl Error for TypeDepthError {}
 impl ValueType {
     pub const MAX_DEPTH: usize = 16;
 
+    pub fn infer_json(value: &Value) -> Self {
+        fn infer_at(value: &Value, depth: usize) -> ValueType {
+            match value {
+                Value::Null => ValueType::Null,
+                Value::Bool(_) => ValueType::Boolean,
+                Value::Number(number) if number.is_f64() => ValueType::Float64,
+                Value::Number(number) if number.as_i64().is_some() => ValueType::Int64,
+                Value::Number(_) => ValueType::Number,
+                Value::String(_) => ValueType::String,
+                Value::Array(items) if depth < ValueType::MAX_DEPTH && !items.is_empty() => {
+                    let element = infer_at(&items[0], depth + 1);
+                    if items[1..]
+                        .iter()
+                        .all(|item| infer_at(item, depth + 1) == element)
+                    {
+                        ValueType::List(Box::new(element))
+                    } else {
+                        ValueType::Array
+                    }
+                }
+                Value::Array(_) => ValueType::Array,
+                Value::Object(entries) if depth < ValueType::MAX_DEPTH && !entries.is_empty() => {
+                    let first = entries
+                        .values()
+                        .next()
+                        .expect("nonempty map has a first value");
+                    let element = infer_at(first, depth + 1);
+                    if entries
+                        .values()
+                        .skip(1)
+                        .all(|item| infer_at(item, depth + 1) == element)
+                    {
+                        ValueType::Map(Box::new(element))
+                    } else {
+                        ValueType::Object
+                    }
+                }
+                Value::Object(_) => ValueType::Object,
+            }
+        }
+
+        infer_at(value, 1)
+    }
+
     pub fn is_assignable_to(&self, input: &Self) -> bool {
         self.compatibility_with(input) == TypeCompatibility::Static
     }
@@ -243,6 +287,102 @@ pub struct NodePorts {
     pub outputs: Vec<PortSpec>,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum OutputDerivation {
+    Literal { output: String, value: Value },
+    ForwardInput { output: String, input: String },
+}
+
+impl OutputDerivation {
+    pub fn literal(output: impl Into<String>, value: Value) -> Self {
+        Self::Literal {
+            output: output.into(),
+            value,
+        }
+    }
+
+    pub fn forward_input(output: impl Into<String>, input: impl Into<String>) -> Self {
+        Self::ForwardInput {
+            output: output.into(),
+            input: input.into(),
+        }
+    }
+
+    pub fn output(&self) -> &str {
+        match self {
+            Self::Literal { output, .. } | Self::ForwardInput { output, .. } => output,
+        }
+    }
+}
+
+#[derive(Debug, Snafu)]
+pub enum OutputDerivationError {
+    #[snafu(display("node `{node_id}` derivation references unknown output `{output}`"))]
+    UnknownOutput { node_id: String, output: String },
+    #[snafu(display("node `{node_id}` output `{output}` has more than one derivation"))]
+    DuplicateOutput { node_id: String, output: String },
+    #[snafu(display("node `{node_id}` output `{output}` forwards unknown input `{input}`"))]
+    UnknownInput {
+        node_id: String,
+        output: String,
+        input: String,
+    },
+    #[snafu(display(
+        "node `{node_id}` output `{output}` literal conflicts with its declared type: {source}"
+    ))]
+    LiteralTypeMismatch {
+        node_id: String,
+        output: String,
+        source: TypeMismatch,
+    },
+}
+
+impl NodePorts {
+    pub fn validate_derivations(
+        &self,
+        node_id: &str,
+        derivations: &[OutputDerivation],
+    ) -> Result<(), OutputDerivationError> {
+        let mut seen = std::collections::BTreeSet::new();
+        for derivation in derivations {
+            let output = derivation.output();
+            let Some(port) = self.outputs.iter().find(|port| port.name == output) else {
+                return Err(OutputDerivationError::UnknownOutput {
+                    node_id: node_id.to_owned(),
+                    output: output.to_owned(),
+                });
+            };
+            if !seen.insert(output) {
+                return Err(OutputDerivationError::DuplicateOutput {
+                    node_id: node_id.to_owned(),
+                    output: output.to_owned(),
+                });
+            }
+            match derivation {
+                OutputDerivation::Literal { value, .. } => port
+                    .value_type
+                    .validate_value(value)
+                    .map_err(|source| OutputDerivationError::LiteralTypeMismatch {
+                        node_id: node_id.to_owned(),
+                        output: output.to_owned(),
+                        source,
+                    })?,
+                OutputDerivation::ForwardInput { input, .. }
+                    if !self.inputs.iter().any(|port| port.name == *input) =>
+                {
+                    return Err(OutputDerivationError::UnknownInput {
+                        node_id: node_id.to_owned(),
+                        output: output.to_owned(),
+                        input: input.clone(),
+                    });
+                }
+                OutputDerivation::ForwardInput { .. } => {}
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ContextReference {
     pub output: String,
@@ -302,6 +442,10 @@ pub trait Node: Send + Sync {
 
     fn ports(&self) -> Option<NodePorts> {
         None
+    }
+
+    fn output_derivations(&self) -> Vec<OutputDerivation> {
+        Vec::new()
     }
 
     fn context_references(&self) -> Vec<ContextReference> {
@@ -442,5 +586,91 @@ mod tests {
         assert!(valid.check_depth().is_ok());
         let error = list(valid).check_depth().unwrap_err();
         assert_eq!(error.depth, ValueType::MAX_DEPTH + 1);
+    }
+
+    #[test]
+    fn infers_json_literals_without_exceeding_descriptor_depth() {
+        use ValueType::{Array, Boolean, Float64, Int64, Map, Null, Number, Object, String};
+
+        for (value, expected) in [
+            (json!(null), Null),
+            (json!(false), Boolean),
+            (json!(i64::MIN), Int64),
+            (json!(i64::MAX), Int64),
+            (json!(u64::MAX), Number),
+            (json!(1.0), Float64),
+            (json!("text"), String),
+            (json!([]), Array),
+            (json!({}), Object),
+            (json!([1, "text"]), Array),
+            (json!({"a": 1, "b": false}), Object),
+            (json!([true, false]), list(Boolean)),
+            (json!({"a": 1, "b": 2}), Map(Box::new(Int64))),
+            (json!([{"count": 1}, {"count": 2}]), list(map(Int64))),
+        ] {
+            assert_eq!(ValueType::infer_json(&value), expected, "{value}");
+        }
+
+        let mut value = json!(1);
+        for _ in 0..ValueType::MAX_DEPTH {
+            value = json!([value]);
+        }
+        let mut inferred = ValueType::infer_json(&value);
+        inferred.check_depth().unwrap();
+        for _ in 1..ValueType::MAX_DEPTH {
+            let ValueType::List(inner) = inferred else {
+                panic!("expected a refined list before the depth boundary");
+            };
+            inferred = *inner;
+        }
+        assert_eq!(inferred, Array);
+    }
+
+    #[test]
+    fn validates_output_derivations_against_instance_ports() {
+        let ports = NodePorts {
+            inputs: vec![PortSpec::new("input", ValueType::Any, true)],
+            outputs: vec![PortSpec::new("value", ValueType::String, true)],
+        };
+        ports
+            .validate_derivations(
+                "fixture",
+                &[OutputDerivation::forward_input("value", "input")],
+            )
+            .unwrap();
+        ports
+            .validate_derivations(
+                "fixture",
+                &[OutputDerivation::literal("value", json!("ok"))],
+            )
+            .unwrap();
+
+        for (derivations, message) in [
+            (
+                vec![OutputDerivation::literal("missing", json!("x"))],
+                "unknown output `missing`",
+            ),
+            (
+                vec![OutputDerivation::forward_input("value", "missing")],
+                "unknown input `missing`",
+            ),
+            (
+                vec![OutputDerivation::literal("value", json!(42))],
+                "output `value` literal conflicts",
+            ),
+            (
+                vec![
+                    OutputDerivation::literal("value", json!("a")),
+                    OutputDerivation::literal("value", json!("b")),
+                ],
+                "more than one derivation",
+            ),
+        ] {
+            let error = ports
+                .validate_derivations("fixture", &derivations)
+                .unwrap_err();
+            assert!(error.to_string().contains("node `fixture`"), "{error}");
+            assert!(error.to_string().contains(message), "{error}");
+        }
     }
 }
