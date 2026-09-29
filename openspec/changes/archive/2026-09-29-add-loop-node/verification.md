@@ -6,12 +6,12 @@ The scenarios below are exercised by the named tests. The complete workspace sui
 
 | Scenario | Check |
 | --- | --- |
-| Initialize and expose loop variables | `loop_planning::executes_loop_with_persistent_state_in_memory`; `loop_planning::generated_loop_matches_in_memory_without_build_inputs` |
+| Initialize and expose loop variables | `loop_planning::generated_loop_matches_in_memory_without_build_inputs` |
 | Reject an invalid definition version | `loop_planning::rejects_old_schema_and_invalid_loop_structure` |
 | Reject a body cycle or cross-scope reference | `loop_planning::rejects_old_schema_and_invalid_loop_structure` |
 | Validate an inactive body branch | `loop_planning::validates_body_plugins_and_loop_port_types` |
 | Reject assignment outside a Loop | `loop_planning::rejects_old_schema_and_invalid_loop_structure` |
-| Refine a value across passes | `loop_planning::executes_loop_with_persistent_state_in_memory` |
+| Refine a value across passes | `loop_planning::generated_loop_matches_in_memory_without_build_inputs` |
 | Do not reuse a stale body output | `loop_planning::later_pass_cannot_read_an_omitted_prior_output` |
 | Preserve state through a skipped assignment | `loop_planning::skipped_assignment_preserves_previous_value` |
 | Stop after a condition becomes true | `loop_planning::loop_observation_identifies_each_pass_and_body_invocation` |
@@ -26,7 +26,7 @@ The scenarios below are exercised by the named tests. The complete workspace sui
 
 | Scenario | Check |
 | --- | --- |
-| Compile a valid workflow | `loop_planning::generated_loop_matches_in_memory_without_build_inputs`; `packaged_cli::packaged_cli_acceptance` |
+| Compile a valid Loop workflow | `loop_planning::generated_loop_matches_in_memory_without_build_inputs`; `packaged_cli::packaged_cli_acceptance` |
 | Run a compiled Loop workflow | `loop_planning::generated_loop_matches_in_memory_without_build_inputs` |
 | Run without build inputs | `packaged_cli::packaged_cli_acceptance` |
 | Reject a body cycle before code generation | `loop_planning::rejects_old_schema_and_invalid_loop_structure` |

@@ -227,17 +227,6 @@ fn initial_literal_does_not_specialize_later_passes() {
 }
 
 #[test]
-fn executes_loop_with_persistent_state_in_memory() {
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let plan = compile_definition(&parse(definition()), &registry).unwrap();
-    let output = instantiate_compiled(&plan, &registry)
-        .unwrap()
-        .execute()
-        .unwrap();
-    assert_eq!(output["count"], json!(3));
-}
-
-#[test]
 fn generated_loop_matches_in_memory_without_build_inputs() {
     let directory = tempfile::tempdir().unwrap();
     let definition_path = directory.path().join("loop.json");
@@ -249,6 +238,7 @@ fn generated_loop_matches_in_memory_without_build_inputs() {
         (exit_definition(), json!({"count": 2})),
         (skipped_definition(), json!({})),
     ] {
+        assert_eq!(run_in_memory(value.clone()).unwrap(), expected);
         value["dependencies"] = json!({
             "core": {"package": "mfn-core", "path": common::crates_dir().join("builtin-nodes/core")},
             "code": {"package": "mfn-code", "path": common::crates_dir().join("builtin-nodes/code")}
