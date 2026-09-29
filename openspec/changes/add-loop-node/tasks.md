@@ -2,9 +2,9 @@
 
 ## 1. Define and validate structured Loop graphs
 
-- [ ] 1.1 Add the `2026-09-29` definition variant, typed Loop/body/variable/condition structures, reserved engine kinds, and shared type descriptor parsing with Code's existing concrete subset preserved. Preserve `2026-09-26` parsing and serialization behavior; reject Loop constructs in the old version.
-- [ ] 1.2 Extend structural planning recursively with per-scope IDs, the synthetic `$loop` source, nesting and count limits, local edge validation, and deterministic body order. Cover cycles, cross-scope references, invalid assignment/exit placement, and `until` validation without loading plugins.
-- [ ] 1.3 Extend runner validation and type inference to resolve all ordinary body plugins, typed state ports, assignment inputs, and context references. Validate inactive branches and reject an initial-value fact that would incorrectly specialize a later pass.
+- [x] 1.1 Add the `2026-09-29` definition variant, typed Loop/body/variable/condition structures, reserved engine kinds, and shared type descriptor parsing with Code's existing concrete subset preserved. Preserve `2026-09-26` parsing and serialization behavior; reject Loop constructs in the old version.
+- [x] 1.2 Extend structural planning recursively with per-scope IDs, the synthetic `$loop` source, nesting and count limits, local edge validation, and deterministic body order. Cover cycles, cross-scope references, invalid assignment/exit placement, and `until` validation without loading plugins.
+- [x] 1.3 Extend runner validation and type inference to resolve all ordinary body plugins, typed state ports, assignment inputs, and context references. Validate inactive branches and reject an initial-value fact that would incorrectly specialize a later pass.
 
 ## 2. Execute Loop frames in both engines
 

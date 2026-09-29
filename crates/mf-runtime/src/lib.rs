@@ -10,8 +10,11 @@ pub use context::{
     select_context_output,
 };
 pub use definition::{
-    ControlEdgeDefinition, DefinitionId, DefinitionParseError, EdgeDefinition, NodeDefinition,
-    NodeDependency, WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
+    ControlEdgeDefinition, DefinitionId, DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition,
+    LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition, LoopComparisonOperator,
+    LoopConditionDefinition, LoopDefinition, LoopVariableDefinition, MAX_LOOP_DEPTH,
+    MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition, NodeDependency, WorkflowDefinition,
+    WorkflowDefinitionVersion, WorkflowOutputDefinition,
 };
 pub use flow::{Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowOutputs, NodeId};
 pub use mf_telemetry::observation::RunObservation;

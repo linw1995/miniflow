@@ -66,10 +66,12 @@ impl WorkflowDefinition {
 pub enum WorkflowDefinitionVersion {
     #[serde(rename = "2026-09-26")]
     V2026_09_26,
+    #[serde(rename = "2026-09-29")]
+    V2026_09_29,
 }
 
 impl WorkflowDefinitionVersion {
-    pub const CURRENT: Self = Self::V2026_09_26;
+    pub const CURRENT: Self = Self::V2026_09_29;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -79,6 +81,63 @@ pub struct NodeDefinition {
     pub kind: String,
     #[serde(default = "empty_object")]
     pub config: Value,
+    #[serde(rename = "loop", default, skip_serializing_if = "Option::is_none")]
+    pub loop_definition: Option<Box<LoopDefinition>>,
+}
+
+pub const LOOP_KIND: &str = "workflow.loop";
+pub const LOOP_ASSIGN_KIND: &str = "workflow.loop_assign";
+pub const EXIT_LOOP_KIND: &str = "workflow.exit_loop";
+pub const LOOP_SOURCE_ID: &str = "$loop";
+pub const MAX_LOOP_ITERATIONS: u16 = 1000;
+pub const MAX_LOOP_DEPTH: usize = 4;
+pub const MAX_SCHEDULED_STEPS: usize = 10_000;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoopDefinition {
+    pub max_iterations: u16,
+    pub variables: Vec<LoopVariableDefinition>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until: Option<LoopConditionDefinition>,
+    pub body: LoopBodyDefinition,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoopVariableDefinition {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub value_type: Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoopBodyDefinition {
+    pub nodes: Vec<NodeDefinition>,
+    #[serde(default)]
+    pub edges: Vec<EdgeDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub control_edges: Vec<ControlEdgeDefinition>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopComparisonOperator {
+    Eq,
+    Ne,
+    Gt,
+    Gte,
+    Lt,
+    Lte,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LoopConditionDefinition {
+    pub variable: String,
+    pub operator: LoopComparisonOperator,
+    pub value: Value,
 }
 
 fn empty_object() -> Value {

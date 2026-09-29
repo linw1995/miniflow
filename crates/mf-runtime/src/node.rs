@@ -71,6 +71,49 @@ impl Error for TypeDepthError {}
 impl ValueType {
     pub const MAX_DEPTH: usize = 16;
 
+    pub fn parse_descriptor(value: &Value) -> Result<Self, String> {
+        fn parse(value: &Value, depth: usize) -> Result<ValueType, String> {
+            if depth > ValueType::MAX_DEPTH {
+                return Err(format!(
+                    "type nesting depth exceeds {}",
+                    ValueType::MAX_DEPTH
+                ));
+            }
+            match value {
+                Value::String(name) => match name.as_str() {
+                    "any" => Ok(ValueType::Any),
+                    "null" => Ok(ValueType::Null),
+                    "bool" => Ok(ValueType::Boolean),
+                    "number" => Ok(ValueType::Number),
+                    "int" => Ok(ValueType::Int64),
+                    "double" => Ok(ValueType::Float64),
+                    "string" => Ok(ValueType::String),
+                    "array" => Ok(ValueType::Array),
+                    "object" => Ok(ValueType::Object),
+                    _ => Err(format!("unsupported type `{name}`")),
+                },
+                Value::Object(fields) if fields.len() == 1 => {
+                    let (kind, inner) = fields.iter().next().unwrap();
+                    match kind.as_str() {
+                        "list" => Ok(ValueType::List(Box::new(parse(inner, depth + 1)?))),
+                        "map" => Ok(ValueType::Map(Box::new(parse(inner, depth + 1)?))),
+                        _ => Err(format!("unsupported type constructor `{kind}`")),
+                    }
+                }
+                _ => Err("type must be a scalar, list, or map descriptor".into()),
+            }
+        }
+        parse(value, 1)
+    }
+
+    pub fn is_concrete(&self) -> bool {
+        match self {
+            Self::Null | Self::Boolean | Self::Int64 | Self::Float64 | Self::String => true,
+            Self::List(inner) | Self::Map(inner) => inner.is_concrete(),
+            Self::Any | Self::Number | Self::Array | Self::Object => false,
+        }
+    }
+
     pub fn infer_json(value: &Value) -> Self {
         fn infer_at(value: &Value, depth: usize) -> ValueType {
             match value {
@@ -586,6 +629,22 @@ mod tests {
         assert!(valid.check_depth().is_ok());
         let error = list(valid).check_depth().unwrap_err();
         assert_eq!(error.depth, ValueType::MAX_DEPTH + 1);
+    }
+
+    #[test]
+    fn parses_shared_type_descriptors_without_relaxing_code_inputs() {
+        assert_eq!(
+            ValueType::parse_descriptor(&json!("any")).unwrap(),
+            ValueType::Any
+        );
+        assert_eq!(
+            ValueType::parse_descriptor(&json!({"list": {"map": "number"}})).unwrap(),
+            list(map(ValueType::Number))
+        );
+        assert!(!ValueType::Any.is_concrete());
+        assert!(!list(ValueType::Any).is_concrete());
+        assert!(list(map(ValueType::Int64)).is_concrete());
+        assert!(ValueType::parse_descriptor(&json!({"map": "unknown"})).is_err());
     }
 
     #[test]

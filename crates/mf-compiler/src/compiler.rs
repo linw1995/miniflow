@@ -158,6 +158,8 @@ pub enum WorkflowCompileError {
         to_node: DefinitionId,
         message: String,
     },
+    #[snafu(display("invalid Loop at {path}: {message}"))]
+    InvalidLoop { path: String, message: String },
 }
 
 #[derive(Clone)]
@@ -321,8 +323,19 @@ fn prepare_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
-    let order = structural_order(definition)?;
-    let mut nodes = resolve_nodes(definition, registry)?;
+    crate::loops::validate_structure(definition)?;
+    let prepared = prepare_graph(definition, registry, None)?;
+    prepare_loop_bodies(definition, registry, &[])?;
+    Ok(prepared)
+}
+
+fn prepare_graph(
+    definition: &WorkflowDefinition,
+    registry: &NodeRegistry,
+    enclosing: Option<&BTreeMap<String, ValueType>>,
+) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
+    let order = structural_order_graph(definition)?;
+    let mut nodes = resolve_nodes_in_scope(definition, registry, enclosing)?;
     validate_base_metadata(definition, &nodes, &order)?;
 
     let indices: BTreeMap<_, _> = nodes
@@ -345,6 +358,36 @@ fn prepare_definition(
         inference.resolve_node(&mut nodes[indices[id]], &dependencies)?;
     }
     Ok((nodes, order))
+}
+
+fn prepare_loop_bodies(
+    definition: &WorkflowDefinition,
+    registry: &NodeRegistry,
+    path: &[DefinitionId],
+) -> Result<(), WorkflowCompileError> {
+    for node in &definition.nodes {
+        let Some(loop_definition) = &node.loop_definition else {
+            continue;
+        };
+        let mut body_path = path.to_vec();
+        body_path.push(node.id.clone());
+        let types =
+            crate::loops::variable_types(&loop_definition.variables).map_err(|message| {
+                WorkflowCompileError::InvalidLoop {
+                    path: format!("{body_path:?}"),
+                    message,
+                }
+            })?;
+        let body = crate::loops::body_definition(&loop_definition.body, &definition.dependencies);
+        prepare_graph(&body, registry, Some(&types)).map_err(|error| {
+            WorkflowCompileError::InvalidLoop {
+                path: format!("{body_path:?}"),
+                message: error.to_string(),
+            }
+        })?;
+        prepare_loop_bodies(&body, registry, &body_path)?;
+    }
+    Ok(())
 }
 
 fn validate_base_metadata(
@@ -605,6 +648,13 @@ fn dependency_pairs(definition: &WorkflowDefinition) -> BTreeSet<(DefinitionId, 
 pub fn structural_order(
     definition: &WorkflowDefinition,
 ) -> Result<Vec<DefinitionId>, WorkflowCompileError> {
+    crate::loops::validate_structure(definition)?;
+    structural_order_graph(definition)
+}
+
+pub(crate) fn structural_order_graph(
+    definition: &WorkflowDefinition,
+) -> Result<Vec<DefinitionId>, WorkflowCompileError> {
     validate_structure(definition)?;
     let mut indegree = BTreeMap::new();
     let mut outgoing: BTreeMap<DefinitionId, Vec<DefinitionId>> = BTreeMap::new();
@@ -722,10 +772,13 @@ fn normalize_plan(
         .iter()
         .map(|node| (node.id.clone(), node))
         .collect();
-    let nodes = execution_order
+    let mut nodes: Vec<crate::NodeDefinition> = execution_order
         .iter()
         .map(|id| (*nodes_by_id[id]).clone())
         .collect();
+    for node in &mut nodes {
+        normalize_loop_node(node, &definition.dependencies)?;
+    }
     let mut edges = definition.edges.clone();
     edges.sort_by(|left, right| {
         (
@@ -759,6 +812,49 @@ fn normalize_plan(
         },
         execution_order,
     })
+}
+
+fn normalize_loop_node(
+    node: &mut crate::NodeDefinition,
+    dependencies: &BTreeMap<String, crate::NodeDependency>,
+) -> Result<(), WorkflowCompileError> {
+    let Some(loop_definition) = &mut node.loop_definition else {
+        return Ok(());
+    };
+    let body = crate::loops::body_definition(&loop_definition.body, dependencies);
+    let order = structural_order_graph(&body)?;
+    let nodes_by_id: BTreeMap<_, _> = loop_definition
+        .body
+        .nodes
+        .iter()
+        .map(|node| (node.id.clone(), node))
+        .collect();
+    let mut normalized = Vec::with_capacity(nodes_by_id.len());
+    for id in order {
+        if id.as_str() == crate::LOOP_SOURCE_ID {
+            continue;
+        }
+        let mut child = nodes_by_id[&id].clone();
+        normalize_loop_node(&mut child, dependencies)?;
+        normalized.push(child);
+    }
+    loop_definition.body.nodes = normalized;
+    loop_definition.body.edges.sort_by(|left, right| {
+        (
+            &left.from_node,
+            &left.from_output,
+            &left.to_node,
+            &left.to_input,
+        )
+            .cmp(&(
+                &right.from_node,
+                &right.from_output,
+                &right.to_node,
+                &right.to_input,
+            ))
+    });
+    loop_definition.body.control_edges.sort();
+    Ok(())
 }
 
 pub fn instantiate_compiled(
@@ -886,10 +982,22 @@ pub fn resolve_nodes(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
+    crate::loops::validate_structure(definition)?;
+    resolve_nodes_in_scope(definition, registry, None)
+}
+
+fn resolve_nodes_in_scope(
+    definition: &WorkflowDefinition,
+    registry: &NodeRegistry,
+    enclosing: Option<&BTreeMap<String, ValueType>>,
+) -> Result<Vec<FlowNode>, WorkflowCompileError> {
     definition
         .nodes
         .iter()
         .map(|node| {
+            if let Some(structural) = crate::loops::structural_node(node, enclosing) {
+                return Ok(structural);
+            }
             let Some(registration) = registry.get(&node.kind) else {
                 return UnknownNodeKindSnafu {
                     definition_id: node.id.clone(),

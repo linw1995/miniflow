@@ -10,6 +10,8 @@ pub enum NodeRegistryError {
     MissingKind { kind: String },
     #[snafu(display("node kind `{kind}` is linked but absent from the selected plugin bundle"))]
     UnexpectedKind { kind: String },
+    #[snafu(display("node kind `{kind}` is reserved for workflow control"))]
+    ReservedKind { kind: String },
 }
 
 #[derive(Debug, Default)]
@@ -36,6 +38,17 @@ impl NodeRegistry {
         let mut registry = Self::default();
 
         for registration in registrations {
+            if matches!(
+                registration.kind,
+                crate::LOOP_KIND
+                    | crate::LOOP_ASSIGN_KIND
+                    | crate::EXIT_LOOP_KIND
+                    | crate::LOOP_SOURCE_ID
+            ) {
+                return Err(NodeRegistryError::ReservedKind {
+                    kind: registration.kind.to_owned(),
+                });
+            }
             if registry
                 .registrations
                 .insert(registration.kind, registration)
@@ -95,6 +108,13 @@ mod tests {
         factory: second_factory,
     };
 
+    static RESERVED: NodeRegistration = NodeRegistration {
+        kind: crate::LOOP_KIND,
+        inputs: &[],
+        outputs: &[],
+        factory: first_factory,
+    };
+
     #[test]
     fn rejects_duplicate_node_kinds() {
         let error = NodeRegistry::from_registrations([&FIRST, &SECOND]).unwrap_err();
@@ -102,5 +122,13 @@ mod tests {
         assert!(
             matches!(error, NodeRegistryError::DuplicateKind { ref kind } if kind == "test.duplicate")
         );
+    }
+
+    #[test]
+    fn rejects_reserved_workflow_kinds() {
+        assert!(matches!(
+            NodeRegistry::from_registrations([&RESERVED]),
+            Err(NodeRegistryError::ReservedKind { .. })
+        ));
     }
 }
