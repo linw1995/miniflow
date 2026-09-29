@@ -1,4 +1,6 @@
+use crate::iteration::{body_definition, parse_config};
 use crate::{DefinitionId, LoopDefinition, WorkflowDefinition};
+use mf_runtime::{ITERATION_INPUT_KIND, ITERATION_KIND, IterationErrorPolicy, IterationMode};
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use serde::{Deserialize, Serialize};
@@ -40,6 +42,11 @@ pub enum PlanError {
     GeneratedSyntax { source: syn::Error },
     #[snafu(display("invalid embedded Loop node `{definition_id}`: {message}"))]
     InvalidLoopConfig {
+        definition_id: DefinitionId,
+        message: String,
+    },
+    #[snafu(display("could not generate iteration node `{definition_id}`: {message}"))]
+    Iteration {
         definition_id: DefinitionId,
         message: String,
     },
@@ -257,25 +264,21 @@ fn generate_scope(
         let node_ident = format_ident!("node_{scope}_{index}");
         let id_lit = LitStr::new(id.as_str(), Span::call_site());
         let kind_lit = LitStr::new(&node.kind, Span::call_site());
-        let mut bindings = Vec::new();
-        for edge in definition.edges.iter().filter(|edge| edge.to_node == *id) {
-            let source = LitStr::new(edge.from_node.as_str(), Span::call_site());
-            let port = LitStr::new(&edge.from_output, Span::call_site());
-            let input = LitStr::new(&edge.to_input, Span::call_site());
-            bindings.push(quote! { mf_runtime::ExecutionDependency {
-                input: Some(#input), source_node: #source, source_output: #port
-            } });
-        }
-        for edge in definition
-            .control_edges
-            .iter()
-            .filter(|edge| edge.to_node == *id)
-        {
-            let source = LitStr::new(edge.from_node.as_str(), Span::call_site());
-            let port = LitStr::new(&edge.from_output, Span::call_site());
-            bindings.push(quote! { mf_runtime::ExecutionDependency {
-                input: None, source_node: #source, source_output: #port
-            } });
+        let bindings = dependency_tokens(definition, id);
+        if node.kind == ITERATION_KIND {
+            preparations.push(iteration_preparation(
+                definition,
+                node,
+                scope,
+                index,
+                &node_ident,
+                &inference_ident,
+                &bindings,
+            )?);
+            statements.push(quote! {
+                mf_runtime::execute_node_in_context(&#node_ident, &[#(#bindings),*], state)?;
+            });
+            continue;
         }
 
         let constructor = match node.kind.as_str() {
@@ -392,4 +395,153 @@ fn generate_scope(
         });
     }
     Ok((preparations, statements))
+}
+
+fn dependency_tokens(definition: &WorkflowDefinition, id: &DefinitionId) -> Vec<TokenStream> {
+    let mut bindings = Vec::new();
+    for edge in definition.edges.iter().filter(|edge| &edge.to_node == id) {
+        let source = LitStr::new(edge.from_node.as_str(), Span::call_site());
+        let port = LitStr::new(&edge.from_output, Span::call_site());
+        let input = LitStr::new(&edge.to_input, Span::call_site());
+        bindings.push(quote! { mf_runtime::ExecutionDependency { input: Some(#input), source_node: #source, source_output: #port } });
+    }
+    for edge in definition
+        .control_edges
+        .iter()
+        .filter(|edge| &edge.to_node == id)
+    {
+        let source = LitStr::new(edge.from_node.as_str(), Span::call_site());
+        let port = LitStr::new(&edge.from_output, Span::call_site());
+        bindings.push(quote! { mf_runtime::ExecutionDependency { input: None, source_node: #source, source_output: #port } });
+    }
+    bindings
+}
+
+fn iteration_preparation(
+    parent: &WorkflowDefinition,
+    node: &crate::NodeDefinition,
+    scope: &str,
+    index: usize,
+    node_ident: &syn::Ident,
+    inference_ident: &syn::Ident,
+    bindings: &[TokenStream],
+) -> Result<TokenStream, PlanError> {
+    let invalid = |message: String| PlanError::Iteration {
+        definition_id: node.id.clone(),
+        message,
+    };
+    let config = parse_config(node).map_err(invalid)?;
+    let body = body_definition(parent, &config).map_err(invalid)?;
+    let order = crate::structural_order(&body).map_err(|error| invalid(error.to_string()))?;
+    let definitions: BTreeMap<_, _> = body.nodes.iter().map(|node| (&node.id, node)).collect();
+    let mut preparations = Vec::new();
+    let mut executions = Vec::new();
+    let mut result_ident = None;
+    let body_inference = format_ident!("body_inference_{scope}_{index}");
+    let outer_id = LitStr::new(node.id.as_str(), Span::call_site());
+    let outer_kind = LitStr::new(ITERATION_KIND, Span::call_site());
+    let outer_config = LitStr::new(
+        &serde_json::to_string(&node.config).context(SerializeSnafu)?,
+        Span::call_site(),
+    );
+    for (position, id) in order.iter().enumerate() {
+        let body_node = definitions[id];
+        let body_ident = format_ident!("body_node_{scope}_{index}_{position}");
+        if id == &config.body.result.node {
+            result_ident = Some(body_ident.clone());
+        }
+        let inner_id = LitStr::new(id.as_str(), Span::call_site());
+        let inner_bindings = dependency_tokens(&body, id);
+        let construct = if body_node.kind == ITERATION_INPUT_KIND {
+            quote! { mf_runtime::iteration_input_flow_node() }
+        } else {
+            let kind = LitStr::new(&body_node.kind, Span::call_site());
+            let config_json = serde_json::to_string(&body_node.config).context(SerializeSnafu)?;
+            let config_lit = LitStr::new(&config_json, Span::call_site());
+            quote! {
+                mf_runtime::instantiate_node_with_metadata(registry, #inner_id, #kind, #config_lit)
+                    .map_err(|error| {
+                        state.preparation_failed(#outer_id, &error);
+                        mf_runtime::WorkflowRunError::Context {
+                            definition_id: #outer_id.into(),
+                            message: format!("iteration body: {error}"),
+                        }
+                    })?
+            }
+        };
+        preparations.push(quote! {
+            let mut #body_ident = #construct;
+            #body_inference.resolve_node(&mut #body_ident, &[#(#inner_bindings),*])
+                .map_err(|error| {
+                    state.preparation_failed(#outer_id, &error);
+                    mf_runtime::WorkflowRunError::Context {
+                        definition_id: #outer_id.into(),
+                        message: format!("iteration body: {error}"),
+                    }
+                })?;
+        });
+        executions.push(quote! {
+            mf_runtime::execute_node_in_context(&#body_ident, &[#(#inner_bindings),*], &mut child)
+                .map_err(|source| mf_runtime::NodeExecutionError::PluginFailed {
+                    source: Box::new(source),
+                })?;
+        });
+    }
+    let result_ident = result_ident.ok_or_else(|| invalid("body result node is unknown".into()))?;
+    let result_node = LitStr::new(config.body.result.node.as_str(), Span::call_site());
+    let result_port = LitStr::new(&config.body.result.port, Span::call_site());
+    let mode = match config.mode {
+        IterationMode::Sequential => quote! { mf_runtime::IterationMode::Sequential },
+        IterationMode::Parallel => quote! { mf_runtime::IterationMode::Parallel },
+    };
+    let on_error = match config.on_error {
+        IterationErrorPolicy::Terminate => quote! { mf_runtime::IterationErrorPolicy::Terminate },
+        IterationErrorPolicy::ContinueOnError => {
+            quote! { mf_runtime::IterationErrorPolicy::ContinueOnError }
+        }
+        IterationErrorPolicy::RemoveFailed => {
+            quote! { mf_runtime::IterationErrorPolicy::RemoveFailed }
+        }
+    };
+    let body_nodes = config.body.nodes.iter().map(|body_node| {
+        let id = LitStr::new(body_node.id.as_str(), Span::call_site());
+        let kind = LitStr::new(&body_node.kind, Span::call_site());
+        quote! { mf_runtime::NodeIdentity { id: #id.into(), kind: #kind.into(), path: Vec::new() } }
+    });
+    Ok(quote! {
+        let _registered_iteration = state.prepare_node(registry, #outer_id, #outer_kind, #outer_config)?;
+        let mut #body_inference = mf_compiler::TypeInferenceState::default();
+        #(#preparations)*
+        let result_type = #result_ident.ports.outputs.iter()
+            .find(|port| port.name == #result_port)
+            .ok_or_else(|| {
+                let error = mf_runtime::WorkflowRunError::Context {
+                    definition_id: #outer_id.into(),
+                    message: format!("iteration body result `{}`.`{}` is unavailable", #result_node, #result_port),
+                };
+                state.preparation_failed(#outer_id, &error);
+                error
+            })?
+            .value_type.clone();
+        let iteration = mf_runtime::IterationNode::new(#outer_id, vec![#(#body_nodes),*], #mode, #on_error, result_type, move |item, index, observation| {
+            let mut child = mf_runtime::ExecutionContext::for_iteration_with_observation(item, index, observation)?;
+            #(#executions)*
+            child.select_output("result", #result_node, #result_port, false)
+                .map_err(|source| mf_runtime::NodeExecutionError::PluginFailed {
+                    source: Box::new(source),
+                })?
+                .ok_or_else(|| mf_runtime::NodeExecutionError::ExecutionFailed {
+                    message: "iteration body did not produce `result`".into(),
+                })
+        });
+        let ports = iteration.ports();
+        let mut #node_ident = mf_runtime::FlowNode::new(#outer_id, Box::new(iteration), ports);
+        #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*]).map_err(|error| {
+            state.preparation_failed(#outer_id, &error);
+            mf_runtime::WorkflowRunError::Context {
+                definition_id: #outer_id.into(),
+                message: error.to_string(),
+            }
+        })?;
+    })
 }

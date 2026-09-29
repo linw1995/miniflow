@@ -193,6 +193,28 @@ configuration.
 
 Schema 2's workflow final record reports the actual number of scheduled steps and the outer graph's visited prefix. The TUI compares the actual step count with observed pass prefixes, so a missing pass cannot look complete merely because the remaining records have contiguous sequence numbers. A known missing body outcome remains unknown after later passes complete; receiving that delayed record can close the gap. The old description and event versions remain supported for existing binaries.
 
+## Iteration observation
+
+An Iteration remains one node in its containing workflow lifecycle stream and graph description. Its ordinary
+`mf.node` span and `mf.node.started` / `mf.node.finished` records bracket the complete array operation. Repeated body
+invocations use a separate `mf.iteration` instrumentation scope so they do not consume the bounded outer lifecycle
+sequence or appear as duplicate node outcomes in the terminal UI.
+
+Each started item emits `mf.iteration.item.started` and `mf.iteration.item.finished` logs and an `mf.iteration.item`
+span. Each reached user-defined body node emits `mf.iteration.node.started` and
+`mf.iteration.node.finished` logs, or `mf.iteration.node.skipped` when a dependency is skipped, with an
+`mf.iteration.node` span. Dependency failures can finish a node without a start record. All detail logs carry
+`mf.workflow.id`, `mf.run.id`, `mf.iteration.id`, and zero-based `mf.iteration.index`; body-node records also carry
+`mf.node.id` and `mf.node.kind`. Terminal records include an outcome, duration when available, and failure context.
+They exclude item and result values. Plugin-provided failure messages can contain data supplied by that plugin.
+
+When an Iteration runs inside a Loop body, item detail spans inherit that pass's Iteration invocation span. The item span is a child of the Iteration node span, and each body-node span is a child of its item span. The
+item context is attached in its worker thread, so spans created by a body plugin during its node invocation inherit
+that body-node context. Parallel completion order can differ from input order; use the item index and trace parentage
+to group records. Under `continue_on_error` or `remove_failed`, failed items and body nodes retain failed detail
+outcomes while the outer Iteration node can succeed. The terminal UI currently displays the outer node and does not
+render these repeated body invocations.
+
 ## Runner export configuration
 
 The generated runner initializes exporters only in execution mode when `OTEL_EXPORTER_OTLP_ENDPOINT`,

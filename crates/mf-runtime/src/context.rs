@@ -1,7 +1,12 @@
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use mf_telemetry::{
-    event::{FailurePhase, LoopPassOutcome, LoopPathEntry, LoopStopReason, LoopSummary, SkipCause},
-    observation::{NodeObservation, RunObservation},
+    event::{
+        FailurePhase, LoopPassOutcome, LoopPathEntry, LoopStopReason, LoopSummary, NodeIdentity,
+        SkipCause,
+    },
+    observation::{
+        BodyNodeObservation, BodyObservation, IterationObservation, NodeObservation, RunObservation,
+    },
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,6 +48,7 @@ pub struct ExecutionContext {
     // A present None is an explicit skip; an absent key is a missing output.
     outputs: BTreeMap<String, Option<Value>>,
     observation: Option<RunObservation>,
+    body_observation: Option<BodyObservation>,
     loop_frames: Vec<LoopFrame>,
     pending_loop_write: Option<(String, Value)>,
     pending_loop_summary: Option<LoopSummary>,
@@ -54,6 +60,7 @@ impl Default for ExecutionContext {
         Self {
             outputs: BTreeMap::new(),
             observation: None,
+            body_observation: None,
             loop_frames: Vec::new(),
             pending_loop_write: None,
             pending_loop_summary: None,
@@ -63,6 +70,42 @@ impl Default for ExecutionContext {
 }
 
 impl ExecutionContext {
+    pub fn for_iteration(item: Value, index: usize) -> Result<Self, NodeExecutionError> {
+        Self::for_iteration_with_observation(item, index, None)
+    }
+
+    pub fn for_iteration_with_observation(
+        item: Value,
+        index: usize,
+        body_observation: Option<BodyObservation>,
+    ) -> Result<Self, NodeExecutionError> {
+        let index = i64::try_from(index).map_err(|_| NodeExecutionError::ExecutionFailed {
+            message: "iteration index exceeds the signed 64-bit range".into(),
+        })?;
+        Ok(Self {
+            outputs: BTreeMap::from([
+                (crate::iteration::ITERATION_SEED_ITEM.into(), Some(item)),
+                (
+                    crate::iteration::ITERATION_SEED_INDEX.into(),
+                    Some(Value::from(index)),
+                ),
+            ]),
+            body_observation,
+            ..Self::default()
+        })
+    }
+
+    pub fn iteration_observation(
+        &self,
+        id: &str,
+        body_nodes: &[NodeIdentity],
+    ) -> Option<IterationObservation> {
+        let path = self.loop_path();
+        self.observation
+            .as_ref()?
+            .iteration_observation(id, &path, body_nodes.to_vec())
+    }
+
     /// Runs a synchronous execution scope without changing its result or installing providers.
     pub fn run<T, E: std::fmt::Display>(
         observation: Option<RunObservation>,
@@ -380,6 +423,70 @@ pub struct ExecutionDependency<'a> {
     pub source_output: &'a str,
 }
 
+enum StepObservation {
+    Root(NodeObservation),
+    Body(BodyNodeObservation),
+}
+
+impl StepObservation {
+    fn started(&mut self, ctx: &mut ExecutionContext) {
+        match self {
+            Self::Root(step) => ctx.observation.as_mut().unwrap().node_started(step),
+            Self::Body(step) => step.started(),
+        }
+    }
+
+    fn failed(self, ctx: &mut ExecutionContext, phase: FailurePhase, message: String) {
+        match self {
+            Self::Root(step) => ctx
+                .observation
+                .as_mut()
+                .unwrap()
+                .node_failed(step, phase, message),
+            Self::Body(step) => step.failed(phase, message),
+        }
+    }
+
+    fn succeeded(
+        self,
+        ctx: &mut ExecutionContext,
+        produced_ports: Vec<String>,
+        skipped_ports: Vec<String>,
+        loop_summary: Option<LoopSummary>,
+    ) {
+        match self {
+            Self::Root(step) => ctx
+                .observation
+                .as_mut()
+                .unwrap()
+                .node_succeeded_with_loop_summary(
+                    step,
+                    produced_ports,
+                    skipped_ports,
+                    loop_summary,
+                ),
+            Self::Body(step) => step.succeeded(produced_ports, skipped_ports),
+        }
+    }
+
+    fn skipped(
+        self,
+        ctx: &mut ExecutionContext,
+        causes: Vec<SkipCause>,
+        skipped_ports: Vec<String>,
+    ) {
+        match self {
+            Self::Root(step) => {
+                ctx.observation
+                    .as_mut()
+                    .unwrap()
+                    .node_skipped(step, causes, skipped_ports)
+            }
+            Self::Body(step) => step.skipped(causes, skipped_ports),
+        }
+    }
+}
+
 /// Executes one step of a validated plan, in its topological order.
 pub fn execute_node_in_context(
     node: &FlowNode,
@@ -391,14 +498,26 @@ pub fn execute_node_in_context(
     ctx.pending_loop_write = None;
     ctx.pending_loop_summary = None;
     let path = ctx.loop_path();
-    let mut step = if path.is_empty() {
-        ctx.observation.as_mut().and_then(|run| run.begin_node(id))
+    let mut step = if let Some(run) = ctx.observation.as_mut() {
+        if path.is_empty() {
+            run.begin_node(id).map(StepObservation::Root)
+        } else {
+            run.begin_invocation(path, id).map(StepObservation::Root)
+        }
     } else {
-        ctx.observation
-            .as_mut()
-            .and_then(|run| run.begin_invocation(path, id))
+        ctx.body_observation
+            .as_ref()
+            .and_then(|body| body.begin_node(id))
+            .map(StepObservation::Body)
     };
-    let _context = step.as_ref().map(NodeObservation::enter);
+    let _root_context = match &step {
+        Some(StepObservation::Root(step)) => Some(step.enter()),
+        _ => None,
+    };
+    let _body_context = match &step {
+        Some(StepObservation::Body(step)) => Some(step.enter()),
+        _ => None,
+    };
     let mut dependencies = dependencies.to_vec();
     dependencies.sort();
     let mut inputs = Inputs::new();
@@ -419,8 +538,8 @@ pub fn execute_node_in_context(
         let value = match value {
             Ok(value) => value,
             Err(error) => {
-                if let (Some(run), Some(step)) = (ctx.observation.as_mut(), step) {
-                    run.node_failed(step, FailurePhase::Dependency, error.to_string());
+                if let Some(step) = step.take() {
+                    step.failed(ctx, FailurePhase::Dependency, error.to_string());
                 }
                 return Err(error);
             }
@@ -458,14 +577,14 @@ pub fn execute_node_in_context(
                         .map_err(|error| state_error(id, format!("input `{name}`: {error}")))
                 });
             if let Err(error) = validation {
-                if let (Some(run), Some(step)) = (ctx.observation.as_mut(), step) {
-                    run.node_failed(step, FailurePhase::Dependency, error.to_string());
+                if let Some(step) = step.take() {
+                    step.failed(ctx, FailurePhase::Dependency, error.to_string());
                 }
                 return Err(error);
             }
         }
-        if let (Some(run), Some(step)) = (ctx.observation.as_mut(), step.as_mut()) {
-            run.node_started(step);
+        if let Some(step) = step.as_mut() {
+            step.started(ctx);
         }
         let result = node
             .node
@@ -477,8 +596,8 @@ pub fn execute_node_in_context(
         match result {
             Ok(result) => Some(result),
             Err(error) => {
-                if let (Some(run), Some(step)) = (ctx.observation.as_mut(), step) {
-                    run.node_failed(step, FailurePhase::Execution, error.to_string());
+                if let Some(step) = step.take() {
+                    step.failed(ctx, FailurePhase::Execution, error.to_string());
                 }
                 return Err(error);
             }
@@ -497,18 +616,11 @@ pub fn execute_node_in_context(
     }
     let result = ctx.publish(node, result);
     let loop_summary = ctx.pending_loop_summary.take();
-    if let (Some(run), Some(step)) = (ctx.observation.as_mut(), step) {
+    if let Some(step) = step.take() {
         match &result {
-            Err(error) => run.node_failed(step, FailurePhase::Publication, error.to_string()),
-            Ok(()) if skipped => {
-                run.node_skipped(step, causes.into_iter().collect(), skipped_ports)
-            }
-            Ok(()) => run.node_succeeded_with_loop_summary(
-                step,
-                produced_ports,
-                skipped_ports,
-                loop_summary,
-            ),
+            Err(error) => step.failed(ctx, FailurePhase::Publication, error.to_string()),
+            Ok(()) if skipped => step.skipped(ctx, causes.into_iter().collect(), skipped_ports),
+            Ok(()) => step.succeeded(ctx, produced_ports, skipped_ports, loop_summary),
         }
     }
     result

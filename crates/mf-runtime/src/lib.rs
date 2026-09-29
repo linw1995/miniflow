@@ -1,6 +1,7 @@
 mod context;
 mod definition;
 mod flow;
+mod iteration;
 mod loop_node;
 mod node;
 mod number;
@@ -19,10 +20,16 @@ pub use definition::{
     WorkflowDefinitionVersion, WorkflowOutputDefinition,
 };
 pub use flow::{Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowOutputs, NodeId};
+pub use iteration::{
+    ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
+    IterationConfig, IterationErrorPolicy, IterationMode, IterationNode, IterationResultDefinition,
+    MAX_PARALLEL_ITEMS, iteration_input_flow_node,
+};
 pub use loop_node::{
     prepared_loop_assign, prepared_loop_assign_from_json, prepared_loop_exit, prepared_loop_node,
     prepared_loop_node_from_json, prepared_loop_source_from_json, prepared_loop_source_types,
 };
+pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
 pub use node::{
     ContextReference, Inputs, Node, NodeBuildError, NodeExecutionError, NodeFactory, NodePorts,

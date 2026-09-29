@@ -13,7 +13,7 @@ use crate::{
 use opentelemetry::{
     Context, ContextGuard, KeyValue,
     global::BoxedTracer,
-    logs::{Logger, LoggerProvider},
+    logs::{AnyValue, LogRecord, Logger, LoggerProvider},
     trace::{Status, TraceContextExt, Tracer, TracerProvider},
 };
 use std::{
@@ -24,10 +24,18 @@ use std::{
 };
 
 type EmitLog = dyn Fn(&WireRecord) -> Result<(), ContractError> + Send + Sync;
+type EmitNestedLog = dyn Fn(NestedLog) + Send + Sync;
+
+struct NestedLog {
+    name: &'static str,
+    attributes: Vec<(String, AnyValue)>,
+    context: Context,
+}
 
 struct Backend {
     tracer: BoxedTracer,
     emit: Box<EmitLog>,
+    emit_nested: Box<EmitNestedLog>,
 }
 
 /// Holds instruments obtained from providers owned and shut down by the caller.
@@ -44,6 +52,7 @@ impl Observer {
         L::Logger: Send + Sync + 'static,
     {
         let logger = logs.logger(INSTRUMENTATION_SCOPE);
+        let nested_logger = logs.logger("mf.iteration");
         Self(Arc::new(Backend {
             tracer: BoxedTracer::new(Box::new(traces.tracer(INSTRUMENTATION_SCOPE))),
             emit: Box::new(move |wire| {
@@ -60,6 +69,27 @@ impl Observer {
                     .then(|| Context::new().attach());
                 logger.emit(record);
                 Ok(())
+            }),
+            emit_nested: Box::new(move |log| {
+                if Context::is_current_telemetry_suppressed() {
+                    return;
+                }
+                let mut record = nested_logger.create_log_record();
+                record.set_event_name(log.name);
+                record.set_timestamp(SystemTime::now());
+                record.set_body(AnyValue::String(log.name.into()));
+                record.add_attributes(log.attributes);
+                let span = log.context.span();
+                let correlation = span.span_context();
+                if correlation.is_valid() {
+                    record.set_trace_context(
+                        correlation.trace_id(),
+                        correlation.span_id(),
+                        Some(correlation.trace_flags()),
+                    );
+                }
+                let _context = (!correlation.is_valid()).then(|| Context::new().attach());
+                nested_logger.emit(record);
             }),
         }))
     }
@@ -208,6 +238,41 @@ impl RunObservation {
 
     pub fn enter(&self) -> ContextGuard {
         self.context.clone().attach()
+    }
+
+    pub fn iteration_observation(
+        &self,
+        id: &str,
+        path: &[LoopPathEntry],
+        body_nodes: Vec<NodeIdentity>,
+    ) -> Option<IterationObservation> {
+        if self.closed {
+            return None;
+        }
+        if path.is_empty() {
+            self.nodes.get(id)?;
+        } else {
+            let static_path: Vec<_> = path.iter().map(|entry| entry.loop_id.clone()).collect();
+            self.description
+                .as_ref()?
+                .loop_body(&static_path)?
+                .nodes
+                .iter()
+                .find(|node| node.id == id)?;
+        }
+        Some(IterationObservation {
+            backend: Arc::clone(&self.backend),
+            workflow_id: self.workflow_id.clone(),
+            run_id: self.run_id,
+            iteration_id: id.into(),
+            parent: Context::current(),
+            body_nodes: Arc::new(
+                body_nodes
+                    .into_iter()
+                    .map(|node| (node.id.clone(), node))
+                    .collect(),
+            ),
+        })
     }
 
     fn elapsed(&self) -> Count {
@@ -556,6 +621,358 @@ impl Drop for NodeObservation {
     }
 }
 
+pub struct IterationObservation {
+    backend: Arc<Backend>,
+    workflow_id: WorkflowId,
+    run_id: RunId,
+    iteration_id: String,
+    parent: Context,
+    body_nodes: Arc<BTreeMap<String, NodeIdentity>>,
+}
+
+impl IterationObservation {
+    pub fn begin_item(&self, index: usize) -> Option<ItemObservation> {
+        let index = i64::try_from(index).ok()?;
+        let span = self
+            .backend
+            .tracer
+            .span_builder("mf.iteration.item")
+            .with_attributes([
+                KeyValue::new("mf.workflow.id", self.workflow_id.to_string()),
+                KeyValue::new("mf.run.id", self.run_id.to_string()),
+                KeyValue::new("mf.iteration.id", self.iteration_id.clone()),
+                KeyValue::new("mf.iteration.index", index),
+            ])
+            .start_with_context(&self.backend.tracer, &self.parent);
+        let item = ItemObservation {
+            backend: Arc::clone(&self.backend),
+            workflow_id: self.workflow_id.clone(),
+            run_id: self.run_id,
+            iteration_id: self.iteration_id.clone(),
+            index,
+            context: self.parent.with_span(span),
+            body_nodes: Arc::clone(&self.body_nodes),
+            started: Instant::now(),
+            finished: false,
+        };
+        item.emit("mf.iteration.item.started", Vec::new());
+        Some(item)
+    }
+}
+
+pub struct ItemObservation {
+    backend: Arc<Backend>,
+    workflow_id: WorkflowId,
+    run_id: RunId,
+    iteration_id: String,
+    index: i64,
+    context: Context,
+    body_nodes: Arc<BTreeMap<String, NodeIdentity>>,
+    started: Instant,
+    finished: bool,
+}
+
+impl ItemObservation {
+    pub fn enter(&self) -> ContextGuard {
+        self.context.clone().attach()
+    }
+
+    pub fn body_observation(&self) -> BodyObservation {
+        BodyObservation {
+            backend: Arc::clone(&self.backend),
+            workflow_id: self.workflow_id.clone(),
+            run_id: self.run_id,
+            iteration_id: self.iteration_id.clone(),
+            index: self.index,
+            context: self.context.clone(),
+            body_nodes: Arc::clone(&self.body_nodes),
+        }
+    }
+
+    pub fn finish(&mut self, error: Option<&str>) {
+        if self.finished {
+            return;
+        }
+        self.finished = true;
+        let mut attributes = vec![(
+            "mf.duration.ns".into(),
+            AnyValue::Int(nanos(self.started.elapsed()).get()),
+        )];
+        match error {
+            Some(message) => {
+                self.context
+                    .span()
+                    .set_attribute(KeyValue::new("mf.outcome", "failed"));
+                self.context
+                    .span()
+                    .set_status(Status::error(message.to_owned()));
+                attributes.push(("mf.outcome".into(), AnyValue::String("failed".into())));
+                attributes.push((
+                    "mf.failure.message".into(),
+                    AnyValue::String(message.to_owned().into()),
+                ));
+            }
+            None => {
+                self.context
+                    .span()
+                    .set_attribute(KeyValue::new("mf.outcome", "succeeded"));
+                attributes.push(("mf.outcome".into(), AnyValue::String("succeeded".into())));
+            }
+        }
+        self.emit("mf.iteration.item.finished", attributes);
+    }
+
+    fn emit(&self, name: &'static str, attributes: Vec<(String, AnyValue)>) {
+        let mut common = nested_attributes(
+            &self.workflow_id,
+            self.run_id,
+            &self.iteration_id,
+            self.index,
+        );
+        common.extend(attributes);
+        (self.backend.emit_nested)(NestedLog {
+            name,
+            attributes: common,
+            context: self.context.clone(),
+        });
+    }
+}
+
+impl Drop for ItemObservation {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.context
+                .span()
+                .set_status(Status::error("iteration item observation abandoned"));
+        }
+        self.context.span().end();
+    }
+}
+
+#[derive(Clone)]
+pub struct BodyObservation {
+    backend: Arc<Backend>,
+    workflow_id: WorkflowId,
+    run_id: RunId,
+    iteration_id: String,
+    index: i64,
+    context: Context,
+    body_nodes: Arc<BTreeMap<String, NodeIdentity>>,
+}
+
+impl fmt::Debug for BodyObservation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BodyObservation")
+            .field("run_id", &self.run_id)
+            .field("iteration_id", &self.iteration_id)
+            .field("index", &self.index)
+            .finish_non_exhaustive()
+    }
+}
+
+impl BodyObservation {
+    pub fn begin_node(&self, id: &str) -> Option<BodyNodeObservation> {
+        let node = self.body_nodes.get(id)?.clone();
+        let span = self
+            .backend
+            .tracer
+            .span_builder("mf.iteration.node")
+            .with_attributes([
+                KeyValue::new("mf.workflow.id", self.workflow_id.to_string()),
+                KeyValue::new("mf.run.id", self.run_id.to_string()),
+                KeyValue::new("mf.iteration.id", self.iteration_id.clone()),
+                KeyValue::new("mf.iteration.index", self.index),
+                KeyValue::new("mf.node.id", node.id.clone()),
+                KeyValue::new("mf.node.kind", node.kind.clone()),
+            ])
+            .start_with_context(&self.backend.tracer, &self.context);
+        Some(BodyNodeObservation {
+            backend: Arc::clone(&self.backend),
+            workflow_id: self.workflow_id.clone(),
+            run_id: self.run_id,
+            iteration_id: self.iteration_id.clone(),
+            index: self.index,
+            node,
+            context: self.context.with_span(span),
+            invoked: None,
+            finished: false,
+        })
+    }
+}
+
+pub struct BodyNodeObservation {
+    backend: Arc<Backend>,
+    workflow_id: WorkflowId,
+    run_id: RunId,
+    iteration_id: String,
+    index: i64,
+    node: NodeIdentity,
+    context: Context,
+    invoked: Option<Instant>,
+    finished: bool,
+}
+
+impl BodyNodeObservation {
+    pub fn enter(&self) -> ContextGuard {
+        self.context.clone().attach()
+    }
+
+    pub fn started(&mut self) {
+        self.invoked = Some(Instant::now());
+        self.emit("mf.iteration.node.started", Vec::new());
+    }
+
+    pub fn succeeded(mut self, produced_ports: Vec<String>, skipped_ports: Vec<String>) {
+        self.finished = true;
+        self.context
+            .span()
+            .set_attribute(KeyValue::new("mf.outcome", "succeeded"));
+        let mut attributes = vec![("mf.outcome".into(), AnyValue::String("succeeded".into()))];
+        if let Some(started) = self.invoked {
+            attributes.push((
+                "mf.duration.ns".into(),
+                AnyValue::Int(nanos(started.elapsed()).get()),
+            ));
+        }
+        attributes.push(("mf.produced.ports".into(), port_names(produced_ports)));
+        attributes.push(("mf.skipped.ports".into(), port_names(skipped_ports)));
+        self.emit("mf.iteration.node.finished", attributes);
+    }
+
+    pub fn skipped(mut self, causes: Vec<SkipCause>, skipped_ports: Vec<String>) {
+        self.finished = true;
+        self.context
+            .span()
+            .set_attribute(KeyValue::new("mf.outcome", "skipped"));
+        self.emit(
+            "mf.iteration.node.skipped",
+            vec![
+                ("mf.outcome".into(), AnyValue::String("skipped".into())),
+                ("mf.skipped.ports".into(), port_names(skipped_ports)),
+                (
+                    "mf.skip.causes".into(),
+                    AnyValue::ListAny(Box::new(
+                        causes
+                            .into_iter()
+                            .map(|cause| {
+                                AnyValue::Map(Box::new(
+                                    [
+                                        (
+                                            "source_node".into(),
+                                            AnyValue::String(cause.source_node.into()),
+                                        ),
+                                        (
+                                            "source_output".into(),
+                                            AnyValue::String(cause.source_output.into()),
+                                        ),
+                                    ]
+                                    .into_iter()
+                                    .collect(),
+                                ))
+                            })
+                            .collect(),
+                    )),
+                ),
+            ],
+        );
+    }
+
+    pub fn failed(mut self, phase: FailurePhase, message: String) {
+        self.finished = true;
+        let failure = Failure {
+            phase,
+            message: message.clone(),
+        };
+        mark_failed(&self.context, &failure);
+        let mut attributes = vec![
+            ("mf.outcome".into(), AnyValue::String("failed".into())),
+            (
+                "mf.failure.phase".into(),
+                AnyValue::String(phase_name(phase).into()),
+            ),
+            (
+                "mf.failure.message".into(),
+                AnyValue::String(message.into()),
+            ),
+        ];
+        if let Some(started) = self.invoked {
+            attributes.push((
+                "mf.duration.ns".into(),
+                AnyValue::Int(nanos(started.elapsed()).get()),
+            ));
+        }
+        self.emit("mf.iteration.node.finished", attributes);
+    }
+
+    fn emit(&self, name: &'static str, attributes: Vec<(String, AnyValue)>) {
+        let mut common = nested_attributes(
+            &self.workflow_id,
+            self.run_id,
+            &self.iteration_id,
+            self.index,
+        );
+        common.push((
+            "mf.node.id".into(),
+            AnyValue::String(self.node.id.clone().into()),
+        ));
+        common.push((
+            "mf.node.kind".into(),
+            AnyValue::String(self.node.kind.clone().into()),
+        ));
+        common.extend(attributes);
+        (self.backend.emit_nested)(NestedLog {
+            name,
+            attributes: common,
+            context: self.context.clone(),
+        });
+    }
+}
+
+impl Drop for BodyNodeObservation {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.context
+                .span()
+                .set_status(Status::error("iteration body node observation abandoned"));
+        }
+        self.context.span().end();
+    }
+}
+
+fn nested_attributes(
+    workflow_id: &WorkflowId,
+    run_id: RunId,
+    iteration_id: &str,
+    index: i64,
+) -> Vec<(String, AnyValue)> {
+    vec![
+        ("mf.schema.version".into(), AnyValue::Int(1)),
+        (
+            "mf.workflow.id".into(),
+            AnyValue::String(workflow_id.to_string().into()),
+        ),
+        (
+            "mf.run.id".into(),
+            AnyValue::String(run_id.to_string().into()),
+        ),
+        (
+            "mf.iteration.id".into(),
+            AnyValue::String(iteration_id.to_owned().into()),
+        ),
+        ("mf.iteration.index".into(), AnyValue::Int(index)),
+    ]
+}
+
+fn port_names(names: Vec<String>) -> AnyValue {
+    AnyValue::ListAny(Box::new(
+        names
+            .into_iter()
+            .map(|name| AnyValue::String(name.into()))
+            .collect(),
+    ))
+}
+
 fn nanos(duration: Duration) -> Count {
     Count::try_from(duration.as_nanos().min(i64::MAX as u128) as i64)
         .expect("duration is clamped to the signed range")
@@ -565,17 +982,21 @@ fn mark_failed(context: &Context, failure: &Failure) {
     context
         .span()
         .set_attribute(KeyValue::new("mf.outcome", "failed"));
-    let phase = match failure.phase {
-        FailurePhase::Preparation => "preparation",
-        FailurePhase::Dependency => "dependency",
-        FailurePhase::Execution => "execution",
-        FailurePhase::Publication => "publication",
-        FailurePhase::OutputSelection => "output_selection",
-    };
+    let phase = phase_name(failure.phase);
     context
         .span()
         .set_attribute(KeyValue::new("mf.failure.phase", phase));
     context
         .span()
         .set_status(Status::error(failure.message.clone()));
+}
+
+fn phase_name(phase: FailurePhase) -> &'static str {
+    match phase {
+        FailurePhase::Preparation => "preparation",
+        FailurePhase::Dependency => "dependency",
+        FailurePhase::Execution => "execution",
+        FailurePhase::Publication => "publication",
+        FailurePhase::OutputSelection => "output_selection",
+    }
 }

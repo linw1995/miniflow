@@ -1,10 +1,12 @@
 mod constant;
 mod identity;
 mod if_else;
+mod iteration;
 
 pub use constant::{KIND as CONSTANT_KIND, kind as constant_kind};
 pub use identity::{KIND as IDENTITY_KIND, kind as identity_kind};
 pub use if_else::KIND as IF_ELSE_KIND;
+pub use iteration::KIND as ITERATION_KIND;
 
 #[cfg(test)]
 mod tests {

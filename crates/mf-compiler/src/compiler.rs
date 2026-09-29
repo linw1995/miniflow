@@ -1,8 +1,13 @@
+use crate::iteration::{body_definition, normalize_config, parse_config};
 use crate::{
     CompiledWorkflow, ExecutionDependency, Flow, FlowBuildError, FlowNode, NodeBuildError,
     NodeRegistry, ValueType,
 };
 use crate::{DefinitionId, WorkflowDefinition};
+use mf_runtime::{
+    ExecutionContext, ITERATION_INPUT_KIND, ITERATION_KIND, IterationNode, NodeExecutionError,
+    iteration_input_flow_node,
+};
 use mf_runtime::{OutputDerivation, TypeCompatibility, TypeMismatch};
 use mf_telemetry::{
     ContractError,
@@ -10,6 +15,7 @@ use mf_telemetry::{
         ControlEdge, DataEdge, LoopBodyDescription, NodeDescription, WorkflowDescription,
         WorkflowDescriptionVersion,
     },
+    event::NodeIdentity,
     identity::WorkflowId,
 };
 use serde_json::Value;
@@ -161,6 +167,11 @@ pub enum WorkflowCompileError {
     },
     #[snafu(display("invalid Loop at {path}: {message}"))]
     InvalidLoop { path: String, message: String },
+    #[snafu(display("invalid iteration node `{definition_id}`: {message}"))]
+    InvalidIteration {
+        definition_id: DefinitionId,
+        message: String,
+    },
 }
 
 #[derive(Clone)]
@@ -325,16 +336,20 @@ fn prepare_definition(
     registry: &NodeRegistry,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    prepare_graph(definition, registry, None)
+    prepare_graph(definition, registry, None, false)
 }
 
 fn prepare_graph(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
     enclosing: Option<&BTreeMap<String, ValueType>>,
+    allow_iteration_input: bool,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
+    if allow_iteration_input {
+        crate::loops::validate_structure(definition)?;
+    }
     let order = structural_order_graph(definition)?;
-    let mut nodes = resolve_nodes_in_scope(definition, registry, enclosing)?;
+    let mut nodes = resolve_nodes_in_scope(definition, registry, enclosing, allow_iteration_input)?;
     validate_base_metadata(definition, &nodes, &order)?;
 
     let indices: BTreeMap<_, _> = nodes
@@ -729,6 +744,32 @@ pub fn compile_definition(
 pub fn plan_definition(
     definition: &WorkflowDefinition,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
+    for node in &definition.nodes {
+        if node.kind == ITERATION_INPUT_KIND {
+            return InvalidIterationSnafu {
+                definition_id: node.id.clone(),
+                message: "internal iteration input is not a workflow node".to_owned(),
+            }
+            .fail();
+        }
+        if node.kind == ITERATION_KIND {
+            let config =
+                parse_config(node).map_err(|message| WorkflowCompileError::InvalidIteration {
+                    definition_id: node.id.clone(),
+                    message,
+                })?;
+            let body = body_definition(definition, &config).map_err(|message| {
+                WorkflowCompileError::InvalidIteration {
+                    definition_id: node.id.clone(),
+                    message,
+                }
+            })?;
+            structural_order(&body).map_err(|error| WorkflowCompileError::InvalidIteration {
+                definition_id: node.id.clone(),
+                message: error.to_string(),
+            })?;
+        }
+    }
     normalize_plan(definition, structural_order(definition)?)
 }
 
@@ -747,6 +788,14 @@ fn normalize_plan(
         .collect();
     for node in &mut nodes {
         normalize_loop_node(node, &definition.dependencies)?;
+        if node.kind == ITERATION_KIND {
+            node.config = normalize_config(definition, node).map_err(|message| {
+                WorkflowCompileError::InvalidIteration {
+                    definition_id: node.id.clone(),
+                    message,
+                }
+            })?;
+        }
     }
     let mut edges = definition.edges.clone();
     edges.sort_by(|left, right| {
@@ -805,6 +854,14 @@ fn normalize_loop_node(
         }
         let mut child = nodes_by_id[&id].clone();
         normalize_loop_node(&mut child, dependencies)?;
+        if child.kind == ITERATION_KIND {
+            child.config = normalize_config(&body, &child).map_err(|message| {
+                WorkflowCompileError::InvalidIteration {
+                    definition_id: child.id.clone(),
+                    message,
+                }
+            })?;
+        }
         normalized.push(child);
     }
     loop_definition.body.nodes = normalized;
@@ -999,7 +1056,8 @@ pub fn execute_compiled(
             .inspect_err(|error| {
                 if let WorkflowCompileError::NodeConstruction { definition_id, .. }
                 | WorkflowCompileError::UnknownNodeKind { definition_id, .. }
-                | WorkflowCompileError::InvalidNodeMetadata { definition_id, .. } = error
+                | WorkflowCompileError::InvalidNodeMetadata { definition_id, .. }
+                | WorkflowCompileError::InvalidIteration { definition_id, .. } = error
                 {
                     state.preparation_failed(definition_id.as_str(), error);
                 }
@@ -1014,13 +1072,14 @@ pub fn resolve_nodes(
     registry: &NodeRegistry,
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    resolve_nodes_in_scope(definition, registry, None)
+    resolve_nodes_in_scope(definition, registry, None, false)
 }
 
 fn resolve_nodes_in_scope(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
     enclosing: Option<&BTreeMap<String, ValueType>>,
+    allow_iteration_input: bool,
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
     definition
         .nodes
@@ -1035,10 +1094,12 @@ fn resolve_nodes_in_scope(
                         &loop_definition.body,
                         &definition.dependencies,
                     );
-                    let (body_nodes, body_order) = prepare_graph(&body, registry, Some(&types))
-                        .map_err(|error| WorkflowCompileError::InvalidLoop {
-                            path: format!("{:?}", node.id),
-                            message: error.to_string(),
+                    let (body_nodes, body_order) =
+                        prepare_graph(&body, registry, Some(&types), false).map_err(|error| {
+                            WorkflowCompileError::InvalidLoop {
+                                path: format!("{:?}", node.id),
+                                message: error.to_string(),
+                            }
                         })?;
                     let body_flow = Flow::new(body_nodes, body.edges, body_order, Vec::new())
                         .and_then(|flow| flow.with_control_edges(body.control_edges))
@@ -1072,6 +1133,121 @@ fn resolve_nodes_in_scope(
                     ));
                 }
                 _ => {}
+            }
+            if node.kind == ITERATION_INPUT_KIND {
+                if allow_iteration_input && node.id.as_str() == mf_runtime::ITERATION_INPUT_ID {
+                    return Ok(iteration_input_flow_node());
+                }
+                return InvalidIterationSnafu {
+                    definition_id: node.id.clone(),
+                    message: "internal iteration input is reserved for iteration bodies".to_owned(),
+                }
+                .fail();
+            }
+            if node.kind == ITERATION_KIND {
+                if allow_iteration_input {
+                    return InvalidIterationSnafu {
+                        definition_id: node.id.clone(),
+                        message: "nested iterations are not supported".to_owned(),
+                    }
+                    .fail();
+                }
+                let Some(registration) = registry.get(ITERATION_KIND) else {
+                    return UnknownNodeKindSnafu {
+                        definition_id: node.id.clone(),
+                        kind: node.kind.clone(),
+                    }
+                    .fail();
+                };
+                // The selected node package owns the kind; orchestration uses the compiled body.
+                registration
+                    .instantiate(node.config.clone())
+                    .context(NodeConstructionSnafu {
+                        definition_id: node.id.clone(),
+                        kind: node.kind.clone(),
+                    })?;
+                let config = parse_config(node).map_err(|message| {
+                    WorkflowCompileError::InvalidIteration {
+                        definition_id: node.id.clone(),
+                        message,
+                    }
+                })?;
+                let body_definition = body_definition(definition, &config).map_err(|message| {
+                    WorkflowCompileError::InvalidIteration {
+                        definition_id: node.id.clone(),
+                        message,
+                    }
+                })?;
+                let (body_nodes, order) = prepare_graph(&body_definition, registry, None, true)
+                    .map_err(|error| WorkflowCompileError::InvalidIteration {
+                        definition_id: node.id.clone(),
+                        message: error.to_string(),
+                    })?;
+                let result_type = body_nodes
+                    .iter()
+                    .find(|candidate| candidate.definition_id == config.body.result.node)
+                    .and_then(|candidate| {
+                        candidate
+                            .ports
+                            .outputs
+                            .iter()
+                            .find(|port| port.name == config.body.result.port)
+                    })
+                    .map(|port| port.value_type.clone())
+                    .ok_or_else(|| WorkflowCompileError::InvalidIteration {
+                        definition_id: node.id.clone(),
+                        message: format!(
+                            "body result `{}`.`{}` is unavailable",
+                            config.body.result.node, config.body.result.port
+                        ),
+                    })?;
+                let flow = Flow::new(
+                    body_nodes,
+                    body_definition.edges,
+                    order,
+                    body_definition.outputs,
+                )
+                .and_then(|flow| flow.with_control_edges(body_definition.control_edges))
+                .map_err(|error| WorkflowCompileError::InvalidIteration {
+                    definition_id: node.id.clone(),
+                    message: error.to_string(),
+                })?;
+                let instance = IterationNode::new(
+                    node.id.as_str(),
+                    config
+                        .body
+                        .nodes
+                        .iter()
+                        .map(|body_node| NodeIdentity {
+                            id: body_node.id.to_string(),
+                            kind: body_node.kind.clone(),
+                            path: Vec::new(),
+                        })
+                        .collect(),
+                    config.mode,
+                    config.on_error,
+                    result_type,
+                    move |item, index, observation| {
+                        let mut state = ExecutionContext::for_iteration_with_observation(
+                            item,
+                            index,
+                            observation,
+                        )?;
+                        let mut outputs =
+                            flow.execute_in_context(&mut state).map_err(|source| {
+                                NodeExecutionError::PluginFailed {
+                                    source: Box::new(source),
+                                }
+                            })?;
+                        outputs.remove("result").ok_or_else(|| {
+                            NodeExecutionError::ExecutionFailed {
+                                message: "iteration body did not produce `result`".into(),
+                            }
+                        })
+                    },
+                );
+                let ports = instance.ports();
+                return Ok(FlowNode::new(node.id.clone(), Box::new(instance), ports));
             }
             let Some(registration) = registry.get(&node.kind) else {
                 return UnknownNodeKindSnafu {
