@@ -417,6 +417,131 @@ fn final_step_count_cannot_hide_an_unreported_pass() {
 }
 
 #[test]
+fn duplicate_delivery_and_a_new_pass_have_distinct_identities() {
+    let mut state = SessionState::new(loop_graph(), run_id()).unwrap();
+    state
+        .apply(event(
+            1,
+            Event::WorkflowStarted {
+                node_count: count(3),
+                elapsed_ns: Count::ZERO,
+            },
+        ))
+        .unwrap();
+    let pass = |index, sequence| {
+        event(
+            sequence,
+            Event::LoopPassStarted {
+                path: vec![LoopPathEntry {
+                    loop_id: "repeat".into(),
+                    index: count(index),
+                }],
+                elapsed_ns: count(sequence),
+            },
+        )
+    };
+    assert_eq!(state.apply(pass(0, 2)).unwrap(), Admission::Applied);
+    assert_eq!(state.apply(pass(0, 2)).unwrap(), Admission::Duplicate);
+    assert_eq!(state.apply(pass(1, 3)).unwrap(), Admission::Applied);
+    assert_eq!(state.snapshot().total_loop_passes, 2);
+}
+
+#[test]
+fn live_body_start_shows_running_in_the_active_pass() {
+    let mut state = SessionState::new(loop_graph(), run_id()).unwrap();
+    let path = vec![LoopPathEntry {
+        loop_id: "repeat".into(),
+        index: count(2),
+    }];
+    for item in [
+        event(
+            1,
+            Event::WorkflowStarted {
+                node_count: count(3),
+                elapsed_ns: Count::ZERO,
+            },
+        ),
+        event(
+            2,
+            Event::NodeStarted {
+                node: node("repeat", "workflow.loop"),
+                position: Count::ZERO,
+                elapsed_ns: count(1),
+            },
+        ),
+        event(
+            3,
+            Event::LoopPassStarted {
+                path: path.clone(),
+                elapsed_ns: count(2),
+            },
+        ),
+        event(
+            4,
+            Event::NodeStarted {
+                node: NodeIdentity {
+                    id: "step".into(),
+                    kind: "fixture.sink".into(),
+                    path,
+                },
+                position: count(1),
+                elapsed_ns: count(3),
+            },
+        ),
+    ] {
+        state.apply(item).unwrap();
+    }
+    let snapshot = state.snapshot();
+    assert_eq!(snapshot.loop_overviews[0].active_index, Some(count(2)));
+    let nodes =
+        snapshot.loop_passes[0].display_nodes([("$loop", "$loop"), ("step", "fixture.sink")]);
+    assert_eq!(nodes[1].status, NodeStatus::Running);
+    assert_eq!(nodes[1].started_elapsed_ns, Some(count(3)));
+}
+
+#[test]
+fn early_exit_marks_only_the_unvisited_body_suffix_not_run() {
+    let mut state = SessionState::new(loop_graph(), run_id()).unwrap();
+    let path = vec![LoopPathEntry {
+        loop_id: "repeat".into(),
+        index: Count::ZERO,
+    }];
+    for item in [
+        event(
+            1,
+            Event::WorkflowStarted {
+                node_count: count(3),
+                elapsed_ns: Count::ZERO,
+            },
+        ),
+        event(
+            2,
+            Event::LoopPassStarted {
+                path: path.clone(),
+                elapsed_ns: count(1),
+            },
+        ),
+        event(
+            3,
+            Event::LoopPassFinished {
+                path,
+                elapsed_ns: count(2),
+                visited_node_count: count(1),
+                outcome: LoopPassOutcome::Exit,
+            },
+        ),
+    ] {
+        state.apply(item).unwrap();
+    }
+    let snapshot = state.snapshot();
+    let nodes =
+        snapshot.loop_passes[0].display_nodes([("$loop", "$loop"), ("step", "fixture.sink")]);
+    assert_eq!(nodes[0].status, NodeStatus::Pending);
+    assert_eq!(nodes[1].status, NodeStatus::NotRun);
+    assert_eq!(snapshot.total_loop_passes, 1);
+}
+
+#[test]
 fn conflicting_body_event_does_not_mark_a_same_named_root_node() {
     let mut description = loop_graph();
     let body = &mut description.loop_bodies[0];

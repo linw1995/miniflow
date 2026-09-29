@@ -20,7 +20,7 @@
 
 ## 4. Document and validate delivery
 
-- [ ] 4.1 Add a runnable Loop example and document the schema, variable scope, ordering, stop behavior, limits, diagnostics, and relationship to Dify Loop and Iteration.
-- [ ] 4.2 Cover parser, planner, runtime, generated runner, packaged CLI, observation, and TUI acceptance scenarios in this change's specs. Check that invalid definitions never replace an existing binary or lock.
-- [ ] 4.3 In `nix develop`, run `prek install`, `prek -a`, and `nix flake check -L`. Run coverage with `nix develop --command bash scripts/run-cov.sh` where execution or reducer paths need coverage evidence.
-- [ ] 4.4 Run `openspec validate add-loop-node --strict` and map every specification scenario to an implementation check before archiving this change.
+- [x] 4.1 Add a runnable Loop example and document the schema, variable scope, ordering, stop behavior, limits, diagnostics, and relationship to Dify Loop and Iteration.
+- [x] 4.2 Cover parser, planner, runtime, generated runner, packaged CLI, observation, and TUI acceptance scenarios in this change's specs. Check that invalid definitions never replace an existing binary or lock.
+- [x] 4.3 In `nix develop`, run `prek install`, `prek -a`, and `nix flake check -L`. Run coverage with `nix develop --command bash scripts/run-cov.sh` where execution or reducer paths need coverage evidence.
+- [x] 4.4 Run `openspec validate add-loop-node --strict` and map every specification scenario to an implementation check before archiving this change.

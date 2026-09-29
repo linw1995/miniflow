@@ -1,0 +1,60 @@
+{
+  "version": "2026-09-29",
+  "dependencies": {
+    "core": { "package": "mfn-core", "path": "../crates/builtin-nodes/core" },
+    "code": { "package": "mfn-code", "path": "../crates/builtin-nodes/code" }
+  },
+  "nodes": [
+    { "id": "seed", "kind": "builtin.constant", "config": { "value": 0 } },
+    {
+      "id": "repeat",
+      "kind": "workflow.loop",
+      "loop": {
+        "max_iterations": 5,
+        "variables": [{ "name": "count", "type": "int" }],
+        "until": { "variable": "count", "operator": "gte", "value": 3 },
+        "body": {
+          "nodes": [
+            {
+              "id": "increment",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": { "count": "int" },
+                "code": { "next": "count + 1" }
+              }
+            },
+            {
+              "id": "assign",
+              "kind": "workflow.loop_assign",
+              "config": { "variable": "count" }
+            }
+          ],
+          "edges": [
+            {
+              "from_node": "$loop",
+              "from_output": "count",
+              "to_node": "increment",
+              "to_input": "count"
+            },
+            {
+              "from_node": "increment",
+              "from_output": "next",
+              "to_node": "assign",
+              "to_input": "value"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "seed",
+      "from_output": "value",
+      "to_node": "repeat",
+      "to_input": "count"
+    }
+  ],
+  "outputs": [{ "name": "count", "node": "repeat", "port": "count" }]
+}

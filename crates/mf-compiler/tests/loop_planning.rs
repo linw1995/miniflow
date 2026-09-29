@@ -151,6 +151,24 @@ fn rejects_old_schema_and_invalid_loop_structure() {
             .to_string()
             .contains("cycle")
     );
+
+    for kind in ["workflow.loop_assign", "workflow.exit_loop"] {
+        let mut value = definition();
+        value["nodes"].as_array_mut().unwrap().push(json!({
+            "id": "outside", "kind": kind,
+            "config": if kind == "workflow.loop_assign" {
+                json!({"variable": "count"})
+            } else {
+                json!({})
+            }
+        }));
+        assert!(
+            plan_definition(&parse(value))
+                .unwrap_err()
+                .to_string()
+                .contains("requires a Loop")
+        );
+    }
 }
 
 #[test]
@@ -160,6 +178,22 @@ fn validates_body_plugins_and_loop_port_types() {
     value["nodes"][1]["loop"]["body"]["nodes"][1]["kind"] = json!("missing.plugin");
     assert!(
         compile_definition(&parse(value), &registry)
+            .unwrap_err()
+            .to_string()
+            .contains("missing.plugin")
+    );
+
+    let mut inactive = exit_definition();
+    inactive["nodes"][1]["loop"]["body"]["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id": "invalid_inactive", "kind": "missing.plugin"}));
+    inactive["nodes"][1]["loop"]["body"]["control_edges"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"from_node": "route", "from_output": "stop", "to_node": "invalid_inactive"}));
+    assert!(
+        compile_definition(&parse(inactive), &registry)
             .unwrap_err()
             .to_string()
             .contains("missing.plugin")
@@ -272,6 +306,40 @@ fn generated_loop_matches_in_memory_without_build_inputs() {
     let result = Command::new(&executable).output().unwrap();
     assert!(!result.status.success());
     assert!(String::from_utf8_lossy(&result.stderr).contains("budget"));
+}
+
+#[test]
+fn invalid_loop_edit_preserves_installed_binary_and_lock() {
+    let directory = tempfile::tempdir().unwrap();
+    let definition_path = directory.path().join("loop.json");
+    let executable = directory.path().join("runner");
+    let build = directory.path().join("build");
+    let mut value = definition();
+    value["dependencies"] = json!({
+        "core": {"package": "mfn-core", "path": common::crates_dir().join("builtin-nodes/core")},
+        "code": {"package": "mfn-code", "path": common::crates_dir().join("builtin-nodes/code")}
+    });
+    let support = SupportPackages::Local {
+        crates_dir: common::crates_dir(),
+    };
+    fs::write(&definition_path, value.to_string()).unwrap();
+    let request = CompileRequest {
+        definition: &definition_path,
+        output: &executable,
+        locked: false,
+        build_dir: Some(&build),
+        support: &support,
+    };
+    compile_project(&request).unwrap();
+    let installed = fs::read(&executable).unwrap();
+    let lock_path = definition_path.with_extension("lock");
+    let lock = fs::read(&lock_path).unwrap();
+    value["nodes"][1]["loop"]["max_iterations"] = json!(0);
+    fs::write(&definition_path, value.to_string()).unwrap();
+    let error = compile_project(&request).unwrap_err();
+    assert_eq!(error.stage, "structural validation");
+    assert_eq!(fs::read(&executable).unwrap(), installed);
+    assert_eq!(fs::read(&lock_path).unwrap(), lock);
 }
 
 fn run_in_memory(value: Value) -> Result<Value, String> {
@@ -458,7 +526,9 @@ fn invalid_assignment_does_not_publish_partial_loop_output() {
 #[test]
 fn loop_observation_identifies_each_pass_and_body_invocation() {
     let registry = NodeRegistry::from_inventory().unwrap();
-    let plan = compile_definition(&parse(definition()), &registry).unwrap();
+    let mut value = definition();
+    value["nodes"][1]["loop"]["max_iterations"] = json!(3);
+    let plan = compile_definition(&parse(value), &registry).unwrap();
     let harness = capture::Harness::new(true);
     let observation = plan
         .start_observation(&harness.observer(), RunId::new())

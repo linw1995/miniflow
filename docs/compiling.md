@@ -22,7 +22,7 @@ mf compile flow.json --output ./flow --locked
 
 The output directory must exist. A successful first build creates `flow.lock`. See [workflow definitions](workflows.md) for dependency sources, features, and lock behavior. Native libraries required by plugins must be installed separately.
 
-The CLI checks graph structure and generates fixed node orchestration, then compiles one runner
+The CLI checks graph structure in every scope and generates fixed node orchestration, including structured repeated execution for Loop bodies, then compiles one runner
 using `cargo build --release --locked`. It invokes that binary with `--validate` to check registered
 kinds, configuration, inferred port types, and port contracts without executing node operations.
 Only the validated binary is installed. A constant such as `[1, "x"]` connected to a `List(Int64)`
@@ -34,7 +34,7 @@ literals in the generated workflow source. Normal execution resolves type metada
 generated node calls and prints selected outputs as JSON. It does not require the definition, lock, plugin sources, or
 Cargo at runtime. It retains `--validate` for
 checking its embedded configuration without executing the workflow. `--describe` prints one date-versioned JSON
-document containing the workflow identity, node IDs/kinds, named data/control edges, and execution order. It reads
+document containing the workflow identity, node IDs/kinds, named data/control edges, and execution order. Loop-capable runners use description version `2026-09-29` and also describe each nested body's path and local graph. It reads
 the embedded plan without constructing plugins, and excludes configuration and business values. Edge names identify
 connected ports; the complete list of dynamic or unconnected ports is unavailable in this description.
 
@@ -74,9 +74,13 @@ cargo run -p mf-cli --features development-support -- \
 cargo run -p mf-cli --features development-support -- \
   compile examples/cel-list.json --output "$output_dir/cel-list"
 "$output_dir/cel-list"
+
+cargo run -p mf-cli --features development-support -- \
+  compile examples/loop.json --output "$output_dir/loop"
+"$output_dir/loop"
 ```
 
-Normal release builds ignore this environment variable. The hello example declares a local `mfn-core` dependency. Both CEL examples also declare a local `mfn-code` dependency for `builtin.code`; they produce `{"doubled":42}` and `{"doubled":[2,4]}` respectively. A portable Flow should declare available registry or Git packages instead.
+Normal release builds ignore this environment variable. The hello example declares a local `mfn-core` dependency. Both CEL examples also declare a local `mfn-code` dependency for `builtin.code`; they produce `{"doubled":42}` and `{"doubled":[2,4]}` respectively. The Loop example declares both packages for its ordinary nodes and produces `{"count":3}`. A portable Flow should declare available registry or Git packages instead.
 
 ## Build failures
 

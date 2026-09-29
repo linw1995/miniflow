@@ -2,7 +2,7 @@
 
 ## JSON format
 
-The [example definition](../examples/hello-workflow.json) uses schema version `2026-09-26`. This is the only accepted version at present. Each node has a unique, nonblank string `id`, a registered `kind`, and an optional JSON `config`. An edge connects a named output port to a named input port. An `outputs` entry selects a node port and gives it a name in the executable's JSON output.
+The [basic example](../examples/hello-workflow.json) uses schema version `2026-09-26` for a flat DAG. Version `2026-09-29` adds structured Loop bodies and is required when using Loop control kinds. Both versions are accepted. Each ordinary node has a unique, nonblank string `id`, a registered `kind`, and an optional JSON `config`. An edge connects a named output port to a named input port. An `outputs` entry selects a node port and gives it a name in the executable's JSON output.
 
 ## Node dependencies
 
@@ -27,7 +27,7 @@ The required `dependencies` object maps aliases to node packages. Aliases identi
 
 Each entry requires `package` and exactly one source: a crates.io `version`, a `git` URL with a full commit `rev`, or a local `path`. Features default to empty and default features are enabled. Unknown fields and incomplete or conflicting sources are rejected. The package names above are illustrative.
 
-Built-in nodes are packages too. For example, [the CEL scalar Flow](../examples/cel-scalar.json) declares both packages it uses (these paths are relative to the definition in `examples/`):
+Ordinary built-in nodes are packages too. Structural Loop kinds are provided by the engine and require no node package. For example, [the CEL scalar Flow](../examples/cel-scalar.json) declares both packages it uses (these paths are relative to the definition in `examples/`):
 
 ```json
 {
@@ -95,9 +95,72 @@ with the [repository development commands](compiling.md#repository-development).
 and `{"doubled":[2,4]}` respectively. Replace the examples' local package paths with published package versions
 when compiling outside the checkout.
 
+## Structured Loop
+
+The [Loop example](../examples/loop.json) returns `{"count":3}`. It declares `mfn-core` for its initial constant and `mfn-code` for the body transformation. `workflow.loop`, `workflow.loop_assign`, `workflow.exit_loop`, and the synthetic `$loop` source are engine constructs; plugins cannot register these kinds. The outer graph and every Loop body remain acyclic. The engine repeats a body's fixed execution order instead of adding a graph back edge.
+
+A Loop node has a typed `loop` field with required `max_iterations`, a nonempty `variables` list, an
+optional `until` condition, and a `body` containing ordinary `nodes`, `edges`, and `control_edges`.
+Each variable creates a required Loop input for its initial value and a required Loop output for its
+final value. The body reads current values and a zero-based `index` through the synthetic `$loop`
+node. Every body node ID is local to that body; `$loop` and `index` are reserved there. Cross-scope
+edges and implicit reads of outer outputs are rejected. Import an outer value through a Loop input,
+including when initializing a nested Loop.
+
+```json
+{
+  "id": "repeat",
+  "kind": "workflow.loop",
+  "loop": {
+    "max_iterations": 5,
+    "variables": [{"name": "count", "type": "int"}],
+    "until": {"variable": "count", "operator": "gte", "value": 3},
+    "body": {
+      "nodes": [
+        {"id": "increment", "kind": "builtin.code", "config": {
+          "language": "cel", "inputs": {"count": "int"}, "code": {"next": "count + 1"}
+        }},
+        {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "count"}}
+      ],
+      "edges": [
+        {"from_node": "$loop", "from_output": "count", "to_node": "increment", "to_input": "count"},
+        {"from_node": "increment", "from_output": "next", "to_node": "assign", "to_input": "value"}
+      ]
+    }
+  }
+}
+```
+
+The surrounding graph binds the initial `count` input and may bind the final `count` output. Variable types use the shared port descriptor grammar: `any`, `null`, `bool`, `number`, `int`, `double`, `string`, `array`, `object`, and nested `{"list": T}` or `{"map": T}`. `builtin.code` continues to accept only its concrete subset. Initial values, assignments, and final outputs are checked against each variable's declared type; a broad source is checked at runtime when necessary.
+
+`workflow.loop_assign` takes one required `value` input and produces a `done` control output. A
+reached assignment overwrites its target variable; a skipped assignment leaves it unchanged. A later
+body step that must read the new value needs an explicit data or control dependency on the
+assignment. `workflow.exit_loop` has no data ports; when activated by a control dependency, it ends
+the nearest Loop immediately and leaves the rest of that pass unvisited. A skipped exit has no
+effect. Assignment and exit steps are invalid outside a Loop.
+
+An active Loop runs at least one pass. Each pass starts with fresh body outputs and skip markers
+while variable values persist. After a complete pass, `until` compares a declared scalar variable
+with its literal using `eq`, `ne`, `gt`, `gte`, `lt`, or `lte`. Numeric comparisons retain the
+existing exact JSON number behavior. A true condition stops the Loop; reaching `max_iterations` also
+stops it successfully. If both happen on the same pass, the stop reason is `condition`. Without
+`until`, the Loop runs to its maximum unless an exit step runs. A skipped incoming dependency skips
+the entire Loop, including all its output ports, without running a pass. Body failure or budget
+exhaustion fails the workflow without publishing partial Loop outputs; completed plugin side effects
+are not rolled back.
+
+`max_iterations` must be between 1 and 1000. Loops can nest four levels deep. A workflow run is
+limited to 10,000 scheduled steps across all scopes, including skipped and structural steps.
+Exceeding that budget fails before the over-budget step runs. Loop errors identify the scope and
+pass index when execution has begun. This feature follows Dify's
+[Loop](https://docs.dify.ai/en/cloud/use-dify/nodes/loop) pattern of sequential refinement; Dify's
+array [Iteration](https://docs.dify.ai/en/cloud/use-dify/nodes/iteration), export format,
+conversation variables, parallel execution, and error-continue modes are separate features.
+
 ## Validation
 
-The CLI checks node IDs, edge endpoints, selected output names, and cycles before generating runner code. The compiled runner validates registered kinds, configuration, ports, type compatibility, and required input connections before installation. Every failure returns a nonzero status and preserves an existing output executable.
+The CLI checks node IDs, edge endpoints, selected output names, reserved Loop controls, and cycles in every scope before generating runner code. The compiled runner validates registered ordinary kinds, configuration, ports, type compatibility, required input connections, and Loop state contracts before installation. Every failure returns a nonzero status and preserves an existing output executable.
 
 Port connections are statically safe when the source type fits the target, such as `Int64` to `Number` or `List(Int64)` to
 `Array`. A constant's configured value determines its output type, and `builtin.identity` carries known type and value

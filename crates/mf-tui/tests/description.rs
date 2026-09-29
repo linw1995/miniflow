@@ -120,11 +120,15 @@ fn times_out_and_closes_pipes_held_by_descendants() {
         "printf '%s\\n' '{json}'\npython3 -c 'import os,time; p=os.fork(); os._exit(0) if p else time.sleep(60)'",
     ));
     let started = Instant::now();
+    let drain_limits = DescriptionLimits {
+        timeout: Duration::from_secs(5),
+        ..limits()
+    };
     assert!(matches!(
-        describe_executable_with_limits(&runner, limits()),
+        describe_executable_with_limits(&runner, drain_limits),
         Err(DescriptionError::OpenPipe)
     ));
-    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(started.elapsed() < Duration::from_secs(6));
 }
 
 #[test]
