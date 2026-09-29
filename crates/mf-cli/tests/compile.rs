@@ -58,6 +58,30 @@ fn compile(definition: &Path, output: &Path, rustflags: Option<&str>) -> Output 
     command.output().unwrap()
 }
 
+#[test]
+fn development_support_uses_checkout_crates_without_override() {
+    let temporary = temporary_directory();
+    let definition = temporary.path().join("workflow.json");
+    let output = temporary.path().join("workflow");
+    fs::write(&definition, definition_json()).unwrap();
+
+    let result = compile_command(&definition, &output)
+        .env_remove("MF_DEV_SUPPORT_ROOT")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let execution = Command::new(output).output().unwrap();
+    assert!(execution.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&execution.stdout).unwrap()["answer"],
+        json!(41)
+    );
+}
+
 fn assert_rejected_definition(mut value: serde_json::Value, diagnostics: &[&str]) {
     let temporary = temporary_directory();
     let definition = temporary.path().join("invalid-workflow.json");

@@ -58,20 +58,20 @@ Rebuild without `--locked` once to refresh an older adjacent Flow lock for the n
 
 ## Repository development
 
-Repository development can use an explicit source override enabled only by the `development-support` Cargo feature:
+The `development-support` Cargo feature uses support crates from this checkout by default. Set `MF_DEV_SUPPORT_ROOT` only to override the crates directory:
 
 ```sh
 nix develop
 output_dir=$(mktemp -d)
-MF_DEV_SUPPORT_ROOT="$PWD/crates" cargo run -p mf-cli --features development-support -- \
+cargo run -p mf-cli --features development-support -- \
   compile examples/hello-workflow.json --output "$output_dir/hello-workflow"
 "$output_dir/hello-workflow"
 
-MF_DEV_SUPPORT_ROOT="$PWD/crates" cargo run -p mf-cli --features development-support -- \
+cargo run -p mf-cli --features development-support -- \
   compile examples/cel-scalar.json --output "$output_dir/cel-scalar"
 "$output_dir/cel-scalar"
 
-MF_DEV_SUPPORT_ROOT="$PWD/crates" cargo run -p mf-cli --features development-support -- \
+cargo run -p mf-cli --features development-support -- \
   compile examples/cel-list.json --output "$output_dir/cel-list"
 "$output_dir/cel-list"
 ```
