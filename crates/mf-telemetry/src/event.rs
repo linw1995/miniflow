@@ -581,10 +581,6 @@ impl EventSequence {
         }
     }
 
-    pub fn new_loop() -> Self {
-        Self::with_maximum(crate::maximum_loop_event_count())
-    }
-
     pub fn reserve(&mut self) -> Result<Count, ContractError> {
         // Keep one slot for a terminal boundary, even when every node emits two records.
         require(

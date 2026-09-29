@@ -122,7 +122,7 @@ impl Observer {
             node_count
         };
         let sequence = if loop_schema {
-            EventSequence::new_loop()
+            EventSequence::with_maximum(crate::maximum_loop_event_count())
         } else {
             EventSequence::new(node_count)?
         };
