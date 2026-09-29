@@ -1,7 +1,7 @@
 //! Logical OTel field mapping. JSON fixtures are not OTLP/HTTP request envelopes.
 
 use crate::{
-    ContractError, EVENT_SCHEMA_VERSION, INSTRUMENTATION_SCOPE,
+    ContractError, EVENT_SCHEMA_VERSION, INSTRUMENTATION_SCOPE, LOOP_EVENT_SCHEMA_VERSION,
     event::{Event, LifecycleEvent},
     require,
 };
@@ -53,7 +53,24 @@ impl WireRecord {
         time_unix_nano: u64,
         trace_context: Option<TraceContext>,
     ) -> Result<Self, ContractError> {
+        Self::from_event_with_version(event, EVENT_SCHEMA_VERSION, time_unix_nano, trace_context)
+    }
+
+    pub fn from_event_with_version(
+        event: &LifecycleEvent,
+        schema_version: i64,
+        time_unix_nano: u64,
+        trace_context: Option<TraceContext>,
+    ) -> Result<Self, ContractError> {
         event.validate()?;
+        require(
+            matches!(
+                schema_version,
+                EVENT_SCHEMA_VERSION | LOOP_EVENT_SCHEMA_VERSION
+            ),
+            "unsupported event schema version",
+        )?;
+        validate_event_version(&event.event, schema_version)?;
         if let Some(context) = &trace_context {
             context.ids()?;
         }
@@ -62,7 +79,7 @@ impl WireRecord {
             .as_object_mut()
             .expect("event bodies are objects");
         let mut attributes = Map::from_iter([
-            ("mf.schema.version".into(), json!(EVENT_SCHEMA_VERSION)),
+            ("mf.schema.version".into(), json!(schema_version)),
             ("mf.workflow.id".into(), json!(event.workflow_id)),
             ("mf.run.id".into(), json!(event.run_id)),
             ("mf.event.sequence".into(), json!(event.sequence)),
@@ -70,9 +87,21 @@ impl WireRecord {
         if let Some(node) = body.remove("node") {
             attributes.insert("mf.node.id".into(), node["id"].clone());
             attributes.insert("mf.node.kind".into(), node["kind"].clone());
+            if let Some(path) = node.get("path") {
+                require(
+                    schema_version == LOOP_EVENT_SCHEMA_VERSION,
+                    "old event schema cannot contain a Loop path",
+                )?;
+                body.insert("loop_path".into(), path.clone());
+            }
         }
-        if let Some(outcome) = body.remove("outcome") {
-            attributes.insert("mf.outcome".into(), outcome);
+        if matches!(
+            event.event,
+            Event::NodeFinished { .. } | Event::WorkflowFinished { .. }
+        ) {
+            if let Some(outcome) = body.remove("outcome") {
+                attributes.insert("mf.outcome".into(), outcome);
+            }
         } else if matches!(event.event, Event::NodeSkipped { .. }) {
             attributes.insert("mf.outcome".into(), json!("skipped"));
         }
@@ -99,10 +128,7 @@ impl WireRecord {
             self.scope == INSTRUMENTATION_SCOPE,
             "unexpected instrumentation scope",
         )?;
-        require(
-            self.attribute("mf.schema.version")?.as_i64() == Some(EVENT_SCHEMA_VERSION),
-            "unsupported event schema version",
-        )?;
+        let schema_version = self.schema_version()?;
         if let Some(context) = &self.trace_context {
             context.ids()?;
         }
@@ -112,13 +138,22 @@ impl WireRecord {
             .ok_or_else(|| crate::invalid("event body must be a structured map"))?
             .clone();
         require(
-            !body.contains_key("node") && !body.contains_key("outcome"),
+            !body.contains_key("node")
+                && (!body.contains_key("outcome") || self.event_name == "mf.loop.pass.finished"),
             "routing fields belong in attributes",
         )?;
         if self.event_name.starts_with("mf.node.") {
+            let path = body.remove("loop_path");
+            require(
+                schema_version == LOOP_EVENT_SCHEMA_VERSION || path.is_none(),
+                "old event schema cannot contain a Loop path",
+            )?;
             body.insert(
                 "node".into(),
-                json!({"id":self.attribute("mf.node.id")?, "kind":self.attribute("mf.node.kind")?}),
+                match path {
+                    Some(path) => json!({"id":self.attribute("mf.node.id")?, "kind":self.attribute("mf.node.kind")?, "path":path}),
+                    None => json!({"id":self.attribute("mf.node.id")?, "kind":self.attribute("mf.node.kind")?}),
+                },
             );
         } else {
             require(
@@ -169,7 +204,20 @@ impl WireRecord {
             event: serde_json::from_value(json!({"event_name":self.event_name,"body":body}))?,
         };
         result.validate()?;
+        validate_event_version(&result.event, schema_version)?;
         Ok(result)
+    }
+
+    pub fn schema_version(&self) -> Result<i64, ContractError> {
+        let version = self
+            .attribute("mf.schema.version")?
+            .as_i64()
+            .ok_or_else(|| crate::invalid("invalid event schema version"))?;
+        require(
+            matches!(version, EVENT_SCHEMA_VERSION | LOOP_EVENT_SCHEMA_VERSION),
+            "unsupported event schema version",
+        )?;
+        Ok(version)
     }
 
     fn attribute(&self, key: &str) -> Result<&Value, ContractError> {
@@ -183,7 +231,12 @@ impl WireRecord {
     pub fn write_to(&self, record: &mut impl LogRecord) -> Result<(), ContractError> {
         let event = self.decode()?;
         // Normalize known fields; additive fields from a newer producer are not re-emitted.
-        let normalized = Self::from_event(&event, self.time_unix_nano, self.trace_context.clone())?;
+        let normalized = Self::from_event_with_version(
+            &event,
+            self.schema_version()?,
+            self.time_unix_nano,
+            self.trace_context.clone(),
+        )?;
         let timestamp = UNIX_EPOCH
             .checked_add(Duration::from_nanos(self.time_unix_nano))
             .ok_or_else(|| crate::invalid("timestamp exceeds platform range"))?;
@@ -203,6 +256,39 @@ impl WireRecord {
         }
         Ok(())
     }
+}
+
+fn validate_event_version(event: &Event, schema_version: i64) -> Result<(), ContractError> {
+    if schema_version == EVENT_SCHEMA_VERSION {
+        require(
+            !matches!(
+                event,
+                Event::LoopPassStarted { .. } | Event::LoopPassFinished { .. }
+            ),
+            "old event schema cannot contain Loop passes",
+        )?;
+        require(
+            event.node().is_none_or(|(node, _)| node.path.is_empty()),
+            "old event schema cannot contain a Loop path",
+        )?;
+        if let Event::NodeFinished { loop_summary, .. } = event {
+            require(
+                loop_summary.is_none(),
+                "old event schema cannot contain a Loop summary",
+            )?;
+        }
+        if let Event::WorkflowFinished {
+            top_level_visited_count,
+            ..
+        } = event
+        {
+            require(
+                top_level_visited_count.is_none(),
+                "old event schema cannot contain a Loop visited prefix",
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn any_value(value: Value) -> Result<AnyValue, ContractError> {

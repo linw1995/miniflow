@@ -1,7 +1,7 @@
 use mf_telemetry::{
     Count,
     description::WorkflowDescription,
-    event::EventSequence,
+    event::{Event, EventSequence, LifecycleEvent, LoopPathEntry},
     identity::{RunId, WorkflowId},
     maximum_event_count,
     wire::{TraceContext, WireRecord},
@@ -117,6 +117,49 @@ fn all_event_fixtures_round_trip_with_exact_attribute_and_body_mapping() {
 }
 
 #[test]
+fn loop_pass_wire_records_require_the_new_schema() {
+    let event = LifecycleEvent {
+        workflow_id: graph().workflow_id,
+        run_id: RunId::new(),
+        sequence: Count::try_from(2).unwrap(),
+        event: Event::LoopPassStarted {
+            path: vec![LoopPathEntry {
+                loop_id: "repeat".into(),
+                index: Count::ZERO,
+            }],
+            elapsed_ns: Count::try_from(1).unwrap(),
+        },
+    };
+    assert!(WireRecord::from_event(&event, 1, None).is_err());
+    let wire = WireRecord::from_event_with_version(&event, 2, 1, None).unwrap();
+    assert_eq!(wire.schema_version().unwrap(), 2);
+    assert_eq!(wire.decode().unwrap(), event);
+}
+
+#[test]
+fn nested_descriptions_validate_scope_ownership_and_version() {
+    let mut value = serde_json::to_value(graph()).unwrap();
+    value["version"] = json!("2026-09-29");
+    value["nodes"] = json!([{"id": "repeat", "kind": "workflow.loop"}]);
+    value["data_edges"] = json!([]);
+    value["control_edges"] = json!([]);
+    value["execution_order"] = json!(["repeat"]);
+    value["loop_bodies"] = json!([{
+        "path": ["repeat"],
+        "nodes": [{"id": "$loop", "kind": "$loop"}, {"id": "child", "kind": "fixture.echo"}],
+        "data_edges": [{"from_node": "$loop", "from_output": "value", "to_node": "child", "to_input": "input"}],
+        "control_edges": [],
+        "execution_order": ["$loop", "child"]
+    }]);
+    WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).unwrap();
+    value["loop_bodies"][0]["path"] = json!(["missing"]);
+    assert!(WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).is_err());
+    value["loop_bodies"][0]["path"] = json!(["repeat"]);
+    value["version"] = json!("2026-09-27");
+    assert!(WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).is_err());
+}
+
+#[test]
 fn additive_fields_are_ignored_but_required_fields_and_versions_are_checked() {
     let wire = record("success");
     let expected = wire.decode().unwrap();
@@ -126,7 +169,7 @@ fn additive_fields_are_ignored_but_required_fields_and_versions_are_checked() {
         .insert("mf.future".into(), json!({"anything":true}));
     extended.body["future"] = json!([null, 1.5]);
     assert_eq!(expected, extended.decode().unwrap());
-    for value in [json!(2), json!("1"), json!(1.0), json!(-1)] {
+    for value in [json!(3), json!("1"), json!(1.0), json!(-1)] {
         let mut invalid = wire.clone();
         invalid.attributes.insert("mf.schema.version".into(), value);
         assert!(invalid.decode().is_err());

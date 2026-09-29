@@ -51,6 +51,14 @@ impl CompiledWorkflow {
         observer: &mf_telemetry::observation::Observer,
         run_id: mf_telemetry::identity::RunId,
     ) -> Result<mf_runtime::RunObservation, mf_telemetry::ContractError> {
+        if self.definition.version == mf_runtime::WorkflowDefinitionVersion::V2026_09_29 {
+            let description = crate::describe_compiled(self).map_err(|error| {
+                mf_telemetry::ContractError::Invalid {
+                    message: error.to_string(),
+                }
+            })?;
+            return observer.start_with_description(description, run_id);
+        }
         if self.execution_order.len() != self.definition.nodes.len() {
             return Err(mf_telemetry::ContractError::Invalid {
                 message: "observation order is incomplete".into(),
@@ -82,6 +90,7 @@ impl CompiledWorkflow {
                     .map(|node| mf_telemetry::event::NodeIdentity {
                         id: id.to_string(),
                         kind: node.kind.clone(),
+                        path: Vec::new(),
                     })
                     .ok_or_else(|| mf_telemetry::ContractError::Invalid {
                         message: format!("unknown observation node {id}"),
@@ -152,7 +161,7 @@ impl CompiledWorkflow {
         }
 
         let (preparations, node_statements) =
-            generate_scope(&self.definition, &self.execution_order, "root", None)?;
+            generate_scope(&self.definition, &self.execution_order, "root", &[], None)?;
 
         let outputs_binding = if self.definition.outputs.is_empty() {
             quote! { let workflow_outputs = mf_runtime::FlowOutputs::new(); }
@@ -224,6 +233,7 @@ fn generate_scope(
     definition: &WorkflowDefinition,
     order: &[DefinitionId],
     scope: &str,
+    static_scope: &[String],
     enclosing: Option<&LoopDefinition>,
 ) -> Result<(Vec<TokenStream>, Vec<TokenStream>), PlanError> {
     let nodes_by_id: BTreeMap<_, _> = definition
@@ -237,6 +247,10 @@ fn generate_scope(
     }];
     let mut statements = Vec::new();
     for (index, id) in order.iter().enumerate() {
+        let scope_literals: Vec<_> = static_scope
+            .iter()
+            .map(|id| LitStr::new(id, Span::call_site()))
+            .collect();
         let node = nodes_by_id.get(id).ok_or_else(|| PlanError::UnknownNode {
             definition_id: id.clone(),
         })?;
@@ -282,8 +296,15 @@ fn generate_scope(
                         }
                     })?;
                 let child_scope = format!("{scope}_{index}");
-                let (body_preparations, body_statements) =
-                    generate_scope(&body, &body_order, &child_scope, Some(loop_definition))?;
+                let mut child_static_scope = static_scope.to_vec();
+                child_static_scope.push(id.to_string());
+                let (body_preparations, body_statements) = generate_scope(
+                    &body,
+                    &body_order,
+                    &child_scope,
+                    &child_static_scope,
+                    Some(loop_definition),
+                )?;
                 preparations.extend(body_preparations);
                 let config_json = serde_json::to_string(loop_definition).context(SerializeSnafu)?;
                 let config_lit = LitStr::new(&config_json, Span::call_site());
@@ -334,13 +355,24 @@ fn generate_scope(
             _ => {
                 let config_json = serde_json::to_string(&node.config).context(SerializeSnafu)?;
                 let config_lit = LitStr::new(&config_json, Span::call_site());
-                quote! { state.prepare_node(registry, #id_lit, #kind_lit, #config_lit)? }
+                if static_scope.is_empty() {
+                    quote! { state.prepare_node(registry, #id_lit, #kind_lit, #config_lit)? }
+                } else {
+                    quote! { state.prepare_node_in_loop(
+                        registry, #id_lit, #kind_lit, #config_lit, &[#(#scope_literals),*]
+                    )? }
+                }
             }
+        };
+        let report_preparation = if static_scope.is_empty() {
+            quote! { state.preparation_failed(#id_lit, &error); }
+        } else {
+            quote! { state.preparation_failed_in_loop(&[#(#scope_literals),*], #id_lit, &error); }
         };
         preparations.push(quote! {
             let mut #node_ident = #constructor;
             #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*]).map_err(|error| {
-                state.preparation_failed(#id_lit, &error);
+                #report_preparation
                 mf_runtime::WorkflowRunError::Context {
                     definition_id: #id_lit.into(),
                     message: error.to_string(),

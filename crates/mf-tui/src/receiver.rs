@@ -402,6 +402,17 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), String> {
             .record_local_lifecycle_drop(1, "invalid lifecycle schema");
         error.to_string()
     })?;
+    let schema_version = wire.schema_version().map_err(|error| error.to_string())?;
+    {
+        let mut state = context
+            .state
+            .lock()
+            .expect("receiver state was not poisoned");
+        if schema_version != state.expected_event_schema_version() {
+            state.record_local_lifecycle_drop(1, "event and description versions disagree");
+            return Err("event and description versions disagree".into());
+        }
+    }
     let admission = context
         .state
         .lock()

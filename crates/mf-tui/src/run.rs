@@ -5,7 +5,7 @@ use crate::{
     duration::format_duration_ns,
     graph::{GraphError, GraphLayout, GraphView},
     receiver::{LoopbackReceiver, ReceiverError},
-    state::{NodeObservation, StateSnapshot},
+    state::{LoopPassObservation, NodeObservation, StateSnapshot},
 };
 use crossterm::{
     cursor::{Hide, Show},
@@ -13,7 +13,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use mf_telemetry::identity::RunId;
+use mf_telemetry::{event::LoopPathEntry, identity::RunId};
 use nix::{
     fcntl::{FcntlArg, OFlag, fcntl},
     sys::signal::Signal,
@@ -28,7 +28,7 @@ use ratatui::{
 use signal_hook::{SigId, consts::SIGINT, flag, low_level::unregister};
 use snafu::Snafu;
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, VecDeque},
     env,
     fs::File,
     io::{self, IsTerminal, Read, Seek, SeekFrom, Write},
@@ -77,6 +77,12 @@ pub fn run_executable(path: &Path) -> Result<u8, RunError> {
     let description =
         describe_executable(path).map_err(|source| RunError::Description { source })?;
     let layout = GraphLayout::new(&description).map_err(|source| RunError::Graph { source })?;
+    let mut body_layouts = BTreeMap::new();
+    for body in &description.loop_bodies {
+        let body_layout = GraphLayout::from_loop_body(&description, &body.path)
+            .map_err(|source| RunError::Graph { source })?;
+        body_layouts.insert(body.path.clone(), body_layout);
+    }
     let capture = Arc::new(Mutex::new(
         Capture::new().map_err(|source| RunError::Spool { source })?,
     ));
@@ -126,6 +132,7 @@ pub fn run_executable(path: &Path) -> Result<u8, RunError> {
             capture_worker.as_mut().expect("capture worker was started"),
             &mut receiver,
             &layout,
+            &body_layouts,
             &mut terminal,
             &signal,
         )
@@ -450,11 +457,100 @@ fn set_nonblocking(fd: impl AsFd) -> io::Result<()> {
     Ok(())
 }
 
+#[derive(Default)]
+struct ViewState {
+    path: Vec<String>,
+    offset: (u32, u32),
+    selected: usize,
+    pass_offset: usize,
+}
+
+impl ViewState {
+    fn layout<'a>(
+        &self,
+        root: &'a GraphLayout,
+        bodies: &'a BTreeMap<Vec<String>, GraphLayout>,
+    ) -> &'a GraphLayout {
+        if self.path.is_empty() {
+            root
+        } else {
+            &bodies[&self.path]
+        }
+    }
+
+    fn pass<'a>(&self, snapshot: &'a StateSnapshot) -> Option<&'a LoopPassObservation> {
+        let matching: Vec<_> = snapshot
+            .loop_passes
+            .iter()
+            .filter(|pass| {
+                pass.path
+                    .iter()
+                    .map(|entry| &entry.loop_id)
+                    .eq(self.path.iter())
+            })
+            .collect();
+        let offset = self.pass_offset.min(matching.len().checked_sub(1)?);
+        matching.get(matching.len() - offset - 1).copied()
+    }
+
+    fn handle_key(
+        &mut self,
+        key: KeyCode,
+        snapshot: &StateSnapshot,
+        root: &GraphLayout,
+        bodies: &BTreeMap<Vec<String>, GraphLayout>,
+    ) {
+        match key {
+            KeyCode::Char('l') => {
+                if let Some(node) = self.layout(root, bodies).nodes().get(self.selected)
+                    && node.kind == "workflow.loop"
+                {
+                    let mut child = self.path.clone();
+                    child.push(node.id.clone());
+                    if bodies.contains_key(&child) {
+                        self.path = child;
+                        self.offset = (0, 0);
+                        self.selected = 0;
+                        self.pass_offset = 0;
+                    }
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Esc => {
+                if !self.path.is_empty() {
+                    self.path.pop();
+                    self.offset = (0, 0);
+                    self.selected = 0;
+                    self.pass_offset = 0;
+                }
+            }
+            KeyCode::Char('[') => {
+                let count = snapshot
+                    .loop_passes
+                    .iter()
+                    .filter(|pass| {
+                        pass.path
+                            .iter()
+                            .map(|entry| &entry.loop_id)
+                            .eq(self.path.iter())
+                    })
+                    .count();
+                self.pass_offset = (self.pass_offset + 1).min(count.saturating_sub(1));
+            }
+            KeyCode::Char(']') => self.pass_offset = self.pass_offset.saturating_sub(1),
+            _ => {
+                let nodes = self.layout(root, bodies).nodes().len();
+                navigate(key, &mut self.offset, &mut self.selected, nodes);
+            }
+        }
+    }
+}
+
 fn supervise(
     child: &mut ChildGuard,
     capture: &mut CaptureWorker,
     receiver: &mut LoopbackReceiver,
     layout: &GraphLayout,
+    body_layouts: &BTreeMap<Vec<String>, GraphLayout>,
     terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
     signal: &SignalGuard,
 ) -> Result<(ExitStatus, bool, bool), RunError> {
@@ -463,8 +559,7 @@ fn supervise(
     let mut interrupted_at: Option<Instant> = None;
     let mut killed = false;
     let mut capture_forced = false;
-    let mut offset = (0u32, 0u32);
-    let mut selected = 0usize;
+    let mut view_state = ViewState::default();
     let mut last_frame = Instant::now() - FRAME_INTERVAL;
     loop {
         let view = capture.view();
@@ -518,11 +613,11 @@ fn supervise(
             draw(
                 terminal,
                 layout,
+                body_layouts,
                 &snapshot,
                 &final_view,
                 completed_elapsed,
-                offset,
-                selected,
+                &view_state,
                 Some(status),
             )?;
             loop {
@@ -537,7 +632,10 @@ fn supervise(
                             if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                         {
                             match key.code {
-                                KeyCode::Char('q') | KeyCode::Enter | KeyCode::Esc => {
+                                KeyCode::Char('q') | KeyCode::Enter => {
+                                    return Ok((status, interrupted_at.is_some(), capture_forced));
+                                }
+                                KeyCode::Esc if view_state.path.is_empty() => {
                                     return Ok((status, interrupted_at.is_some(), capture_forced));
                                 }
                                 KeyCode::Char('c')
@@ -546,11 +644,11 @@ fn supervise(
                                     return Ok((status, interrupted_at.is_some(), capture_forced));
                                 }
                                 _ => {
-                                    navigate(
+                                    view_state.handle_key(
                                         key.code,
-                                        &mut offset,
-                                        &mut selected,
-                                        layout.nodes().len(),
+                                        &snapshot,
+                                        layout,
+                                        body_layouts,
                                     );
                                 }
                             }
@@ -565,11 +663,11 @@ fn supervise(
                     draw(
                         terminal,
                         layout,
+                        body_layouts,
                         &snapshot,
                         &final_view,
                         completed_elapsed,
-                        offset,
-                        selected,
+                        &view_state,
                         Some(status),
                     )?;
                 }
@@ -581,11 +679,11 @@ fn supervise(
             draw(
                 terminal,
                 layout,
+                body_layouts,
                 &snapshot,
                 &view,
                 started.elapsed(),
-                offset,
-                selected,
+                &view_state,
                 None,
             )?;
             last_frame = Instant::now();
@@ -605,7 +703,8 @@ fn supervise(
                             interrupt(child, &mut interrupted_at);
                         }
                     } else {
-                        navigate(key.code, &mut offset, &mut selected, layout.nodes().len());
+                        let snapshot = receiver.snapshot();
+                        view_state.handle_key(key.code, &snapshot, layout, body_layouts);
                     }
                     last_frame = Instant::now() - FRAME_INTERVAL;
                 }
@@ -644,14 +743,34 @@ fn navigate(key: KeyCode, offset: &mut (u32, u32), selected: &mut usize, nodes: 
 #[allow(clippy::too_many_arguments)]
 fn draw(
     terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
-    layout: &GraphLayout,
+    root_layout: &GraphLayout,
+    body_layouts: &BTreeMap<Vec<String>, GraphLayout>,
     snapshot: &StateSnapshot,
     capture: &CaptureView,
     elapsed: Duration,
-    offset: (u32, u32),
-    selected: usize,
+    view_state: &ViewState,
     status: Option<ExitStatus>,
 ) -> Result<(), RunError> {
+    let layout = view_state.layout(root_layout, body_layouts);
+    let pass = view_state.pass(snapshot);
+    let display_nodes = if view_state.path.is_empty() {
+        None
+    } else {
+        let order = || {
+            layout
+                .nodes()
+                .iter()
+                .map(|node| (node.id.as_str(), node.kind.as_str()))
+        };
+        Some(pass.map_or_else(
+            || {
+                order()
+                    .map(|(id, kind)| NodeObservation::pending(id, kind))
+                    .collect()
+            },
+            |pass| pass.display_nodes(order()),
+        ))
+    };
     terminal.draw(|frame| {
         let [header, body, footer] = Layout::vertical([
             Constraint::Length(1), Constraint::Min(1), Constraint::Length(2),
@@ -661,17 +780,40 @@ fn draw(
             mf_telemetry::event::Outcome::Succeeded => "Succeeded",
             mf_telemetry::event::Outcome::Failed => "Failed",
         });
-        frame.render_widget(Paragraph::new(format!("Workflow: {workflow}  |  Process: {phase}  |  {:.1}s", elapsed.as_secs_f64())), header);
+        let scope = if view_state.path.is_empty() {
+            "root".to_owned()
+        } else {
+            format!("{:?}", view_state.path)
+        };
+        let pass_label = pass.and_then(|pass| pass.path.last())
+            .map_or(String::new(), |entry| format!("  |  Pass: {}", entry.index.get()));
+        frame.render_widget(Paragraph::new(format!(
+            "Workflow: {workflow}  |  Process: {phase}  |  Scope: {scope}{pass_label}  |  {:.1}s",
+            elapsed.as_secs_f64()
+        )), header);
         let [graph, details] = Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)]).areas(body);
-        frame.render_widget(GraphView::new(layout).snapshot(snapshot).offset(offset.0, offset.1).elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64), graph);
-        let selected_node = snapshot.nodes.get(selected);
-        frame.render_widget(Paragraph::new(details_text(selected_node, snapshot, capture))
+        let mut graph_view = GraphView::new(layout)
+            .offset(view_state.offset.0, view_state.offset.1)
+            .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64);
+        if view_state.path.is_empty() {
+            graph_view = graph_view.snapshot(snapshot);
+        } else if let Some(nodes) = &display_nodes {
+            graph_view = graph_view.nodes(nodes);
+        }
+        frame.render_widget(graph_view, graph);
+        let selected_node = if let Some(nodes) = &display_nodes {
+            nodes.get(view_state.selected)
+        } else {
+            snapshot.nodes.get(view_state.selected)
+        };
+        let parent_path = pass.map_or(&[][..], |pass| pass.path.as_slice());
+        frame.render_widget(Paragraph::new(details_text(selected_node, parent_path, snapshot, capture))
             .block(Block::default().title("Details").borders(Borders::ALL))
             .wrap(Wrap { trim: false }), details);
         let lifecycle = &snapshot.lifecycle;
         let controls = if status.is_some() { "q/Enter close" } else { "Ctrl-C interrupt" };
         frame.render_widget(Paragraph::new(format!(
-            "Observation: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows pan | f origin | Tab/j/k select | {controls}",
+            "Observation: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows pan | f origin | Tab/j/k select | l enter Loop | h back | [/] pass | {controls}",
             lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
             lifecycle.observation_errors + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
         )), footer);
@@ -681,6 +823,7 @@ fn draw(
 
 fn details_text(
     node: Option<&NodeObservation>,
+    parent_path: &[LoopPathEntry],
     snapshot: &StateSnapshot,
     capture: &CaptureView,
 ) -> String {
@@ -723,6 +866,29 @@ fn details_text(
         if node.possibly_missing_events || node.conflicted {
             details.push_str("Node observation may be incomplete\n");
         }
+        if node.kind == "workflow.loop"
+            && let Some(loop_state) = snapshot
+                .loop_overviews
+                .iter()
+                .find(|overview| overview.parent_path == parent_path && overview.loop_id == node.id)
+        {
+            details.push_str(&format!(
+                "Completed passes: {}\n",
+                loop_state.completed_passes
+            ));
+            if let Some(index) = loop_state.active_index {
+                details.push_str(&format!("Active pass: {}\n", index.get()));
+            }
+            if let Some(reason) = loop_state.stop_reason {
+                details.push_str(&format!("Stop reason: {reason:?}\n"));
+            }
+        }
+    }
+    if snapshot.hidden_loop_passes != 0 {
+        details.push_str(&format!(
+            "Older pass details hidden: {}\n",
+            snapshot.hidden_loop_passes
+        ));
     }
     if snapshot.lifecycle.final_sequence.is_none() {
         details.push_str("Final lifecycle boundary missing\n");
@@ -769,6 +935,97 @@ fn details_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mf_telemetry::{
+        Count,
+        description::{
+            LoopBodyDescription, NodeDescription, WorkflowDescription, WorkflowDescriptionVersion,
+        },
+        event::{Event as LifecycleKind, LifecycleEvent, LoopPathEntry},
+        identity::WorkflowId,
+    };
+
+    #[test]
+    fn loop_view_enters_body_and_returns_to_root() {
+        let description = WorkflowDescription {
+            version: WorkflowDescriptionVersion::V2026_09_29,
+            workflow_id: WorkflowId::try_from(format!("sha256:{}", "c".repeat(64))).unwrap(),
+            nodes: vec![NodeDescription {
+                id: "repeat".into(),
+                kind: "workflow.loop".into(),
+            }],
+            data_edges: vec![],
+            control_edges: vec![],
+            execution_order: vec!["repeat".into()],
+            loop_bodies: vec![LoopBodyDescription {
+                path: vec!["repeat".into()],
+                nodes: vec![NodeDescription {
+                    id: "$loop".into(),
+                    kind: "$loop".into(),
+                }],
+                data_edges: vec![],
+                control_edges: vec![],
+                execution_order: vec!["$loop".into()],
+            }],
+        };
+        let root = GraphLayout::new(&description).unwrap();
+        let bodies = BTreeMap::from([(
+            vec!["repeat".into()],
+            GraphLayout::from_loop_body(&description, &["repeat".into()]).unwrap(),
+        )]);
+        let run_id = RunId::new();
+        let mut session = crate::state::SessionState::new(description.clone(), run_id).unwrap();
+        let count = |value| Count::try_from(value).unwrap();
+        for (sequence, event) in [
+            (
+                1,
+                LifecycleKind::WorkflowStarted {
+                    node_count: count(2),
+                    elapsed_ns: Count::ZERO,
+                },
+            ),
+            (
+                2,
+                LifecycleKind::LoopPassStarted {
+                    path: vec![LoopPathEntry {
+                        loop_id: "repeat".into(),
+                        index: Count::ZERO,
+                    }],
+                    elapsed_ns: count(1),
+                },
+            ),
+            (
+                3,
+                LifecycleKind::LoopPassStarted {
+                    path: vec![LoopPathEntry {
+                        loop_id: "repeat".into(),
+                        index: count(1),
+                    }],
+                    elapsed_ns: count(2),
+                },
+            ),
+        ] {
+            session
+                .apply(LifecycleEvent {
+                    workflow_id: description.workflow_id.clone(),
+                    run_id,
+                    sequence: count(sequence),
+                    event,
+                })
+                .unwrap();
+        }
+        let snapshot = session.snapshot();
+        let mut view = ViewState::default();
+        view.handle_key(KeyCode::Char('l'), &snapshot, &root, &bodies);
+        assert_eq!(view.path, ["repeat"]);
+        assert_eq!(view.layout(&root, &bodies).nodes()[0].id, "$loop");
+        assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 1);
+        view.handle_key(KeyCode::Char('['), &snapshot, &root, &bodies);
+        assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 0);
+        view.handle_key(KeyCode::Char(']'), &snapshot, &root, &bodies);
+        assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 1);
+        view.handle_key(KeyCode::Char('h'), &snapshot, &root, &bodies);
+        assert!(view.path.is_empty());
+    }
 
     #[test]
     fn stdout_spool_limit_preserves_the_available_prefix() {

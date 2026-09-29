@@ -121,7 +121,8 @@ Emit `mf.loop.pass.started` before each body traversal and `mf.loop.pass.finishe
 completed, exited, or failed pass. A pass finish carries its local visited prefix, so a reached exit
 proves which later body steps were not run. Keep the per-run sequence and lightweight workflow final
 boundary. Replace the current static `2 * node_count + 2` event bound with a checked bound of `4 *
-10,000 + 2`: at most two node and two pass records per scheduled step. Record actual visited-step
+10,000 + 4`: at most two node and two pass records per scheduled step, plus one failed pass that
+cannot schedule its first step after budget exhaustion. Record actual visited-step
 counts and the currently active frame/prefix on failure; a future pass that never started is not a
 skipped node. Loop completion records include pass count and a stop reason (`condition`, `maximum`,
 or `exit`) but no variable values. A skipped Loop emits a skip outcome without creating pass

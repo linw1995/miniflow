@@ -3,6 +3,7 @@ use crate::{
     LoopDefinition, LoopVariableDefinition, Node, NodeExecutionError, NodePorts, NodeResult,
     Outputs, PortSpec, ValueType, WorkflowRunError, compare_json_numbers,
 };
+use mf_telemetry::event::LoopStopReason;
 use serde_json::Value;
 use std::{cmp::Ordering, collections::BTreeMap};
 
@@ -100,22 +101,30 @@ where
         ctx: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
         let mut variables = inputs;
+        let mut pass_count = 0;
+        let mut reason = LoopStopReason::Maximum;
         for index in 0..usize::from(self.definition.max_iterations) {
             let (updated, exited) = ctx
-                .run_loop_frame(variables, self.types.clone(), index, |ctx| (self.body)(ctx))
+                .run_loop_frame(&self.id, variables, self.types.clone(), index, |ctx| {
+                    (self.body)(ctx)
+                })
                 .map_err(|error| {
                     structural_error(format!("Loop `{}` pass {index}: {error}", self.id))
                 })?;
             variables = updated;
+            pass_count = index + 1;
             if exited {
+                reason = LoopStopReason::Exit;
                 break;
             }
             if let Some(condition) = &self.definition.until
                 && condition_matches(condition, &variables)?
             {
+                reason = LoopStopReason::Condition;
                 break;
             }
         }
+        ctx.set_loop_summary(pass_count, reason);
         Ok(variables.into())
     }
 }

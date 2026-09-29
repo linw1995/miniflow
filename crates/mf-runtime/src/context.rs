@@ -1,6 +1,6 @@
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use mf_telemetry::{
-    event::{FailurePhase, SkipCause},
+    event::{FailurePhase, LoopPassOutcome, LoopPathEntry, LoopStopReason, LoopSummary, SkipCause},
     observation::{NodeObservation, RunObservation},
 };
 use serde_json::Value;
@@ -8,10 +8,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
 struct LoopFrame {
+    loop_id: String,
     variables: BTreeMap<String, Value>,
     types: BTreeMap<String, crate::ValueType>,
     index: usize,
     exit_requested: bool,
+    visited_steps: usize,
 }
 
 #[derive(Debug, Default)]
@@ -43,6 +45,7 @@ pub struct ExecutionContext {
     observation: Option<RunObservation>,
     loop_frames: Vec<LoopFrame>,
     pending_loop_write: Option<(String, Value)>,
+    pending_loop_summary: Option<LoopSummary>,
     remaining_steps: usize,
 }
 
@@ -53,6 +56,7 @@ impl Default for ExecutionContext {
             observation: None,
             loop_frames: Vec::new(),
             pending_loop_write: None,
+            pending_loop_summary: None,
             remaining_steps: crate::MAX_SCHEDULED_STEPS,
         }
     }
@@ -93,6 +97,35 @@ impl ExecutionContext {
             self.preparation_failed(id, error);
         }
         result
+    }
+
+    pub fn prepare_node_in_loop(
+        &mut self,
+        registry: &crate::NodeRegistry,
+        id: &str,
+        kind: &str,
+        config: &str,
+        scope: &[&str],
+    ) -> Result<FlowNode, WorkflowRunError> {
+        let result = crate::instantiate_node_with_metadata(registry, id, kind, config);
+        if let Err(error) = &result {
+            self.preparation_failed_in_loop(scope, id, error);
+        }
+        result
+    }
+
+    pub fn preparation_failed_in_loop(
+        &mut self,
+        scope: &[&str],
+        id: &str,
+        error: &dyn std::fmt::Display,
+    ) {
+        if let Some(run) = self.observation.as_mut() {
+            run.preparation_failed_unattributed(format!(
+                "Loop scope {} node `{id}`: {error}",
+                serde_json::to_string(scope).expect("scope IDs serialize")
+            ));
+        }
     }
 
     pub fn preparation_failed(&mut self, id: &str, error: &dyn std::fmt::Display) {
@@ -183,6 +216,7 @@ impl ExecutionContext {
 
     pub(crate) fn run_loop_frame(
         &mut self,
+        loop_id: &str,
         variables: BTreeMap<String, Value>,
         types: BTreeMap<String, crate::ValueType>,
         index: usize,
@@ -190,16 +224,54 @@ impl ExecutionContext {
     ) -> Result<(BTreeMap<String, Value>, bool), WorkflowRunError> {
         let parent_outputs = std::mem::take(&mut self.outputs);
         self.loop_frames.push(LoopFrame {
+            loop_id: loop_id.into(),
             variables,
             types,
             index,
             exit_requested: false,
+            visited_steps: 0,
         });
+        let path = self.loop_path();
+        if let Some(run) = self.observation.as_mut().filter(|run| run.supports_loops()) {
+            run.loop_pass_started(path.clone());
+        }
         let result = run(self);
+        let frame = self.loop_frames.last().expect("Loop frame was just pushed");
+        let outcome = if result.is_err() {
+            LoopPassOutcome::Failed
+        } else if frame.exit_requested {
+            LoopPassOutcome::Exit
+        } else {
+            LoopPassOutcome::Completed
+        };
+        let visited = mf_telemetry::Count::try_from(frame.visited_steps as i64)
+            .expect("scheduled-step budget bounds pass visits");
+        if let Some(run) = self.observation.as_mut().filter(|run| run.supports_loops()) {
+            run.loop_pass_finished(path, visited, outcome);
+        }
         let frame = self.loop_frames.pop().expect("Loop frame was just pushed");
         self.outputs = parent_outputs;
         self.pending_loop_write = None;
         result.map(|()| (frame.variables, frame.exit_requested))
+    }
+
+    fn loop_path(&self) -> Vec<LoopPathEntry> {
+        self.loop_frames
+            .iter()
+            .map(|frame| LoopPathEntry {
+                loop_id: frame.loop_id.clone(),
+                index: mf_telemetry::Count::try_from(frame.index as i64)
+                    .expect("Loop index is bounded"),
+            })
+            .collect()
+    }
+
+    pub(crate) fn set_loop_summary(&mut self, pass_count: usize, reason: LoopStopReason) {
+        self.pending_loop_summary = Some(LoopSummary {
+            pass_count: mf_telemetry::Count::try_from(pass_count as i64)
+                .expect("Loop pass count is bounded"),
+            reason,
+        });
     }
 
     fn reserve_step(&mut self, id: &str) -> Result<(), WorkflowRunError> {
@@ -213,6 +285,9 @@ impl ExecutionContext {
             ));
         }
         self.remaining_steps -= 1;
+        if let Some(frame) = self.loop_frames.last_mut() {
+            frame.visited_steps += 1;
+        }
         Ok(())
     }
 
@@ -314,10 +389,14 @@ pub fn execute_node_in_context(
     let id = node.definition_id.as_str();
     ctx.reserve_step(id)?;
     ctx.pending_loop_write = None;
-    let mut step = if ctx.loop_frames.is_empty() {
+    ctx.pending_loop_summary = None;
+    let path = ctx.loop_path();
+    let mut step = if path.is_empty() {
         ctx.observation.as_mut().and_then(|run| run.begin_node(id))
     } else {
-        None
+        ctx.observation
+            .as_mut()
+            .and_then(|run| run.begin_invocation(path, id))
     };
     let _context = step.as_ref().map(NodeObservation::enter);
     let mut dependencies = dependencies.to_vec();
@@ -417,13 +496,19 @@ pub fn execute_node_in_context(
         }
     }
     let result = ctx.publish(node, result);
+    let loop_summary = ctx.pending_loop_summary.take();
     if let (Some(run), Some(step)) = (ctx.observation.as_mut(), step) {
         match &result {
             Err(error) => run.node_failed(step, FailurePhase::Publication, error.to_string()),
             Ok(()) if skipped => {
                 run.node_skipped(step, causes.into_iter().collect(), skipped_ports)
             }
-            Ok(()) => run.node_succeeded(step, produced_ports, skipped_ports),
+            Ok(()) => run.node_succeeded_with_loop_summary(
+                step,
+                produced_ports,
+                skipped_ports,
+                loop_summary,
+            ),
         }
     }
     result

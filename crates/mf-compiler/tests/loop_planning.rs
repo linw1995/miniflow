@@ -1,3 +1,5 @@
+#[path = "fixtures/observation_capture.rs"]
+mod capture;
 mod common;
 extern crate mfn_code as _;
 extern crate mfn_core as _;
@@ -6,7 +8,11 @@ use mf_compiler::{
     CompileRequest, ExecutionContext, Inputs, Node, NodeBuildError, NodeExecutionError,
     NodeRegistration, NodeRegistry, Outputs, PortSpec, SupportPackages, ValueType,
     WorkflowDefinition, WorkflowDefinitionVersion, compile_definition, compile_project,
-    instantiate_compiled, plan_definition,
+    execute_compiled, instantiate_compiled, plan_definition,
+};
+use mf_telemetry::{
+    event::{Event, LoopPassOutcome, LoopStopReason},
+    identity::RunId,
 };
 use serde_json::{Value, json};
 use std::{fs, process::Command};
@@ -358,6 +364,11 @@ fn nested_loops_restore_parent_state_and_share_step_budget() {
         run_in_memory(nested_definition()).unwrap(),
         json!({"count": 2})
     );
+    let plan = plan_definition(&parse(nested_definition())).unwrap();
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    assert_eq!(description.loop_bodies.len(), 2);
+    assert_eq!(description.loop_bodies[0].path, ["repeat"]);
+    assert_eq!(description.loop_bodies[1].path, ["repeat", "inner"]);
     let error = run_in_memory(budget_definition()).unwrap_err();
     assert!(
         error.contains("budget") && error.contains("inner"),
@@ -442,4 +453,185 @@ fn invalid_assignment_does_not_publish_partial_loop_output() {
         "{error}"
     );
     assert!(context.output("repeat.count").is_err());
+}
+
+#[test]
+fn loop_observation_identifies_each_pass_and_body_invocation() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&parse(definition()), &registry).unwrap();
+    let harness = capture::Harness::new(true);
+    let observation = plan
+        .start_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let output = execute_compiled(&plan, &registry, Some(observation)).unwrap();
+    assert_eq!(output["count"], json!(3));
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    assert_eq!(description.loop_bodies.len(), 1);
+    let records = harness.records();
+    assert!(
+        records
+            .iter()
+            .all(|record| record.schema_version().unwrap() == 2)
+    );
+    let mut pass_starts = 0;
+    let mut pass_finishes = 0;
+    let mut increments = Vec::new();
+    let mut summary = None;
+    for record in &records {
+        let event = record.decode().unwrap();
+        event.validate_for(&description).unwrap();
+        match event.event {
+            Event::LoopPassStarted { path, .. } => {
+                assert_eq!(path.last().unwrap().loop_id, "repeat");
+                pass_starts += 1;
+            }
+            Event::LoopPassFinished { path, outcome, .. } => {
+                assert_eq!(path.last().unwrap().loop_id, "repeat");
+                assert_eq!(outcome, LoopPassOutcome::Completed);
+                pass_finishes += 1;
+            }
+            Event::NodeFinished {
+                node, loop_summary, ..
+            } if node.id == "increment" => {
+                increments.push(node.path.last().unwrap().index.get());
+                assert!(loop_summary.is_none());
+            }
+            Event::NodeFinished {
+                node, loop_summary, ..
+            } if node.id == "repeat" => {
+                summary = loop_summary;
+            }
+            _ => {}
+        }
+        assert!(!record.body.to_string().contains("\"count\":3"));
+    }
+    assert_eq!(
+        (pass_starts, pass_finishes),
+        (3, 3),
+        "{:?}",
+        records
+            .iter()
+            .map(|record| &record.event_name)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(increments, vec![0, 1, 2]);
+    let summary = summary.unwrap();
+    assert_eq!(summary.pass_count.get(), 3);
+    assert_eq!(summary.reason, LoopStopReason::Condition);
+    let spans = harness.spans.get_finished_spans().unwrap();
+    let loop_span = spans
+        .iter()
+        .find(|span| {
+            span.attributes.iter().any(|attribute| {
+                attribute.key.as_str() == "mf.node.id" && attribute.value.to_string() == "repeat"
+            })
+        })
+        .unwrap();
+    assert!(spans.iter().any(|span| {
+        span.attributes.iter().any(|attribute| {
+            attribute.key.as_str() == "mf.node.id" && attribute.value.to_string() == "increment"
+        }) && span.parent_span_id == loop_span.span_context.span_id()
+    }));
+}
+
+#[test]
+fn loop_observation_distinguishes_exit_skip_and_nested_paths() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for (value, expected) in [
+        (exit_definition(), json!({"count": 2})),
+        (skipped_definition(), json!({})),
+        (nested_definition(), json!({"count": 2})),
+    ] {
+        let plan = compile_definition(&parse(value), &registry).unwrap();
+        let description = mf_compiler::describe_compiled(&plan).unwrap();
+        let harness = capture::Harness::new(true);
+        let observation = plan
+            .start_observation(&harness.observer(), RunId::new())
+            .unwrap();
+        let output = execute_compiled(&plan, &registry, Some(observation)).unwrap();
+        assert_eq!(serde_json::to_value(output).unwrap(), expected);
+        let events: Vec<_> = harness
+            .records()
+            .iter()
+            .map(|record| {
+                let event = record.decode().unwrap();
+                event.validate_for(&description).unwrap();
+                event.event
+            })
+            .collect();
+        if expected == json!({}) {
+            assert!(
+                !events
+                    .iter()
+                    .any(|event| matches!(event, Event::LoopPassStarted { .. }))
+            );
+            assert!(events.iter().any(|event| matches!(event,
+                Event::NodeSkipped { node, .. } if node.id == "repeat")));
+        } else if description.loop_bodies.len() == 2 {
+            assert!(events.iter().any(|event| matches!(event,
+                Event::NodeFinished { node, .. }
+                    if node.id == "increment" && node.path.len() == 2)));
+        } else {
+            let outcomes: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    Event::LoopPassFinished { outcome, .. } => Some(*outcome),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                outcomes,
+                [LoopPassOutcome::Completed, LoopPassOutcome::Exit]
+            );
+            assert!(events.iter().any(|event| matches!(event,
+                Event::NodeSkipped { node, causes, .. }
+                    if node.id == "exit" && causes.iter().any(|cause|
+                        cause.source_node == "route" && cause.source_output == "stop"))));
+            assert!(events.iter().any(|event| matches!(event,
+                Event::NodeFinished { node, loop_summary: Some(summary), .. }
+                    if node.id == "repeat" && summary.reason == LoopStopReason::Exit)));
+        }
+    }
+}
+
+#[test]
+fn failed_body_emits_a_failed_pass_and_no_loop_success() {
+    let mut value = definition();
+    value["nodes"][1]["loop"]["body"] = json!({
+        "nodes": [
+            {"id": "wrong", "kind": "test.wrong_type"},
+            {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "count"}}
+        ],
+        "edges": [{"from_node": "wrong", "from_output": "value", "to_node": "assign", "to_input": "value"}]
+    });
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&parse(value), &registry).unwrap();
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    let harness = capture::Harness::new(true);
+    let observation = plan
+        .start_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    assert!(execute_compiled(&plan, &registry, Some(observation)).is_err());
+    let events: Vec<_> = harness
+        .records()
+        .iter()
+        .map(|record| {
+            let event = record.decode().unwrap();
+            event.validate_for(&description).unwrap();
+            event.event
+        })
+        .collect();
+    assert!(events.iter().any(|event| matches!(
+        event,
+        Event::LoopPassFinished {
+            outcome: LoopPassOutcome::Failed,
+            ..
+        }
+    )));
+    assert!(events.iter().any(|event| matches!(event,
+        Event::NodeFinished { node, outcome: mf_telemetry::event::Outcome::Failed, .. }
+            if node.id == "assign" && node.path.len() == 1)));
+    assert!(!events.iter().any(|event| matches!(event,
+        Event::NodeFinished { node, outcome: mf_telemetry::event::Outcome::Succeeded, .. }
+            if node.id == "repeat")));
 }

@@ -89,9 +89,9 @@ pub const LOOP_KIND: &str = "workflow.loop";
 pub const LOOP_ASSIGN_KIND: &str = "workflow.loop_assign";
 pub const EXIT_LOOP_KIND: &str = "workflow.exit_loop";
 pub const LOOP_SOURCE_ID: &str = "$loop";
-pub const MAX_LOOP_ITERATIONS: u16 = 1000;
-pub const MAX_LOOP_DEPTH: usize = 4;
-pub const MAX_SCHEDULED_STEPS: usize = 10_000;
+pub const MAX_LOOP_ITERATIONS: u16 = mf_telemetry::MAX_LOOP_ITERATIONS;
+pub const MAX_LOOP_DEPTH: usize = mf_telemetry::MAX_LOOP_DEPTH;
+pub const MAX_SCHEDULED_STEPS: usize = mf_telemetry::MAX_LOOP_SCHEDULED_STEPS as usize;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

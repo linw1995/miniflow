@@ -14,9 +14,9 @@
 
 ## 3. Update observation and terminal presentation
 
-- [ ] 3.1 Add versioned nested descriptions, per-invocation lifecycle identities, pass start/finish boundaries, bounded event counts, and stop reasons. Verify old protocol fixtures and old-binary description handling remain valid.
-- [ ] 3.2 Instrument Loop and body steps in the shared executor. Verify live events, failure paths, early exit, skipped Loop, skip causes, nested pass paths, sequence gaps, trace correlation, and absence of business values in emitted records.
-- [ ] 3.3 Extend the TUI reducer and graph view with active-pass status, bounded recent-pass history, aggregate counts, and missing-event uncertainty. Verify repeated invocations do not conflict or regress, older detail eviction is visible, and process outcomes remain independent of telemetry completeness.
+- [x] 3.1 Add versioned nested descriptions, per-invocation lifecycle identities, pass start/finish boundaries, bounded event counts, and stop reasons. Verify old protocol fixtures and old-binary description handling remain valid.
+- [x] 3.2 Instrument Loop and body steps in the shared executor. Verify live events, failure paths, early exit, skipped Loop, skip causes, nested pass paths, sequence gaps, trace correlation, and absence of business values in emitted records.
+- [x] 3.3 Extend the TUI reducer and graph view with active-pass status, bounded recent-pass history, aggregate counts, and missing-event uncertainty. Verify repeated invocations do not conflict or regress, older detail eviction is visible, and process outcomes remain independent of telemetry completeness.
 
 ## 4. Document and validate delivery
 

@@ -7,7 +7,8 @@ use mf_runtime::{OutputDerivation, TypeCompatibility, TypeMismatch};
 use mf_telemetry::{
     ContractError,
     description::{
-        ControlEdge, DataEdge, NodeDescription, WorkflowDescription, WorkflowDescriptionVersion,
+        ControlEdge, DataEdge, LoopBodyDescription, NodeDescription, WorkflowDescription,
+        WorkflowDescriptionVersion,
     },
     identity::WorkflowId,
 };
@@ -893,8 +894,17 @@ pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription,
         .iter()
         .map(ToString::to_string)
         .collect();
+    let mut loop_bodies = Vec::new();
+    describe_loop_bodies(&plan.definition, &mut Vec::new(), &mut loop_bodies)?;
     let description = WorkflowDescription {
-        version: WorkflowDescriptionVersion::CURRENT,
+        version: match plan.definition.version {
+            mf_runtime::WorkflowDefinitionVersion::V2026_09_26 => {
+                WorkflowDescriptionVersion::V2026_09_27
+            }
+            mf_runtime::WorkflowDefinitionVersion::V2026_09_29 => {
+                WorkflowDescriptionVersion::V2026_09_29
+            }
+        },
         workflow_id: WorkflowId::from_definition(&plan.definition, &order)
             .context(ContractSnafu)?,
         nodes,
@@ -920,9 +930,62 @@ pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription,
             })
             .collect(),
         execution_order: order,
+        loop_bodies,
     };
     description.validate().context(ContractSnafu)?;
     Ok(description)
+}
+
+fn describe_loop_bodies(
+    definition: &WorkflowDefinition,
+    path: &mut Vec<String>,
+    bodies: &mut Vec<LoopBodyDescription>,
+) -> Result<(), DescriptionError> {
+    for node in &definition.nodes {
+        let Some(loop_definition) = &node.loop_definition else {
+            continue;
+        };
+        path.push(node.id.to_string());
+        let body = crate::loops::body_definition(&loop_definition.body, &definition.dependencies);
+        let order = structural_order_graph(&body).map_err(|_| DescriptionError::InvalidPlan)?;
+        let nodes_by_id: BTreeMap<_, _> = body.nodes.iter().map(|node| (&node.id, node)).collect();
+        bodies.push(LoopBodyDescription {
+            path: path.clone(),
+            nodes: order
+                .iter()
+                .map(|id| {
+                    let node = nodes_by_id[id];
+                    NodeDescription {
+                        id: id.to_string(),
+                        kind: node.kind.clone(),
+                    }
+                })
+                .collect(),
+            data_edges: body
+                .edges
+                .iter()
+                .map(|edge| DataEdge {
+                    from_node: edge.from_node.to_string(),
+                    from_output: edge.from_output.clone(),
+                    to_node: edge.to_node.to_string(),
+                    to_input: edge.to_input.clone(),
+                })
+                .collect(),
+            control_edges: body
+                .control_edges
+                .iter()
+                .map(|edge| ControlEdge {
+                    from_node: edge.from_node.to_string(),
+                    from_output: edge.from_output.clone(),
+                    to_node: edge.to_node.to_string(),
+                })
+                .collect(),
+            execution_order: order.iter().map(ToString::to_string).collect(),
+        });
+        describe_loop_bodies(&body, path, bodies)?;
+        path.pop();
+    }
+    Ok(())
 }
 
 /// Observes construction and execution together; validation-only callers keep using instantiate_compiled.

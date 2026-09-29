@@ -1,7 +1,8 @@
 #![cfg(unix)]
 
 use mf_compiler::{
-    SupportPackages, WorkflowDefinition, plan_definition, resolve_project, write_dependency_project,
+    CompileRequest, SupportPackages, WorkflowDefinition, compile_project, plan_definition,
+    resolve_project, write_dependency_project,
 };
 use mf_tui::{
     description::describe_executable,
@@ -165,6 +166,80 @@ fn last_json(stdout: &[u8]) -> Value {
         .rfind(|line| !line.is_empty())
         .unwrap();
     serde_json::from_slice(line).unwrap()
+}
+
+#[test]
+fn generated_loop_runner_exports_complete_per_pass_observations() {
+    if !loopback_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let definition = root.path().join("loop.json");
+    let executable = root.path().join("loop-runner");
+    let build_dir = root.path().join("build");
+    fs::write(&definition, json!({
+        "version": "2026-09-29",
+        "dependencies": {
+            "core": {"package": "mfn-core", "path": crates_dir().join("builtin-nodes/core")},
+            "code": {"package": "mfn-code", "path": crates_dir().join("builtin-nodes/code")}
+        },
+        "nodes": [
+            {"id": "seed", "kind": "builtin.constant", "config": {"value": 0}},
+            {"id": "repeat", "kind": "workflow.loop", "loop": {
+                "max_iterations": 5,
+                "variables": [{"name": "count", "type": "int"}],
+                "until": {"variable": "count", "operator": "gte", "value": 3},
+                "body": {
+                    "nodes": [
+                        {"id": "increment", "kind": "builtin.code", "config": {
+                            "language": "cel", "inputs": {"count": "int"},
+                            "code": {"next": "count + 1"}
+                        }},
+                        {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "count"}}
+                    ],
+                    "edges": [
+                        {"from_node": "$loop", "from_output": "count", "to_node": "increment", "to_input": "count"},
+                        {"from_node": "increment", "from_output": "next", "to_node": "assign", "to_input": "value"}
+                    ]
+                }
+            }}
+        ],
+        "edges": [{"from_node": "seed", "from_output": "value", "to_node": "repeat", "to_input": "count"}],
+        "outputs": [{"name": "count", "node": "repeat", "port": "count"}]
+    }).to_string()).unwrap();
+    compile_project(&CompileRequest {
+        definition: &definition,
+        output: &executable,
+        locked: false,
+        build_dir: Some(&build_dir),
+        support: &SupportPackages::Local {
+            crates_dir: crates_dir(),
+        },
+    })
+    .unwrap();
+    let description = describe_executable(&executable).unwrap();
+    assert_eq!(description.loop_bodies.len(), 1);
+    let description_json = serde_json::to_string(&description).unwrap();
+    assert!(!description_json.contains("count + 1"));
+    assert!(!description_json.contains("max_iterations"));
+    let run_id = mf_telemetry::identity::RunId::new();
+    let mut receiver = LoopbackReceiver::bind(description, run_id).unwrap();
+    let result = command(&executable)
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
+        .env("MF_RUN_ID", run_id.to_string())
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(last_json(&result.stdout), json!({"count": 3}));
+    let snapshot = receiver.finish();
+    assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
+    assert_eq!(snapshot.total_loop_passes, 3);
+    assert_eq!(snapshot.loop_passes.len(), 3);
+    assert_eq!(snapshot.loop_overviews[0].completed_passes, 3);
 }
 
 fn read_request(mut stream: TcpStream) -> Option<(String, Vec<u8>)> {
@@ -690,6 +765,7 @@ fn blocked_otel_export_does_not_block_flow_execution() {
         .map(|id| mf_telemetry::event::NodeIdentity {
             id,
             kind: "fixture.empty".into(),
+            path: Vec::new(),
         })
         .collect();
     let observation = providers

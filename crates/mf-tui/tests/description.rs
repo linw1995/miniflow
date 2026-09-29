@@ -25,12 +25,14 @@ fn create_runner(script: &str) -> (TempDir, PathBuf) {
 
 fn sample() -> (String, WorkflowDescription) {
     let description = WorkflowDescription {
-        version: WorkflowDescriptionVersion::CURRENT,
+        version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
         nodes: vec![],
         data_edges: vec![],
         control_edges: vec![],
         execution_order: vec![],
+
+        loop_bodies: Vec::new(),
     };
     (
         String::from_utf8(description.to_json().unwrap()).unwrap(),

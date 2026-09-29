@@ -1,7 +1,13 @@
 use mf_telemetry::{
     Count,
-    description::{DataEdge, NodeDescription, WorkflowDescription, WorkflowDescriptionVersion},
-    event::{Event, Failure, FailurePhase, LifecycleEvent, NodeIdentity, Outcome, SkipCause},
+    description::{
+        DataEdge, LoopBodyDescription, NodeDescription, WorkflowDescription,
+        WorkflowDescriptionVersion,
+    },
+    event::{
+        Event, Failure, FailurePhase, LifecycleEvent, LoopPassOutcome, LoopPathEntry,
+        LoopStopReason, LoopSummary, NodeIdentity, Outcome, SkipCause,
+    },
     identity::{RunId, WorkflowId},
 };
 use mf_tui::state::{Admission, Completeness, NodeStatus, SessionState};
@@ -12,7 +18,7 @@ fn count(value: i64) -> Count {
 
 fn graph() -> WorkflowDescription {
     WorkflowDescription {
-        version: WorkflowDescriptionVersion::CURRENT,
+        version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
         nodes: vec![
             NodeDescription {
@@ -32,6 +38,7 @@ fn graph() -> WorkflowDescription {
         }],
         control_edges: vec![],
         execution_order: vec!["a".into(), "b".into()],
+        loop_bodies: Vec::new(),
     }
 }
 
@@ -43,6 +50,7 @@ fn node(id: &str, kind: &str) -> NodeIdentity {
     NodeIdentity {
         id: id.into(),
         kind: kind.into(),
+        path: Vec::new(),
     }
 }
 
@@ -88,6 +96,7 @@ fn node_success(sequence: i64, id: &str, kind: &str, position: i64) -> Lifecycle
             produced_ports: vec!["value".into()],
             skipped_ports: vec![],
             failure: None,
+            loop_summary: None,
         },
     )
 }
@@ -102,12 +111,359 @@ fn success() -> LifecycleEvent {
             outcome: Outcome::Succeeded,
             failure_node_id: None,
             failure: None,
+            top_level_visited_count: None,
         },
     )
 }
 
 fn state() -> SessionState {
     SessionState::new(graph(), run_id()).unwrap()
+}
+
+fn loop_graph() -> WorkflowDescription {
+    WorkflowDescription {
+        version: WorkflowDescriptionVersion::V2026_09_29,
+        workflow_id: graph().workflow_id,
+        nodes: vec![NodeDescription {
+            id: "repeat".into(),
+            kind: "workflow.loop".into(),
+        }],
+        data_edges: vec![],
+        control_edges: vec![],
+        execution_order: vec!["repeat".into()],
+        loop_bodies: vec![LoopBodyDescription {
+            path: vec!["repeat".into()],
+            nodes: vec![
+                NodeDescription {
+                    id: "$loop".into(),
+                    kind: "$loop".into(),
+                },
+                NodeDescription {
+                    id: "step".into(),
+                    kind: "fixture.sink".into(),
+                },
+            ],
+            data_edges: vec![DataEdge {
+                from_node: "$loop".into(),
+                from_output: "count".into(),
+                to_node: "step".into(),
+                to_input: "input".into(),
+            }],
+            control_edges: vec![],
+            execution_order: vec!["$loop".into(), "step".into()],
+        }],
+    }
+}
+
+fn complete_loop_events() -> Vec<LifecycleEvent> {
+    let path = vec![LoopPathEntry {
+        loop_id: "repeat".into(),
+        index: count(0),
+    }];
+    let body_node = |id: &str, kind: &str| NodeIdentity {
+        id: id.into(),
+        kind: kind.into(),
+        path: path.clone(),
+    };
+    let events = vec![
+        event(
+            1,
+            Event::WorkflowStarted {
+                node_count: count(3),
+                elapsed_ns: count(0),
+            },
+        ),
+        event(
+            2,
+            Event::NodeStarted {
+                node: node("repeat", "workflow.loop"),
+                position: count(0),
+                elapsed_ns: count(1),
+            },
+        ),
+        event(
+            3,
+            Event::LoopPassStarted {
+                path: path.clone(),
+                elapsed_ns: count(2),
+            },
+        ),
+        event(
+            4,
+            Event::NodeStarted {
+                node: body_node("$loop", "$loop"),
+                position: count(0),
+                elapsed_ns: count(3),
+            },
+        ),
+        event(
+            5,
+            Event::NodeFinished {
+                node: body_node("$loop", "$loop"),
+                position: count(0),
+                elapsed_ns: count(4),
+                duration_ns: Some(count(1)),
+                outcome: Outcome::Succeeded,
+                produced_ports: vec!["count".into()],
+                skipped_ports: vec![],
+                failure: None,
+                loop_summary: None,
+            },
+        ),
+        event(
+            6,
+            Event::NodeStarted {
+                node: body_node("step", "fixture.sink"),
+                position: count(1),
+                elapsed_ns: count(5),
+            },
+        ),
+        event(
+            7,
+            Event::NodeFinished {
+                node: body_node("step", "fixture.sink"),
+                position: count(1),
+                elapsed_ns: count(6),
+                duration_ns: Some(count(1)),
+                outcome: Outcome::Succeeded,
+                produced_ports: vec!["value".into()],
+                skipped_ports: vec![],
+                failure: None,
+                loop_summary: None,
+            },
+        ),
+        event(
+            8,
+            Event::LoopPassFinished {
+                path: path.clone(),
+                elapsed_ns: count(7),
+                visited_node_count: count(2),
+                outcome: LoopPassOutcome::Completed,
+            },
+        ),
+        event(
+            9,
+            Event::NodeFinished {
+                node: node("repeat", "workflow.loop"),
+                position: count(0),
+                elapsed_ns: count(8),
+                duration_ns: Some(count(7)),
+                outcome: Outcome::Succeeded,
+                produced_ports: vec!["count".into()],
+                skipped_ports: vec![],
+                failure: None,
+                loop_summary: Some(LoopSummary {
+                    pass_count: count(1),
+                    reason: LoopStopReason::Maximum,
+                }),
+            },
+        ),
+        event(
+            10,
+            Event::WorkflowFinished {
+                final_sequence: count(10),
+                elapsed_ns: count(9),
+                visited_node_count: count(3),
+                top_level_visited_count: Some(count(1)),
+                outcome: Outcome::Succeeded,
+                failure_node_id: None,
+                failure: None,
+            },
+        ),
+    ];
+    events
+}
+
+#[test]
+fn loop_passes_keep_independent_node_outcomes_and_bounded_history() {
+    let mut state = SessionState::new(loop_graph(), run_id()).unwrap();
+    let mut events = complete_loop_events();
+    events.swap(3, 4);
+    events.swap(5, 6);
+    for item in events {
+        assert_eq!(state.apply(item).unwrap(), Admission::Applied);
+    }
+    let snapshot = state.snapshot();
+    assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
+    assert_eq!(snapshot.loop_passes.len(), 1);
+    assert_eq!(
+        snapshot.loop_passes[0].nodes[1].status,
+        NodeStatus::Succeeded
+    );
+    assert_eq!(
+        snapshot.loop_overviews[0].stop_reason,
+        Some(LoopStopReason::Maximum)
+    );
+
+    let mut state = SessionState::new(loop_graph(), run_id()).unwrap();
+    state
+        .apply(event(
+            1,
+            Event::WorkflowStarted {
+                node_count: count(3),
+                elapsed_ns: count(0),
+            },
+        ))
+        .unwrap();
+    for index in (0..70).rev() {
+        state
+            .apply(event(
+                index + 2,
+                Event::LoopPassStarted {
+                    path: vec![LoopPathEntry {
+                        loop_id: "repeat".into(),
+                        index: count(index),
+                    }],
+                    elapsed_ns: count(index + 1),
+                },
+            ))
+            .unwrap();
+    }
+    let snapshot = state.snapshot();
+    assert_eq!(snapshot.total_loop_passes, 70);
+    assert_eq!(snapshot.loop_passes.len(), 64);
+    assert_eq!(snapshot.hidden_loop_passes, 6);
+    assert_eq!(snapshot.loop_passes.first().unwrap().path[0].index.get(), 6);
+    assert_eq!(snapshot.loop_passes.last().unwrap().path[0].index.get(), 69);
+}
+
+#[test]
+fn a_late_body_outcome_closes_the_gap_without_inventing_success() {
+    let mut events = complete_loop_events();
+    let late = events.remove(6);
+    let mut state = SessionState::new(loop_graph(), run_id()).unwrap();
+    for item in events {
+        state.apply(item).unwrap();
+    }
+    let before = state.snapshot();
+    assert_eq!(before.lifecycle.known_missing_count, 1);
+    assert_eq!(before.lifecycle.unresolved_visited_nodes, 1);
+    assert_eq!(
+        before.loop_passes[0]
+            .nodes
+            .iter()
+            .find(|node| node.id == "step")
+            .unwrap()
+            .status,
+        NodeStatus::Running
+    );
+    assert_ne!(before.lifecycle.completeness, Completeness::Complete);
+    state.apply(late).unwrap();
+    let after = state.snapshot();
+    assert_eq!(after.lifecycle.known_missing_count, 0);
+    assert_eq!(after.lifecycle.unresolved_visited_nodes, 0);
+    assert_eq!(after.lifecycle.completeness, Completeness::Complete);
+}
+
+#[test]
+fn final_step_count_cannot_hide_an_unreported_pass() {
+    let mut state = SessionState::new(loop_graph(), run_id()).unwrap();
+    state
+        .apply(event(
+            1,
+            Event::WorkflowStarted {
+                node_count: count(3),
+                elapsed_ns: count(0),
+            },
+        ))
+        .unwrap();
+    state
+        .apply(event(
+            2,
+            Event::NodeStarted {
+                node: node("repeat", "workflow.loop"),
+                position: count(0),
+                elapsed_ns: count(1),
+            },
+        ))
+        .unwrap();
+    state
+        .apply(event(
+            3,
+            Event::NodeFinished {
+                node: node("repeat", "workflow.loop"),
+                position: count(0),
+                elapsed_ns: count(2),
+                duration_ns: Some(count(1)),
+                outcome: Outcome::Succeeded,
+                produced_ports: vec!["count".into()],
+                skipped_ports: vec![],
+                failure: None,
+                loop_summary: Some(LoopSummary {
+                    pass_count: count(1),
+                    reason: LoopStopReason::Maximum,
+                }),
+            },
+        ))
+        .unwrap();
+    state
+        .apply(event(
+            4,
+            Event::WorkflowFinished {
+                final_sequence: count(4),
+                elapsed_ns: count(3),
+                visited_node_count: count(3),
+                top_level_visited_count: Some(count(1)),
+                outcome: Outcome::Succeeded,
+                failure_node_id: None,
+                failure: None,
+            },
+        ))
+        .unwrap();
+    let integrity = state.integrity();
+    assert_eq!(integrity.known_missing_count, 0);
+    assert_eq!(integrity.unresolved_visited_nodes, 2);
+    assert_ne!(integrity.completeness, Completeness::Complete);
+}
+
+#[test]
+fn conflicting_body_event_does_not_mark_a_same_named_root_node() {
+    let mut description = loop_graph();
+    let body = &mut description.loop_bodies[0];
+    body.nodes[1].id = "repeat".into();
+    body.data_edges[0].to_node = "repeat".into();
+    body.execution_order[1] = "repeat".into();
+    let mut state = SessionState::new(description, run_id()).unwrap();
+    let identity = NodeIdentity {
+        id: "repeat".into(),
+        kind: "fixture.sink".into(),
+        path: vec![LoopPathEntry {
+            loop_id: "repeat".into(),
+            index: Count::ZERO,
+        }],
+    };
+    state
+        .apply(event(
+            2,
+            Event::NodeStarted {
+                node: identity.clone(),
+                position: count(1),
+                elapsed_ns: count(1),
+            },
+        ))
+        .unwrap();
+    assert_eq!(
+        state
+            .apply(event(
+                2,
+                Event::NodeFinished {
+                    node: identity,
+                    position: count(1),
+                    elapsed_ns: count(2),
+                    duration_ns: Some(count(1)),
+                    outcome: Outcome::Succeeded,
+                    produced_ports: vec!["value".into()],
+                    skipped_ports: vec![],
+                    failure: None,
+                    loop_summary: None,
+                }
+            ))
+            .unwrap(),
+        Admission::Conflict
+    );
+    let snapshot = state.snapshot();
+    assert!(!snapshot.nodes[0].conflicted);
+    assert!(snapshot.loop_passes[0].nodes[0].conflicted);
 }
 
 #[test]
@@ -224,6 +580,7 @@ fn final_prefix_and_missing_tail_keep_unknowns_explicit() {
                     phase: FailurePhase::Preparation,
                     message: "bad config".into(),
                 }),
+                top_level_visited_count: None,
             },
         ))
         .unwrap();
@@ -333,6 +690,7 @@ fn visited_prefix_uses_execution_order_and_final_failure_identity() {
                     phase: FailurePhase::Execution,
                     message: "execution failed".into(),
                 }),
+                top_level_visited_count: None,
             },
         ))
         .unwrap();
@@ -365,6 +723,7 @@ fn late_start_can_fill_timing_for_a_failure_proven_by_final_boundary() {
                     phase: FailurePhase::Execution,
                     message: "execution failed".into(),
                 }),
+                top_level_visited_count: None,
             },
         ))
         .unwrap();
@@ -396,6 +755,7 @@ fn a_contiguous_stream_without_visited_node_outcomes_is_not_complete() {
                 outcome: Outcome::Succeeded,
                 failure_node_id: None,
                 failure: None,
+                top_level_visited_count: None,
             },
         ))
         .unwrap();
@@ -500,6 +860,7 @@ fn conditional_skip_keeps_its_cause_and_inactive_port_outcome() {
                 produced_ports: vec![],
                 skipped_ports: vec!["value".into()],
                 failure: None,
+                loop_summary: None,
             },
         ))
         .unwrap();
@@ -532,6 +893,7 @@ fn conditional_skip_keeps_its_cause_and_inactive_port_outcome() {
                 outcome: Outcome::Succeeded,
                 failure_node_id: None,
                 failure: None,
+                top_level_visited_count: None,
             },
         ))
         .unwrap();
@@ -565,6 +927,7 @@ fn failure_and_diagnostic_text_have_independent_display_limits() {
                 produced_ports: vec![],
                 skipped_ports: vec![],
                 failure: Some(failure.clone()),
+                loop_summary: None,
             },
         ))
         .unwrap();
@@ -578,6 +941,7 @@ fn failure_and_diagnostic_text_have_independent_display_limits() {
                 outcome: Outcome::Failed,
                 failure_node_id: Some("a".into()),
                 failure: Some(failure),
+                top_level_visited_count: None,
             },
         ))
         .unwrap();
@@ -620,6 +984,7 @@ fn late_node_failure_cannot_confirm_a_successful_final_boundary() {
                         phase: FailurePhase::Execution,
                         message: "failed".into(),
                     }),
+                    loop_summary: None,
                 },
             ))
             .unwrap(),
