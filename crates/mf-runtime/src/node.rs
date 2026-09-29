@@ -483,6 +483,14 @@ pub trait Node: Send + Sync {
         self.execute(inputs).map(Into::into)
     }
 
+    fn execute_with_context_mut(
+        &self,
+        inputs: Inputs,
+        ctx: &mut crate::ExecutionContext,
+    ) -> Result<crate::NodeResult, NodeExecutionError> {
+        self.execute_with_context(inputs, ctx)
+    }
+
     fn ports(&self) -> Option<NodePorts> {
         None
     }

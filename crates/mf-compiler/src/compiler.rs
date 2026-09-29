@@ -324,9 +324,7 @@ fn prepare_definition(
     registry: &NodeRegistry,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    let prepared = prepare_graph(definition, registry, None)?;
-    prepare_loop_bodies(definition, registry, &[])?;
-    Ok(prepared)
+    prepare_graph(definition, registry, None)
 }
 
 fn prepare_graph(
@@ -358,36 +356,6 @@ fn prepare_graph(
         inference.resolve_node(&mut nodes[indices[id]], &dependencies)?;
     }
     Ok((nodes, order))
-}
-
-fn prepare_loop_bodies(
-    definition: &WorkflowDefinition,
-    registry: &NodeRegistry,
-    path: &[DefinitionId],
-) -> Result<(), WorkflowCompileError> {
-    for node in &definition.nodes {
-        let Some(loop_definition) = &node.loop_definition else {
-            continue;
-        };
-        let mut body_path = path.to_vec();
-        body_path.push(node.id.clone());
-        let types =
-            crate::loops::variable_types(&loop_definition.variables).map_err(|message| {
-                WorkflowCompileError::InvalidLoop {
-                    path: format!("{body_path:?}"),
-                    message,
-                }
-            })?;
-        let body = crate::loops::body_definition(&loop_definition.body, &definition.dependencies);
-        prepare_graph(&body, registry, Some(&types)).map_err(|error| {
-            WorkflowCompileError::InvalidLoop {
-                path: format!("{body_path:?}"),
-                message: error.to_string(),
-            }
-        })?;
-        prepare_loop_bodies(&body, registry, &body_path)?;
-    }
-    Ok(())
 }
 
 fn validate_base_metadata(
@@ -995,8 +963,52 @@ fn resolve_nodes_in_scope(
         .nodes
         .iter()
         .map(|node| {
-            if let Some(structural) = crate::loops::structural_node(node, enclosing) {
-                return Ok(structural);
+            match node.kind.as_str() {
+                crate::LOOP_KIND => {
+                    let loop_definition = node.loop_definition.as_deref().expect("validated Loop");
+                    let types = crate::loops::variable_types(&loop_definition.variables)
+                        .expect("validated Loop variables");
+                    let body = crate::loops::body_definition(
+                        &loop_definition.body,
+                        &definition.dependencies,
+                    );
+                    let (body_nodes, body_order) = prepare_graph(&body, registry, Some(&types))
+                        .map_err(|error| WorkflowCompileError::InvalidLoop {
+                            path: format!("{:?}", node.id),
+                            message: error.to_string(),
+                        })?;
+                    let body_flow = Flow::new(body_nodes, body.edges, body_order, Vec::new())
+                        .and_then(|flow| flow.with_control_edges(body.control_edges))
+                        .context(FlowConstructionSnafu)?;
+                    return mf_runtime::prepared_loop_node(
+                        node.id.as_str(),
+                        loop_definition.clone(),
+                        move |state| body_flow.execute_in_context(state).map(|_| ()),
+                    )
+                    .map_err(|error| WorkflowCompileError::InvalidLoop {
+                        path: format!("{:?}", node.id),
+                        message: error.to_string(),
+                    });
+                }
+                crate::LOOP_ASSIGN_KIND => {
+                    let target = crate::loops::assignment_target(&node.config)
+                        .expect("validated assignment");
+                    let value_type = enclosing.expect("assignment has a Loop")[&target].clone();
+                    return Ok(mf_runtime::prepared_loop_assign(
+                        node.id.as_str(),
+                        &target,
+                        value_type,
+                    ));
+                }
+                crate::EXIT_LOOP_KIND => {
+                    return Ok(mf_runtime::prepared_loop_exit(node.id.as_str()));
+                }
+                crate::LOOP_SOURCE_ID => {
+                    return Ok(mf_runtime::prepared_loop_source_types(
+                        enclosing.expect("Loop source has variables"),
+                    ));
+                }
+                _ => {}
             }
             let Some(registration) = registry.get(&node.kind) else {
                 return UnknownNodeKindSnafu {

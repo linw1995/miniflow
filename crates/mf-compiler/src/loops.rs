@@ -1,7 +1,4 @@
-use crate::{
-    DefinitionId, FlowNode, Node, NodeExecutionError, NodePorts, Outputs, PortSpec, ValueType,
-    WorkflowCompileError, WorkflowDefinition,
-};
+use crate::{DefinitionId, ValueType, WorkflowCompileError, WorkflowDefinition};
 use mf_runtime::{
     EXIT_LOOP_KIND, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition,
     LoopComparisonOperator, LoopDefinition, LoopVariableDefinition, MAX_LOOP_DEPTH,
@@ -15,22 +12,6 @@ use std::collections::{BTreeMap, BTreeSet};
 #[serde(deny_unknown_fields)]
 struct AssignmentConfig {
     variable: String,
-}
-
-struct StructuralNode {
-    ports: NodePorts,
-}
-
-impl Node for StructuralNode {
-    fn execute(&self, _: crate::Inputs) -> Result<Outputs, NodeExecutionError> {
-        Err(NodeExecutionError::ExecutionFailed {
-            message: "structural node requires the workflow executor".into(),
-        })
-    }
-
-    fn ports(&self) -> Option<NodePorts> {
-        Some(self.ports.clone())
-    }
 }
 
 fn path_label(path: &[DefinitionId]) -> String {
@@ -261,51 +242,4 @@ fn validate_loop(
         validate_node(node, Some(&types), depth, path, dependencies)?;
     }
     Ok(())
-}
-
-pub(crate) fn structural_node(
-    node: &NodeDefinition,
-    enclosing: Option<&BTreeMap<String, ValueType>>,
-) -> Option<FlowNode> {
-    let ports = match node.kind.as_str() {
-        LOOP_KIND => {
-            let types = variable_types(&node.loop_definition.as_ref()?.variables).ok()?;
-            let variable_ports: Vec<_> = types
-                .into_iter()
-                .map(|(name, value_type)| PortSpec::owned(name, value_type, true))
-                .collect();
-            NodePorts {
-                inputs: variable_ports.clone(),
-                outputs: variable_ports,
-            }
-        }
-        LOOP_ASSIGN_KIND => {
-            let target = assignment_target(&node.config).ok()?;
-            let value_type = enclosing?.get(&target)?.clone();
-            NodePorts {
-                inputs: vec![PortSpec::owned("value", value_type, true)],
-                outputs: vec![PortSpec::owned("done", ValueType::Boolean, true)],
-            }
-        }
-        EXIT_LOOP_KIND => NodePorts::default(),
-        LOOP_SOURCE_ID => {
-            let mut outputs: Vec<_> = enclosing?
-                .iter()
-                .map(|(name, value_type)| PortSpec::owned(name, value_type.clone(), true))
-                .collect();
-            outputs.push(PortSpec::owned("index", ValueType::Int64, true));
-            NodePorts {
-                inputs: Vec::new(),
-                outputs,
-            }
-        }
-        _ => return None,
-    };
-    Some(FlowNode::new(
-        node.id.clone(),
-        Box::new(StructuralNode {
-            ports: ports.clone(),
-        }),
-        ports,
-    ))
 }

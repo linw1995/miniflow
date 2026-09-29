@@ -1,11 +1,57 @@
+mod common;
 extern crate mfn_code as _;
 extern crate mfn_core as _;
 
 use mf_compiler::{
-    NodeRegistry, WorkflowDefinition, WorkflowDefinitionVersion, compile_definition,
-    plan_definition,
+    CompileRequest, ExecutionContext, Inputs, Node, NodeBuildError, NodeExecutionError,
+    NodeRegistration, NodeRegistry, Outputs, PortSpec, SupportPackages, ValueType,
+    WorkflowDefinition, WorkflowDefinitionVersion, compile_definition, compile_project,
+    instantiate_compiled, plan_definition,
 };
 use serde_json::{Value, json};
+use std::{fs, process::Command};
+
+struct OmitOnSecond;
+
+struct WrongType;
+
+impl Node for WrongType {
+    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
+        Ok(Outputs::from([("value".into(), json!("wrong"))]))
+    }
+}
+
+impl Node for OmitOnSecond {
+    fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
+        if inputs["index"] == json!(0) {
+            Ok(Outputs::from([("value".into(), json!(1))]))
+        } else {
+            Ok(Outputs::new())
+        }
+    }
+}
+
+fn omit_factory(_: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+    Ok(Box::new(OmitOnSecond))
+}
+
+fn wrong_type_factory(_: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+    Ok(Box::new(WrongType))
+}
+
+inventory::submit! { NodeRegistration {
+    kind: "test.omit_on_second",
+    inputs: &[PortSpec::new("index", ValueType::Int64, true)],
+    outputs: &[PortSpec::new("value", ValueType::Int64, true)],
+    factory: omit_factory,
+} }
+
+inventory::submit! { NodeRegistration {
+    kind: "test.wrong_type",
+    inputs: &[],
+    outputs: &[PortSpec::new("value", ValueType::Any, true)],
+    factory: wrong_type_factory,
+} }
 
 fn definition() -> Value {
     json!({
@@ -138,4 +184,262 @@ fn initial_literal_does_not_specialize_later_passes() {
     value["nodes"][1]["loop"]["variables"][0]["type"] = json!("any");
     value["nodes"][1]["loop"]["until"] = Value::Null;
     compile_definition(&parse(value), &NodeRegistry::from_inventory().unwrap()).unwrap();
+}
+
+#[test]
+fn executes_loop_with_persistent_state_in_memory() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&parse(definition()), &registry).unwrap();
+    let output = instantiate_compiled(&plan, &registry)
+        .unwrap()
+        .execute()
+        .unwrap();
+    assert_eq!(output["count"], json!(3));
+}
+
+#[test]
+fn generated_loop_matches_in_memory_without_build_inputs() {
+    let directory = tempfile::tempdir().unwrap();
+    let definition_path = directory.path().join("loop.json");
+    let executable = directory.path().join("loop-runner");
+    let build = directory.path().join("build");
+    for (mut value, expected) in [
+        (definition(), json!({"count": 3})),
+        (nested_definition(), json!({"count": 2})),
+        (exit_definition(), json!({"count": 2})),
+        (skipped_definition(), json!({})),
+    ] {
+        value["dependencies"] = json!({
+            "core": {"package": "mfn-core", "path": common::crates_dir().join("builtin-nodes/core")},
+            "code": {"package": "mfn-code", "path": common::crates_dir().join("builtin-nodes/code")}
+        });
+        fs::write(&definition_path, value.to_string()).unwrap();
+        compile_project(&CompileRequest {
+            definition: &definition_path,
+            output: &executable,
+            locked: false,
+            build_dir: Some(&build),
+            support: &SupportPackages::Local {
+                crates_dir: common::crates_dir(),
+            },
+        })
+        .unwrap();
+        let result = Command::new(&executable).output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&result.stdout).unwrap(),
+            expected
+        );
+    }
+    fs::remove_file(&definition_path).unwrap();
+    let result = Command::new(&executable).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap(),
+        json!({})
+    );
+
+    let mut value = budget_definition();
+    value["dependencies"] = json!({
+        "core": {"package": "mfn-core", "path": common::crates_dir().join("builtin-nodes/core")},
+        "code": {"package": "mfn-code", "path": common::crates_dir().join("builtin-nodes/code")}
+    });
+    fs::write(&definition_path, value.to_string()).unwrap();
+    compile_project(&CompileRequest {
+        definition: &definition_path,
+        output: &executable,
+        locked: false,
+        build_dir: Some(&build),
+        support: &SupportPackages::Local {
+            crates_dir: common::crates_dir(),
+        },
+    })
+    .unwrap();
+    let result = Command::new(&executable).output().unwrap();
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("budget"));
+}
+
+fn run_in_memory(value: Value) -> Result<Value, String> {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&parse(value), &registry).map_err(|error| error.to_string())?;
+    let flow = instantiate_compiled(&plan, &registry).map_err(|error| error.to_string())?;
+    let output = flow.execute().map_err(|error| error.to_string())?;
+    Ok(serde_json::to_value(output).unwrap())
+}
+
+#[test]
+fn stops_at_maximum_and_immediate_exit() {
+    let mut value = definition();
+    value["nodes"][1]["loop"]["until"] = Value::Null;
+    assert_eq!(run_in_memory(value.clone()).unwrap(), json!({"count": 5}));
+
+    assert_eq!(
+        run_in_memory(exit_definition()).unwrap(),
+        json!({"count": 2})
+    );
+}
+
+fn exit_definition() -> Value {
+    let mut value = definition();
+    value["nodes"][1]["loop"]["until"] = Value::Null;
+    let body = &mut value["nodes"][1]["loop"]["body"];
+    body["nodes"].as_array_mut().unwrap().extend([
+        json!({"id": "route", "kind": "builtin.if_else", "config": {"branches": [{
+            "id": "stop", "condition": {"source": {"output": "increment.next", "path": ""},
+            "operator": "eq", "value": 2}
+        }]}}),
+        json!({"id": "exit", "kind": "workflow.exit_loop"}),
+        json!({"id": "override", "kind": "builtin.constant", "config": {"value": 999}}),
+        json!({"id": "zz_after", "kind": "workflow.loop_assign", "config": {"variable": "count"}}),
+    ]);
+    body["edges"].as_array_mut().unwrap().push(json!({
+        "from_node": "override", "from_output": "value", "to_node": "zz_after", "to_input": "value"
+    }));
+    body["control_edges"] = json!([
+        {"from_node": "assign", "from_output": "done", "to_node": "route"},
+        {"from_node": "route", "from_output": "stop", "to_node": "exit"},
+        {"from_node": "route", "from_output": "stop", "to_node": "zz_after"}
+    ]);
+    value
+}
+
+#[test]
+fn skipped_assignment_preserves_previous_value() {
+    let mut value = definition();
+    value["nodes"][1]["loop"]["until"] = Value::Null;
+    value["nodes"][1]["loop"]["max_iterations"] = json!(2);
+    let body = &mut value["nodes"][1]["loop"]["body"];
+    body["nodes"].as_array_mut().unwrap().push(json!({
+        "id": "route", "kind": "builtin.if_else", "config": {"branches": [{
+            "id": "skip", "condition": {"source": {"output": "$loop.index", "path": ""},
+            "operator": "eq", "value": 0}
+        }]}
+    }));
+    body["control_edges"] = json!([
+        {"from_node": "$loop", "from_output": "index", "to_node": "route"},
+        {"from_node": "route", "from_output": "else", "to_node": "assign"}
+    ]);
+    assert_eq!(run_in_memory(value).unwrap(), json!({"count": 1}));
+}
+
+fn nested_definition() -> Value {
+    let mut value = definition();
+    let inner = value["nodes"][1]["loop"].clone();
+    value["nodes"][1]["loop"]["until"] = Value::Null;
+    value["nodes"][1]["loop"]["max_iterations"] = json!(2);
+    let mut inner = inner;
+    inner["until"] = Value::Null;
+    inner["max_iterations"] = json!(1);
+    value["nodes"][1]["loop"]["body"] = json!({
+        "nodes": [
+            {"id": "inner", "kind": "workflow.loop", "loop": inner},
+            {"id": "assign_outer", "kind": "workflow.loop_assign", "config": {"variable": "count"}}
+        ],
+        "edges": [
+            {"from_node": "$loop", "from_output": "count", "to_node": "inner", "to_input": "count"},
+            {"from_node": "inner", "from_output": "count", "to_node": "assign_outer", "to_input": "value"}
+        ]
+    });
+    value
+}
+
+#[test]
+fn nested_loops_restore_parent_state_and_share_step_budget() {
+    assert_eq!(
+        run_in_memory(nested_definition()).unwrap(),
+        json!({"count": 2})
+    );
+    let error = run_in_memory(budget_definition()).unwrap_err();
+    assert!(
+        error.contains("budget") && error.contains("inner"),
+        "{error}"
+    );
+}
+
+fn budget_definition() -> Value {
+    let mut value = nested_definition();
+    let inner = &mut value["nodes"][1]["loop"]["body"]["nodes"][0]["loop"];
+    inner["max_iterations"] = json!(1000);
+    inner["body"] = json!({
+        "nodes": [{"id": "tick", "kind": "builtin.constant", "config": {"value": true}}]
+    });
+    value["nodes"][1]["loop"]["max_iterations"] = json!(1000);
+    value
+}
+
+#[test]
+fn later_pass_cannot_read_an_omitted_prior_output() {
+    let mut value = definition();
+    value["nodes"][1]["loop"]["until"] = Value::Null;
+    value["nodes"][1]["loop"]["max_iterations"] = json!(2);
+    value["nodes"][1]["loop"]["body"] = json!({
+        "nodes": [
+            {"id": "probe", "kind": "test.omit_on_second"},
+            {"id": "sink", "kind": "builtin.identity"}
+        ],
+        "edges": [
+            {"from_node": "$loop", "from_output": "index", "to_node": "probe", "to_input": "index"},
+            {"from_node": "probe", "from_output": "value", "to_node": "sink", "to_input": "input"}
+        ]
+    });
+    let error = run_in_memory(value).unwrap_err();
+    assert!(
+        error.contains("pass 1") && error.contains("probe.value"),
+        "{error}"
+    );
+}
+
+#[test]
+fn skips_the_whole_loop_when_a_control_dependency_is_inactive() {
+    assert_eq!(run_in_memory(skipped_definition()).unwrap(), json!({}));
+}
+
+fn skipped_definition() -> Value {
+    let mut value = definition();
+    value["nodes"].as_array_mut().unwrap().push(json!({
+        "id": "route", "kind": "builtin.if_else", "config": {"branches": [{
+            "id": "run", "condition": {"source": {"output": "seed.value", "path": ""},
+            "operator": "eq", "value": 1}
+        }]}
+    }));
+    value["control_edges"] = json!([
+        {"from_node": "seed", "from_output": "value", "to_node": "route"},
+        {"from_node": "route", "from_output": "run", "to_node": "repeat"}
+    ]);
+    value["outputs"][0]["optional"] = json!(true);
+    value
+}
+
+#[test]
+fn invalid_assignment_does_not_publish_partial_loop_output() {
+    let mut value = definition();
+    value["nodes"][1]["loop"]["body"] = json!({
+        "nodes": [
+            {"id": "wrong", "kind": "test.wrong_type"},
+            {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "count"}}
+        ],
+        "edges": [{"from_node": "wrong", "from_output": "value", "to_node": "assign", "to_input": "value"}]
+    });
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&parse(value), &registry).unwrap();
+    let flow = instantiate_compiled(&plan, &registry).unwrap();
+    let mut context = ExecutionContext::default();
+    let error = flow
+        .execute_in_context(&mut context)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("pass 0") && error.contains("expected int64"),
+        "{error}"
+    );
+    assert!(context.output("repeat.count").is_err());
 }

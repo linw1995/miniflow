@@ -8,14 +8,14 @@
 
 ## 2. Execute Loop frames in both engines
 
-- [ ] 2.1 Add scoped outputs, typed variable maps, an execution budget, and engine-owned assignment/exit operations to `mf-runtime`. Keep plugin context access read-only and preserve existing flat-flow behavior.
-- [ ] 2.2 Execute a body with fresh outputs on every pass, persistent variables, post-pass `until`, maximum-count success, and immediate exit. Verify skipped Loop activation, skipped assignment/exit, nested scopes, wrong types, missing outputs, early failures, and no publication of partial Loop results.
-- [ ] 2.3 Generate structured Rust loops and prepare plugin instances once. Run the same fixtures in memory and as standalone binaries, comparing results, calls, skip causes, errors, and execution budgets; verify generated binaries run without source or Cargo.
+- [x] 2.1 Add scoped outputs, typed variable maps, an execution budget, and engine-owned assignment/exit operations to `mf-runtime`. Keep plugin context access read-only and preserve existing flat-flow behavior.
+- [x] 2.2 Execute a body with fresh outputs on every pass, persistent variables, post-pass `until`, maximum-count success, and immediate exit. Verify skipped Loop activation, skipped assignment/exit, nested scopes, wrong types, missing outputs, early failures, and no publication of partial Loop results.
+- [x] 2.3 Generate structured Rust loops and prepare plugin instances once. Run the same fixtures in memory and as standalone binaries, comparing results, pass counts, skipped results, errors, and execution budgets; verify generated binaries run without source or Cargo.
 
 ## 3. Update observation and terminal presentation
 
 - [ ] 3.1 Add versioned nested descriptions, per-invocation lifecycle identities, pass start/finish boundaries, bounded event counts, and stop reasons. Verify old protocol fixtures and old-binary description handling remain valid.
-- [ ] 3.2 Instrument Loop and body steps in the shared executor. Verify live events, failure paths, early exit, skipped Loop, nested pass paths, sequence gaps, trace correlation, and absence of business values in emitted records.
+- [ ] 3.2 Instrument Loop and body steps in the shared executor. Verify live events, failure paths, early exit, skipped Loop, skip causes, nested pass paths, sequence gaps, trace correlation, and absence of business values in emitted records.
 - [ ] 3.3 Extend the TUI reducer and graph view with active-pass status, bounded recent-pass history, aggregate counts, and missing-event uncertainty. Verify repeated invocations do not conflict or regress, older detail eviction is visible, and process outcomes remain independent of telemetry completeness.
 
 ## 4. Document and validate delivery

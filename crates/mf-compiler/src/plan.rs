@@ -1,4 +1,4 @@
-use crate::{DefinitionId, WorkflowDefinition};
+use crate::{DefinitionId, LoopDefinition, WorkflowDefinition};
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,11 @@ pub enum PlanError {
     DuplicateOutputName { name: String },
     #[snafu(display("generated Rust code is invalid: {source}"))]
     GeneratedSyntax { source: syn::Error },
+    #[snafu(display("invalid embedded Loop node `{definition_id}`: {message}"))]
+    InvalidLoopConfig {
+        definition_id: DefinitionId,
+        message: String,
+    },
 }
 
 impl CompiledWorkflow {
@@ -146,51 +151,8 @@ impl CompiledWorkflow {
             }
         }
 
-        let mut preparations: Vec<TokenStream> = Vec::new();
-        let mut node_statements: Vec<TokenStream> = Vec::new();
-        for (index, definition_id) in self.execution_order.iter().enumerate() {
-            let node = nodes_by_id[definition_id];
-            let config_json = serde_json::to_string(&node.config).context(SerializeSnafu)?;
-            let config_lit = LitStr::new(&config_json, Span::call_site());
-            let node_ident = format_ident!("node_{index}");
-            let id_lit = LitStr::new(node.id.as_str(), Span::call_site());
-            let kind_lit = LitStr::new(&node.kind, Span::call_site());
-            let mut bindings: Vec<TokenStream> = Vec::new();
-            for edge in self
-                .definition
-                .edges
-                .iter()
-                .filter(|edge| edge.to_node == *definition_id)
-            {
-                let source = LitStr::new(edge.from_node.as_str(), Span::call_site());
-                let port = LitStr::new(&edge.from_output, Span::call_site());
-                let input = LitStr::new(&edge.to_input, Span::call_site());
-                bindings.push(quote! { mf_runtime::ExecutionDependency { input: Some(#input), source_node: #source, source_output: #port } });
-            }
-            for edge in self
-                .definition
-                .control_edges
-                .iter()
-                .filter(|edge| edge.to_node == *definition_id)
-            {
-                let source = LitStr::new(edge.from_node.as_str(), Span::call_site());
-                let port = LitStr::new(&edge.from_output, Span::call_site());
-                bindings.push(quote! { mf_runtime::ExecutionDependency { input: None, source_node: #source, source_output: #port } });
-            }
-            preparations.push(quote! {
-                let mut #node_ident = state.prepare_node(registry, #id_lit, #kind_lit, #config_lit)?;
-                inference.resolve_node(&mut #node_ident, &[#(#bindings),*]).map_err(|error| {
-                    state.preparation_failed(#id_lit, &error);
-                    mf_runtime::WorkflowRunError::Context {
-                        definition_id: #id_lit.into(),
-                        message: error.to_string(),
-                    }
-                })?;
-            });
-            node_statements.push(quote! {
-                mf_runtime::execute_node_in_context(&#node_ident, &[#(#bindings),*], state)?;
-            });
-        }
+        let (preparations, node_statements) =
+            generate_scope(&self.definition, &self.execution_order, "root", None)?;
 
         let outputs_binding = if self.definition.outputs.is_empty() {
             quote! { let workflow_outputs = mf_runtime::FlowOutputs::new(); }
@@ -241,7 +203,6 @@ impl CompiledWorkflow {
                 registry: &mf_runtime::NodeRegistry,
                 state: &mut mf_runtime::ExecutionContext,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                let mut inference = mf_compiler::TypeInferenceState::default();
                 #(#preparations)*
                 #(#node_statements)*
                 #outputs_binding
@@ -257,4 +218,146 @@ impl CompiledWorkflow {
             plan_json: self.to_json()?,
         })
     }
+}
+
+fn generate_scope(
+    definition: &WorkflowDefinition,
+    order: &[DefinitionId],
+    scope: &str,
+    enclosing: Option<&LoopDefinition>,
+) -> Result<(Vec<TokenStream>, Vec<TokenStream>), PlanError> {
+    let nodes_by_id: BTreeMap<_, _> = definition
+        .nodes
+        .iter()
+        .map(|node| (&node.id, node))
+        .collect();
+    let inference_ident = format_ident!("inference_{scope}");
+    let mut preparations = vec![quote! {
+        let mut #inference_ident = mf_compiler::TypeInferenceState::default();
+    }];
+    let mut statements = Vec::new();
+    for (index, id) in order.iter().enumerate() {
+        let node = nodes_by_id.get(id).ok_or_else(|| PlanError::UnknownNode {
+            definition_id: id.clone(),
+        })?;
+        let node_ident = format_ident!("node_{scope}_{index}");
+        let id_lit = LitStr::new(id.as_str(), Span::call_site());
+        let kind_lit = LitStr::new(&node.kind, Span::call_site());
+        let mut bindings = Vec::new();
+        for edge in definition.edges.iter().filter(|edge| edge.to_node == *id) {
+            let source = LitStr::new(edge.from_node.as_str(), Span::call_site());
+            let port = LitStr::new(&edge.from_output, Span::call_site());
+            let input = LitStr::new(&edge.to_input, Span::call_site());
+            bindings.push(quote! { mf_runtime::ExecutionDependency {
+                input: Some(#input), source_node: #source, source_output: #port
+            } });
+        }
+        for edge in definition
+            .control_edges
+            .iter()
+            .filter(|edge| edge.to_node == *id)
+        {
+            let source = LitStr::new(edge.from_node.as_str(), Span::call_site());
+            let port = LitStr::new(&edge.from_output, Span::call_site());
+            bindings.push(quote! { mf_runtime::ExecutionDependency {
+                input: None, source_node: #source, source_output: #port
+            } });
+        }
+
+        let constructor = match node.kind.as_str() {
+            crate::LOOP_KIND => {
+                let loop_definition = node.loop_definition.as_deref().ok_or_else(|| {
+                    PlanError::InvalidLoopConfig {
+                        definition_id: id.clone(),
+                        message: "missing Loop definition".into(),
+                    }
+                })?;
+                let body =
+                    crate::loops::body_definition(&loop_definition.body, &definition.dependencies);
+                let body_order =
+                    crate::compiler::structural_order_graph(&body).map_err(|error| {
+                        PlanError::InvalidLoopConfig {
+                            definition_id: id.clone(),
+                            message: error.to_string(),
+                        }
+                    })?;
+                let child_scope = format!("{scope}_{index}");
+                let (body_preparations, body_statements) =
+                    generate_scope(&body, &body_order, &child_scope, Some(loop_definition))?;
+                preparations.extend(body_preparations);
+                let config_json = serde_json::to_string(loop_definition).context(SerializeSnafu)?;
+                let config_lit = LitStr::new(&config_json, Span::call_site());
+                quote! {
+                    mf_runtime::prepared_loop_node_from_json(#id_lit, #config_lit,
+                        move |state: &mut mf_runtime::ExecutionContext| {
+                            #(#body_statements)*
+                            Ok(())
+                        }
+                    )?
+                }
+            }
+            crate::LOOP_ASSIGN_KIND => {
+                let target = crate::loops::assignment_target(&node.config).map_err(|message| {
+                    PlanError::InvalidLoopConfig {
+                        definition_id: id.clone(),
+                        message,
+                    }
+                })?;
+                let variable = enclosing
+                    .and_then(|loop_definition| {
+                        loop_definition
+                            .variables
+                            .iter()
+                            .find(|variable| variable.name == target)
+                    })
+                    .ok_or_else(|| PlanError::InvalidLoopConfig {
+                        definition_id: id.clone(),
+                        message: format!("unknown assignment variable `{target}`"),
+                    })?;
+                let target_lit = LitStr::new(&target, Span::call_site());
+                let type_json =
+                    serde_json::to_string(&variable.value_type).context(SerializeSnafu)?;
+                let type_lit = LitStr::new(&type_json, Span::call_site());
+                quote! { mf_runtime::prepared_loop_assign_from_json(#id_lit, #target_lit, #type_lit)? }
+            }
+            crate::EXIT_LOOP_KIND => quote! { mf_runtime::prepared_loop_exit(#id_lit) },
+            crate::LOOP_SOURCE_ID => {
+                let variables = enclosing.ok_or_else(|| PlanError::InvalidLoopConfig {
+                    definition_id: id.clone(),
+                    message: "Loop source has no parent Loop".into(),
+                })?;
+                let variables_json =
+                    serde_json::to_string(&variables.variables).context(SerializeSnafu)?;
+                let variables_lit = LitStr::new(&variables_json, Span::call_site());
+                quote! { mf_runtime::prepared_loop_source_from_json(#variables_lit)? }
+            }
+            _ => {
+                let config_json = serde_json::to_string(&node.config).context(SerializeSnafu)?;
+                let config_lit = LitStr::new(&config_json, Span::call_site());
+                quote! { state.prepare_node(registry, #id_lit, #kind_lit, #config_lit)? }
+            }
+        };
+        preparations.push(quote! {
+            let mut #node_ident = #constructor;
+            #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*]).map_err(|error| {
+                state.preparation_failed(#id_lit, &error);
+                mf_runtime::WorkflowRunError::Context {
+                    definition_id: #id_lit.into(),
+                    message: error.to_string(),
+                }
+            })?;
+        });
+        let exit_check = enclosing.map(|_| {
+            quote! {
+                if state.loop_exit_requested() {
+                    return Ok(());
+                }
+            }
+        });
+        statements.push(quote! {
+            mf_runtime::execute_node_in_context(&#node_ident, &[#(#bindings),*], state)?;
+            #exit_check
+        });
+    }
+    Ok((preparations, statements))
 }

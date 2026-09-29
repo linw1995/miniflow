@@ -389,6 +389,9 @@ impl Flow {
                 });
             }
             crate::execute_node_in_context(node, &dependencies, state)?;
+            if state.loop_exit_requested() {
+                break;
+            }
         }
         let mut workflow_outputs = FlowOutputs::new();
         for output in &self.outputs {

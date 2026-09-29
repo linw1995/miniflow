@@ -6,6 +6,14 @@ use mf_telemetry::{
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
+#[derive(Debug)]
+struct LoopFrame {
+    variables: BTreeMap<String, Value>,
+    types: BTreeMap<String, crate::ValueType>,
+    index: usize,
+    exit_requested: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct NodeResult {
     pub outputs: Outputs,
@@ -28,11 +36,26 @@ pub enum ContextValue<'a> {
 }
 
 /// Completed output values for one run. Nodes receive an immutable reference.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ExecutionContext {
     // A present None is an explicit skip; an absent key is a missing output.
     outputs: BTreeMap<String, Option<Value>>,
     observation: Option<RunObservation>,
+    loop_frames: Vec<LoopFrame>,
+    pending_loop_write: Option<(String, Value)>,
+    remaining_steps: usize,
+}
+
+impl Default for ExecutionContext {
+    fn default() -> Self {
+        Self {
+            outputs: BTreeMap::new(),
+            observation: None,
+            loop_frames: Vec::new(),
+            pending_loop_write: None,
+            remaining_steps: crate::MAX_SCHEDULED_STEPS,
+        }
+    }
 }
 
 impl ExecutionContext {
@@ -43,7 +66,7 @@ impl ExecutionContext {
     ) -> Result<T, E> {
         let mut state = Self {
             observation,
-            outputs: BTreeMap::new(),
+            ..Self::default()
         };
         let _context = state.observation.as_ref().map(RunObservation::enter);
         let result = execute(&mut state);
@@ -100,6 +123,97 @@ impl ExecutionContext {
                 message: format!("missing context output `{id}`"),
             }),
         }
+    }
+
+    pub(crate) fn loop_source_values(&self) -> Result<Outputs, NodeExecutionError> {
+        let frame = self
+            .loop_frames
+            .last()
+            .ok_or_else(|| NodeExecutionError::ExecutionFailed {
+                message: "Loop source is outside a Loop frame".into(),
+            })?;
+        let mut values = frame.variables.clone();
+        values.insert("index".into(), Value::from(frame.index as i64));
+        Ok(values)
+    }
+
+    pub(crate) fn request_loop_exit(&mut self) -> Result<(), NodeExecutionError> {
+        let frame =
+            self.loop_frames
+                .last_mut()
+                .ok_or_else(|| NodeExecutionError::ExecutionFailed {
+                    message: "Loop exit is outside a Loop frame".into(),
+                })?;
+        frame.exit_requested = true;
+        Ok(())
+    }
+
+    pub fn loop_exit_requested(&self) -> bool {
+        self.loop_frames
+            .last()
+            .is_some_and(|frame| frame.exit_requested)
+    }
+
+    pub(crate) fn stage_loop_write(
+        &mut self,
+        variable: &str,
+        value: Value,
+    ) -> Result<(), NodeExecutionError> {
+        let frame = self
+            .loop_frames
+            .last()
+            .ok_or_else(|| NodeExecutionError::ExecutionFailed {
+                message: "Loop assignment is outside a Loop frame".into(),
+            })?;
+        let value_type =
+            frame
+                .types
+                .get(variable)
+                .ok_or_else(|| NodeExecutionError::ExecutionFailed {
+                    message: format!("unknown Loop variable `{variable}`"),
+                })?;
+        value_type
+            .validate_value(&value)
+            .map_err(|error| NodeExecutionError::ExecutionFailed {
+                message: format!("Loop variable `{variable}`: {error}"),
+            })?;
+        self.pending_loop_write = Some((variable.to_owned(), value));
+        Ok(())
+    }
+
+    pub(crate) fn run_loop_frame(
+        &mut self,
+        variables: BTreeMap<String, Value>,
+        types: BTreeMap<String, crate::ValueType>,
+        index: usize,
+        run: impl FnOnce(&mut Self) -> Result<(), WorkflowRunError>,
+    ) -> Result<(BTreeMap<String, Value>, bool), WorkflowRunError> {
+        let parent_outputs = std::mem::take(&mut self.outputs);
+        self.loop_frames.push(LoopFrame {
+            variables,
+            types,
+            index,
+            exit_requested: false,
+        });
+        let result = run(self);
+        let frame = self.loop_frames.pop().expect("Loop frame was just pushed");
+        self.outputs = parent_outputs;
+        self.pending_loop_write = None;
+        result.map(|()| (frame.variables, frame.exit_requested))
+    }
+
+    fn reserve_step(&mut self, id: &str) -> Result<(), WorkflowRunError> {
+        if self.remaining_steps == 0 {
+            return Err(state_error(
+                id,
+                format!(
+                    "scheduled-step budget of {} exhausted",
+                    crate::MAX_SCHEDULED_STEPS
+                ),
+            ));
+        }
+        self.remaining_steps -= 1;
+        Ok(())
     }
 
     fn publish(
@@ -163,6 +277,16 @@ impl ExecutionContext {
                     .map(|port| (output_id(id, &port.name), None)),
             ),
         }
+        if let Some((variable, value)) = self.pending_loop_write.take() {
+            let frame = self
+                .loop_frames
+                .last_mut()
+                .expect("validated Loop write has a frame");
+            frame.variables.insert(variable.clone(), value.clone());
+            // Later body steps read the current state through the synthetic source.
+            self.outputs
+                .insert(output_id(crate::LOOP_SOURCE_ID, &variable), Some(value));
+        }
         Ok(())
     }
 }
@@ -188,7 +312,13 @@ pub fn execute_node_in_context(
     ctx: &mut ExecutionContext,
 ) -> Result<(), WorkflowRunError> {
     let id = node.definition_id.as_str();
-    let mut step = ctx.observation.as_mut().and_then(|run| run.begin_node(id));
+    ctx.reserve_step(id)?;
+    ctx.pending_loop_write = None;
+    let mut step = if ctx.loop_frames.is_empty() {
+        ctx.observation.as_mut().and_then(|run| run.begin_node(id))
+    } else {
+        None
+    };
     let _context = step.as_ref().map(NodeObservation::enter);
     let mut dependencies = dependencies.to_vec();
     dependencies.sort();
@@ -260,7 +390,7 @@ pub fn execute_node_in_context(
         }
         let result = node
             .node
-            .execute_with_context(inputs, ctx)
+            .execute_with_context_mut(inputs, ctx)
             .map_err(|source| WorkflowRunError::NodeExecution {
                 definition_id: node.definition_id.clone(),
                 source,

@@ -111,7 +111,7 @@ impl Condition {
             Operator::Eq | Operator::Ne => {
                 let equal = match (value, literal) {
                     (Value::Number(left), Value::Number(right)) => {
-                        crate::number::compare(left, right) == Ordering::Equal
+                        mf_runtime::compare_json_numbers(left, right) == Ordering::Equal
                     }
                     _ => value == literal,
                 };
@@ -125,7 +125,7 @@ impl Condition {
                 let (Value::Number(left), Value::Number(right)) = (value, literal) else {
                     return Err("ordering requires numeric operands".into());
                 };
-                let order = crate::number::compare(left, right);
+                let order = mf_runtime::compare_json_numbers(left, right);
                 Ok(match operator {
                     Operator::Gt => order == Ordering::Greater,
                     Operator::Gte => order != Ordering::Less,

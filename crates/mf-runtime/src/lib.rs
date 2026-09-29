@@ -1,7 +1,9 @@
 mod context;
 mod definition;
 mod flow;
+mod loop_node;
 mod node;
+mod number;
 mod registry;
 mod runner;
 
@@ -17,11 +19,17 @@ pub use definition::{
     WorkflowDefinitionVersion, WorkflowOutputDefinition,
 };
 pub use flow::{Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowOutputs, NodeId};
+pub use loop_node::{
+    prepared_loop_assign, prepared_loop_assign_from_json, prepared_loop_exit, prepared_loop_node,
+    prepared_loop_node_from_json, prepared_loop_source, prepared_loop_source_from_json,
+    prepared_loop_source_types,
+};
 pub use mf_telemetry::observation::RunObservation;
 pub use node::{
     ContextReference, Inputs, Node, NodeBuildError, NodeExecutionError, NodeFactory, NodePorts,
     NodeRegistration, OutputDerivation, OutputDerivationError, Outputs, PortSpec,
     TypeCompatibility, TypeDepthError, TypeMismatch, ValueType, deserialize_config, output_id,
 };
+pub use number::compare_json_numbers;
 pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::{WorkflowRunError, instantiate_node_with_metadata};
