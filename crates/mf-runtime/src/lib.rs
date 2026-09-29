@@ -1,6 +1,7 @@
 mod context;
 mod definition;
 mod flow;
+mod iteration;
 mod node;
 mod registry;
 mod runner;
@@ -14,6 +15,11 @@ pub use definition::{
     NodeDependency, WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
 };
 pub use flow::{Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowOutputs, NodeId};
+pub use iteration::{
+    ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationErrorPolicy, IterationMode,
+    IterationNode, MAX_PARALLEL_ITEMS, iteration_input_flow_node,
+};
+pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
 pub use node::{
     ContextReference, Inputs, Node, NodeBuildError, NodeExecutionError, NodeFactory, NodePorts,
