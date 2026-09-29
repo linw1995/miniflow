@@ -51,7 +51,17 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: ./.github/actions/setup-nix
+      - name: Check and build without tests
+        if: matrix.runner == 'ubuntu-latest'
+        run: |
+          nix flake check --no-build
+          nix build --no-link -L \
+            '.#checks.x86_64-linux.miniflow' \
+            '.#checks.x86_64-linux.fmt' \
+            '.#checks.x86_64-linux.clippy' \
+            '.#checks.x86_64-linux.workflows'
       - name: Check and build
+        if: matrix.runner == 'macos-14'
         run: nix flake check -L
 
   coverage:
