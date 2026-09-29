@@ -219,6 +219,66 @@ fn receives_protobuf_logs_and_traces_before_acknowledging() {
 }
 
 #[test]
+fn iteration_detail_logs_leave_outer_lifecycle_complete() {
+    if !loopback_available() {
+        return;
+    }
+    let mut receiver = LoopbackReceiver::bind(graph(), run_id()).unwrap();
+    let detail = LogRecord {
+        event_name: "mf.iteration.node.finished".into(),
+        attributes: vec![
+            attribute("mf.workflow.id", string(graph().workflow_id.to_string())),
+            attribute("mf.run.id", string(run_id().to_string())),
+            attribute("mf.iteration.id", string("iteration")),
+            attribute("mf.iteration.index", integer(0)),
+            attribute("mf.node.id", string("body")),
+        ],
+        body: Some(string("mf.iteration.node.finished")),
+        ..Default::default()
+    };
+    let request = ExportLogsServiceRequest {
+        resource_logs: vec![ResourceLogs {
+            scope_logs: vec![
+                ScopeLogs {
+                    scope: Some(InstrumentationScope {
+                        name: "mf.iteration".into(),
+                        ..Default::default()
+                    }),
+                    log_records: vec![detail],
+                    ..Default::default()
+                },
+                ScopeLogs {
+                    scope: Some(InstrumentationScope {
+                        name: "mf.workflow".into(),
+                        ..Default::default()
+                    }),
+                    log_records: vec![
+                        record(1, false, &run_id().to_string(), 1),
+                        record(2, true, &run_id().to_string(), 1),
+                    ],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }],
+    }
+    .encode_to_vec();
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &request,
+        ),
+        200
+    );
+    let snapshot = receiver.finish();
+    assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
+    assert_eq!(snapshot.lifecycle.local_drops, 0);
+    assert_eq!(snapshot.lifecycle.observation_errors, 0);
+}
+
+#[test]
 fn unrelated_and_malformed_requests_are_visible_without_fabricating_events() {
     if !loopback_available() {
         return;

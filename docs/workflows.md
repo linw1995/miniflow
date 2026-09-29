@@ -55,7 +55,12 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | `builtin.constant` | Required `value`: any JSON value | None | `value`: inferred from the configured value |
 | `mfn-core` | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input, with its known type |
 | `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by control edges | One boolean activation output per branch, plus `else` |
+| `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array | `results`: collected array |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |
+
+`mfn-core` registers `builtin.iteration` for explicit dependency selection. The compiler and runtime orchestrate its
+body because an ordinary node invocation does not schedule a subgraph. Body nodes can use other linked packages
+declared by the enclosing workflow.
 
 `builtin.code` requires an explicit `language` field; the supported value is
 `cel`. Input names have concrete type declarations, while output names and expressions live in `code`. The CEL checker
@@ -113,6 +118,57 @@ coerced. Produced outputs are checked against their resolved types before public
 consumers. A runtime mismatch reports the node, port, and nested JSON Pointer path where applicable.
 
 See [compiling workflows](compiling.md) to build and run a definition, or [node development](node-development.md) to add node kinds.
+
+## Iteration
+
+The [iteration example](../examples/iteration.json) runs a body graph once per input array element and returns
+`{"results":[2,5,8]}`. It follows the array mapping, zero-based index, execution modes, and error policies described
+by the [Dify Iteration node](https://docs.dify.ai/en/cloud/use-dify/nodes/iteration). Add a `builtin.iteration` node to
+the outer graph, connect an array to its required `items` input, and read the collected array from its `results`
+output. An empty input returns an empty array after the body has passed validation.
+
+```json
+{
+  "id": "iteration",
+  "kind": "builtin.iteration",
+  "config": {
+    "mode": "sequential",
+    "on_error": "terminate",
+    "body": {
+      "nodes": [{ "id": "copy", "kind": "builtin.identity" }],
+      "edges": [
+        { "from_node": "@iteration", "from_output": "items", "to_node": "copy", "to_input": "input" }
+      ],
+      "result": { "node": "copy", "port": "value" }
+    }
+  }
+}
+```
+
+The enclosing workflow must declare `mfn-core` for both `builtin.iteration` and `builtin.identity`. `@iteration` is a reserved body
+source with outputs `items` (the current JSON element) and `index` (a zero-based signed integer). Body
+nodes, data edges, and optional `control_edges` use the ordinary workflow graph rules. The required `result` selects
+one body port for each item. Body node IDs belong to the body scope; outer edges cannot address them. All body nodes
+are constructed and validated before the runner is installed, including when the input array is empty.
+
+`mode` defaults to `sequential`. `parallel` uses at most ten workers, keeps results in input order, and is suitable
+when body operations are independent. Nodes in the body may be invoked repeatedly and concurrently, so a plugin with
+mutable internal state must synchronize it or use sequential mode. Each invocation gets fresh context values for
+`@iteration.items` and `@iteration.index`; body outputs from another item are never visible.
+
+`on_error` defaults to `terminate`. With `terminate`, the first failing item stops sequential execution and fails the
+iteration without publishing a partial result. Parallel execution stops scheduling new items after a failure, lets
+already started items finish, and reports the lowest failed input index among those started. `continue_on_error` places
+JSON null at each failed input position. `remove_failed` omits failed results while retaining successful input order.
+A skipped body result counts as an item failure. `continue_on_error` exposes `List(Any)` because the array may contain
+null; the other policies expose a list of the selected body's output type.
+
+The current scope supports one iteration level. Body graphs cannot contain another Iteration node or access outer
+context outputs directly. Pass values through the input array or add nodes inside the body. The runner description and
+terminal UI show the Iteration node as one outer graph node. OTel emits separate item and body-node spans and logs with
+the outer node ID and item index; failures remain visible even under `continue_on_error` and `remove_failed`. See
+[observation contracts](observability.md#iteration-observation). Answer-node streaming is outside the current workflow
+runner's output contract.
 
 ## Dependency locks
 

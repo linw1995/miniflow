@@ -161,6 +161,28 @@ Observation loss is acceptable. Consumers must expose gaps and local drops, and 
 
 There is no replay, persistent journal, reconnect protocol, node rescheduling, or full-state recovery. Known missing sequences and local drop counts can overlap; do not sum them as distinct losses. Trace availability and diagnostic-history truncation are separate from lifecycle completeness. Missing telemetry must not alter workflow results. Missing business stdout is a separate CLI output error.
 
+## Iteration observation
+
+An Iteration remains one outer node in the version 1 workflow lifecycle stream and graph description. Its ordinary
+`mf.node` span and `mf.node.started` / `mf.node.finished` records bracket the complete array operation. Repeated body
+invocations use a separate `mf.iteration` instrumentation scope so they do not consume the bounded outer lifecycle
+sequence or appear as duplicate node outcomes in the terminal UI.
+
+Each started item emits `mf.iteration.item.started` and `mf.iteration.item.finished` logs and an `mf.iteration.item`
+span. Each reached user-defined body node emits `mf.iteration.node.started` and
+`mf.iteration.node.finished` logs, or `mf.iteration.node.skipped` when a dependency is skipped, with an
+`mf.iteration.node` span. Dependency failures can finish a node without a start record. All detail logs carry
+`mf.workflow.id`, `mf.run.id`, `mf.iteration.id`, and zero-based `mf.iteration.index`; body-node records also carry
+`mf.node.id` and `mf.node.kind`. Terminal records include an outcome, duration when available, and failure context.
+They exclude item and result values. Plugin-provided failure messages can contain data supplied by that plugin.
+
+The item span is a child of the outer Iteration node span, and each body-node span is a child of its item span. The
+item context is attached in its worker thread, so spans created by a body plugin during its node invocation inherit
+that body-node context. Parallel completion order can differ from input order; use the item index and trace parentage
+to group records. Under `continue_on_error` or `remove_failed`, failed items and body nodes retain failed detail
+outcomes while the outer Iteration node can succeed. The terminal UI currently displays the outer node and does not
+render these repeated body invocations.
+
 ## Runner export configuration
 
 The generated runner initializes exporters only in execution mode when `OTEL_EXPORTER_OTLP_ENDPOINT`,
