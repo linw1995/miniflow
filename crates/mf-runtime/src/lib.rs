@@ -26,8 +26,9 @@ pub use iteration::{
     MAX_PARALLEL_ITEMS, iteration_input_flow_node,
 };
 pub use loop_node::{
-    prepared_loop_assign, prepared_loop_assign_from_json, prepared_loop_exit, prepared_loop_node,
-    prepared_loop_node_from_json, prepared_loop_source_from_json, prepared_loop_source_types,
+    loop_variable_types, prepared_loop_assign, prepared_loop_assign_from_json, prepared_loop_exit,
+    prepared_loop_node, prepared_loop_node_from_json, prepared_loop_source_from_json,
+    prepared_loop_source_types,
 };
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;

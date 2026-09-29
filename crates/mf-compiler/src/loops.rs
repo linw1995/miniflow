@@ -1,8 +1,8 @@
 use crate::{DefinitionId, ValueType, WorkflowCompileError, WorkflowDefinition};
 use mf_runtime::{
     EXIT_LOOP_KIND, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition,
-    LoopComparisonOperator, LoopDefinition, LoopVariableDefinition, MAX_LOOP_DEPTH,
-    MAX_LOOP_ITERATIONS, NodeDefinition, WorkflowDefinitionVersion,
+    LoopComparisonOperator, LoopDefinition, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, NodeDefinition,
+    WorkflowDefinitionVersion,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -33,29 +33,6 @@ pub(crate) fn assignment_target(config: &Value) -> Result<String, String> {
         return Err("assignment variable must not be blank".into());
     }
     Ok(assignment.variable)
-}
-
-pub(crate) fn variable_types(
-    variables: &[LoopVariableDefinition],
-) -> Result<BTreeMap<String, ValueType>, String> {
-    if variables.is_empty() {
-        return Err("variables must not be empty".into());
-    }
-    let mut types = BTreeMap::new();
-    for variable in variables {
-        if variable.name.trim().is_empty() || variable.name == "index" {
-            return Err(format!(
-                "invalid or reserved variable name `{}`",
-                variable.name
-            ));
-        }
-        let value_type = ValueType::parse_descriptor(&variable.value_type)
-            .map_err(|error| format!("variable `{}`: {error}", variable.name))?;
-        if types.insert(variable.name.clone(), value_type).is_some() {
-            return Err(format!("duplicate variable `{}`", variable.name));
-        }
-    }
-    Ok(types)
 }
 
 pub(crate) fn body_definition(
@@ -167,8 +144,8 @@ fn validate_loop(
     if !(1..=MAX_LOOP_ITERATIONS).contains(&loop_definition.max_iterations) {
         return Err(invalid(path, "max_iterations must be in 1..=1000"));
     }
-    let types =
-        variable_types(&loop_definition.variables).map_err(|message| invalid(path, message))?;
+    let types = mf_runtime::loop_variable_types(&loop_definition.variables)
+        .map_err(|message| invalid(path, message))?;
     if let Some(condition) = &loop_definition.until {
         let value_type = types.get(&condition.variable).ok_or_else(|| {
             invalid(

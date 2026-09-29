@@ -1088,7 +1088,7 @@ fn resolve_nodes_in_scope(
             match node.kind.as_str() {
                 crate::LOOP_KIND => {
                     let loop_definition = node.loop_definition.as_deref().expect("validated Loop");
-                    let types = crate::loops::variable_types(&loop_definition.variables)
+                    let types = mf_runtime::loop_variable_types(&loop_definition.variables)
                         .expect("validated Loop variables");
                     let body = crate::loops::body_definition(
                         &loop_definition.body,

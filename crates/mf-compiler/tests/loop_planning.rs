@@ -172,6 +172,50 @@ fn rejects_old_schema_and_invalid_loop_structure() {
 }
 
 #[test]
+fn loop_variable_validation_matches_planner_and_runtime_construction() {
+    for (variables, expected) in [
+        (json!([]), "variables must not be empty"),
+        (
+            json!([{"name": "index", "type": "int"}]),
+            "invalid or reserved variable name",
+        ),
+        (
+            json!([
+                {"name": "count", "type": "int"},
+                {"name": "count", "type": "int"}
+            ]),
+            "duplicate variable",
+        ),
+        (
+            json!([{"name": "count", "type": "unsupported"}]),
+            "unsupported type",
+        ),
+    ] {
+        let mut value = definition();
+        value["nodes"][1]["loop"]["variables"] = variables.clone();
+        let error = plan_definition(&parse(value)).unwrap_err().to_string();
+        assert!(error.contains(expected), "{error}");
+
+        let config = json!({
+            "max_iterations": 5,
+            "variables": variables,
+        });
+        let error =
+            mf_runtime::prepared_loop_node_from_json("repeat", &config.to_string(), |_| Ok(()))
+                .err()
+                .unwrap()
+                .to_string();
+        assert!(error.contains(expected), "{error}");
+    }
+
+    let complete_definition = definition()["nodes"][1]["loop"].to_string();
+    let prepared =
+        mf_runtime::prepared_loop_node_from_json("repeat", &complete_definition, |_| Ok(()))
+            .unwrap();
+    assert_eq!(prepared.ports.inputs[0].name, "count");
+}
+
+#[test]
 fn validates_body_plugins_and_loop_port_types() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut value = definition();
