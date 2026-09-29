@@ -21,8 +21,7 @@ pub use definition::{
 pub use flow::{Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowOutputs, NodeId};
 pub use loop_node::{
     prepared_loop_assign, prepared_loop_assign_from_json, prepared_loop_exit, prepared_loop_node,
-    prepared_loop_node_from_json, prepared_loop_source, prepared_loop_source_from_json,
-    prepared_loop_source_types,
+    prepared_loop_node_from_json, prepared_loop_source_from_json, prepared_loop_source_types,
 };
 pub use mf_telemetry::observation::RunObservation;
 pub use node::{

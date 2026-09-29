@@ -77,7 +77,6 @@ struct LoopNode<F> {
     id: String,
     definition: LoopDefinition,
     types: BTreeMap<String, ValueType>,
-    ports: NodePorts,
     body: F,
 }
 
@@ -89,10 +88,6 @@ where
         Err(structural_error(
             "Loop requires a workflow execution context",
         ))
-    }
-
-    fn ports(&self) -> Option<NodePorts> {
-        Some(self.ports.clone())
     }
 
     fn execute_with_context_mut(
@@ -156,7 +151,6 @@ where
             id: id.to_owned(),
             definition,
             types,
-            ports: ports.clone(),
             body,
         }),
         ports,
@@ -180,17 +174,11 @@ where
     prepared_loop_node(id, definition, body)
 }
 
-struct LoopSourceNode {
-    ports: NodePorts,
-}
+struct LoopSourceNode;
 
 impl Node for LoopSourceNode {
     fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
         Err(structural_error("Loop source requires a Loop frame"))
-    }
-
-    fn ports(&self) -> Option<NodePorts> {
-        Some(self.ports.clone())
     }
 
     fn execute_with_context_mut(
@@ -202,16 +190,6 @@ impl Node for LoopSourceNode {
     }
 }
 
-pub fn prepared_loop_source(
-    variables: &[LoopVariableDefinition],
-) -> Result<FlowNode, WorkflowRunError> {
-    let types = variable_types(variables).map_err(|message| WorkflowRunError::Context {
-        definition_id: crate::LOOP_SOURCE_ID.into(),
-        message,
-    })?;
-    Ok(prepared_loop_source_types(&types))
-}
-
 pub fn prepared_loop_source_from_json(variables_json: &str) -> Result<FlowNode, WorkflowRunError> {
     let variables: Vec<LoopVariableDefinition> =
         serde_json::from_str(variables_json).map_err(|source| {
@@ -220,7 +198,11 @@ pub fn prepared_loop_source_from_json(variables_json: &str) -> Result<FlowNode, 
                 source,
             }
         })?;
-    prepared_loop_source(&variables)
+    let types = variable_types(&variables).map_err(|message| WorkflowRunError::Context {
+        definition_id: crate::LOOP_SOURCE_ID.into(),
+        message,
+    })?;
+    Ok(prepared_loop_source_types(&types))
 }
 
 pub fn prepared_loop_source_types(types: &BTreeMap<String, ValueType>) -> FlowNode {
@@ -233,27 +215,16 @@ pub fn prepared_loop_source_types(types: &BTreeMap<String, ValueType>) -> FlowNo
         inputs: Vec::new(),
         outputs,
     };
-    FlowNode::new(
-        crate::LOOP_SOURCE_ID,
-        Box::new(LoopSourceNode {
-            ports: ports.clone(),
-        }),
-        ports,
-    )
+    FlowNode::new(crate::LOOP_SOURCE_ID, Box::new(LoopSourceNode), ports)
 }
 
 struct LoopAssignNode {
     variable: String,
-    ports: NodePorts,
 }
 
 impl Node for LoopAssignNode {
     fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
         Err(structural_error("Loop assignment requires a Loop frame"))
-    }
-
-    fn ports(&self) -> Option<NodePorts> {
-        Some(self.ports.clone())
     }
 
     fn execute_with_context_mut(
@@ -278,7 +249,6 @@ pub fn prepared_loop_assign(id: &str, variable: &str, value_type: ValueType) -> 
         id,
         Box::new(LoopAssignNode {
             variable: variable.to_owned(),
-            ports: ports.clone(),
         }),
         ports,
     )
