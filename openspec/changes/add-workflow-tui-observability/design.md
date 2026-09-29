@@ -123,7 +123,7 @@ Reject `--tui` when the required interactive terminal is unavailable before star
 The three implementation plans are complete as planning artifacts and are applied in this order. Implementation progress and remaining acceptance work are tracked in [tasks.md](tasks.md).
 
 1. [Lifecycle events and observable loss](plans/01-events-and-state.md): exact field mapping, lightweight terminal boundary, transition table, detectable gaps versus unverified tails, and loss-injection acceptance cases. Maps to tasks 1.2, 2.3, and 4.2-4.4.
-2. [Runner description and output isolation](plans/02-runner-description.md): versioned graph JSON, early stdout descriptor isolation on Linux/macOS, bounded preflight, and noisy-factory fixtures. Maps to task 3.1.
+2. [Embedded runner description and bounded preflight](plans/02-runner-description.md): date-versioned graph JSON from the embedded plan, no factory calls, and bounded child output collection. Maps to task 3.1.
 3. [Child process and terminal cleanup](plans/03-process-and-terminal.md): resource ownership, output budgets, process groups, deadlines, exit-result precedence, and the failure matrix. Maps to tasks 5.1-5.4.
 
 These plans use the existing capability deltas and crates. The terminal layout can be refined during task 5.3 with success, failure, and conditional-branch examples at narrow and wide sizes.
@@ -132,7 +132,7 @@ These plans use the existing capability deltas and crates. The terminal layout c
 
 - Telemetry can be delayed, duplicated, dropped, or lost at process death -> sequence-aware reduction, bounded draining, lightweight terminal boundaries, and explicit unknown/incomplete states.
 - OTel and terminal dependencies increase build size -> isolate UI dependencies and enable exporter support only where initialized; measure generated runner size and disabled-export overhead.
-- Constructors can print while resolving dynamic metadata -> isolate their diagnostics from `--describe` output and test a noisy third-party fixture.
+- Constructors can print during validation -> keep `--describe` on the embedded-plan path and verify factory calls are absent with a noisy third-party fixture.
 - Large workflows can exceed metadata/event budgets -> document limits, reject oversized descriptions before execution, and surface telemetry truncation as incomplete observation; graph preflight still requires a complete description.
 - Plugin diagnostics can contain sensitive values -> exclude configuration and input/output values from generated metadata; preserve the existing diagnostic policy rather than claiming automatic sanitization of plugin messages.
 - Description and execution occur in separate processes -> require deterministic configuration-derived port descriptions, as existing validation already does.

@@ -285,6 +285,13 @@ fn graph_relative_event_validation_rejects_wrong_nodes_and_out_of_range_evidence
 }
 
 #[test]
+fn graph_validation_accepts_unconnected_dynamic_port_names() {
+    let mut wire = record("success");
+    wire.body["produced_ports"] = json!(["unconnected.dynamic"]);
+    assert!(wire.decode().unwrap().validate_for(&graph()).is_ok());
+}
+
+#[test]
 fn trace_context_validates_native_ids_without_serializing_them_into_attributes() {
     let wire = record("node-start");
     let context = TraceContext {

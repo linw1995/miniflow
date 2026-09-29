@@ -40,6 +40,8 @@ unknown; aggregate workflow success cannot fill them in.
 
 Only lifecycle events share the sequence. Plugin logs and trace spans do not consume it. There are at most `2 * node_count + 2` lifecycle records for this execution model. Emit the workflow finish last and reject further lifecycle emission through the completed observation scope. A failed serialization/enqueue still leaves a sequence gap; an exporter retransmission preserves the original sequence and content.
 
+The embedded description exposes connected port names through edges, not the full effective port table. Receiver validation can check nonempty unique reported port names and skip causes against graph edges, but cannot prove that a reported list covers every dynamic output. Treat this unavailable metadata separately from lifecycle delivery loss. The runtime remains responsible for validating effective ports before event emission.
+
 ## Detecting Loss
 
 Maintain received sequence membership bounded by the described graph's event maximum, per-node state, and explicit local-drop counters. Validate sequence bounds before allocating. A record counts as received for completeness only after decoding, session validation, and admission to the state reducer; acknowledgment by the HTTP handler alone is insufficient.

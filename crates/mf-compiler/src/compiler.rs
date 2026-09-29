@@ -4,6 +4,13 @@ use crate::{
 };
 use crate::{DefinitionId, WorkflowDefinition};
 use mf_runtime::{OutputDerivation, TypeCompatibility, TypeMismatch};
+use mf_telemetry::{
+    ContractError,
+    description::{
+        ControlEdge, DataEdge, NodeDescription, WorkflowDescription, WorkflowDescriptionVersion,
+    },
+    identity::WorkflowId,
+};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
 use std::collections::{BTreeMap, BTreeSet};
@@ -780,6 +787,78 @@ pub enum WorkflowExecutionError {
     Execution {
         source: mf_runtime::WorkflowRunError,
     },
+}
+
+#[derive(Debug, Snafu)]
+pub enum DescriptionError {
+    #[snafu(display("compiled workflow has incomplete or duplicate node definitions"))]
+    InvalidPlan,
+    #[snafu(display("could not describe node `{definition_id}`"))]
+    MissingNode { definition_id: DefinitionId },
+    #[snafu(display("invalid workflow description: {source}"))]
+    Contract { source: ContractError },
+}
+
+pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription, DescriptionError> {
+    let definitions: BTreeMap<_, _> = plan
+        .definition
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node))
+        .collect();
+    if definitions.len() != plan.definition.nodes.len()
+        || plan.execution_order.len() != plan.definition.nodes.len()
+    {
+        return Err(DescriptionError::InvalidPlan);
+    }
+    let mut nodes = Vec::with_capacity(plan.execution_order.len());
+    for definition_id in &plan.execution_order {
+        let id = definition_id.as_str();
+        let definition = definitions
+            .get(id)
+            .ok_or_else(|| DescriptionError::MissingNode {
+                definition_id: definition_id.clone(),
+            })?;
+        nodes.push(NodeDescription {
+            id: id.into(),
+            kind: definition.kind.clone(),
+        });
+    }
+    let order: Vec<String> = plan
+        .execution_order
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    let description = WorkflowDescription {
+        version: WorkflowDescriptionVersion::CURRENT,
+        workflow_id: WorkflowId::from_definition(&plan.definition, &order)
+            .context(ContractSnafu)?,
+        nodes,
+        data_edges: plan
+            .definition
+            .edges
+            .iter()
+            .map(|edge| DataEdge {
+                from_node: edge.from_node.to_string(),
+                from_output: edge.from_output.clone(),
+                to_node: edge.to_node.to_string(),
+                to_input: edge.to_input.clone(),
+            })
+            .collect(),
+        control_edges: plan
+            .definition
+            .control_edges
+            .iter()
+            .map(|edge| ControlEdge {
+                from_node: edge.from_node.to_string(),
+                from_output: edge.from_output.clone(),
+                to_node: edge.to_node.to_string(),
+            })
+            .collect(),
+        execution_order: order,
+    };
+    description.validate().context(ContractSnafu)?;
+    Ok(description)
 }
 
 /// Observes construction and execution together; validation-only callers keep using instantiate_compiled.

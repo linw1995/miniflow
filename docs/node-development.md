@@ -16,7 +16,7 @@ A plugin can register several unique kinds from one crate. Dependency aliases do
 
 All plugins and the consumer must resolve the same `mf-runtime` package identity, including its version and source. Registrations from a different runtime identity are not entries in the consumer's inventory.
 
-Factories validate configuration and construct instances during build validation and again during execution. Keep external I/O and business side effects in `Node::execute`; validation must not execute the workflow. Building a Rust plugin can execute its build scripts and procedural macros with the build user's permissions.
+Factories validate configuration and construct instances during build validation and execution. Keep external I/O and business side effects in `Node::execute`; validation and `--describe` must not execute the workflow. Description mode reads the embedded graph without calling factories, so factory diagnostics cannot enter its JSON output. Building a Rust plugin can execute its build scripts and procedural macros with the build user's permissions.
 
 ## Select dependencies in a Flow
 

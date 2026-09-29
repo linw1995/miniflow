@@ -74,10 +74,12 @@ fn checks_owners_and_resolves_exact_workspace_versions() {
         "mfn-code",
     ] {
         assert!(owners.lines().any(|line| line == name), "{name}");
-        assert!(
-            manifest.contains(&format!("{name} = \"=1.2.3\"")),
-            "{manifest}"
-        );
+        let expected = if name == "mf-telemetry" {
+            "mf-telemetry = { version = \"=1.2.3\", features = [\"otlp\"] }".to_owned()
+        } else {
+            format!("{name} = \"=1.2.3\"")
+        };
+        assert!(manifest.contains(&expected), "{manifest}");
     }
 }
 

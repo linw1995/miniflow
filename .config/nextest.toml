@@ -36,6 +36,8 @@ filter = '''
 )) |
 (binary_id(=mf-compiler::observation) &
     test(=generated_execution_matches_memory_for_success_and_failures)) |
+(binary_id(=mf-cli::runner_observability) &
+    test(=generated_runner_describes_embedded_graph_and_exports_correlated_otel)) |
 (binary_id(=mf-compiler::if_else) &
     test(=compiled_branches_match_memory_and_rebuild_when_precedence_changes))
 '''
@@ -68,6 +70,8 @@ filter = '''
 )) |
 (binary_id(=mf-compiler::observation) &
     test(=generated_execution_matches_memory_for_success_and_failures)) |
+(binary_id(=mf-cli::runner_observability) &
+    test(=generated_runner_describes_embedded_graph_and_exports_correlated_otel)) |
 (binary_id(=mf-compiler::if_else) &
     test(=compiled_branches_match_memory_and_rebuild_when_precedence_changes))
 '''
