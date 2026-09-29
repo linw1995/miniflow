@@ -34,6 +34,8 @@ filter = '''
     test(=generated_runner_matches_inference_and_preserves_installed_binary_on_conflict) |
     test(=generated_runner_rejects_a_false_output_derivation)
 )) |
+(binary_id(=mf-compiler::observation) &
+    test(=generated_execution_matches_memory_for_success_and_failures)) |
 (binary_id(=mf-compiler::if_else) &
     test(=compiled_branches_match_memory_and_rebuild_when_precedence_changes))
 '''
@@ -64,6 +66,8 @@ filter = '''
     test(=generated_runner_matches_inference_and_preserves_installed_binary_on_conflict) |
     test(=generated_runner_rejects_a_false_output_derivation)
 )) |
+(binary_id(=mf-compiler::observation) &
+    test(=generated_execution_matches_memory_for_success_and_failures)) |
 (binary_id(=mf-compiler::if_else) &
     test(=compiled_branches_match_memory_and_rebuild_when_precedence_changes))
 '''

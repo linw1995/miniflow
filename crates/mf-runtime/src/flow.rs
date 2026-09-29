@@ -347,7 +347,21 @@ impl Flow {
     }
 
     pub fn execute(&self) -> Result<FlowOutputs, crate::WorkflowRunError> {
-        let mut state = crate::ExecutionContext::default();
+        self.execute_with_observation(None)
+    }
+
+    pub fn execute_with_observation(
+        &self,
+        observation: Option<crate::RunObservation>,
+    ) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        crate::ExecutionContext::run(observation, |state| self.execute_in_context(state))
+    }
+
+    /// Executes already constructed nodes inside a caller-owned run scope.
+    pub fn execute_in_context(
+        &self,
+        state: &mut crate::ExecutionContext,
+    ) -> Result<FlowOutputs, crate::WorkflowRunError> {
         for node_id in &self.execution_order {
             let node = &self.nodes[node_id.index()];
             let mut dependencies = Vec::new();
@@ -374,18 +388,14 @@ impl Flow {
                     source_output: &edge.from_output,
                 });
             }
-            crate::execute_node_in_context(node, &dependencies, &mut state)?;
+            crate::execute_node_in_context(node, &dependencies, state)?;
         }
         let mut workflow_outputs = FlowOutputs::new();
         for output in &self.outputs {
             let id = self.nodes[output.node_id.index()].definition_id.as_str();
-            if let Some(value) = crate::select_context_output(
-                &state,
-                &output.name,
-                id,
-                &output.port,
-                output.optional,
-            )? {
+            if let Some(value) =
+                state.select_output(&output.name, id, &output.port, output.optional)?
+            {
                 workflow_outputs.insert(output.name.clone(), value);
             }
         }

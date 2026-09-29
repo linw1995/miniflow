@@ -8,11 +8,11 @@
 
 ## 2. Instrument shared workflow execution
 
-- [ ] 2.1 Add caller-owned observation scope support and shared node instrumentation without library-owned global provider installation; verify generated and in-memory execution produce equivalent lifecycle meanings and preserve results with observation disabled.
-- [ ] 2.2 Cover preparation, dependency resolution, invocation, output publication, and selected-output extraction; verify failure phase reporting, no fabricated starts, missing-output precedence, and success only after publication.
-- [ ] 2.3 Emit conditional skip causes, produced/skipped port names, and a final sequence/visited-prefix record without a full node snapshot; verify inactive side effects remain suppressed, early failures identify NotRun nodes, and missing visited-node outcomes are not inferred from workflow success.
-- [ ] 2.4 Add workflow/node spans and independently emitted OTel lifecycle LogRecords with active node context; verify a long node's start is observable before its span ends and lifecycle records remain available under trace sampling and diagnostic filtering.
-- [ ] 2.5 Document embedding/provider ownership and plugin context behavior; verify a plugin fixture can create a correlated child span without changing its ordinary execution interface.
+- [x] 2.1 Add caller-owned observation scope support and shared node instrumentation without library-owned global provider installation; verify generated and in-memory execution produce equivalent lifecycle meanings and preserve results with observation disabled.
+- [x] 2.2 Cover preparation, dependency resolution, invocation, output publication, and selected-output extraction; verify failure phase reporting, no fabricated starts, missing-output precedence, and success only after publication.
+- [x] 2.3 Emit conditional skip causes, produced/skipped port names, and a final sequence/visited-prefix record without a full node snapshot; verify inactive side effects remain suppressed, early failures identify NotRun nodes, and missing visited-node outcomes are not inferred from workflow success.
+- [x] 2.4 Add workflow/node spans and independently emitted OTel lifecycle LogRecords with active node context; verify a long node's start is observable before its span ends and lifecycle records remain available under trace sampling and diagnostic filtering.
+- [x] 2.5 Document embedding/provider ownership and plugin context behavior; verify a plugin fixture can create a correlated child span without changing its ordinary execution interface.
 
 ## 3. Generate description and export support
 

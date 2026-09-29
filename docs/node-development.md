@@ -85,3 +85,9 @@ carries multiple JSON types; a specific declaration must match every produced va
 ## Prepared execution nodes
 
 `FlowNode::new` requires resolved `NodePorts`. Compiler preparation supplies these from the instance or static registration. Both in-memory execution and generated runners return `WorkflowRunError`. Context-aware implementations take `&ExecutionContext`; generated step helpers assume a validated plan and its execution order.
+
+## Workflow observation context
+
+Observed execution activates the workflow's OTel context and a node span around dependency resolution, invocation, and output publication. A node using an application-provided OTel tracer can create child spans through the current context without changing its execution interface. The runtime does not install a global provider or configure a plugin's tracer. Threads created by plugins require explicit context propagation.
+
+Lifecycle events are emitted by the runtime independently of plugin diagnostic logs. Plugins continue to return values and explicit skipped ports normally; the runtime records success only after validating and publishing those results. See [observation contracts](observability.md) for provider ownership, failure phases, and a runnable SDK example.
