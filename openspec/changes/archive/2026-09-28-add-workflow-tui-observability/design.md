@@ -142,11 +142,4 @@ These plans use the existing capability deltas and crates. Task 5.3 uses `rust-s
 
 Implement contracts and shared runtime instrumentation first, then runner description/export, then receiver/reducer and terminal presentation. Add matching `mf-telemetry` support-package publication and exact-version resolution before distributing a CLI that generates runners using it. Recompile existing workflows to gain description and export support; source workflow schema and ordinary plugin execution behavior remain unchanged.
 
-Direct runner execution remains available without export configuration. Users can stop using TUI mode or remove export configuration independently of workflow behavior. Keep this change unarchived and implementation tasks unchecked until the implementation and acceptance checks are complete.
-
-## References
-
-- [OTel Trace SDK: span processors and exporters](https://opentelemetry.io/docs/specs/otel/trace/sdk/)
-- [OTel Logs data model: events and trace correlation](https://opentelemetry.io/docs/specs/otel/logs/data-model/)
-- [OTLP transport and delivery](https://opentelemetry.io/docs/specs/otlp/)
-- [OTLP exporter endpoint configuration](https://opentelemetry.io/docs/specs/otel/protocol/exporter/)
+Direct runner execution remains available without export configuration. Users can stop using TUI mode or remove export configuration independently of workflow behavior.

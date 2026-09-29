@@ -81,7 +81,3 @@ Apply useful records immediately; missing global sequences do not stall all node
 3. Implement the pure reducer with bounded sequence tracking; verify every transition above independently of HTTP and terminal code.
 4. Connect OTel emission and reception; verify start visibility while a node remains executing and finish delivery for short handled runs.
 5. Exercise interior loss, prefix loss, final-record loss, an entirely lost stream, delayed gaps, malformed records, local queue overflow, and trace-only loss. Assert exact gaps only when evidence permits, and assert workflow outputs remain unchanged.
-
-## Reference
-
-[OTLP delivery semantics](https://opentelemetry.io/docs/specs/otlp/) allow duplicate records after retransmission. Application-level sequencing and completeness classification are the workflow contract defined here.
