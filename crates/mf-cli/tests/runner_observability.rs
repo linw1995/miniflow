@@ -3,7 +3,11 @@
 use mf_compiler::{
     SupportPackages, WorkflowDefinition, plan_definition, resolve_project, write_dependency_project,
 };
-use mf_tui::description::describe_executable;
+use mf_tui::{
+    description::describe_executable,
+    receiver::LoopbackReceiver,
+    state::{Completeness, NodeStatus},
+};
 use opentelemetry_proto::tonic::{
     collector::{logs::v1::ExportLogsServiceRequest, trace::v1::ExportTraceServiceRequest},
     common::v1::any_value,
@@ -482,6 +486,28 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
                     Some(any_value::Value::StringValue(id)) if id == "12345678-1234-4234-9234-123456789abc")
             })
         }));
+
+    let run_id =
+        mf_telemetry::identity::RunId::try_from("12345678-1234-4234-9234-123456789abd".to_owned())
+            .unwrap();
+    let mut receiver = LoopbackReceiver::bind(description.clone(), run_id).unwrap();
+    let received = command(&runner)
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
+        .env("MF_RUN_ID", run_id.to_string())
+        .output()
+        .unwrap();
+    assert!(received.status.success());
+    assert_eq!(received.stdout, plain.stdout);
+    let snapshot = receiver.finish();
+    assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
+    assert_eq!(snapshot.lifecycle.known_missing_count, 0);
+    assert!(
+        snapshot
+            .nodes
+            .iter()
+            .all(|node| node.status == NodeStatus::Succeeded)
+    );
+    assert_eq!(snapshot.traces.observed_spans, 4);
 
     let (endpoint, worker) = collector(1);
     let logs_only = command(&runner)

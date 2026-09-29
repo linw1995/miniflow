@@ -50,7 +50,7 @@ Maintain received sequence membership bounded by the described graph's event max
 | --- | --- |
 | Run active, no gap currently visible | Collecting; completeness has not been established |
 | Higher sequence arrives before a lower one | Show a pending gap immediately; clear it if delayed records arrive |
-| Valid final record, every sequence from 1 through final received and applied, no conflicts/local lifecycle drops | Complete lifecycle stream |
+| Valid final record, every sequence from 1 through final received and applied, all visited outcomes justified, no conflicts/local lifecycle drops | Complete lifecycle stream |
 | Gap remains after bounded drain, or a local lifecycle record was discarded | Incomplete; show missing ranges/counts where known and the relevant reason |
 | No final record by the drain deadline, including no records at all | Unverified tail; show that the final boundary is missing and the total missing count is unknown |
 | Receiver, schema, or identity validation prevents interpreting the session | Show an observation error; retain known states and never claim completeness |

@@ -2,9 +2,9 @@
 
 ## Availability and package boundaries
 
-`mf-telemetry` provides versioned descriptions, lifecycle events, workflow/run identities, sequence reservation, validation, and mapping into OpenTelemetry log records. Shared runtime instrumentation and generated execution accept caller-owned observations. Compiled runners also provide `--describe` and initialize OTel export only when an endpoint is configured. The local OTLP receiver and `mf run --tui` are subsequent implementation steps.
+`mf-telemetry` provides versioned descriptions, lifecycle events, workflow/run identities, sequence reservation, validation, and mapping into OpenTelemetry log records. Shared runtime instrumentation and generated execution accept caller-owned observations. Compiled runners also provide `--describe` and initialize OTel export only when an endpoint is configured. `mf-tui` now contains a local OTLP receiver and state reducer; the `mf run --tui` entry point is a subsequent implementation step.
 
-`mf-runtime` depends on the minimal telemetry package. `mf-cli` depends on the separate `mf-tui` package, currently providing bounded description preflight. Neither the compiler nor runtime depends on `mf-tui`. Generated runners resolve telemetry transitively through the runtime, without SDK, HTTP-client, or terminal dependencies by default.
+`mf-runtime` depends on the minimal telemetry package. `mf-cli` depends on the separate `mf-tui` package for bounded description preflight and local reception. Neither the compiler nor runtime depends on `mf-tui`. Generated runners resolve telemetry transitively through the runtime, without SDK, HTTP-client, or terminal dependencies by default.
 
 The `mf-telemetry/otlp` feature selects the OTel SDK and OTLP/HTTP protobuf exporters with an explicit blocking HTTP client and TLS support. Enabling the feature alone does not initialize an exporter. The generated runner owns provider initialization and bounded shutdown; libraries do not install global providers for callers.
 
@@ -173,5 +173,33 @@ emits one JSON graph document on stdout; it does not initialize the registry or 
 `mf-tui::description::describe_executable` preflight runs a child in an owned process group, applies a 30-second deadline
 and 16 MiB document limit, drains both streams, and rejects malformed or unsupported descriptions. The interactive CLI
 entry point is part of the later UI work.
+
+## Local reception and state aggregation
+
+`mf-tui::receiver::LoopbackReceiver::bind` opens an ephemeral `127.0.0.1` OTLP/HTTP endpoint for one described workflow
+and run ID. It accepts protobuf logs at `/v1/logs` and spans at `/v1/traces`. Request bodies are limited to 8 MiB,
+each signal request to 1,024 records, and active connections to 16. A request has a two-second read deadline. An HTTP
+success response follows decoding, session checks, and state admission; it does not claim that later network hops or
+the TUI display are complete. Unrelated runs are ignored. Malformed matching lifecycle records and receiver errors
+remain visible as local drops or observation errors. Trace-only drops do not invalidate lifecycle completeness.
+
+`mf-tui::state::SessionState` keeps one state record per described node and sparse sequence membership bounded by the
+graph's maximum lifecycle event count. Identical retransmissions are ignored; conflicting sequence content or
+incompatible terminal outcomes are surfaced without moving a terminal node back to Running. A finish event can arrive
+before its start, and later evidence may close an active sequence gap. Unknown node outcomes inside the final visited
+prefix remain Unknown; a valid final boundary can prove that later nodes were NotRun.
+
+Session admission limits descriptions to 10,000 nodes and individual lifecycle events to 128 KiB. State snapshots retain
+at most 64 missing ranges and 64 diagnostic entries, each at most 1 KiB; omitted ranges and diagnostic bytes are counted.
+Each node retains at most 32 produced and 32 skipped port names of 128 bytes each, 32 short skip causes, and 4 KiB of
+failure text. Omitted display metadata is counted separately from lifecycle loss. The receiver rejects records that
+exceed admission limits rather than allocating memory proportional to untrusted decoded content indefinitely.
+
+Completeness stays Collecting while the run is active and gaps may still close. A final record with every sequence
+applied, every visited node outcome justified, and no local lifecycle loss, observation error, or conflict is Complete. Remaining gaps or local lifecycle
+drops after bounded collection are Incomplete. If the final record is absent, the tail is UnverifiedTail and its total
+missing count is unknown, even when no telemetry arrived. Known missing ranges and local drop counts may overlap and
+must be shown separately. Observed span count, trace drops, and diagnostic truncation are separate indicators; none
+proves lifecycle loss. There is no replay, persistence, reconnect, retry scheduling, or workflow restart.
 
 See [compiling workflows](compiling.md) for executable commands, endpoint settings, lock migration, and build prerequisites. Automatically generated metadata excludes configuration and business values. Arbitrary plugin failure messages can contain sensitive text and are not automatically sanitized by this contract.
