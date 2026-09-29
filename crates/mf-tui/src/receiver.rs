@@ -156,7 +156,14 @@ async fn serve(
         tokio::select! {
             _ = &mut stopped => break,
             accepted = listener.accept() => {
-                let Ok((stream, _)) = accepted else { continue };
+                let (stream, _) = match accepted {
+                    Ok(connection) => connection,
+                    Err(error) => {
+                        note_error(&context, &format!("OTLP accept failed: {error}"));
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
                 let Ok(permit) = Arc::clone(&permits).try_acquire_owned() else {
                     context.state.lock().expect("receiver state was not poisoned")
                         .record_observation_error("OTLP connection limit exceeded");

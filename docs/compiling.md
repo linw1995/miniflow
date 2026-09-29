@@ -16,6 +16,7 @@ With Cargo, a compatible Rust toolchain, CMake, a C compiler, and the declared n
 mf compile flow.json --output ./flow
 ./flow
 ./flow --describe
+mf run ./flow --tui
 mf compile flow.json --output ./flow --locked
 ```
 

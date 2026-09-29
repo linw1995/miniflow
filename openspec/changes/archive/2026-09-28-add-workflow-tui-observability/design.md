@@ -126,7 +126,7 @@ The three implementation plans are complete as planning artifacts and are applie
 2. [Embedded runner description and bounded preflight](plans/02-runner-description.md): date-versioned graph JSON from the embedded plan, no factory calls, and bounded child output collection. Maps to task 3.1.
 3. [Child process and terminal cleanup](plans/03-process-and-terminal.md): resource ownership, output budgets, process groups, deadlines, exit-result precedence, and the failure matrix. Maps to tasks 5.1-5.4.
 
-These plans use the existing capability deltas and crates. The terminal layout can be refined during task 5.3 with success, failure, and conditional-branch examples at narrow and wide sizes.
+These plans use the existing capability deltas and crates. Task 5.3 uses `rust-sugiyama` for static layers and sibling ordering, then projects the result onto fixed terminal cells. The first renderer draws simple orthogonal links without obstacle search; dense graphs may show crossings or obscured segments. Keep node geometry stable while lifecycle state changes, and refine the presentation with success, failure, and conditional-branch examples at narrow and wide sizes.
 
 ## Risks / Trade-offs
 
@@ -142,11 +142,4 @@ These plans use the existing capability deltas and crates. The terminal layout c
 
 Implement contracts and shared runtime instrumentation first, then runner description/export, then receiver/reducer and terminal presentation. Add matching `mf-telemetry` support-package publication and exact-version resolution before distributing a CLI that generates runners using it. Recompile existing workflows to gain description and export support; source workflow schema and ordinary plugin execution behavior remain unchanged.
 
-Direct runner execution remains available without export configuration. Users can stop using TUI mode or remove export configuration independently of workflow behavior. Keep this change unarchived and implementation tasks unchecked until the implementation and acceptance checks are complete.
-
-## References
-
-- [OTel Trace SDK: span processors and exporters](https://opentelemetry.io/docs/specs/otel/trace/sdk/)
-- [OTel Logs data model: events and trace correlation](https://opentelemetry.io/docs/specs/otel/logs/data-model/)
-- [OTLP transport and delivery](https://opentelemetry.io/docs/specs/otlp/)
-- [OTLP exporter endpoint configuration](https://opentelemetry.io/docs/specs/otel/protocol/exporter/)
+Direct runner execution remains available without export configuration. Users can stop using TUI mode or remove export configuration independently of workflow behavior.

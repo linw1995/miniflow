@@ -75,7 +75,3 @@ Avoid panic-driven cleanup as the primary mechanism. A terminal guard handles or
 3. Add process-group interruption and deadline enforcement on Linux/macOS; verify a child ignoring SIGINT and a descendant holding pipes open.
 4. Add the terminal guard and completed-view behavior; use a PTY harness to verify terminal settings before/after normal close, spawn failure, rendering failure, and interruption.
 5. Run generated workflows end to end with injected telemetry gaps and stdout/stderr noise. Verify workflow results are unaffected by observation loss and that every loss class has an appropriate indicator.
-
-## Reference
-
-[Rust Unix process-group configuration](https://doc.rust-lang.org/std/os/unix/process/trait.CommandExt.html#tymethod.process_group) supplies the child group boundary used by the supervisor.

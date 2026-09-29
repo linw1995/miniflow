@@ -31,16 +31,16 @@
 
 ## 5. Integrate CLI supervision and terminal presentation
 
-- [ ] 5.1 Add `mf run <executable> --tui` using [plan 3](plans/03-process-and-terminal.md), bounded preflight, null child stdin, receiver-before-spawn ordering, and child-only configuration; verify terminal requirements, fresh sessions, unsupported runners, and remote credential isolation.
-- [ ] 5.2 Implement plan 3's concurrent raw-byte drains, private stdout spool, bounded diagnostic tail, capture budgets, and cancellation-aware readers; verify byte-for-byte delivery, pipe saturation, visible truncation, disk failures, and descendant-held pipes.
-- [ ] 5.3 Render graph/data/control relationships, node states, active elapsed time, branch outcomes, selected-node diagnostics, and observation completeness; verify representative states in a terminal harness and visually inspect a long-running conditional workflow.
-- [ ] 5.4 Implement plan 3's process groups, deadlines, final-view keys, exit-result precedence, and terminal guard; verify its failure matrix on Linux/macOS, including ignored SIGINT, failed stdout delivery, and PTY settings after each recoverable exit.
-- [ ] 5.5 Document TUI invocation, keyboard behavior, terminal requirements, stdout handling, and incomplete-observation behavior; verify the documented workflow using only a compiled executable.
+- [x] 5.1 Add `mf run <executable> --tui` using [plan 3](plans/03-process-and-terminal.md), bounded preflight, null child stdin, receiver-before-spawn ordering, and child-only configuration; verify terminal requirements, fresh sessions, unsupported runners, and remote credential isolation.
+- [x] 5.2 Implement plan 3's concurrent raw-byte drains, private stdout spool, bounded diagnostic tail, capture budgets, and cancellation-aware readers; verify byte-for-byte delivery, pipe saturation, visible truncation, disk failures, and descendant-held pipes.
+- [x] 5.3 Render graph/data/control relationships, node states, active elapsed time, branch outcomes, selected-node diagnostics, and observation completeness; verify representative states in a terminal harness and visually inspect a long-running conditional workflow.
+- [x] 5.4 Implement plan 3's process groups, deadlines, final-view keys, exit-result precedence, and terminal guard; verify its failure matrix on Linux/macOS, including ignored SIGINT, failed stdout delivery, and PTY settings after each recoverable exit.
+- [x] 5.5 Document TUI invocation, keyboard behavior, terminal requirements, stdout handling, and incomplete-observation behavior; verify the documented workflow using only a compiled executable.
 
 ## 6. Validate integrated delivery
 
-- [ ] 6.1 Run actual generated binaries through all three plans' acceptance cases, including total telemetry loss, missing terminal boundaries, noisy description factories, output limits, and process death; verify visible loss, unchanged workflow results for telemetry-only failures, and absent TUI dependencies in runners.
-- [ ] 6.2 Measure generated runner size, disabled-export overhead, start-event latency, short-run flush time, and bounded-memory behavior; record results locally under `target/` and verify interactive delivery and failure timeouts meet the documented settings.
-- [ ] 6.3 In `nix develop`, run `prek install`, `prek -a`, and `nix flake check -L`; resolve failures and record final results.
-- [ ] 6.4 Run `nix develop --command bash scripts/run-cov.sh` for lifecycle, reducer, and process-cleanup changes; inspect coverage under `target/coverage/result/` and add meaningful cases for uncovered failure behavior.
-- [ ] 6.5 Run `openspec validate add-workflow-tui-observability --strict` and check every acceptance scenario against implementation evidence before marking tasks complete or archiving the change.
+- [x] 6.1 Run actual generated binaries through all three plans' acceptance cases, including total telemetry loss, missing terminal boundaries, noisy description factories, output limits, and process death; verify visible loss, unchanged workflow results for telemetry-only failures, and absent TUI dependencies in runners.
+- [x] 6.2 Measure generated runner size, disabled-export overhead, start-event latency, short-run flush time, and bounded-memory behavior; record results locally under `target/` and verify interactive delivery and failure timeouts meet the documented settings.
+- [x] 6.3 In `nix develop`, run `prek install`, `prek -a`, and `nix flake check -L`; resolve failures and record final results.
+- [x] 6.4 Run `nix develop --command bash scripts/run-cov.sh` for lifecycle, reducer, and process-cleanup changes; inspect coverage under `target/coverage/result/` and add meaningful cases for uncovered failure behavior.
+- [x] 6.5 Run `openspec validate add-workflow-tui-observability --strict` and check every acceptance scenario against implementation evidence before marking tasks complete or archiving the change.

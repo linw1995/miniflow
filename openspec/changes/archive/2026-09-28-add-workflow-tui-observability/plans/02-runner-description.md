@@ -33,7 +33,3 @@ Use the ownership and deadlines from plan 3 for pipe/child cleanup. Do not enter
 3. Dispatch before registry construction; verify factory diagnostics appear only during validation, not description.
 4. Add bounded CLI collection; verify noisy output beyond pipe capacity, invalid versions, oversized output, descendant-held pipes, and partial writes have deterministic outcomes.
 5. Compile once, invoke validation and description on that exact binary, then move it away from build inputs and repeat. Confirm no second compilation or TUI dependency is introduced.
-
-## References
-
-- [Cross-platform process groups and Job Objects](https://docs.rs/process-wrap/latest/process_wrap/)

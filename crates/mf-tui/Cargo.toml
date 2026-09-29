@@ -7,17 +7,23 @@ repository.workspace = true
 description = "Terminal observation of locally launched miniflow workflows"
 
 [dependencies]
+crossterm = "0.29.0"
 http-body-util = "0.1.5"
 hyper = { version = "1.11.1", default-features = false, features = ["http1", "server"] }
 hyper-util = { version = "0.1.21", default-features = false, features = ["tokio"] }
 mf-telemetry.workspace = true
+nix = { version = "0.31.3", features = ["fs", "signal", "process"] }
 opentelemetry-proto = { version = "0.33.0", default-features = false, features = ["gen-tonic-messages", "logs", "trace"] }
 process-wrap = { version = "10.0.1", default-features = false, features = ["std", "process-group", "job-object"] }
 prost = "0.14.4"
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm"] }
+rust-sugiyama = "0.4.0"
 serde_json = "1.0.151"
 sha2 = "0.11.0"
+signal-hook = "0.3.18"
 snafu = "0.9.2"
+tempfile = "3.27.0"
 tokio = { version = "1.53.1", default-features = false, features = ["macros", "net", "rt", "sync", "time"] }
 
-[dev-dependencies]
-tempfile = "3.27.0"
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.5", features = ["termios"] }

@@ -147,6 +147,7 @@ fn finish_before_start_preserves_terminal_state_and_late_gaps_close() {
     );
     assert_eq!(state.integrity().completeness, Completeness::Complete);
     assert_eq!(state.integrity().known_missing_count, 0);
+    assert_eq!(state.snapshot().workflow_outcome, Some(Outcome::Succeeded));
 }
 
 #[test]
@@ -338,6 +339,11 @@ fn visited_prefix_uses_execution_order_and_final_failure_identity() {
     let snapshot = state.snapshot();
     assert_eq!(snapshot.nodes[0].id, "a");
     assert_eq!(snapshot.nodes[0].status, NodeStatus::Failed);
+    assert_eq!(snapshot.workflow_outcome, Some(Outcome::Failed));
+    assert_eq!(
+        snapshot.workflow_failure.as_ref().unwrap().message,
+        "execution failed"
+    );
     assert_eq!(snapshot.nodes[1].id, "b");
     assert_eq!(snapshot.nodes[1].status, NodeStatus::NotRun);
     assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
@@ -397,6 +403,7 @@ fn a_contiguous_stream_without_visited_node_outcomes_is_not_complete() {
     let snapshot = state.snapshot();
     assert_eq!(snapshot.lifecycle.known_missing_count, 0);
     assert_eq!(snapshot.lifecycle.unresolved_visited_nodes, 2);
+    assert_eq!(snapshot.workflow_outcome, Some(Outcome::Succeeded));
     assert_eq!(snapshot.lifecycle.completeness, Completeness::Incomplete);
     assert!(
         snapshot
