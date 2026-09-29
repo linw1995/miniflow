@@ -7,23 +7,26 @@ miniflow compiles a declarative DAG workflow into a standalone executable. Each 
 
 ## Quick start
 
-From the repository root, enter the pinned development environment and compile the [example workflow](examples/hello-workflow.json):
+With `mf` installed and its matching support packages available on crates.io, compile and run the [one-node example](examples/hello-workflow.json) from the repository root:
 
 ```sh
-nix develop
-output_dir=$(mktemp -d)
-MF_DEV_SUPPORT_ROOT="$PWD/crates" cargo run -p mf-cli --features development-support -- \
-  compile examples/hello-workflow.json --output "$output_dir/hello-workflow"
-"$output_dir/hello-workflow"
+mf compile examples/hello-workflow.json --output ./hello-workflow
+./hello-workflow
 ```
 
 Expected output:
 
 ```json
-{"answer":42,"greeting":"hello"}
+{"answer":42}
 ```
 
-Flows declare their node dependencies directly in JSON. Installed release CLIs build available registry, Git, or local node packages without a source checkout; Cargo and a compatible Rust toolchain are required. The command above explicitly uses local support crates for repository development. Generated executables run without the definition or build tools.
+On Linux or macOS, run the same executable in the terminal UI:
+
+```sh
+mf run ./hello-workflow --tui
+```
+
+If those packages are not yet available, use the [repository development commands](docs/compiling.md#repository-development), which select local support crates. The generated executable runs without the definition or build tools.
 
 ## Documentation
 

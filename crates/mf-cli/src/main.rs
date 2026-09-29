@@ -138,11 +138,13 @@ fn compile(options: CompileOptions) -> Result<(), CliError> {
 
 fn support_packages() -> SupportPackages {
     #[cfg(feature = "development-support")]
-    if let Some(path) = env::var_os("MF_DEV_SUPPORT_ROOT") {
-        return SupportPackages::Local {
-            crates_dir: path.into(),
-        };
+    {
+        let crates_dir = env::var_os("MF_DEV_SUPPORT_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(".."));
+        SupportPackages::Local { crates_dir }
     }
+    #[cfg(not(feature = "development-support"))]
     SupportPackages::Registry
 }
 
