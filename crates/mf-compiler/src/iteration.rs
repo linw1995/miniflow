@@ -34,9 +34,6 @@ pub(crate) struct IterationResultDefinition {
 }
 
 pub(crate) fn parse_config(node: &NodeDefinition) -> Result<IterationConfig, String> {
-    if node.kind != ITERATION_KIND {
-        return Err("node is not an iteration".into());
-    }
     serde_json::from_value(node.config.clone()).map_err(|error| error.to_string())
 }
 

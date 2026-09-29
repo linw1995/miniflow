@@ -38,7 +38,7 @@ pub enum IterationErrorPolicy {
     RemoveFailed,
 }
 
-pub type IterationBody = dyn Fn(Value, usize, Option<BodyObservation>) -> Result<Value, NodeExecutionError>
+type IterationBody = dyn Fn(Value, usize, Option<BodyObservation>) -> Result<Value, NodeExecutionError>
     + Send
     + Sync
     + 'static;
@@ -206,10 +206,6 @@ impl Node for IterationNode {
             ctx.iteration_observation(&self.id, &self.body_nodes),
         )
         .map(Into::into)
-    }
-
-    fn ports(&self) -> Option<NodePorts> {
-        Some(self.ports())
     }
 }
 

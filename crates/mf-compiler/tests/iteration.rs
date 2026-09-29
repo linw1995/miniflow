@@ -138,6 +138,16 @@ fn iteration_error_policies_preserve_positions_or_remove_failures() {
 #[test]
 fn iteration_rejects_invalid_body_structure_and_result_ports() {
     let mut invalid = definition(json!([1]), "sequential", "terminate");
+    invalid["nodes"][1]["config"]["body"]["nodes"][0]["id"] = json!("@iteration");
+    let invalid_definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
+    assert!(
+        plan_definition(&invalid_definition)
+            .unwrap_err()
+            .to_string()
+            .contains("reserved")
+    );
+
+    let mut invalid = definition(json!([1]), "sequential", "terminate");
     invalid["nodes"][1]["config"]["body"]["nodes"][0]["kind"] = json!("builtin.iteration");
     let invalid_definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
     assert!(
@@ -322,6 +332,30 @@ fn parallel_iteration_reports_correlated_item_and_body_node_activity() {
         assert_eq!(node_span.name, "mf.iteration.node");
         assert_eq!(node_span.parent_span_id, item_span.span_context.span_id());
     }
+
+    let definition: WorkflowDefinition =
+        serde_json::from_value(self::definition(json!([1, 0, 3]), "parallel", "terminate"))
+            .unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let harness = capture::Harness::new(true);
+    let observation = plan
+        .start_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let error = execute_compiled(&plan, &registry, Some(observation))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("iteration item 1"));
+    let records = harness.records();
+    assert!(records.iter().any(|record| {
+        record.event_name == "mf.iteration.item.finished"
+            && record.attributes["mf.iteration.index"] == 1
+            && record.attributes["mf.outcome"] == "failed"
+    }));
+    assert!(records.iter().any(|record| {
+        record.event_name == "mf.node.finished"
+            && record.attributes["mf.node.id"] == "iteration"
+            && record.attributes["mf.outcome"] == "failed"
+    }));
 }
 
 #[test]
