@@ -1,9 +1,10 @@
 use crate::{
     ExecutionContext, FlowNode, Inputs, LoopComparisonOperator, LoopConditionDefinition,
-    LoopDefinition, LoopVariableDefinition, Node, NodeExecutionError, NodePorts, NodeResult,
-    Outputs, PortSpec, ValueType, WorkflowRunError, compare_json_numbers,
+    LoopVariableDefinition, Node, NodeExecutionError, NodePorts, NodeResult, Outputs, PortSpec,
+    ValueType, WorkflowRunError, compare_json_numbers,
 };
 use mf_telemetry::event::LoopStopReason;
+use serde::Deserialize;
 use serde_json::Value;
 use std::{cmp::Ordering, collections::BTreeMap};
 
@@ -13,15 +14,24 @@ fn structural_error(message: impl Into<String>) -> NodeExecutionError {
     }
 }
 
-fn variable_types(
+pub fn loop_variable_types(
     variables: &[LoopVariableDefinition],
 ) -> Result<BTreeMap<String, ValueType>, String> {
+    if variables.is_empty() {
+        return Err("variables must not be empty".into());
+    }
     let mut types = BTreeMap::new();
     for variable in variables {
+        if variable.name.trim().is_empty() || variable.name == "index" {
+            return Err(format!(
+                "invalid or reserved variable name `{}`",
+                variable.name
+            ));
+        }
         let value_type = ValueType::parse_descriptor(&variable.value_type)
             .map_err(|error| format!("variable `{}`: {error}", variable.name))?;
         if types.insert(variable.name.clone(), value_type).is_some() {
-            return Err(format!("duplicate Loop variable `{}`", variable.name));
+            return Err(format!("duplicate variable `{}`", variable.name));
         }
     }
     Ok(types)
@@ -75,9 +85,19 @@ fn condition_matches(
 
 struct LoopNode<F> {
     id: String,
-    definition: LoopDefinition,
+    max_iterations: u16,
+    until: Option<LoopConditionDefinition>,
     types: BTreeMap<String, ValueType>,
     body: F,
+}
+
+// Older generated sources include a body field; deserialization ignores it for rebuild compatibility.
+#[derive(Deserialize)]
+struct LoopExecutionConfig {
+    max_iterations: u16,
+    variables: Vec<LoopVariableDefinition>,
+    #[serde(default)]
+    until: Option<LoopConditionDefinition>,
 }
 
 impl<F> Node for LoopNode<F>
@@ -98,7 +118,7 @@ where
         let mut variables = inputs;
         let mut pass_count = 0;
         let mut reason = LoopStopReason::Maximum;
-        for index in 0..usize::from(self.definition.max_iterations) {
+        for index in 0..usize::from(self.max_iterations) {
             let (updated, exited) = ctx
                 .run_loop_frame(&self.id, variables, self.types.clone(), index, |ctx| {
                     (self.body)(ctx)
@@ -112,7 +132,7 @@ where
                 reason = LoopStopReason::Exit;
                 break;
             }
-            if let Some(condition) = &self.definition.until
+            if let Some(condition) = &self.until
                 && condition_matches(condition, &variables)?
             {
                 reason = LoopStopReason::Condition;
@@ -126,30 +146,32 @@ where
 
 pub fn prepared_loop_node<F>(
     id: &str,
-    definition: LoopDefinition,
+    max_iterations: u16,
+    variables: &[LoopVariableDefinition],
+    until: Option<LoopConditionDefinition>,
     body: F,
 ) -> Result<FlowNode, WorkflowRunError>
 where
     F: Fn(&mut ExecutionContext) -> Result<(), WorkflowRunError> + Send + Sync + 'static,
 {
-    let types =
-        variable_types(&definition.variables).map_err(|message| WorkflowRunError::Context {
-            definition_id: id.into(),
-            message,
-        })?;
-    let variables: Vec<_> = types
+    let types = loop_variable_types(variables).map_err(|message| WorkflowRunError::Context {
+        definition_id: id.into(),
+        message,
+    })?;
+    let ports_for_variables: Vec<_> = types
         .iter()
         .map(|(name, value_type)| PortSpec::owned(name, value_type.clone(), true))
         .collect();
     let ports = NodePorts {
-        inputs: variables.clone(),
-        outputs: variables,
+        inputs: ports_for_variables.clone(),
+        outputs: ports_for_variables,
     };
     Ok(FlowNode::new(
         id,
         Box::new(LoopNode {
             id: id.to_owned(),
-            definition,
+            max_iterations,
+            until,
             types,
             body,
         }),
@@ -165,13 +187,19 @@ pub fn prepared_loop_node_from_json<F>(
 where
     F: Fn(&mut ExecutionContext) -> Result<(), WorkflowRunError> + Send + Sync + 'static,
 {
-    let definition: LoopDefinition = serde_json::from_str(definition_json).map_err(|source| {
+    let config: LoopExecutionConfig = serde_json::from_str(definition_json).map_err(|source| {
         WorkflowRunError::InvalidEmbeddedConfig {
             definition_id: id.into(),
             source,
         }
     })?;
-    prepared_loop_node(id, definition, body)
+    prepared_loop_node(
+        id,
+        config.max_iterations,
+        &config.variables,
+        config.until,
+        body,
+    )
 }
 
 struct LoopSourceNode;
@@ -198,7 +226,7 @@ pub fn prepared_loop_source_from_json(variables_json: &str) -> Result<FlowNode, 
                 source,
             }
         })?;
-    let types = variable_types(&variables).map_err(|message| WorkflowRunError::Context {
+    let types = loop_variable_types(&variables).map_err(|message| WorkflowRunError::Context {
         definition_id: crate::LOOP_SOURCE_ID.into(),
         message,
     })?;

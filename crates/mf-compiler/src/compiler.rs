@@ -1106,7 +1106,9 @@ fn resolve_nodes_in_scope(
                         .context(FlowConstructionSnafu)?;
                     return mf_runtime::prepared_loop_node(
                         node.id.as_str(),
-                        loop_definition.clone(),
+                        loop_definition.max_iterations,
+                        &loop_definition.variables,
+                        loop_definition.until.clone(),
                         move |state| body_flow.execute_in_context(state).map(|_| ()),
                     )
                     .map_err(|error| WorkflowCompileError::InvalidLoop {

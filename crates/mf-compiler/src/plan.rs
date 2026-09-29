@@ -309,7 +309,12 @@ fn generate_scope(
                     Some(loop_definition),
                 )?;
                 preparations.extend(body_preparations);
-                let config_json = serde_json::to_string(loop_definition).context(SerializeSnafu)?;
+                let config_json = serde_json::to_string(&serde_json::json!({
+                    "max_iterations": loop_definition.max_iterations,
+                    "variables": loop_definition.variables,
+                    "until": loop_definition.until,
+                }))
+                .context(SerializeSnafu)?;
                 let config_lit = LitStr::new(&config_json, Span::call_site());
                 quote! {
                     mf_runtime::prepared_loop_node_from_json(#id_lit, #config_lit,
