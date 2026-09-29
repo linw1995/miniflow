@@ -16,8 +16,9 @@ pub use definition::{
 };
 pub use flow::{Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowOutputs, NodeId};
 pub use iteration::{
-    ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationErrorPolicy, IterationMode,
-    IterationNode, MAX_PARALLEL_ITEMS, iteration_input_flow_node,
+    ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
+    IterationConfig, IterationErrorPolicy, IterationMode, IterationNode, IterationResultDefinition,
+    MAX_PARALLEL_ITEMS, iteration_input_flow_node,
 };
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;

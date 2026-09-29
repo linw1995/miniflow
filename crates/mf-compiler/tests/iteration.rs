@@ -591,4 +591,32 @@ fn generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node(
     let failed = Command::new(&output).output().unwrap();
     assert!(!failed.status.success());
     assert_eq!(String::from_utf8_lossy(&failed.stderr).trim(), expected);
+
+    let installed = fs::read(&output).unwrap();
+    let lock = fs::read(path.with_extension("lock")).unwrap();
+    value["dependencies"]
+        .as_object_mut()
+        .unwrap()
+        .remove("core");
+    value["nodes"][0] = json!({
+        "id":"source",
+        "kind":"builtin.code",
+        "config":{"language":"cel","inputs":{},"code":{"values":"[1, 2]"}}
+    });
+    value["nodes"][1]["config"]["body"] = json!({
+        "nodes":[],
+        "result":{"node":"@iteration","port":"items"}
+    });
+    value["edges"][0]["from_output"] = json!("values");
+    fs::write(&path, value.to_string()).unwrap();
+    let error = compile_project(&request).unwrap_err();
+    assert_eq!(error.stage, "runner validation");
+    let validation = Command::new(common::runner_executable(&build, "release"))
+        .arg("--validate")
+        .output()
+        .unwrap();
+    assert!(!validation.status.success());
+    assert!(String::from_utf8_lossy(&validation.stderr).contains("builtin.iteration"));
+    assert_eq!(fs::read(&output).unwrap(), installed);
+    assert_eq!(fs::read(path.with_extension("lock")).unwrap(), lock);
 }

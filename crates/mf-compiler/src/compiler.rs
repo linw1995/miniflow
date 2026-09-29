@@ -973,6 +973,20 @@ fn resolve_nodes_in_scope(
                     }
                     .fail();
                 }
+                let Some(registration) = registry.get(ITERATION_KIND) else {
+                    return UnknownNodeKindSnafu {
+                        definition_id: node.id.clone(),
+                        kind: node.kind.clone(),
+                    }
+                    .fail();
+                };
+                // The selected node package owns the kind; orchestration uses the compiled body.
+                registration
+                    .instantiate(node.config.clone())
+                    .context(NodeConstructionSnafu {
+                        definition_id: node.id.clone(),
+                        kind: node.kind.clone(),
+                    })?;
                 let config = parse_config(node).map_err(|message| {
                     WorkflowCompileError::InvalidIteration {
                         definition_id: node.id.clone(),

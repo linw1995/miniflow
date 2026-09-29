@@ -55,10 +55,12 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | `builtin.constant` | Required `value`: any JSON value | None | `value`: inferred from the configured value |
 | `mfn-core` | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input, with its known type |
 | `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by control edges | One boolean activation output per branch, plus `else` |
+| `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array | `results`: collected array |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |
 
-`builtin.iteration` is a structural node implemented by the compiler and runtime, so it does not require an additional
-node package. Its body can use any linked node packages declared by the enclosing workflow.
+`mfn-core` registers `builtin.iteration` for explicit dependency selection. The compiler and runtime orchestrate its
+body because an ordinary node invocation does not schedule a subgraph. Body nodes can use other linked packages
+declared by the enclosing workflow.
 
 `builtin.code` requires an explicit `language` field; the supported value is
 `cel`. Input names have concrete type declarations, while output names and expressions live in `code`. The CEL checker
@@ -143,7 +145,7 @@ output. An empty input returns an empty array after the body has passed validati
 }
 ```
 
-The enclosing workflow still needs to declare `mfn-core` for `builtin.identity`. `@iteration` is a reserved body
+The enclosing workflow must declare `mfn-core` for both `builtin.iteration` and `builtin.identity`. `@iteration` is a reserved body
 source with outputs `items` (the current JSON element) and `index` (a zero-based signed integer). Body
 nodes, data edges, and optional `control_edges` use the ordinary workflow graph rules. The required `result` selects
 one body port for each item. Body node IDs belong to the body scope; outer edges cannot address them. All body nodes

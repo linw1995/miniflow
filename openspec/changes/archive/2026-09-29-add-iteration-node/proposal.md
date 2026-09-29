@@ -25,6 +25,9 @@ Flows can transform an array with one Code expression, but cannot run a multi-no
 
 ## Impact
 
-`mf-runtime` gains iteration scheduling and item contexts. `mf-compiler` gains body parsing, validation, type propagation, normalization, and code generation. Workflow definitions retain schema version `2026-09-26`; ordinary plugins and existing definitions retain their current shape. An Iteration body uses the enclosing workflow's declared node packages.
+`mfn-core` registers the Iteration kind. `mf-runtime` gains its shared configuration, scheduling, and item contexts.
+`mf-compiler` gains body planning, validation, type propagation, normalization, and code generation. Workflow
+definitions retain schema version `2026-09-26`; ordinary plugins and existing definitions retain their current shape.
+An Iteration body uses the enclosing workflow's declared node packages.
 
 Nested iterations, direct outer-context captures, and Answer-node streaming are outside this change.

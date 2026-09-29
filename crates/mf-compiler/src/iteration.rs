@@ -1,43 +1,11 @@
-use crate::{
-    ControlEdgeDefinition, DefinitionId, EdgeDefinition, IterationErrorPolicy, IterationMode,
-    NodeDefinition, WorkflowDefinition, WorkflowOutputDefinition,
-};
-use mf_runtime::{ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND};
-use serde::{Deserialize, Serialize};
+use crate::{NodeDefinition, WorkflowDefinition, WorkflowOutputDefinition};
+use mf_runtime::{ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationConfig};
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct IterationConfig {
-    #[serde(default)]
-    pub mode: IterationMode,
-    #[serde(default)]
-    pub on_error: IterationErrorPolicy,
-    pub body: IterationBodyDefinition,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct IterationBodyDefinition {
-    pub nodes: Vec<NodeDefinition>,
-    #[serde(default)]
-    pub edges: Vec<EdgeDefinition>,
-    #[serde(default)]
-    pub control_edges: Vec<ControlEdgeDefinition>,
-    pub result: IterationResultDefinition,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct IterationResultDefinition {
-    pub node: DefinitionId,
-    pub port: String,
-}
-
-pub(crate) fn parse_config(node: &NodeDefinition) -> Result<IterationConfig, String> {
+pub fn parse_config(node: &NodeDefinition) -> Result<IterationConfig, String> {
     serde_json::from_value(node.config.clone()).map_err(|error| error.to_string())
 }
 
-pub(crate) fn body_definition(
+pub fn body_definition(
     parent: &WorkflowDefinition,
     config: &IterationConfig,
 ) -> Result<WorkflowDefinition, String> {
@@ -74,7 +42,7 @@ pub(crate) fn body_definition(
     })
 }
 
-pub(crate) fn normalize_config(
+pub fn normalize_config(
     parent: &WorkflowDefinition,
     node: &NodeDefinition,
 ) -> Result<serde_json::Value, String> {

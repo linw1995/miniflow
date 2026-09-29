@@ -5,6 +5,7 @@
 - [x] 1.1 Add structural Iteration configuration and the reserved item/index body source.
 - [x] 1.2 Validate body graph structure, nested-kind exclusion, ports, result selection, and types before runner installation.
 - [x] 1.3 Normalize body node and edge order in the compiled plan.
+- [x] 1.4 Register Iteration in `mfn-core` and require its explicit package declaration.
 
 ## 2. Execute each item
 

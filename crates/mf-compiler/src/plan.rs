@@ -295,6 +295,11 @@ fn iteration_preparation(
     let mut result_ident = None;
     let body_inference = format_ident!("body_inference_{index}");
     let outer_id = LitStr::new(node.id.as_str(), Span::call_site());
+    let outer_kind = LitStr::new(ITERATION_KIND, Span::call_site());
+    let outer_config = LitStr::new(
+        &serde_json::to_string(&node.config).context(SerializeSnafu)?,
+        Span::call_site(),
+    );
     for (position, id) in order.iter().enumerate() {
         let body_node = definitions[id];
         let body_ident = format_ident!("body_node_{index}_{position}");
@@ -360,6 +365,7 @@ fn iteration_preparation(
         quote! { mf_runtime::NodeIdentity { id: #id.into(), kind: #kind.into() } }
     });
     Ok(quote! {
+        let _registered_iteration = state.prepare_node(registry, #outer_id, #outer_kind, #outer_config)?;
         let mut #body_inference = mf_compiler::TypeInferenceState::default();
         #(#preparations)*
         let result_type = #result_ident.ports.outputs.iter()

@@ -10,7 +10,10 @@ The target behavior follows the [Dify Iteration documentation](https://docs.dify
 
 ### 1. Treat Iteration as orchestration
 
-`builtin.iteration` is recognized by the compiler and runtime, not resolved through a node package. Its configuration contains `mode`, `on_error`, and a body with ordinary nodes, data/control edges, and one required result selection. Outer edges connect only to `items` and `results`.
+`mfn-core` registers `builtin.iteration` so it follows the same explicit dependency selection as other built-ins. The
+compiler recognizes the linked structural kind and delegates body scheduling to `mf-runtime`; the registered node
+declaration validates configuration shape. Its configuration contains `mode`, `on_error`, and a body with ordinary
+nodes, data/control edges, and one required result selection. Outer edges connect only to `items` and `results`.
 
 The compiler inserts `@iteration` into the body graph. Its `items` output has type `Any` and its `index` output has type `Int64`. Body nodes use normal dependency, context-reference, port, and cycle checks. The body cannot define the reserved ID or contain an iteration or internal input kind. The input element type remains a checked boundary because a broad input array need not have homogeneous elements.
 

@@ -8,7 +8,12 @@ Run a validated body graph once per array element and collect its selected resul
 
 ### Requirement: Bind item and index within a scoped body
 
-`builtin.iteration` SHALL expose one required array input `items` and one required array output `results`. Its body SHALL contain ordinary nodes, optional data and control edges, and one required result selection. The reserved `@iteration` source SHALL expose the current element as `items` and its zero-based index as `index`. Each item SHALL use a fresh context; outputs from another item MUST NOT be visible. The body MUST NOT contain the reserved source ID or another Iteration node.
+`mfn-core` SHALL register `builtin.iteration`, and workflows using it MUST explicitly declare a package that registers
+the kind. The node SHALL expose
+one required array input `items` and one required array output `results`. Its body SHALL contain ordinary nodes,
+optional data and control edges, and one required result selection. The reserved `@iteration` source SHALL expose the
+current element as `items` and its zero-based index as `index`. Each item SHALL use a fresh context; outputs from
+another item MUST NOT be visible. The body MUST NOT contain the reserved source ID or another Iteration node.
 
 #### Scenario: Transform an array
 
@@ -24,6 +29,11 @@ Run a validated body graph once per array element and collect its selected resul
 
 - **WHEN** a body redefines `@iteration`, includes another Iteration node, or selects a missing result port
 - **THEN** runner validation fails before installation with the outer iteration ID and body error
+
+#### Scenario: Reject an undeclared Iteration package
+
+- **WHEN** a Flow uses `builtin.iteration` without declaring a package that registers it
+- **THEN** runner validation reports the unavailable kind and preserves an existing installed executable
 
 ### Requirement: Bound scheduling and preserve result order
 

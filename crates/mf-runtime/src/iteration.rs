@@ -1,6 +1,6 @@
 use crate::{
-    ContextValue, ExecutionContext, FlowNode, Inputs, Node, NodeExecutionError, NodePorts, Outputs,
-    PortSpec, ValueType,
+    ContextValue, ControlEdgeDefinition, DefinitionId, EdgeDefinition, ExecutionContext, FlowNode,
+    Inputs, Node, NodeDefinition, NodeExecutionError, NodePorts, Outputs, PortSpec, ValueType,
 };
 use mf_telemetry::{
     event::NodeIdentity,
@@ -36,6 +36,34 @@ pub enum IterationErrorPolicy {
     Terminate,
     ContinueOnError,
     RemoveFailed,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IterationConfig {
+    #[serde(default)]
+    pub mode: IterationMode,
+    #[serde(default)]
+    pub on_error: IterationErrorPolicy,
+    pub body: IterationBodyDefinition,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IterationBodyDefinition {
+    pub nodes: Vec<NodeDefinition>,
+    #[serde(default)]
+    pub edges: Vec<EdgeDefinition>,
+    #[serde(default)]
+    pub control_edges: Vec<ControlEdgeDefinition>,
+    pub result: IterationResultDefinition,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct IterationResultDefinition {
+    pub node: DefinitionId,
+    pub port: String,
 }
 
 type IterationBody = dyn Fn(Value, usize, Option<BodyObservation>) -> Result<Value, NodeExecutionError>
