@@ -1,0 +1,10 @@
+[package]
+name = "mf-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Terminal observation of locally launched miniflow workflows"
+
+[dependencies]
+mf-telemetry.workspace = true

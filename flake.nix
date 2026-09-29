@@ -37,6 +37,7 @@
               (craneLib.fileset.commonCargoSources ./.)
               ./.config/nextest.toml
               ./examples
+              ./crates/mf-telemetry/tests/fixtures
               ./scripts/check-release-support.sh
               ./scripts/nextest-build-cache.py
               ./scripts/nextest-cargo.sh

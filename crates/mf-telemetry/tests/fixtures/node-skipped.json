@@ -1,0 +1,27 @@
+{
+  "scope": "mf.workflow",
+  "event_name": "mf.node.skipped",
+  "time_unix_nano": 1700000000000000000,
+  "attributes": {
+    "mf.schema.version": 1,
+    "mf.workflow.id": "sha256:67389167c589949c07cb3864dbb0bcca61d38bfaef42649c24042cc35875e2a9",
+    "mf.run.id": "12345678-1234-4234-9234-123456789abc",
+    "mf.event.sequence": 4,
+    "mf.node.id": "branch/target",
+    "mf.node.kind": "fixture.echo",
+    "mf.outcome": "skipped"
+  },
+  "body": {
+    "position": 1,
+    "elapsed_ns": 21,
+    "causes": [
+      {
+        "source_node": "load.order",
+        "source_output": "branch.false"
+      }
+    ],
+    "skipped_ports": [
+      "value"
+    ]
+  }
+}
