@@ -1,0 +1,67 @@
+{
+  "version": "2026-09-26",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
+    }
+  },
+  "nodes": [
+    {
+      "id": "source",
+      "kind": "builtin.constant",
+      "config": { "value": [1, 2, 3] }
+    },
+    {
+      "id": "iteration",
+      "kind": "builtin.iteration",
+      "config": {
+        "mode": "sequential",
+        "on_error": "terminate",
+        "body": {
+          "nodes": [
+            {
+              "id": "transform",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": { "item": "int", "position": "int" },
+                "code": { "value": "item * 2 + position" }
+              }
+            }
+          ],
+          "edges": [
+            {
+              "from_node": "@iteration",
+              "from_output": "items",
+              "to_node": "transform",
+              "to_input": "item"
+            },
+            {
+              "from_node": "@iteration",
+              "from_output": "index",
+              "to_node": "transform",
+              "to_input": "position"
+            }
+          ],
+          "result": { "node": "transform", "port": "value" }
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "source",
+      "from_output": "value",
+      "to_node": "iteration",
+      "to_input": "items"
+    }
+  ],
+  "outputs": [
+    { "name": "results", "node": "iteration", "port": "results" }
+  ]
+}
