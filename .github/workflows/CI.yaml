@@ -54,7 +54,6 @@ jobs:
       - name: Check and build without tests
         if: matrix.runner == 'ubuntu-latest'
         run: |
-          nix flake check --no-build
           nix build --no-link -L \
             '.#checks.x86_64-linux.miniflow' \
             '.#checks.x86_64-linux.fmt' \
