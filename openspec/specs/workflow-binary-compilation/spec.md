@@ -459,19 +459,14 @@ Validation and description modes MUST NOT be interpreted as workflow execution r
 
 ### Requirement: Compile structured Loop definitions into executable binaries
 
-The system SHALL provide a compilation entry point that reads supported date-versioned workflow
-definitions and produces an executable workflow binary. It MUST reject malformed or unsupported
-versions. The binary MUST encode validated scope-local node orders and port bindings as generated
-executable code, including structured repeated execution for Loop bodies, and require no source
-definition file at runtime. An installed CLI SHALL compile a project with declared third-party nodes
-without rebuilding the CLI or requiring a miniflow source checkout. Compilation SHALL require Cargo,
-a compatible Rust toolchain, available versioned support packages, and the declared dependencies.
-The executable MUST run without the dependency lock, Cargo, or plugin source directories.
-Definitions in the earlier `2026-09-26` version SHALL retain their existing DAG behavior.
+The compiler SHALL encode each validated Loop body as scope-local generated execution steps with
+its planned order and port bindings. A generated Loop runner SHALL match in-memory execution for
+selected outputs and remain runnable without the source definition, dependency lock, Cargo, or
+plugin sources. Definitions in `2026-09-26` SHALL retain their existing DAG behavior.
 
 #### Scenario: Compile a valid Loop workflow
 
-- **WHEN** a user compiles a valid DAG definition or a valid structured Loop definition that references registered ordinary node kinds
+- **WHEN** a user compiles a valid structured Loop definition that references registered ordinary node kinds
 - **THEN** the system generates and compiles a runner with the planned scope-local order
 
 #### Scenario: Run a compiled Loop workflow
@@ -481,8 +476,8 @@ Definitions in the earlier `2026-09-26` version SHALL retain their existing DAG 
 
 #### Scenario: Run a Loop binary without build inputs
 
-- **WHEN** the generated executable is moved to a compatible runtime environment without its project files, plugin sources, or Rust build tools
-- **THEN** it executes its embedded DAG or Loop workflow and produces the selected outputs
+- **WHEN** a generated Loop executable is moved to a compatible runtime environment without its project files, plugin sources, or Rust build tools
+- **THEN** it executes its embedded Loop workflow and produces the selected outputs
 
 ### Requirement: Validate every Loop scope before code generation
 
