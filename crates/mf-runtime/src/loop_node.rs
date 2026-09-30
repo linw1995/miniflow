@@ -1,7 +1,7 @@
 use crate::{
-    ExecutionContext, FlowNode, Inputs, LoopComparisonOperator, LoopConditionDefinition,
-    LoopVariableDefinition, Node, NodeExecutionError, NodePorts, NodeResult, Outputs, PortSpec,
-    ValueType, WorkflowRunError, compare_json_numbers,
+    ExecutionContext, ExecutionScope, FlowNode, Inputs, LoopComparisonOperator,
+    LoopConditionDefinition, LoopVariableDefinition, Node, NodeExecutionError, NodePorts,
+    NodeResult, Outputs, PortSpec, ValueType, WorkflowRunError, compare_json_numbers,
 };
 use mf_telemetry::event::LoopStopReason;
 use serde::Deserialize;
@@ -119,13 +119,18 @@ where
         let mut pass_count = 0;
         let mut reason = LoopStopReason::Maximum;
         for index in 0..usize::from(self.max_iterations) {
-            let (updated, exited) = ctx
-                .run_loop_frame(&self.id, variables, self.types.clone(), index, |ctx| {
-                    (self.body)(ctx)
-                })
-                .map_err(|error| {
-                    structural_error(format!("Loop `{}` pass {index}: {error}", self.id))
-                })?;
+            let scope = ExecutionScope::new(
+                &self.id,
+                crate::LOOP_SOURCE_ID,
+                index,
+                variables,
+                self.types.clone(),
+            )?;
+            let ((), updated, exited) =
+                ctx.run_scope(scope, |ctx| (self.body)(ctx))
+                    .map_err(|error| {
+                        structural_error(format!("Loop `{}` pass {index}: {error}", self.id))
+                    })?;
             variables = updated;
             pass_count = index + 1;
             if exited {
@@ -202,9 +207,9 @@ where
     )
 }
 
-struct LoopSourceNode;
+struct ScopeSourceNode;
 
-impl Node for LoopSourceNode {
+impl Node for ScopeSourceNode {
     fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
         Err(structural_error("Loop source requires a Loop frame"))
     }
@@ -214,7 +219,7 @@ impl Node for LoopSourceNode {
         _: Inputs,
         ctx: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
-        ctx.loop_source_values().map(Into::into)
+        ctx.scope_values().map(Into::into)
     }
 }
 
@@ -234,6 +239,10 @@ pub fn prepared_loop_source_from_json(variables_json: &str) -> Result<FlowNode, 
 }
 
 pub fn prepared_loop_source_types(types: &BTreeMap<String, ValueType>) -> FlowNode {
+    prepared_scope_source(crate::LOOP_SOURCE_ID, types)
+}
+
+pub fn prepared_scope_source(id: &str, types: &BTreeMap<String, ValueType>) -> FlowNode {
     let mut outputs: Vec<_> = types
         .iter()
         .map(|(name, value_type)| PortSpec::owned(name, value_type.clone(), true))
@@ -243,7 +252,7 @@ pub fn prepared_loop_source_types(types: &BTreeMap<String, ValueType>) -> FlowNo
         inputs: Vec::new(),
         outputs,
     };
-    FlowNode::new(crate::LOOP_SOURCE_ID, Box::new(LoopSourceNode), ports)
+    FlowNode::new(id, Box::new(ScopeSourceNode), ports)
 }
 
 struct LoopAssignNode {
@@ -263,7 +272,7 @@ impl Node for LoopAssignNode {
         let value = inputs
             .remove("value")
             .ok_or_else(|| structural_error("missing assignment value"))?;
-        ctx.stage_loop_write(&self.variable, value)?;
+        ctx.stage_scope_write(&self.variable, value)?;
         Ok(Outputs::from([("done".into(), Value::Bool(true))]).into())
     }
 }
@@ -313,7 +322,7 @@ impl Node for ExitLoopNode {
         _: Inputs,
         ctx: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
-        ctx.request_loop_exit()?;
+        ctx.request_scope_exit()?;
         Ok(Outputs::new().into())
     }
 }

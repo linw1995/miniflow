@@ -389,7 +389,7 @@ impl Flow {
                 });
             }
             crate::execute_node_in_context(node, &dependencies, state)?;
-            if state.loop_exit_requested() {
+            if state.scope_exit_requested() {
                 break;
             }
         }

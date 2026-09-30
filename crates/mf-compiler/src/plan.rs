@@ -416,7 +416,7 @@ fn generate_scope(
         });
         let exit_check = enclosing.map(|_| {
             quote! {
-                if state.loop_exit_requested() {
+                if state.scope_exit_requested() {
                     return Ok(());
                 }
             }

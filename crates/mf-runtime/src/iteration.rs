@@ -1,7 +1,7 @@
 use crate::{
-    ContextValue, ControlEdgeDefinition, DefinitionId, EdgeDefinition, ExecutionContext, FlowNode,
-    Inputs, Node, NodeDefinition, NodeExecutionError, NodePorts, Outputs, PortSpec, ValueType,
-    WorkflowRunError,
+    ControlEdgeDefinition, DefinitionId, EdgeDefinition, ExecutionContext, ExecutionScope,
+    FlowNode, Inputs, Node, NodeDefinition, NodeExecutionError, NodePorts, Outputs, PortSpec,
+    ValueType, WorkflowRunError,
 };
 use mf_telemetry::{
     event::NodeIdentity,
@@ -9,7 +9,7 @@ use mf_telemetry::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::sync::{
     Mutex,
     atomic::{AtomicBool, Ordering},
@@ -18,8 +18,6 @@ use std::sync::{
 pub const ITERATION_KIND: &str = "builtin.iteration";
 pub const ITERATION_INPUT_KIND: &str = "builtin.iteration_input";
 pub const ITERATION_INPUT_ID: &str = "@iteration";
-pub const ITERATION_SEED_ITEM: &str = "@iteration_seed.items";
-pub const ITERATION_SEED_INDEX: &str = "@iteration_seed.index";
 pub const MAX_PARALLEL_ITEMS: usize = 10;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
@@ -78,11 +76,20 @@ pub fn execute_iteration_body(
     observation: Option<BodyObservation>,
     body: impl FnOnce(&mut ExecutionContext) -> Result<Option<Value>, WorkflowRunError>,
 ) -> Result<Value, NodeExecutionError> {
-    let mut state = ExecutionContext::for_iteration_with_observation(item, index, observation)?;
-    body(&mut state)
+    let mut state = ExecutionContext::for_body(observation);
+    let scope = ExecutionScope::new(
+        ITERATION_INPUT_ID,
+        ITERATION_INPUT_ID,
+        index,
+        Outputs::from([("items".into(), item)]),
+        BTreeMap::from([("items".into(), ValueType::Any)]),
+    )?;
+    state
+        .run_scope(scope, body)
         .map_err(|source| NodeExecutionError::PluginFailed {
             source: Box::new(source),
         })?
+        .0
         .ok_or_else(|| NodeExecutionError::ExecutionFailed {
             message: "iteration body did not produce `result`".into(),
         })
@@ -254,45 +261,10 @@ impl Node for IterationNode {
     }
 }
 
-struct IterationInputNode;
-
-impl Node for IterationInputNode {
-    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Err(NodeExecutionError::ExecutionFailed {
-            message: "iteration input requires an item context".into(),
-        })
-    }
-
-    fn execute_with_context(
-        &self,
-        _: Inputs,
-        ctx: &ExecutionContext,
-    ) -> Result<crate::NodeResult, NodeExecutionError> {
-        let read = |id: &str| match ctx.output(id)? {
-            ContextValue::Value(value) => Ok(value.clone()),
-            ContextValue::Skipped => Err(NodeExecutionError::ExecutionFailed {
-                message: format!("iteration input `{id}` was skipped"),
-            }),
-        };
-        Ok(Outputs::from([
-            ("items".into(), read(ITERATION_SEED_ITEM)?),
-            ("index".into(), read(ITERATION_SEED_INDEX)?),
-        ])
-        .into())
-    }
-}
-
 pub fn iteration_input_flow_node() -> FlowNode {
-    FlowNode::new(
+    crate::prepared_scope_source(
         ITERATION_INPUT_ID,
-        Box::new(IterationInputNode),
-        NodePorts {
-            inputs: vec![],
-            outputs: vec![
-                PortSpec::new("items", ValueType::Any, true),
-                PortSpec::new("index", ValueType::Int64, true),
-            ],
-        },
+        &BTreeMap::from([("items".into(), ValueType::Any)]),
     )
 }
 
