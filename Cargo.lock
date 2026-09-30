@@ -1287,6 +1287,7 @@ version = "0.1.0"
 dependencies = [
  "inventory",
  "mf-runtime",
+ "mf-telemetry",
  "serde",
  "serde_json",
 ]

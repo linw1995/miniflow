@@ -447,6 +447,8 @@ pub fn output_id(node: &str, port: &str) -> String {
 
 #[derive(Debug, Snafu)]
 pub enum NodeBuildError {
+    #[snafu(display("invalid prepared subgraph: {message}"))]
+    InvalidSubgraph { message: String },
     #[snafu(display("invalid node configuration: {source}"))]
     InvalidConfiguration { source: serde_json::Error },
     #[snafu(display("node factory failed: {source}"))]
@@ -474,6 +476,17 @@ where
 
 pub trait Node: Send + Sync {
     fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError>;
+
+    fn with_subgraph(
+        self: Box<Self>,
+        _id: &str,
+        _options: Value,
+        _body: crate::PreparedSubgraph,
+    ) -> Result<Box<dyn Node>, NodeBuildError> {
+        Err(NodeBuildError::InvalidSubgraph {
+            message: "node does not support prepared subgraphs".into(),
+        })
+    }
 
     fn execute_with_context(
         &self,

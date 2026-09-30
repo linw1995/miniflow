@@ -211,18 +211,36 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
             "max_iterations": 5,
             "variables": variables,
         });
-        let error =
-            mf_runtime::prepared_loop_node_from_json("repeat", &config.to_string(), |_| Ok(()))
-                .err()
-                .unwrap()
-                .to_string();
+        let error = mf_runtime::instantiate_node_with_metadata(
+            &NodeRegistry::from_inventory().unwrap(),
+            "repeat",
+            mf_runtime::LOOP_KIND,
+            "{}",
+        )
+        .unwrap()
+        .with_subgraph_from_json(
+            &config.to_string(),
+            mf_runtime::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
+        )
+        .err()
+        .unwrap()
+        .to_string();
         assert!(error.contains(expected), "{error}");
     }
 
     let complete_definition = definition()["nodes"][1]["loop"].to_string();
-    let prepared =
-        mf_runtime::prepared_loop_node_from_json("repeat", &complete_definition, |_| Ok(()))
-            .unwrap();
+    let prepared = mf_runtime::instantiate_node_with_metadata(
+        &NodeRegistry::from_inventory().unwrap(),
+        "repeat",
+        mf_runtime::LOOP_KIND,
+        "{}",
+    )
+    .unwrap()
+    .with_subgraph_from_json(
+        &complete_definition,
+        mf_runtime::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
+    )
+    .unwrap();
     assert_eq!(prepared.ports.inputs[0].name, "count");
 }
 

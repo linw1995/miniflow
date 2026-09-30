@@ -31,7 +31,7 @@ pub use mf_runtime::{
     WorkflowOutputDefinition, WorkflowRunError, deserialize_config, execute_node_in_context,
     instantiate_node_with_metadata, output_id, select_context_output,
 };
-pub use mf_runtime::{IterationErrorPolicy, IterationMode, IterationNode};
+pub use mf_runtime::{IterationErrorPolicy, IterationMode};
 pub use pipeline::{
     CompileRequest, PipelineError, cargo_command, compile_project, resolve_project,
 };

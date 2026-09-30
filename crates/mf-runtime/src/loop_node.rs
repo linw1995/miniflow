@@ -1,12 +1,9 @@
 use crate::{
-    ExecutionContext, ExecutionScope, FlowNode, Inputs, LoopComparisonOperator,
-    LoopConditionDefinition, LoopVariableDefinition, Node, NodeExecutionError, NodePorts,
-    NodeResult, Outputs, PortSpec, ValueType, WorkflowRunError, compare_json_numbers,
+    ExecutionContext, FlowNode, Inputs, LoopVariableDefinition, Node, NodeExecutionError,
+    NodePorts, NodeResult, Outputs, PortSpec, ValueType, WorkflowRunError,
 };
-use mf_telemetry::event::LoopStopReason;
-use serde::Deserialize;
 use serde_json::Value;
-use std::{cmp::Ordering, collections::BTreeMap};
+use std::collections::BTreeMap;
 
 fn structural_error(message: impl Into<String>) -> NodeExecutionError {
     NodeExecutionError::ExecutionFailed {
@@ -37,181 +34,13 @@ pub fn loop_variable_types(
     Ok(types)
 }
 
-fn condition_matches(
-    condition: &LoopConditionDefinition,
-    variables: &BTreeMap<String, Value>,
-) -> Result<bool, NodeExecutionError> {
-    let actual = variables.get(&condition.variable).ok_or_else(|| {
-        structural_error(format!("missing Loop variable `{}`", condition.variable))
-    })?;
-    let expected = &condition.value;
-    if actual.is_array() || actual.is_object() {
-        return Err(structural_error(format!(
-            "Loop condition variable `{}` must be scalar",
-            condition.variable
-        )));
-    }
-    let order = match (actual, expected) {
-        (Value::Number(left), Value::Number(right)) => Some(compare_json_numbers(left, right)),
-        _ => None,
-    };
-    let result = match condition.operator {
-        LoopComparisonOperator::Eq => {
-            order.map_or(actual == expected, |order| order == Ordering::Equal)
-        }
-        LoopComparisonOperator::Ne => {
-            order.map_or(actual != expected, |order| order != Ordering::Equal)
-        }
-        LoopComparisonOperator::Gt => order == Some(Ordering::Greater),
-        LoopComparisonOperator::Gte => matches!(order, Some(Ordering::Greater | Ordering::Equal)),
-        LoopComparisonOperator::Lt => order == Some(Ordering::Less),
-        LoopComparisonOperator::Lte => matches!(order, Some(Ordering::Less | Ordering::Equal)),
-    };
-    if matches!(
-        condition.operator,
-        LoopComparisonOperator::Gt
-            | LoopComparisonOperator::Gte
-            | LoopComparisonOperator::Lt
-            | LoopComparisonOperator::Lte
-    ) && order.is_none()
-    {
-        return Err(structural_error(format!(
-            "Loop condition variable `{}` requires numeric operands",
-            condition.variable
-        )));
-    }
-    Ok(result)
-}
-
-struct LoopNode<F> {
-    id: String,
-    max_iterations: u16,
-    until: Option<LoopConditionDefinition>,
-    types: BTreeMap<String, ValueType>,
-    body: F,
-}
-
-// Older generated sources include a body field; deserialization ignores it for rebuild compatibility.
-#[derive(Deserialize)]
-struct LoopExecutionConfig {
-    max_iterations: u16,
-    variables: Vec<LoopVariableDefinition>,
-    #[serde(default)]
-    until: Option<LoopConditionDefinition>,
-}
-
-impl<F> Node for LoopNode<F>
-where
-    F: Fn(&mut ExecutionContext) -> Result<(), WorkflowRunError> + Send + Sync,
-{
-    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Err(structural_error(
-            "Loop requires a workflow execution context",
-        ))
-    }
-
-    fn execute_with_context_mut(
-        &self,
-        inputs: Inputs,
-        ctx: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
-        let mut variables = inputs;
-        let mut pass_count = 0;
-        let mut reason = LoopStopReason::Maximum;
-        for index in 0..usize::from(self.max_iterations) {
-            let scope = ExecutionScope::new(
-                &self.id,
-                crate::LOOP_SOURCE_ID,
-                index,
-                variables,
-                self.types.clone(),
-            )?;
-            let ((), updated, exited) =
-                ctx.run_scope(scope, |ctx| (self.body)(ctx))
-                    .map_err(|error| {
-                        structural_error(format!("Loop `{}` pass {index}: {error}", self.id))
-                    })?;
-            variables = updated;
-            pass_count = index + 1;
-            if exited {
-                reason = LoopStopReason::Exit;
-                break;
-            }
-            if let Some(condition) = &self.until
-                && condition_matches(condition, &variables)?
-            {
-                reason = LoopStopReason::Condition;
-                break;
-            }
-        }
-        ctx.set_loop_summary(pass_count, reason);
-        Ok(variables.into())
-    }
-}
-
-pub fn prepared_loop_node<F>(
-    id: &str,
-    max_iterations: u16,
-    variables: &[LoopVariableDefinition],
-    until: Option<LoopConditionDefinition>,
-    body: F,
-) -> Result<FlowNode, WorkflowRunError>
-where
-    F: Fn(&mut ExecutionContext) -> Result<(), WorkflowRunError> + Send + Sync + 'static,
-{
-    let types = loop_variable_types(variables).map_err(|message| WorkflowRunError::Context {
-        definition_id: id.into(),
-        message,
-    })?;
-    let ports_for_variables: Vec<_> = types
-        .iter()
-        .map(|(name, value_type)| PortSpec::owned(name, value_type.clone(), true))
-        .collect();
-    let ports = NodePorts {
-        inputs: ports_for_variables.clone(),
-        outputs: ports_for_variables,
-    };
-    Ok(FlowNode::new(
-        id,
-        Box::new(LoopNode {
-            id: id.to_owned(),
-            max_iterations,
-            until,
-            types,
-            body,
-        }),
-        ports,
-    ))
-}
-
-pub fn prepared_loop_node_from_json<F>(
-    id: &str,
-    definition_json: &str,
-    body: F,
-) -> Result<FlowNode, WorkflowRunError>
-where
-    F: Fn(&mut ExecutionContext) -> Result<(), WorkflowRunError> + Send + Sync + 'static,
-{
-    let config: LoopExecutionConfig = serde_json::from_str(definition_json).map_err(|source| {
-        WorkflowRunError::InvalidEmbeddedConfig {
-            definition_id: id.into(),
-            source,
-        }
-    })?;
-    prepared_loop_node(
-        id,
-        config.max_iterations,
-        &config.variables,
-        config.until,
-        body,
-    )
-}
-
 struct ScopeSourceNode;
 
 impl Node for ScopeSourceNode {
     fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Err(structural_error("Loop source requires a Loop frame"))
+        Err(structural_error(
+            "scope source requires an execution context",
+        ))
     }
 
     fn execute_with_context_mut(

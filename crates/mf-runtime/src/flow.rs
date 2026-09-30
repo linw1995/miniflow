@@ -37,6 +37,28 @@ pub struct FlowNode {
 }
 
 impl FlowNode {
+    pub fn with_subgraph_from_json(
+        self,
+        options: &str,
+        body: crate::PreparedSubgraph,
+    ) -> Result<Self, crate::WorkflowRunError> {
+        let options = serde_json::from_str(options).map_err(|source| {
+            crate::WorkflowRunError::InvalidEmbeddedConfig {
+                definition_id: self.definition_id.clone(),
+                source,
+            }
+        })?;
+        let node = self
+            .node
+            .with_subgraph(self.definition_id.as_str(), options, body)
+            .map_err(|source| crate::WorkflowRunError::NodeConstruction {
+                definition_id: self.definition_id.clone(),
+                source,
+            })?;
+        let ports = node.ports().unwrap_or(self.ports);
+        Ok(Self::new(self.definition_id, node, ports))
+    }
+
     pub fn new(
         definition_id: impl Into<DefinitionId>,
         node: Box<dyn Node>,

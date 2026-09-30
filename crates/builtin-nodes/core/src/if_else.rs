@@ -204,6 +204,7 @@ impl Node for IfElse {
                 .filter(|name| *name != selected)
                 .map(str::to_owned)
                 .collect(),
+            ..NodeResult::default()
         })
     }
 }

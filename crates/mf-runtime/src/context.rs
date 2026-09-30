@@ -1,9 +1,6 @@
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use mf_telemetry::{
-    event::{
-        FailurePhase, LoopPassOutcome, LoopPathEntry, LoopStopReason, LoopSummary, NodeIdentity,
-        SkipCause,
-    },
+    event::{FailurePhase, LoopPassOutcome, LoopPathEntry, LoopSummary, NodeIdentity, SkipCause},
     observation::{
         BodyNodeObservation, BodyObservation, IterationObservation, NodeObservation, RunObservation,
     },
@@ -63,13 +60,14 @@ impl Drop for ScopeGuard<'_> {
 pub struct NodeResult {
     pub outputs: Outputs,
     pub skipped: BTreeSet<String>,
+    pub loop_summary: Option<LoopSummary>,
 }
 
 impl From<Outputs> for NodeResult {
     fn from(outputs: Outputs) -> Self {
         Self {
             outputs,
-            skipped: BTreeSet::new(),
+            ..Self::default()
         }
     }
 }
@@ -89,7 +87,6 @@ pub struct ExecutionContext {
     body_observation: Option<BodyObservation>,
     scopes: Vec<ExecutionScope>,
     pending_loop_write: Option<(String, Value)>,
-    pending_loop_summary: Option<LoopSummary>,
     remaining_steps: usize,
 }
 
@@ -101,7 +98,6 @@ impl Default for ExecutionContext {
             body_observation: None,
             scopes: Vec::new(),
             pending_loop_write: None,
-            pending_loop_summary: None,
             remaining_steps: crate::MAX_SCHEDULED_STEPS,
         }
     }
@@ -333,14 +329,6 @@ impl ExecutionContext {
             .collect()
     }
 
-    pub(crate) fn set_loop_summary(&mut self, pass_count: usize, reason: LoopStopReason) {
-        self.pending_loop_summary = Some(LoopSummary {
-            pass_count: mf_telemetry::Count::try_from(pass_count as i64)
-                .expect("Loop pass count is bounded"),
-            reason,
-        });
-    }
-
     fn reserve_step(&mut self, id: &str) -> Result<(), WorkflowRunError> {
         if self.remaining_steps == 0 {
             return Err(state_error(
@@ -520,7 +508,6 @@ pub fn execute_node_in_context(
     let id = node.definition_id.as_str();
     ctx.reserve_step(id)?;
     ctx.pending_loop_write = None;
-    ctx.pending_loop_summary = None;
     let path = ctx.loop_path();
     let mut step = if let Some(run) = ctx.observation.as_mut() {
         if path.is_empty() {
@@ -638,8 +625,10 @@ pub fn execute_node_in_context(
             skipped_ports.sort();
         }
     }
+    let loop_summary = result
+        .as_ref()
+        .and_then(|result| result.loop_summary.clone());
     let result = ctx.publish(node, result);
-    let loop_summary = ctx.pending_loop_summary.take();
     if let Some(step) = step.take() {
         match &result {
             Err(error) => step.failed(ctx, FailurePhase::Publication, error.to_string()),
