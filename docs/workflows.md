@@ -27,7 +27,10 @@ The required `dependencies` object maps aliases to node packages. Aliases identi
 
 Each entry requires `package` and exactly one source: a crates.io `version`, a `git` URL with a full commit `rev`, or a local `path`. Features default to empty and default features are enabled. Unknown fields and incomplete or conflicting sources are rejected. The package names above are illustrative.
 
-Ordinary built-in nodes are packages too. Structural Loop kinds are provided by the engine and require no node package. For example, [the CEL scalar Flow](../examples/cel-scalar.json) declares both packages it uses (these paths are relative to the definition in `examples/`):
+Built-in nodes and subgraph declarations are provided by node packages. Include `mfn-core` for the
+Loop declaration; its assignment and exit controls are supplied by the engine. For example,
+[the CEL scalar Flow](../examples/cel-scalar.json) declares both packages it uses (these paths are
+relative to the definition in `examples/`):
 
 ```json
 {
@@ -102,7 +105,12 @@ when compiling outside the checkout.
 
 ## Structured Loop
 
-The [Loop example](../examples/loop.json) returns `{"count":3}`. It declares `mfn-core` for its initial constant and `mfn-code` for the body transformation. `workflow.loop`, `workflow.loop_assign`, `workflow.exit_loop`, and the synthetic `$loop` source are engine constructs; plugins cannot register these kinds. The outer graph and every Loop body remain acyclic. The engine repeats a body's fixed execution order instead of adding a graph back edge.
+The [Loop example](../examples/loop.json) returns `{"count":3}`. It declares `mfn-core` for both its
+initial constant and the `workflow.loop` declaration, and `mfn-code` for the body transformation.
+The compiler replaces the Loop declaration with an engine-prepared executor. `workflow.loop_assign`,
+`workflow.exit_loop`, and the synthetic `$loop` source remain engine controls that plugins cannot
+register. The outer graph and every Loop body remain acyclic. The engine repeats a body's fixed
+execution order instead of adding a graph back edge.
 
 A Loop node has a typed `loop` field with required `max_iterations`, a nonempty `variables` list, an
 optional `until` condition, and a `body` containing ordinary `nodes`, `edges`, and `control_edges`.
@@ -165,7 +173,7 @@ conversation variables, parallel execution, and error-continue modes are separat
 
 ## Validation
 
-The CLI checks node IDs, edge endpoints, selected output names, reserved Loop controls, and cycles in every scope before generating runner code. The compiled runner validates registered ordinary kinds, configuration, ports, type compatibility, required input connections, and Loop state contracts before installation. Every failure returns a nonzero status and preserves an existing output executable.
+The CLI checks node IDs, edge endpoints, selected output names, reserved Loop controls, and cycles in every scope before generating runner code. The compiled runner requires a registered Loop declaration and validates ordinary kinds, configuration, ports, type compatibility, required input connections, and Loop state contracts before installation. Every failure returns a nonzero status and preserves an existing output executable.
 
 Port connections are statically safe when the source type fits the target, such as `Int64` to `Number` or `List(Int64)` to
 `Array`. A constant's configured value determines its output type, and `builtin.identity` carries known type and value

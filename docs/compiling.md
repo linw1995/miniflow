@@ -80,7 +80,11 @@ cargo run -p mf-cli --features development-support -- \
 "$output_dir/loop"
 ```
 
-Normal release builds ignore this environment variable. The hello example declares a local `mfn-core` dependency. Both CEL examples also declare a local `mfn-code` dependency for `builtin.code`; they produce `{"doubled":42}` and `{"doubled":[2,4]}` respectively. The Loop example declares both packages for its ordinary nodes and produces `{"count":3}`. A portable Flow should declare available registry or Git packages instead.
+Normal release builds ignore this environment variable. The hello example declares a local `mfn-core`
+dependency. Both CEL examples also declare a local `mfn-code` dependency for `builtin.code`; they
+produce `{"doubled":42}` and `{"doubled":[2,4]}` respectively. The Loop example declares `mfn-core`
+for its Loop declaration and initial constant, and `mfn-code` for its body transformation; it produces
+`{"count":3}`. A portable Flow should declare available registry or Git packages instead.
 
 ## Build failures
 

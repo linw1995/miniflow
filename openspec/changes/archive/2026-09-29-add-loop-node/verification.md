@@ -8,6 +8,7 @@ The scenarios below are exercised by the named tests. The complete workspace sui
 | --- | --- |
 | Initialize and expose loop variables | `loop_planning::generated_loop_matches_in_memory_without_build_inputs` |
 | Reject an invalid definition version | `loop_planning::rejects_old_schema_and_invalid_loop_structure` |
+| Reject a missing Loop declaration | `loop_planning::loop_requires_a_registered_declaration`; `loop_planning::invalid_loop_edit_preserves_installed_binary_and_lock` |
 | Reject a body cycle or cross-scope reference | `loop_planning::rejects_old_schema_and_invalid_loop_structure` |
 | Validate an inactive body branch | `loop_planning::validates_body_plugins_and_loop_port_types` |
 | Reject assignment outside a Loop | `loop_planning::rejects_old_schema_and_invalid_loop_structure` |
@@ -65,6 +66,7 @@ The scenarios below are exercised by the named tests. The complete workspace sui
 
 - `nix develop --command prek install`
 - `nix develop --command prek -a`
-- `nix flake check -L`: 236 tests passed on `aarch64-darwin`; the flake reported other systems as incompatible with this host.
-- `nix develop --command bash scripts/run-cov.sh -E 'test(loop) | test(state) | test(observation)'`: 23 selected tests passed; local reports were written to `target/coverage/result/`.
-- `openspec validate add-loop-node --strict`
+- `nix flake check -L`: 251 tests passed on `aarch64-darwin`; the flake reported other systems as incompatible with this host.
+- `nix develop --command bash scripts/run-cov.sh -E 'test(loop) | test(iteration) | test(observation)'`: 31 selected tests passed; local reports were written to `target/coverage/result/`.
+- `openspec validate --all --strict --no-interactive`: 10 specifications passed.
+- `openspec validate --archived --strict --no-interactive`: 9 archived changes passed.

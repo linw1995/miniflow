@@ -2,11 +2,13 @@ mod constant;
 mod identity;
 mod if_else;
 mod iteration;
+mod loop_declaration;
 
 pub use constant::{KIND as CONSTANT_KIND, kind as constant_kind};
 pub use identity::{KIND as IDENTITY_KIND, kind as identity_kind};
 pub use if_else::KIND as IF_ELSE_KIND;
 pub use iteration::KIND as ITERATION_KIND;
+pub use loop_declaration::KIND as LOOP_KIND;
 
 #[cfg(test)]
 mod tests {

@@ -8,9 +8,14 @@ The [Dify Loop documentation](https://docs.dify.ai/en/cloud/use-dify/nodes/loop)
 
 ## Decisions
 
-### 1. Use an explicit container, not a plugin factory
+### 1. Use an explicit container with a built-in declaration
 
-Add definition version `2026-09-29` while continuing to accept `2026-09-26` definitions unchanged. A node with reserved kind `workflow.loop` has a typed `loop` field rather than an opaque `config` payload. The engine also reserves `workflow.loop_assign` and `workflow.exit_loop` for use inside a loop body. These three kinds cannot be supplied or overridden by plugin registrations. All ordinary body nodes still resolve through the Flow's declared `dependencies`.
+Add definition version `2026-09-29` while continuing to accept `2026-09-26` definitions unchanged.
+A node with kind `workflow.loop` has a typed `loop` field rather than an opaque `config` payload.
+`mfn-core` registers the Loop declaration; the compiler requires that registration and replaces the
+declaration with an engine-prepared executor. The engine reserves `workflow.loop_assign` and
+`workflow.exit_loop` for use inside a loop body. These control kinds cannot be supplied by plugin
+registrations. All ordinary body nodes still resolve through the Flow's declared `dependencies`.
 
 The loop field declares `max_iterations`, a nonempty list of `{name, type}` variables, an optional
 `until` condition, and a `body` with `nodes`, `edges`, and `control_edges`. `max_iterations` is

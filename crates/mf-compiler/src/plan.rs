@@ -308,6 +308,14 @@ fn generate_scope(
                     &child_static_scope,
                     Some(loop_definition),
                 )?;
+                let declaration = if static_scope.is_empty() {
+                    quote! { state.prepare_node(registry, #id_lit, #kind_lit, "{}")? }
+                } else {
+                    quote! { state.prepare_node_in_loop(
+                        registry, #id_lit, #kind_lit, "{}", &[#(#scope_literals),*]
+                    )? }
+                };
+                preparations.push(quote! { let _ = #declaration; });
                 preparations.extend(body_preparations);
                 let config_json = serde_json::to_string(&serde_json::json!({
                     "max_iterations": loop_definition.max_iterations,

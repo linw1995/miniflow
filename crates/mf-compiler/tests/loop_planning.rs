@@ -113,6 +113,17 @@ fn plans_and_type_checks_nested_loop_body() {
 }
 
 #[test]
+fn loop_requires_a_registered_declaration() {
+    let mut value = definition();
+    value["nodes"].as_array_mut().unwrap().remove(0);
+    value["edges"] = json!([]);
+    let error = compile_definition(&parse(value), &NodeRegistry::default())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("workflow.loop"), "{error}");
+}
+
+#[test]
 fn rejects_old_schema_and_invalid_loop_structure() {
     let mut value = definition();
     value["version"] = json!("2026-09-26");
@@ -372,6 +383,28 @@ fn invalid_loop_edit_preserves_installed_binary_and_lock() {
     fs::write(&definition_path, value.to_string()).unwrap();
     let error = compile_project(&request).unwrap_err();
     assert_eq!(error.stage, "structural validation");
+    assert_eq!(fs::read(&executable).unwrap(), installed);
+    assert_eq!(fs::read(&lock_path).unwrap(), lock);
+
+    value["nodes"][1]["loop"]["max_iterations"] = json!(5);
+    value["nodes"][0] = json!({
+        "id": "seed",
+        "kind": "builtin.code",
+        "config": {"language": "cel", "inputs": {}, "code": {"value": "0"}}
+    });
+    value["dependencies"]
+        .as_object_mut()
+        .unwrap()
+        .remove("core");
+    fs::write(&definition_path, value.to_string()).unwrap();
+    let error = compile_project(&request).unwrap_err();
+    assert_eq!(error.stage, "runner validation");
+    let runner = common::runner_executable(&build, "release");
+    for args in [vec!["--validate"], Vec::new()] {
+        let result = Command::new(&runner).args(args).output().unwrap();
+        assert!(!result.status.success());
+        assert!(String::from_utf8_lossy(&result.stderr).contains("workflow.loop"));
+    }
     assert_eq!(fs::read(&executable).unwrap(), installed);
     assert_eq!(fs::read(&lock_path).unwrap(), lock);
 }

@@ -33,6 +33,6 @@ registration would leave planning, state isolation, generated execution, and obs
 ## Impact
 
 - `mf-runtime` gains loop frames, state writes, exit signaling, and an execution budget. Ordinary plugin `Node` methods remain read-only with respect to engine state.
-- `mf-compiler` gains recursive structural planning and generated loop control flow. Loop control kinds are reserved engine constructs; plugin dependencies remain explicit for ordinary nodes inside and outside loops.
+- `mf-compiler` gains recursive structural planning and generated loop control flow. `mfn-core` registers the Loop declaration; assignment and exit remain reserved engine controls. Plugin dependencies remain explicit for the Loop container and ordinary nodes inside and outside it.
 - `mf-telemetry` and `mf-tui` gain new protocol versions for repeated invocations; existing runner descriptions and lifecycle records retain their current interpretation.
 - Documentation and a compiled example cover variable updates, both stop conditions, early exit, skipped branches, and diagnostics. Dify workflow export/import compatibility is outside this change.

@@ -10,7 +10,7 @@ explicitly; `mfn-core` does not register this kind. See the [CEL examples](workf
 
 A plugin crate depends on `mf-runtime`, implements `Node::execute`, provides a factory, and submits a `NodeRegistration` through `inventory::submit!`. The registration declares a unique `kind` and its input and output `PortSpec` values. See [constant](../crates/builtin-nodes/core/src/constant.rs) and [identity](../crates/builtin-nodes/core/src/identity.rs) for working registrations.
 
-`workflow.loop`, `workflow.loop_assign`, `workflow.exit_loop`, and the synthetic `$loop` source are reserved engine kinds. They cannot be registered by a plugin. Ordinary nodes inside a Loop body still require their package in the Flow's top-level `dependencies` object.
+`mfn-core` registers the `workflow.loop` declaration. The compiler replaces it with an engine-prepared subgraph executor, so a Flow using Loop must declare `mfn-core` in its top-level `dependencies`. `workflow.loop_assign`, `workflow.exit_loop`, and the synthetic `$loop` source remain reserved engine kinds. Ordinary nodes inside a Loop body also require their packages in `dependencies`.
 
 ## Registration contract
 

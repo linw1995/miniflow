@@ -40,10 +40,7 @@ impl NodeRegistry {
         for registration in registrations {
             if matches!(
                 registration.kind,
-                crate::LOOP_KIND
-                    | crate::LOOP_ASSIGN_KIND
-                    | crate::EXIT_LOOP_KIND
-                    | crate::LOOP_SOURCE_ID
+                crate::LOOP_ASSIGN_KIND | crate::EXIT_LOOP_KIND | crate::LOOP_SOURCE_ID
             ) {
                 return Err(NodeRegistryError::ReservedKind {
                     kind: registration.kind.to_owned(),
@@ -109,7 +106,7 @@ mod tests {
     };
 
     static RESERVED: NodeRegistration = NodeRegistration {
-        kind: crate::LOOP_KIND,
+        kind: crate::LOOP_ASSIGN_KIND,
         inputs: &[],
         outputs: &[],
         factory: first_factory,

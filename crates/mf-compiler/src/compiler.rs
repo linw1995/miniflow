@@ -1088,6 +1088,19 @@ fn resolve_nodes_in_scope(
             match node.kind.as_str() {
                 crate::LOOP_KIND => {
                     let loop_definition = node.loop_definition.as_deref().expect("validated Loop");
+                    let Some(registration) = registry.get(crate::LOOP_KIND) else {
+                        return UnknownNodeKindSnafu {
+                            definition_id: node.id.clone(),
+                            kind: node.kind.clone(),
+                        }
+                        .fail();
+                    };
+                    registration.instantiate(node.config.clone()).context(
+                        NodeConstructionSnafu {
+                            definition_id: node.id.clone(),
+                            kind: node.kind.clone(),
+                        },
+                    )?;
                     let types = mf_runtime::loop_variable_types(&loop_definition.variables)
                         .expect("validated Loop variables");
                     let body = crate::loops::body_definition(

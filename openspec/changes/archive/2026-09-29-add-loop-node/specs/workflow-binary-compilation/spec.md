@@ -28,9 +28,9 @@ plugin sources. Definitions in `2026-09-26` SHALL retain their existing DAG beha
 
 Before generating a runner, the CLI SHALL validate nonblank unique node IDs within each scope,
 existing local edge endpoints, selected output node references and names, scope boundaries, reserved
-engine constructs, Loop count and nesting limits, and acyclicity within every graph. Before
-installing the executable, its validation mode SHALL validate ordinary registered kinds,
-configuration, existing ports, required input connections, typed Loop variables, assignments,
+engine controls, Loop count and nesting limits, and acyclicity within every graph. Before
+installing the executable, its validation mode SHALL require a registered Loop declaration and
+validate ordinary registered kinds, configuration, existing ports, required input connections, typed Loop variables, assignments,
 termination conditions, and context references in every scope. Validation MUST NOT execute node
 implementations. A failed validation MUST preserve any previously installed output binary.
 
