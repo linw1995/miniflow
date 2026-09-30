@@ -636,7 +636,7 @@ pub fn structural_order(
     structural_order_graph(definition)
 }
 
-pub(crate) fn structural_order_graph(
+pub fn structural_order_graph(
     definition: &WorkflowDefinition,
 ) -> Result<Vec<DefinitionId>, WorkflowCompileError> {
     validate_structure(definition)?;

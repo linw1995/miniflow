@@ -26,7 +26,7 @@ fn invalid(path: &[DefinitionId], message: impl Into<String>) -> WorkflowCompile
     }
 }
 
-pub(crate) fn assignment_target(config: &Value) -> Result<String, String> {
+pub fn assignment_target(config: &Value) -> Result<String, String> {
     let assignment: AssignmentConfig =
         serde_json::from_value(config.clone()).map_err(|error| error.to_string())?;
     if assignment.variable.trim().is_empty() {
@@ -35,7 +35,7 @@ pub(crate) fn assignment_target(config: &Value) -> Result<String, String> {
     Ok(assignment.variable)
 }
 
-pub(crate) fn body_definition(
+pub fn body_definition(
     body: &LoopBodyDefinition,
     dependencies: &BTreeMap<String, mf_runtime::NodeDependency>,
 ) -> WorkflowDefinition {
@@ -57,9 +57,7 @@ pub(crate) fn body_definition(
     }
 }
 
-pub(crate) fn validate_structure(
-    definition: &WorkflowDefinition,
-) -> Result<(), WorkflowCompileError> {
+pub fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCompileError> {
     for node in &definition.nodes {
         if definition.version == WorkflowDefinitionVersion::V2026_09_26
             && (node.loop_definition.is_some()
