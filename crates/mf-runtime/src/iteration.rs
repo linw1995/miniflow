@@ -1,6 +1,7 @@
 use crate::{
     ContextValue, ControlEdgeDefinition, DefinitionId, EdgeDefinition, ExecutionContext, FlowNode,
     Inputs, Node, NodeDefinition, NodeExecutionError, NodePorts, Outputs, PortSpec, ValueType,
+    WorkflowRunError,
 };
 use mf_telemetry::{
     event::NodeIdentity,
@@ -70,6 +71,22 @@ type IterationBody = dyn Fn(Value, usize, Option<BodyObservation>) -> Result<Val
     + Send
     + Sync
     + 'static;
+
+pub fn execute_iteration_body(
+    item: Value,
+    index: usize,
+    observation: Option<BodyObservation>,
+    body: impl FnOnce(&mut ExecutionContext) -> Result<Option<Value>, WorkflowRunError>,
+) -> Result<Value, NodeExecutionError> {
+    let mut state = ExecutionContext::for_iteration_with_observation(item, index, observation)?;
+    body(&mut state)
+        .map_err(|source| NodeExecutionError::PluginFailed {
+            source: Box::new(source),
+        })?
+        .ok_or_else(|| NodeExecutionError::ExecutionFailed {
+            message: "iteration body did not produce `result`".into(),
+        })
+}
 
 pub struct IterationNode {
     id: String,

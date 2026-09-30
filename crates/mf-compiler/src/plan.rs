@@ -167,8 +167,14 @@ impl CompiledWorkflow {
             }
         }
 
-        let (preparations, node_statements) =
-            generate_scope(&self.definition, &self.execution_order, "root", &[], None)?;
+        let (preparations, node_statements) = generate_scope(
+            &self.definition,
+            &self.execution_order,
+            "root",
+            &[],
+            None,
+            None,
+        )?;
 
         let outputs_binding = if self.definition.outputs.is_empty() {
             quote! { let workflow_outputs = mf_runtime::FlowOutputs::new(); }
@@ -242,6 +248,7 @@ fn generate_scope(
     scope: &str,
     static_scope: &[String],
     enclosing: Option<&LoopDefinition>,
+    preparation_error_override: Option<&TokenStream>,
 ) -> Result<(Vec<TokenStream>, Vec<TokenStream>), PlanError> {
     let nodes_by_id: BTreeMap<_, _> = definition
         .nodes
@@ -281,6 +288,20 @@ fn generate_scope(
             continue;
         }
 
+        let preparation_error = preparation_error_override.cloned().unwrap_or_else(|| {
+            let report = if static_scope.is_empty() {
+                quote! { state.preparation_failed(#id_lit, &error); }
+            } else {
+                quote! { state.preparation_failed_in_loop(&[#(#scope_literals),*], #id_lit, &error); }
+            };
+            quote! {
+                #report
+                mf_runtime::WorkflowRunError::Context {
+                    definition_id: #id_lit.into(),
+                    message: error.to_string(),
+                }
+            }
+        });
         let constructor = match node.kind.as_str() {
             crate::LOOP_KIND => {
                 let loop_definition = node.loop_definition.as_deref().ok_or_else(|| {
@@ -307,6 +328,7 @@ fn generate_scope(
                     &child_scope,
                     &child_static_scope,
                     Some(loop_definition),
+                    None,
                 )?;
                 let declaration = if static_scope.is_empty() {
                     quote! { state.prepare_node(registry, #id_lit, #kind_lit, "{}")? }
@@ -358,6 +380,7 @@ fn generate_scope(
                 quote! { mf_runtime::prepared_loop_assign_from_json(#id_lit, #target_lit, #type_lit)? }
             }
             crate::EXIT_LOOP_KIND => quote! { mf_runtime::prepared_loop_exit(#id_lit) },
+            ITERATION_INPUT_KIND => quote! { mf_runtime::iteration_input_flow_node() },
             crate::LOOP_SOURCE_ID => {
                 let variables = enclosing.ok_or_else(|| PlanError::InvalidLoopConfig {
                     definition_id: id.clone(),
@@ -371,7 +394,12 @@ fn generate_scope(
             _ => {
                 let config_json = serde_json::to_string(&node.config).context(SerializeSnafu)?;
                 let config_lit = LitStr::new(&config_json, Span::call_site());
-                if static_scope.is_empty() {
+                if preparation_error_override.is_some() {
+                    quote! {
+                        mf_runtime::instantiate_node_with_metadata(registry, #id_lit, #kind_lit, #config_lit)
+                            .map_err(|error| { #preparation_error })?
+                    }
+                } else if static_scope.is_empty() {
                     quote! { state.prepare_node(registry, #id_lit, #kind_lit, #config_lit)? }
                 } else {
                     quote! { state.prepare_node_in_loop(
@@ -380,19 +408,10 @@ fn generate_scope(
                 }
             }
         };
-        let report_preparation = if static_scope.is_empty() {
-            quote! { state.preparation_failed(#id_lit, &error); }
-        } else {
-            quote! { state.preparation_failed_in_loop(&[#(#scope_literals),*], #id_lit, &error); }
-        };
         preparations.push(quote! {
             let mut #node_ident = #constructor;
             #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*]).map_err(|error| {
-                #report_preparation
-                mf_runtime::WorkflowRunError::Context {
-                    definition_id: #id_lit.into(),
-                    message: error.to_string(),
-                }
+                #preparation_error
             })?;
         });
         let exit_check = enclosing.map(|_| {
@@ -446,61 +465,33 @@ fn iteration_preparation(
     let config = parse_config(node).map_err(invalid)?;
     let body = body_definition(parent, &config).map_err(invalid)?;
     let order = crate::structural_order(&body).map_err(|error| invalid(error.to_string()))?;
-    let definitions: BTreeMap<_, _> = body.nodes.iter().map(|node| (&node.id, node)).collect();
-    let mut preparations = Vec::new();
-    let mut executions = Vec::new();
-    let mut result_ident = None;
-    let body_inference = format_ident!("body_inference_{scope}_{index}");
+    let body_scope = format!("{scope}_{index}_iteration");
+    let result_position = order
+        .iter()
+        .position(|id| id == &config.body.result.node)
+        .ok_or_else(|| invalid("body result node is unknown".into()))?;
+    let result_ident = format_ident!("node_{body_scope}_{result_position}");
     let outer_id = LitStr::new(node.id.as_str(), Span::call_site());
     let outer_kind = LitStr::new(ITERATION_KIND, Span::call_site());
     let outer_config = LitStr::new(
         &serde_json::to_string(&node.config).context(SerializeSnafu)?,
         Span::call_site(),
     );
-    for (position, id) in order.iter().enumerate() {
-        let body_node = definitions[id];
-        let body_ident = format_ident!("body_node_{scope}_{index}_{position}");
-        if id == &config.body.result.node {
-            result_ident = Some(body_ident.clone());
+    let preparation_error = quote! {
+        state.preparation_failed(#outer_id, &error);
+        mf_runtime::WorkflowRunError::Context {
+            definition_id: #outer_id.into(),
+            message: format!("iteration body: {error}"),
         }
-        let inner_id = LitStr::new(id.as_str(), Span::call_site());
-        let inner_bindings = dependency_tokens(&body, id);
-        let construct = if body_node.kind == ITERATION_INPUT_KIND {
-            quote! { mf_runtime::iteration_input_flow_node() }
-        } else {
-            let kind = LitStr::new(&body_node.kind, Span::call_site());
-            let config_json = serde_json::to_string(&body_node.config).context(SerializeSnafu)?;
-            let config_lit = LitStr::new(&config_json, Span::call_site());
-            quote! {
-                mf_runtime::instantiate_node_with_metadata(registry, #inner_id, #kind, #config_lit)
-                    .map_err(|error| {
-                        state.preparation_failed(#outer_id, &error);
-                        mf_runtime::WorkflowRunError::Context {
-                            definition_id: #outer_id.into(),
-                            message: format!("iteration body: {error}"),
-                        }
-                    })?
-            }
-        };
-        preparations.push(quote! {
-            let mut #body_ident = #construct;
-            #body_inference.resolve_node(&mut #body_ident, &[#(#inner_bindings),*])
-                .map_err(|error| {
-                    state.preparation_failed(#outer_id, &error);
-                    mf_runtime::WorkflowRunError::Context {
-                        definition_id: #outer_id.into(),
-                        message: format!("iteration body: {error}"),
-                    }
-                })?;
-        });
-        executions.push(quote! {
-            mf_runtime::execute_node_in_context(&#body_ident, &[#(#inner_bindings),*], &mut child)
-                .map_err(|source| mf_runtime::NodeExecutionError::PluginFailed {
-                    source: Box::new(source),
-                })?;
-        });
-    }
-    let result_ident = result_ident.ok_or_else(|| invalid("body result node is unknown".into()))?;
+    };
+    let (preparations, executions) = generate_scope(
+        &body,
+        &order,
+        &body_scope,
+        &[],
+        None,
+        Some(&preparation_error),
+    )?;
     let result_node = LitStr::new(config.body.result.node.as_str(), Span::call_site());
     let result_port = LitStr::new(&config.body.result.port, Span::call_site());
     let mode = match config.mode {
@@ -523,7 +514,6 @@ fn iteration_preparation(
     });
     Ok(quote! {
         let _registered_iteration = state.prepare_node(registry, #outer_id, #outer_kind, #outer_config)?;
-        let mut #body_inference = mf_compiler::TypeInferenceState::default();
         #(#preparations)*
         let result_type = #result_ident.ports.outputs.iter()
             .find(|port| port.name == #result_port)
@@ -537,15 +527,10 @@ fn iteration_preparation(
             })?
             .value_type.clone();
         let iteration = mf_runtime::IterationNode::new(#outer_id, vec![#(#body_nodes),*], #mode, #on_error, result_type, move |item, index, observation| {
-            let mut child = mf_runtime::ExecutionContext::for_iteration_with_observation(item, index, observation)?;
-            #(#executions)*
-            child.select_output("result", #result_node, #result_port, false)
-                .map_err(|source| mf_runtime::NodeExecutionError::PluginFailed {
-                    source: Box::new(source),
-                })?
-                .ok_or_else(|| mf_runtime::NodeExecutionError::ExecutionFailed {
-                    message: "iteration body did not produce `result`".into(),
-                })
+            mf_runtime::execute_iteration_body(item, index, observation, |state| {
+                #(#executions)*
+                state.select_output("result", #result_node, #result_port, false)
+            })
         });
         let ports = iteration.ports();
         let mut #node_ident = mf_runtime::FlowNode::new(#outer_id, Box::new(iteration), ports);

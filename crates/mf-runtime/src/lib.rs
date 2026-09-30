@@ -23,7 +23,7 @@ pub use flow::{Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowO
 pub use iteration::{
     ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
     IterationConfig, IterationErrorPolicy, IterationMode, IterationNode, IterationResultDefinition,
-    MAX_PARALLEL_ITEMS, iteration_input_flow_node,
+    MAX_PARALLEL_ITEMS, execute_iteration_body, iteration_input_flow_node,
 };
 pub use loop_node::{
     loop_variable_types, prepared_loop_assign, prepared_loop_assign_from_json, prepared_loop_exit,

@@ -4,10 +4,7 @@ use crate::{
     NodeRegistry, ValueType,
 };
 use crate::{DefinitionId, WorkflowDefinition};
-use mf_runtime::{
-    ExecutionContext, ITERATION_INPUT_KIND, ITERATION_KIND, IterationNode, NodeExecutionError,
-    iteration_input_flow_node,
-};
+use mf_runtime::{ITERATION_INPUT_KIND, ITERATION_KIND, IterationNode, iteration_input_flow_node};
 use mf_runtime::{OutputDerivation, TypeCompatibility, TypeMismatch};
 use mf_telemetry::{
     ContractError,
@@ -1190,21 +1187,9 @@ fn resolve_nodes_in_scope(
                     config.on_error,
                     result_type,
                     move |item, index, observation| {
-                        let mut state = ExecutionContext::for_iteration_with_observation(
-                            item,
-                            index,
-                            observation,
-                        )?;
-                        let mut outputs =
-                            flow.execute_in_context(&mut state).map_err(|source| {
-                                NodeExecutionError::PluginFailed {
-                                    source: Box::new(source),
-                                }
-                            })?;
-                        outputs.remove("result").ok_or_else(|| {
-                            NodeExecutionError::ExecutionFailed {
-                                message: "iteration body did not produce `result`".into(),
-                            }
+                        mf_runtime::execute_iteration_body(item, index, observation, |state| {
+                            flow.execute_in_context(state)
+                                .map(|mut outputs| outputs.remove("result"))
                         })
                     },
                 );
