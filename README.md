@@ -3,7 +3,7 @@
 [![CI](https://github.com/linw1995/miniflow/actions/workflows/CI.yaml/badge.svg)](https://github.com/linw1995/miniflow/actions/workflows/CI.yaml)
 [![codecov](https://codecov.io/github/linw1995/miniflow/graph/badge.svg?token=AZZ4U2PD3T)](https://codecov.io/github/linw1995/miniflow)
 
-miniflow compiles declarative workflows into standalone executables. Each graph is a DAG; structured Loop nodes can run an inner DAG repeatedly with typed state. Ordinary nodes are statically linked Rust plugins. The core package registers the Loop container; the execution engine manages its scoped state and control steps. The compiler validates each scope and generates direct node calls in deterministic order.
+miniflow compiles declarative workflows into standalone executables with statically linked Rust nodes.
 
 ## Quick start
 
@@ -32,7 +32,6 @@ If those packages are not yet available, use the [repository development command
 
 - [Compiling workflows](docs/compiling.md): CLI build, usage, and build failures.
 - [Workflow definitions](docs/workflows.md): JSON format, built-in nodes, and validation.
-- [Loop example](examples/loop.json): bounded refinement with persistent state.
 - [Node development](docs/node-development.md): node registration and dependency selection.
 - [Observation contracts](docs/observability.md): lifecycle schema, identity, loss semantics, and package boundaries.
 - [Contributing](CONTRIBUTING.md): development setup, checks, and submission conventions.
