@@ -1,6 +1,6 @@
-use crate::iteration::{body_definition, parse_config};
-use crate::{DefinitionId, LoopDefinition, WorkflowDefinition};
-use mf_runtime::{ITERATION_INPUT_KIND, ITERATION_KIND};
+use crate::iteration::parse_config;
+use crate::{DefinitionId, NodeRegistry, WorkflowDefinition};
+use mf_runtime::{ITERATION_KIND, SCOPE_INPUT_KIND, SubgraphDefinition, ValueType};
 use proc_macro2::{Span, TokenStream};
 use quote::{format_ident, quote};
 use serde::{Deserialize, Serialize};
@@ -15,7 +15,7 @@ pub struct CompiledWorkflow {
     pub execution_order: Vec<DefinitionId>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GeneratedWorkflowArtifacts {
     pub rust_source: String,
     pub plan_json: String,
@@ -116,6 +116,20 @@ impl CompiledWorkflow {
     }
 
     pub fn generate_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
+        self.generate_using_registry(None)
+    }
+
+    pub fn generate_artifacts_with_registry(
+        &self,
+        registry: &NodeRegistry,
+    ) -> Result<GeneratedWorkflowArtifacts, PlanError> {
+        self.generate_using_registry(Some(registry))
+    }
+
+    fn generate_using_registry(
+        &self,
+        registry: Option<&NodeRegistry>,
+    ) -> Result<GeneratedWorkflowArtifacts, PlanError> {
         if self.execution_order.len() != self.definition.nodes.len() {
             return InvalidExecutionOrderSnafu.fail();
         }
@@ -170,10 +184,13 @@ impl CompiledWorkflow {
         let (preparations, node_statements) = generate_scope(
             &self.definition,
             &self.execution_order,
-            "root",
-            &[],
-            None,
-            None,
+            GenerationScope {
+                name: "root",
+                path: &[],
+                declaration: None,
+                error: None,
+                registry,
+            },
         )?;
 
         let mut output_names = BTreeSet::new();
@@ -226,14 +243,23 @@ impl CompiledWorkflow {
     }
 }
 
+struct GenerationScope<'a> {
+    name: &'a str,
+    path: &'a [String],
+    declaration: Option<&'a SubgraphDefinition>,
+    error: Option<&'a TokenStream>,
+    registry: Option<&'a NodeRegistry>,
+}
+
 fn generate_scope(
     definition: &WorkflowDefinition,
     order: &[DefinitionId],
-    scope: &str,
-    static_scope: &[String],
-    enclosing: Option<&LoopDefinition>,
-    preparation_error_override: Option<&TokenStream>,
+    context: GenerationScope<'_>,
 ) -> Result<(Vec<TokenStream>, Vec<TokenStream>), PlanError> {
+    let scope = context.name;
+    let static_scope = context.path;
+    let enclosing = context.declaration;
+    let preparation_error_override = context.error;
     let nodes_by_id: BTreeMap<_, _> = definition
         .nodes
         .iter()
@@ -256,19 +282,15 @@ fn generate_scope(
         let id_lit = LitStr::new(id.as_str(), Span::call_site());
         let kind_lit = LitStr::new(&node.kind, Span::call_site());
         let bindings = dependency_tokens(definition, id);
-        if matches!(node.kind.as_str(), crate::LOOP_KIND | ITERATION_KIND) {
+        if let Some(request) = declared_subgraph(node, context.registry)? {
             preparations.push(subgraph_preparation(
-                definition,
-                node,
-                scope,
-                index,
-                static_scope,
-                &bindings,
+                definition, node, &context, index, &bindings, request,
             )?);
-            let exit_check = enclosing.map(|_| {
+            let output_return = generate_outputs(definition);
+            let exit_check = enclosing.filter(|scope| scope.allow_state).map(|_| {
                 quote! {
                     if state.scope_exit_requested() {
-                        return Ok(mf_runtime::FlowOutputs::new());
+                        return { #output_return };
                     }
                 }
             });
@@ -302,33 +324,34 @@ fn generate_scope(
                     }
                 })?;
                 let variable = enclosing
-                    .and_then(|loop_definition| {
-                        loop_definition
-                            .variables
-                            .iter()
-                            .find(|variable| variable.name == target)
-                    })
+                    .filter(|scope| scope.allow_state)
+                    .and_then(|scope| scope.inputs.get(&target))
                     .ok_or_else(|| PlanError::InvalidLoopConfig {
                         definition_id: id.clone(),
-                        message: format!("unknown assignment variable `{target}`"),
+                        message: format!("unknown assignment variable {target}"),
                     })?;
                 let target_lit = LitStr::new(&target, Span::call_site());
                 let type_json =
-                    serde_json::to_string(&variable.value_type).context(SerializeSnafu)?;
+                    serde_json::to_string(&variable.descriptor()).context(SerializeSnafu)?;
                 let type_lit = LitStr::new(&type_json, Span::call_site());
                 quote! { mf_runtime::prepared_loop_assign_from_json(#id_lit, #target_lit, #type_lit)? }
             }
             crate::EXIT_LOOP_KIND => quote! { mf_runtime::prepared_loop_exit(#id_lit) },
-            ITERATION_INPUT_KIND => quote! { mf_runtime::iteration_input_flow_node() },
-            crate::LOOP_SOURCE_ID => {
-                let variables = enclosing.ok_or_else(|| PlanError::InvalidLoopConfig {
+            SCOPE_INPUT_KIND => {
+                let request = enclosing.ok_or_else(|| PlanError::InvalidLoopConfig {
                     definition_id: id.clone(),
-                    message: "Loop source has no parent Loop".into(),
+                    message: "scope source has no declaration".into(),
                 })?;
-                let variables_json =
-                    serde_json::to_string(&variables.variables).context(SerializeSnafu)?;
-                let variables_lit = LitStr::new(&variables_json, Span::call_site());
-                quote! { mf_runtime::prepared_loop_source_from_json(#variables_lit)? }
+                let inputs: BTreeMap<_, _> = request
+                    .inputs
+                    .iter()
+                    .map(|(name, value_type)| (name, value_type.descriptor()))
+                    .collect();
+                let types = LitStr::new(
+                    &serde_json::to_string(&inputs).context(SerializeSnafu)?,
+                    Span::call_site(),
+                );
+                quote! { mf_runtime::prepared_scope_source_from_json(#id_lit, #types)? }
             }
             _ => {
                 let config_json = serde_json::to_string(&node.config).context(SerializeSnafu)?;
@@ -353,10 +376,11 @@ fn generate_scope(
                 #preparation_error
             })?;
         });
-        let exit_check = enclosing.map(|_| {
+        let output_return = generate_outputs(definition);
+        let exit_check = enclosing.filter(|scope| scope.allow_state).map(|_| {
             quote! {
                 if state.scope_exit_requested() {
-                    return Ok(mf_runtime::FlowOutputs::new());
+                    return { #output_return };
                 }
             }
         });
@@ -391,11 +415,13 @@ fn dependency_tokens(definition: &WorkflowDefinition, id: &DefinitionId) -> Vec<
 fn subgraph_preparation(
     parent: &WorkflowDefinition,
     node: &crate::NodeDefinition,
-    scope: &str,
+    context: &GenerationScope<'_>,
     index: usize,
-    static_scope: &[String],
     bindings: &[TokenStream],
+    request: SubgraphDefinition,
 ) -> Result<TokenStream, PlanError> {
+    let scope = context.name;
+    let static_scope = context.path;
     let node_ident = format_ident!("node_{scope}_{index}");
     let inference_ident = format_ident!("inference_{scope}");
     let declaration_ident = format_ident!("declaration_{scope}_{index}");
@@ -406,42 +432,19 @@ fn subgraph_preparation(
         &serde_json::to_string(&node.config).context(SerializeSnafu)?,
         Span::call_site(),
     );
+    let body = request.workflow(parent);
     let mut body_static_scope = static_scope.to_vec();
-    let (body, options, enclosing, preparation_error) = if node.kind == crate::LOOP_KIND {
-        let definition =
-            node.loop_definition
-                .as_deref()
-                .ok_or_else(|| PlanError::InvalidLoopConfig {
-                    definition_id: node.id.clone(),
-                    message: "missing Loop definition".into(),
-                })?;
+    let preparation_error = if request.allow_state {
         body_static_scope.push(node.id.to_string());
-        (
-            crate::loops::body_definition(&definition.body, &parent.dependencies),
-            serde_json::json!({
-                "max_iterations": definition.max_iterations,
-                "variables": definition.variables,
-                "until": definition.until,
-            }),
-            Some(definition),
-            None,
-        )
+        None
     } else {
-        let invalid = |message| PlanError::Iteration {
-            definition_id: node.id.clone(),
-            message,
-        };
-        let config = parse_config(node).map_err(invalid)?;
-        let body = body_definition(parent, &config).map_err(invalid)?;
         body_static_scope.clear();
-        let error = quote! {
+        Some(quote! {
             state.preparation_failed(#outer_id, &error);
             mf_runtime::WorkflowRunError::Context {
-                definition_id: #outer_id.into(),
-                message: format!("iteration body: {error}"),
+                definition_id: #outer_id.into(), message: format!("subgraph body: {error}"),
             }
-        };
-        (body, serde_json::Value::Null, None, Some(error))
+        })
     };
     let order = crate::compiler::structural_order_graph(&body).map_err(|error| {
         if node.kind == crate::LOOP_KIND {
@@ -460,13 +463,16 @@ fn subgraph_preparation(
     let (preparations, executions) = generate_scope(
         &body,
         &order,
-        &body_scope,
-        &body_static_scope,
-        enclosing,
-        preparation_error.as_ref(),
+        GenerationScope {
+            name: &body_scope,
+            path: &body_static_scope,
+            declaration: Some(&request),
+            error: preparation_error.as_ref(),
+            registry: context.registry,
+        },
     )?;
     let nodes = body.nodes.iter()
-        .filter(|node| node.kind != ITERATION_INPUT_KIND && node.kind != crate::LOOP_SOURCE_ID)
+        .filter(|node| node.kind != SCOPE_INPUT_KIND)
         .map(|node| {
             let id = LitStr::new(node.id.as_str(), Span::call_site());
             let kind = LitStr::new(&node.kind, Span::call_site());
@@ -497,7 +503,7 @@ fn subgraph_preparation(
     });
     let body_outputs = generate_outputs(&body);
     let options = LitStr::new(
-        &serde_json::to_string(&options).context(SerializeSnafu)?,
+        &serde_json::to_string(&request.options).context(SerializeSnafu)?,
         Span::call_site(),
     );
     let scopes: Vec<_> = static_scope
@@ -554,4 +560,67 @@ fn generate_outputs(definition: &WorkflowDefinition) -> TokenStream {
         }
     });
     quote! { #binding #(#outputs)* Ok(workflow_outputs) }
+}
+
+fn declared_subgraph(
+    node: &crate::NodeDefinition,
+    registry: Option<&NodeRegistry>,
+) -> Result<Option<SubgraphDefinition>, PlanError> {
+    let invalid = |message| PlanError::Iteration {
+        definition_id: node.id.clone(),
+        message,
+    };
+    if matches!(
+        node.kind.as_str(),
+        SCOPE_INPUT_KIND | crate::LOOP_ASSIGN_KIND | crate::EXIT_LOOP_KIND
+    ) {
+        return Ok(None);
+    }
+    if let Some(registry) = registry {
+        let registration = registry
+            .get(&node.kind)
+            .ok_or_else(|| invalid(format!("unknown kind {}", node.kind)))?;
+        let declaration = registration
+            .instantiate(node.config.clone())
+            .map_err(|error| invalid(error.to_string()))?;
+        return declaration
+            .subgraph_definition(node)
+            .map_err(|error| invalid(error.to_string()));
+    }
+    if let Some(definition) = node.loop_definition.as_deref() {
+        return Ok(Some(SubgraphDefinition {
+            body: definition.body.clone(),
+            body_pointer: "/loop/body".into(),
+            source_id: crate::LOOP_SOURCE_ID.into(),
+            inputs: mf_runtime::loop_variable_types(&definition.variables).map_err(invalid)?,
+            outputs: Vec::new(),
+            allow_state: true,
+            options: serde_json::json!({
+                "max_iterations": definition.max_iterations,
+                "variables": definition.variables, "until": definition.until,
+            }),
+        }));
+    }
+    if node.kind == ITERATION_KIND {
+        let config = parse_config(node).map_err(invalid)?;
+        return Ok(Some(SubgraphDefinition {
+            body: mf_runtime::LoopBodyDefinition {
+                nodes: config.body.nodes,
+                edges: config.body.edges,
+                control_edges: config.body.control_edges,
+            },
+            body_pointer: "/config/body".into(),
+            source_id: mf_runtime::ITERATION_INPUT_ID.into(),
+            inputs: BTreeMap::from([("items".into(), ValueType::Any)]),
+            outputs: vec![mf_runtime::WorkflowOutputDefinition {
+                name: "result".into(),
+                node: config.body.result.node,
+                port: config.body.result.port,
+                optional: false,
+            }],
+            options: serde_json::Value::Null,
+            allow_state: false,
+        }));
+    }
+    Ok(None)
 }

@@ -21,6 +21,32 @@ struct Config {}
 struct LoopDeclaration;
 
 impl Node for LoopDeclaration {
+    fn subgraph_definition(
+        &self,
+        node: &mf_runtime::NodeDefinition,
+    ) -> Result<Option<mf_runtime::SubgraphDefinition>, NodeBuildError> {
+        let definition =
+            node.loop_definition
+                .as_deref()
+                .ok_or_else(|| NodeBuildError::InvalidSubgraph {
+                    message: "missing Loop definition".into(),
+                })?;
+        let inputs = loop_variable_types(&definition.variables)
+            .map_err(|message| NodeBuildError::InvalidSubgraph { message })?;
+        Ok(Some(mf_runtime::SubgraphDefinition {
+            body: definition.body.clone(),
+            body_pointer: "/loop/body".into(),
+            source_id: mf_runtime::LOOP_SOURCE_ID.into(),
+            inputs,
+            outputs: Vec::new(),
+            allow_state: true,
+            options: serde_json::json!({
+                "max_iterations": definition.max_iterations,
+                "variables": definition.variables, "until": definition.until,
+            }),
+        }))
+    }
+
     fn with_subgraph(
         self: Box<Self>,
         id: &str,

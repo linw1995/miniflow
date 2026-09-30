@@ -28,6 +28,59 @@ struct IterationDeclaration {
 }
 
 impl Node for IterationDeclaration {
+    fn subgraph_definition(
+        &self,
+        node: &mf_runtime::NodeDefinition,
+    ) -> Result<Option<mf_runtime::SubgraphDefinition>, NodeBuildError> {
+        let config: IterationConfig = deserialize_config(node.config.clone())?;
+        for child in &config.body.nodes {
+            if child.id.as_str() == mf_runtime::ITERATION_INPUT_ID
+                || matches!(
+                    child.kind.as_str(),
+                    mf_runtime::ITERATION_KIND | mf_runtime::ITERATION_INPUT_KIND
+                )
+            {
+                return Err(NodeBuildError::InvalidSubgraph {
+                    message: format!(
+                        "body node {} uses a reserved ID or unsupported nested kind",
+                        child.id
+                    ),
+                });
+            }
+            if child.loop_definition.is_some()
+                || matches!(
+                    child.kind.as_str(),
+                    mf_runtime::LOOP_KIND
+                        | mf_runtime::LOOP_ASSIGN_KIND
+                        | mf_runtime::EXIT_LOOP_KIND
+                        | mf_runtime::LOOP_SOURCE_ID
+                )
+            {
+                return Err(NodeBuildError::InvalidSubgraph {
+                    message: format!("body node {} uses an unsupported Loop construct", child.id),
+                });
+            }
+        }
+        Ok(Some(mf_runtime::SubgraphDefinition {
+            body: mf_runtime::LoopBodyDefinition {
+                nodes: config.body.nodes,
+                edges: config.body.edges,
+                control_edges: config.body.control_edges,
+            },
+            body_pointer: "/config/body".into(),
+            source_id: mf_runtime::ITERATION_INPUT_ID.into(),
+            inputs: BTreeMap::from([("items".into(), ValueType::Any)]),
+            outputs: vec![mf_runtime::WorkflowOutputDefinition {
+                name: "result".into(),
+                node: config.body.result.node,
+                port: config.body.result.port,
+                optional: false,
+            }],
+            options: Value::Null,
+            allow_state: false,
+        }))
+    }
+
     fn with_subgraph(
         self: Box<Self>,
         id: &str,

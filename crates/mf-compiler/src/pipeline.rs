@@ -121,7 +121,51 @@ pub fn compile_project(request: &CompileRequest<'_>) -> Result<PathBuf, Pipeline
         &project,
         validate_runtime_identity(&metadata),
     )?;
-    let executable = build_runner(&project)?;
+    let mut executable = build_runner(&project)?;
+    let preparation_path = project.join("workflow-preparation.json");
+    match fs::remove_file(&preparation_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(failure("runner preparation", &project, error.to_string())),
+    }
+    let prepared = at(
+        "runner validation",
+        &project,
+        Command::new(&executable)
+            .arg("--prepare")
+            .arg(&preparation_path)
+            .current_dir(&project)
+            .stdin(Stdio::null())
+            .output(),
+    )?;
+    if !prepared.status.success() {
+        eprint!("{}", String::from_utf8_lossy(&prepared.stderr));
+        return Err(failure(
+            "runner validation",
+            &project,
+            format!("preparation exited with {}", prepared.status),
+        ));
+    }
+    let artifacts = at(
+        "runner preparation",
+        &project,
+        fs::read(&preparation_path).and_then(|bytes| {
+            serde_json::from_slice::<crate::GeneratedWorkflowArtifacts>(&bytes)
+                .map_err(io::Error::other)
+        }),
+    )?;
+    let changed = at(
+        "prepared project",
+        &project,
+        crate::dependency_project::persist_prepared_artifacts(
+            &project,
+            plan.to_json().expect("input plan serializes"),
+            artifacts,
+        ),
+    )?;
+    if changed {
+        executable = build_runner(&project)?;
+    }
     validate_runner(&project, &executable)?;
     if !request.locked {
         let lock = at("lock read", &project, fs::read(project.join("Cargo.lock")))?;

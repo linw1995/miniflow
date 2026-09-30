@@ -1,11 +1,11 @@
-use crate::iteration::{body_definition, normalize_config, parse_config};
+use crate::iteration::normalize_config;
 use crate::{
     CompiledWorkflow, ExecutionDependency, Flow, FlowBuildError, FlowNode, NodeBuildError,
     NodeRegistry, ValueType,
 };
 use crate::{DefinitionId, WorkflowDefinition};
 use mf_runtime::{
-    ITERATION_INPUT_KIND, ITERATION_KIND, PreparedSubgraph, iteration_input_flow_node,
+    ITERATION_INPUT_KIND, ITERATION_KIND, PreparedSubgraph, SCOPE_INPUT_KIND, SubgraphDefinition,
 };
 use mf_runtime::{OutputDerivation, TypeCompatibility, TypeMismatch};
 use mf_telemetry::{
@@ -335,20 +335,31 @@ fn prepare_definition(
     registry: &NodeRegistry,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    prepare_graph(definition, registry, None, false)
+    let graph = prepare_graph(definition, registry, None, 0)?;
+    Ok((graph.nodes, graph.order))
+}
+
+struct PreparedGraph {
+    nodes: Vec<FlowNode>,
+    order: Vec<DefinitionId>,
+    definition: WorkflowDefinition,
 }
 
 fn prepare_graph(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
-    enclosing: Option<&BTreeMap<String, ValueType>>,
-    allow_iteration_input: bool,
-) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
-    if allow_iteration_input {
-        crate::loops::validate_structure(definition)?;
+    scope: Option<&SubgraphDefinition>,
+    depth: usize,
+) -> Result<PreparedGraph, WorkflowCompileError> {
+    if depth > crate::MAX_LOOP_DEPTH {
+        return InvalidIterationSnafu {
+            definition_id: definition.nodes[0].id.clone(),
+            message: "subgraph nesting depth exceeds four",
+        }
+        .fail();
     }
     let order = structural_order_graph(definition)?;
-    let mut nodes = resolve_nodes_in_scope(definition, registry, enclosing, allow_iteration_input)?;
+    let (mut nodes, definitions) = resolve_nodes_in_scope(definition, registry, scope, depth)?;
     validate_base_metadata(definition, &nodes, &order)?;
 
     let indices: BTreeMap<_, _> = nodes
@@ -370,7 +381,14 @@ fn prepare_graph(
             .collect();
         inference.resolve_node(&mut nodes[indices[id]], &dependencies)?;
     }
-    Ok((nodes, order))
+    let mut canonical = definition.clone();
+    canonical.nodes = definitions;
+    let canonical = normalize_plan(&canonical, order.clone())?.definition;
+    Ok(PreparedGraph {
+        nodes,
+        order,
+        definition: canonical,
+    })
 }
 
 fn validate_base_metadata(
@@ -726,17 +744,20 @@ pub fn compile_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
-    let (nodes, execution_order) = prepare_definition(definition, registry)?;
+    crate::loops::validate_structure(definition)?;
+    let graph = prepare_graph(definition, registry, None, 0)?;
     Flow::new(
-        nodes,
-        definition.edges.clone(),
-        execution_order.clone(),
-        definition.outputs.clone(),
+        graph.nodes,
+        graph.definition.edges.clone(),
+        graph.order.clone(),
+        graph.definition.outputs.clone(),
     )
-    .and_then(|flow| flow.with_control_edges(definition.control_edges.clone()))
+    .and_then(|flow| flow.with_control_edges(graph.definition.control_edges.clone()))
     .context(FlowConstructionSnafu)?;
-
-    normalize_plan(definition, execution_order)
+    Ok(CompiledWorkflow {
+        definition: graph.definition,
+        execution_order: graph.order,
+    })
 }
 
 /// Plans graph structure without loading plugins. Validate the generated runner before installation.
@@ -1021,7 +1042,7 @@ pub fn resolve_nodes(
     registry: &NodeRegistry,
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    resolve_nodes_in_scope(definition, registry, None, false)
+    resolve_nodes_in_scope(definition, registry, None, 0).map(|(nodes, _)| nodes)
 }
 
 fn instantiate_registered(
@@ -1048,31 +1069,44 @@ fn instantiate_registered(
 fn bind_subgraph_node(
     node: &crate::NodeDefinition,
     registry: &NodeRegistry,
-    body: &WorkflowDefinition,
-    enclosing: Option<&BTreeMap<String, ValueType>>,
-    allow_iteration_input: bool,
-    options: Value,
-) -> Result<FlowNode, WorkflowCompileError> {
-    let (registration, declaration) = instantiate_registered(node, registry)?;
-    let (nodes, order) =
-        prepare_graph(body, registry, enclosing, allow_iteration_input).map_err(|error| {
-            if node.kind == crate::LOOP_KIND {
-                WorkflowCompileError::InvalidLoop {
-                    path: format!("{:?}", node.id),
-                    message: error.to_string(),
-                }
-            } else {
-                WorkflowCompileError::InvalidIteration {
-                    definition_id: node.id.clone(),
-                    message: error.to_string(),
-                }
+    declaration: Box<dyn crate::Node>,
+    registration: &'static crate::NodeRegistration,
+    definition: &WorkflowDefinition,
+    request: SubgraphDefinition,
+    depth: usize,
+) -> Result<(FlowNode, crate::NodeDefinition), WorkflowCompileError> {
+    if request
+        .body
+        .nodes
+        .iter()
+        .any(|child| child.id == request.source_id)
+    {
+        return InvalidIterationSnafu {
+            definition_id: node.id.clone(),
+            message: "body redefines its reserved source",
+        }
+        .fail();
+    }
+    let body = request.workflow(definition);
+    let graph = prepare_graph(&body, registry, Some(&request), depth + 1).map_err(|error| {
+        if node.kind == crate::LOOP_KIND {
+            WorkflowCompileError::InvalidLoop {
+                path: format!("{:?}", node.id),
+                message: error.to_string(),
             }
-        })?;
+        } else {
+            WorkflowCompileError::InvalidIteration {
+                definition_id: node.id.clone(),
+                message: error.to_string(),
+            }
+        }
+    })?;
     let outputs = body
         .outputs
         .iter()
         .map(|output| {
-            let port = nodes
+            let port = graph
+                .nodes
                 .iter()
                 .find(|node| node.definition_id == output.node)
                 .and_then(|node| {
@@ -1085,113 +1119,143 @@ fn bind_subgraph_node(
             crate::PortSpec::owned(&output.name, port.value_type.clone(), !output.optional)
         })
         .collect();
-    let identities = body
+    let identities = graph
+        .definition
         .nodes
         .iter()
-        .filter(|node| node.kind != ITERATION_INPUT_KIND && node.kind != crate::LOOP_SOURCE_ID)
+        .filter(|node| node.kind != SCOPE_INPUT_KIND)
         .map(|node| NodeIdentity {
             id: node.id.to_string(),
             kind: node.kind.clone(),
             path: Vec::new(),
         })
         .collect();
-    let flow = Flow::new(nodes, body.edges.clone(), order, body.outputs.clone())
-        .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
-        .context(FlowConstructionSnafu)?;
+    let mut canonical = serde_json::to_value(node).expect("node definitions serialize");
+    let target = canonical
+        .pointer_mut(&request.body_pointer)
+        .filter(|value| value.is_object())
+        .ok_or_else(|| WorkflowCompileError::InvalidIteration {
+            definition_id: node.id.clone(),
+            message: "body pointer is unavailable".into(),
+        })?;
+    target["nodes"] = serde_json::to_value(
+        graph
+            .definition
+            .nodes
+            .iter()
+            .filter(|node| node.kind != SCOPE_INPUT_KIND)
+            .collect::<Vec<_>>(),
+    )
+    .expect("body nodes serialize");
+    target["edges"] = serde_json::to_value(&graph.definition.edges).expect("edges serialize");
+    target["control_edges"] =
+        serde_json::to_value(&graph.definition.control_edges).expect("control edges serialize");
+    let canonical = serde_json::from_value(canonical).expect("canonical node definition");
+    let flow = Flow::new(
+        graph.nodes,
+        graph.definition.edges,
+        graph.order,
+        graph.definition.outputs,
+    )
+    .and_then(|flow| flow.with_control_edges(graph.definition.control_edges))
+    .context(FlowConstructionSnafu)?;
     let body = PreparedSubgraph::new(identities, outputs, move |state| {
         flow.execute_in_context(state)
     });
     let instance = declaration
-        .with_subgraph(node.id.as_str(), options, body)
+        .with_subgraph(node.id.as_str(), request.options, body)
         .context(NodeConstructionSnafu {
             definition_id: node.id.clone(),
             kind: node.kind.clone(),
         })?;
     let ports = registration.effective_ports(instance.as_ref());
-    Ok(FlowNode::new(node.id.clone(), instance, ports))
+    Ok((FlowNode::new(node.id.clone(), instance, ports), canonical))
 }
 
 fn resolve_nodes_in_scope(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
-    enclosing: Option<&BTreeMap<String, ValueType>>,
-    allow_iteration_input: bool,
-) -> Result<Vec<FlowNode>, WorkflowCompileError> {
+    scope: Option<&SubgraphDefinition>,
+    depth: usize,
+) -> Result<(Vec<FlowNode>, Vec<crate::NodeDefinition>), WorkflowCompileError> {
     definition
         .nodes
         .iter()
         .map(|node| {
-            match node.kind.as_str() {
-                crate::LOOP_KIND => {
-                    let loop_definition = node.loop_definition.as_deref().expect("validated Loop");
-                    let types = mf_runtime::loop_variable_types(&loop_definition.variables)
-                        .expect("validated Loop variables");
-                    let body = crate::loops::body_definition(
-                        &loop_definition.body,
-                        &definition.dependencies,
-                    );
-                    let options = serde_json::json!({
-                        "max_iterations": loop_definition.max_iterations,
-                        "variables": loop_definition.variables,
-                        "until": loop_definition.until,
-                    });
-                    return bind_subgraph_node(node, registry, &body, Some(&types), false, options);
-                }
-                crate::LOOP_ASSIGN_KIND => {
-                    let target = crate::loops::assignment_target(&node.config)
-                        .expect("validated assignment");
-                    let value_type = enclosing.expect("assignment has a Loop")[&target].clone();
-                    return Ok(mf_runtime::prepared_loop_assign(
+            let intrinsic = match node.kind.as_str() {
+                SCOPE_INPUT_KIND => {
+                    let scope = scope
+                        .filter(|scope| scope.source_id == node.id)
+                        .ok_or_else(|| WorkflowCompileError::InvalidIteration {
+                            definition_id: node.id.clone(),
+                            message: "scope source is reserved for declared bodies".into(),
+                        })?;
+                    Some(mf_runtime::prepared_scope_source(
                         node.id.as_str(),
-                        &target,
-                        value_type,
-                    ));
+                        &scope.inputs,
+                    ))
                 }
-                crate::EXIT_LOOP_KIND => {
-                    return Ok(mf_runtime::prepared_loop_exit(node.id.as_str()));
-                }
-                crate::LOOP_SOURCE_ID => {
-                    return Ok(mf_runtime::prepared_loop_source_types(
-                        enclosing.expect("Loop source has variables"),
-                    ));
-                }
-                _ => {}
-            }
-            if node.kind == ITERATION_INPUT_KIND {
-                if allow_iteration_input && node.id.as_str() == mf_runtime::ITERATION_INPUT_ID {
-                    return Ok(iteration_input_flow_node());
-                }
-                return InvalidIterationSnafu {
-                    definition_id: node.id.clone(),
-                    message: "internal iteration input is reserved for iteration bodies".to_owned(),
-                }
-                .fail();
-            }
-            if node.kind == ITERATION_KIND {
-                if allow_iteration_input {
-                    return InvalidIterationSnafu {
-                        definition_id: node.id.clone(),
-                        message: "nested iterations are not supported".to_owned(),
+                crate::LOOP_ASSIGN_KIND | crate::EXIT_LOOP_KIND => {
+                    let scope = scope.filter(|scope| scope.allow_state).ok_or_else(|| {
+                        WorkflowCompileError::InvalidIteration {
+                            definition_id: node.id.clone(),
+                            message: "state control requires a declared stateful body".into(),
+                        }
+                    })?;
+                    if node.kind == crate::EXIT_LOOP_KIND {
+                        Some(mf_runtime::prepared_loop_exit(node.id.as_str()))
+                    } else {
+                        let target =
+                            crate::loops::assignment_target(&node.config).map_err(|message| {
+                                WorkflowCompileError::InvalidIteration {
+                                    definition_id: node.id.clone(),
+                                    message,
+                                }
+                            })?;
+                        let value_type = scope
+                            .inputs
+                            .get(&target)
+                            .ok_or_else(|| WorkflowCompileError::InvalidIteration {
+                                definition_id: node.id.clone(),
+                                message: format!("unknown variable {target}"),
+                            })?
+                            .clone();
+                        Some(mf_runtime::prepared_loop_assign(
+                            node.id.as_str(),
+                            &target,
+                            value_type,
+                        ))
                     }
-                    .fail();
                 }
-                let config = parse_config(node).map_err(|message| {
-                    WorkflowCompileError::InvalidIteration {
-                        definition_id: node.id.clone(),
-                        message,
-                    }
-                })?;
-                let body = body_definition(definition, &config).map_err(|message| {
-                    WorkflowCompileError::InvalidIteration {
-                        definition_id: node.id.clone(),
-                        message,
-                    }
-                })?;
-                return bind_subgraph_node(node, registry, &body, None, true, Value::Null);
+                _ => None,
+            };
+            if let Some(intrinsic) = intrinsic {
+                return Ok((intrinsic, node.clone()));
             }
             let (registration, instance) = instantiate_registered(node, registry)?;
+            let request = instance
+                .subgraph_definition(node)
+                .context(NodeConstructionSnafu {
+                    definition_id: node.id.clone(),
+                    kind: node.kind.clone(),
+                })?;
+            if let Some(request) = request {
+                return bind_subgraph_node(
+                    node,
+                    registry,
+                    instance,
+                    registration,
+                    definition,
+                    request,
+                    depth,
+                );
+            }
             let ports = registration.effective_ports(instance.as_ref());
-            Ok(FlowNode::new(node.id.clone(), instance, ports))
+            Ok((
+                FlowNode::new(node.id.clone(), instance, ports),
+                node.clone(),
+            ))
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
+        .map(|nodes| nodes.into_iter().unzip())
 }

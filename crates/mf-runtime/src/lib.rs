@@ -29,6 +29,7 @@ pub use iteration::{
 pub use loop_node::{
     loop_variable_types, prepared_loop_assign, prepared_loop_assign_from_json, prepared_loop_exit,
     prepared_loop_source_from_json, prepared_loop_source_types, prepared_scope_source,
+    prepared_scope_source_from_json,
 };
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
@@ -40,4 +41,4 @@ pub use node::{
 pub use number::compare_json_numbers;
 pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::{WorkflowRunError, instantiate_node_with_metadata};
-pub use subgraph::PreparedSubgraph;
+pub use subgraph::{PreparedSubgraph, SCOPE_INPUT_KIND, SubgraphDefinition};

@@ -48,6 +48,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         stdout.flush()?;
         return Ok(());
     }
+    if args.len() == 2 && args[0] == "--prepare" {
+        let registry = mf_runtime::NodeRegistry::from_inventory()?;
+        let input = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
+        let plan = mf_compiler::compile_definition(&input.definition, &registry)?;
+        let artifacts = plan.generate_artifacts_with_registry(&registry)?;
+        mf_compiler::atomic_write(std::path::Path::new(&args[1]), &serde_json::to_vec(&artifacts)?)?;
+        return Ok(());
+    }
     if args.len() == 1 && args[0] == "--validate" {
         let registry = mf_runtime::NodeRegistry::from_inventory()?;
         let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
@@ -137,7 +145,15 @@ pub fn write_dependency_project(
     plan: &CompiledWorkflow,
     support: &SupportPackages,
 ) -> Result<(), DependencyProjectError> {
-    let artifacts = plan.generate_artifacts().context(PlanSnafu)?;
+    let input_plan = plan.to_json().context(PlanSnafu)?;
+    let prepared = fs::read(project.join("workflow-prepared.json"))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<PreparedArtifacts>(&bytes).ok())
+        .filter(|prepared| prepared.input_plan == input_plan);
+    let artifacts = match prepared {
+        Some(prepared) => prepared.artifacts,
+        None => plan.generate_artifacts().context(PlanSnafu)?,
+    };
     let definition = &plan.definition;
     let mut manifest = String::from(
         "[package]\nname = \"mf-generated-workflow\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[dependencies]\nserde_json = \"1.0.151\"\n",
@@ -216,4 +232,33 @@ pub fn write_dependency_project(
             .context(StateSnafu)?;
     }
     Ok(())
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PreparedArtifacts {
+    input_plan: String,
+    artifacts: crate::GeneratedWorkflowArtifacts,
+}
+
+pub fn persist_prepared_artifacts(
+    project: &Path,
+    input_plan: String,
+    artifacts: crate::GeneratedWorkflowArtifacts,
+) -> Result<bool, crate::StateError> {
+    let source = project.join("src/workflow.rs");
+    let changed = fs::read(&source)
+        .map(|bytes| bytes != artifacts.rust_source.as_bytes())
+        .unwrap_or(true);
+    crate::state::write_if_changed(&source, artifacts.rust_source.as_bytes())?;
+    crate::state::write_if_changed(
+        &project.join("workflow-plan.json"),
+        artifacts.plan_json.as_bytes(),
+    )?;
+    let prepared = PreparedArtifacts {
+        input_plan,
+        artifacts,
+    };
+    let bytes = serde_json::to_vec(&prepared).expect("prepared artifacts serialize");
+    crate::state::write_if_changed(&project.join("workflow-prepared.json"), &bytes)?;
+    Ok(changed)
 }

@@ -40,7 +40,10 @@ impl NodeRegistry {
         for registration in registrations {
             if matches!(
                 registration.kind,
-                crate::LOOP_ASSIGN_KIND | crate::EXIT_LOOP_KIND | crate::LOOP_SOURCE_ID
+                crate::LOOP_ASSIGN_KIND
+                    | crate::EXIT_LOOP_KIND
+                    | crate::LOOP_SOURCE_ID
+                    | crate::SCOPE_INPUT_KIND
             ) {
                 return Err(NodeRegistryError::ReservedKind {
                     kind: registration.kind.to_owned(),
