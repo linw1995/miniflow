@@ -7,7 +7,6 @@ mod node;
 mod number;
 mod registry;
 mod runner;
-mod snapshot;
 mod subgraph;
 mod value;
 
@@ -45,8 +44,3 @@ pub use runner::{WorkflowRunError, instantiate_node_with_metadata};
 pub use subgraph::PreparedSubgraph;
 
 pub use value::{PortValues, SharedArray, SharedObject, ValueKind, ValueRef};
-
-pub use snapshot::{
-    NodeSnapshot, SNAPSHOT_FILE_ENV, SNAPSHOT_VERSION, Snapshot, SnapshotEntry, SnapshotOutcome,
-    SnapshotRecord, SnapshotRecorder, SnapshotStore, ValueDefinition, ValueId,
-};
