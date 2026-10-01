@@ -176,7 +176,7 @@ pub enum WorkflowCompileError {
 #[derive(Clone)]
 struct TypeFact {
     value_type: ValueType,
-    exact: Option<std::sync::Arc<Value>>,
+    exact: Option<mf_runtime::ValueRef>,
 }
 
 #[derive(Default)]
@@ -226,7 +226,7 @@ impl TypeInferenceState {
             if let Some(value) = &source.exact {
                 input
                     .value_type
-                    .validate_value(value)
+                    .validate_shared(value)
                     .map_err(
                         |source_error| WorkflowCompileError::KnownValueTypeConflict {
                             from_node: source_id.clone(),
@@ -272,8 +272,8 @@ impl TypeInferenceState {
             let declared = output.value_type.clone();
             let mut fact = match derivations.get(output.name.as_ref()) {
                 Some(OutputDerivation::Literal { value, .. }) => TypeFact {
-                    value_type: ValueType::infer_json(value),
-                    exact: Some(std::sync::Arc::new(value.clone())),
+                    value_type: ValueType::infer_shared(value),
+                    exact: Some(value.clone()),
                 },
                 Some(OutputDerivation::ForwardInput { input, .. }) => inputs
                     .get(input.as_str())
@@ -295,7 +295,7 @@ impl TypeInferenceState {
                 },
             };
             if let Some(value) = &fact.exact {
-                declared.validate_value(value).map_err(|error| {
+                declared.validate_shared(value).map_err(|error| {
                     WorkflowCompileError::InvalidNodeMetadata {
                         definition_id: id.clone(),
                         message: format!("output `{}` known value: {error}", output.name),
@@ -1032,7 +1032,6 @@ pub fn execute_compiled(
                 }
             })
             .context(PreparationSnafu)?;
-        state.enable_output_reclamation();
         flow.execute_in_context(state).context(ExecutionSnafu)
     })
 }
