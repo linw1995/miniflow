@@ -65,5 +65,4 @@ inventory::submit! {
 }
 
 mod context_fixture;
-mod subgraph_fixture;
 mod typed_fixture;

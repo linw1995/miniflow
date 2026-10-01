@@ -84,28 +84,6 @@ pub fn prepared_scope_source(id: &str, types: &BTreeMap<String, ValueType>) -> F
     FlowNode::new(id, Box::new(ScopeSourceNode), ports)
 }
 
-pub fn prepared_scope_source_from_json(
-    id: &str,
-    types: &str,
-) -> Result<FlowNode, WorkflowRunError> {
-    let descriptors: BTreeMap<String, Value> =
-        serde_json::from_str(types).map_err(|source| WorkflowRunError::InvalidEmbeddedConfig {
-            definition_id: id.into(),
-            source,
-        })?;
-    let types = descriptors
-        .into_iter()
-        .map(|(name, value)| {
-            ValueType::parse_descriptor(&value).map(|value_type| (name, value_type))
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()
-        .map_err(|message| WorkflowRunError::Context {
-            definition_id: id.into(),
-            message,
-        })?;
-    Ok(prepared_scope_source(id, &types))
-}
-
 struct LoopAssignNode {
     variable: String,
 }

@@ -69,22 +69,6 @@ impl fmt::Display for TypeDepthError {
 impl Error for TypeDepthError {}
 
 impl ValueType {
-    pub fn descriptor(&self) -> Value {
-        match self {
-            Self::Any => Value::from("any"),
-            Self::Null => Value::from("null"),
-            Self::Boolean => Value::from("bool"),
-            Self::Number => Value::from("number"),
-            Self::Int64 => Value::from("int"),
-            Self::Float64 => Value::from("double"),
-            Self::String => Value::from("string"),
-            Self::Array => Value::from("array"),
-            Self::Object => Value::from("object"),
-            Self::List(inner) => serde_json::json!({"list": inner.descriptor()}),
-            Self::Map(inner) => serde_json::json!({"map": inner.descriptor()}),
-        }
-    }
-
     pub const MAX_DEPTH: usize = 16;
 
     pub fn parse_descriptor(value: &Value) -> Result<Self, String> {
@@ -492,13 +476,6 @@ where
 
 pub trait Node: Send + Sync {
     fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError>;
-
-    fn subgraph_definition(
-        &self,
-        _definition: &crate::NodeDefinition,
-    ) -> Result<Option<crate::SubgraphDefinition>, NodeBuildError> {
-        Ok(None)
-    }
 
     fn with_subgraph(
         self: Box<Self>,

@@ -38,7 +38,7 @@ fn plugin(root: &Path) -> PathBuf {
     let plugin = root.join("plugin");
     fs::create_dir_all(plugin.join("src")).unwrap();
     let fixture = crates_dir().join("mf-compiler/tests/fixtures/multi-nodes/src");
-    for name in ["lib.rs", "context_fixture.rs", "subgraph_fixture.rs"] {
+    for name in ["lib.rs", "context_fixture.rs"] {
         fs::copy(fixture.join(name), plugin.join("src").join(name)).unwrap();
     }
     let lib = plugin.join("src/lib.rs");
@@ -67,7 +67,6 @@ double = []
 [dependencies]
 mf-runtime = {{ path = {runtime}, version = "0.1.0" }}
 inventory = "0.3.24"
-serde = {{ version = "1.0.229", features = ["derive"] }}
 serde_json = "1.0.151"
 "#
         ),
