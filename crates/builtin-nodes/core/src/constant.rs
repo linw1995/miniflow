@@ -21,6 +21,10 @@ struct ConstantNode {
 }
 
 impl Node for ConstantNode {
+    fn context_references_complete(&self) -> bool {
+        true
+    }
+
     fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
         Ok(Outputs::from([("value".to_owned(), self.value.clone())]))
     }

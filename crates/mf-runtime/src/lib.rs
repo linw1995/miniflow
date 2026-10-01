@@ -11,7 +11,7 @@ mod subgraph;
 
 pub use context::{
     ContextValue, ExecutionContext, ExecutionDependency, ExecutionScope, NodeResult,
-    execute_node_in_context, select_context_output,
+    OutputRetentionPlan, execute_node_in_context, select_context_output,
 };
 pub use definition::{
     ControlEdgeDefinition, DefinitionId, DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition,

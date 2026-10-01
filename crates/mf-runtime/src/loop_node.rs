@@ -37,6 +37,10 @@ pub fn loop_variable_types(
 struct ScopeSourceNode;
 
 impl Node for ScopeSourceNode {
+    fn context_references_complete(&self) -> bool {
+        true
+    }
+
     fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
         Err(structural_error(
             "scope source requires an execution context",
@@ -89,6 +93,10 @@ struct LoopAssignNode {
 }
 
 impl Node for LoopAssignNode {
+    fn context_references_complete(&self) -> bool {
+        true
+    }
+
     fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
         Err(structural_error("Loop assignment requires a Loop frame"))
     }
@@ -142,6 +150,10 @@ pub fn prepared_loop_assign_from_json(
 struct ExitLoopNode;
 
 impl Node for ExitLoopNode {
+    fn context_references_complete(&self) -> bool {
+        true
+    }
+
     fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
         Err(structural_error("Loop exit requires a Loop frame"))
     }

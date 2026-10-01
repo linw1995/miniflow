@@ -13,6 +13,10 @@ pub fn kind() -> &'static str {
 struct IdentityNode;
 
 impl Node for IdentityNode {
+    fn context_references_complete(&self) -> bool {
+        true
+    }
+
     fn execute(&self, mut inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
         let Some(value) = inputs.remove("input") else {
             return Err(NodeExecutionError::ExecutionFailed {

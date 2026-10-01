@@ -120,6 +120,7 @@ impl IterationNode {
         let _context = step.as_ref().map(ItemObservation::enter);
         let body_observation = step.as_ref().map(ItemObservation::body_observation);
         let mut state = ExecutionContext::for_body(body_observation);
+        state.enable_output_reclamation();
         let result = ExecutionScope::new(
             &self.id,
             mf_runtime::ITERATION_INPUT_ID,
@@ -231,6 +232,10 @@ impl IterationNode {
 }
 
 impl Node for IterationNode {
+    fn context_references_complete(&self) -> bool {
+        true
+    }
+
     fn ports(&self) -> Option<NodePorts> {
         Some(IterationNode::ports(self))
     }

@@ -515,6 +515,12 @@ pub trait Node: Send + Sync {
     fn context_references(&self) -> Vec<ContextReference> {
         Vec::new()
     }
+
+    /// Opts into reclaiming outputs after their last declared consumer.
+    /// The default preserves arbitrary historical context reads by existing plugins.
+    fn context_references_complete(&self) -> bool {
+        false
+    }
 }
 
 pub type NodeFactory = fn(Value) -> Result<Box<dyn Node>, NodeBuildError>;

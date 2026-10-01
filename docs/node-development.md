@@ -76,6 +76,13 @@ Override `Node::execute_with_context` to read declared outputs through `ctx.outp
 declarations support compile-time dependency checks; the context does not enforce a runtime read whitelist. The runtime
 publishes results only after successful execution and starts with fresh context for each run.
 
+Nodes may override `context_references_complete()` to return `true` when every context output read is declared.
+This includes nodes that never read context outputs. Prepared executors can then reclaim intermediate outputs after
+their last data, control, or declared context consumer. Selected workflow outputs remain available until collection.
+The default is `false`, preserving all historical outputs through the invocation of existing third-party nodes.
+Low-level contexts retain outputs unless their owner calls `enable_output_reclamation()`; ordinary workflow runners
+enable it automatically. Loop variables retain their current source values throughout each pass.
+
 The executor calls `Node::execute_with_context_mut`, whose default implementation delegates to the read-only `execute_with_context` method. Loop assignment and exit use engine-owned operations behind this adapter; plugins cannot write Loop variables or publish outputs directly. A Loop body has its own output scope for every pass. A context reference inside that body resolves only within its scope, including the synthetic `%loop` outputs, and still requires an explicit ancestor dependency.
 
 Keep output names local in node results. Runtime publication qualifies them with the instance ID. Explicit skipped names must be declared non-required outputs and cannot also be produced. A scheduler-skipped node propagates skipping through every output, including required ones. Context references alone never activate or skip a node.

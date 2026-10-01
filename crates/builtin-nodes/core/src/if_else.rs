@@ -142,6 +142,10 @@ struct IfElse {
     branches: Vec<Branch>,
 }
 impl Node for IfElse {
+    fn context_references_complete(&self) -> bool {
+        true
+    }
+
     fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
         Err(execution_error(
             "if-else requires a workflow execution context",

@@ -117,6 +117,10 @@ struct LoopNode {
 }
 
 impl Node for LoopNode {
+    fn context_references_complete(&self) -> bool {
+        true
+    }
+
     fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
         Err(structural_error(
             "Loop requires a workflow execution context",

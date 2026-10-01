@@ -99,6 +99,7 @@ fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
             };
             mf_runtime::ExecutionContext::run(observation, |state| -> Result<_, Box<dyn std::error::Error>> {
                 let registry = mf_runtime::NodeRegistry::from_inventory()?;
+                state.enable_output_reclamation();
                 Ok(workflow::run_workflow_in_context(&registry, state)?)
             })
         })(),

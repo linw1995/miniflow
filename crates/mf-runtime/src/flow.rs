@@ -186,6 +186,7 @@ pub struct Flow {
     execution_order: Vec<NodeId>,
     outputs: Vec<FlowOutput>,
     controls: Vec<crate::ControlEdgeDefinition>,
+    retention: crate::OutputRetentionPlan,
 }
 
 impl Flow {
@@ -304,14 +305,17 @@ impl Flow {
             ));
         }
 
-        Ok(Self {
+        let mut flow = Self {
             nodes,
             connections: resolved_connections,
             incoming_connections,
             execution_order: resolved_order,
             outputs: resolved_outputs,
             controls: Vec::new(),
-        })
+            retention: crate::OutputRetentionPlan::default(),
+        };
+        flow.prepare_retention();
+        Ok(flow)
     }
 
     pub fn with_control_edges(
@@ -343,7 +347,51 @@ impl Flow {
             }
         }
         self.controls = controls;
+        self.prepare_retention();
         Ok(self)
+    }
+
+    fn prepare_retention(&mut self) {
+        let positions: BTreeMap<_, _> = self
+            .execution_order
+            .iter()
+            .enumerate()
+            .map(|(position, id)| (self.nodes[id.index()].definition_id.as_str(), position))
+            .collect();
+        let mut incoming = vec![Vec::new(); self.nodes.len()];
+        for edge in &self.connections {
+            let source = &self.nodes[edge.from_node.index()];
+            let target = &self.nodes[edge.to_node.index()];
+            incoming[positions[target.definition_id.as_str()]].push(crate::ExecutionDependency {
+                input: Some(&edge.to_input),
+                source_node: source.definition_id.as_str(),
+                source_output: &edge.from_output,
+            });
+        }
+        for edge in &self.controls {
+            incoming[positions[edge.to_node.as_str()]].push(crate::ExecutionDependency {
+                input: None,
+                source_node: edge.from_node.as_str(),
+                source_output: &edge.from_output,
+            });
+        }
+        let steps: Vec<_> = self
+            .execution_order
+            .iter()
+            .enumerate()
+            .map(|(position, id)| (&self.nodes[id.index()], incoming[position].as_slice()))
+            .collect();
+        let selected: Vec<_> = self
+            .outputs
+            .iter()
+            .map(|output| {
+                crate::output_id(
+                    self.nodes[output.node_id.index()].definition_id.as_str(),
+                    &output.port,
+                )
+            })
+            .collect();
+        self.retention = crate::OutputRetentionPlan::new(&steps, &selected);
     }
 
     pub fn node(&self, id: &NodeId) -> Option<&dyn Node> {
@@ -376,7 +424,10 @@ impl Flow {
         &self,
         observation: Option<crate::RunObservation>,
     ) -> Result<FlowOutputs, crate::WorkflowRunError> {
-        crate::ExecutionContext::run(observation, |state| self.execute_in_context(state))
+        crate::ExecutionContext::run(observation, |state| {
+            state.enable_output_reclamation();
+            self.execute_in_context(state)
+        })
     }
 
     /// Executes already constructed nodes inside a caller-owned run scope.
@@ -384,7 +435,7 @@ impl Flow {
         &self,
         state: &mut crate::ExecutionContext,
     ) -> Result<FlowOutputs, crate::WorkflowRunError> {
-        for node_id in &self.execution_order {
+        for (position, node_id) in self.execution_order.iter().enumerate() {
             let node = &self.nodes[node_id.index()];
             let mut dependencies = Vec::new();
             if let Some(incoming) = self.incoming_connections.get(node_id) {
@@ -411,6 +462,7 @@ impl Flow {
                 });
             }
             crate::execute_node_in_context(node, &dependencies, state)?;
+            state.release_outputs(self.retention.after_step(position));
             if state.scope_exit_requested() {
                 break;
             }
