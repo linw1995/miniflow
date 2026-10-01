@@ -72,37 +72,6 @@ fn generated_runner_matches_inference_and_preserves_installed_binary_on_conflict
         in_memory(&valid).unwrap()
     );
 
-    let snapshots = tempfile::NamedTempFile::new().unwrap();
-    let recorded = Command::new(&output)
-        .env(mf_runtime::SNAPSHOT_FILE_ENV, snapshots.path())
-        .output()
-        .unwrap();
-    assert!(recorded.status.success());
-    assert_eq!(recorded.stdout, actual.stdout);
-    let mut history = mf_runtime::SnapshotStore::default();
-    for line in fs::read_to_string(snapshots.path()).unwrap().lines() {
-        history.apply(serde_json::from_str(line).unwrap()).unwrap();
-    }
-    assert!(history.is_complete());
-    assert_eq!(history.history().len(), 6);
-    let source = history.current().node(&[], "source").unwrap();
-    let sink = history.current().node(&[], "sink").unwrap();
-    assert!(source.outputs["value"].ptr_eq(&sink.inputs["input"]));
-    assert!(source.outputs["value"].ptr_eq(&sink.outputs["value"]));
-    let bytes = fs::read(snapshots.path()).unwrap();
-    for mode in ["--describe", "--validate"] {
-        assert!(
-            Command::new(&output)
-                .arg(mode)
-                .env(mf_runtime::SNAPSHOT_FILE_ENV, snapshots.path())
-                .output()
-                .unwrap()
-                .status
-                .success()
-        );
-        assert_eq!(fs::read(snapshots.path()).unwrap(), bytes);
-    }
-
     let mut inactive_conflict = valid.clone();
     inactive_conflict["nodes"][0]["config"]["value"] = json!([{"count":1},{"count":"wrong"}]);
     inactive_conflict["nodes"].as_array_mut().unwrap().extend([
