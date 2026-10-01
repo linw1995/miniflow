@@ -6,7 +6,7 @@ use mf_runtime::{
     Inputs, Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, Outputs,
     PortSpec, ValueType, deserialize_config,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, error::Error, fmt};
 use value::{Budget, MAX_JSON_BYTES, cel_to_json, json_to_cel};
@@ -128,6 +128,29 @@ fn uses_explicit_dyn(expression: &SpannedExpr) -> bool {
     }
 }
 
+fn json_size(value: &(impl Serialize + ?Sized)) -> Result<usize, serde_json::Error> {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > MAX_JSON_BYTES.saturating_sub(self.0) {
+                self.0 = MAX_JSON_BYTES + 1;
+                return Err(std::io::Error::other("JSON byte limit"));
+            }
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    let result = serde_json::to_writer(&mut counter, value);
+    if counter.0 <= MAX_JSON_BYTES {
+        result?;
+    }
+    Ok(counter.0)
+}
+
 struct CodeNode {
     ports: NodePorts,
     programs: BTreeMap<String, Program>,
@@ -135,9 +158,8 @@ struct CodeNode {
 
 impl Node for CodeNode {
     fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        let input_size = serde_json::to_vec(&inputs)
-            .map_err(|error| execution_error(format!("could not measure inputs: {error}")))?
-            .len();
+        let input_size = json_size(&inputs)
+            .map_err(|error| execution_error(format!("could not measure inputs: {error}")))?;
         if input_size > MAX_JSON_BYTES {
             return Err(execution_error(format!(
                 "inputs exceed the {MAX_JSON_BYTES}-byte JSON limit"
@@ -169,12 +191,11 @@ impl Node for CodeNode {
             }
             let converted = cel_to_json(&result, &port.value_type, &mut budget, "", 1)
                 .map_err(|error| execution_error(format!("output `{name}`: {error}")))?;
-            let encoded_name = serde_json::to_vec(name)
+            let encoded_name = json_size(name)
                 .map_err(|error| execution_error(format!("output `{name}`: {error}")))?;
-            let encoded_value = serde_json::to_vec(&converted)
+            let encoded_value = json_size(&converted)
                 .map_err(|error| execution_error(format!("output `{name}`: {error}")))?;
-            output_size +=
-                encoded_name.len() + encoded_value.len() + 1 + usize::from(!outputs.is_empty());
+            output_size += encoded_name + encoded_value + 1 + usize::from(!outputs.is_empty());
             if output_size > MAX_JSON_BYTES {
                 return Err(execution_error(format!(
                     "output `{name}`: outputs exceed the {MAX_JSON_BYTES}-byte JSON limit"
@@ -556,6 +577,45 @@ mod tests {
             .to_string();
         assert!(error.contains("output `second`"), "{error}");
         assert!(error.contains("collection entry limit"), "{error}");
+    }
+
+    #[test]
+    fn accepts_exact_json_byte_limits_and_rejects_one_extra_byte() {
+        let payload = |bytes: usize| {
+            let unit = "\0\\\"\n\u{1f642}";
+            let encoded = serde_json::to_vec(unit).unwrap().len() - 2;
+            format!(
+                "{}{}",
+                unit.repeat(bytes / encoded),
+                "x".repeat(bytes % encoded)
+            )
+        };
+        for (input, output, input_limited) in [("payload", "out", true), ("x", "result", false)] {
+            let node = factory(json!({
+                "language": "cel",
+                "inputs": BTreeMap::from([(input, "string")]),
+                "code": BTreeMap::from([(output, input)])
+            }))
+            .unwrap();
+            let bounded_name = if input_limited { input } else { output };
+            let overhead = serde_json::to_vec(&BTreeMap::from([(bounded_name, "")]))
+                .unwrap()
+                .len();
+            let exact = payload(MAX_JSON_BYTES - overhead);
+            let inputs = Inputs::from([(input.into(), exact.clone().into())]);
+            let outputs = node.execute(inputs).unwrap();
+            assert_eq!(outputs[output].as_str(), Some(exact.as_str()));
+            let error = node
+                .execute(Inputs::from([(input.into(), format!("{exact}x").into())]))
+                .unwrap_err()
+                .to_string();
+            let expected = if input_limited {
+                "inputs exceed".to_owned()
+            } else {
+                format!("output `{output}`: outputs exceed")
+            };
+            assert!(error.contains(&expected), "{error}");
+        }
     }
 
     #[test]
