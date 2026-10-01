@@ -102,7 +102,7 @@ impl Node for LoopAssignNode {
             .remove("value")
             .ok_or_else(|| structural_error("missing assignment value"))?;
         ctx.stage_scope_write(&self.variable, value)?;
-        Ok(Outputs::from([("done".into(), Value::Bool(true))]).into())
+        Ok(Outputs::from([("done".into(), Value::Bool(true).into())]).into())
     }
 }
 

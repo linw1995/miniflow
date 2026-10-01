@@ -5,8 +5,8 @@ use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
 
-pub type Inputs = crate::PortValues;
-pub type Outputs = crate::PortValues;
+pub type Inputs = std::collections::BTreeMap<String, crate::ValueRef>;
+pub type Outputs = Inputs;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ValueType {

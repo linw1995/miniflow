@@ -307,7 +307,7 @@ mod tests {
         let output = node
             .execute(Inputs::from([(
                 "items".into(),
-                Value::Array(items.clone()),
+                Value::Array(items.clone()).into(),
             )]))
             .unwrap();
         assert_eq!(output["results"], Value::Array(items));

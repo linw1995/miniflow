@@ -43,4 +43,4 @@ pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::{WorkflowRunError, instantiate_node_with_metadata};
 pub use subgraph::PreparedSubgraph;
 
-pub use value::{PortValues, SharedArray, SharedObject, ValueKind, ValueRef};
+pub use value::{ValueKind, ValueRef};

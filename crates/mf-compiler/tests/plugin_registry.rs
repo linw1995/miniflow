@@ -8,7 +8,7 @@ struct SourceNode;
 
 impl Node for SourceNode {
     fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::from([("value".to_owned(), json!(7))]))
+        Ok(Outputs::from([("value".to_owned(), json!(7).into())]))
     }
 }
 
