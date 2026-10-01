@@ -6,7 +6,11 @@ pub mod identity;
 pub mod observation;
 #[cfg(feature = "otlp")]
 pub mod otlp;
+#[cfg(feature = "snapshot")]
+pub mod snapshot;
 pub mod wire;
+
+pub const SNAPSHOT_CAPTURE_ENV: &str = "MF_CAPTURE_SNAPSHOTS";
 
 use snafu::Snafu;
 

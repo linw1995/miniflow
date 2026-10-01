@@ -5,6 +5,7 @@ use crate::{
     duration::format_duration_ns,
     graph::{GraphError, GraphLayout, GraphView},
     receiver::{LoopbackReceiver, ReceiverError},
+    snapshots::HistoryView,
     state::{LoopPassObservation, NodeObservation, StateSnapshot},
 };
 use crossterm::{
@@ -113,7 +114,8 @@ pub fn run_executable(path: &Path) -> Result<u8, RunError> {
         }
         command
             .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
-            .env("MF_RUN_ID", run_id.to_string());
+            .env("MF_RUN_ID", run_id.to_string())
+            .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1");
         let mut command = CommandWrap::from(command);
         command.wrap(ProcessGroup::leader());
         let child = command.spawn().map_err(|source| RunError::Spawn {
@@ -459,6 +461,7 @@ fn set_nonblocking(fd: impl AsFd) -> io::Result<()> {
 
 #[derive(Default)]
 struct ViewState {
+    history: HistoryView,
     path: Vec<String>,
     offset: (u32, u32),
     selected: usize,
@@ -499,7 +502,11 @@ impl ViewState {
         snapshot: &StateSnapshot,
         root: &GraphLayout,
         bodies: &BTreeMap<Vec<String>, GraphLayout>,
+        history_count: usize,
     ) {
+        if self.history.handle_key(key, history_count) {
+            return;
+        }
         match key {
             KeyCode::Char('l') => {
                 if let Some(node) = self.layout(root, bodies).nodes().get(self.selected)
@@ -545,6 +552,7 @@ impl ViewState {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn supervise(
     child: &mut ChildGuard,
     capture: &mut CaptureWorker,
@@ -617,7 +625,8 @@ fn supervise(
                 &snapshot,
                 &final_view,
                 completed_elapsed,
-                &view_state,
+                &mut view_state,
+                receiver,
                 Some(status),
             )?;
             loop {
@@ -635,7 +644,10 @@ fn supervise(
                                 KeyCode::Char('q') | KeyCode::Enter => {
                                     return Ok((status, interrupted_at.is_some(), capture_forced));
                                 }
-                                KeyCode::Esc if view_state.path.is_empty() => {
+                                KeyCode::Esc
+                                    if view_state.path.is_empty()
+                                        && !view_state.history.visible =>
+                                {
                                     return Ok((status, interrupted_at.is_some(), capture_forced));
                                 }
                                 KeyCode::Char('c')
@@ -649,6 +661,7 @@ fn supervise(
                                         &snapshot,
                                         layout,
                                         body_layouts,
+                                        receiver.history_len(),
                                     );
                                 }
                             }
@@ -667,7 +680,8 @@ fn supervise(
                         &snapshot,
                         &final_view,
                         completed_elapsed,
-                        &view_state,
+                        &mut view_state,
+                        receiver,
                         Some(status),
                     )?;
                 }
@@ -683,7 +697,8 @@ fn supervise(
                 &snapshot,
                 &view,
                 started.elapsed(),
-                &view_state,
+                &mut view_state,
+                receiver,
                 None,
             )?;
             last_frame = Instant::now();
@@ -704,7 +719,13 @@ fn supervise(
                         }
                     } else {
                         let snapshot = receiver.snapshot_shared();
-                        view_state.handle_key(key.code, &snapshot, layout, body_layouts);
+                        view_state.handle_key(
+                            key.code,
+                            &snapshot,
+                            layout,
+                            body_layouts,
+                            receiver.history_len(),
+                        );
                     }
                     last_frame = Instant::now() - FRAME_INTERVAL;
                 }
@@ -748,9 +769,22 @@ fn draw(
     snapshot: &StateSnapshot,
     capture: &CaptureView,
     elapsed: Duration,
-    view_state: &ViewState,
+    view_state: &mut ViewState,
+    history: &LoopbackReceiver,
     status: Option<ExitStatus>,
 ) -> Result<(), RunError> {
+    if view_state.history.visible {
+        terminal
+            .draw(|frame| {
+                let snapshot = history.history_snapshot(
+                    view_state.history.selection(),
+                    usize::from(frame.area().height.saturating_sub(6)),
+                );
+                view_state.history.draw(frame, &snapshot);
+            })
+            .map_err(|source| RunError::Terminal { source })?;
+        return Ok(());
+    }
     let layout = view_state.layout(root_layout, body_layouts);
     let pass = view_state.pass(snapshot);
     let display_nodes = if view_state.path.is_empty() {
@@ -813,7 +847,7 @@ fn draw(
         let lifecycle = &snapshot.lifecycle;
         let controls = if status.is_some() { "q/Enter close" } else { "Ctrl-C interrupt" };
         frame.render_widget(Paragraph::new(format!(
-            "Observation: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows pan | f origin | Tab/j/k select | l enter Loop | h back | [/] pass | {controls}",
+            "Observation: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nv data history | Arrows pan | Tab/j/k select | l enter Loop | h back | [/] pass | {controls}",
             lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
             lifecycle.observation_errors + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
         )), footer);
@@ -1015,15 +1049,15 @@ mod tests {
         }
         let snapshot = session.snapshot();
         let mut view = ViewState::default();
-        view.handle_key(KeyCode::Char('l'), &snapshot, &root, &bodies);
+        view.handle_key(KeyCode::Char('l'), &snapshot, &root, &bodies, 0);
         assert_eq!(view.path, ["repeat"]);
         assert_eq!(view.layout(&root, &bodies).nodes()[0].id, "%loop");
         assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 1);
-        view.handle_key(KeyCode::Char('['), &snapshot, &root, &bodies);
+        view.handle_key(KeyCode::Char('['), &snapshot, &root, &bodies, 0);
         assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 0);
-        view.handle_key(KeyCode::Char(']'), &snapshot, &root, &bodies);
+        view.handle_key(KeyCode::Char(']'), &snapshot, &root, &bodies, 0);
         assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 1);
-        view.handle_key(KeyCode::Char('h'), &snapshot, &root, &bodies);
+        view.handle_key(KeyCode::Char('h'), &snapshot, &root, &bodies, 0);
         assert!(view.path.is_empty());
     }
 

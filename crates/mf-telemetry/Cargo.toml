@@ -8,7 +8,8 @@ description = "Versioned workflow observation contracts for miniflow"
 
 [features]
 default = []
-otlp = ["dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:reqwest"]
+snapshot = ["dep:opentelemetry-proto", "dep:prost"]
+otlp = ["snapshot", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:reqwest"]
 
 [dependencies]
 opentelemetry = { version = "0.33.0", default-features = false, features = ["logs", "trace"] }
@@ -20,3 +21,6 @@ serde_json = "1.0.151"
 sha2 = "0.11.0"
 snafu = "0.9.2"
 uuid = { version = "1.26.1", features = ["v4", "serde"] }
+
+opentelemetry-proto = { version = "0.33.0", default-features = false, features = ["gen-tonic-messages", "logs"], optional = true }
+prost = { version = "0.14.4", optional = true }

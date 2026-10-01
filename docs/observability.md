@@ -62,7 +62,9 @@ configured OTel processors synchronously. Custom processors must be nonblocking 
 
 The run context is active during preparation/execution and a node context is active during each shared step. A plugin using a caller-provided OTel tracer can start a child span with the ordinary current-context API without changing `Node::execute` or `execute_with_context`. The library does not choose plugin tracers or propagate context into plugin-created threads; plugins must explicitly attach a captured context there. Context guards restore the prior caller context on return or unwind.
 
-No library call shuts down the application's providers. Panic/unwind preserves the original panic and ends held spans without fabricating a workflow finish or successful node outcome. An abandoned scope therefore has no terminal boundary. Handled errors retain the original execution result; dropped or unencodable telemetry never becomes a workflow error. No per-node completion snapshot, retry scheduler, or replay state is introduced.
+No library call shuts down the application's providers. Panic/unwind preserves the original panic and ends held spans without fabricating a workflow finish or successful node outcome. An abandoned scope therefore has no terminal boundary. Handled errors retain the original execution result; dropped or unencodable telemetry never becomes a workflow error.
+OTel lifecycle events contain execution metadata. Optional input/output history uses the snapshot events described below;
+it does not enable workflow replay or retry scheduling.
 
 ## Workflow and run identity
 
@@ -259,6 +261,35 @@ missing count is unknown, even when no telemetry arrived. Known missing ranges a
 must be shown separately. Observed span count, trace drops, and diagnostic truncation are separate indicators; none
 proves lifecycle loss. There is no replay, persistence, reconnect, retry scheduling, or workflow restart.
 
+## Input and output history
+
+Generated runners collect value history only when `MF_CAPTURE_SNAPSHOTS=1` and an OTLP logs
+endpoint are configured. TUI execution sets this flag and uses its existing loopback `/v1/logs`
+endpoint. Ordinary execution does not allocate a snapshot recorder. Runners built with
+`--no-telemetry` report that data history requires a telemetry-enabled build.
+
+Snapshot events use the `mf.snapshot` instrumentation scope and the standard OTLP `LogRecord`
+body. Each record includes `mf.workflow.id`, `mf.run.id`, `mf.snapshot.version` (currently 1),
+`mf.snapshot.sequence` (starting at zero), and a SHA-256 `mf.snapshot.digest` byte array.
+The digest uses the canonical typed-body encoding implemented by `mf-telemetry::snapshot`; map key order is ignored.
+`mf.snapshot.record` carries a structured map containing a stream header, a value definition,
+a node change, or an end marker. Values are defined once; arrays, objects, and node inputs/outputs
+reference value IDs. Typed number definitions use decimal text to preserve unsigned 64-bit integers
+and integer/float distinctions. The receiver reconstructs immutable roots with shared descendants.
+
+Bodies larger than 32 KiB are encoded as a standard Protobuf `AnyValue` and split across
+`mf.snapshot.fragment` events. Their structured bodies contain `index`, `total`, and `payload`
+(bytes). The receiver verifies the assembled digest before admitting a record. Sequence numbers
+make retransmissions idempotent and allow reordering; up to 1,024 incomplete or out-of-order records
+may wait for a gap to close. Complete history and values are retained throughout the session.
+
+Snapshot publication uses a dedicated log processor on the same OTLP endpoint, with 64-record
+batches and a 128-record queue. The producer waits for a flush every 64 packets, preventing queue
+overflow during bursts. Export failures disable further capture and produce a diagnostic without
+changing the workflow result. A missing definition, conflicting retransmission, or incomplete tail
+is shown as incomplete history; previously received snapshots remain available. Capture uses no
+temporary files or file polling.
+
 ## Graph presentation
 
 `mf-tui::graph::GraphLayout` uses `rust-sugiyama` to assign layers and sibling order from the complete described graph, including isolated nodes. Data and control edges both contribute to the topology; parallel node pairs are deduplicated only for layout. A fixed-size terminal projection keeps node boxes in place as observations arrive.
@@ -292,6 +323,12 @@ older detail. `q` has no action while the workflow runs. Ctrl-C requests interru
 Ctrl-C or the two-second deadline forces termination. After the runner exits, the view stays open
 until `q`, Enter, Esc at the root, or Ctrl-C. The terminal is restored before the captured stdout is
 copied to CLI stdout.
+
+Press `v` to browse recorded inputs and outputs, including Loop passes and Iteration items.
+Use `j`/`k` or Up/Down to select a change, Home for the first change, and End/`f` to follow the latest.
+PgUp/PgDn scroll values; `v` or Esc returns to the graph. Previews are limited to 64 KiB per
+input/output object, while the complete values remain in memory. The view copies only the visible
+history entries and shares their immutable roots with the receiver.
 
 The CLI keeps at most 256 MiB of stdout in a private temporary spool and 1 MiB of recent stderr. It drains both pipes
 without waiting for a frame. If stdout capture fails or reaches its limit, the CLI stops the process group, displays the

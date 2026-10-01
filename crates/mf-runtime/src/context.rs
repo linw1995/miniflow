@@ -54,7 +54,7 @@ impl Drop for ScopeGuard<'_> {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct NodeResult {
     pub outputs: Outputs,
     pub skipped: BTreeSet<String>,
@@ -86,6 +86,8 @@ pub struct ExecutionContext {
     scopes: Vec<ExecutionScope>,
     pending_loop_write: Option<(String, Value)>,
     remaining_steps: usize,
+    snapshots: Option<crate::SnapshotRecorder>,
+    snapshot_prefix: Vec<LoopPathEntry>,
 }
 
 impl Default for ExecutionContext {
@@ -97,11 +99,75 @@ impl Default for ExecutionContext {
             scopes: Vec::new(),
             pending_loop_write: None,
             remaining_steps: crate::MAX_SCHEDULED_STEPS,
+            snapshots: None,
+            snapshot_prefix: Vec::new(),
         }
     }
 }
 
 impl ExecutionContext {
+    pub fn set_snapshot_recorder(&mut self, recorder: crate::SnapshotRecorder) {
+        self.snapshots = Some(recorder);
+    }
+
+    pub fn snapshot_recorder(&self) -> Option<&crate::SnapshotRecorder> {
+        self.snapshots.as_ref()
+    }
+
+    pub fn fork_body(&self, observation: Option<BodyObservation>) -> Self {
+        let mut child = Self::for_body(observation);
+        if self.snapshots.is_some() {
+            child.snapshots = self.snapshots.clone();
+            child.snapshot_prefix = self.snapshot_path();
+        }
+        child
+    }
+
+    fn snapshot_path(&self) -> Vec<LoopPathEntry> {
+        let mut path = self.snapshot_prefix.clone();
+        path.extend(self.scope_path());
+        path
+    }
+
+    fn capture_node(
+        &self,
+        node: &FlowNode,
+        inputs: &Inputs,
+        result: Option<&NodeResult>,
+        outcome: crate::SnapshotOutcome,
+        error: Option<&dyn std::fmt::Display>,
+    ) {
+        if let Some(recorder) = &self.snapshots {
+            recorder.record(
+                self.snapshot_path(),
+                node.definition_id.as_str(),
+                crate::NodeSnapshot {
+                    inputs: crate::snapshot::ports_snapshot(inputs),
+                    outputs: result.map_or_else(
+                        || crate::ValueRef::object([]),
+                        |result| crate::snapshot::ports_snapshot(&result.outputs),
+                    ),
+                    skipped: if outcome == crate::SnapshotOutcome::Skipped {
+                        node.ports
+                            .outputs
+                            .iter()
+                            .map(|port| port.name.to_string())
+                            .collect::<Vec<_>>()
+                            .into()
+                    } else {
+                        result
+                            .map_or_else(Vec::new, |result| {
+                                result.skipped.iter().cloned().collect()
+                            })
+                            .into()
+                    },
+                    outcome,
+                    error: error.map(|error| error.to_string().into()),
+                },
+            );
+        }
+    }
+
     pub fn for_body(body_observation: Option<BodyObservation>) -> Self {
         Self {
             body_observation,
@@ -537,6 +603,13 @@ pub fn execute_ordered_node_in_context<'a>(
                 if let Some(step) = step.take() {
                     step.failed(ctx, FailurePhase::Dependency, error.to_string());
                 }
+                ctx.capture_node(
+                    node,
+                    &inputs,
+                    None,
+                    crate::SnapshotOutcome::Failed,
+                    Some(&error),
+                );
                 return Err(error);
             }
         };
@@ -557,6 +630,7 @@ pub fn execute_ordered_node_in_context<'a>(
             }
         }
     }
+    let snapshot_inputs = ctx.snapshots.as_ref().map(|_| inputs.clone());
     let result = if skipped {
         None
     } else {
@@ -576,9 +650,17 @@ pub fn execute_ordered_node_in_context<'a>(
                 if let Some(step) = step.take() {
                     step.failed(ctx, FailurePhase::Dependency, error.to_string());
                 }
+                ctx.capture_node(
+                    node,
+                    &inputs,
+                    None,
+                    crate::SnapshotOutcome::Failed,
+                    Some(&error),
+                );
                 return Err(error);
             }
         }
+        ctx.capture_node(node, &inputs, None, crate::SnapshotOutcome::Started, None);
         if let Some(step) = step.as_mut() {
             step.started(ctx);
         }
@@ -594,6 +676,15 @@ pub fn execute_ordered_node_in_context<'a>(
             Err(error) => {
                 if let Some(step) = step.take() {
                     step.failed(ctx, FailurePhase::Execution, error.to_string());
+                }
+                if let Some(inputs) = &snapshot_inputs {
+                    ctx.capture_node(
+                        node,
+                        inputs,
+                        None,
+                        crate::SnapshotOutcome::Failed,
+                        Some(&error),
+                    );
                 }
                 return Err(error);
             }
@@ -613,7 +704,27 @@ pub fn execute_ordered_node_in_context<'a>(
     let loop_summary = result
         .as_ref()
         .and_then(|result| result.loop_summary.clone());
+    let snapshot_result = ctx.snapshots.as_ref().and_then(|_| result.clone());
     let result = ctx.publish(node, result);
+    if let Some(inputs) = &snapshot_inputs {
+        let outcome = if result.is_err() {
+            crate::SnapshotOutcome::Failed
+        } else if skipped {
+            crate::SnapshotOutcome::Skipped
+        } else {
+            crate::SnapshotOutcome::Succeeded
+        };
+        ctx.capture_node(
+            node,
+            inputs,
+            snapshot_result.as_ref(),
+            outcome,
+            result
+                .as_ref()
+                .err()
+                .map(|error| error as &dyn std::fmt::Display),
+        );
+    }
     if let Some(step) = step.take() {
         match &result {
             Err(error) => step.failed(ctx, FailurePhase::Publication, error.to_string()),

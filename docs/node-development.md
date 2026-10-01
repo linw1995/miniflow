@@ -85,6 +85,15 @@ Nodes forwarding an input should move or clone its handle. New arrays and object
 handles with `ValueRef::array` and `ValueRef::object`. Context outputs remain available within their
 execution scope.
 
+History is opt-in: attach a `SnapshotRecorder` to an `ExecutionContext` when a consumer needs past
+inputs and outputs. Ordinary execution retains current bindings without recording snapshots. The
+recorder stores immutable global roots, shares unchanged branches, and interns equal values across
+nodes and scopes. A repeated identical node state does not create a new snapshot. Loop passes and
+Iteration items retain separate scope paths. Generated runners enable capture only when
+`MF_CAPTURE_SNAPSHOTS=1` requests OTLP snapshot events. `SnapshotRecorder::with_sink` supports
+other explicit consumers; records define each value once and reference its ID.
+`--validate` and `--describe` do not capture data. Call `finish()` after an explicitly recorded run.
+
 The executor calls `Node::execute_with_context_mut`, whose default implementation delegates to the read-only `execute_with_context` method. Loop assignment and exit use engine-owned operations behind this adapter; plugins cannot write Loop variables or publish outputs directly. A Loop body has its own output scope for every pass. A context reference inside that body resolves only within its scope, including the synthetic `%loop` outputs, and still requires an explicit ancestor dependency.
 
 Keep output names local in node results. Runtime publication qualifies them with the instance ID. Explicit skipped names must be declared non-required outputs and cannot also be produced. A scheduler-skipped node propagates skipping through every output, including required ones. Context references alone never activate or skip a node.

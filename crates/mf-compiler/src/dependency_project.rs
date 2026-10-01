@@ -91,45 +91,69 @@ fn run_id() -> mf_telemetry::identity::RunId {
     }
 }
 
+fn capture_requested() -> bool {
+    std::env::var(mf_telemetry::SNAPSHOT_CAPTURE_ENV).is_ok_and(|value| value == "1")
+}
+
 #[cfg(not(feature = "telemetry"))]
 fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
-    let registry = mf_runtime::NodeRegistry::from_inventory()?;
-    Ok(workflow::run_workflow(&registry)?)
+    if capture_requested() {
+        eprintln!("data history unavailable: recompile the runner without --no-telemetry");
+    }
+    execute_workflow(None, None)
 }
 
 #[cfg(feature = "telemetry")]
 fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
-        Err(error) => {
-            eprintln!("telemetry export unavailable: {error}");
-            None
-        }
+        Err(error) => { eprintln!("telemetry export unavailable: {error}"); None }
     };
-    let result: Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> = match providers.as_ref() {
-        Some(providers) => (|| {
-            let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
-            let observation = match plan.start_observation(&providers.observer(), run_id()) {
-                Ok(observation) => Some(observation),
-                Err(error) => {
-                    eprintln!("telemetry observation unavailable: {error}");
-                    None
-                }
-            };
-            mf_runtime::ExecutionContext::run(observation, |state| -> Result<_, Box<dyn std::error::Error>> {
-                let registry = mf_runtime::NodeRegistry::from_inventory()?;
-                Ok(workflow::run_workflow_in_context(&registry, state)?)
-            })
-        })(),
-        None => {
-            let registry = mf_runtime::NodeRegistry::from_inventory()?;
-            Ok(workflow::run_workflow(&registry)?)
-        }
-    };
+    let result = (|| {
+        let Some(providers) = providers.as_ref() else {
+            if capture_requested() { eprintln!("data history unavailable: configure an OTLP logs endpoint"); }
+            return execute_workflow(None, None);
+        };
+        let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
+        let run_id = run_id();
+        let observation = match plan.start_observation(&providers.observer(), run_id) {
+            Ok(observation) => Some(observation),
+            Err(error) => { eprintln!("telemetry observation unavailable: {error}"); None }
+        };
+        let snapshots = if capture_requested() {
+            match snapshot_recorder(&plan, run_id) {
+                Ok(recorder) => Some(recorder),
+                Err(error) => { eprintln!("data history unavailable: {error}"); None }
+            }
+        } else { None };
+        execute_workflow(observation, snapshots)
+    })();
     if let Some(providers) = providers {
-        for diagnostic in providers.shutdown() {
-            eprintln!("telemetry export incomplete: {diagnostic}");
-        }
+        for diagnostic in providers.shutdown() { eprintln!("telemetry export incomplete: {diagnostic}"); }
+    }
+    result
+}
+
+#[cfg(feature = "telemetry")]
+fn snapshot_recorder(plan: &mf_compiler::CompiledWorkflow, run_id: mf_telemetry::identity::RunId) -> Result<mf_runtime::SnapshotRecorder, String> {
+    let description = mf_compiler::describe_compiled(plan).map_err(|error| error.to_string())?;
+    let mut exporter = mf_telemetry::otlp::SnapshotExporter::from_env(description.workflow_id, run_id)?;
+    mf_runtime::SnapshotRecorder::with_sink(move |record| {
+        exporter.emit(serde_json::to_value(record).map_err(|error| error.to_string())?)?;
+        if matches!(record, mf_runtime::SnapshotRecord::End) { exporter.finish()?; }
+        Ok(())
+    })
+}
+
+fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: Option<mf_runtime::SnapshotRecorder>) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+    let result = mf_runtime::ExecutionContext::run(observation, |state| -> Result<_, Box<dyn std::error::Error>> {
+        if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.clone()); }
+        let registry = mf_runtime::NodeRegistry::from_inventory()?;
+        Ok(workflow::run_workflow_in_context(&registry, state)?)
+    });
+    if let Some(snapshots) = snapshots {
+        snapshots.finish();
+        if let Some(error) = snapshots.diagnostic() { eprintln!("data history incomplete: {error}"); }
     }
     result
 }
