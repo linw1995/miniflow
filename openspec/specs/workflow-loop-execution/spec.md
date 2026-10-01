@@ -13,7 +13,9 @@ SHALL declare a nonempty typed variable set, a body DAG, and a maximum pass coun
 1000. Each variable SHALL be a required Loop input and required Loop output of the declared type.
 The body SHALL have a synthetic `$loop` source exposing current variable values and a zero-based
 `index`. A Loop container SHALL resolve a `workflow.loop` declaration from the selected node
-packages; the compiler SHALL replace that declaration with the engine-prepared executor. Assignment
+packages; the compiler SHALL bind the engine-prepared body to that registered implementation.
+The node package SHALL own the sequential driver, state progression, termination conditions, and
+completion summary. Assignment
 and exit kinds and the synthetic source SHALL remain engine-owned and MUST NOT resolve through
 plugin registrations. Earlier definition versions SHALL retain their existing behavior.
 
