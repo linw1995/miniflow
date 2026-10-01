@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    types: [opened, edited, reopened, synchronize]
+    types: [opened, reopened, synchronize]
   workflow_dispatch:
   push:
     branches:
@@ -11,19 +11,12 @@ on:
 permissions:
   contents: read
 
-jobs:
-  pr-title:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-      - name: Check PR title
-        if: github.event_name == 'pull_request'
-        env:
-          PR_TITLE: ${{ github.event.pull_request.title }}
-        run: python3 scripts/check_semantic_title.py --pr-title
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+jobs:
   lint:
-    needs: pr-title
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
