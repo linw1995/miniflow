@@ -83,8 +83,8 @@ fn definition(items: Value, mode: &str, on_error: &str) -> Value {
                 "body":{
                     "nodes":[{"id":"map","kind":"test.iteration_map"}],
                     "edges":[
-                        {"from_node":"@iteration","from_output":"items","to_node":"map","to_input":"item"},
-                        {"from_node":"@iteration","from_output":"index","to_node":"map","to_input":"index"}
+                        {"from_node":"%iteration","from_output":"items","to_node":"map","to_input":"item"},
+                        {"from_node":"%iteration","from_output":"index","to_node":"map","to_input":"index"}
                     ],
                     "result":{"node":"map","port":"value"}
                 }
@@ -138,7 +138,7 @@ fn iteration_error_policies_preserve_positions_or_remove_failures() {
 #[test]
 fn iteration_rejects_invalid_body_structure_and_result_ports() {
     let mut invalid = definition(json!([1]), "sequential", "terminate");
-    invalid["nodes"][1]["config"]["body"]["nodes"][0]["id"] = json!("@iteration");
+    invalid["nodes"][1]["config"]["body"]["nodes"][0]["id"] = json!("%iteration");
     let invalid_definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
     assert!(
         plan_definition(&invalid_definition)
@@ -382,7 +382,7 @@ fn body_plugins_inherit_the_correlated_node_span() {
     value["nodes"][1]["config"]["body"] = json!({
         "nodes":[{"id":"probe","kind":"test.iteration_trace_probe"}],
         "control_edges":[{
-            "from_node":"@iteration",
+            "from_node":"%iteration",
             "from_output":"items",
             "to_node":"probe"
         }],
@@ -443,7 +443,7 @@ fn skipped_body_nodes_report_their_item_and_dependency() {
             {"id":"route","kind":"builtin.if_else","config":{"branches":[{
                 "id":"one",
                 "condition":{
-                    "source":{"output":"@iteration.items","path":""},
+                    "source":{"output":"%iteration.items","path":""},
                     "operator":"eq",
                     "value":1
                 }
@@ -451,10 +451,10 @@ fn skipped_body_nodes_report_their_item_and_dependency() {
             {"id":"copy","kind":"builtin.identity"}
         ],
         "edges":[
-            {"from_node":"@iteration","from_output":"items","to_node":"copy","to_input":"input"}
+            {"from_node":"%iteration","from_output":"items","to_node":"copy","to_input":"input"}
         ],
         "control_edges":[
-            {"from_node":"@iteration","from_output":"items","to_node":"route"},
+            {"from_node":"%iteration","from_output":"items","to_node":"route"},
             {"from_node":"route","from_output":"one","to_node":"copy"}
         ],
         "result":{"node":"copy","port":"value"}
@@ -623,7 +623,7 @@ fn generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node(
     });
     value["nodes"][1]["config"]["body"] = json!({
         "nodes":[],
-        "result":{"node":"@iteration","port":"items"}
+        "result":{"node":"%iteration","port":"items"}
     });
     value["edges"][0]["from_output"] = json!("values");
     fs::write(&path, value.to_string()).unwrap();
@@ -707,7 +707,7 @@ fn loop_and_iteration_share_a_workflow_in_memory_and_generated_runners() {
             {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "items"}}
         ],
         "edges": [
-            {"from_node": "$loop", "from_output": "items", "to_node": "iteration", "to_input": "items"},
+            {"from_node": "%loop", "from_output": "items", "to_node": "iteration", "to_input": "items"},
             {"from_node": "iteration", "from_output": "results", "to_node": "assign", "to_input": "value"}
         ]
     });

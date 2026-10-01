@@ -177,7 +177,10 @@ impl WorkflowDescription {
             require(
                 body.nodes
                     .iter()
-                    .any(|node| node.id == "$loop" && node.kind == "$loop"),
+                    // Existing runners embed the original source name in their descriptions.
+                    .any(|node| {
+                        matches!(node.id.as_str(), "%loop" | "$loop") && node.kind == node.id
+                    }),
                 "Loop body omits its synthetic source",
             )?;
             let scope = Self {

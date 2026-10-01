@@ -12,7 +12,7 @@ Run a validated body graph once per array element and collect its selected resul
 the kind. The compiler SHALL bind an engine-prepared body to the registered implementation, and
 the node package SHALL own item scheduling, result collection, and failure policies. The node SHALL expose
 one required array input `items` and one required array output `results`. Its body SHALL contain ordinary nodes,
-optional data and control edges, and one required result selection. The reserved `@iteration` source SHALL expose the
+optional data and control edges, and one required result selection. The reserved `%iteration` source SHALL expose the
 current element as `items` and its zero-based index as `index`. Each item SHALL use a fresh context; outputs from
 another item MUST NOT be visible. The body MUST NOT contain the reserved source ID, another Iteration node, or a structured Loop construct.
 
@@ -28,7 +28,7 @@ another item MUST NOT be visible. The body MUST NOT contain the reserved source 
 
 #### Scenario: Reject a scope violation
 
-- **WHEN** a body redefines `@iteration`, includes another Iteration node or a structured Loop construct, or selects a missing result port
+- **WHEN** a body redefines `%iteration`, includes another Iteration node or a structured Loop construct, or selects a missing result port
 - **THEN** runner validation fails before installation with the outer iteration ID and body error
 
 #### Scenario: Reject an undeclared Iteration package

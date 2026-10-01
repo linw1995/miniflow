@@ -82,8 +82,8 @@ fn loop_body_layout_renders_the_selected_pass_independently() {
         path: vec!["repeat".into()],
         nodes: vec![
             NodeDescription {
-                id: "$loop".into(),
-                kind: "$loop".into(),
+                id: "%loop".into(),
+                kind: "%loop".into(),
             },
             NodeDescription {
                 id: "child".into(),
@@ -91,19 +91,19 @@ fn loop_body_layout_renders_the_selected_pass_independently() {
             },
         ],
         data_edges: vec![DataEdge {
-            from_node: "$loop".into(),
+            from_node: "%loop".into(),
             from_output: "count".into(),
             to_node: "child".into(),
             to_input: "input".into(),
         }],
         control_edges: vec![],
-        execution_order: vec!["$loop".into(), "child".into()],
+        execution_order: vec!["%loop".into(), "child".into()],
     }];
     let layout = GraphLayout::from_loop_body(&graph, &["repeat".into()]).unwrap();
     assert_eq!(layout.nodes().len(), 2);
     assert_eq!(layout.edges().len(), 1);
     let mut nodes = vec![
-        NodeObservation::pending("$loop", "$loop"),
+        NodeObservation::pending("%loop", "%loop"),
         NodeObservation::pending("child", "fixture.child"),
     ];
     nodes[1].status = NodeStatus::Running;
@@ -112,7 +112,7 @@ fn loop_body_layout_renders_the_selected_pass_independently() {
         .nodes(&nodes)
         .render(buffer.area, &mut buffer);
     let rendered = buffer_text(&buffer);
-    assert!(rendered.contains("$loop") && rendered.contains("child"));
+    assert!(rendered.contains("%loop") && rendered.contains("child"));
 }
 
 fn count(value: i64) -> Count {

@@ -316,7 +316,7 @@ mod tests {
             .instantiate(json!({
                 "body": {
                     "nodes": [],
-                    "result": {"node": "@iteration", "port": "items"}
+                    "result": {"node": "%iteration", "port": "items"}
                 }
             }))
             .unwrap();

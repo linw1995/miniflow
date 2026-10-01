@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 pub const ITERATION_KIND: &str = "builtin.iteration";
 pub const ITERATION_INPUT_KIND: &str = "builtin.iteration_input";
-pub const ITERATION_INPUT_ID: &str = "@iteration";
+pub const ITERATION_INPUT_ID: &str = "%iteration";
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]

@@ -32,7 +32,7 @@
           ],
           "edges": [
             {
-              "from_node": "$loop",
+              "from_node": "%loop",
               "from_output": "count",
               "to_node": "increment",
               "to_input": "count"

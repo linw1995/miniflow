@@ -81,7 +81,7 @@ fn definition() -> Value {
                             }}
                         ],
                         "edges": [
-                            {"from_node": "$loop", "from_output": "count", "to_node": "increment", "to_input": "count"},
+                            {"from_node": "%loop", "from_output": "count", "to_node": "increment", "to_input": "count"},
                             {"from_node": "increment", "from_output": "next", "to_node": "assign", "to_input": "value"}
                         ]
                     }
@@ -479,12 +479,12 @@ fn skipped_assignment_preserves_previous_value() {
     let body = &mut value["nodes"][1]["loop"]["body"];
     body["nodes"].as_array_mut().unwrap().push(json!({
         "id": "route", "kind": "builtin.if_else", "config": {"branches": [{
-            "id": "skip", "condition": {"source": {"output": "$loop.index", "path": ""},
+            "id": "skip", "condition": {"source": {"output": "%loop.index", "path": ""},
             "operator": "eq", "value": 0}
         }]}
     }));
     body["control_edges"] = json!([
-        {"from_node": "$loop", "from_output": "index", "to_node": "route"},
+        {"from_node": "%loop", "from_output": "index", "to_node": "route"},
         {"from_node": "route", "from_output": "else", "to_node": "assign"}
     ]);
     assert_eq!(run_in_memory(value).unwrap(), json!({"count": 1}));
@@ -504,7 +504,7 @@ fn nested_definition() -> Value {
             {"id": "assign_outer", "kind": "workflow.loop_assign", "config": {"variable": "count"}}
         ],
         "edges": [
-            {"from_node": "$loop", "from_output": "count", "to_node": "inner", "to_input": "count"},
+            {"from_node": "%loop", "from_output": "count", "to_node": "inner", "to_input": "count"},
             {"from_node": "inner", "from_output": "count", "to_node": "assign_outer", "to_input": "value"}
         ]
     });
@@ -551,7 +551,7 @@ fn later_pass_cannot_read_an_omitted_prior_output() {
             {"id": "sink", "kind": "builtin.identity"}
         ],
         "edges": [
-            {"from_node": "$loop", "from_output": "index", "to_node": "probe", "to_input": "index"},
+            {"from_node": "%loop", "from_output": "index", "to_node": "probe", "to_input": "index"},
             {"from_node": "probe", "from_output": "value", "to_node": "sink", "to_input": "input"}
         ]
     });

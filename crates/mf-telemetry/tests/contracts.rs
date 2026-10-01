@@ -138,25 +138,37 @@ fn loop_pass_wire_records_require_the_new_schema() {
 
 #[test]
 fn nested_descriptions_validate_scope_ownership_and_version() {
-    let mut value = serde_json::to_value(graph()).unwrap();
-    value["version"] = json!("2026-09-29");
-    value["nodes"] = json!([{"id": "repeat", "kind": "workflow.loop"}]);
-    value["data_edges"] = json!([]);
-    value["control_edges"] = json!([]);
-    value["execution_order"] = json!(["repeat"]);
-    value["loop_bodies"] = json!([{
-        "path": ["repeat"],
-        "nodes": [{"id": "$loop", "kind": "$loop"}, {"id": "child", "kind": "fixture.echo"}],
-        "data_edges": [{"from_node": "$loop", "from_output": "value", "to_node": "child", "to_input": "input"}],
-        "control_edges": [],
-        "execution_order": ["$loop", "child"]
-    }]);
-    WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).unwrap();
-    value["loop_bodies"][0]["path"] = json!(["missing"]);
-    assert!(WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).is_err());
-    value["loop_bodies"][0]["path"] = json!(["repeat"]);
-    value["version"] = json!("2026-09-27");
-    assert!(WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).is_err());
+    for source in ["%loop", "$loop"] {
+        let mut value = serde_json::to_value(graph()).unwrap();
+        value["version"] = json!("2026-09-29");
+        value["nodes"] = json!([{"id": "repeat", "kind": "workflow.loop"}]);
+        value["data_edges"] = json!([]);
+        value["control_edges"] = json!([]);
+        value["execution_order"] = json!(["repeat"]);
+        value["loop_bodies"] = json!([{
+            "path": ["repeat"],
+            "nodes": [{"id": source, "kind": source}, {"id": "child", "kind": "fixture.echo"}],
+            "data_edges": [{"from_node": source, "from_output": "value", "to_node": "child", "to_input": "input"}],
+            "control_edges": [],
+            "execution_order": [source, "child"]
+        }]);
+        let description =
+            WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).unwrap();
+        assert_eq!(description.loop_bodies[0].nodes[0].id, source);
+        assert_eq!(description.workflow_id, graph().workflow_id);
+
+        let mut invalid_source = value.clone();
+        invalid_source["loop_bodies"][0]["nodes"][0]["kind"] = json!("fixture.source");
+        assert!(
+            WorkflowDescription::from_json(&serde_json::to_vec(&invalid_source).unwrap()).is_err()
+        );
+
+        value["loop_bodies"][0]["path"] = json!(["missing"]);
+        assert!(WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).is_err());
+        value["loop_bodies"][0]["path"] = json!(["repeat"]);
+        value["version"] = json!("2026-09-27");
+        assert!(WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).is_err());
+    }
 }
 
 #[test]
