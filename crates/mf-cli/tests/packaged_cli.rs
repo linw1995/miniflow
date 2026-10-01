@@ -74,16 +74,14 @@ fn packaged_cli_acceptance() {
     let manifest = fs::read_to_string(build.join("Cargo.toml")).unwrap();
     assert!(!manifest.contains("path =") && !manifest.contains("mf-bundle"));
     assert!(!manifest.contains("\nlibc = "));
-    for name in ["mf-runtime", "mf-compiler"] {
+    for name in ["mf-runtime", "mf-compiler", "mf-telemetry"] {
         assert!(manifest.contains(&format!(
-            "{name} = {{ version = \"={}\" }}",
+            "{name} = {{ version = \"={}\", default-features = false }}",
             env!("CARGO_PKG_VERSION")
         )));
     }
-    assert!(manifest.contains(&format!(
-        "mf-telemetry = {{ version = \"={}\", features = [\"otlp\"] }}",
-        env!("CARGO_PKG_VERSION")
-    )));
+    assert!(manifest.contains("default = [\"telemetry\"]"));
+    assert!(manifest.contains("telemetry = [\"mf-telemetry/otlp\"]"));
     assert!(!manifest.contains("mf-tui"));
     let generated = fs::read_to_string(build.join("src/workflow.rs")).unwrap();
     assert!(generated.contains("mf_runtime::execute_node"));
