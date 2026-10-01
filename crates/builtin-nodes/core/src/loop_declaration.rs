@@ -117,10 +117,6 @@ struct LoopNode {
 }
 
 impl Node for LoopNode {
-    fn context_references_complete(&self) -> bool {
-        true
-    }
-
     fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
         Err(structural_error(
             "Loop requires a workflow execution context",
@@ -197,7 +193,7 @@ impl Node for LoopNode {
 
 fn condition_matches(
     condition: &LoopConditionDefinition,
-    variables: &BTreeMap<String, Value>,
+    variables: &Outputs,
 ) -> Result<bool, NodeExecutionError> {
     let actual = variables.get(&condition.variable).ok_or_else(|| {
         structural_error(format!("missing Loop variable `{}`", condition.variable))
@@ -209,8 +205,8 @@ fn condition_matches(
             condition.variable
         )));
     }
-    let order = match (actual, expected) {
-        (Value::Number(left), Value::Number(right)) => Some(compare_json_numbers(left, right)),
+    let order = match (actual.as_number(), expected.as_number()) {
+        (Some(left), Some(right)) => Some(compare_json_numbers(left, right)),
         _ => None,
     };
     let result = match condition.operator {

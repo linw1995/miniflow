@@ -76,12 +76,23 @@ Override `Node::execute_with_context` to read declared outputs through `ctx.outp
 declarations support compile-time dependency checks; the context does not enforce a runtime read whitelist. The runtime
 publishes results only after successful execution and starts with fresh context for each run.
 
-Nodes may override `context_references_complete()` to return `true` when every context output read is declared.
-This includes nodes that never read context outputs. Prepared executors can then reclaim intermediate outputs after
-their last data, control, or declared context consumer. Selected workflow outputs remain available until collection.
-The default is `false`, preserving all historical outputs through the invocation of existing third-party nodes.
-Low-level contexts retain outputs unless their owner calls `enable_output_reclamation()`; ordinary workflow runners
-enable it automatically. Loop variables retain their current source values throughout each pass.
+`Inputs` and `Outputs` map port names to immutable `ValueRef` handles. Cloning a handle shares its
+payload, including array and object descendants. Construct new values with `ValueRef::from(json)`
+or insert JSON directly into `Outputs`. Read values through the familiar `as_*`, indexing, and
+`pointer` methods; use `kind()` for pattern matching. `to_json()` explicitly creates an owned JSON
+copy for APIs that require one. Serialization reads the shared tree directly.
+
+Use `with_field`, `with_index`, or `with_pointer` for persistent updates. They return a new root
+that shares unchanged descendants; equal updates return the existing root. Nodes forwarding an input
+should move or clone its handle. Context outputs remain available within their execution scope.
+
+History is opt-in: attach a `SnapshotRecorder` to an `ExecutionContext` when a consumer needs past
+inputs and outputs. Ordinary execution retains current bindings without recording snapshots. The
+recorder stores immutable global roots, shares unchanged branches, and interns equal values across
+nodes and scopes. A repeated identical node state does not create a new snapshot. Loop passes and
+Iteration items retain separate scope paths. Generated runners enable capture only when
+`MF_SNAPSHOT_FILE` names an existing file; records define each value once and reference its ID.
+`--validate` and `--describe` do not capture data. Call `finish()` after an explicitly recorded run.
 
 The executor calls `Node::execute_with_context_mut`, whose default implementation delegates to the read-only `execute_with_context` method. Loop assignment and exit use engine-owned operations behind this adapter; plugins cannot write Loop variables or publish outputs directly. A Loop body has its own output scope for every pass. A context reference inside that body resolves only within its scope, including the synthetic `%loop` outputs, and still requires an explicit ancestor dependency.
 

@@ -134,10 +134,6 @@ struct CodeNode {
 }
 
 impl Node for CodeNode {
-    fn context_references_complete(&self) -> bool {
-        true
-    }
-
     fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
         let input_size = serde_json::to_vec(&inputs)
             .map_err(|error| execution_error(format!("could not measure inputs: {error}")))?

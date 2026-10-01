@@ -17,14 +17,10 @@ struct ConstantConfig {
 }
 
 struct ConstantNode {
-    value: Value,
+    value: mf_runtime::ValueRef,
 }
 
 impl Node for ConstantNode {
-    fn context_references_complete(&self) -> bool {
-        true
-    }
-
     fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
         Ok(Outputs::from([("value".to_owned(), self.value.clone())]))
     }
@@ -34,7 +30,7 @@ impl Node for ConstantNode {
             inputs: Vec::new(),
             outputs: vec![PortSpec::new(
                 "value",
-                ValueType::infer_json(&self.value),
+                ValueType::infer_shared(&self.value),
                 true,
             )],
         })
@@ -48,7 +44,7 @@ impl Node for ConstantNode {
 fn constant_factory(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
     let config: ConstantConfig = deserialize_config(config)?;
     Ok(Box::new(ConstantNode {
-        value: config.value,
+        value: config.value.into(),
     }))
 }
 

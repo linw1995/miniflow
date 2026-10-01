@@ -3,7 +3,6 @@ use crate::definition::{DefinitionId, EdgeDefinition, WorkflowOutputDefinition};
 #[cfg(test)]
 use crate::{Inputs, Outputs};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use snafu::Snafu;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -121,7 +120,7 @@ impl FlowOutput {
     }
 }
 
-pub type FlowOutputs = BTreeMap<String, Value>;
+pub type FlowOutputs = crate::Outputs;
 
 #[derive(Debug, Snafu)]
 pub enum FlowBuildError {
@@ -186,7 +185,6 @@ pub struct Flow {
     execution_order: Vec<NodeId>,
     outputs: Vec<FlowOutput>,
     controls: Vec<crate::ControlEdgeDefinition>,
-    retention: crate::OutputRetentionPlan,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -326,7 +324,6 @@ impl Flow {
             execution_order: resolved_order,
             outputs: resolved_outputs,
             controls: Vec::new(),
-            retention: crate::OutputRetentionPlan::default(),
         };
         flow.prepare_execution();
         Ok(flow)
@@ -393,33 +390,6 @@ impl Flow {
             dependencies.sort();
         }
         self.dependencies = incoming;
-        let borrowed: Vec<Vec<_>> = self
-            .dependencies
-            .iter()
-            .map(|dependencies| {
-                dependencies
-                    .iter()
-                    .map(PreparedDependency::borrowed)
-                    .collect()
-            })
-            .collect();
-        let steps: Vec<_> = self
-            .execution_order
-            .iter()
-            .enumerate()
-            .map(|(position, id)| (&self.nodes[id.index()], borrowed[position].as_slice()))
-            .collect();
-        let selected: Vec<_> = self
-            .outputs
-            .iter()
-            .map(|output| {
-                crate::output_id(
-                    self.nodes[output.node_id.index()].definition_id.as_str(),
-                    &output.port,
-                )
-            })
-            .collect();
-        self.retention = crate::OutputRetentionPlan::new(&steps, &selected);
     }
 
     pub fn node(&self, id: &NodeId) -> Option<&dyn Node> {
@@ -452,10 +422,7 @@ impl Flow {
         &self,
         observation: Option<crate::RunObservation>,
     ) -> Result<FlowOutputs, crate::WorkflowRunError> {
-        crate::ExecutionContext::run(observation, |state| {
-            state.enable_output_reclamation();
-            self.execute_in_context(state)
-        })
+        crate::ExecutionContext::run(observation, |state| self.execute_in_context(state))
     }
 
     /// Executes already constructed nodes inside a caller-owned run scope.
@@ -472,7 +439,6 @@ impl Flow {
                     .map(PreparedDependency::borrowed),
                 state,
             )?;
-            state.release_outputs(self.retention.after_step(position));
             if state.scope_exit_requested() {
                 break;
             }
