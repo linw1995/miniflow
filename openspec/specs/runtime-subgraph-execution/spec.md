@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Provide shared body preparation, scoped execution, and observation hooks while node providers own container policies.
+Provide shared prepared-body binding and scoped execution while node providers own container policies and lifecycle events.
 
 ## Requirements
 
@@ -26,39 +26,18 @@ The runtime node contract SHALL provide prepared-body binding. Registered provid
 
 ### Requirement: Keep container policies above the runtime
 
-The runtime SHALL manage scopes, input sources, node execution, type checks, publication, and budget consumption. `mfn-core` SHALL own Loop termination and Iteration scheduling, result collection, and failure policies. Sequential Iteration SHALL use the same sequential Loop driver as Loop.
+The runtime SHALL manage scopes, input sources, node execution, type checks, publication, and budget consumption. `mfn-core` SHALL own Loop termination and Iteration scheduling, result collection, and failure policies. Loop and Iteration SHALL share prepared-body execution through managed runtime scopes.
 
 #### Scenario: Reuse sequential execution
 
 - **WHEN** a Loop repeats its body or an Iteration processes items sequentially
-- **THEN** the node package uses the common Loop driver while supplying its own state, result, and termination policy
+- **THEN** both execute prepared bodies through runtime scopes while supplying their own state, result, and termination policy
 
-### Requirement: Discover bodies through registered declarations
+### Requirement: Keep container lifecycle observation in node implementations
 
-Node providers SHALL be able to declare a subgraph with its body location, source identity, input types, selected outputs, binding options, and state-intrinsic permission.
-Registered preparation and code generation SHALL validate and canonicalize the declared body independently of the container kind. The final standalone runner SHALL execute generated direct node calls.
-Preparation artifacts SHALL be written separately from factory stdout, and cached artifacts SHALL only be reused for matching input plans.
-
-#### Scenario: Execute a third-party container
-
-- **WHEN** a registered third-party node declares a body with a custom synthetic source and repeats its prepared callback
-- **THEN** the memory and standalone backends produce equivalent results without a compiler branch for that node kind
-
-#### Scenario: Preserve warm-build sources
-
-- **WHEN** an unchanged workflow is compiled again and preparation produces the same artifacts
-- **THEN** generated source files remain unchanged and factory stdout does not corrupt preparation output
-
-### Requirement: Let providers select scope observation
-
-The runtime SHALL provide optional scope lifecycle and node invocation hooks. A scope without an observer SHALL NOT select a container observation protocol. Node packages SHALL own Loop pass and Iteration item protocol adapters. Custom scope lifecycle hooks SHALL run on completion, explicit exit, and failure even when no run observer is installed.
+Node implementations SHALL own Loop pass and Iteration item lifecycle publication. The runtime SHALL propagate existing Run and Body observation contexts and scoped invocation identities during node execution.
 
 #### Scenario: Preserve built-in observation protocols
 
 - **WHEN** an observed Loop pass or Iteration item executes a prepared body
-- **THEN** the node package adapter emits the existing protocol events through the runtime hooks
-
-#### Scenario: Observe a custom scope without a run observer
-
-- **WHEN** a third-party provider installs a scope observer without a run observer
-- **THEN** the observer receives the scope identity, index, visited steps, exit state, and failure outcome
+- **THEN** node lifecycle publication and runtime context propagation preserve the existing protocol events
