@@ -245,15 +245,17 @@ pub fn persist_prepared_artifacts(
     input_plan: String,
     artifacts: crate::GeneratedWorkflowArtifacts,
 ) -> Result<bool, crate::StateError> {
-    let source = project.join("src/workflow.rs");
-    let changed = fs::read(&source)
-        .map(|bytes| bytes != artifacts.rust_source.as_bytes())
-        .unwrap_or(true);
-    crate::state::write_if_changed(&source, artifacts.rust_source.as_bytes())?;
-    crate::state::write_if_changed(
-        &project.join("workflow-plan.json"),
-        artifacts.plan_json.as_bytes(),
-    )?;
+    let mut changed = false;
+    for (name, value) in [
+        ("src/workflow.rs", &artifacts.rust_source),
+        ("workflow-plan.json", &artifacts.plan_json),
+    ] {
+        let path = project.join(name);
+        changed |= fs::read(&path)
+            .map(|bytes| bytes != value.as_bytes())
+            .unwrap_or(true);
+        crate::state::write_if_changed(&path, value.as_bytes())?;
+    }
     let prepared = PreparedArtifacts {
         input_plan,
         artifacts,
