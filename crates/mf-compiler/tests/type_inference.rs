@@ -213,7 +213,7 @@ struct InvalidMetadataNode;
 impl Node for InvalidMetadataNode {
     fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
         INVALID_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
-        Ok(Outputs::from([("value".into(), json!("wrong"))]))
+        Ok(Outputs::from([("value".into(), json!("wrong").into())]))
     }
 
     fn output_derivations(&self) -> Vec<OutputDerivation> {

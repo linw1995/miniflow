@@ -58,7 +58,11 @@ impl Node for ContextNode {
         }
         let mut result = NodeResult::default();
         if let Some(values) = self.0["outputs"].as_object() {
-            result.outputs.extend(values.clone());
+            result.outputs.extend(
+                values
+                    .iter()
+                    .map(|(name, value)| (name.clone(), value.clone().into())),
+            );
         }
         if let Some(skips) = self.0["skipped"].as_array() {
             result

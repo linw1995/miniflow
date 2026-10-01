@@ -15,7 +15,7 @@ impl Node for Source {
         }
         Ok(Outputs::from([(
             "value".into(),
-            json!(if cfg!(feature = "double") { 14 } else { 7 }),
+            json!(if cfg!(feature = "double") { 14 } else { 7 }).into(),
         )]))
     }
 }
