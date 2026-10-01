@@ -193,7 +193,7 @@ impl ValueRef {
         update(self, &pointer_segments(pointer)?, value.into())
     }
 
-    /// Fingerprints accelerate snapshot interning; equality still resolves collisions.
+    /// Fingerprints accelerate content comparisons; equality still resolves collisions.
     pub fn fingerprint(&self) -> u64 {
         *self.0.fingerprint.get_or_init(|| {
             let mut state = std::collections::hash_map::DefaultHasher::new();
@@ -426,13 +426,6 @@ impl PortValues {
     pub fn new() -> Self {
         Self::default()
     }
-    pub fn snapshot(&self) -> ValueRef {
-        ValueRef::object(
-            self.0
-                .iter()
-                .map(|(key, value)| (Arc::from(key.as_str()), value.clone())),
-        )
-    }
     pub fn insert(&mut self, key: String, value: impl Into<ValueRef>) -> Option<ValueRef> {
         self.0.insert(key, value.into())
     }
@@ -593,6 +586,5 @@ mod tests {
         let ports = PortValues::from([("value".into(), json!({"data": [1, 2, 3]}))]);
         let clone = ports.clone();
         assert!(ports["value"].ptr_eq(&clone["value"]));
-        assert!(ports.snapshot()["value"].ptr_eq(&ports["value"]));
     }
 }
