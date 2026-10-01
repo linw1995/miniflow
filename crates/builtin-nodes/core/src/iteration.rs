@@ -4,10 +4,7 @@ use mf_runtime::{
     Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, NodeResult, Outputs,
     PortSpec, PreparedSubgraph, ValueType, deserialize_config,
 };
-use mf_telemetry::{
-    event::NodeIdentity,
-    observation::{BodyObservation, ItemObservation, IterationObservation},
-};
+use mf_telemetry::observation::{ItemObservation, IterationObservation};
 use std::{
     collections::{BTreeMap, VecDeque},
     ops::ControlFlow,
@@ -34,44 +31,12 @@ impl Node for IterationDeclaration {
         _: Value,
         body: PreparedSubgraph,
     ) -> Result<Box<dyn Node>, NodeBuildError> {
-        let result_type = body
-            .outputs
-            .iter()
-            .find(|port| port.name == "result" && port.required)
-            .ok_or_else(|| NodeBuildError::InvalidSubgraph {
-                message: "iteration body must declare a required result output".into(),
-            })?
-            .value_type
-            .clone();
-        let nodes = body.nodes.clone();
-        let scope_id = id.to_owned();
         Ok(Box::new(IterationNode::new(
             id,
-            nodes,
             self.mode,
             self.on_error,
-            result_type,
-            move |item, index, observation| {
-                let mut state = ExecutionContext::for_body(observation);
-                let scope = ExecutionScope::new(
-                    &scope_id,
-                    mf_runtime::ITERATION_INPUT_ID,
-                    index,
-                    Outputs::from([("items".into(), item)]),
-                    BTreeMap::from([("items".into(), ValueType::Any)]),
-                )?;
-                let (mut outputs, _, _) = state
-                    .run_scope(scope, |state| body.execute_in_context(state))
-                    .map_err(|source| NodeExecutionError::PluginFailed {
-                        source: Box::new(source),
-                    })?;
-                outputs
-                    .remove("result")
-                    .ok_or_else(|| NodeExecutionError::ExecutionFailed {
-                        message: "iteration body did not produce `result`".into(),
-                    })
-            },
-        )))
+            body,
+        )?))
     }
 
     fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
@@ -98,40 +63,37 @@ inventory::submit! {
     }
 }
 
-type IterationBody = dyn Fn(Value, usize, Option<BodyObservation>) -> Result<Value, NodeExecutionError>
-    + Send
-    + Sync
-    + 'static;
-
 pub struct IterationNode {
     id: String,
-    body_nodes: Vec<NodeIdentity>,
     mode: IterationMode,
     on_error: IterationErrorPolicy,
     result_type: ValueType,
-    body: Box<IterationBody>,
+    body: PreparedSubgraph,
 }
 
 impl IterationNode {
     pub fn new(
         id: impl Into<String>,
-        body_nodes: Vec<NodeIdentity>,
         mode: IterationMode,
         on_error: IterationErrorPolicy,
-        result_type: ValueType,
-        body: impl Fn(Value, usize, Option<BodyObservation>) -> Result<Value, NodeExecutionError>
-        + Send
-        + Sync
-        + 'static,
-    ) -> Self {
-        Self {
+        body: PreparedSubgraph,
+    ) -> Result<Self, NodeBuildError> {
+        let result_type = body
+            .outputs
+            .iter()
+            .find(|port| port.name == "result" && port.required)
+            .ok_or_else(|| NodeBuildError::InvalidSubgraph {
+                message: "iteration body must declare a required result output".into(),
+            })?
+            .value_type
+            .clone();
+        Ok(Self {
             id: id.into(),
-            body_nodes,
             mode,
             on_error,
             result_type,
-            body: Box::new(body),
-        }
+            body,
+        })
     }
 
     pub fn ports(&self) -> NodePorts {
@@ -159,7 +121,26 @@ impl IterationNode {
         let mut step = observation.and_then(|observation| observation.begin_item(index));
         let _context = step.as_ref().map(ItemObservation::enter);
         let body_observation = step.as_ref().map(ItemObservation::body_observation);
-        let result = (self.body)(item, index, body_observation);
+        let mut state = ExecutionContext::for_body(body_observation);
+        let result = ExecutionScope::new(
+            &self.id,
+            mf_runtime::ITERATION_INPUT_ID,
+            index,
+            Outputs::from([("items".into(), item)]),
+            BTreeMap::from([("items".into(), ValueType::Any)]),
+        )
+        .and_then(|scope| {
+            let (mut outputs, _, _) = state
+                .run_scope(scope, |state| self.body.execute_in_context(state))
+                .map_err(|source| NodeExecutionError::PluginFailed {
+                    source: Box::new(source),
+                })?;
+            outputs
+                .remove("result")
+                .ok_or_else(|| NodeExecutionError::ExecutionFailed {
+                    message: "iteration body did not produce `result`".into(),
+                })
+        });
         if let Some(step) = step.as_mut() {
             let failure = result.as_ref().err().map(ToString::to_string);
             step.finish(failure.as_deref());
@@ -272,7 +253,7 @@ impl Node for IterationNode {
         self.execute_items(
             inputs,
             ctx.observation().and_then(|run| {
-                run.iteration_observation(&self.id, &ctx.scope_path(), self.body_nodes.clone())
+                run.iteration_observation(&self.id, &ctx.scope_path(), self.body.nodes.clone())
             }),
         )
         .map(Into::into)
@@ -282,7 +263,7 @@ impl Node for IterationNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mf_runtime::NodeRegistry;
+    use mf_runtime::{NodeRegistry, execute_node_in_context};
     use serde_json::json;
     use std::sync::{Arc, atomic::AtomicUsize};
     use std::time::Duration;
@@ -293,22 +274,35 @@ mod tests {
         let peak = Arc::new(AtomicUsize::new(0));
         let node = IterationNode::new(
             "iteration",
-            Vec::new(),
             IterationMode::Parallel,
             IterationErrorPolicy::Terminate,
-            ValueType::Int64,
-            {
-                let active = Arc::clone(&active);
-                let peak = Arc::clone(&peak);
-                move |item, _, _| {
-                    let concurrent = active.fetch_add(1, Ordering::SeqCst) + 1;
-                    peak.fetch_max(concurrent, Ordering::SeqCst);
-                    std::thread::sleep(Duration::from_millis(2));
-                    active.fetch_sub(1, Ordering::SeqCst);
-                    Ok(item)
-                }
-            },
-        );
+            PreparedSubgraph::new(
+                Vec::new(),
+                vec![PortSpec::new("result", ValueType::Int64, true)],
+                {
+                    let active = Arc::clone(&active);
+                    let peak = Arc::clone(&peak);
+                    let source = mf_runtime::iteration_input_flow_node();
+                    move |state| {
+                        execute_node_in_context(&source, &[], state)?;
+                        let item = state
+                            .select_output(
+                                "result",
+                                mf_runtime::ITERATION_INPUT_ID,
+                                "items",
+                                false,
+                            )?
+                            .unwrap();
+                        let concurrent = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(concurrent, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(2));
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        Ok(Outputs::from([("result".into(), item)]))
+                    }
+                },
+            ),
+        )
+        .unwrap();
         let items: Vec<_> = (0..64).map(Value::from).collect();
         let output = node
             .execute(Inputs::from([(
