@@ -261,8 +261,16 @@ fn generate_scope(
         let node_ident = format_ident!("node_{scope}_{index}");
         let id_lit = LitStr::new(id.as_str(), Span::call_site());
         let kind_lit = LitStr::new(&node.kind, Span::call_site());
-        let bindings = dependency_tokens(incoming.get(id.as_str()).map_or(&[], Vec::as_slice));
-        retention_steps.push(quote! { (&#node_ident, &[#(#bindings),*][..]) });
+        let dependencies = incoming.get(id.as_str()).map_or(&[][..], Vec::as_slice);
+        let bindings = dependency_tokens(dependencies);
+        let mut ordered = dependencies.to_vec();
+        ordered.sort();
+        let ordered = dependency_tokens(&ordered);
+        let dependencies_ident = format_ident!("DEPENDENCIES_{}_{}", scope.to_uppercase(), index);
+        preparations.push(quote! {
+            const #dependencies_ident: &[mf_runtime::ExecutionDependency<'static>] = &[#(#ordered),*];
+        });
+        retention_steps.push(quote! { (&#node_ident, #dependencies_ident) });
         if matches!(node.kind.as_str(), crate::LOOP_KIND | ITERATION_KIND) {
             preparations.push(subgraph_preparation(
                 definition,
@@ -280,7 +288,7 @@ fn generate_scope(
                 }
             });
             statements.push(quote! {
-                mf_runtime::execute_node_in_context(&#node_ident, &[#(#bindings),*], state)?;
+                mf_runtime::execute_node_in_context(&#node_ident, #dependencies_ident, state)?;
                 state.release_outputs(#retention_ident.after_step(#index));
                 #exit_check
             });
@@ -369,7 +377,7 @@ fn generate_scope(
             }
         });
         statements.push(quote! {
-            mf_runtime::execute_node_in_context(&#node_ident, &[#(#bindings),*], state)?;
+            mf_runtime::execute_node_in_context(&#node_ident, #dependencies_ident, state)?;
             state.release_outputs(#retention_ident.after_step(#index));
             #exit_check
         });

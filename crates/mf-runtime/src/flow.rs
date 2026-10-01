@@ -182,11 +182,28 @@ pub enum FlowBuildError {
 pub struct Flow {
     nodes: Vec<FlowNode>,
     connections: Vec<FlowConnection>,
-    incoming_connections: BTreeMap<NodeId, Vec<usize>>,
+    dependencies: Vec<Vec<PreparedDependency>>,
     execution_order: Vec<NodeId>,
     outputs: Vec<FlowOutput>,
     controls: Vec<crate::ControlEdgeDefinition>,
     retention: crate::OutputRetentionPlan,
+}
+
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PreparedDependency {
+    input: Option<String>,
+    source_node: String,
+    source_output: String,
+}
+
+impl PreparedDependency {
+    fn borrowed(&self) -> crate::ExecutionDependency<'_> {
+        crate::ExecutionDependency {
+            input: self.input.as_deref(),
+            source_node: &self.source_node,
+            source_output: &self.source_output,
+        }
+    }
 }
 
 impl Flow {
@@ -236,7 +253,6 @@ impl Flow {
         }
 
         let mut resolved_connections = Vec::with_capacity(connections.len());
-        let mut incoming_connections: BTreeMap<NodeId, Vec<usize>> = BTreeMap::new();
         let mut connected_inputs = BTreeSet::new();
         for connection in connections {
             let Some(&from_node) = definition_indices.get(&connection.from_node) else {
@@ -274,8 +290,6 @@ impl Flow {
                 .fail();
             }
 
-            let index = resolved_connections.len();
-            incoming_connections.entry(to_node).or_default().push(index);
             resolved_connections.push(FlowConnection::new(
                 from_node,
                 connection.from_output,
@@ -308,13 +322,13 @@ impl Flow {
         let mut flow = Self {
             nodes,
             connections: resolved_connections,
-            incoming_connections,
+            dependencies: Vec::new(),
             execution_order: resolved_order,
             outputs: resolved_outputs,
             controls: Vec::new(),
             retention: crate::OutputRetentionPlan::default(),
         };
-        flow.prepare_retention();
+        flow.prepare_execution();
         Ok(flow)
     }
 
@@ -347,11 +361,11 @@ impl Flow {
             }
         }
         self.controls = controls;
-        self.prepare_retention();
+        self.prepare_execution();
         Ok(self)
     }
 
-    fn prepare_retention(&mut self) {
+    fn prepare_execution(&mut self) {
         let positions: BTreeMap<_, _> = self
             .execution_order
             .iter()
@@ -362,24 +376,38 @@ impl Flow {
         for edge in &self.connections {
             let source = &self.nodes[edge.from_node.index()];
             let target = &self.nodes[edge.to_node.index()];
-            incoming[positions[target.definition_id.as_str()]].push(crate::ExecutionDependency {
-                input: Some(&edge.to_input),
-                source_node: source.definition_id.as_str(),
-                source_output: &edge.from_output,
+            incoming[positions[target.definition_id.as_str()]].push(PreparedDependency {
+                input: Some(edge.to_input.clone()),
+                source_node: source.definition_id.to_string(),
+                source_output: edge.from_output.clone(),
             });
         }
         for edge in &self.controls {
-            incoming[positions[edge.to_node.as_str()]].push(crate::ExecutionDependency {
+            incoming[positions[edge.to_node.as_str()]].push(PreparedDependency {
                 input: None,
-                source_node: edge.from_node.as_str(),
-                source_output: &edge.from_output,
+                source_node: edge.from_node.to_string(),
+                source_output: edge.from_output.clone(),
             });
         }
+        for dependencies in &mut incoming {
+            dependencies.sort();
+        }
+        self.dependencies = incoming;
+        let borrowed: Vec<Vec<_>> = self
+            .dependencies
+            .iter()
+            .map(|dependencies| {
+                dependencies
+                    .iter()
+                    .map(PreparedDependency::borrowed)
+                    .collect()
+            })
+            .collect();
         let steps: Vec<_> = self
             .execution_order
             .iter()
             .enumerate()
-            .map(|(position, id)| (&self.nodes[id.index()], incoming[position].as_slice()))
+            .map(|(position, id)| (&self.nodes[id.index()], borrowed[position].as_slice()))
             .collect();
         let selected: Vec<_> = self
             .outputs
@@ -437,31 +465,13 @@ impl Flow {
     ) -> Result<FlowOutputs, crate::WorkflowRunError> {
         for (position, node_id) in self.execution_order.iter().enumerate() {
             let node = &self.nodes[node_id.index()];
-            let mut dependencies = Vec::new();
-            if let Some(incoming) = self.incoming_connections.get(node_id) {
-                for index in incoming {
-                    let connection = &self.connections[*index];
-                    dependencies.push(crate::ExecutionDependency {
-                        input: Some(&connection.to_input),
-                        source_node: self.nodes[connection.from_node.index()]
-                            .definition_id
-                            .as_str(),
-                        source_output: &connection.from_output,
-                    });
-                }
-            }
-            for edge in self
-                .controls
-                .iter()
-                .filter(|edge| edge.to_node == node.definition_id)
-            {
-                dependencies.push(crate::ExecutionDependency {
-                    input: None,
-                    source_node: edge.from_node.as_str(),
-                    source_output: &edge.from_output,
-                });
-            }
-            crate::execute_node_in_context(node, &dependencies, state)?;
+            crate::context::execute_ordered_node_in_context(
+                node,
+                self.dependencies[position]
+                    .iter()
+                    .map(PreparedDependency::borrowed),
+                state,
+            )?;
             state.release_outputs(self.retention.after_step(position));
             if state.scope_exit_requested() {
                 break;
@@ -601,6 +611,61 @@ mod tests {
             from_output: from_output.to_owned(),
             to_node: to_node.into(),
             to_input: to_input.to_owned(),
+        }
+    }
+
+    #[test]
+    fn prepared_controls_keep_error_order_and_refresh_when_replaced() {
+        for reverse in [false, true] {
+            let source = |id| {
+                FlowNode::new(
+                    id,
+                    Box::new(EmptyNode),
+                    crate::NodePorts {
+                        inputs: Vec::new(),
+                        outputs: vec![crate::PortSpec::new("value", crate::ValueType::Any, false)],
+                    },
+                )
+            };
+            let trace = Arc::new(Mutex::new(Vec::new()));
+            let mut controls = vec![
+                crate::ControlEdgeDefinition {
+                    from_node: "b".into(),
+                    from_output: "value".into(),
+                    to_node: "target".into(),
+                },
+                crate::ControlEdgeDefinition {
+                    from_node: "a".into(),
+                    from_output: "value".into(),
+                    to_node: "target".into(),
+                },
+            ];
+            if reverse {
+                controls.reverse();
+            }
+            let flow = Flow::new(
+                vec![
+                    test_node("target", Action::Fail, &trace),
+                    source("a"),
+                    source("b"),
+                ],
+                Vec::new(),
+                ["b", "a", "target"].into_iter().map(Into::into).collect(),
+                Vec::new(),
+            )
+            .unwrap()
+            .with_control_edges(controls)
+            .unwrap();
+            for _ in 0..2 {
+                assert!(flow.execute().unwrap_err().to_string().contains("a.value"));
+            }
+            let flow = flow.with_control_edges(Vec::new()).unwrap();
+            assert!(
+                flow.execute()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("deliberate failure")
+            );
         }
     }
 
