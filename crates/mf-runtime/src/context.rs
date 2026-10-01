@@ -476,11 +476,27 @@ pub fn execute_node_in_context(
     dependencies: &[ExecutionDependency<'_>],
     ctx: &mut ExecutionContext,
 ) -> Result<(), WorkflowRunError> {
+    let dependencies = if dependencies.is_sorted() {
+        std::borrow::Cow::Borrowed(dependencies)
+    } else {
+        let mut ordered = dependencies.to_vec();
+        ordered.sort();
+        std::borrow::Cow::Owned(ordered)
+    };
+    execute_ordered_node_in_context(node, dependencies.iter().copied(), ctx)
+}
+
+pub fn execute_ordered_node_in_context<'a>(
+    node: &FlowNode,
+    dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
+    ctx: &mut ExecutionContext,
+) -> Result<(), WorkflowRunError> {
     let id = node.definition_id.as_str();
     ctx.reserve_step(id)?;
     ctx.pending_loop_write = None;
-    let path = ctx.scope_path();
+    let path = ctx.observation.as_ref().map(|_| ctx.scope_path());
     let mut step = if let Some(run) = ctx.observation.as_mut() {
+        let path = path.expect("observation has a scope path");
         if path.is_empty() {
             run.begin_node(id).map(StepObservation::Root)
         } else {
@@ -500,8 +516,6 @@ pub fn execute_node_in_context(
         Some(StepObservation::Body(step)) => Some(step.enter()),
         _ => None,
     };
-    let mut dependencies = dependencies.to_vec();
-    dependencies.sort();
     let mut inputs = Inputs::new();
     let mut skipped = false;
     let mut causes = BTreeSet::new();
