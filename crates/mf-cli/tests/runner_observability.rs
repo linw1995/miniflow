@@ -198,7 +198,7 @@ fn generated_loop_runner_exports_complete_per_pass_observations() {
                         {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "count"}}
                     ],
                     "edges": [
-                        {"from_node": "$loop", "from_output": "count", "to_node": "increment", "to_input": "count"},
+                        {"from_node": "%loop", "from_output": "count", "to_node": "increment", "to_input": "count"},
                         {"from_node": "increment", "from_output": "next", "to_node": "assign", "to_input": "value"}
                     ]
                 }

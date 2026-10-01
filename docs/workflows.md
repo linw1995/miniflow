@@ -49,6 +49,11 @@ Paths resolve relative to the canonical definition's directory, including when t
 
 Definitions with version `2026-09-24` are rejected with a migration diagnostic. Change the version to `2026-09-26` and add `dependencies` declaring the packages that provide every node kind, including built-ins. An empty object is valid for definitions that require no plugins. Node configuration, connections, and selected outputs retain their meanings.
 
+Built-in body sources use the `%` prefix: `%loop` for Loop variables and `%iteration` for Iteration
+items. In earlier definitions, replace `$loop` with `%loop` and `@iteration` with `%iteration` in
+edge endpoints, body result selections, and context output references before recompiling. For
+example, `$loop.count` becomes `%loop.count`, and `@iteration.items` becomes `%iteration.items`.
+
 ## Built-in nodes
 
 Declare the package for each built-in kind you use. `mfn-core` provides the basic nodes; `mfn-code` provides the optional CEL Code node. To migrate older definitions, replace `mfn-constant` and `mfn-identity` dependencies with `mfn-core`, retaining node kinds and edges, then rebuild without `--locked` to update the adjacent lock. Subsequent builds can use `--locked` again.
@@ -108,15 +113,15 @@ when compiling outside the checkout.
 The [Loop example](../examples/loop.json) returns `{"count":3}`. It declares `mfn-core` for both its
 initial constant and the `workflow.loop` declaration, and `mfn-code` for the body transformation.
 The compiler replaces the Loop declaration with an engine-prepared executor. `workflow.loop_assign`,
-`workflow.exit_loop`, and the synthetic `$loop` source remain engine controls that plugins cannot
+`workflow.exit_loop`, and the synthetic `%loop` source remain engine controls that plugins cannot
 register. The outer graph and every Loop body remain acyclic. The engine repeats a body's fixed
 execution order instead of adding a graph back edge.
 
 A Loop node has a typed `loop` field with required `max_iterations`, a nonempty `variables` list, an
 optional `until` condition, and a `body` containing ordinary `nodes`, `edges`, and `control_edges`.
 Each variable creates a required Loop input for its initial value and a required Loop output for its
-final value. The body reads current values and a zero-based `index` through the synthetic `$loop`
-node. Every body node ID is local to that body; `$loop` and `index` are reserved there. Cross-scope
+final value. The body reads current values and a zero-based `index` through the synthetic `%loop`
+node. Every body node ID is local to that body; `%loop` and `index` are reserved there. Cross-scope
 edges and implicit reads of outer outputs are rejected. Import an outer value through a Loop input,
 including when initializing a nested Loop.
 
@@ -136,7 +141,7 @@ including when initializing a nested Loop.
         {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "count"}}
       ],
       "edges": [
-        {"from_node": "$loop", "from_output": "count", "to_node": "increment", "to_input": "count"},
+        {"from_node": "%loop", "from_output": "count", "to_node": "increment", "to_input": "count"},
         {"from_node": "increment", "from_output": "next", "to_node": "assign", "to_input": "value"}
       ]
     }
@@ -208,7 +213,7 @@ output. An empty input returns an empty array after the body has passed validati
     "body": {
       "nodes": [{ "id": "copy", "kind": "builtin.identity" }],
       "edges": [
-        { "from_node": "@iteration", "from_output": "items", "to_node": "copy", "to_input": "input" }
+        { "from_node": "%iteration", "from_output": "items", "to_node": "copy", "to_input": "input" }
       ],
       "result": { "node": "copy", "port": "value" }
     }
@@ -216,7 +221,7 @@ output. An empty input returns an empty array after the body has passed validati
 }
 ```
 
-The enclosing workflow must declare `mfn-core` for both `builtin.iteration` and `builtin.identity`. `@iteration` is a reserved body
+The enclosing workflow must declare `mfn-core` for both `builtin.iteration` and `builtin.identity`. `%iteration` is a reserved body
 source with outputs `items` (the current JSON element) and `index` (a zero-based signed integer). Body
 nodes, data edges, and optional `control_edges` use the ordinary workflow graph rules. The required `result` selects
 one body port for each item. Body node IDs belong to the body scope; outer edges cannot address them. All body nodes
@@ -225,7 +230,7 @@ are constructed and validated before the runner is installed, including when the
 `mode` defaults to `sequential`. `parallel` uses at most ten workers, keeps results in input order, and is suitable
 when body operations are independent. Nodes in the body may be invoked repeatedly and concurrently, so a plugin with
 mutable internal state must synchronize it or use sequential mode. Each invocation gets fresh context values for
-`@iteration.items` and `@iteration.index`; body outputs from another item are never visible.
+`%iteration.items` and `%iteration.index`; body outputs from another item are never visible.
 
 `on_error` defaults to `terminate`. With `terminate`, the first failing item stops sequential execution and fails the
 iteration without publishing a partial result. Parallel execution stops scheduling new items after a failure, lets

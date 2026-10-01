@@ -11,7 +11,7 @@ Execute bounded, stateful workflow loops over validated DAG bodies, with typed v
 `mfn-core` SHALL register `workflow.loop`. The system SHALL accept Loop containers only in the `2026-09-29` workflow definition version. A Loop
 SHALL declare a nonempty typed variable set, a body DAG, and a maximum pass count from 1 through
 1000. Each variable SHALL be a required Loop input and required Loop output of the declared type.
-The body SHALL have a synthetic `$loop` source exposing current variable values and a zero-based
+The body SHALL have a synthetic `%loop` source exposing current variable values and a zero-based
 `index`. A Loop container SHALL resolve a `workflow.loop` declaration from the selected node
 packages; the compiler SHALL bind the engine-prepared body to that registered implementation.
 The node package SHALL own the sequential driver, state progression, termination conditions, and
@@ -37,10 +37,10 @@ plugin registrations. Earlier definition versions SHALL retain their existing be
 ### Requirement: Validate every loop body as a local DAG
 
 The planner SHALL validate outer and body graphs independently. Body data and control edges SHALL
-stay in their scope, except for reads from the synthetic `$loop` source. Ordinary body nodes SHALL
+stay in their scope, except for reads from the synthetic `%loop` source. Ordinary body nodes SHALL
 resolve from declared dependencies and undergo the same configuration, port, type,
 context-reference, and required-input validation as top-level nodes. Context references SHALL
-resolve only to same-scope explicit ancestors or `$loop`. Nested Loops SHALL be supported to depth
+resolve only to same-scope explicit ancestors or `%loop`. Nested Loops SHALL be supported to depth
 four; assignment and exit steps SHALL apply to the nearest enclosing Loop and SHALL be invalid
 outside a Loop.
 

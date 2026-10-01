@@ -135,8 +135,8 @@ fn loop_graph() -> WorkflowDescription {
             path: vec!["repeat".into()],
             nodes: vec![
                 NodeDescription {
-                    id: "$loop".into(),
-                    kind: "$loop".into(),
+                    id: "%loop".into(),
+                    kind: "%loop".into(),
                 },
                 NodeDescription {
                     id: "step".into(),
@@ -144,13 +144,13 @@ fn loop_graph() -> WorkflowDescription {
                 },
             ],
             data_edges: vec![DataEdge {
-                from_node: "$loop".into(),
+                from_node: "%loop".into(),
                 from_output: "count".into(),
                 to_node: "step".into(),
                 to_input: "input".into(),
             }],
             control_edges: vec![],
-            execution_order: vec!["$loop".into(), "step".into()],
+            execution_order: vec!["%loop".into(), "step".into()],
         }],
     }
 }
@@ -191,7 +191,7 @@ fn complete_loop_events() -> Vec<LifecycleEvent> {
         event(
             4,
             Event::NodeStarted {
-                node: body_node("$loop", "$loop"),
+                node: body_node("%loop", "%loop"),
                 position: count(0),
                 elapsed_ns: count(3),
             },
@@ -199,7 +199,7 @@ fn complete_loop_events() -> Vec<LifecycleEvent> {
         event(
             5,
             Event::NodeFinished {
-                node: body_node("$loop", "$loop"),
+                node: body_node("%loop", "%loop"),
                 position: count(0),
                 elapsed_ns: count(4),
                 duration_ns: Some(count(1)),
@@ -494,7 +494,7 @@ fn live_body_start_shows_running_in_the_active_pass() {
     let snapshot = state.snapshot();
     assert_eq!(snapshot.loop_overviews[0].active_index, Some(count(2)));
     let nodes =
-        snapshot.loop_passes[0].display_nodes([("$loop", "$loop"), ("step", "fixture.sink")]);
+        snapshot.loop_passes[0].display_nodes([("%loop", "%loop"), ("step", "fixture.sink")]);
     assert_eq!(nodes[1].status, NodeStatus::Running);
     assert_eq!(nodes[1].started_elapsed_ns, Some(count(3)));
 }
@@ -535,7 +535,7 @@ fn early_exit_marks_only_the_unvisited_body_suffix_not_run() {
     }
     let snapshot = state.snapshot();
     let nodes =
-        snapshot.loop_passes[0].display_nodes([("$loop", "$loop"), ("step", "fixture.sink")]);
+        snapshot.loop_passes[0].display_nodes([("%loop", "%loop"), ("step", "fixture.sink")]);
     assert_eq!(nodes[0].status, NodeStatus::Pending);
     assert_eq!(nodes[1].status, NodeStatus::NotRun);
     assert_eq!(snapshot.total_loop_passes, 1);

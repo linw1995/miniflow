@@ -80,12 +80,15 @@ Each invocation has a fresh canonical lowercase UUID v4 `RunId`, independent of 
 
 Description version `2026-09-27` contains `workflow_id`, `nodes`, `data_edges`, `control_edges`, and
 `execution_order`. Version `2026-09-29` adds `loop_bodies`: each entry has a static path of
-enclosing Loop IDs and a local graph with the same node and edge metadata. The synthetic `$loop`
+enclosing Loop IDs and a local graph with the same node and edge metadata. The synthetic `%loop`
 source appears in its body graph. Nodes contain `id` and `kind`; edge endpoints carry connected port
 names. Description mode excludes Loop configuration, variable values, predicates, and ordinary node
 configuration. The full effective port table is unavailable, so unconnected ports, types, and
 required flags remain unknown to the TUI. Compile validation still checks those contracts by
 constructing plugin instances.
+
+New runners name the synthetic Loop source `%loop`. Description readers also accept `$loop` from
+previously compiled runners, preserving its original node IDs and workflow identity.
 
 `WorkflowDescription::from_json` rejects unsupported versions, oversized input (16 MiB), duplicate IDs, incomplete
 execution order, missing endpoints, empty edge port names, backward edges, and duplicate input/control bindings.

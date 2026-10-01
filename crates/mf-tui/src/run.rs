@@ -959,12 +959,12 @@ mod tests {
             loop_bodies: vec![LoopBodyDescription {
                 path: vec!["repeat".into()],
                 nodes: vec![NodeDescription {
-                    id: "$loop".into(),
-                    kind: "$loop".into(),
+                    id: "%loop".into(),
+                    kind: "%loop".into(),
                 }],
                 data_edges: vec![],
                 control_edges: vec![],
-                execution_order: vec!["$loop".into()],
+                execution_order: vec!["%loop".into()],
             }],
         };
         let root = GraphLayout::new(&description).unwrap();
@@ -1017,7 +1017,7 @@ mod tests {
         let mut view = ViewState::default();
         view.handle_key(KeyCode::Char('l'), &snapshot, &root, &bodies);
         assert_eq!(view.path, ["repeat"]);
-        assert_eq!(view.layout(&root, &bodies).nodes()[0].id, "$loop");
+        assert_eq!(view.layout(&root, &bodies).nodes()[0].id, "%loop");
         assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 1);
         view.handle_key(KeyCode::Char('['), &snapshot, &root, &bodies);
         assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 0);

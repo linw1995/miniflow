@@ -123,7 +123,7 @@ fn validate_node(
         }
         LOOP_SOURCE_ID => Err(invalid(
             &node_path,
-            "`$loop` is reserved for the body source",
+            "`%loop` is reserved for the body source",
         )),
         _ if node.loop_definition.is_some() => Err(invalid(
             &node_path,
