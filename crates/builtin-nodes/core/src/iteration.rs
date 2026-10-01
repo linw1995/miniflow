@@ -1,4 +1,3 @@
-use crate::loop_declaration::run_loop;
 use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, IterationConfig, IterationErrorPolicy, IterationMode,
     Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, NodeResult, Outputs,
@@ -7,7 +6,6 @@ use mf_runtime::{
 use mf_telemetry::observation::{ItemObservation, IterationObservation};
 use std::{
     collections::{BTreeMap, VecDeque},
-    ops::ControlFlow,
     sync::{
         Mutex,
         atomic::{AtomicBool, Ordering},
@@ -163,18 +161,14 @@ impl IterationNode {
         let mut results = Vec::with_capacity(items.len());
         match self.mode {
             IterationMode::Sequential => {
-                run_loop(items.into_iter().enumerate(), |(index, item)| {
+                for (index, item) in items.into_iter().enumerate() {
                     results.push(self.run_item(item, index, observation.as_ref()));
-                    Ok(
-                        if matches!(self.on_error, IterationErrorPolicy::Terminate)
-                            && results.last().is_some_and(Result::is_err)
-                        {
-                            ControlFlow::Break(())
-                        } else {
-                            ControlFlow::Continue(())
-                        },
-                    )
-                })?;
+                    if matches!(self.on_error, IterationErrorPolicy::Terminate)
+                        && results.last().is_some_and(Result::is_err)
+                    {
+                        break;
+                    }
+                }
             }
             IterationMode::Parallel => {
                 let worker_count = items.len().min(MAX_PARALLEL_ITEMS);

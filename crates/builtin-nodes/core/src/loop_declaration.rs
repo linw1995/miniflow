@@ -10,7 +10,7 @@ use mf_telemetry::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use std::{cmp::Ordering, collections::BTreeMap, ops::ControlFlow};
+use std::{cmp::Ordering, collections::BTreeMap};
 
 pub const KIND: &str = mf_runtime::LOOP_KIND;
 
@@ -92,18 +92,6 @@ mod tests {
     }
 }
 
-pub fn run_loop<T>(
-    steps: impl IntoIterator<Item = T>,
-    mut run: impl FnMut(T) -> Result<ControlFlow<()>, NodeExecutionError>,
-) -> Result<(), NodeExecutionError> {
-    for step in steps {
-        if run(step)?.is_break() {
-            break;
-        }
-    }
-    Ok(())
-}
-
 fn structural_error(message: impl Into<String>) -> NodeExecutionError {
     NodeExecutionError::ExecutionFailed {
         message: message.into(),
@@ -147,7 +135,7 @@ impl Node for LoopNode {
         let mut variables = inputs;
         let mut pass_count = 0;
         let mut reason = LoopStopReason::Maximum;
-        run_loop(0..usize::from(self.max_iterations), |index| {
+        for index in 0..usize::from(self.max_iterations) {
             let scope = ExecutionScope::new(
                 &self.id,
                 mf_runtime::LOOP_SOURCE_ID,
@@ -183,16 +171,15 @@ impl Node for LoopNode {
             pass_count = index + 1;
             if exited {
                 reason = LoopStopReason::Exit;
-                return Ok(ControlFlow::Break(()));
+                break;
             }
             if let Some(condition) = &self.until
                 && condition_matches(condition, &variables)?
             {
                 reason = LoopStopReason::Condition;
-                return Ok(ControlFlow::Break(()));
+                break;
             }
-            Ok(ControlFlow::Continue(()))
-        })?;
+        }
         Ok(NodeResult {
             outputs: variables,
             loop_summary: Some(LoopSummary {
