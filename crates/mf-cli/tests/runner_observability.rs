@@ -67,6 +67,7 @@ double = []
 [dependencies]
 mf-runtime = {{ path = {runtime}, version = "0.1.0" }}
 inventory = "0.3.24"
+serde = {{ version = "1.0.229", features = ["derive"] }}
 serde_json = "1.0.151"
 "#
         ),
