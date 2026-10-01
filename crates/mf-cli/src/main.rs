@@ -1,36 +1,67 @@
+use clap::{Args, Parser, Subcommand};
 use mf_compiler::{
     CompileRequest, PipelineError, RunnerOptions, SupportPackages, compile_project_with_options,
 };
 use snafu::{ResultExt, Snafu};
+#[cfg(feature = "development-support")]
 use std::env;
-use std::ffi::{OsStr, OsString};
 use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "Usage: mf compile <definition> --output <path> [--locked] [--build-dir <path>] [--no-telemetry]\n       mf run <executable> --tui";
+#[derive(Debug, Parser)]
+#[command(name = "mf", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Compile a workflow definition into a native executable.
+    Compile(CompileOptions),
+    /// Run a workflow executable with the terminal UI.
+    Run {
+        /// Path to the workflow executable.
+        executable: PathBuf,
+        /// Observe workflow execution in the terminal UI.
+        #[arg(long, required = true)]
+        tui: bool,
+    },
+}
 
 #[derive(Debug, Snafu)]
 enum CliError {
-    #[snafu(display("{message}\n{USAGE}"))]
-    Usage { message: String },
     #[snafu(display("{source}"))]
     Build { source: PipelineError },
     #[cfg(unix)]
     #[snafu(display("{source}"))]
     Run { source: mf_tui::run::RunError },
+    #[cfg(not(unix))]
+    #[snafu(display("TUI execution is supported on Linux and macOS"))]
+    UnsupportedTui,
 }
 
+#[derive(Debug, Args)]
 struct CompileOptions {
+    /// Path to the workflow definition.
     definition: PathBuf,
+    /// Destination for the compiled executable.
+    #[arg(long, value_name = "PATH")]
     output: PathBuf,
+    /// Require the existing workflow dependency lock.
+    #[arg(long)]
     locked: bool,
+    /// Disable telemetry in the generated runner.
+    #[arg(long = "no-telemetry", action = clap::ArgAction::SetFalse)]
     telemetry: bool,
+    /// Directory for reusable generated sources and build artifacts.
+    #[arg(long, value_name = "PATH")]
     build_dir: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
-    match run() {
+    match run(Cli::parse()) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             let _ = writeln!(io::stderr().lock(), "{error}");
@@ -39,95 +70,24 @@ fn main() -> ExitCode {
     }
 }
 
-fn run() -> Result<u8, CliError> {
-    let mut args = env::args_os().skip(1);
-    let Some(command) = args.next() else {
-        return UsageSnafu {
-            message: "missing command",
+fn run(cli: Cli) -> Result<u8, CliError> {
+    match cli.command {
+        Command::Compile(options) => {
+            compile(options)?;
+            Ok(0)
         }
-        .fail();
-    };
-    if command == OsStr::new("--help") || command == OsStr::new("-h") {
-        println!("{USAGE}");
-        return Ok(0);
-    }
-    if command == OsStr::new("run") {
-        let Some(executable) = args.next() else {
-            return UsageSnafu {
-                message: "missing executable path",
+        Command::Run { executable, .. } => {
+            #[cfg(unix)]
+            {
+                mf_tui::run::run_executable(&executable).context(RunSnafu)
             }
-            .fail();
-        };
-        if args.next().as_deref() != Some(OsStr::new("--tui")) || args.next().is_some() {
-            return UsageSnafu {
-                message: "expected exactly --tui after the executable",
+            #[cfg(not(unix))]
+            {
+                let _ = executable;
+                UnsupportedTuiSnafu.fail()
             }
-            .fail();
-        }
-        #[cfg(unix)]
-        return mf_tui::run::run_executable(&PathBuf::from(executable)).context(RunSnafu);
-        #[cfg(not(unix))]
-        return UsageSnafu {
-            message: "TUI execution is supported on Linux and macOS",
-        }
-        .fail();
-    }
-    if command != OsStr::new("compile") {
-        return UsageSnafu {
-            message: "unknown command",
-        }
-        .fail();
-    }
-    let options = parse_compile_args(args)?;
-    compile(options)?;
-    Ok(0)
-}
-
-fn parse_compile_args(
-    mut args: impl Iterator<Item = OsString>,
-) -> Result<CompileOptions, CliError> {
-    let Some(definition) = args.next() else {
-        return UsageSnafu {
-            message: "missing definition path",
-        }
-        .fail();
-    };
-    let mut output = None;
-    let mut locked = false;
-    let mut telemetry = true;
-    let mut build_dir = None;
-    while let Some(option) = args.next() {
-        if option == OsStr::new("--locked") && !locked {
-            locked = true;
-        } else if option == OsStr::new("--no-telemetry") && telemetry {
-            telemetry = false;
-        } else if option == OsStr::new("--build-dir") && build_dir.is_none() {
-            build_dir = Some(PathBuf::from(args.next().ok_or_else(|| {
-                CliError::Usage {
-                    message: "missing build directory".into(),
-                }
-            })?));
-        } else if option == OsStr::new("--output") && output.is_none() {
-            output = Some(args.next().ok_or_else(|| CliError::Usage {
-                message: "missing output path".into(),
-            })?);
-        } else {
-            return UsageSnafu {
-                message: "unexpected or repeated argument",
-            }
-            .fail();
         }
     }
-    let output = output.ok_or_else(|| CliError::Usage {
-        message: "missing --output option".into(),
-    })?;
-    Ok(CompileOptions {
-        definition: definition.into(),
-        output: output.into(),
-        locked,
-        telemetry,
-        build_dir,
-    })
 }
 
 fn compile(options: CompileOptions) -> Result<(), CliError> {
@@ -163,47 +123,122 @@ fn support_packages() -> SupportPackages {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     #[test]
-    fn parses_locked_in_either_option_order() {
-        for args in [
-            ["flow.json", "--locked", "--output", "flow"],
-            ["flow.json", "--output", "flow", "--locked"],
-        ] {
-            let options = parse_compile_args(args.into_iter().map(OsString::from)).unwrap();
-            assert!(options.locked);
-            assert_eq!(options.output, PathBuf::from("flow"));
-        }
-        assert!(
-            parse_compile_args(
-                ["f", "--locked", "--locked"]
-                    .into_iter()
-                    .map(OsString::from)
-            )
-            .is_err()
-        );
+    fn parses_compile_defaults() {
+        let cli = Cli::try_parse_from(["mf", "compile", "flow.json", "--output", "flow"]).unwrap();
+        let Command::Compile(options) = cli.command else {
+            panic!("expected compile command");
+        };
+        assert_eq!(options.definition, PathBuf::from("flow.json"));
+        assert_eq!(options.output, PathBuf::from("flow"));
+        assert!(!options.locked);
+        assert!(options.telemetry);
+        assert_eq!(options.build_dir, None);
     }
 
     #[test]
-    fn parses_optional_telemetry_without_changing_the_default() {
-        let args = ["flow.json", "--output", "flow"];
-        assert!(
-            parse_compile_args(args.map(OsString::from).into_iter())
-                .unwrap()
-                .telemetry
-        );
-        let args = ["flow.json", "--no-telemetry", "--output", "flow"];
-        assert!(
-            !parse_compile_args(args.map(OsString::from).into_iter())
-                .unwrap()
-                .telemetry
-        );
-        let args = [
-            "flow.json",
-            "--no-telemetry",
-            "--no-telemetry",
-            "--output",
-            "flow",
-        ];
-        assert!(parse_compile_args(args.map(OsString::from).into_iter()).is_err());
+    fn parses_compile_options_in_any_order() {
+        for args in [
+            [
+                "mf",
+                "compile",
+                "flow.json",
+                "--locked",
+                "--no-telemetry",
+                "--output",
+                "flow",
+                "--build-dir",
+                "build",
+            ],
+            [
+                "mf",
+                "compile",
+                "--output",
+                "flow",
+                "--build-dir",
+                "build",
+                "--no-telemetry",
+                "--locked",
+                "flow.json",
+            ],
+        ] {
+            let Command::Compile(options) = Cli::try_parse_from(args).unwrap().command else {
+                panic!("expected compile command");
+            };
+            assert_eq!(options.definition, PathBuf::from("flow.json"));
+            assert_eq!(options.output, PathBuf::from("flow"));
+            assert!(options.locked);
+            assert!(!options.telemetry);
+            assert_eq!(options.build_dir, Some(PathBuf::from("build")));
+        }
+    }
+
+    #[test]
+    fn rejects_repeated_compile_options() {
+        for repeated in [
+            &["--locked", "--locked"][..],
+            &["--no-telemetry", "--no-telemetry"],
+            &["--output", "another"],
+            &["--build-dir", "build", "--build-dir", "another"],
+        ] {
+            let args = ["mf", "compile", "flow.json", "--output", "flow"]
+                .into_iter()
+                .chain(repeated.iter().copied());
+            let error = Cli::try_parse_from(args).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+        }
+    }
+
+    #[test]
+    fn parses_run_options_in_either_order() {
+        for args in [
+            ["mf", "run", "./flow", "--tui"],
+            ["mf", "run", "--tui", "./flow"],
+        ] {
+            let Command::Run { executable, tui } = Cli::try_parse_from(args).unwrap().command
+            else {
+                panic!("expected run command");
+            };
+            assert_eq!(executable, PathBuf::from("./flow"));
+            assert!(tui);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn preserves_non_utf8_paths() {
+        use std::ffi::OsString;
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = OsString::from_vec(b"flow-\xff".to_vec());
+        let cli = Cli::try_parse_from([
+            OsString::from("mf"),
+            "compile".into(),
+            path.clone(),
+            "--output".into(),
+            path.clone(),
+            "--build-dir".into(),
+            path.clone(),
+        ])
+        .unwrap();
+        let Command::Compile(options) = cli.command else {
+            panic!("expected compile command");
+        };
+        assert_eq!(options.definition, PathBuf::from(&path));
+        assert_eq!(options.output, PathBuf::from(&path));
+        assert_eq!(options.build_dir, Some(PathBuf::from(&path)));
+
+        let cli = Cli::try_parse_from([
+            OsString::from("mf"),
+            "run".into(),
+            path.clone(),
+            "--tui".into(),
+        ])
+        .unwrap();
+        let Command::Run { executable, .. } = cli.command else {
+            panic!("expected run command");
+        };
+        assert_eq!(executable, PathBuf::from(path));
     }
 }
