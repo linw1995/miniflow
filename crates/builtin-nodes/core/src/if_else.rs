@@ -92,7 +92,7 @@ impl Condition {
             _ => Err("operator requires a scalar comparison value, a numeric ordering value, or no value for existence checks".into()),
         }
     }
-    fn evaluate(&self, source: Option<&Value>) -> Result<bool, String> {
+    fn evaluate(&self, source: Option<&mf_runtime::ValueRef>) -> Result<bool, String> {
         let value = source.and_then(|value| value.pointer(&self.source.path));
         match self.operator {
             Operator::Exists => return Ok(value.is_some()),
@@ -109,8 +109,8 @@ impl Condition {
             .expect("comparison literals are validated during construction");
         match self.operator {
             Operator::Eq | Operator::Ne => {
-                let equal = match (value, literal) {
-                    (Value::Number(left), Value::Number(right)) => {
+                let equal = match (value.as_number(), literal.as_number()) {
+                    (Some(left), Some(right)) => {
                         mf_runtime::compare_json_numbers(left, right) == Ordering::Equal
                     }
                     _ => value == literal,
@@ -122,7 +122,7 @@ impl Condition {
                 })
             }
             operator => {
-                let (Value::Number(left), Value::Number(right)) = (value, literal) else {
+                let (Some(left), Some(right)) = (value.as_number(), literal.as_number()) else {
                     return Err("ordering requires numeric operands".into());
                 };
                 let order = mf_runtime::compare_json_numbers(left, right);
@@ -195,7 +195,7 @@ impl Node for IfElse {
             }
         }
         Ok(NodeResult {
-            outputs: Outputs::from([(selected.to_owned(), Value::Bool(true))]),
+            outputs: Outputs::from([(selected.to_owned(), Value::Bool(true).into())]),
             skipped: self
                 .branches
                 .iter()
@@ -315,7 +315,10 @@ mod tests {
             let predicate: Condition =
                 serde_json::from_value(condition(operator, literal)).unwrap();
             predicate.validate().unwrap();
-            assert_eq!(predicate.evaluate(Some(&input)).unwrap(), expected);
+            assert_eq!(
+                predicate.evaluate(Some(&input.clone().into())).unwrap(),
+                expected
+            );
         }
         let input = json!({"a/b":null,"a~b":true,"items":[{"price":10}]});
         for (path, expected) in [
@@ -333,7 +336,7 @@ mod tests {
                 .unwrap();
                 predicate.validate().unwrap();
                 assert_eq!(
-                    predicate.evaluate(Some(&input)).unwrap(),
+                    predicate.evaluate(Some(&input.clone().into())).unwrap(),
                     if operator == "exists" {
                         expected
                     } else {
@@ -345,8 +348,8 @@ mod tests {
         }
         let eq: Condition = serde_json::from_value(condition("eq", json!(1))).unwrap();
         assert!(eq.evaluate(None).is_err());
-        assert!(eq.evaluate(Some(&json!({}))).is_err());
+        assert!(eq.evaluate(Some(&json!({}).into())).is_err());
         let gt: Condition = serde_json::from_value(condition("gt", json!(1))).unwrap();
-        assert!(gt.evaluate(Some(&json!("2"))).is_err());
+        assert!(gt.evaluate(Some(&json!("2").into())).is_err());
     }
 }

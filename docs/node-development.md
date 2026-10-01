@@ -76,6 +76,15 @@ Override `Node::execute_with_context` to read declared outputs through `ctx.outp
 declarations support compile-time dependency checks; the context does not enforce a runtime read whitelist. The runtime
 publishes results only after successful execution and starts with fresh context for each run.
 
+`Inputs` and `Outputs` are standard `BTreeMap<String, ValueRef>` values. A `ValueRef` owns an
+immutable JSON value; cloning it shares its payload and descendants. Convert JSON explicitly with
+`.into()` when constructing outputs, for example `Outputs::from([("value".into(), json!(42).into())])`.
+Read values through `as_*`, indexing, `pointer`, or `kind()`. `serde_json::to_value(&value)` creates
+an owned JSON value when an external API requires one; serialization otherwise reads shared data directly.
+Nodes forwarding an input should move or clone its handle. New arrays and objects can reuse child
+handles with `ValueRef::array` and `ValueRef::object`. Context outputs remain available within their
+execution scope.
+
 The executor calls `Node::execute_with_context_mut`, whose default implementation delegates to the read-only `execute_with_context` method. Loop assignment and exit use engine-owned operations behind this adapter; plugins cannot write Loop variables or publish outputs directly. A Loop body has its own output scope for every pass. A context reference inside that body resolves only within its scope, including the synthetic `%loop` outputs, and still requires an explicit ancestor dependency.
 
 Keep output names local in node results. Runtime publication qualifies them with the instance ID. Explicit skipped names must be declared non-required outputs and cannot also be produced. A scheduler-skipped node propagates skipping through every output, including required ones. Context references alone never activate or skip a node.

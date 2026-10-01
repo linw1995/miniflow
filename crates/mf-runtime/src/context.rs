@@ -1,16 +1,16 @@
+use crate::ValueRef as Value;
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use mf_telemetry::{
     event::{FailurePhase, LoopPathEntry, LoopSummary, SkipCause},
     observation::{BodyNodeObservation, BodyObservation, NodeObservation, RunObservation},
 };
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
 pub struct ExecutionScope {
     node_id: String,
     source_id: String,
-    variables: BTreeMap<String, Value>,
+    variables: Outputs,
     types: BTreeMap<String, crate::ValueType>,
     index: usize,
     exit_requested: bool,
@@ -272,11 +272,11 @@ impl ExecutionContext {
                 .ok_or_else(|| NodeExecutionError::ExecutionFailed {
                     message: format!("unknown Loop variable `{variable}`"),
                 })?;
-        value_type
-            .validate_value(&value)
-            .map_err(|error| NodeExecutionError::ExecutionFailed {
+        value_type.validate_shared(&value).map_err(|error| {
+            NodeExecutionError::ExecutionFailed {
                 message: format!("Loop variable `{variable}`: {error}"),
-            })?;
+            }
+        })?;
         self.pending_loop_write = Some((variable.to_owned(), value));
         Ok(())
     }
@@ -351,7 +351,7 @@ impl ExecutionContext {
                     ));
                 };
                 port.value_type
-                    .validate_value(value)
+                    .validate_shared(value)
                     .map_err(|error| state_error(id, format!("output `{name}`: {error}")))?;
             }
         }
@@ -555,7 +555,7 @@ pub fn execute_node_in_context(
                 .ok_or_else(|| state_error(id, format!("received undeclared input `{name}`")))
                 .and_then(|port| {
                     port.value_type
-                        .validate_value(value)
+                        .validate_shared(value)
                         .map_err(|error| state_error(id, format!("input `{name}`: {error}")))
                 });
             if let Err(error) = validation {
@@ -657,7 +657,7 @@ mod tests {
     impl Node for CountNode {
         fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(Outputs::from([("value".into(), json!(true))]))
+            Ok(Outputs::from([("value".into(), json!(true).into())]))
         }
     }
 
@@ -669,7 +669,9 @@ mod tests {
     fn scoped_execution_restores_parent_state_after_failure_and_unwind() {
         for unwinds in [false, true] {
             let mut state = ExecutionContext::default();
-            state.outputs.insert("parent.value".into(), Some(json!(9)));
+            state
+                .outputs
+                .insert("parent.value".into(), Some(json!(9).into()));
             let parent_outputs = state.outputs.clone();
             let types = BTreeMap::from([("count".into(), ValueType::Int64)]);
             let source = crate::prepared_scope_source("input", &types);
@@ -677,7 +679,7 @@ mod tests {
                 "scope",
                 "input",
                 0,
-                Outputs::from([("count".into(), json!(7))]),
+                Outputs::from([("count".into(), json!(7).into())]),
                 types,
             )
             .unwrap();
@@ -718,8 +720,8 @@ mod tests {
         let node = FlowNode::new(
             "producer",
             Box::new(EmitNode(Outputs::from([
-                ("good".into(), json!(1)),
-                ("bad".into(), json!("wrong")),
+                ("good".into(), json!(1).into()),
+                ("bad".into(), json!("wrong").into()),
             ]))),
             NodePorts {
                 inputs: vec![],
@@ -757,7 +759,7 @@ mod tests {
         let mut context = ExecutionContext::default();
         context.outputs.insert(
             "source.value".into(),
-            Some(json!([{"count": 1}, {"count": "two"}])),
+            Some(json!([{"count": 1}, {"count": "two"}]).into()),
         );
         let dependency = ExecutionDependency {
             input: Some("payload"),
@@ -787,7 +789,7 @@ mod tests {
         let mut context = ExecutionContext::default();
         context
             .outputs
-            .insert("source.value".into(), Some(json!(1)));
+            .insert("source.value".into(), Some(json!(1).into()));
         let dependency = ExecutionDependency {
             input: Some("unexpected"),
             source_node: "source",
@@ -848,7 +850,7 @@ mod tests {
             } else {
                 json!(42)
             };
-            Ok(Outputs::from([("value".into(), value)]))
+            Ok(Outputs::from([("value".into(), value.into())]))
         }
     }
 
@@ -890,7 +892,7 @@ mod tests {
                 vec![
                     FlowNode::new(
                         "source",
-                        Box::new(EmitNode(Outputs::from([("value".into(), value)]))),
+                        Box::new(EmitNode(Outputs::from([("value".into(), value.into())]))),
                         NodePorts {
                             inputs: vec![],
                             outputs: vec![port("value", ValueType::Any, true)],

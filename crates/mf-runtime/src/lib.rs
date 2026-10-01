@@ -8,6 +8,7 @@ mod number;
 mod registry;
 mod runner;
 mod subgraph;
+mod value;
 
 pub use context::{
     ContextValue, ExecutionContext, ExecutionDependency, ExecutionScope, NodeResult,
@@ -41,3 +42,5 @@ pub use number::compare_json_numbers;
 pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::{WorkflowRunError, instantiate_node_with_metadata};
 pub use subgraph::PreparedSubgraph;
+
+pub use value::{ValueKind, ValueRef};

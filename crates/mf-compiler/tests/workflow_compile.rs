@@ -18,7 +18,10 @@ struct ConstantNode {
 
 impl Node for ConstantNode {
     fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::from([("value".to_owned(), json!(self.value))]))
+        Ok(Outputs::from([(
+            "value".to_owned(),
+            json!(self.value).into(),
+        )]))
     }
 }
 

@@ -204,7 +204,9 @@ impl CompiledWorkflow {
                 registry: &mf_runtime::NodeRegistry,
                 observation: Option<mf_runtime::RunObservation>,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                mf_runtime::ExecutionContext::run(observation, |state| run_workflow_in_context(registry, state))
+                mf_runtime::ExecutionContext::run(observation, |state| {
+                    run_workflow_in_context(registry, state)
+                })
             }
 
             pub fn run_workflow_in_context(
@@ -366,6 +368,7 @@ fn generate_scope(
             #exit_check
         });
     }
+    preparations.push(quote! { drop(#inference_ident); });
     Ok((preparations, statements))
 }
 

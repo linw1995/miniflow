@@ -27,9 +27,9 @@ pub use mf_runtime::{
     MAX_SCHEDULED_STEPS, Node, NodeBuildError, NodeDefinition, NodeDependency, NodeExecutionError,
     NodeFactory, NodeId, NodePorts, NodeRegistration, NodeRegistry, NodeRegistryError, NodeResult,
     OutputDerivation, OutputDerivationError, Outputs, PortSpec, RunObservation, TypeCompatibility,
-    TypeDepthError, TypeMismatch, ValueType, WorkflowDefinition, WorkflowDefinitionVersion,
-    WorkflowOutputDefinition, WorkflowRunError, deserialize_config, execute_node_in_context,
-    instantiate_node_with_metadata, output_id, select_context_output,
+    TypeDepthError, TypeMismatch, ValueKind, ValueRef, ValueType, WorkflowDefinition,
+    WorkflowDefinitionVersion, WorkflowOutputDefinition, WorkflowRunError, deserialize_config,
+    execute_node_in_context, instantiate_node_with_metadata, output_id, select_context_output,
 };
 pub use mf_runtime::{IterationErrorPolicy, IterationMode};
 pub use pipeline::{

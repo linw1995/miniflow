@@ -112,10 +112,10 @@ impl IterationNode {
 
     fn run_item(
         &self,
-        item: Value,
+        item: mf_runtime::ValueRef,
         index: usize,
         observation: Option<&IterationObservation>,
-    ) -> Result<Value, NodeExecutionError> {
+    ) -> Result<mf_runtime::ValueRef, NodeExecutionError> {
         let mut step = observation.and_then(|observation| observation.begin_item(index));
         let _context = step.as_ref().map(ItemObservation::enter);
         let body_observation = step.as_ref().map(ItemObservation::body_observation);
@@ -153,7 +153,8 @@ impl IterationNode {
         mut inputs: Inputs,
         observation: Option<IterationObservation>,
     ) -> Result<Outputs, NodeExecutionError> {
-        let Some(Value::Array(items)) = inputs.remove("items") else {
+        let items = inputs.remove("items");
+        let Some(items) = items.as_ref().and_then(mf_runtime::ValueRef::as_array) else {
             return Err(NodeExecutionError::ExecutionFailed {
                 message: "iteration requires an array input `items`".into(),
             });
@@ -161,7 +162,7 @@ impl IterationNode {
         let mut results = Vec::with_capacity(items.len());
         match self.mode {
             IterationMode::Sequential => {
-                for (index, item) in items.into_iter().enumerate() {
+                for (index, item) in items.iter().cloned().enumerate() {
                     results.push(self.run_item(item, index, observation.as_ref()));
                     if matches!(self.on_error, IterationErrorPolicy::Terminate)
                         && results.last().is_some_and(Result::is_err)
@@ -172,7 +173,7 @@ impl IterationNode {
             }
             IterationMode::Parallel => {
                 let worker_count = items.len().min(MAX_PARALLEL_ITEMS);
-                let queue = Mutex::new(items.into_iter().enumerate().collect::<VecDeque<_>>());
+                let queue = Mutex::new(items.iter().cloned().enumerate().collect::<VecDeque<_>>());
                 let completed = Mutex::new(Vec::new());
                 let stopped = AtomicBool::new(false);
                 std::thread::scope(|scope| {
@@ -222,11 +223,16 @@ impl IterationNode {
             match (self.on_error, result) {
                 (_, Ok(value)) => values.push(value),
                 (IterationErrorPolicy::Terminate, Err(error)) => return Err(error),
-                (IterationErrorPolicy::ContinueOnError, Err(_)) => values.push(Value::Null),
+                (IterationErrorPolicy::ContinueOnError, Err(_)) => {
+                    values.push(mf_runtime::ValueRef::null())
+                }
                 (IterationErrorPolicy::RemoveFailed, Err(_)) => {}
             }
         }
-        Ok(Outputs::from([("results".into(), Value::Array(values))]))
+        Ok(Outputs::from([(
+            "results".into(),
+            mf_runtime::ValueRef::array(values),
+        )]))
     }
 }
 
@@ -301,7 +307,7 @@ mod tests {
         let output = node
             .execute(Inputs::from([(
                 "items".into(),
-                Value::Array(items.clone()),
+                Value::Array(items.clone()).into(),
             )]))
             .unwrap();
         assert_eq!(output["results"], Value::Array(items));

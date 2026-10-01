@@ -19,7 +19,10 @@ struct ConstantNode {
 
 impl Node for ConstantNode {
     fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::from([("value".to_owned(), json!(self.value))]))
+        Ok(Outputs::from([(
+            "value".to_owned(),
+            json!(self.value).into(),
+        )]))
     }
 }
 
@@ -28,7 +31,7 @@ struct IncrementNode;
 impl Node for IncrementNode {
     fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
         let value = inputs["input"].as_i64().unwrap() + 1;
-        Ok(Outputs::from([("value".to_owned(), json!(value))]))
+        Ok(Outputs::from([("value".to_owned(), json!(value).into())]))
     }
 }
 

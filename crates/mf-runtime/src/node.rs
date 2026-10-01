@@ -2,12 +2,11 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
 use std::borrow::Cow;
-use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
-pub type Inputs = BTreeMap<String, Value>;
-pub type Outputs = BTreeMap<String, Value>;
+pub type Inputs = std::collections::BTreeMap<String, crate::ValueRef>;
+pub type Outputs = Inputs;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ValueType {
@@ -115,47 +114,48 @@ impl ValueType {
     }
 
     pub fn infer_json(value: &Value) -> Self {
-        fn infer_at(value: &Value, depth: usize) -> ValueType {
-            match value {
-                Value::Null => ValueType::Null,
-                Value::Bool(_) => ValueType::Boolean,
-                Value::Number(number) if number.is_f64() => ValueType::Float64,
-                Value::Number(number) if number.as_i64().is_some() => ValueType::Int64,
-                Value::Number(_) => ValueType::Number,
-                Value::String(_) => ValueType::String,
-                Value::Array(items) if depth < ValueType::MAX_DEPTH && !items.is_empty() => {
-                    let element = infer_at(&items[0], depth + 1);
-                    if items[1..]
-                        .iter()
-                        .all(|item| infer_at(item, depth + 1) == element)
-                    {
-                        ValueType::List(Box::new(element))
-                    } else {
-                        ValueType::Array
-                    }
-                }
-                Value::Array(_) => ValueType::Array,
-                Value::Object(entries) if depth < ValueType::MAX_DEPTH && !entries.is_empty() => {
-                    let first = entries
-                        .values()
-                        .next()
-                        .expect("nonempty map has a first value");
-                    let element = infer_at(first, depth + 1);
-                    if entries
-                        .values()
-                        .skip(1)
-                        .all(|item| infer_at(item, depth + 1) == element)
-                    {
-                        ValueType::Map(Box::new(element))
-                    } else {
-                        ValueType::Object
-                    }
-                }
-                Value::Object(_) => ValueType::Object,
-            }
-        }
+        Self::infer_view(value, 1)
+    }
+    pub fn infer_shared(value: &crate::ValueRef) -> Self {
+        Self::infer_view(value, 1)
+    }
 
-        infer_at(value, 1)
+    fn infer_view<V: crate::value::JsonView>(value: &V, depth: usize) -> Self {
+        match value.shape() {
+            "null" => Self::Null,
+            "boolean" => Self::Boolean,
+            "number" => match value.number().unwrap() {
+                number if number.is_f64() => Self::Float64,
+                number if number.as_i64().is_some() => Self::Int64,
+                _ => Self::Number,
+            },
+            "string" => Self::String,
+            "array" => {
+                let mut items = value.array_items();
+                if depth < Self::MAX_DEPTH
+                    && let Some(first) = items.next()
+                {
+                    let element = Self::infer_view(first, depth + 1);
+                    if items.all(|item| Self::infer_view(item, depth + 1) == element) {
+                        return Self::List(Box::new(element));
+                    }
+                }
+                Self::Array
+            }
+            "object" => {
+                let mut entries = value.object_items();
+                if depth < Self::MAX_DEPTH
+                    && let Some((_, first)) = entries.next()
+                {
+                    let element = Self::infer_view(first, depth + 1);
+                    if entries.all(|(_, item)| Self::infer_view(item, depth + 1) == element) {
+                        return Self::Map(Box::new(element));
+                    }
+                }
+                Self::Object
+            }
+            _ => unreachable!("JSON values have a known shape"),
+        }
     }
 
     pub fn is_assignable_to(&self, input: &Self) -> bool {
@@ -208,25 +208,33 @@ impl ValueType {
         self.validate_at(value, &mut String::new())
     }
 
-    fn validate_at(&self, value: &Value, path: &mut String) -> Result<(), TypeMismatch> {
-        let valid = match (self, value) {
+    pub fn validate_shared(&self, value: &crate::ValueRef) -> Result<(), TypeMismatch> {
+        self.validate_at(value, &mut String::new())
+    }
+
+    fn validate_at<V: crate::value::JsonView>(
+        &self,
+        value: &V,
+        path: &mut String,
+    ) -> Result<(), TypeMismatch> {
+        let valid = match (self, value.shape()) {
             (Self::Any, _) => true,
-            (Self::Null, Value::Null)
-            | (Self::Boolean, Value::Bool(_))
-            | (Self::Number | Self::Int64 | Self::Float64, Value::Number(_))
-            | (Self::String, Value::String(_))
-            | (Self::Array, Value::Array(_))
-            | (Self::Object, Value::Object(_)) => match self {
+            (Self::Null, "null")
+            | (Self::Boolean, "boolean")
+            | (Self::Number | Self::Int64 | Self::Float64, "number")
+            | (Self::String, "string")
+            | (Self::Array, "array")
+            | (Self::Object, "object") => match self {
                 Self::Int64 => value
-                    .as_number()
+                    .number()
                     .is_some_and(|number| !number.is_f64() && number.as_i64().is_some()),
-                Self::Float64 => value.as_number().is_some_and(|number| {
+                Self::Float64 => value.number().is_some_and(|number| {
                     number.is_f64() && number.as_f64().is_some_and(f64::is_finite)
                 }),
                 _ => true,
             },
-            (Self::List(inner), Value::Array(items)) => {
-                for (index, item) in items.iter().enumerate() {
+            (Self::List(inner), "array") => {
+                for (index, item) in value.array_items().enumerate() {
                     let previous = path.len();
                     path.push('/');
                     use fmt::Write as _;
@@ -237,8 +245,8 @@ impl ValueType {
                 }
                 true
             }
-            (Self::Map(inner), Value::Object(entries)) => {
-                for (key, item) in entries {
+            (Self::Map(inner), "object") => {
+                for (key, item) in value.object_items() {
                     let previous = path.len();
                     path.push('/');
                     for character in key.chars() {
@@ -268,16 +276,17 @@ impl ValueType {
     }
 }
 
-fn actual_type(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(number) if number.is_f64() => "float64",
-        Value::Number(number) if number.as_i64().is_some() => "int64",
-        Value::Number(_) => "unsigned integer",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
+fn actual_type<V: crate::value::JsonView>(value: &V) -> &'static str {
+    if let Some(number) = value.number() {
+        if number.is_f64() {
+            "float64"
+        } else if number.as_i64().is_some() {
+            "int64"
+        } else {
+            "unsigned integer"
+        }
+    } else {
+        value.shape()
     }
 }
 
@@ -332,15 +341,21 @@ pub struct NodePorts {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum OutputDerivation {
-    Literal { output: String, value: Value },
-    ForwardInput { output: String, input: String },
+    Literal {
+        output: String,
+        value: crate::ValueRef,
+    },
+    ForwardInput {
+        output: String,
+        input: String,
+    },
 }
 
 impl OutputDerivation {
-    pub fn literal(output: impl Into<String>, value: Value) -> Self {
+    pub fn literal(output: impl Into<String>, value: impl Into<crate::ValueRef>) -> Self {
         Self::Literal {
             output: output.into(),
-            value,
+            value: value.into(),
         }
     }
 
@@ -402,14 +417,15 @@ impl NodePorts {
                 });
             }
             match derivation {
-                OutputDerivation::Literal { value, .. } => port
-                    .value_type
-                    .validate_value(value)
-                    .map_err(|source| OutputDerivationError::LiteralTypeMismatch {
-                        node_id: node_id.to_owned(),
-                        output: output.to_owned(),
-                        source,
-                    })?,
+                OutputDerivation::Literal { value, .. } => {
+                    port.value_type.validate_shared(value).map_err(|source| {
+                        OutputDerivationError::LiteralTypeMismatch {
+                            node_id: node_id.to_owned(),
+                            output: output.to_owned(),
+                            source,
+                        }
+                    })?
+                }
                 OutputDerivation::ForwardInput { input, .. }
                     if !self.inputs.iter().any(|port| port.name == *input) =>
                 {
