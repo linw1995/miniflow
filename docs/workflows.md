@@ -64,7 +64,11 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input, with its known type |
 | `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by control edges | One boolean activation output per branch, plus `else` |
 | `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array | `results`: collected array |
+| `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |
+
+The built-in Loop is registered as `workflow.loop`. Its settings belong in the node's top-level `loop`
+field; omit `config` or leave it empty. See [Structured Loop](#structured-loop) for its body and control kinds.
 
 `mfn-core` registers `builtin.iteration` for explicit dependency selection. The compiler and runtime orchestrate its
 body because an ordinary node invocation does not schedule a subgraph. Body nodes can use other linked packages
