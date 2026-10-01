@@ -1,12 +1,27 @@
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use mf_telemetry::{
-    event::{FailurePhase, LoopPassOutcome, LoopPathEntry, LoopSummary, NodeIdentity, SkipCause},
-    observation::{
-        BodyNodeObservation, BodyObservation, IterationObservation, NodeObservation, RunObservation,
-    },
+    event::{FailurePhase, LoopSummary, SkipCause},
+    observation::{BodyNodeObservation, NodeObservation, RunObservation},
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+pub trait ScopeObserver: std::fmt::Debug + Send + Sync {
+    fn started(&self, _run: Option<&mut RunObservation>, _path: &[ExecutionScope]) {}
+
+    fn finished(&self, _run: Option<&mut RunObservation>, _path: &[ExecutionScope], _failed: bool) {
+    }
+
+    fn begin_node(
+        &self,
+        _run: Option<&mut RunObservation>,
+        _path: &[ExecutionScope],
+        _id: &str,
+    ) -> Option<ScopeNodeObservation> {
+        None
+    }
+}
 
 #[derive(Debug)]
 pub struct ExecutionScope {
@@ -17,6 +32,7 @@ pub struct ExecutionScope {
     index: usize,
     exit_requested: bool,
     visited_steps: usize,
+    observer: Option<Arc<dyn ScopeObserver>>,
 }
 
 impl ExecutionScope {
@@ -38,7 +54,33 @@ impl ExecutionScope {
             index,
             exit_requested: false,
             visited_steps: 0,
+            observer: None,
         })
+    }
+
+    pub fn with_observer(mut self, observer: Arc<dyn ScopeObserver>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
+    pub fn node_id(&self) -> &str {
+        &self.node_id
+    }
+
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    pub fn visited_steps(&self) -> usize {
+        self.visited_steps
+    }
+
+    pub fn exited(&self) -> bool {
+        self.exit_requested
+    }
+
+    pub fn is_observed(&self) -> bool {
+        self.observer.is_some()
     }
 }
 
@@ -84,7 +126,6 @@ pub struct ExecutionContext {
     // A present None is an explicit skip; an absent key is a missing output.
     outputs: BTreeMap<String, Option<Value>>,
     observation: Option<RunObservation>,
-    body_observation: Option<BodyObservation>,
     scopes: Vec<ExecutionScope>,
     pending_loop_write: Option<(String, Value)>,
     remaining_steps: usize,
@@ -95,7 +136,6 @@ impl Default for ExecutionContext {
         Self {
             outputs: BTreeMap::new(),
             observation: None,
-            body_observation: None,
             scopes: Vec::new(),
             pending_loop_write: None,
             remaining_steps: crate::MAX_SCHEDULED_STEPS,
@@ -104,22 +144,12 @@ impl Default for ExecutionContext {
 }
 
 impl ExecutionContext {
-    pub fn for_body(body_observation: Option<BodyObservation>) -> Self {
-        Self {
-            body_observation,
-            ..Self::default()
-        }
+    pub fn observation(&self) -> Option<&RunObservation> {
+        self.observation.as_ref()
     }
 
-    pub fn iteration_observation(
-        &self,
-        id: &str,
-        body_nodes: &[NodeIdentity],
-    ) -> Option<IterationObservation> {
-        let path = self.loop_path();
-        self.observation
-            .as_ref()?
-            .iteration_observation(id, &path, body_nodes.to_vec())
+    pub fn scopes(&self) -> &[ExecutionScope] {
+        &self.scopes
     }
 
     /// Runs a synchronous execution scope without changing its result or installing providers.
@@ -285,48 +315,16 @@ impl ExecutionContext {
             depth,
         };
         let state = &mut *guard.context;
-        let path = state.loop_path();
-        if let Some(run) = state
-            .observation
-            .as_mut()
-            .filter(|run| run.supports_loops())
-        {
-            run.loop_pass_started(path.clone());
+        let observer = state.scopes.last().and_then(|scope| scope.observer.clone());
+        if let Some(observer) = &observer {
+            observer.started(state.observation.as_mut(), &state.scopes);
         }
         let result = run(state);
-        let frame = state
-            .scopes
-            .last()
-            .expect("execution scope was just pushed");
-        let outcome = if result.is_err() {
-            LoopPassOutcome::Failed
-        } else if frame.exit_requested {
-            LoopPassOutcome::Exit
-        } else {
-            LoopPassOutcome::Completed
-        };
-        let visited = mf_telemetry::Count::try_from(frame.visited_steps as i64)
-            .expect("scheduled-step budget bounds pass visits");
-        if let Some(run) = state
-            .observation
-            .as_mut()
-            .filter(|run| run.supports_loops())
-        {
-            run.loop_pass_finished(path, visited, outcome);
+        if let Some(observer) = &observer {
+            observer.finished(state.observation.as_mut(), &state.scopes, result.is_err());
         }
         let frame = state.scopes.pop().expect("execution scope was just pushed");
         result.map(|output| (output, frame.variables, frame.exit_requested))
-    }
-
-    fn loop_path(&self) -> Vec<LoopPathEntry> {
-        self.scopes
-            .iter()
-            .map(|frame| LoopPathEntry {
-                loop_id: frame.node_id.clone(),
-                index: mf_telemetry::Count::try_from(frame.index as i64)
-                    .expect("Loop index is bounded"),
-            })
-            .collect()
     }
 
     fn reserve_step(&mut self, id: &str) -> Result<(), WorkflowRunError> {
@@ -435,12 +433,12 @@ pub struct ExecutionDependency<'a> {
     pub source_output: &'a str,
 }
 
-enum StepObservation {
+pub enum ScopeNodeObservation {
     Root(NodeObservation),
     Body(BodyNodeObservation),
 }
 
-impl StepObservation {
+impl ScopeNodeObservation {
     fn started(&mut self, ctx: &mut ExecutionContext) {
         match self {
             Self::Root(step) => ctx.observation.as_mut().unwrap().node_started(step),
@@ -508,25 +506,23 @@ pub fn execute_node_in_context(
     let id = node.definition_id.as_str();
     ctx.reserve_step(id)?;
     ctx.pending_loop_write = None;
-    let path = ctx.loop_path();
-    let mut step = if let Some(run) = ctx.observation.as_mut() {
-        if path.is_empty() {
-            run.begin_node(id).map(StepObservation::Root)
-        } else {
-            run.begin_invocation(path, id).map(StepObservation::Root)
-        }
-    } else {
-        ctx.body_observation
+    let mut step = if let Some(scope) = ctx.scopes.last() {
+        scope
+            .observer
             .as_ref()
-            .and_then(|body| body.begin_node(id))
-            .map(StepObservation::Body)
+            .and_then(|observer| observer.begin_node(ctx.observation.as_mut(), &ctx.scopes, id))
+    } else {
+        ctx.observation
+            .as_mut()
+            .and_then(|run| run.begin_node(id))
+            .map(ScopeNodeObservation::Root)
     };
     let _root_context = match &step {
-        Some(StepObservation::Root(step)) => Some(step.enter()),
+        Some(ScopeNodeObservation::Root(step)) => Some(step.enter()),
         _ => None,
     };
     let _body_context = match &step {
-        Some(StepObservation::Body(step)) => Some(step.enter()),
+        Some(ScopeNodeObservation::Body(step)) => Some(step.enter()),
         _ => None,
     };
     let mut dependencies = dependencies.to_vec();
@@ -692,6 +688,65 @@ mod tests {
 
     fn port(name: &str, value_type: ValueType, required: bool) -> PortSpec {
         PortSpec::owned(name, value_type, required)
+    }
+
+    #[test]
+    fn scope_observers_receive_outcomes_without_a_run_observer() {
+        #[derive(Debug)]
+        struct Recorder(Arc<std::sync::Mutex<Vec<Value>>>);
+        impl ScopeObserver for Recorder {
+            fn finished(
+                &self,
+                run: Option<&mut RunObservation>,
+                path: &[ExecutionScope],
+                failed: bool,
+            ) {
+                assert!(run.is_none());
+                let scope = path.last().unwrap();
+                self.0.lock().unwrap().push(json!([
+                    scope.index(),
+                    scope.visited_steps(),
+                    scope.exited(),
+                    failed,
+                ]));
+            }
+        }
+        let records = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let observer = Arc::new(Recorder(records.clone()));
+        let types = BTreeMap::from([("value".into(), ValueType::Int64)]);
+        let source = crate::prepared_scope_source("input", &types);
+        let exit = crate::prepared_loop_exit("exit");
+        let mut state = ExecutionContext::default();
+        for index in 0..3 {
+            let scope = ExecutionScope::new(
+                "custom",
+                "input",
+                index,
+                Outputs::from([("value".into(), json!(7))]),
+                types.clone(),
+            )
+            .unwrap()
+            .with_observer(observer.clone());
+            let result = state.run_scope(scope, |state| {
+                execute_node_in_context(&source, &[], state)?;
+                if index == 1 {
+                    execute_node_in_context(&exit, &[], state)?;
+                } else if index == 2 {
+                    return Err(state_error("body", "body failed"));
+                }
+                Ok(())
+            });
+            assert_eq!(result.is_err(), index == 2);
+        }
+        assert_eq!(
+            *records.lock().unwrap(),
+            vec![
+                json!([0, 1, false, false]),
+                json!([1, 2, true, false]),
+                json!([2, 1, false, true])
+            ]
+        );
+        assert!(state.scopes().is_empty());
     }
 
     #[test]

@@ -1,4 +1,5 @@
 use crate::loop_declaration::run_loop;
+use crate::scope_observation::{ItemScopeObserver, loop_path};
 use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, IterationConfig, IterationErrorPolicy, IterationMode,
     Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, NodeResult, Outputs,
@@ -12,7 +13,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     ops::ControlFlow,
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -105,14 +106,17 @@ impl Node for IterationDeclaration {
             self.on_error,
             result_type,
             move |item, index, observation| {
-                let mut state = ExecutionContext::for_body(observation);
-                let scope = ExecutionScope::new(
+                let mut state = ExecutionContext::default();
+                let mut scope = ExecutionScope::new(
                     &scope_id,
                     mf_runtime::ITERATION_INPUT_ID,
                     index,
                     Outputs::from([("items".into(), item)]),
                     BTreeMap::from([("items".into(), ValueType::Any)]),
                 )?;
+                if let Some(observation) = observation {
+                    scope = scope.with_observer(Arc::new(ItemScopeObserver(observation)));
+                }
                 let (mut outputs, _, _) = state
                     .run_scope(scope, |state| body.execute_in_context(state))
                     .map_err(|source| NodeExecutionError::PluginFailed {
@@ -324,7 +328,13 @@ impl Node for IterationNode {
     ) -> Result<NodeResult, NodeExecutionError> {
         self.execute_items(
             inputs,
-            ctx.iteration_observation(&self.id, &self.body_nodes),
+            ctx.observation().and_then(|run| {
+                run.iteration_observation(
+                    &self.id,
+                    &loop_path(ctx.scopes()),
+                    self.body_nodes.clone(),
+                )
+            }),
         )
         .map(Into::into)
     }

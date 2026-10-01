@@ -1,3 +1,4 @@
+use crate::scope_observation::LoopScopeObserver;
 use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, LoopComparisonOperator, LoopConditionDefinition,
     LoopVariableDefinition, Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration,
@@ -10,6 +11,7 @@ use mf_telemetry::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use std::sync::Arc;
 use std::{cmp::Ordering, collections::BTreeMap, ops::ControlFlow};
 
 pub const KIND: &str = mf_runtime::LOOP_KIND;
@@ -75,6 +77,7 @@ impl Node for LoopDeclaration {
                 inputs: ports.clone(),
                 outputs: ports,
             },
+            observer: Arc::new(LoopScopeObserver),
         }))
     }
 
@@ -152,6 +155,7 @@ struct LoopNode {
     types: BTreeMap<String, ValueType>,
     ports: NodePorts,
     body: PreparedSubgraph,
+    observer: Arc<LoopScopeObserver>,
 }
 
 impl Node for LoopNode {
@@ -180,7 +184,8 @@ impl Node for LoopNode {
                 index,
                 std::mem::take(&mut variables),
                 self.types.clone(),
-            )?;
+            )?
+            .with_observer(self.observer.clone());
             let (_, updated, exited) = ctx
                 .run_scope(scope, |state| self.body.execute_in_context(state))
                 .map_err(|error| {
