@@ -435,10 +435,10 @@ mod tests {
         .unwrap();
         let outputs = node
             .execute(Inputs::from([
-                ("amount".into(), json!(21)),
-                ("items".into(), json!([1, 2])),
-                ("values".into(), json!({"a": 3})),
-                ("nothing".into(), Value::Null),
+                ("amount".into(), json!(21).into()),
+                ("items".into(), json!([1, 2]).into()),
+                ("values".into(), json!({"a": 3}).into()),
+                ("nothing".into(), Value::Null.into()),
             ]))
             .unwrap();
         assert_eq!(outputs["doubled"], json!(42));
@@ -458,19 +458,19 @@ mod tests {
         for (inputs, expected) in [
             (Inputs::new(), "missing input `items`"),
             (
-                Inputs::from([("extra".into(), json!(1))]),
+                Inputs::from([("extra".into(), json!(1).into())]),
                 "undeclared input `extra`",
             ),
             (
-                Inputs::from([("items".into(), json!(null))]),
+                Inputs::from([("items".into(), json!(null).into())]),
                 "expected list",
             ),
             (
-                Inputs::from([("items".into(), json!([{"a/b": 1}, {"a~b": false}]))]),
+                Inputs::from([("items".into(), json!([{"a/b": 1}, {"a~b": false}]).into())]),
                 "path `/1/a~0b`",
             ),
             (
-                Inputs::from([("items".into(), json!([{"a": "wrong"}]))]),
+                Inputs::from([("items".into(), json!([{"a": "wrong"}]).into())]),
                 "path `/0/a`",
             ),
         ] {
@@ -484,7 +484,7 @@ mod tests {
         }))
         .unwrap();
         let error = int_node
-            .execute(Inputs::from([("amount".into(), json!(u64::MAX))]))
+            .execute(Inputs::from([("amount".into(), json!(u64::MAX).into())]))
             .unwrap_err()
             .to_string();
         assert!(error.contains("input `amount`") && error.contains("expected int64"));
@@ -499,7 +499,7 @@ mod tests {
         }))
         .unwrap();
         let error = node
-            .execute(Inputs::from([("divisor".into(), json!(0))]))
+            .execute(Inputs::from([("divisor".into(), json!(0).into())]))
             .unwrap_err()
             .to_string();
         assert!(error.contains("output `second`"), "{error}");
@@ -527,7 +527,7 @@ mod tests {
         let error = node
             .execute(Inputs::from([(
                 "payload".into(),
-                json!("x".repeat(MAX_JSON_BYTES + 1)),
+                json!("x".repeat(MAX_JSON_BYTES + 1)).into(),
             )]))
             .unwrap_err()
             .to_string();
@@ -535,7 +535,7 @@ mod tests {
         let error = node
             .execute(Inputs::from([(
                 "payload".into(),
-                json!("x".repeat(600_000)),
+                json!("x".repeat(600_000)).into(),
             )]))
             .unwrap_err()
             .to_string();
@@ -548,7 +548,10 @@ mod tests {
         }))
         .unwrap();
         let error = node
-            .execute(Inputs::from([("items".into(), json!(vec![1; 4_000]))]))
+            .execute(Inputs::from([(
+                "items".into(),
+                json!(vec![1; 4_000]).into(),
+            )]))
             .unwrap_err()
             .to_string();
         assert!(error.contains("output `second`"), "{error}");

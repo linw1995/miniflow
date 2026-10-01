@@ -9,7 +9,7 @@ struct IntegerSource;
 
 impl Node for IntegerSource {
     fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::from([("value".into(), json!(7))]))
+        Ok(Outputs::from([("value".into(), json!(7).into())]))
     }
 }
 
@@ -79,7 +79,10 @@ struct TypedSource(SourceConfig);
 
 impl Node for TypedSource {
     fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::from([("value".into(), self.0.value.clone())]))
+        Ok(Outputs::from([(
+            "value".into(),
+            self.0.value.clone().into(),
+        )]))
     }
 
     fn ports(&self) -> Option<NodePorts> {
@@ -159,7 +162,7 @@ struct DishonestForward;
 
 impl Node for DishonestForward {
     fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::from([("value".into(), json!("wrong"))]))
+        Ok(Outputs::from([("value".into(), json!("wrong").into())]))
     }
 
     fn output_derivations(&self) -> Vec<OutputDerivation> {

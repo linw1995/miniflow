@@ -35,6 +35,7 @@ mod tests {
                 .execute(Inputs::from([("input".into(), produced["value"].clone())]))
                 .unwrap();
             assert_eq!(result["value"], value);
+            assert!(result["value"].ptr_eq(&produced["value"]));
         }
     }
 

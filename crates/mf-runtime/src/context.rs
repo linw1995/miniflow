@@ -657,7 +657,7 @@ mod tests {
     impl Node for CountNode {
         fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(Outputs::from([("value".into(), json!(true))]))
+            Ok(Outputs::from([("value".into(), json!(true).into())]))
         }
     }
 
@@ -679,7 +679,7 @@ mod tests {
                 "scope",
                 "input",
                 0,
-                Outputs::from([("count".into(), json!(7))]),
+                Outputs::from([("count".into(), json!(7).into())]),
                 types,
             )
             .unwrap();
@@ -720,8 +720,8 @@ mod tests {
         let node = FlowNode::new(
             "producer",
             Box::new(EmitNode(Outputs::from([
-                ("good".into(), json!(1)),
-                ("bad".into(), json!("wrong")),
+                ("good".into(), json!(1).into()),
+                ("bad".into(), json!("wrong").into()),
             ]))),
             NodePorts {
                 inputs: vec![],
@@ -850,7 +850,7 @@ mod tests {
             } else {
                 json!(42)
             };
-            Ok(Outputs::from([("value".into(), value)]))
+            Ok(Outputs::from([("value".into(), value.into())]))
         }
     }
 
@@ -892,7 +892,7 @@ mod tests {
                 vec![
                     FlowNode::new(
                         "source",
-                        Box::new(EmitNode(Outputs::from([("value".into(), value)]))),
+                        Box::new(EmitNode(Outputs::from([("value".into(), value.into())]))),
                         NodePorts {
                             inputs: vec![],
                             outputs: vec![port("value", ValueType::Any, true)],

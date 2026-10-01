@@ -1,4 +1,3 @@
-use rpds::{RedBlackTreeMapSync, VectorSync};
 use serde::{
     Deserialize, Deserializer, Serialize, Serializer,
     ser::{SerializeMap, SerializeSeq},
@@ -7,13 +6,9 @@ use serde_json::{Number, Value};
 use std::{
     collections::BTreeMap,
     fmt,
-    hash::{Hash, Hasher},
-    ops::{Deref, DerefMut, Index},
-    sync::{Arc, LazyLock, OnceLock},
+    ops::Index,
+    sync::{Arc, LazyLock},
 };
-
-pub type SharedArray = VectorSync<ValueRef>;
-pub type SharedObject = RedBlackTreeMapSync<Arc<str>, ValueRef>;
 
 #[derive(Clone, Debug)]
 pub enum ValueKind {
@@ -21,26 +16,17 @@ pub enum ValueKind {
     Bool(bool),
     Number(Number),
     String(Arc<str>),
-    Array(SharedArray),
-    Object(SharedObject),
-}
-
-#[derive(Debug)]
-struct ValueNode {
-    kind: ValueKind,
-    fingerprint: OnceLock<u64>,
+    Array(Vec<ValueRef>),
+    Object(BTreeMap<Arc<str>, ValueRef>),
 }
 
 /// An immutable JSON value whose descendants are shared between versions.
 #[derive(Clone, Debug)]
-pub struct ValueRef(Arc<ValueNode>);
+pub struct ValueRef(Arc<ValueKind>);
 
 impl ValueRef {
     pub fn new(kind: ValueKind) -> Self {
-        Self(Arc::new(ValueNode {
-            kind,
-            fingerprint: OnceLock::new(),
-        }))
+        Self(Arc::new(kind))
     }
     pub fn null() -> Self {
         Self::new(ValueKind::Null)
@@ -52,7 +38,7 @@ impl ValueRef {
         Self::new(ValueKind::Object(entries.into_iter().collect()))
     }
     pub fn kind(&self) -> &ValueKind {
-        &self.0.kind
+        &self.0
     }
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
@@ -108,14 +94,14 @@ impl ValueRef {
             None
         }
     }
-    pub fn as_array(&self) -> Option<&SharedArray> {
+    pub fn as_array(&self) -> Option<&[ValueRef]> {
         if let ValueKind::Array(value) = self.kind() {
             Some(value)
         } else {
             None
         }
     }
-    pub fn as_object(&self) -> Option<&SharedObject> {
+    pub fn as_object(&self) -> Option<&BTreeMap<Arc<str>, ValueRef>> {
         if let ValueKind::Object(value) = self.kind() {
             Some(value)
         } else {
@@ -127,140 +113,41 @@ impl ValueRef {
     }
 
     pub fn pointer(&self, pointer: &str) -> Option<&Self> {
-        let mut value = self;
-        for segment in pointer_segments(pointer)? {
-            value = match value.kind() {
-                ValueKind::Object(entries) => entries.get(segment.as_str())?,
-                ValueKind::Array(items) => items.get(array_index(&segment)?)?,
-                _ => return None,
-            };
+        if pointer.is_empty() {
+            return Some(self);
         }
-        Some(value)
-    }
-
-    pub fn with_field(&self, key: impl Into<Arc<str>>, value: impl Into<Self>) -> Option<Self> {
-        let entries = self.as_object()?;
-        let key = key.into();
-        let value = value.into();
-        if entries.get(key.as_ref()) == Some(&value) {
-            return Some(self.clone());
-        }
-        let key = entries
-            .get_key_value(key.as_ref())
-            .map_or(key.clone(), |(key, _)| key.clone());
-        let mut next = entries.clone();
-        next.insert_mut(key, value);
-        Some(Self::new(ValueKind::Object(next)))
-    }
-
-    pub fn with_index(&self, index: usize, value: impl Into<Self>) -> Option<Self> {
-        let items = self.as_array()?;
-        let previous = items.get(index)?;
-        let value = value.into();
-        if previous == &value {
-            return Some(self.clone());
-        }
-        let mut next = items.clone();
-        next.set_mut(index, value);
-        Some(Self::new(ValueKind::Array(next)))
-    }
-
-    pub fn with_pointer(&self, pointer: &str, value: impl Into<Self>) -> Option<Self> {
-        fn update(current: &ValueRef, path: &[String], value: ValueRef) -> Option<ValueRef> {
-            let Some((segment, rest)) = path.split_first() else {
-                return Some(if current == &value {
-                    current.clone()
-                } else {
-                    value
-                });
-            };
-            match current.kind() {
-                ValueKind::Object(entries) => {
-                    let value = if rest.is_empty() {
-                        value
-                    } else {
-                        update(entries.get(segment.as_str())?, rest, value)?
-                    };
-                    current.with_field(segment.as_str(), value)
+        pointer
+            .strip_prefix('/')?
+            .split('/')
+            .try_fold(self, |value, segment| {
+                let key = unescape(segment)?;
+                match value.kind() {
+                    ValueKind::Object(entries) => entries.get(key.as_ref()),
+                    ValueKind::Array(items) => items.get(array_index(&key)?),
+                    _ => None,
                 }
-                ValueKind::Array(items) => {
-                    let index = array_index(segment)?;
-                    current.with_index(index, update(items.get(index)?, rest, value)?)
-                }
-                _ => None,
-            }
-        }
-        update(self, &pointer_segments(pointer)?, value.into())
-    }
-
-    /// Fingerprints accelerate content comparisons; equality still resolves collisions.
-    pub fn fingerprint(&self) -> u64 {
-        *self.0.fingerprint.get_or_init(|| {
-            let mut state = std::collections::hash_map::DefaultHasher::new();
-            std::mem::discriminant(self.kind()).hash(&mut state);
-            match self.kind() {
-                ValueKind::Null => {}
-                ValueKind::Bool(value) => value.hash(&mut state),
-                ValueKind::Number(value) => value.to_string().hash(&mut state),
-                ValueKind::String(value) => value.hash(&mut state),
-                ValueKind::Array(items) => {
-                    items.len().hash(&mut state);
-                    for item in items {
-                        item.fingerprint().hash(&mut state);
-                    }
-                }
-                ValueKind::Object(entries) => {
-                    entries.size().hash(&mut state);
-                    for (key, value) in entries {
-                        key.hash(&mut state);
-                        value.fingerprint().hash(&mut state);
-                    }
-                }
-            }
-            state.finish()
-        })
-    }
-
-    pub fn to_json(&self) -> Value {
-        match self.kind() {
-            ValueKind::Null => Value::Null,
-            ValueKind::Bool(value) => Value::Bool(*value),
-            ValueKind::Number(value) => Value::Number(value.clone()),
-            ValueKind::String(value) => Value::String(value.to_string()),
-            ValueKind::Array(items) => Value::Array(items.iter().map(Self::to_json).collect()),
-            ValueKind::Object(entries) => Value::Object(
-                entries
-                    .iter()
-                    .map(|(key, value)| (key.to_string(), value.to_json()))
-                    .collect(),
-            ),
-        }
+            })
     }
 }
 
-fn pointer_segments(pointer: &str) -> Option<Vec<String>> {
-    if pointer.is_empty() {
-        return Some(Vec::new());
+fn unescape(segment: &str) -> Option<std::borrow::Cow<'_, str>> {
+    if !segment.contains('~') {
+        return Some(segment.into());
     }
-    let path = pointer.strip_prefix('/')?;
-    path.split('/')
-        .map(|segment| {
-            let mut result = String::new();
-            let mut chars = segment.chars();
-            while let Some(character) = chars.next() {
-                result.push(if character == '~' {
-                    match chars.next()? {
-                        '0' => '~',
-                        '1' => '/',
-                        _ => return None,
-                    }
-                } else {
-                    character
-                });
+    let mut result = String::with_capacity(segment.len());
+    let mut chars = segment.chars();
+    while let Some(character) = chars.next() {
+        result.push(if character == '~' {
+            match chars.next()? {
+                '0' => '~',
+                '1' => '/',
+                _ => return None,
             }
-            Some(result)
-        })
-        .collect()
+        } else {
+            character
+        });
+    }
+    Some(result.into())
 }
 fn array_index(index: &str) -> Option<usize> {
     if index.starts_with('+') || (index.starts_with('0') && index.len() > 1) {
@@ -269,22 +156,20 @@ fn array_index(index: &str) -> Option<usize> {
     index.parse().ok()
 }
 
+fn numbers_equal(left: &Number, right: &Number) -> bool {
+    left == right
+        && (!left.is_f64() || left.as_f64().map(f64::to_bits) == right.as_f64().map(f64::to_bits))
+}
+
 impl PartialEq for ValueRef {
     fn eq(&self, other: &Self) -> bool {
         if self.ptr_eq(other) {
             return true;
         }
-        if let (Some(left), Some(right)) = (self.0.fingerprint.get(), other.0.fingerprint.get())
-            && left != right
-        {
-            return false;
-        }
         match (self.kind(), other.kind()) {
             (ValueKind::Null, ValueKind::Null) => true,
             (ValueKind::Bool(left), ValueKind::Bool(right)) => left == right,
-            (ValueKind::Number(left), ValueKind::Number(right)) => {
-                left.to_string() == right.to_string()
-            }
+            (ValueKind::Number(left), ValueKind::Number(right)) => numbers_equal(left, right),
             (ValueKind::String(left), ValueKind::String(right)) => left == right,
             (ValueKind::Array(left), ValueKind::Array(right)) => left == right,
             (ValueKind::Object(left), ValueKind::Object(right)) => left == right,
@@ -298,16 +183,14 @@ impl PartialEq<Value> for ValueRef {
         match (self.kind(), other) {
             (ValueKind::Null, Value::Null) => true,
             (ValueKind::Bool(left), Value::Bool(right)) => left == right,
-            (ValueKind::Number(left), Value::Number(right)) => {
-                left.to_string() == right.to_string()
-            }
+            (ValueKind::Number(left), Value::Number(right)) => numbers_equal(left, right),
             (ValueKind::String(left), Value::String(right)) => left.as_ref() == right,
             (ValueKind::Array(left), Value::Array(right)) => {
                 left.len() == right.len()
                     && left.iter().zip(right).all(|(left, right)| left == right)
             }
             (ValueKind::Object(left), Value::Object(right)) => {
-                left.size() == right.len()
+                left.len() == right.len()
                     && left.iter().all(|(key, value)| {
                         right.get(key.as_ref()).is_some_and(|right| value == right)
                     })
@@ -403,7 +286,7 @@ impl Serialize for ValueRef {
                 output.end()
             }
             ValueKind::Object(entries) => {
-                let mut output = serializer.serialize_map(Some(entries.size()))?;
+                let mut output = serializer.serialize_map(Some(entries.len()))?;
                 for (key, value) in entries {
                     output.serialize_entry(key.as_ref(), value)?;
                 }
@@ -415,65 +298,6 @@ impl Serialize for ValueRef {
 impl<'de> Deserialize<'de> for ValueRef {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         Value::deserialize(deserializer).map(Into::into)
-    }
-}
-
-/// Node ports own references to immutable values.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct PortValues(BTreeMap<String, ValueRef>);
-impl PortValues {
-    pub fn new() -> Self {
-        Self::default()
-    }
-    pub fn insert(&mut self, key: String, value: impl Into<ValueRef>) -> Option<ValueRef> {
-        self.0.insert(key, value.into())
-    }
-}
-impl Deref for PortValues {
-    type Target = BTreeMap<String, ValueRef>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-impl DerefMut for PortValues {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-impl<T: Into<ValueRef>, const N: usize> From<[(String, T); N]> for PortValues {
-    fn from(entries: [(String, T); N]) -> Self {
-        entries.into_iter().collect()
-    }
-}
-impl<T: Into<ValueRef>> FromIterator<(String, T)> for PortValues {
-    fn from_iter<I: IntoIterator<Item = (String, T)>>(entries: I) -> Self {
-        Self(
-            entries
-                .into_iter()
-                .map(|(key, value)| (key, value.into()))
-                .collect(),
-        )
-    }
-}
-impl<T: Into<ValueRef>> Extend<(String, T)> for PortValues {
-    fn extend<I: IntoIterator<Item = (String, T)>>(&mut self, entries: I) {
-        self.0
-            .extend(entries.into_iter().map(|(key, value)| (key, value.into())));
-    }
-}
-impl IntoIterator for PortValues {
-    type Item = (String, ValueRef);
-    type IntoIter = std::collections::btree_map::IntoIter<String, ValueRef>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
-    }
-}
-impl<'a> IntoIterator for &'a PortValues {
-    type Item = (&'a String, &'a ValueRef);
-    type IntoIter = std::collections::btree_map::Iter<'a, String, ValueRef>;
-    fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
     }
 }
 
@@ -538,20 +362,6 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn persistent_updates_share_unchanged_descendants_and_equal_roots() {
-        let value =
-            ValueRef::from(json!({"items": [{"count": 1}, {"count": 2}], "payload": "unchanged"}));
-        let next = value.with_pointer("/items/0/count", 3).unwrap();
-        assert_eq!(value["items"][0]["count"], json!(1));
-        assert_eq!(next["items"][0]["count"], json!(3));
-        assert!(!value.ptr_eq(&next));
-        assert!(value["payload"].ptr_eq(&next["payload"]));
-        assert!(value["items"][1].ptr_eq(&next["items"][1]));
-        assert!(next.ptr_eq(&next.with_pointer("/items/0/count", 3).unwrap()));
-        assert!(next.ptr_eq(&next.with_pointer("", next.to_json()).unwrap()));
-    }
-
-    #[test]
     fn pointers_decode_escapes_and_reject_invalid_array_indices() {
         let value = ValueRef::from(json!({"a/b": {"~": [1]}, "": true}));
         assert_eq!(value.pointer("/a~1b/~0/0").unwrap(), &json!(1));
@@ -565,7 +375,6 @@ mod tests {
             "/absent/x",
         ] {
             assert!(value.pointer(pointer).is_none(), "{pointer}");
-            assert!(value.with_pointer(pointer, 2).is_none(), "{pointer}");
         }
     }
 
@@ -576,15 +385,10 @@ mod tests {
         assert_eq!(serde_json::to_string(&values).unwrap(), json);
         assert_ne!(values[0], values[1]);
         assert_ne!(values[1], values[2]);
-        assert_ne!(values[1].fingerprint(), values[2].fingerprint());
         assert_eq!(values[3].as_u64(), Some(u64::MAX));
-        assert_eq!(values, values.to_json());
-    }
-
-    #[test]
-    fn cloning_ports_only_clones_value_handles() {
-        let ports = PortValues::from([("value".into(), json!({"data": [1, 2, 3]}))]);
-        let clone = ports.clone();
-        assert!(ports["value"].ptr_eq(&clone["value"]));
+        assert_eq!(
+            serde_json::to_value(&values).unwrap(),
+            serde_json::from_str::<Value>(json).unwrap()
+        );
     }
 }
