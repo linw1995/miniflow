@@ -1,4 +1,6 @@
-use mf_compiler::{CompileRequest, PipelineError, SupportPackages, compile_project};
+use mf_compiler::{
+    CompileRequest, PipelineError, RunnerOptions, SupportPackages, compile_project_with_options,
+};
 use snafu::{ResultExt, Snafu};
 use std::env;
 use std::ffi::{OsStr, OsString};
@@ -6,7 +8,7 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "Usage: mf compile <definition> --output <path> [--locked] [--build-dir <path>]\n       mf run <executable> --tui";
+const USAGE: &str = "Usage: mf compile <definition> --output <path> [--locked] [--build-dir <path>] [--no-telemetry]\n       mf run <executable> --tui";
 
 #[derive(Debug, Snafu)]
 enum CliError {
@@ -23,6 +25,7 @@ struct CompileOptions {
     definition: PathBuf,
     output: PathBuf,
     locked: bool,
+    telemetry: bool,
     build_dir: Option<PathBuf>,
 }
 
@@ -91,10 +94,13 @@ fn parse_compile_args(
     };
     let mut output = None;
     let mut locked = false;
+    let mut telemetry = true;
     let mut build_dir = None;
     while let Some(option) = args.next() {
         if option == OsStr::new("--locked") && !locked {
             locked = true;
+        } else if option == OsStr::new("--no-telemetry") && telemetry {
+            telemetry = false;
         } else if option == OsStr::new("--build-dir") && build_dir.is_none() {
             build_dir = Some(PathBuf::from(args.next().ok_or_else(|| {
                 CliError::Usage {
@@ -119,19 +125,25 @@ fn parse_compile_args(
         definition: definition.into(),
         output: output.into(),
         locked,
+        telemetry,
         build_dir,
     })
 }
 
 fn compile(options: CompileOptions) -> Result<(), CliError> {
     let support = support_packages();
-    compile_project(&CompileRequest {
-        definition: &options.definition,
-        output: &options.output,
-        locked: options.locked,
-        build_dir: options.build_dir.as_deref(),
-        support: &support,
-    })
+    compile_project_with_options(
+        &CompileRequest {
+            definition: &options.definition,
+            output: &options.output,
+            locked: options.locked,
+            build_dir: options.build_dir.as_deref(),
+            support: &support,
+        },
+        &RunnerOptions {
+            telemetry: options.telemetry,
+        },
+    )
     .context(BuildSnafu)?;
     Ok(())
 }
@@ -169,5 +181,29 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn parses_optional_telemetry_without_changing_the_default() {
+        let args = ["flow.json", "--output", "flow"];
+        assert!(
+            parse_compile_args(args.map(OsString::from).into_iter())
+                .unwrap()
+                .telemetry
+        );
+        let args = ["flow.json", "--no-telemetry", "--output", "flow"];
+        assert!(
+            !parse_compile_args(args.map(OsString::from).into_iter())
+                .unwrap()
+                .telemetry
+        );
+        let args = [
+            "flow.json",
+            "--no-telemetry",
+            "--no-telemetry",
+            "--output",
+            "flow",
+        ];
+        assert!(parse_compile_args(args.map(OsString::from).into_iter()).is_err());
     }
 }

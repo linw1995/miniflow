@@ -1,6 +1,6 @@
 use crate::{
-    BuildGuard, BuildInputs, SupportPackages, WorkflowDefinition, atomic_copy, plan_definition,
-    validate_runtime_identity, write_dependency_project,
+    BuildGuard, BuildInputs, RunnerOptions, SupportPackages, WorkflowDefinition, atomic_copy,
+    plan_definition, validate_runtime_identity, write_dependency_project_with_options,
 };
 use snafu::Snafu;
 use std::{
@@ -49,6 +49,13 @@ pub struct CompileRequest<'a> {
 }
 
 pub fn compile_project(request: &CompileRequest<'_>) -> Result<PathBuf, PipelineError> {
+    compile_project_with_options(request, &RunnerOptions::default())
+}
+
+pub fn compile_project_with_options(
+    request: &CompileRequest<'_>,
+    options: &RunnerOptions,
+) -> Result<PathBuf, PipelineError> {
     let inputs = at(
         "input resolution",
         request.definition,
@@ -113,7 +120,7 @@ pub fn compile_project(request: &CompileRequest<'_>) -> Result<PathBuf, Pipeline
     at(
         "project generation",
         &project,
-        write_dependency_project(&project, &plan, request.support),
+        write_dependency_project_with_options(&project, &plan, request.support, options),
     )?;
     let metadata = resolve_project(&project, &inputs.lock, request.locked)?;
     at(

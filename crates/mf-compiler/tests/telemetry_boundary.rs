@@ -1,6 +1,8 @@
 mod common;
 
-use mf_compiler::{SupportPackages, write_dependency_project};
+use mf_compiler::{
+    RunnerOptions, SupportPackages, write_dependency_project, write_dependency_project_with_options,
+};
 use std::{collections::BTreeSet, fs, path::Path};
 
 fn dependency_names(project: &Path) -> BTreeSet<String> {
@@ -63,6 +65,28 @@ fn generated_runner_exports_otel_without_terminal_dependencies() {
     assert!(exporting.contains("opentelemetry_sdk"));
     assert!(exporting.contains("opentelemetry-otlp"));
     assert!(exporting.contains("reqwest"));
+    assert!(!exporting.contains("prettyplease"));
+    let lean_project = root.path().join("lean");
+    write_dependency_project_with_options(
+        &lean_project,
+        &common::fixture_plan(),
+        &SupportPackages::Local {
+            crates_dir: common::crates_dir(),
+        },
+        &RunnerOptions { telemetry: false },
+    )
+    .unwrap();
+    let lean = dependency_names(&lean_project);
+    assert!(lean.contains("mf-compiler"));
+    for name in [
+        "prettyplease",
+        "opentelemetry_sdk",
+        "opentelemetry-otlp",
+        "reqwest",
+        "tokio",
+    ] {
+        assert!(!lean.contains(name), "lean runner contains {name}");
+    }
     for name in [
         "mf-tui",
         "ratatui",

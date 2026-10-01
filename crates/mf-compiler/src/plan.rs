@@ -1,11 +1,20 @@
+#[cfg(feature = "codegen")]
+use crate::LoopDefinition;
+#[cfg(feature = "codegen")]
 use crate::iteration::{body_definition, parse_config};
-use crate::{DefinitionId, LoopDefinition, WorkflowDefinition};
+use crate::{DefinitionId, WorkflowDefinition};
+#[cfg(feature = "codegen")]
 use mf_runtime::{ITERATION_INPUT_KIND, ITERATION_KIND};
+#[cfg(feature = "codegen")]
 use proc_macro2::{Span, TokenStream};
+#[cfg(feature = "codegen")]
 use quote::{format_ident, quote};
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
+#[cfg(feature = "codegen")]
+use std::collections::BTreeSet;
+#[cfg(feature = "codegen")]
 use syn::LitStr;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -38,6 +47,7 @@ pub enum PlanError {
     },
     #[snafu(display("compiled plan selects output name `{name}` more than once"))]
     DuplicateOutputName { name: String },
+    #[cfg(feature = "codegen")]
     #[snafu(display("generated Rust code is invalid: {source}"))]
     GeneratedSyntax { source: syn::Error },
     #[snafu(display("invalid embedded Loop node `{definition_id}`: {message}"))]
@@ -115,6 +125,7 @@ impl CompiledWorkflow {
         serde_json::from_str(input).context(ParseSnafu)
     }
 
+    #[cfg(feature = "codegen")]
     pub fn generate_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
         if self.execution_order.len() != self.definition.nodes.len() {
             return InvalidExecutionOrderSnafu.fail();
@@ -229,6 +240,7 @@ impl CompiledWorkflow {
     }
 }
 
+#[cfg(feature = "codegen")]
 fn generate_scope(
     definition: &WorkflowDefinition,
     order: &[DefinitionId],
@@ -396,6 +408,7 @@ fn generate_scope(
     Ok((preparations, statements))
 }
 
+#[cfg(feature = "codegen")]
 fn dependency_tokens(dependencies: &[mf_runtime::ExecutionDependency<'_>]) -> Vec<TokenStream> {
     dependencies.iter().map(|dependency| {
         let source = LitStr::new(dependency.source_node, Span::call_site());
@@ -411,6 +424,7 @@ fn dependency_tokens(dependencies: &[mf_runtime::ExecutionDependency<'_>]) -> Ve
     }).collect()
 }
 
+#[cfg(feature = "codegen")]
 fn subgraph_preparation(
     parent: &WorkflowDefinition,
     node: &crate::NodeDefinition,
@@ -559,6 +573,7 @@ fn subgraph_preparation(
     })
 }
 
+#[cfg(feature = "codegen")]
 fn generate_outputs(definition: &WorkflowDefinition) -> TokenStream {
     let binding = if definition.outputs.is_empty() {
         quote! { let workflow_outputs = mf_runtime::FlowOutputs::new(); }

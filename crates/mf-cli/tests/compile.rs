@@ -82,6 +82,59 @@ fn development_support_uses_checkout_crates_without_override() {
     );
 }
 
+#[test]
+fn compiles_a_runner_without_telemetry_and_preserves_its_commands() {
+    let temporary = temporary_directory();
+    let definition = temporary.path().join("workflow.json");
+    let output = temporary.path().join("workflow");
+    fs::write(&definition, definition_json()).unwrap();
+    let result = compile_command(&definition, &output)
+        .arg("--no-telemetry")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let execution = Command::new(&output)
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", "invalid endpoint")
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "{}",
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert!(execution.stderr.is_empty());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&execution.stdout).unwrap()["answer"],
+        json!(41)
+    );
+    assert!(
+        Command::new(&output)
+            .arg("--validate")
+            .status()
+            .unwrap()
+            .success()
+    );
+    let description = Command::new(&output).arg("--describe").output().unwrap();
+    assert!(description.status.success());
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&description.stdout).unwrap()["nodes"]
+            .is_array()
+    );
+    let result = compile_command(&definition, &output)
+        .args(["--no-telemetry", "--locked"])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+}
+
 fn assert_rejected_definition(mut value: serde_json::Value, diagnostics: &[&str]) {
     let temporary = temporary_directory();
     let definition = temporary.path().join("invalid-workflow.json");

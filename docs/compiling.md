@@ -22,6 +22,11 @@ mf compile flow.json --output ./flow --locked
 
 The output directory must exist. A successful first build creates `flow.lock`. See [workflow definitions](workflows.md) for dependency sources, features, and lock behavior. Native libraries required by plugins must be installed separately.
 
+Use `mf compile flow.json --output ./flow --no-telemetry` for a smaller runner when live observation is unnecessary.
+It retains workflow execution, `--validate`, and `--describe`, and omits the runner's OTLP SDK and HTTP client.
+This runner does not emit the lifecycle events used by `mf run --tui`. Omit `--no-telemetry` to keep observation support.
+Generated runners disable `mf-compiler`'s `codegen` feature; the compiler CLI enables that feature by default.
+
 The CLI checks graph structure in every scope and generates fixed node orchestration, including structured repeated execution for Loop bodies, then compiles one runner
 using `cargo build --release --locked`. It invokes that binary with `--validate` to check registered
 kinds, configuration, inferred port types, and port contracts without executing node operations.
