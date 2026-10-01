@@ -119,6 +119,14 @@ impl LoopbackReceiver {
             .snapshot()
     }
 
+    pub fn snapshot_shared(&self) -> Arc<StateSnapshot> {
+        self.context
+            .state
+            .lock()
+            .expect("receiver state was not poisoned")
+            .snapshot_shared()
+    }
+
     pub fn finish(&mut self) -> StateSnapshot {
         self.stop();
         let mut state = self

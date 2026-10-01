@@ -80,6 +80,14 @@ The arguments select the node count and string payload size in bytes; zero selec
 Run the built executable repeatedly when comparing timings or measuring peak memory, so Cargo compilation is excluded.
 Keep machine-specific measurements and ablation reports under the ignored `target/` directory.
 
+Compare owned and shared snapshots for an unchanged terminal session:
+
+```sh
+nix develop --command cargo run --release -p mf-tui --example benchmark_snapshots -- 10000 1000
+```
+
+The arguments select the node count and repetition count. Shared snapshots are rebuilt when the session receives updates.
+
 ## Code layout
 
 | Path | Responsibility |
