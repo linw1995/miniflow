@@ -38,7 +38,7 @@ fn plugin(root: &Path) -> PathBuf {
     let plugin = root.join("plugin");
     fs::create_dir_all(plugin.join("src")).unwrap();
     let fixture = crates_dir().join("mf-compiler/tests/fixtures/multi-nodes/src");
-    for name in ["lib.rs", "context_fixture.rs"] {
+    for name in ["lib.rs", "context_fixture.rs", "subgraph_fixture.rs"] {
         fs::copy(fixture.join(name), plugin.join("src").join(name)).unwrap();
     }
     let lib = plugin.join("src/lib.rs");
