@@ -674,7 +674,7 @@ fn supervise(
             }
         }
         if last_frame.elapsed() >= FRAME_INTERVAL {
-            let snapshot = receiver.snapshot();
+            let snapshot = receiver.snapshot_shared();
             let view = capture.view();
             draw(
                 terminal,
@@ -703,7 +703,7 @@ fn supervise(
                             interrupt(child, &mut interrupted_at);
                         }
                     } else {
-                        let snapshot = receiver.snapshot();
+                        let snapshot = receiver.snapshot_shared();
                         view_state.handle_key(key.code, &snapshot, layout, body_layouts);
                     }
                     last_frame = Instant::now() - FRAME_INTERVAL;

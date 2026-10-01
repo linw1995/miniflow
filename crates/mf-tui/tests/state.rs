@@ -11,6 +11,88 @@ use mf_telemetry::{
     identity::{RunId, WorkflowId},
 };
 use mf_tui::state::{Admission, Completeness, NodeStatus, SessionState};
+use std::sync::Arc;
+
+#[test]
+fn shared_snapshots_preserve_old_views_and_follow_session_updates() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<SessionState>();
+    let mut state = state();
+    let updates: &[fn(&mut SessionState)] = &[
+        |state| {
+            state.apply(start()).unwrap();
+        },
+        |state| {
+            state
+                .apply(node_start(2, "a", "fixture.source", 0))
+                .unwrap();
+        },
+        |state| {
+            state
+                .apply(node_success(3, "a", "fixture.source", 0))
+                .unwrap();
+        },
+        |state| state.record_local_lifecycle_drop(1, "dropped lifecycle record"),
+        |state| state.record_trace_span(),
+        |state| state.record_local_trace_drop(1, "dropped span"),
+        |state| state.record_diagnostic_truncation(1),
+        |state| state.record_diagnostic("diagnostic"),
+        |state| state.record_observation_error("observation error"),
+        |state| state.close(),
+    ];
+    for update in updates {
+        let previous = state.snapshot_shared();
+        let expected_previous = state.snapshot();
+        assert!(Arc::ptr_eq(&previous, &state.snapshot_shared()));
+        update(&mut state);
+        let current = state.snapshot_shared();
+        assert!(!Arc::ptr_eq(&previous, &current));
+        assert_eq!(*previous, expected_previous);
+        assert_eq!(*current, state.snapshot());
+    }
+}
+
+#[test]
+fn late_pass_start_updates_recent_history_without_changing_older_snapshots() {
+    let mut state = SessionState::new(loop_graph(), run_id()).unwrap();
+    for index in 0..70 {
+        state
+            .apply(event(
+                index * 3 + 3,
+                Event::LoopPassFinished {
+                    path: vec![LoopPathEntry {
+                        loop_id: "repeat".into(),
+                        index: count(index),
+                    }],
+                    elapsed_ns: count(index * 3 + 3),
+                    visited_node_count: Count::ZERO,
+                    outcome: LoopPassOutcome::Exit,
+                },
+            ))
+            .unwrap();
+    }
+    let previous = state.snapshot_shared();
+    assert_eq!(previous.loop_passes.first().unwrap().path[0].index.get(), 6);
+    assert_eq!(previous.loop_passes.last().unwrap().path[0].index.get(), 69);
+    state
+        .apply(event(
+            2,
+            Event::LoopPassStarted {
+                path: vec![LoopPathEntry {
+                    loop_id: "repeat".into(),
+                    index: count(69),
+                }],
+                elapsed_ns: count(2),
+            },
+        ))
+        .unwrap();
+    let current = state.snapshot_shared();
+    assert_eq!(current.loop_passes.first().unwrap().path[0].index.get(), 5);
+    assert_eq!(current.loop_passes.last().unwrap().path[0].index.get(), 68);
+    assert_eq!(current.total_loop_passes, 70);
+    assert_eq!(current.hidden_loop_passes, 6);
+    assert_eq!(previous.loop_passes.last().unwrap().path[0].index.get(), 69);
+}
 
 fn count(value: i64) -> Count {
     Count::try_from(value).unwrap()
@@ -1125,4 +1207,26 @@ fn late_node_failure_cannot_confirm_a_successful_final_boundary() {
     assert!(snapshot.nodes[0].conflicted);
     state.close();
     assert_eq!(state.integrity().completeness, Completeness::Incomplete);
+}
+
+#[test]
+fn unchanged_admissions_and_repeated_close_reuse_the_snapshot() {
+    use std::sync::Arc;
+    let mut state = state();
+    state.apply(start()).unwrap();
+    let before = state.snapshot_shared();
+    assert_eq!(state.apply(start()).unwrap(), Admission::Duplicate);
+    assert!(Arc::ptr_eq(&before, &state.snapshot_shared()));
+    state.record_diagnostic_truncation(0);
+    assert!(Arc::ptr_eq(&before, &state.snapshot_shared()));
+    let mut invalid = node_start(2, "a", "fixture.source", 0);
+    invalid.sequence = count(10000);
+    assert!(state.apply(invalid).is_err());
+    assert!(Arc::ptr_eq(&before, &state.snapshot_shared()));
+    state.close();
+    let closed = state.snapshot_shared();
+    assert!(!Arc::ptr_eq(&before, &closed));
+    state.close();
+    assert!(state.apply(start()).is_err());
+    assert!(Arc::ptr_eq(&closed, &state.snapshot_shared()));
 }

@@ -12,7 +12,10 @@ use mf_telemetry::{
 };
 use sha2::{Digest, Sha256};
 use snafu::Snafu;
-use std::collections::{BTreeMap, VecDeque};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    sync::{Arc, Mutex},
+};
 
 const MAX_DIAGNOSTICS: usize = 64;
 const MAX_DIAGNOSTIC_ENTRY_BYTES: usize = 1024;
@@ -223,8 +226,10 @@ pub struct SessionState {
     diagnostic_bytes_dropped: u64,
     diagnostics: VecDeque<String>,
     pass_states: BTreeMap<Vec<LoopPathEntry>, PassState>,
+    pass_order: BTreeSet<(Count, Vec<LoopPathEntry>)>,
     loop_summaries: BTreeMap<(Vec<LoopPathEntry>, String), LoopSummary>,
     closed: bool,
+    snapshot_cache: Mutex<Option<Arc<StateSnapshot>>>,
 }
 
 #[derive(Default)]
@@ -308,8 +313,10 @@ impl SessionState {
             diagnostic_bytes_dropped: 0,
             diagnostics: VecDeque::new(),
             pass_states: BTreeMap::new(),
+            pass_order: BTreeSet::new(),
             loop_summaries: BTreeMap::new(),
             closed: false,
+            snapshot_cache: Mutex::new(None),
         })
     }
 
@@ -380,6 +387,7 @@ impl SessionState {
             self.conflict("event followed the final sequence", event.event.node());
             return Ok(Admission::Conflict);
         }
+        self.invalidate_snapshot();
         self.received.insert(
             sequence,
             SequenceWitness {
@@ -420,28 +428,37 @@ impl SessionState {
     }
 
     pub fn record_local_lifecycle_drop(&mut self, count: u64, reason: &str) {
+        self.invalidate_snapshot();
         self.local_lifecycle_drops = self.local_lifecycle_drops.saturating_add(count);
         self.note(reason);
     }
 
     pub fn record_trace_span(&mut self) {
+        self.invalidate_snapshot();
         self.traces.observed_spans = self.traces.observed_spans.saturating_add(1);
     }
 
     pub fn record_local_trace_drop(&mut self, count: u64, reason: &str) {
+        self.invalidate_snapshot();
         self.traces.local_drops = self.traces.local_drops.saturating_add(count);
         self.note(reason);
     }
 
     pub fn record_diagnostic_truncation(&mut self, bytes: u64) {
-        self.diagnostic_bytes_dropped = self.diagnostic_bytes_dropped.saturating_add(bytes);
+        let total = self.diagnostic_bytes_dropped.saturating_add(bytes);
+        if total != self.diagnostic_bytes_dropped {
+            self.invalidate_snapshot();
+            self.diagnostic_bytes_dropped = total;
+        }
     }
 
     pub fn record_diagnostic(&mut self, message: &str) {
+        self.invalidate_snapshot();
         self.note(message);
     }
 
     pub fn record_observation_error(&mut self, reason: &str) {
+        self.invalidate_snapshot();
         self.observation_errors = self.observation_errors.saturating_add(1);
         self.note(reason);
     }
@@ -450,6 +467,7 @@ impl SessionState {
         if self.closed {
             return;
         }
+        self.invalidate_snapshot();
         self.closed = true;
         if self.final_boundary.is_none() {
             for node in &mut self.nodes {
@@ -466,6 +484,26 @@ impl SessionState {
     }
 
     pub fn snapshot(&self) -> StateSnapshot {
+        self.build_snapshot()
+    }
+
+    /// Shares the last immutable snapshot until new evidence changes the session.
+    pub fn snapshot_shared(&self) -> Arc<StateSnapshot> {
+        let mut cached = self
+            .snapshot_cache
+            .lock()
+            .expect("snapshot cache was not poisoned");
+        Arc::clone(cached.get_or_insert_with(|| Arc::new(self.build_snapshot())))
+    }
+
+    fn invalidate_snapshot(&mut self) {
+        self.snapshot_cache
+            .get_mut()
+            .expect("snapshot cache was not poisoned")
+            .take();
+    }
+
+    fn build_snapshot(&self) -> StateSnapshot {
         let lifecycle = self.integrity();
         let has_gap = lifecycle.known_missing_count != 0;
         let mut nodes = self.nodes.clone();
@@ -501,20 +539,25 @@ impl SessionState {
     }
 
     fn recent_loop_pass_snapshots(&self) -> Vec<LoopPassObservation> {
-        let mut passes: Vec<_> = self.pass_states.iter().collect();
-        passes.sort_by_key(|(_, state)| state.first_sequence);
-        passes
-            .into_iter()
+        let recent: Vec<_> = self
+            .pass_order
+            .iter()
             .rev()
             .take(MAX_RECENT_LOOP_PASSES)
+            .collect();
+        recent
+            .into_iter()
             .rev()
-            .map(|(path, state)| LoopPassObservation {
-                path: path.clone(),
-                nodes: state.nodes.values().cloned().collect(),
-                started: state.started_sequence.is_some(),
-                outcome: state.outcome,
-                visited_node_count: state.visited_node_count,
-                interrupted: self.closed && self.final_boundary.is_none(),
+            .map(|(_, path)| {
+                let state = &self.pass_states[path];
+                LoopPassObservation {
+                    path: path.clone(),
+                    nodes: state.nodes.values().cloned().collect(),
+                    started: state.started_sequence.is_some(),
+                    outcome: state.outcome,
+                    visited_node_count: state.visited_node_count,
+                    interrupted: self.closed && self.final_boundary.is_none(),
+                }
             })
             .collect()
     }
@@ -679,10 +722,16 @@ impl SessionState {
 
     fn ensure_pass(&mut self, path: &[LoopPathEntry], sequence: Count) -> &mut PassState {
         let pass = self.pass_states.entry(path.to_vec()).or_default();
-        pass.first_sequence = Some(
-            pass.first_sequence
-                .map_or(sequence, |first| first.min(sequence)),
-        );
+        let first = pass
+            .first_sequence
+            .map_or(sequence, |first| first.min(sequence));
+        if pass.first_sequence != Some(first) {
+            if let Some(previous) = pass.first_sequence {
+                self.pass_order.remove(&(previous, path.to_vec()));
+            }
+            self.pass_order.insert((first, path.to_vec()));
+            pass.first_sequence = Some(first);
+        }
         pass
     }
 
@@ -1067,6 +1116,7 @@ impl SessionState {
     }
 
     fn note(&mut self, message: &str) {
+        self.invalidate_snapshot();
         let (message, dropped) = truncate_utf8(message, MAX_DIAGNOSTIC_ENTRY_BYTES);
         self.diagnostic_bytes_dropped =
             self.diagnostic_bytes_dropped.saturating_add(dropped as u64);
