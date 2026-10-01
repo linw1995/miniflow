@@ -1,0 +1,623 @@
+//! Structured snapshot records carried by OTLP logs.
+use opentelemetry::logs::{AnyValue as SdkValue, LogRecord as SdkRecord};
+use opentelemetry_proto::tonic::{
+    common::v1::{AnyValue, ArrayValue, KeyValue, KeyValueList, any_value},
+    logs::v1::LogRecord,
+};
+use prost::Message;
+use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+pub const SCOPE: &str = "mf.snapshot";
+pub const RECORD_EVENT: &str = "mf.snapshot.record";
+pub const FRAGMENT_EVENT: &str = "mf.snapshot.fragment";
+pub const SCHEMA_VERSION: i64 = 1;
+pub const CHUNK_BYTES: usize = 32 * 1024;
+pub const MAX_PENDING_RECORDS: usize = 1024;
+
+fn digest(value: &Value) -> [u8; 32] {
+    fn hash(value: &Value, state: &mut Sha256) {
+        match value {
+            Value::Null => state.update([0]),
+            Value::Bool(value) => state.update([1, u8::from(*value)]),
+            Value::Number(value) => {
+                if value.is_f64() {
+                    state.update([2]);
+                    state.update(value.as_f64().unwrap().to_bits().to_le_bytes());
+                } else if let Some(value) = value.as_i64() {
+                    state.update([6]);
+                    state.update(value.to_le_bytes());
+                } else {
+                    state.update([7]);
+                    state.update(value.as_u64().unwrap().to_le_bytes());
+                }
+            }
+            Value::String(value) => {
+                state.update([3]);
+                state.update((value.len() as u64).to_le_bytes());
+                state.update(value.as_bytes());
+            }
+            Value::Array(values) => {
+                state.update([4]);
+                state.update((values.len() as u64).to_le_bytes());
+                for value in values {
+                    hash(value, state);
+                }
+            }
+            Value::Object(values) => {
+                state.update([5]);
+                state.update((values.len() as u64).to_le_bytes());
+                let mut entries: Vec<_> = values.iter().collect();
+                entries.sort_by_key(|(key, _)| *key);
+                for (key, value) in entries {
+                    state.update((key.len() as u64).to_le_bytes());
+                    state.update(key.as_bytes());
+                    hash(value, state);
+                }
+            }
+        }
+    }
+    let mut state = Sha256::new();
+    hash(value, &mut state);
+    state.finalize().into()
+}
+
+pub struct Packet {
+    sequence: usize,
+    digest: [u8; 32],
+    event_name: &'static str,
+    body: AnyValue,
+}
+
+pub enum Packets {
+    Record(Option<Packet>),
+    Fragments {
+        sequence: usize,
+        digest: [u8; 32],
+        encoded: Vec<u8>,
+        index: usize,
+    },
+}
+
+pub fn packets(sequence: usize, body: Value) -> Result<Packets, String> {
+    i64::try_from(sequence).map_err(|_| "snapshot sequence exceeds OTLP integer range")?;
+    let digest = digest(&body);
+    let body = encode(body, 0)?;
+    if body.encoded_len() <= CHUNK_BYTES {
+        Ok(Packets::Record(Some(Packet {
+            sequence,
+            digest,
+            event_name: RECORD_EVENT,
+            body,
+        })))
+    } else {
+        Ok(Packets::Fragments {
+            sequence,
+            digest,
+            encoded: body.encode_to_vec(),
+            index: 0,
+        })
+    }
+}
+
+impl Iterator for Packets {
+    type Item = Packet;
+    fn next(&mut self) -> Option<Packet> {
+        match self {
+            Self::Record(packet) => packet.take(),
+            Self::Fragments {
+                sequence,
+                digest,
+                encoded,
+                index,
+            } => {
+                let total = encoded.len().div_ceil(CHUNK_BYTES);
+                if *index == total {
+                    return None;
+                }
+                let start = *index * CHUNK_BYTES;
+                let payload = encoded[start..(start + CHUNK_BYTES).min(encoded.len())].to_vec();
+                let body = object([
+                    ("index", integer(*index as i64)),
+                    ("total", integer(total as i64)),
+                    (
+                        "payload",
+                        AnyValue {
+                            value: Some(any_value::Value::BytesValue(payload)),
+                        },
+                    ),
+                ]);
+                *index += 1;
+                Some(Packet {
+                    sequence: *sequence,
+                    digest: *digest,
+                    event_name: FRAGMENT_EVENT,
+                    body,
+                })
+            }
+        }
+    }
+}
+
+impl Packet {
+    pub fn into_log_record(self, workflow: &str, run: &str) -> LogRecord {
+        LogRecord {
+            time_unix_nano: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+                .min(u64::MAX as u128) as u64,
+            event_name: self.event_name.into(),
+            body: Some(self.body),
+            attributes: vec![
+                pair("mf.workflow.id", string(workflow)),
+                pair("mf.run.id", string(run)),
+                pair("mf.snapshot.version", integer(SCHEMA_VERSION)),
+                pair("mf.snapshot.sequence", integer(self.sequence as i64)),
+                pair(
+                    "mf.snapshot.digest",
+                    AnyValue {
+                        value: Some(any_value::Value::BytesValue(self.digest.to_vec())),
+                    },
+                ),
+            ],
+            ..LogRecord::default()
+        }
+    }
+
+    pub fn write_to(
+        self,
+        record: &mut impl SdkRecord,
+        workflow: &str,
+        run: &str,
+    ) -> Result<(), String> {
+        let event_name = self.event_name;
+        let wire = self.into_log_record(workflow, run);
+        record.set_event_name(event_name);
+        record.set_timestamp(UNIX_EPOCH + std::time::Duration::from_nanos(wire.time_unix_nano));
+        record.set_body(sdk_value(wire.body.unwrap())?);
+        for attribute in wire.attributes {
+            record.add_attribute(attribute.key, sdk_value(attribute.value.unwrap())?);
+        }
+        Ok(())
+    }
+
+    fn from_log(record: LogRecord) -> Result<Self, String> {
+        if record.dropped_attributes_count != 0 {
+            return Err("snapshot attributes were dropped".into());
+        }
+        let mut attributes = BTreeMap::new();
+        for attribute in record.attributes {
+            if attribute.key_strindex != 0 {
+                return Err("indexed snapshot attributes are not supported".into());
+            }
+            if attributes.insert(attribute.key, attribute.value).is_some() {
+                return Err("duplicate snapshot attribute".into());
+            }
+        }
+        let attr = |name: &str| {
+            attributes
+                .get(name)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| format!("missing snapshot attribute {name}"))
+        };
+        if read_int(attr("mf.snapshot.version")?)? != SCHEMA_VERSION {
+            return Err("unsupported snapshot transport version".into());
+        }
+        let sequence = usize::try_from(read_int(attr("mf.snapshot.sequence")?)?)
+            .map_err(|_| "invalid snapshot sequence")?;
+        let digest: [u8; 32] = match &attr("mf.snapshot.digest")?.value {
+            Some(any_value::Value::BytesValue(value)) => value
+                .as_slice()
+                .try_into()
+                .map_err(|_| "invalid snapshot digest")?,
+            _ => return Err("invalid snapshot digest".into()),
+        };
+        let body = record.body.ok_or("missing snapshot body")?;
+        if body.encoded_len() > CHUNK_BYTES + 512 {
+            return Err("snapshot packet exceeded the size limit".into());
+        }
+        let event_name = match record.event_name.as_str() {
+            RECORD_EVENT => RECORD_EVENT,
+            FRAGMENT_EVENT => FRAGMENT_EVENT,
+            _ => return Err("unknown snapshot event".into()),
+        };
+        Ok(Self {
+            sequence,
+            digest,
+            event_name,
+            body,
+        })
+    }
+}
+
+struct PartialRecord {
+    digest: [u8; 32],
+    contents: Contents,
+}
+
+enum Contents {
+    Complete(Value),
+    Fragments {
+        total: usize,
+        parts: BTreeMap<usize, Vec<u8>>,
+    },
+}
+
+#[derive(Default)]
+pub struct Assembler {
+    applied: Vec<[u8; 32]>,
+    pending: BTreeMap<usize, PartialRecord>,
+}
+
+impl Assembler {
+    pub fn has_pending(&self) -> bool {
+        !self.pending.is_empty()
+    }
+    pub fn next_sequence(&self) -> usize {
+        self.applied.len()
+    }
+
+    pub fn push(&mut self, record: LogRecord) -> Result<Vec<Value>, String> {
+        let Packet {
+            sequence,
+            digest: expected,
+            event_name,
+            body,
+        } = Packet::from_log(record)?;
+        if let Some(previous) = self.applied.get(sequence) {
+            if previous != &expected {
+                return Err("conflicting snapshot retransmission".into());
+            }
+            if event_name == RECORD_EVENT {
+                verify(&decode(body, 0)?, &expected)?;
+            }
+            return Ok(Vec::new());
+        }
+        if !self.pending.contains_key(&sequence) && self.pending.len() == MAX_PENDING_RECORDS {
+            return Err("snapshot sequence gap exceeded the pending record limit".into());
+        }
+        if self
+            .pending
+            .get(&sequence)
+            .is_some_and(|record| record.digest != expected)
+        {
+            return Err("conflicting snapshot retransmission".into());
+        }
+        if event_name == RECORD_EVENT {
+            let value = decode(body, 0)?;
+            verify(&value, &expected)?;
+            self.pending.insert(
+                sequence,
+                PartialRecord {
+                    digest: expected,
+                    contents: Contents::Complete(value),
+                },
+            );
+        } else {
+            let mut fields = fields(body)?;
+            let index = usize::try_from(read_int(
+                &fields.remove("index").ok_or("missing fragment index")?,
+            )?)
+            .map_err(|_| "invalid fragment index")?;
+            let total = usize::try_from(read_int(
+                &fields.remove("total").ok_or("missing fragment total")?,
+            )?)
+            .map_err(|_| "invalid fragment total")?;
+            let payload = match fields.remove("payload").and_then(|value| value.value) {
+                Some(any_value::Value::BytesValue(payload)) => payload,
+                _ => return Err("invalid snapshot fragment payload".into()),
+            };
+            if !fields.is_empty()
+                || index >= total
+                || payload.is_empty()
+                || payload.len() > CHUNK_BYTES
+                || (index + 1 < total && payload.len() != CHUNK_BYTES)
+            {
+                return Err("invalid snapshot fragment bounds".into());
+            }
+            let partial = self
+                .pending
+                .entry(sequence)
+                .or_insert_with(|| PartialRecord {
+                    digest: expected,
+                    contents: Contents::Fragments {
+                        total,
+                        parts: BTreeMap::new(),
+                    },
+                });
+            if let Contents::Fragments {
+                total: prior_total,
+                parts,
+            } = &mut partial.contents
+            {
+                if *prior_total != total || parts.get(&index).is_some_and(|prior| prior != &payload)
+                {
+                    return Err("conflicting snapshot fragment".into());
+                }
+                parts.insert(index, payload);
+                if parts.len() == total {
+                    let encoded: Vec<_> = parts
+                        .values()
+                        .flat_map(|part| part.iter().copied())
+                        .collect();
+                    let value =
+                        AnyValue::decode(encoded.as_slice()).map_err(|error| error.to_string())?;
+                    let value = decode(value, 0)?;
+                    verify(&value, &expected)?;
+                    partial.contents = Contents::Complete(value);
+                }
+            }
+        }
+        let mut ready = Vec::new();
+        while self
+            .pending
+            .get(&self.applied.len())
+            .is_some_and(|record| matches!(record.contents, Contents::Complete(_)))
+        {
+            let record = self.pending.remove(&self.applied.len()).unwrap();
+            let Contents::Complete(value) = record.contents else {
+                unreachable!()
+            };
+            self.applied.push(record.digest);
+            ready.push(value);
+        }
+        Ok(ready)
+    }
+}
+
+fn verify(value: &Value, expected: &[u8; 32]) -> Result<(), String> {
+    if &digest(value) == expected {
+        Ok(())
+    } else {
+        Err("snapshot digest mismatch".into())
+    }
+}
+fn pair(key: &str, value: AnyValue) -> KeyValue {
+    KeyValue {
+        key: key.into(),
+        value: Some(value),
+        ..KeyValue::default()
+    }
+}
+fn integer(value: i64) -> AnyValue {
+    AnyValue {
+        value: Some(any_value::Value::IntValue(value)),
+    }
+}
+fn string(value: &str) -> AnyValue {
+    AnyValue {
+        value: Some(any_value::Value::StringValue(value.into())),
+    }
+}
+fn object<const N: usize>(items: [(&str, AnyValue); N]) -> AnyValue {
+    AnyValue {
+        value: Some(any_value::Value::KvlistValue(KeyValueList {
+            values: items
+                .into_iter()
+                .map(|(key, value)| pair(key, value))
+                .collect(),
+        })),
+    }
+}
+fn read_int(value: &AnyValue) -> Result<i64, String> {
+    match value.value {
+        Some(any_value::Value::IntValue(value)) => Ok(value),
+        _ => Err("expected OTLP integer".into()),
+    }
+}
+fn fields(value: AnyValue) -> Result<BTreeMap<String, AnyValue>, String> {
+    let Some(any_value::Value::KvlistValue(map)) = value.value else {
+        return Err("expected OTLP map".into());
+    };
+    let mut fields = BTreeMap::new();
+    for pair in map.values {
+        if pair.key_strindex != 0 {
+            return Err("indexed snapshot keys are not supported".into());
+        }
+        if fields
+            .insert(pair.key, pair.value.ok_or("missing OTLP map value")?)
+            .is_some()
+        {
+            return Err("duplicate OTLP map key".into());
+        }
+    }
+    Ok(fields)
+}
+fn encode(value: Value, depth: usize) -> Result<AnyValue, String> {
+    if depth > 16 {
+        return Err("snapshot envelope nesting exceeded the limit".into());
+    }
+    let value = match value {
+        Value::Null => None,
+        Value::Bool(value) => Some(any_value::Value::BoolValue(value)),
+        Value::String(value) => Some(any_value::Value::StringValue(value)),
+        Value::Number(value) => Some(if value.is_f64() {
+            any_value::Value::DoubleValue(value.as_f64().ok_or("invalid floating-point value")?)
+        } else {
+            any_value::Value::IntValue(
+                value
+                    .as_i64()
+                    .ok_or("OTLP integer exceeds signed 64-bit range")?,
+            )
+        }),
+        Value::Array(values) => Some(any_value::Value::ArrayValue(ArrayValue {
+            values: values
+                .into_iter()
+                .map(|value| encode(value, depth + 1))
+                .collect::<Result<_, _>>()?,
+        })),
+        Value::Object(values) => Some(any_value::Value::KvlistValue(KeyValueList {
+            values: values
+                .into_iter()
+                .map(|(key, value)| {
+                    Ok(KeyValue {
+                        key,
+                        value: Some(encode(value, depth + 1)?),
+                        ..KeyValue::default()
+                    })
+                })
+                .collect::<Result<_, String>>()?,
+        })),
+    };
+    Ok(AnyValue { value })
+}
+fn decode(value: AnyValue, depth: usize) -> Result<Value, String> {
+    if depth > 16 {
+        return Err("snapshot envelope nesting exceeded the limit".into());
+    }
+    Ok(match value.value {
+        None => Value::Null,
+        Some(any_value::Value::StringValue(value)) => Value::String(value),
+        Some(any_value::Value::BoolValue(value)) => Value::Bool(value),
+        Some(any_value::Value::IntValue(value)) => Value::from(value),
+        Some(any_value::Value::DoubleValue(value)) => {
+            Value::Number(serde_json::Number::from_f64(value).ok_or("non-finite snapshot number")?)
+        }
+        Some(any_value::Value::ArrayValue(values)) => Value::Array(
+            values
+                .values
+                .into_iter()
+                .map(|value| decode(value, depth + 1))
+                .collect::<Result<_, _>>()?,
+        ),
+        Some(any_value::Value::KvlistValue(values)) => {
+            let mut map = Map::new();
+            for pair in values.values {
+                if pair.key_strindex != 0 {
+                    return Err("indexed snapshot keys are not supported".into());
+                }
+                if map
+                    .insert(
+                        pair.key,
+                        decode(pair.value.ok_or("missing OTLP map value")?, depth + 1)?,
+                    )
+                    .is_some()
+                {
+                    return Err("duplicate OTLP map key".into());
+                }
+            }
+            Value::Object(map)
+        }
+        _ => return Err("unsupported snapshot body value".into()),
+    })
+}
+fn sdk_value(value: AnyValue) -> Result<SdkValue, String> {
+    Ok(match value.value {
+        Some(any_value::Value::StringValue(value)) => SdkValue::String(value.into()),
+        Some(any_value::Value::BoolValue(value)) => SdkValue::Boolean(value),
+        Some(any_value::Value::IntValue(value)) => SdkValue::Int(value),
+        Some(any_value::Value::DoubleValue(value)) => SdkValue::Double(value),
+        Some(any_value::Value::BytesValue(value)) => SdkValue::Bytes(Box::new(value)),
+        Some(any_value::Value::ArrayValue(values)) => SdkValue::ListAny(Box::new(
+            values
+                .values
+                .into_iter()
+                .map(sdk_value)
+                .collect::<Result<_, _>>()?,
+        )),
+        Some(any_value::Value::KvlistValue(values)) => SdkValue::Map(Box::new(
+            values
+                .values
+                .into_iter()
+                .map(|pair| {
+                    Ok((
+                        pair.key.into(),
+                        sdk_value(pair.value.ok_or("missing OTLP value")?)?,
+                    ))
+                })
+                .collect::<Result<_, String>>()?,
+        )),
+        None => return Err("snapshot envelopes must omit absent optional fields".into()),
+        _ => return Err("indexed OTLP strings are not supported in snapshot envelopes".into()),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn structured_records_are_reordered_and_retransmissions_are_idempotent() {
+        let first = packets(0, json!({"record":"header","version":1}))
+            .unwrap()
+            .next()
+            .unwrap()
+            .into_log_record("workflow", "run");
+        let second = packets(1, json!({"record":"value","id":0,"value":{"kind":"null"}}))
+            .unwrap()
+            .next()
+            .unwrap()
+            .into_log_record("workflow", "run");
+        assert!(matches!(
+            first.body.as_ref().unwrap().value,
+            Some(any_value::Value::KvlistValue(_))
+        ));
+        let mut assembler = Assembler::default();
+        assert!(assembler.push(second.clone()).unwrap().is_empty());
+        assert!(assembler.has_pending());
+        assert_eq!(assembler.push(first.clone()).unwrap().len(), 2);
+        assert!(!assembler.has_pending());
+        assert!(assembler.push(first).unwrap().is_empty());
+        assert!(assembler.push(second).unwrap().is_empty());
+        assert_eq!(assembler.next_sequence(), 2);
+    }
+
+    #[test]
+    fn large_values_use_bounded_protobuf_fragments_without_a_json_string_envelope() {
+        let original = json!({"record":"value","id":0,"value":{"kind":"string","data":"\u{754c}".repeat(CHUNK_BYTES)}});
+        let mut logs: Vec<_> = packets(0, original.clone())
+            .unwrap()
+            .map(|packet| packet.into_log_record("workflow", "run"))
+            .collect();
+        assert!(logs.len() > 1);
+        assert!(
+            logs.iter()
+                .all(|log| log.encoded_len() < CHUNK_BYTES + 1024)
+        );
+        logs.reverse();
+        let mut assembler = Assembler::default();
+        let first = logs[0].clone();
+        assert!(assembler.push(first.clone()).unwrap().is_empty());
+        assert!(assembler.push(first).unwrap().is_empty());
+        let decoded: Vec<_> = logs
+            .into_iter()
+            .flat_map(|log| assembler.push(log).unwrap())
+            .collect();
+        assert_eq!(decoded, vec![original]);
+    }
+
+    #[test]
+    fn conflicts_and_corrupt_fragments_are_rejected() {
+        let mut assembler = Assembler::default();
+        let original = packets(0, json!({"record":"header","version":1}))
+            .unwrap()
+            .next()
+            .unwrap()
+            .into_log_record("workflow", "run");
+        assembler.push(original).unwrap();
+        let conflict = packets(0, json!({"record":"header","version":2}))
+            .unwrap()
+            .next()
+            .unwrap()
+            .into_log_record("workflow", "run");
+        assert!(
+            assembler
+                .push(conflict)
+                .unwrap_err()
+                .contains("conflicting")
+        );
+        let mut record = packets(1, json!({"record":"end"}))
+            .unwrap()
+            .next()
+            .unwrap()
+            .into_log_record("workflow", "run");
+        record.body = Some(string("corrupted"));
+        assert!(assembler.push(record).unwrap_err().contains("digest"));
+    }
+}

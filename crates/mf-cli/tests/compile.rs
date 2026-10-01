@@ -124,6 +124,16 @@ fn compiles_a_runner_without_telemetry_and_preserves_its_commands() {
         serde_json::from_slice::<serde_json::Value>(&description.stdout).unwrap()["nodes"]
             .is_array()
     );
+    let requested = Command::new(&output)
+        .env("MF_CAPTURE_SNAPSHOTS", "1")
+        .output()
+        .unwrap();
+    assert!(requested.status.success());
+    assert_eq!(requested.stdout, execution.stdout);
+    assert!(
+        String::from_utf8_lossy(&requested.stderr)
+            .contains("recompile the runner without --no-telemetry")
+    );
     let result = compile_command(&definition, &output)
         .args(["--no-telemetry", "--locked"])
         .output()

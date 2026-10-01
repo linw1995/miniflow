@@ -115,11 +115,12 @@ impl IterationNode {
         item: mf_runtime::ValueRef,
         index: usize,
         observation: Option<&IterationObservation>,
+        parent: &ExecutionContext,
     ) -> Result<mf_runtime::ValueRef, NodeExecutionError> {
         let mut step = observation.and_then(|observation| observation.begin_item(index));
         let _context = step.as_ref().map(ItemObservation::enter);
         let body_observation = step.as_ref().map(ItemObservation::body_observation);
-        let mut state = ExecutionContext::for_body(body_observation);
+        let mut state = parent.fork_body(body_observation);
         let result = ExecutionScope::new(
             &self.id,
             mf_runtime::ITERATION_INPUT_ID,
@@ -152,6 +153,7 @@ impl IterationNode {
         &self,
         mut inputs: Inputs,
         observation: Option<IterationObservation>,
+        parent: &ExecutionContext,
     ) -> Result<Outputs, NodeExecutionError> {
         let items = inputs.remove("items");
         let Some(items) = items.as_ref().and_then(mf_runtime::ValueRef::as_array) else {
@@ -163,7 +165,7 @@ impl IterationNode {
         match self.mode {
             IterationMode::Sequential => {
                 for (index, item) in items.iter().cloned().enumerate() {
-                    results.push(self.run_item(item, index, observation.as_ref()));
+                    results.push(self.run_item(item, index, observation.as_ref(), parent));
                     if matches!(self.on_error, IterationErrorPolicy::Terminate)
                         && results.last().is_some_and(Result::is_err)
                     {
@@ -196,7 +198,7 @@ impl IterationNode {
                                     let Some((index, item)) = next else {
                                         break;
                                     };
-                                    let result = self.run_item(item, index, observation);
+                                    let result = self.run_item(item, index, observation, parent);
                                     if result.is_err()
                                         && matches!(self.on_error, IterationErrorPolicy::Terminate)
                                     {
@@ -242,7 +244,7 @@ impl Node for IterationNode {
     }
 
     fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        self.execute_items(inputs, None)
+        self.execute_items(inputs, None, &ExecutionContext::default())
     }
 
     fn execute_with_context(
@@ -255,6 +257,7 @@ impl Node for IterationNode {
             ctx.observation().and_then(|run| {
                 run.iteration_observation(&self.id, &ctx.scope_path(), self.body.nodes.clone())
             }),
+            ctx,
         )
         .map(Into::into)
     }

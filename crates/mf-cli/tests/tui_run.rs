@@ -21,14 +21,77 @@ use std::{
 
 #[test]
 fn tui_preserves_stdout_and_restores_terminal_after_missing_telemetry() {
+    check_capture(false);
+}
+
+#[test]
+fn tui_enables_data_history_and_browses_values_after_completion() {
+    check_capture(true);
+}
+
+fn check_capture(with_history: bool) {
     if !loopback_available() {
         return;
     }
     let directory = tempfile::tempdir().unwrap();
     let runner = directory.path().join("fake-runner");
     let json = description_json();
+    let records = [
+        serde_json::json!({"record":"header","version":1}),
+        serde_json::json!({"record":"value","id":0,"value":{"kind":"string","data":"history-payload-42"}}),
+        serde_json::json!({"record":"value","id":1,"value":{"kind":"object","data":{"result":0}}}),
+        serde_json::json!({"record":"value","id":2,"value":{"kind":"object","data":{}}}),
+        serde_json::json!({"record":"node","scope":[],"node":"step","inputs":2,"outputs":1,"skipped":[],"outcome":"succeeded"}),
+        serde_json::json!({"record":"end"}),
+    ];
+    let placeholder = "00000000-0000-4000-8000-000000000000";
+    let workflow = format!("sha256:{}", "a".repeat(64));
+    let logs = records
+        .into_iter()
+        .enumerate()
+        .flat_map(|(sequence, body)| {
+            mf_telemetry::snapshot::packets(sequence, body)
+                .unwrap()
+                .map(|packet| packet.into_log_record(&workflow, placeholder))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let request = opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest {
+        resource_logs: vec![opentelemetry_proto::tonic::logs::v1::ResourceLogs {
+            scope_logs: vec![opentelemetry_proto::tonic::logs::v1::ScopeLogs {
+                scope: Some(
+                    opentelemetry_proto::tonic::common::v1::InstrumentationScope {
+                        name: mf_telemetry::snapshot::SCOPE.into(),
+                        ..Default::default()
+                    },
+                ),
+                log_records: logs,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }],
+    };
+    let encoded: String = prost::Message::encode_to_vec(&request)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let record = if with_history {
+        format!(
+            r#"[ "$MF_CAPTURE_SNAPSHOTS" = 1 ] || exit 10
+python3 -I -S - <<'SNAPSHOTS'
+import os
+import urllib.request
+payload = bytes.fromhex('{encoded}').replace(b'{placeholder}', os.environ['MF_RUN_ID'].encode())
+request = urllib.request.Request(os.environ['OTEL_EXPORTER_OTLP_ENDPOINT'] + '/v1/logs', data=payload, headers={{'Content-Type': 'application/x-protobuf'}})
+urllib.request.build_opener(urllib.request.ProxyHandler({{}})).open(request, timeout=2).read()
+SNAPSHOTS
+"#
+        )
+    } else {
+        String::new()
+    };
     fs::write(&runner, format!(
-        "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  exit 0\nfi\n[ -z \"${{OTEL_EXPORTER_OTLP_HEADERS+x}}\" ] || exit 7\ncase \"$OTEL_EXPORTER_OTLP_ENDPOINT\" in http://127.0.0.1:*) ;; *) exit 8 ;; esac\n[ -n \"$MF_RUN_ID\" ] || exit 9\nprintf '\\001\\000\\377'\ndd if=/dev/zero bs=65536 count=2 2>/dev/null\nprintf 'diagnostic\\n' >&2\n"
+        "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  exit 0\nfi\n{record}[ -z \"${{OTEL_EXPORTER_OTLP_HEADERS+x}}\" ] || exit 7\ncase \"$OTEL_EXPORTER_OTLP_ENDPOINT\" in http://127.0.0.1:*) ;; *) exit 8 ;; esac\n[ -n \"$MF_RUN_ID\" ] || exit 9\nprintf '\\001\\000\\377'\ndd if=/dev/zero bs=65536 count=2 2>/dev/null\nprintf 'diagnostic\\n' >&2\n"
     )).unwrap();
     fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
 
@@ -65,6 +128,7 @@ fn tui_preserves_stdout_and_restores_terminal_after_missing_telemetry() {
         let mut output = Vec::new();
         let mut bytes = [0; 4096];
         let mut sent = false;
+        let mut opened = false;
         loop {
             match master.read(&mut bytes) {
                 Ok(0) | Err(_) => break,
@@ -75,8 +139,15 @@ fn tui_preserves_stdout_and_restores_terminal_after_missing_telemetry() {
                             .windows(b"Exited:".len())
                             .any(|part| part == b"Exited:")
                     {
-                        master.write_all(b"q").unwrap();
-                        sent = true;
+                        if with_history && !opened {
+                            master.write_all(b"v").unwrap();
+                            opened = true;
+                        } else if !with_history
+                            || String::from_utf8_lossy(&output).contains("history-payload-42")
+                        {
+                            master.write_all(b"q").unwrap();
+                            sent = true;
+                        }
                     }
                 }
             }
@@ -108,6 +179,10 @@ fn tui_preserves_stdout_and_restores_terminal_after_missing_telemetry() {
     assert_eq!(&stdout[..3], [1, 0, 255]);
     assert_eq!(stdout.len(), 3 + 131_072);
     assert!(stdout[3..].iter().all(|byte| *byte == 0));
+    if with_history {
+        assert!(screen.contains("history-payload-42"));
+        assert!(screen.contains("Data history"));
+    }
     assert_eq!(status.code(), Some(0));
 }
 

@@ -584,6 +584,35 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     );
     assert_eq!(snapshot.traces.observed_spans, 4);
 
+    assert_eq!(receiver.history_len(), 0);
+    let run_id = mf_telemetry::identity::RunId::new();
+    let mut history_receiver = LoopbackReceiver::bind(description.clone(), run_id).unwrap();
+    let recorded = command(&runner)
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", history_receiver.endpoint())
+        .env("MF_RUN_ID", run_id.to_string())
+        .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1")
+        .output()
+        .unwrap();
+    assert!(
+        recorded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&recorded.stderr)
+    );
+    assert_eq!(recorded.stdout, plain.stdout);
+    history_receiver.finish();
+    let history = history_receiver.history_snapshot(None, 10);
+    assert_eq!(history.status, "Complete");
+    assert_eq!(history.history_len, 6);
+    let history_root = &history.entries.last().unwrap().snapshot;
+    assert!(
+        history_root.node(&[], "a").unwrap().outputs["value"]
+            .ptr_eq(&history_root.node(&[], "b").unwrap().inputs["input"])
+    );
+    assert_eq!(
+        history_root.node(&[], "b").unwrap().outputs["result.alpha"],
+        json!(14)
+    );
+
     let (endpoint, worker) = collector(1);
     let logs_only = command(&runner)
         .env(

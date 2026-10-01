@@ -1,5 +1,6 @@
 //! Bounded loopback OTLP/HTTP reception for one local workflow session.
 
+use crate::snapshots::{HistorySnapshot, SnapshotCapture};
 use crate::state::{SessionState, StateError, StateSnapshot};
 use http_body_util::{BodyExt, Full};
 use hyper::{
@@ -54,6 +55,7 @@ pub enum ReceiverError {
 
 struct Context {
     state: Arc<Mutex<SessionState>>,
+    snapshots: Mutex<SnapshotCapture>,
     workflow_id: WorkflowId,
     run_id: String,
 }
@@ -93,6 +95,7 @@ impl LoopbackReceiver {
         };
         let context = Arc::new(Context {
             state: Arc::new(Mutex::new(state)),
+            snapshots: Mutex::new(SnapshotCapture::default()),
             workflow_id,
             run_id: run_id.to_string(),
         });
@@ -127,8 +130,31 @@ impl LoopbackReceiver {
             .snapshot_shared()
     }
 
+    pub fn history_snapshot(&self, selected: Option<usize>, rows: usize) -> HistorySnapshot {
+        self.context
+            .snapshots
+            .lock()
+            .expect("snapshot capture was not poisoned")
+            .view(selected, rows)
+    }
+
+    pub fn history_len(&self) -> usize {
+        self.context
+            .snapshots
+            .lock()
+            .expect("snapshot capture was not poisoned")
+            .store
+            .history()
+            .len()
+    }
+
     pub fn finish(&mut self) -> StateSnapshot {
         self.stop();
+        self.context
+            .snapshots
+            .lock()
+            .expect("snapshot capture was not poisoned")
+            .finish();
         let mut state = self
             .context
             .state
@@ -321,12 +347,20 @@ fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), String> {
     let mut rejected = false;
     for resource in request.resource_logs {
         for scope in resource.scope_logs {
-            if scope.scope.as_ref().map(|scope| scope.name.as_str()) != Some(INSTRUMENTATION_SCOPE)
-            {
+            let scope_name = scope.scope.as_ref().map(|scope| scope.name.as_str());
+            if !matches!(
+                scope_name,
+                Some(INSTRUMENTATION_SCOPE | mf_telemetry::snapshot::SCOPE)
+            ) {
                 continue;
             }
             for record in scope.log_records {
-                if let Err(error) = receive_log(record, context) {
+                let result = if scope_name == Some(mf_telemetry::snapshot::SCOPE) {
+                    receive_snapshot(record, context)
+                } else {
+                    receive_log(record, context)
+                };
+                if let Err(error) = result {
                     rejected = true;
                     context
                         .state
@@ -342,6 +376,29 @@ fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+fn receive_snapshot(record: LogRecord, context: &Context) -> Result<(), String> {
+    let run = string_attribute(&record.attributes, "mf.run.id");
+    let workflow = string_attribute(&record.attributes, "mf.workflow.id");
+    if let (Some(run), Some(workflow)) = (run, workflow) {
+        if run != context.run_id || workflow != context.workflow_id.as_str() {
+            return Ok(());
+        }
+    } else {
+        let message = "snapshot record omitted session identity";
+        context
+            .snapshots
+            .lock()
+            .expect("snapshot capture was not poisoned")
+            .fail(message);
+        return Err(message.into());
+    }
+    context
+        .snapshots
+        .lock()
+        .expect("snapshot capture was not poisoned")
+        .admit(record)
 }
 
 fn receive_log(record: LogRecord, context: &Context) -> Result<(), String> {
