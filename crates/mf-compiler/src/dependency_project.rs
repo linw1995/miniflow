@@ -11,6 +11,17 @@ pub enum SupportPackages {
     Local { crates_dir: PathBuf },
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct RunnerOptions {
+    pub telemetry: bool,
+}
+
+impl Default for RunnerOptions {
+    fn default() -> Self {
+        Self { telemetry: true }
+    }
+}
+
 #[derive(Debug, Snafu)]
 pub enum DependencyProjectError {
     #[snafu(display(
@@ -62,6 +73,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+#[cfg(feature = "telemetry")]
 fn run_id() -> mf_telemetry::identity::RunId {
     match std::env::var("MF_RUN_ID") {
         Ok(value) => match mf_telemetry::identity::RunId::try_from(value) {
@@ -79,6 +91,13 @@ fn run_id() -> mf_telemetry::identity::RunId {
     }
 }
 
+#[cfg(not(feature = "telemetry"))]
+fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+    let registry = mf_runtime::NodeRegistry::from_inventory()?;
+    Ok(workflow::run_workflow(&registry)?)
+}
+
+#[cfg(feature = "telemetry")]
 fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
@@ -137,10 +156,24 @@ pub fn write_dependency_project(
     plan: &CompiledWorkflow,
     support: &SupportPackages,
 ) -> Result<(), DependencyProjectError> {
+    write_dependency_project_with_options(project, plan, support, &RunnerOptions::default())
+}
+
+pub fn write_dependency_project_with_options(
+    project: &Path,
+    plan: &CompiledWorkflow,
+    support: &SupportPackages,
+    options: &RunnerOptions,
+) -> Result<(), DependencyProjectError> {
     let artifacts = plan.generate_artifacts().context(PlanSnafu)?;
     let definition = &plan.definition;
-    let mut manifest = String::from(
-        "[package]\nname = \"mf-generated-workflow\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[dependencies]\nserde_json = \"1.0.151\"\n",
+    let default_features = if options.telemetry {
+        "\"telemetry\""
+    } else {
+        ""
+    };
+    let mut manifest = format!(
+        "[package]\nname = \"mf-generated-workflow\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[features]\ndefault = [{default_features}]\ntelemetry = [\"mf-telemetry/otlp\"]\n\n[dependencies]\nserde_json = \"1.0.151\"\n"
     );
     for package in ["mf-runtime", "mf-compiler", "mf-telemetry"] {
         let source = match support {
@@ -153,12 +186,9 @@ pub fn write_dependency_project(
                 quoted(&path_string(&crates_dir.join(package))?)
             ),
         };
-        let features = if package == "mf-telemetry" {
-            ", features = [\"otlp\"]"
-        } else {
-            ""
-        };
-        manifest.push_str(&format!("{package} = {{ {source}{features} }}\n"));
+        manifest.push_str(&format!(
+            "{package} = {{ {source}, default-features = false }}\n"
+        ));
     }
     let mut main = String::new();
     for (index, (alias, dependency)) in definition.dependencies.iter().enumerate() {

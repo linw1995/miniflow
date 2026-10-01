@@ -6,7 +6,7 @@
 
 `mf-tui` contains the local OTLP receiver, state reducer, graph renderer, and CLI-only process supervisor used by `mf run <executable> --tui`.
 
-`mf-runtime` depends on the minimal telemetry package. `mf-cli` depends on the separate `mf-tui` package for bounded description preflight and local reception. Neither the compiler nor runtime depends on `mf-tui`. Generated runners resolve telemetry transitively through the runtime, without SDK, HTTP-client, or terminal dependencies by default.
+`mf-runtime` depends on the minimal telemetry package. `mf-cli` depends on the separate `mf-tui` package for bounded description preflight and local reception. Neither the compiler nor runtime depends on `mf-tui`. Generated runners enable OTLP export support by default, while `mf compile --no-telemetry` omits the SDK and HTTP client. Neither runner includes terminal dependencies or the compiler's code generation feature.
 
 The `mf-telemetry/otlp` feature selects the OTel SDK and OTLP/HTTP protobuf exporters with an explicit blocking HTTP client and TLS support. Enabling the feature alone does not initialize an exporter. The generated runner owns provider initialization and bounded shutdown; libraries do not install global providers for callers.
 
