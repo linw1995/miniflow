@@ -755,3 +755,47 @@ fn loop_and_iteration_share_a_workflow_in_memory_and_generated_runners() {
         nested_expected
     );
 }
+
+#[test]
+fn snapshots_retain_every_iteration_item_in_sequential_and_parallel_runs() {
+    for mode in ["sequential", "parallel"] {
+        let definition: WorkflowDefinition =
+            serde_json::from_value(definition(json!([1, 0, 3]), mode, "continue_on_error"))
+                .unwrap();
+        let registry = NodeRegistry::from_inventory().unwrap();
+        let plan = compile_definition(&definition, &registry).unwrap();
+        let flow = instantiate_compiled(&plan, &registry).unwrap();
+        let recorder = mf_runtime::SnapshotRecorder::memory();
+        let mut context = mf_runtime::ExecutionContext::default();
+        assert!(context.snapshot_recorder().is_none());
+        context.set_snapshot_recorder(recorder.clone());
+        let outputs = flow.execute_in_context(&mut context).unwrap();
+        assert_eq!(outputs["results"], json!([2, null, 8]));
+        for (index, input) in [1, 0, 3].into_iter().enumerate() {
+            let scope = vec![mf_telemetry::event::LoopPathEntry {
+                loop_id: "iteration".into(),
+                index: mf_telemetry::Count::try_from(index as i64).unwrap(),
+            }];
+            let root = recorder.current();
+            let item = root.node(&scope, "map").unwrap();
+            assert_eq!(item.inputs["item"], json!(input));
+            assert_eq!(item.inputs["index"], json!(index));
+            if input == 0 {
+                assert_eq!(item.outcome, mf_runtime::SnapshotOutcome::Failed);
+                assert!(
+                    item.error
+                        .as_ref()
+                        .unwrap()
+                        .contains("zero is not accepted")
+                );
+            } else {
+                assert_eq!(item.outcome, mf_runtime::SnapshotOutcome::Succeeded);
+                assert_eq!(item.outputs["value"], outputs["results"][index]);
+                assert!(
+                    item.outputs["value"]
+                        .ptr_eq(&root.node(&[], "iteration").unwrap().outputs["results"][index])
+                );
+            }
+        }
+    }
+}

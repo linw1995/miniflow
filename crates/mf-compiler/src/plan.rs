@@ -205,7 +205,6 @@ impl CompiledWorkflow {
                 observation: Option<mf_runtime::RunObservation>,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
                 mf_runtime::ExecutionContext::run(observation, |state| {
-                    state.enable_output_reclamation();
                     run_workflow_in_context(registry, state)
                 })
             }
@@ -243,8 +242,6 @@ fn generate_scope(
         .map(|node| (&node.id, node))
         .collect();
     let inference_ident = format_ident!("inference_{scope}");
-    let retention_ident = format_ident!("retention_{scope}");
-    let mut retention_steps = Vec::new();
     let mut preparations = vec![quote! {
         let mut #inference_ident = mf_compiler::TypeInferenceState::default();
     }];
@@ -262,7 +259,6 @@ fn generate_scope(
         let id_lit = LitStr::new(id.as_str(), Span::call_site());
         let kind_lit = LitStr::new(&node.kind, Span::call_site());
         let bindings = dependency_tokens(incoming.get(id.as_str()).map_or(&[], Vec::as_slice));
-        retention_steps.push(quote! { (&#node_ident, &[#(#bindings),*][..]) });
         if matches!(node.kind.as_str(), crate::LOOP_KIND | ITERATION_KIND) {
             preparations.push(subgraph_preparation(
                 definition,
@@ -281,7 +277,6 @@ fn generate_scope(
             });
             statements.push(quote! {
                 mf_runtime::execute_node_in_context(&#node_ident, &[#(#bindings),*], state)?;
-                state.release_outputs(#retention_ident.after_step(#index));
                 #exit_check
             });
             continue;
@@ -370,21 +365,10 @@ fn generate_scope(
         });
         statements.push(quote! {
             mf_runtime::execute_node_in_context(&#node_ident, &[#(#bindings),*], state)?;
-            state.release_outputs(#retention_ident.after_step(#index));
             #exit_check
         });
     }
-    let selected = definition.outputs.iter().map(|output| {
-        let id = mf_runtime::output_id(output.node.as_str(), &output.port);
-        let id = LitStr::new(&id, Span::call_site());
-        quote! { #id.to_owned() }
-    });
-    preparations.push(quote! {
-        drop(#inference_ident);
-        let #retention_ident = mf_runtime::OutputRetentionPlan::new(
-            &[#(#retention_steps),*], &[#(#selected),*],
-        );
-    });
+    preparations.push(quote! { drop(#inference_ident); });
     Ok((preparations, statements))
 }
 

@@ -112,15 +112,15 @@ impl IterationNode {
 
     fn run_item(
         &self,
-        item: Value,
+        item: mf_runtime::ValueRef,
         index: usize,
         observation: Option<&IterationObservation>,
-    ) -> Result<Value, NodeExecutionError> {
+        parent: &ExecutionContext,
+    ) -> Result<mf_runtime::ValueRef, NodeExecutionError> {
         let mut step = observation.and_then(|observation| observation.begin_item(index));
         let _context = step.as_ref().map(ItemObservation::enter);
         let body_observation = step.as_ref().map(ItemObservation::body_observation);
-        let mut state = ExecutionContext::for_body(body_observation);
-        state.enable_output_reclamation();
+        let mut state = parent.fork_body(body_observation);
         let result = ExecutionScope::new(
             &self.id,
             mf_runtime::ITERATION_INPUT_ID,
@@ -153,8 +153,10 @@ impl IterationNode {
         &self,
         mut inputs: Inputs,
         observation: Option<IterationObservation>,
+        parent: &ExecutionContext,
     ) -> Result<Outputs, NodeExecutionError> {
-        let Some(Value::Array(items)) = inputs.remove("items") else {
+        let items = inputs.remove("items");
+        let Some(items) = items.as_ref().and_then(mf_runtime::ValueRef::as_array) else {
             return Err(NodeExecutionError::ExecutionFailed {
                 message: "iteration requires an array input `items`".into(),
             });
@@ -162,8 +164,8 @@ impl IterationNode {
         let mut results = Vec::with_capacity(items.len());
         match self.mode {
             IterationMode::Sequential => {
-                for (index, item) in items.into_iter().enumerate() {
-                    results.push(self.run_item(item, index, observation.as_ref()));
+                for (index, item) in items.iter().cloned().enumerate() {
+                    results.push(self.run_item(item, index, observation.as_ref(), parent));
                     if matches!(self.on_error, IterationErrorPolicy::Terminate)
                         && results.last().is_some_and(Result::is_err)
                     {
@@ -173,7 +175,7 @@ impl IterationNode {
             }
             IterationMode::Parallel => {
                 let worker_count = items.len().min(MAX_PARALLEL_ITEMS);
-                let queue = Mutex::new(items.into_iter().enumerate().collect::<VecDeque<_>>());
+                let queue = Mutex::new(items.iter().cloned().enumerate().collect::<VecDeque<_>>());
                 let completed = Mutex::new(Vec::new());
                 let stopped = AtomicBool::new(false);
                 std::thread::scope(|scope| {
@@ -196,7 +198,7 @@ impl IterationNode {
                                     let Some((index, item)) = next else {
                                         break;
                                     };
-                                    let result = self.run_item(item, index, observation);
+                                    let result = self.run_item(item, index, observation, parent);
                                     if result.is_err()
                                         && matches!(self.on_error, IterationErrorPolicy::Terminate)
                                     {
@@ -223,25 +225,26 @@ impl IterationNode {
             match (self.on_error, result) {
                 (_, Ok(value)) => values.push(value),
                 (IterationErrorPolicy::Terminate, Err(error)) => return Err(error),
-                (IterationErrorPolicy::ContinueOnError, Err(_)) => values.push(Value::Null),
+                (IterationErrorPolicy::ContinueOnError, Err(_)) => {
+                    values.push(mf_runtime::ValueRef::null())
+                }
                 (IterationErrorPolicy::RemoveFailed, Err(_)) => {}
             }
         }
-        Ok(Outputs::from([("results".into(), Value::Array(values))]))
+        Ok(Outputs::from([(
+            "results".into(),
+            mf_runtime::ValueRef::array(values),
+        )]))
     }
 }
 
 impl Node for IterationNode {
-    fn context_references_complete(&self) -> bool {
-        true
-    }
-
     fn ports(&self) -> Option<NodePorts> {
         Some(IterationNode::ports(self))
     }
 
     fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        self.execute_items(inputs, None)
+        self.execute_items(inputs, None, &ExecutionContext::default())
     }
 
     fn execute_with_context(
@@ -254,6 +257,7 @@ impl Node for IterationNode {
             ctx.observation().and_then(|run| {
                 run.iteration_observation(&self.id, &ctx.scope_path(), self.body.nodes.clone())
             }),
+            ctx,
         )
         .map(Into::into)
     }

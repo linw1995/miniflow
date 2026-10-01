@@ -1,16 +1,16 @@
+use crate::ValueRef as Value;
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use mf_telemetry::{
     event::{FailurePhase, LoopPathEntry, LoopSummary, SkipCause},
     observation::{BodyNodeObservation, BodyObservation, NodeObservation, RunObservation},
 };
-use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
 pub struct ExecutionScope {
     node_id: String,
     source_id: String,
-    variables: BTreeMap<String, Value>,
+    variables: Outputs,
     types: BTreeMap<String, crate::ValueType>,
     index: usize,
     exit_requested: bool,
@@ -54,7 +54,7 @@ impl Drop for ScopeGuard<'_> {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct NodeResult {
     pub outputs: Outputs,
     pub skipped: BTreeSet<String>,
@@ -86,7 +86,8 @@ pub struct ExecutionContext {
     scopes: Vec<ExecutionScope>,
     pending_loop_write: Option<(String, Value)>,
     remaining_steps: usize,
-    reclaim_outputs: bool,
+    snapshots: Option<crate::SnapshotRecorder>,
+    snapshot_prefix: Vec<LoopPathEntry>,
 }
 
 impl Default for ExecutionContext {
@@ -98,22 +99,72 @@ impl Default for ExecutionContext {
             scopes: Vec::new(),
             pending_loop_write: None,
             remaining_steps: crate::MAX_SCHEDULED_STEPS,
-            reclaim_outputs: false,
+            snapshots: None,
+            snapshot_prefix: Vec::new(),
         }
     }
 }
 
 impl ExecutionContext {
-    /// Enables planned reclamation for a caller-owned execution whose intermediate outputs are private.
-    pub fn enable_output_reclamation(&mut self) {
-        self.reclaim_outputs = true;
+    pub fn set_snapshot_recorder(&mut self, recorder: crate::SnapshotRecorder) {
+        self.snapshots = Some(recorder);
     }
 
-    pub fn release_outputs(&mut self, outputs: &[String]) {
-        if self.reclaim_outputs {
-            for output in outputs {
-                self.outputs.remove(output);
-            }
+    pub fn snapshot_recorder(&self) -> Option<&crate::SnapshotRecorder> {
+        self.snapshots.as_ref()
+    }
+
+    pub fn fork_body(&self, observation: Option<BodyObservation>) -> Self {
+        let mut child = Self::for_body(observation);
+        if self.snapshots.is_some() {
+            child.snapshots = self.snapshots.clone();
+            child.snapshot_prefix = self.snapshot_path();
+        }
+        child
+    }
+
+    fn snapshot_path(&self) -> Vec<LoopPathEntry> {
+        let mut path = self.snapshot_prefix.clone();
+        path.extend(self.scope_path());
+        path
+    }
+
+    fn capture_node(
+        &self,
+        node: &FlowNode,
+        inputs: &Inputs,
+        result: Option<&NodeResult>,
+        outcome: crate::SnapshotOutcome,
+        error: Option<&dyn std::fmt::Display>,
+    ) {
+        if let Some(recorder) = &self.snapshots {
+            recorder.record(
+                self.snapshot_path(),
+                node.definition_id.as_str(),
+                crate::NodeSnapshot {
+                    inputs: inputs.snapshot(),
+                    outputs: result.map_or_else(
+                        || Outputs::new().snapshot(),
+                        |result| result.outputs.snapshot(),
+                    ),
+                    skipped: if outcome == crate::SnapshotOutcome::Skipped {
+                        node.ports
+                            .outputs
+                            .iter()
+                            .map(|port| port.name.to_string())
+                            .collect::<Vec<_>>()
+                            .into()
+                    } else {
+                        result
+                            .map_or_else(Vec::new, |result| {
+                                result.skipped.iter().cloned().collect()
+                            })
+                            .into()
+                    },
+                    outcome,
+                    error: error.map(|error| error.to_string().into()),
+                },
+            );
         }
     }
 
@@ -287,11 +338,11 @@ impl ExecutionContext {
                 .ok_or_else(|| NodeExecutionError::ExecutionFailed {
                     message: format!("unknown Loop variable `{variable}`"),
                 })?;
-        value_type
-            .validate_value(&value)
-            .map_err(|error| NodeExecutionError::ExecutionFailed {
+        value_type.validate_shared(&value).map_err(|error| {
+            NodeExecutionError::ExecutionFailed {
                 message: format!("Loop variable `{variable}`: {error}"),
-            })?;
+            }
+        })?;
         self.pending_loop_write = Some((variable.to_owned(), value));
         Ok(())
     }
@@ -366,7 +417,7 @@ impl ExecutionContext {
                     ));
                 };
                 port.value_type
-                    .validate_value(value)
+                    .validate_shared(value)
                     .map_err(|error| state_error(id, format!("output `{name}`: {error}")))?;
             }
         }
@@ -419,63 +470,6 @@ pub struct ExecutionDependency<'a> {
     pub input: Option<&'a str>,
     pub source_node: &'a str,
     pub source_output: &'a str,
-}
-
-/// Last-use information shared by interpreted and generated execution.
-#[derive(Default)]
-pub struct OutputRetentionPlan {
-    releases: Vec<Vec<String>>,
-}
-
-impl OutputRetentionPlan {
-    pub fn new(steps: &[(&FlowNode, &[ExecutionDependency<'_>])], selected: &[String]) -> Self {
-        let unrestricted = steps
-            .iter()
-            .rposition(|(node, _)| !node.node.context_references_complete());
-        let mut last_use = BTreeMap::new();
-        for (position, (node, _)) in steps.iter().enumerate() {
-            for port in &node.ports.outputs {
-                let last = if node.definition_id.as_str() == crate::LOOP_SOURCE_ID {
-                    // Assignments republish this source during the pass.
-                    steps.len()
-                } else {
-                    unrestricted.map_or(position, |last| last.max(position))
-                };
-                last_use.insert(output_id(node.definition_id.as_str(), &port.name), last);
-            }
-        }
-        for (position, (node, dependencies)) in steps.iter().enumerate() {
-            for output in dependencies
-                .iter()
-                .map(|dependency| output_id(dependency.source_node, dependency.source_output))
-                .chain(
-                    node.references
-                        .iter()
-                        .map(|reference| reference.output.clone()),
-                )
-            {
-                if let Some(last) = last_use.get_mut(&output) {
-                    *last = (*last).max(position);
-                }
-            }
-        }
-        for output in selected {
-            if let Some(last) = last_use.get_mut(output) {
-                *last = steps.len();
-            }
-        }
-        let mut releases = vec![Vec::new(); steps.len()];
-        for (output, position) in last_use {
-            if position < steps.len() {
-                releases[position].push(output);
-            }
-        }
-        Self { releases }
-    }
-
-    pub fn after_step(&self, position: usize) -> &[String] {
-        &self.releases[position]
-    }
 }
 
 enum StepObservation {
@@ -595,6 +589,13 @@ pub fn execute_node_in_context(
                 if let Some(step) = step.take() {
                     step.failed(ctx, FailurePhase::Dependency, error.to_string());
                 }
+                ctx.capture_node(
+                    node,
+                    &inputs,
+                    None,
+                    crate::SnapshotOutcome::Failed,
+                    Some(&error),
+                );
                 return Err(error);
             }
         };
@@ -615,6 +616,7 @@ pub fn execute_node_in_context(
             }
         }
     }
+    let snapshot_inputs = ctx.snapshots.as_ref().map(|_| inputs.clone());
     let result = if skipped {
         None
     } else {
@@ -627,16 +629,24 @@ pub fn execute_node_in_context(
                 .ok_or_else(|| state_error(id, format!("received undeclared input `{name}`")))
                 .and_then(|port| {
                     port.value_type
-                        .validate_value(value)
+                        .validate_shared(value)
                         .map_err(|error| state_error(id, format!("input `{name}`: {error}")))
                 });
             if let Err(error) = validation {
                 if let Some(step) = step.take() {
                     step.failed(ctx, FailurePhase::Dependency, error.to_string());
                 }
+                ctx.capture_node(
+                    node,
+                    &inputs,
+                    None,
+                    crate::SnapshotOutcome::Failed,
+                    Some(&error),
+                );
                 return Err(error);
             }
         }
+        ctx.capture_node(node, &inputs, None, crate::SnapshotOutcome::Started, None);
         if let Some(step) = step.as_mut() {
             step.started(ctx);
         }
@@ -652,6 +662,15 @@ pub fn execute_node_in_context(
             Err(error) => {
                 if let Some(step) = step.take() {
                     step.failed(ctx, FailurePhase::Execution, error.to_string());
+                }
+                if let Some(inputs) = &snapshot_inputs {
+                    ctx.capture_node(
+                        node,
+                        inputs,
+                        None,
+                        crate::SnapshotOutcome::Failed,
+                        Some(&error),
+                    );
                 }
                 return Err(error);
             }
@@ -671,7 +690,27 @@ pub fn execute_node_in_context(
     let loop_summary = result
         .as_ref()
         .and_then(|result| result.loop_summary.clone());
+    let snapshot_result = ctx.snapshots.as_ref().and_then(|_| result.clone());
     let result = ctx.publish(node, result);
+    if let Some(inputs) = &snapshot_inputs {
+        let outcome = if result.is_err() {
+            crate::SnapshotOutcome::Failed
+        } else if skipped {
+            crate::SnapshotOutcome::Skipped
+        } else {
+            crate::SnapshotOutcome::Succeeded
+        };
+        ctx.capture_node(
+            node,
+            inputs,
+            snapshot_result.as_ref(),
+            outcome,
+            result
+                .as_ref()
+                .err()
+                .map(|error| error as &dyn std::fmt::Display),
+        );
+    }
     if let Some(step) = step.take() {
         match &result {
             Err(error) => step.failed(ctx, FailurePhase::Publication, error.to_string()),
@@ -719,10 +758,6 @@ mod tests {
     struct EmitNode(Outputs);
 
     impl Node for EmitNode {
-        fn context_references_complete(&self) -> bool {
-            true
-        }
-
         fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
             Ok(self.0.clone())
         }
@@ -741,150 +776,13 @@ mod tests {
         PortSpec::owned(name, value_type, required)
     }
 
-    struct HistoryReader {
-        declared: bool,
-    }
-
-    impl Node for HistoryReader {
-        fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-            unreachable!("history reader needs its context")
-        }
-
-        fn context_references_complete(&self) -> bool {
-            self.declared
-        }
-
-        fn context_references(&self) -> Vec<crate::ContextReference> {
-            if self.declared {
-                vec![crate::ContextReference::new("source.value", "history")]
-            } else {
-                Vec::new()
-            }
-        }
-
-        fn execute_with_context(
-            &self,
-            _: Inputs,
-            ctx: &ExecutionContext,
-        ) -> Result<NodeResult, NodeExecutionError> {
-            let ContextValue::Value(value) = ctx.output("source.value")? else {
-                panic!("source must be available");
-            };
-            if ctx.reclaim_outputs && self.declared {
-                assert!(ctx.output("unused.value").is_err());
-            } else {
-                assert!(ctx.output("unused.value").is_ok());
-            }
-            Ok(Outputs::from([("value".into(), value.clone())]).into())
-        }
-    }
-
-    #[test]
-    fn reclaims_intermediates_without_losing_context_reads_or_selected_outputs() {
-        for declared in [false, true] {
-            let emit = |id: &str| {
-                FlowNode::new(
-                    id,
-                    Box::new(EmitNode(Outputs::from([("value".into(), json!(42))]))),
-                    NodePorts {
-                        inputs: Vec::new(),
-                        outputs: vec![port("value", ValueType::Int64, true)],
-                    },
-                )
-            };
-            let reader = FlowNode::new(
-                "reader",
-                Box::new(HistoryReader { declared }),
-                NodePorts {
-                    inputs: Vec::new(),
-                    outputs: vec![port("value", ValueType::Int64, true)],
-                },
-            );
-            let flow = Flow::new(
-                vec![emit("source"), emit("unused"), emit("middle"), reader],
-                Vec::new(),
-                ["source", "unused", "middle", "reader"]
-                    .into_iter()
-                    .map(Into::into)
-                    .collect(),
-                vec![WorkflowOutputDefinition {
-                    name: "result".into(),
-                    node: "reader".into(),
-                    port: "value".into(),
-                    optional: false,
-                }],
-            )
-            .unwrap()
-            .with_control_edges(vec![
-                crate::ControlEdgeDefinition {
-                    from_node: "source".into(),
-                    from_output: "value".into(),
-                    to_node: "middle".into(),
-                },
-                crate::ControlEdgeDefinition {
-                    from_node: "middle".into(),
-                    from_output: "value".into(),
-                    to_node: "reader".into(),
-                },
-            ])
-            .unwrap();
-            let mut state = ExecutionContext::default();
-            flow.execute_in_context(&mut state).unwrap();
-            assert_eq!(state.outputs.len(), 4);
-            let mut state = ExecutionContext::default();
-            state.enable_output_reclamation();
-            assert_eq!(
-                flow.execute_in_context(&mut state).unwrap()["result"],
-                json!(42)
-            );
-            assert_eq!(
-                state.outputs.keys().map(String::as_str).collect::<Vec<_>>(),
-                ["reader.value"]
-            );
-            assert_eq!(flow.execute().unwrap()["result"], json!(42));
-        }
-    }
-
-    #[test]
-    fn retains_selected_and_mutable_scope_outputs_after_their_last_consumer() {
-        let source = crate::prepared_scope_source(
-            crate::LOOP_SOURCE_ID,
-            &BTreeMap::from([("value".into(), ValueType::Int64)]),
-        );
-        let selected = FlowNode::new(
-            "selected",
-            Box::new(EmitNode(Outputs::new())),
-            NodePorts {
-                inputs: Vec::new(),
-                outputs: vec![port("value", ValueType::Int64, false)],
-            },
-        );
-        let plan = OutputRetentionPlan::new(
-            &[(&source, &[]), (&selected, &[])],
-            &["selected.value".into()],
-        );
-        let mut state = ExecutionContext::default();
-        state.enable_output_reclamation();
-        state.outputs.insert("%loop.value".into(), Some(json!(1)));
-        state.outputs.insert("selected.value".into(), None);
-        for position in 0..2 {
-            state.release_outputs(plan.after_step(position));
-        }
-        assert_eq!(
-            state.output("%loop.value").unwrap(),
-            ContextValue::Value(&json!(1))
-        );
-        assert_eq!(
-            state.output("selected.value").unwrap(),
-            ContextValue::Skipped
-        );
-    }
-
     #[test]
     fn scoped_execution_restores_parent_state_after_failure_and_unwind() {
         for unwinds in [false, true] {
             let mut state = ExecutionContext::default();
-            state.outputs.insert("parent.value".into(), Some(json!(9)));
+            state
+                .outputs
+                .insert("parent.value".into(), Some(json!(9).into()));
             let parent_outputs = state.outputs.clone();
             let types = BTreeMap::from([("count".into(), ValueType::Int64)]);
             let source = crate::prepared_scope_source("input", &types);
@@ -972,7 +870,7 @@ mod tests {
         let mut context = ExecutionContext::default();
         context.outputs.insert(
             "source.value".into(),
-            Some(json!([{"count": 1}, {"count": "two"}])),
+            Some(json!([{"count": 1}, {"count": "two"}]).into()),
         );
         let dependency = ExecutionDependency {
             input: Some("payload"),
@@ -1002,7 +900,7 @@ mod tests {
         let mut context = ExecutionContext::default();
         context
             .outputs
-            .insert("source.value".into(), Some(json!(1)));
+            .insert("source.value".into(), Some(json!(1).into()));
         let dependency = ExecutionDependency {
             input: Some("unexpected"),
             source_node: "source",
