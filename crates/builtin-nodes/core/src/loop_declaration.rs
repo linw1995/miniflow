@@ -1,4 +1,3 @@
-use crate::scope_observation::LoopScopeObserver;
 use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, LoopComparisonOperator, LoopConditionDefinition,
     LoopVariableDefinition, Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration,
@@ -7,11 +6,10 @@ use mf_runtime::{
 };
 use mf_telemetry::{
     Count,
-    event::{LoopStopReason, LoopSummary},
+    event::{LoopPassOutcome, LoopStopReason, LoopSummary},
 };
 use serde::Deserialize;
 use serde_json::Value;
-use std::sync::Arc;
 use std::{cmp::Ordering, collections::BTreeMap, ops::ControlFlow};
 
 pub const KIND: &str = mf_runtime::LOOP_KIND;
@@ -51,7 +49,6 @@ impl Node for LoopDeclaration {
                 inputs: ports.clone(),
                 outputs: ports,
             },
-            observer: Arc::new(LoopScopeObserver),
         }))
     }
 
@@ -129,7 +126,6 @@ struct LoopNode {
     types: BTreeMap<String, ValueType>,
     ports: NodePorts,
     body: PreparedSubgraph,
-    observer: Arc<LoopScopeObserver>,
 }
 
 impl Node for LoopNode {
@@ -158,10 +154,28 @@ impl Node for LoopNode {
                 index,
                 std::mem::take(&mut variables),
                 self.types.clone(),
-            )?
-            .with_observer(self.observer.clone());
+            )?;
             let (_, updated, exited) = ctx
-                .run_scope(scope, |state| self.body.execute_in_context(state))
+                .run_scope(scope, |state| {
+                    let path = state.scope_path();
+                    if let Some(run) = state.observation_mut().filter(|run| run.supports_loops()) {
+                        run.loop_pass_started(path.clone());
+                    }
+                    let result = self.body.execute_in_context(state);
+                    let outcome = if result.is_err() {
+                        LoopPassOutcome::Failed
+                    } else if state.scope_exit_requested() {
+                        LoopPassOutcome::Exit
+                    } else {
+                        LoopPassOutcome::Completed
+                    };
+                    let visited = Count::try_from(state.scope_visited_steps() as i64)
+                        .expect("scope budget bounds visits");
+                    if let Some(run) = state.observation_mut().filter(|run| run.supports_loops()) {
+                        run.loop_pass_finished(path, visited, outcome);
+                    }
+                    result
+                })
                 .map_err(|error| {
                     structural_error(format!("Loop `{}` pass {index}: {error}", self.id))
                 })?;

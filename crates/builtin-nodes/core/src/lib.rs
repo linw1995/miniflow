@@ -3,7 +3,6 @@ mod identity;
 mod if_else;
 mod iteration;
 mod loop_declaration;
-mod scope_observation;
 
 pub use constant::{KIND as CONSTANT_KIND, kind as constant_kind};
 pub use identity::{KIND as IDENTITY_KIND, kind as identity_kind};
