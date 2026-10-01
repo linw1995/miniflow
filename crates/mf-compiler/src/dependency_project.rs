@@ -93,8 +93,7 @@ fn run_id() -> mf_telemetry::identity::RunId {
 
 #[cfg(not(feature = "telemetry"))]
 fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
-    let registry = mf_runtime::NodeRegistry::from_inventory()?;
-    Ok(workflow::run_workflow(&registry)?)
+    execute_workflow(None)
 }
 
 #[cfg(feature = "telemetry")]
@@ -106,27 +105,21 @@ fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
             None
         }
     };
-    let result: Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> = match providers.as_ref() {
-        Some(providers) => (|| {
+    let result: Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> = (|| {
+        let observation = if let Some(providers) = providers.as_ref() {
             let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
-            let observation = match plan.start_observation(&providers.observer(), run_id()) {
+            match plan.start_observation(&providers.observer(), run_id()) {
                 Ok(observation) => Some(observation),
                 Err(error) => {
                     eprintln!("telemetry observation unavailable: {error}");
                     None
                 }
-            };
-            mf_runtime::ExecutionContext::run(observation, |state| -> Result<_, Box<dyn std::error::Error>> {
-                let registry = mf_runtime::NodeRegistry::from_inventory()?;
-                state.enable_output_reclamation();
-                Ok(workflow::run_workflow_in_context(&registry, state)?)
-            })
-        })(),
-        None => {
-            let registry = mf_runtime::NodeRegistry::from_inventory()?;
-            Ok(workflow::run_workflow(&registry)?)
-        }
-    };
+            }
+        } else {
+            None
+        };
+        execute_workflow(observation)
+    })();
     if let Some(providers) = providers {
         for diagnostic in providers.shutdown() {
             eprintln!("telemetry export incomplete: {diagnostic}");
@@ -134,6 +127,30 @@ fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     }
     result
 }
+fn execute_workflow(observation: Option<mf_runtime::RunObservation>) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+    let snapshots = match mf_runtime::SnapshotRecorder::from_env() {
+        Ok(snapshots) => snapshots,
+        Err(error) => {
+            eprintln!("snapshot capture unavailable: {error}");
+            None
+        }
+    };
+    let result = mf_runtime::ExecutionContext::run(observation, |state| -> Result<_, Box<dyn std::error::Error>> {
+        if let Some(snapshots) = &snapshots {
+            state.set_snapshot_recorder(snapshots.clone());
+        }
+        let registry = mf_runtime::NodeRegistry::from_inventory()?;
+        Ok(workflow::run_workflow_in_context(&registry, state)?)
+    });
+    if let Some(snapshots) = snapshots {
+        snapshots.finish();
+        if let Some(error) = snapshots.diagnostic() {
+            eprintln!("snapshot capture incomplete: {error}");
+        }
+    }
+    result
+}
+
 "#;
 
 fn quoted(value: &str) -> String {
