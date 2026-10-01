@@ -1,7 +1,7 @@
 //! Compare retained JSON copies with retained persistent roots.
-use mf_runtime::{NodeSnapshot, Outputs, SnapshotOutcome, SnapshotRecorder, ValueRef};
+use mf_runtime::ValueRef;
 use serde_json::json;
-use std::{hint::black_box, sync::Arc, time::Instant};
+use std::{hint::black_box, time::Instant};
 
 fn main() {
     let steps = 500;
@@ -39,26 +39,9 @@ fn main() {
         }
         black_box(&roots);
         let shared_us = started.elapsed().as_micros();
-        let recorder = SnapshotRecorder::memory();
-        let started = Instant::now();
-        for value in &roots {
-            recorder.record(
-                vec![],
-                "node",
-                NodeSnapshot {
-                    inputs: Outputs::new().snapshot(),
-                    outputs: Outputs::from([("value".into(), value.clone())]).snapshot(),
-                    skipped: Arc::from([]),
-                    outcome: SnapshotOutcome::Succeeded,
-                    error: None,
-                },
-            );
-        }
         println!(
-            "{mode}: owned_us={copy_us} shared_us={shared_us} capture_us={} roots={} unique_values={}",
-            started.elapsed().as_micros(),
-            recorder.history().len(),
-            recorder.value_count()
+            "{mode}: owned_us={copy_us} shared_us={shared_us} roots={}",
+            roots.len()
         );
     }
 }

@@ -124,25 +124,6 @@ fn compiles_a_runner_without_telemetry_and_preserves_its_commands() {
         serde_json::from_slice::<serde_json::Value>(&description.stdout).unwrap()["nodes"]
             .is_array()
     );
-    let snapshots = tempfile::NamedTempFile::new().unwrap();
-    let recorded = Command::new(&output)
-        .env("MF_SNAPSHOT_FILE", snapshots.path())
-        .output()
-        .unwrap();
-    assert!(recorded.status.success());
-    assert_eq!(recorded.stdout, execution.stdout);
-    let records: Vec<serde_json::Value> = fs::read_to_string(snapshots.path())
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(records.first().unwrap()["record"], "header");
-    assert!(
-        records
-            .iter()
-            .any(|record| record["record"] == "node" && record["outcome"] == "succeeded")
-    );
-    assert_eq!(records.last().unwrap()["record"], "end");
     let result = compile_command(&definition, &output)
         .args(["--no-telemetry", "--locked"])
         .output()
