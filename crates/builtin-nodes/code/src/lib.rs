@@ -45,32 +45,12 @@ fn execution_error(message: impl Into<String>) -> NodeExecutionError {
     }
 }
 
-fn parse_type(value: &Value, depth: usize) -> Result<ValueType, String> {
-    if depth > ValueType::MAX_DEPTH {
-        return Err(format!(
-            "type nesting depth exceeds {}",
-            ValueType::MAX_DEPTH
-        ));
+fn parse_type(value: &Value) -> Result<ValueType, String> {
+    let value_type = ValueType::parse_descriptor(value)?;
+    if !value_type.is_concrete() {
+        return Err("type must be a concrete scalar, list, or map descriptor".into());
     }
-    match value {
-        Value::String(name) => match name.as_str() {
-            "int" => Ok(ValueType::Int64),
-            "double" => Ok(ValueType::Float64),
-            "bool" => Ok(ValueType::Boolean),
-            "string" => Ok(ValueType::String),
-            "null" => Ok(ValueType::Null),
-            _ => Err(format!("unsupported type `{name}`")),
-        },
-        Value::Object(fields) if fields.len() == 1 => {
-            let (kind, inner) = fields.iter().next().unwrap();
-            match kind.as_str() {
-                "list" => Ok(ValueType::List(Box::new(parse_type(inner, depth + 1)?))),
-                "map" => Ok(ValueType::Map(Box::new(parse_type(inner, depth + 1)?))),
-                _ => Err(format!("unsupported type constructor `{kind}`")),
-            }
-        }
-        _ => Err("type must be a concrete scalar, list, or map descriptor".into()),
-    }
+    Ok(value_type)
 }
 
 fn cel_type(value_type: &ValueType) -> CelType {
@@ -224,8 +204,8 @@ fn factory(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
         if !valid_identifier(name) {
             return Err(invalid(format!("invalid input name `{name}`")));
         }
-        let value_type = parse_type(descriptor, 1)
-            .map_err(|error| invalid(format!("input `{name}`: {error}")))?;
+        let value_type =
+            parse_type(descriptor).map_err(|error| invalid(format!("input `{name}`: {error}")))?;
         env = env.with_variable(name, cel_type(&value_type));
         inputs.push(PortSpec::owned(name, value_type, true));
     }

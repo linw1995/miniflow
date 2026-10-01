@@ -1,10 +1,11 @@
 //! Caller-owned OTel instrumentation for one synchronous workflow invocation.
 
 use crate::{
-    ContractError, Count, INSTRUMENTATION_SCOPE,
+    ContractError, Count, EVENT_SCHEMA_VERSION, INSTRUMENTATION_SCOPE, LOOP_EVENT_SCHEMA_VERSION,
+    description::WorkflowDescription,
     event::{
-        Event, EventSequence, Failure, FailurePhase, LifecycleEvent, NodeIdentity, Outcome,
-        SkipCause,
+        Event, EventSequence, Failure, FailurePhase, LifecycleEvent, LoopPassOutcome,
+        LoopPathEntry, LoopSummary, NodeIdentity, Outcome, SkipCause,
     },
     identity::{RunId, WorkflowId},
     wire::{TraceContext, WireRecord},
@@ -99,10 +100,62 @@ impl Observer {
         run_id: RunId,
         nodes: Vec<NodeIdentity>,
     ) -> Result<RunObservation, ContractError> {
+        self.start_inner(workflow_id, run_id, nodes, None)
+    }
+
+    pub fn start_with_description(
+        &self,
+        description: WorkflowDescription,
+        run_id: RunId,
+    ) -> Result<RunObservation, ContractError> {
+        description.validate()?;
+        crate::require(
+            description.version == crate::description::WorkflowDescriptionVersion::V2026_09_29,
+            "Loop observation requires the new description version",
+        )?;
+        let nodes = description
+            .nodes
+            .iter()
+            .map(|node| NodeIdentity {
+                id: node.id.clone(),
+                kind: node.kind.clone(),
+                path: Vec::new(),
+            })
+            .collect();
+        self.start_inner(
+            description.workflow_id.clone(),
+            run_id,
+            nodes,
+            Some(description),
+        )
+    }
+
+    fn start_inner(
+        &self,
+        workflow_id: WorkflowId,
+        run_id: RunId,
+        nodes: Vec<NodeIdentity>,
+        description: Option<WorkflowDescription>,
+    ) -> Result<RunObservation, ContractError> {
         let node_count = Count::try_from(
             i64::try_from(nodes.len()).map_err(|_| crate::invalid("too many nodes"))?,
         )?;
-        let sequence = EventSequence::new(node_count)?;
+        let loop_schema = description.as_ref().is_some_and(|description| {
+            description.version == crate::description::WorkflowDescriptionVersion::V2026_09_29
+        });
+        let static_count = if loop_schema {
+            description
+                .as_ref()
+                .expect("Loop description exists")
+                .static_node_count()?
+        } else {
+            node_count
+        };
+        let sequence = if loop_schema {
+            EventSequence::with_maximum(crate::maximum_loop_event_count())
+        } else {
+            EventSequence::new(node_count)?
+        };
         let mut index = BTreeMap::new();
         for (position, node) in nodes.into_iter().enumerate() {
             crate::require(
@@ -137,12 +190,14 @@ impl Observer {
             started,
             context,
             visited: Count::ZERO,
+            visited_steps: Count::ZERO,
+            description,
             failure: None,
             closed: false,
         };
         run.record(
             Event::WorkflowStarted {
-                node_count,
+                node_count: static_count,
                 elapsed_ns: Count::ZERO,
             },
             None,
@@ -160,6 +215,8 @@ pub struct RunObservation {
     started: Instant,
     context: Context,
     visited: Count,
+    visited_steps: Count,
+    description: Option<WorkflowDescription>,
     failure: Option<(Option<String>, Failure)>,
     closed: bool,
 }
@@ -175,6 +232,10 @@ impl fmt::Debug for RunObservation {
 }
 
 impl RunObservation {
+    pub fn supports_loops(&self) -> bool {
+        self.description.is_some()
+    }
+
     pub fn enter(&self) -> ContextGuard {
         self.context.clone().attach()
     }
@@ -182,10 +243,22 @@ impl RunObservation {
     pub fn iteration_observation(
         &self,
         id: &str,
+        path: &[LoopPathEntry],
         body_nodes: Vec<NodeIdentity>,
     ) -> Option<IterationObservation> {
-        if self.closed || !self.nodes.contains_key(id) {
+        if self.closed {
             return None;
+        }
+        if path.is_empty() {
+            self.nodes.get(id)?;
+        } else {
+            let static_path: Vec<_> = path.iter().map(|entry| entry.loop_id.clone()).collect();
+            self.description
+                .as_ref()?
+                .loop_body(&static_path)?
+                .nodes
+                .iter()
+                .find(|node| node.id == id)?;
         }
         Some(IterationObservation {
             backend: Arc::clone(&self.backend),
@@ -211,6 +284,11 @@ impl RunObservation {
             return None;
         }
         let (position, node) = self.nodes.get(id)?;
+        Some(self.span_for(node.clone(), *position))
+    }
+
+    fn span_for(&self, node: NodeIdentity, position: Count) -> NodeObservation {
+        let parent = Context::current();
         let span = self
             .backend
             .tracer
@@ -221,13 +299,13 @@ impl RunObservation {
                 KeyValue::new("mf.node.id", node.id.clone()),
                 KeyValue::new("mf.node.kind", node.kind.clone()),
             ])
-            .start_with_context(&self.backend.tracer, &self.context);
-        Some(NodeObservation {
-            node: node.clone(),
-            position: *position,
-            context: self.context.with_span(span),
+            .start_with_context(&self.backend.tracer, &parent);
+        NodeObservation {
+            node,
+            position,
+            context: parent.with_span(span),
             invoked: None,
-        })
+        }
     }
 
     /// Marks a scheduled step as visited before resolving dependencies.
@@ -235,6 +313,33 @@ impl RunObservation {
         let step = self.span(id)?;
         self.visited =
             Count::try_from(step.position.get() + 1).expect("node position is bounded at start");
+        self.visited_steps = Count::try_from(self.visited_steps.get() + 1).ok()?;
+        Some(step)
+    }
+
+    pub fn begin_invocation(
+        &mut self,
+        path: Vec<LoopPathEntry>,
+        id: &str,
+    ) -> Option<NodeObservation> {
+        if self.closed {
+            return None;
+        }
+        let description = self.description.as_ref()?;
+        let static_path: Vec<_> = path.iter().map(|entry| entry.loop_id.clone()).collect();
+        let body = description.loop_body(&static_path)?;
+        let position = body.execution_order.iter().position(|node| node == id)?;
+        let kind = body.nodes.iter().find(|node| node.id == id)?.kind.clone();
+        let position = Count::try_from(position as i64).ok()?;
+        let step = self.span_for(
+            NodeIdentity {
+                id: id.into(),
+                kind,
+                path,
+            },
+            position,
+        );
+        self.visited_steps = Count::try_from(self.visited_steps.get() + 1).ok()?;
         Some(step)
     }
 
@@ -256,6 +361,16 @@ impl RunObservation {
         produced_ports: Vec<String>,
         skipped_ports: Vec<String>,
     ) {
+        self.node_succeeded_with_loop_summary(step, produced_ports, skipped_ports, None);
+    }
+
+    pub fn node_succeeded_with_loop_summary(
+        &mut self,
+        step: NodeObservation,
+        produced_ports: Vec<String>,
+        skipped_ports: Vec<String>,
+        loop_summary: Option<LoopSummary>,
+    ) {
         step.context
             .span()
             .set_attribute(KeyValue::new("mf.outcome", "succeeded"));
@@ -270,6 +385,7 @@ impl RunObservation {
                 produced_ports,
                 skipped_ports,
                 failure: None,
+                loop_summary,
             },
             Some(&step.context),
         );
@@ -311,6 +427,7 @@ impl RunObservation {
                 produced_ports: Vec::new(),
                 skipped_ports: Vec::new(),
                 failure: Some(failure),
+                loop_summary: None,
             },
             Some(&step.context),
         );
@@ -330,6 +447,16 @@ impl RunObservation {
         }
     }
 
+    pub fn preparation_failed_unattributed(&mut self, message: String) {
+        self.failure = Some((
+            None,
+            Failure {
+                phase: FailurePhase::Preparation,
+                message,
+            },
+        ));
+    }
+
     pub fn output_selection_failed(&mut self, message: String) {
         self.failure = Some((
             None,
@@ -338,6 +465,35 @@ impl RunObservation {
                 message,
             },
         ));
+    }
+
+    pub fn loop_pass_started(&mut self, path: Vec<LoopPathEntry>) {
+        let current = Context::current();
+        self.record(
+            Event::LoopPassStarted {
+                path,
+                elapsed_ns: self.elapsed(),
+            },
+            Some(&current),
+        );
+    }
+
+    pub fn loop_pass_finished(
+        &mut self,
+        path: Vec<LoopPathEntry>,
+        visited_node_count: Count,
+        outcome: LoopPassOutcome,
+    ) {
+        let current = Context::current();
+        self.record(
+            Event::LoopPassFinished {
+                path,
+                elapsed_ns: self.elapsed(),
+                visited_node_count,
+                outcome,
+            },
+            Some(&current),
+        );
     }
 
     /// Ends a handled run. Encoding or delivery failures never become workflow errors.
@@ -379,7 +535,12 @@ impl RunObservation {
                 Event::WorkflowFinished {
                     final_sequence: sequence,
                     elapsed_ns: self.elapsed(),
-                    visited_node_count: self.visited,
+                    visited_node_count: if self.description.is_some() {
+                        self.visited_steps
+                    } else {
+                        self.visited
+                    },
+                    top_level_visited_count: self.description.as_ref().map(|_| self.visited),
                     outcome,
                     failure_node_id,
                     failure,
@@ -416,7 +577,14 @@ impl RunObservation {
             sequence,
             event,
         };
-        if let Ok(record) = WireRecord::from_event(&event, timestamp, trace_context) {
+        let schema_version = if self.description.is_some() {
+            LOOP_EVENT_SCHEMA_VERSION
+        } else {
+            EVENT_SCHEMA_VERSION
+        };
+        if let Ok(record) =
+            WireRecord::from_event_with_version(&event, schema_version, timestamp, trace_context)
+        {
             let _ = (self.backend.emit)(&record);
         }
     }

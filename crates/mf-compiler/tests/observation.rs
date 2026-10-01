@@ -354,6 +354,7 @@ fn a_running_plugin_exposes_start_before_end_and_inherits_the_node_context() {
             vec![mf_telemetry::event::NodeIdentity {
                 id: "blocking".into(),
                 kind: "fixture.blocking".into(),
+                path: Vec::new(),
             }],
         )
         .unwrap();
@@ -482,6 +483,7 @@ fn unwinding_restores_context_without_fabricating_completion() {
             vec![mf_telemetry::event::NodeIdentity {
                 id: "a".into(),
                 kind: "fixture.panic".into(),
+                path: Vec::new(),
             }],
         )
         .unwrap();

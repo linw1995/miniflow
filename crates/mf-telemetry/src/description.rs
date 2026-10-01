@@ -8,16 +8,29 @@ pub const MAX_DESCRIPTION_BYTES: usize = 16 * 1024 * 1024;
 pub enum WorkflowDescriptionVersion {
     #[serde(rename = "2026-09-27")]
     V2026_09_27,
+    #[serde(rename = "2026-09-29")]
+    V2026_09_29,
 }
 
 impl WorkflowDescriptionVersion {
-    pub const CURRENT: Self = Self::V2026_09_27;
+    pub const CURRENT: Self = Self::V2026_09_29;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowDescription {
     pub version: WorkflowDescriptionVersion,
     pub workflow_id: WorkflowId,
+    pub nodes: Vec<NodeDescription>,
+    pub data_edges: Vec<DataEdge>,
+    pub control_edges: Vec<ControlEdge>,
+    pub execution_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loop_bodies: Vec<LoopBodyDescription>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopBodyDescription {
+    pub path: Vec<String>,
     pub nodes: Vec<NodeDescription>,
     pub data_edges: Vec<DataEdge>,
     pub control_edges: Vec<ControlEdge>,
@@ -72,8 +85,31 @@ impl WorkflowDescription {
         Count::try_from(count)
     }
 
+    pub fn static_node_count(&self) -> Result<Count, ContractError> {
+        let count = self
+            .loop_bodies
+            .iter()
+            .try_fold(self.nodes.len(), |count, body| {
+                count
+                    .checked_add(body.nodes.len())
+                    .ok_or_else(|| crate::invalid("too many nodes"))
+            })?;
+        let count = i64::try_from(count).map_err(|_| crate::invalid("too many nodes"))?;
+        Count::try_from(count)
+    }
+
+    pub fn loop_body(&self, path: &[String]) -> Option<&LoopBodyDescription> {
+        self.loop_bodies.iter().find(|body| body.path == path)
+    }
+
     pub fn validate(&self) -> Result<(), ContractError> {
         crate::maximum_event_count(self.node_count()?)?;
+        if self.version == WorkflowDescriptionVersion::V2026_09_27 {
+            require(
+                self.loop_bodies.is_empty(),
+                "old description cannot contain Loop bodies",
+            )?;
+        }
         let mut nodes = BTreeMap::new();
         for node in &self.nodes {
             require(
@@ -118,6 +154,48 @@ impl WorkflowDescription {
         for edge in &self.control_edges {
             endpoint(&edge.from_node, &edge.from_output, &edge.to_node)?;
             require(controls.insert(edge), "duplicate control edge")?;
+        }
+        let mut scopes: BTreeMap<Vec<String>, Vec<NodeDescription>> = BTreeMap::new();
+        scopes.insert(Vec::new(), self.nodes.clone());
+        let mut bodies: Vec<_> = self.loop_bodies.iter().collect();
+        bodies.sort_by_key(|body| body.path.len());
+        for body in bodies {
+            require(
+                !body.path.is_empty() && body.path.len() <= crate::MAX_LOOP_DEPTH,
+                "invalid Loop body path",
+            )?;
+            let (loop_id, parent_path) = body.path.split_last().expect("path is nonempty");
+            let parent = scopes
+                .get(parent_path)
+                .ok_or_else(|| crate::invalid("unknown parent Loop scope"))?;
+            require(
+                parent
+                    .iter()
+                    .any(|node| node.id == *loop_id && node.kind == "workflow.loop"),
+                "Loop body path does not name a parent Loop",
+            )?;
+            require(
+                body.nodes
+                    .iter()
+                    .any(|node| node.id == "$loop" && node.kind == "$loop"),
+                "Loop body omits its synthetic source",
+            )?;
+            let scope = Self {
+                version: WorkflowDescriptionVersion::V2026_09_27,
+                workflow_id: self.workflow_id.clone(),
+                nodes: body.nodes.clone(),
+                data_edges: body.data_edges.clone(),
+                control_edges: body.control_edges.clone(),
+                execution_order: body.execution_order.clone(),
+                loop_bodies: Vec::new(),
+            };
+            scope.validate()?;
+            require(
+                scopes
+                    .insert(body.path.clone(), body.nodes.clone())
+                    .is_none(),
+                "duplicate Loop body path",
+            )?;
         }
         Ok(())
     }

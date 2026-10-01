@@ -52,7 +52,7 @@ impl Decimal {
     }
 }
 
-pub fn compare(left: &Number, right: &Number) -> Ordering {
+pub fn compare_json_numbers(left: &Number, right: &Number) -> Ordering {
     // Decimal normalization preserves integer distinctions that f64 conversion would erase.
     let left = Decimal::from_number(left);
     let right = Decimal::from_number(right);
@@ -94,8 +94,12 @@ mod tests {
         ] {
             let left: Number = serde_json::from_str(left).unwrap();
             let right: Number = serde_json::from_str(right).unwrap();
-            assert_eq!(compare(&left, &right), expected, "{left} vs {right}");
-            assert_eq!(compare(&right, &left), expected.reverse());
+            assert_eq!(
+                compare_json_numbers(&left, &right),
+                expected,
+                "{left} vs {right}"
+            );
+            assert_eq!(compare_json_numbers(&right, &left), expected.reverse());
         }
     }
 }

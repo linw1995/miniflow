@@ -158,6 +158,24 @@ fn iteration_rejects_invalid_body_structure_and_result_ports() {
     );
 
     let mut invalid = definition(json!([1]), "sequential", "terminate");
+    invalid["nodes"][1]["config"]["body"]["nodes"][0] = json!({
+        "id": "inner_loop",
+        "kind": "workflow.loop",
+        "loop": {
+            "max_iterations": 1,
+            "variables": [{"name": "value", "type": "int"}],
+            "body": {"nodes": [{"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "value"}}]}
+        }
+    });
+    let invalid_definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
+    assert!(
+        plan_definition(&invalid_definition)
+            .unwrap_err()
+            .to_string()
+            .contains("unsupported Loop")
+    );
+
+    let mut invalid = definition(json!([1]), "sequential", "terminate");
     invalid["nodes"][1]["config"]["body"]["result"]["port"] = json!("missing");
     let definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
@@ -619,4 +637,121 @@ fn generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node(
     assert!(String::from_utf8_lossy(&validation.stderr).contains("builtin.iteration"));
     assert_eq!(fs::read(&output).unwrap(), installed);
     assert_eq!(fs::read(path.with_extension("lock")).unwrap(), lock);
+}
+
+#[test]
+fn loop_and_iteration_share_a_workflow_in_memory_and_generated_runners() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("flow.json");
+    let output = root.path().join("flow");
+    let build = root.path().join("build");
+    let mut flow: Value =
+        serde_json::from_str(include_str!("../../../examples/loop.json")).unwrap();
+    let iteration: Value =
+        serde_json::from_str(include_str!("../../../examples/iteration.json")).unwrap();
+    flow["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .extend(iteration["nodes"].as_array().unwrap().iter().cloned());
+    flow["edges"]
+        .as_array_mut()
+        .unwrap()
+        .extend(iteration["edges"].as_array().unwrap().iter().cloned());
+    flow["outputs"]
+        .as_array_mut()
+        .unwrap()
+        .extend(iteration["outputs"].as_array().unwrap().iter().cloned());
+    flow["dependencies"]["core"]["path"] = json!(common::crates_dir().join("builtin-nodes/core"));
+    flow["dependencies"]["code"]["path"] = json!(common::crates_dir().join("builtin-nodes/code"));
+
+    let expected = json!({"count": 3, "results": [2, 5, 8]});
+    assert_eq!(execute(flow.clone()).unwrap(), expected);
+    fs::write(&path, flow.to_string()).unwrap();
+    compile_project(&CompileRequest {
+        definition: &path,
+        output: &output,
+        locked: false,
+        build_dir: Some(&build),
+        support: &SupportPackages::Local {
+            crates_dir: common::crates_dir(),
+        },
+    })
+    .unwrap();
+    let result = Command::new(&output).output().unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&result.stdout).unwrap(),
+        expected
+    );
+    let described = Command::new(&output).arg("--describe").output().unwrap();
+    assert!(described.status.success());
+    let description: Value = serde_json::from_slice(&described.stdout).unwrap();
+    assert_eq!(description["version"], "2026-09-29");
+    assert_eq!(description["nodes"].as_array().unwrap().len(), 4);
+    assert_eq!(description["loop_bodies"].as_array().unwrap().len(), 1);
+
+    let mut nested: Value =
+        serde_json::from_str(include_str!("../../../examples/loop.json")).unwrap();
+    nested["dependencies"] = flow["dependencies"].clone();
+    nested["nodes"][0]["config"]["value"] = json!([1, 2, 3]);
+    nested["nodes"][1]["loop"]["max_iterations"] = json!(2);
+    nested["nodes"][1]["loop"]["variables"] = json!([{"name": "items", "type": "array"}]);
+    nested["nodes"][1]["loop"]["until"] = Value::Null;
+    nested["nodes"][1]["loop"]["body"] = json!({
+        "nodes": [
+            iteration["nodes"][1].clone(),
+            {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "items"}}
+        ],
+        "edges": [
+            {"from_node": "$loop", "from_output": "items", "to_node": "iteration", "to_input": "items"},
+            {"from_node": "iteration", "from_output": "results", "to_node": "assign", "to_input": "value"}
+        ]
+    });
+    nested["edges"][0]["to_input"] = json!("items");
+    nested["outputs"][0]["name"] = json!("items");
+    nested["outputs"][0]["port"] = json!("items");
+    let nested_expected = json!({"items": [4, 11, 18]});
+    assert_eq!(execute(nested.clone()).unwrap(), nested_expected);
+
+    let definition: WorkflowDefinition = serde_json::from_value(nested.clone()).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let harness = capture::Harness::new(true);
+    let observation = plan
+        .start_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let observed = execute_compiled(&plan, &registry, Some(observation)).unwrap();
+    assert_eq!(json!(observed), nested_expected);
+    assert!(
+        harness
+            .records()
+            .iter()
+            .any(|record| record.scope == "mf.iteration")
+    );
+
+    fs::write(&path, nested.to_string()).unwrap();
+    compile_project(&CompileRequest {
+        definition: &path,
+        output: &output,
+        locked: false,
+        build_dir: Some(&build),
+        support: &SupportPackages::Local {
+            crates_dir: common::crates_dir(),
+        },
+    })
+    .unwrap();
+    let nested_result = Command::new(&output).output().unwrap();
+    assert!(
+        nested_result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&nested_result.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&nested_result.stdout).unwrap(),
+        nested_expected
+    );
 }

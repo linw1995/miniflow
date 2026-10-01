@@ -4,7 +4,10 @@ use crate::{
     duration::format_duration_ns,
     state::{MAX_SESSION_NODES, NodeObservation, NodeStatus, StateSnapshot},
 };
-use mf_telemetry::{ContractError, description::WorkflowDescription};
+use mf_telemetry::{
+    ContractError,
+    description::{WorkflowDescription, WorkflowDescriptionVersion},
+};
 use ratatui::{
     buffer::Buffer,
     layout::{Position, Rect},
@@ -31,6 +34,8 @@ pub enum GraphError {
     Description { source: ContractError },
     #[snafu(display("workflow graph exceeds the {limit}-node display limit"))]
     TooManyNodes { limit: usize },
+    #[snafu(display("Loop body is absent from the workflow description"))]
+    MissingLoopBody,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -73,6 +78,25 @@ pub struct GraphLayout {
 }
 
 impl GraphLayout {
+    pub fn from_loop_body(
+        description: &WorkflowDescription,
+        path: &[String],
+    ) -> Result<Self, GraphError> {
+        let body = description
+            .loop_body(path)
+            .ok_or(GraphError::MissingLoopBody)?;
+        let scope = WorkflowDescription {
+            version: WorkflowDescriptionVersion::V2026_09_27,
+            workflow_id: description.workflow_id.clone(),
+            nodes: body.nodes.clone(),
+            data_edges: body.data_edges.clone(),
+            control_edges: body.control_edges.clone(),
+            execution_order: body.execution_order.clone(),
+            loop_bodies: Vec::new(),
+        };
+        Self::new(&scope)
+    }
+
     pub fn new(description: &WorkflowDescription) -> Result<Self, GraphError> {
         description
             .validate()
@@ -249,7 +273,7 @@ impl GraphLayout {
 
 pub struct GraphView<'a> {
     layout: &'a GraphLayout,
-    snapshot: Option<&'a StateSnapshot>,
+    nodes: Option<&'a [NodeObservation]>,
     offset: (u32, u32),
     elapsed_ns: u64,
 }
@@ -258,14 +282,19 @@ impl<'a> GraphView<'a> {
     pub fn new(layout: &'a GraphLayout) -> Self {
         Self {
             layout,
-            snapshot: None,
+            nodes: None,
             offset: (0, 0),
             elapsed_ns: 0,
         }
     }
 
     pub fn snapshot(mut self, snapshot: &'a StateSnapshot) -> Self {
-        self.snapshot = Some(snapshot);
+        self.nodes = Some(&snapshot.nodes);
+        self
+    }
+
+    pub fn nodes(mut self, nodes: &'a [NodeObservation]) -> Self {
+        self.nodes = Some(nodes);
         self
     }
 
@@ -399,8 +428,8 @@ impl<'a> GraphView<'a> {
             EdgeKind::Control => Color::Blue,
         };
         let Some(source) = self
-            .snapshot
-            .and_then(|snapshot| snapshot.nodes.get(edge.from))
+            .nodes
+            .and_then(|nodes| nodes.get(edge.from))
             .filter(|source| source.id == self.layout.nodes[edge.from].id)
         else {
             return Style::default().fg(default);
@@ -440,8 +469,8 @@ impl<'a> GraphView<'a> {
             return;
         }
         let observed = self
-            .snapshot
-            .and_then(|snapshot| snapshot.nodes.get(index).filter(|item| item.id == node.id));
+            .nodes
+            .and_then(|nodes| nodes.get(index).filter(|item| item.id == node.id));
         let status = observed.map_or(NodeStatus::Pending, |item| item.status);
         let style = node_style(status);
         for x in rect.x + 1..rect.x + rect.width - 1 {

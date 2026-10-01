@@ -12,6 +12,10 @@ use snafu::Snafu;
 
 pub const INSTRUMENTATION_SCOPE: &str = "mf.workflow";
 pub const EVENT_SCHEMA_VERSION: i64 = 1;
+pub const LOOP_EVENT_SCHEMA_VERSION: i64 = 2;
+pub const MAX_LOOP_DEPTH: usize = 4;
+pub const MAX_LOOP_ITERATIONS: u16 = 1000;
+pub const MAX_LOOP_SCHEDULED_STEPS: i64 = 10_000;
 
 #[derive(Debug, Snafu)]
 pub enum ContractError {
@@ -87,4 +91,8 @@ pub fn maximum_event_count(node_count: Count) -> Result<Count, ContractError> {
         .and_then(|n| n.checked_add(2))
         .map(Count)
         .ok_or_else(|| invalid("node count exceeds lifecycle sequence capacity"))
+}
+
+pub fn maximum_loop_event_count() -> Count {
+    Count(4 * MAX_LOOP_SCHEDULED_STEPS + 4)
 }

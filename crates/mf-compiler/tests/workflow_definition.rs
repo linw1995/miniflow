@@ -10,7 +10,7 @@ fn parses_a_versioned_workflow_definition() {
     )
     .unwrap();
 
-    assert_eq!(definition.version, WorkflowDefinitionVersion::CURRENT);
+    assert_eq!(definition.version, WorkflowDefinitionVersion::V2026_09_26);
     assert_eq!(definition.nodes[0].id.as_str(), "source");
     assert_eq!(definition.nodes[0].config, serde_json::json!({}));
     assert_eq!(

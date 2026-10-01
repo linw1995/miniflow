@@ -147,7 +147,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<(
 
 fn description() -> WorkflowDescription {
     WorkflowDescription {
-        version: WorkflowDescriptionVersion::CURRENT,
+        version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "c".repeat(64)))
             .expect("fixture workflow ID is valid"),
         nodes: ["fetch", "transform", "publish", "archive"]
@@ -187,6 +187,7 @@ fn description() -> WorkflowDescription {
             .into_iter()
             .map(str::to_owned)
             .collect(),
+        loop_bodies: Vec::new(),
     }
 }
 
@@ -198,6 +199,7 @@ fn scheduled_events(
     let node = |id: &str| NodeIdentity {
         id: id.into(),
         kind: format!("preview.{id}"),
+        path: Vec::new(),
     };
     let record = |at_ms: i64, sequence: i64, event| {
         (
@@ -240,6 +242,7 @@ fn scheduled_events(
                 produced_ports: vec!["value".into()],
                 skipped_ports: vec![],
                 failure: None,
+                loop_summary: None,
             },
         ),
         record(
@@ -263,6 +266,7 @@ fn scheduled_events(
                 produced_ports: vec!["value".into(), "ready".into()],
                 skipped_ports: vec!["archive".into()],
                 failure: None,
+                loop_summary: None,
             },
         ),
         record(
@@ -286,6 +290,7 @@ fn scheduled_events(
                 produced_ports: vec![],
                 skipped_ports: vec![],
                 failure: None,
+                loop_summary: None,
             },
         ),
         record(
@@ -312,6 +317,7 @@ fn scheduled_events(
                 outcome: Outcome::Succeeded,
                 failure_node_id: None,
                 failure: None,
+                top_level_visited_count: None,
             },
         ),
     ]

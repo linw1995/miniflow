@@ -4,7 +4,7 @@
 
 ### Requirement: Observe Iteration at its outer node boundary
 
-The workflow description and version 1 lifecycle SHALL identify an Iteration as one outer node. Its start and finish
+The workflow description and lifecycle SHALL identify an Iteration as one node in its containing graph. Its start and finish
 SHALL bracket all item execution. Repeated items and body nodes SHALL emit separate OTel spans and logs in the
 `mf.iteration` scope without consuming the bounded outer lifecycle sequence. Detail records SHALL identify the
 workflow, run, outer iteration node, and input index; body-node records SHALL also identify the inner node and kind.

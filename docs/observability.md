@@ -49,8 +49,7 @@ See `crates/mf-compiler/examples/observe.rs` for provider ownership and cleanup.
 
 ### Spans, events, and failure boundaries
 
-A workflow span covers its run scope. Each reached node gets a sibling child span under that workflow, including
-dependency failures and conditional skips. `mf.node.started` is emitted immediately before invoking the implementation;
+A workflow span covers its run scope. Each reached top-level node gets a child span under that workflow, including dependency failures and conditional skips. In Loop-capable runs, body-node spans are children of their enclosing Loop-node span. `mf.node.started` is emitted immediately before invoking the implementation;
 node success is emitted only after output validation/publication. Construction failure can emit a failed node record
 without a start. Skips have an explicit skipped outcome and do not set error status. Root output-selection failure
 leaves successful node outcomes intact.
@@ -75,11 +74,18 @@ rather than the raw source file's spelling. It does not identify plugin binary c
 
 `WorkflowId::from_definition` implements this contract. Golden input and an independently computed SHA-256 digest live in `crates/mf-telemetry/tests/fixtures/identity-*`. Format changes require a new identity format version. A hash of low-entropy configuration is not a confidentiality boundary.
 
-Each invocation has a fresh canonical lowercase UUID v4 `RunId`, independent of trace identity. A node has one lifecycle per `(run_id, node_id)`; there is no attempt number or workflow retry policy. Definition IDs and port names are opaque strings and are never split on punctuation.
+Each invocation has a fresh canonical lowercase UUID v4 `RunId`, independent of trace identity. For the original flat protocol, a node has one lifecycle per `(run_id, node_id)`. In Loop-capable runs, each actual invocation is identified by `(run_id, loop_path, local_node_id)`; repeated passes are not retries. There is no workflow retry policy. Definition IDs and port names are opaque strings and are never split on punctuation.
 
 ## Description schema
 
-Description version `2026-09-27` contains `workflow_id`, `nodes`, `data_edges`, `control_edges`, and `execution_order`. Nodes contain `id` and `kind`; edge endpoints carry connected port names. The full effective port table is unavailable in description mode, so unconnected ports, types, and required flags remain unknown to the TUI. Compile validation still checks those contracts by constructing plugin instances.
+Description version `2026-09-27` contains `workflow_id`, `nodes`, `data_edges`, `control_edges`, and
+`execution_order`. Version `2026-09-29` adds `loop_bodies`: each entry has a static path of
+enclosing Loop IDs and a local graph with the same node and edge metadata. The synthetic `$loop`
+source appears in its body graph. Nodes contain `id` and `kind`; edge endpoints carry connected port
+names. Description mode excludes Loop configuration, variable values, predicates, and ordinary node
+configuration. The full effective port table is unavailable, so unconnected ports, types, and
+required flags remain unknown to the TUI. Compile validation still checks those contracts by
+constructing plugin instances.
 
 `WorkflowDescription::from_json` rejects unsupported versions, oversized input (16 MiB), duplicate IDs, incomplete
 execution order, missing endpoints, empty edge port names, backward edges, and duplicate input/control bindings.
@@ -95,7 +101,7 @@ Use the instrumentation scope `mf.workflow`. Event names, timestamps, and option
 
 | Attribute | Type | Meaning |
 | --- | --- | --- |
-| `mf.schema.version` | Signed integer | Event schema version, currently 1 |
+| `mf.schema.version` | Signed integer | Event schema version: 1 for flat runners, 2 for Loop-capable runners |
 | `mf.workflow.id` | String | Identity shared with the description |
 | `mf.run.id` | String | Identity of this invocation |
 | `mf.event.sequence` | Signed integer | Positive per-run sequence starting at 1 |
@@ -109,13 +115,21 @@ The body is an OTel structured map, not a JSON message string. All counts and mo
 | --- | --- |
 | `mf.workflow.started` | `node_count`, `elapsed_ns: 0`; sequence 1, before preparation |
 | `mf.node.started` | `position`, `elapsed_ns`; dependencies resolved, implementation about to run |
-| `mf.node.finished` | `position`, `elapsed_ns`, available `duration_ns`, `produced_ports`, `skipped_ports`, optional `failure` map; success follows publication |
+| `mf.node.finished` | `position`, `elapsed_ns`, available `duration_ns`, `produced_ports`, `skipped_ports`, optional `failure` map; Loop success also carries `loop_summary` with pass count and stop reason |
 | `mf.node.skipped` | `position`, `elapsed_ns`, `causes` with `source_node`/`source_output`, and all skipped output names; no invocation |
-| `mf.workflow.finished` | `final_sequence`, `elapsed_ns`, `visited_node_count`, optional `failure_node_id` and `failure`; after selected outputs or handled failure |
+| `mf.loop.pass.started` | Loop path and `elapsed_ns`; before each body traversal in schema 2 |
+| `mf.loop.pass.finished` | Loop path, `elapsed_ns`, local `visited_node_count`, and `completed`, `exit`, or `failed` outcome in schema 2 |
+| `mf.workflow.finished` | `final_sequence`, `elapsed_ns`, `visited_node_count`, optional `failure_node_id` and `failure`; schema 2 also carries `top_level_visited_count` |
 
 `failure` contains a diagnostic `message`; its phase is the `mf.failure.phase` attribute. Phases are `preparation`, `dependency`, `execution`, `publication`, and `output_selection`. Pre-invocation failures have no execution duration. Failed nodes have no published port outcomes. A failed workflow requires failure context; successful outcomes cannot carry it.
 
-`visited_node_count` is the prefix of scheduled steps reached, including a step failing dependency resolution. Preparation failure visits zero steps and can identify a node anywhere in the order. Output selection requires all steps visited. Unreached nodes can be classified NotRun from this boundary. Missing outcomes inside the visited prefix stay unknown, even when the workflow succeeded. The final record contains no per-node snapshot.
+In schema 1, `visited_node_count` is the prefix of scheduled steps reached, including a step failing
+dependency resolution. In schema 2, it is the total number of scheduled steps across all scopes,
+while `top_level_visited_count` retains the outer graph prefix. Each pass finish records its local
+visited prefix. Preparation failure visits zero steps; output selection requires the outer graph to
+finish. A proven unvisited suffix of an exited or failed pass is NotRun, while future passes that
+never started have no node invocations. Missing outcomes inside a visited prefix stay unknown, even
+when the workflow succeeded. The final record contains no per-node snapshot.
 
 This logical fixture demonstrates successful node completion:
 
@@ -149,7 +163,12 @@ This logical fixture demonstrates successful node completion:
 
 ## Sequences and acceptable loss
 
-Reserve sequences before serialization/enqueueing through `EventSequence`. A dropped record consumes its sequence. The final reservation closes the sequence permanently, and retransmitting a record preserves its identity. For the current execution model, at most `2 * node_count + 2` lifecycle records are possible; checked arithmetic rejects counts exceeding the signed range. The sequence helper does not execute nodes or enforce a scheduler.
+Reserve sequences before serialization/enqueueing through `EventSequence`. A dropped record consumes
+its sequence. The final reservation closes the sequence permanently, and retransmitting a record
+preserves its identity. Schema 1 permits at most `2 * node_count + 2` lifecycle records. Schema 2
+permits at most `4 * 10,000 + 4`: two node records and two pass boundaries per scheduled step, with
+room for one pass that fails before its first step after budget exhaustion. The sequence helper does
+not execute nodes or enforce a scheduler.
 
 Observation loss is acceptable. Consumers must expose gaps and local drops, and must not claim completeness without evidence:
 
@@ -161,9 +180,22 @@ Observation loss is acceptable. Consumers must expose gaps and local drops, and 
 
 There is no replay, persistent journal, reconnect protocol, node rescheduling, or full-state recovery. Known missing sequences and local drop counts can overlap; do not sum them as distinct losses. Trace availability and diagnostic-history truncation are separate from lifecycle completeness. Missing telemetry must not alter workflow results. Missing business stdout is a separate CLI output error.
 
+### Loop invocation identity and pass boundaries
+
+Schema 2 node records include a `loop_path` list in the structured body. Each entry has an opaque
+Loop node ID and a zero-based pass index. Top-level nodes have an empty path. The event's local node
+ID, kind, and position resolve against the body graph named by that path. Nested paths keep scopes
+distinct even when bodies reuse node IDs. `mf.loop.pass.started` and `mf.loop.pass.finished` carry
+the full path. A pass finish records its visited body prefix and whether the pass completed, exited,
+or failed. A successful Loop node finish carries `loop_summary` with the number of passes and a stop
+reason of `condition`, `maximum`, or `exit`. No record carries loop variable values or node
+configuration.
+
+Schema 2's workflow final record reports the actual number of scheduled steps and the outer graph's visited prefix. The TUI compares the actual step count with observed pass prefixes, so a missing pass cannot look complete merely because the remaining records have contiguous sequence numbers. A known missing body outcome remains unknown after later passes complete; receiving that delayed record can close the gap. The old description and event versions remain supported for existing binaries.
+
 ## Iteration observation
 
-An Iteration remains one outer node in the version 1 workflow lifecycle stream and graph description. Its ordinary
+An Iteration remains one node in its containing workflow lifecycle stream and graph description. Its ordinary
 `mf.node` span and `mf.node.started` / `mf.node.finished` records bracket the complete array operation. Repeated body
 invocations use a separate `mf.iteration` instrumentation scope so they do not consume the bounded outer lifecycle
 sequence or appear as duplicate node outcomes in the terminal UI.
@@ -176,7 +208,7 @@ span. Each reached user-defined body node emits `mf.iteration.node.started` and
 `mf.node.id` and `mf.node.kind`. Terminal records include an outcome, duration when available, and failure context.
 They exclude item and result values. Plugin-provided failure messages can contain data supplied by that plugin.
 
-The item span is a child of the outer Iteration node span, and each body-node span is a child of its item span. The
+When an Iteration runs inside a Loop body, item detail spans inherit that pass's Iteration invocation span. The item span is a child of the Iteration node span, and each body-node span is a child of its item span. The
 item context is attached in its worker thread, so spans created by a body plugin during its node invocation inherit
 that body-node context. Parallel completion order can differ from input order; use the item index and trace parentage
 to group records. Under `continue_on_error` or `remove_failed`, failed items and body nodes retain failed detail
@@ -206,13 +238,12 @@ success response follows decoding, session checks, and state admission; it does 
 the TUI display are complete. Unrelated runs are ignored. Malformed matching lifecycle records and receiver errors
 remain visible as local drops or observation errors. Trace-only drops do not invalidate lifecycle completeness.
 
-`mf-tui::state::SessionState` keeps one state record per described node and sparse sequence membership bounded by the
-graph's maximum lifecycle event count. Identical retransmissions are ignored; conflicting sequence content or
+`mf-tui::state::SessionState` keeps one state record per outer node, sparse per-invocation Loop state, and sequence membership bounded by the graph's lifecycle event count. It retains details for up to 64 recent pass frames and aggregate counts when older pass details leave the view. Identical retransmissions are ignored; conflicting sequence content or
 incompatible terminal outcomes are surfaced without moving a terminal node back to Running. A finish event can arrive
 before its start, and later evidence may close an active sequence gap. Unknown node outcomes inside the final visited
 prefix remain Unknown; a valid final boundary can prove that later nodes were NotRun.
 
-Session admission limits descriptions to 10,000 nodes and individual lifecycle events to 128 KiB. State snapshots retain
+Session admission limits the total described nodes across all scopes to 10,000 and individual lifecycle events to 128 KiB. State snapshots retain
 at most 64 missing ranges and 64 diagnostic entries, each at most 1 KiB; omitted ranges and diagnostic bytes are counted.
 Each node retains at most 32 produced and 32 skipped port names of 128 bytes each, 32 short skip causes, and 4 KiB of
 failure text. Omitted display metadata is counted separately from lifecycle loss. The receiver rejects records that
@@ -231,7 +262,7 @@ proves lifecycle loss. There is no replay, persistence, reconnect, retry schedul
 
 `GraphView` draws data and control edges with distinct line symbols, clips to a caller-owned viewport, and renders node status and elapsed time from a state snapshot. Confirmed produced or skipped output ports change the associated edge style; possible lifecycle loss remains visibly uncertain.
 
-The initial routing is a midpoint orthogonal path between boxes. It does not search around intervening boxes, so crowded graphs can have line crossings or obscured segments. Layout is calculated once from the runner description; the CLI terminal loop owns panning, status banners, diagnostics, and terminal cleanup.
+The initial routing is a midpoint orthogonal path between boxes. It does not search around intervening boxes, so crowded graphs can have line crossings or obscured segments. Layout is calculated once per described scope; the CLI terminal loop owns scope navigation, panning, status banners, diagnostics, and terminal cleanup.
 
 ## Local TUI execution
 
@@ -249,11 +280,15 @@ description contract must be recompiled. A fresh run ID and loopback OTLP/HTTP r
 execution child receives these session settings; inherited `OTEL_EXPORTER_OTLP_*` settings, including remote
 endpoints and headers, are removed from the child environment. The parent environment is unchanged.
 
-The graph shows data and control edges, node status, elapsed time, and confirmed branch outcomes. The header keeps the
-observed workflow outcome separate from the child process result. Arrow keys pan; `f` resets the viewport; Tab, `j`, and
-`k` select a node for details. `q` has no action while the workflow runs. Ctrl-C requests interruption, and a second
-Ctrl-C or the two-second deadline forces termination. After the runner exits, the view stays open until `q`, Enter, Esc,
-or Ctrl-C. The terminal is restored before the captured stdout is copied to CLI stdout.
+The graph shows data and control edges, node status, elapsed time, and confirmed branch outcomes.
+The header keeps the observed workflow outcome separate from the child process result. Arrow keys
+pan; `f` resets the viewport; Tab, `j`, and `k` select a node for details. On a Loop node, `l` opens
+its body graph; `h` or Esc returns to the parent graph. `[` and `]` inspect older and newer retained
+pass frames. The detail pane shows active and completed pass counts, stop reason, and any hidden
+older detail. `q` has no action while the workflow runs. Ctrl-C requests interruption, and a second
+Ctrl-C or the two-second deadline forces termination. After the runner exits, the view stays open
+until `q`, Enter, Esc at the root, or Ctrl-C. The terminal is restored before the captured stdout is
+copied to CLI stdout.
 
 The CLI keeps at most 256 MiB of stdout in a private temporary spool and 1 MiB of recent stderr. It drains both pipes
 without waiting for a frame. If stdout capture fails or reaches its limit, the CLI stops the process group, displays the

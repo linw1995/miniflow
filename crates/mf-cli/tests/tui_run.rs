@@ -540,7 +540,7 @@ fn failed_stdout_delivery_uses_cli_error_or_preserves_child_failure() {
 
 fn description_json() -> String {
     let description = WorkflowDescription {
-        version: WorkflowDescriptionVersion::CURRENT,
+        version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
         nodes: vec![NodeDescription {
             id: "step".into(),
@@ -549,6 +549,8 @@ fn description_json() -> String {
         data_edges: vec![],
         control_edges: vec![],
         execution_order: vec!["step".into()],
+
+        loop_bodies: Vec::new(),
     };
     String::from_utf8(description.to_json().unwrap()).unwrap()
 }

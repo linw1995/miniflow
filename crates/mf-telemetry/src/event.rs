@@ -33,6 +33,36 @@ pub struct Failure {
 pub struct NodeIdentity {
     pub id: String,
     pub kind: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<LoopPathEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct LoopPathEntry {
+    pub loop_id: String,
+    pub index: Count,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopStopReason {
+    Condition,
+    Maximum,
+    Exit,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoopSummary {
+    pub pass_count: Count,
+    pub reason: LoopStopReason,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoopPassOutcome {
+    Completed,
+    Exit,
+    Failed,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -67,6 +97,8 @@ pub enum Event {
         skipped_ports: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         failure: Option<Failure>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        loop_summary: Option<LoopSummary>,
     },
     #[serde(rename = "mf.node.skipped")]
     NodeSkipped {
@@ -76,11 +108,25 @@ pub enum Event {
         causes: Vec<SkipCause>,
         skipped_ports: Vec<String>,
     },
+    #[serde(rename = "mf.loop.pass.started")]
+    LoopPassStarted {
+        path: Vec<LoopPathEntry>,
+        elapsed_ns: Count,
+    },
+    #[serde(rename = "mf.loop.pass.finished")]
+    LoopPassFinished {
+        path: Vec<LoopPathEntry>,
+        elapsed_ns: Count,
+        visited_node_count: Count,
+        outcome: LoopPassOutcome,
+    },
     #[serde(rename = "mf.workflow.finished")]
     WorkflowFinished {
         final_sequence: Count,
         elapsed_ns: Count,
         visited_node_count: Count,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        top_level_visited_count: Option<Count>,
         outcome: Outcome,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         failure_node_id: Option<String>,
@@ -96,6 +142,8 @@ impl Event {
             Self::NodeStarted { .. } => "mf.node.started",
             Self::NodeFinished { .. } => "mf.node.finished",
             Self::NodeSkipped { .. } => "mf.node.skipped",
+            Self::LoopPassStarted { .. } => "mf.loop.pass.started",
+            Self::LoopPassFinished { .. } => "mf.loop.pass.finished",
             Self::WorkflowFinished { .. } => "mf.workflow.finished",
         }
     }
@@ -115,6 +163,7 @@ impl Event {
                 !node.id.trim().is_empty() && !node.kind.trim().is_empty(),
                 "blank node identity",
             )?;
+            validate_path(&node.path)?;
         }
         match self {
             Self::WorkflowStarted {
@@ -134,6 +183,7 @@ impl Event {
                 skipped_ports,
                 duration_ns,
                 elapsed_ns,
+                loop_summary,
                 ..
             } => {
                 validate_outcome(*outcome, failure)?;
@@ -167,6 +217,12 @@ impl Event {
                     duration_ns.is_none_or(|d| d <= *elapsed_ns),
                     "duration exceeds elapsed time",
                 )?;
+                if let Some(summary) = loop_summary {
+                    require(
+                        *outcome == Outcome::Succeeded && summary.pass_count.get() > 0,
+                        "Loop summary requires a successful node and positive pass count",
+                    )?;
+                }
             }
             Self::NodeSkipped {
                 causes,
@@ -228,10 +284,38 @@ impl Event {
                     }
                 }
             }
+            Self::LoopPassStarted { path, .. } => {
+                validate_path(path)?;
+                require(!path.is_empty(), "Loop pass requires a path")?;
+            }
+            Self::LoopPassFinished {
+                path,
+                visited_node_count,
+                ..
+            } => {
+                validate_path(path)?;
+                require(!path.is_empty(), "Loop pass requires a path")?;
+                maximum_event_count(*visited_node_count)?;
+            }
             Self::NodeStarted { .. } => {}
         }
         Ok(())
     }
+}
+
+fn validate_path(path: &[LoopPathEntry]) -> Result<(), ContractError> {
+    require(
+        path.len() <= crate::MAX_LOOP_DEPTH,
+        "Loop path exceeds nesting limit",
+    )?;
+    for entry in path {
+        require(
+            !entry.loop_id.trim().is_empty()
+                && entry.index.get() < i64::from(crate::MAX_LOOP_ITERATIONS),
+            "invalid Loop path entry",
+        )?;
+    }
+    Ok(())
 }
 
 fn validate_outcome(outcome: Outcome, failure: &Option<Failure>) -> Result<(), ContractError> {
@@ -290,37 +374,96 @@ impl LifecycleEvent {
         graph: &crate::description::WorkflowDescription,
     ) -> Result<(), ContractError> {
         graph.validate()?;
+        self.validate_for_validated_description(graph)
+    }
+
+    /// Validates an event against a description already checked by `WorkflowDescription::validate`.
+    pub fn validate_for_validated_description(
+        &self,
+        graph: &crate::description::WorkflowDescription,
+    ) -> Result<(), ContractError> {
         self.validate()?;
         require(
             self.workflow_id == graph.workflow_id,
             "workflow identity mismatch",
         )?;
-        let count = graph.node_count()?;
+        let loop_schema =
+            graph.version == crate::description::WorkflowDescriptionVersion::V2026_09_29;
+        let count = if loop_schema {
+            graph.static_node_count()?
+        } else {
+            graph.node_count()?
+        };
+        let maximum = if loop_schema {
+            crate::maximum_loop_event_count()
+        } else {
+            maximum_event_count(count)?
+        };
         require(
-            self.sequence <= maximum_event_count(count)?,
+            self.sequence <= maximum,
             "sequence exceeds graph event bound",
         )?;
         if let Some((identity, position)) = self.event.node() {
+            require(
+                loop_schema || identity.path.is_empty(),
+                "old event has a Loop path",
+            )?;
+            let static_path: Vec<_> = identity
+                .path
+                .iter()
+                .map(|entry| entry.loop_id.clone())
+                .collect();
+            let (nodes, data_edges, control_edges, order) = if static_path.is_empty() {
+                (
+                    &graph.nodes,
+                    &graph.data_edges,
+                    &graph.control_edges,
+                    &graph.execution_order,
+                )
+            } else {
+                let body = graph
+                    .loop_body(&static_path)
+                    .ok_or_else(|| crate::invalid("unknown Loop body path"))?;
+                (
+                    &body.nodes,
+                    &body.data_edges,
+                    &body.control_edges,
+                    &body.execution_order,
+                )
+            };
             let position = usize::try_from(position.get())
                 .map_err(|_| crate::invalid("node position exceeds platform range"))?;
             require(
-                graph.execution_order.get(position) == Some(&identity.id),
+                order.get(position) == Some(&identity.id),
                 "node position disagrees with execution order",
             )?;
-            let node = graph
-                .nodes
+            let node = nodes
                 .iter()
                 .find(|node| node.id == identity.id)
                 .expect("validated graph contains ordered node");
             require(node.kind == identity.kind, "node kind mismatch")?;
+            if let Event::NodeFinished {
+                loop_summary: Some(summary),
+                ..
+            } = &self.event
+            {
+                require(
+                    identity.kind == "workflow.loop",
+                    "Loop summary belongs to a Loop node",
+                )?;
+                require(
+                    summary.pass_count.get() <= i64::from(crate::MAX_LOOP_ITERATIONS),
+                    "Loop pass count exceeds limit",
+                )?;
+            }
             if let Event::NodeSkipped { causes, .. } = &self.event {
                 for cause in causes {
                     require(
-                        graph.data_edges.iter().any(|e| {
+                        data_edges.iter().any(|e| {
                             e.to_node == identity.id
                                 && e.from_node == cause.source_node
                                 && e.from_output == cause.source_output
-                        }) || graph.control_edges.iter().any(|e| {
+                        }) || control_edges.iter().any(|e| {
                             e.to_node == identity.id
                                 && e.from_node == cause.source_node
                                 && e.from_output == cause.source_output
@@ -334,21 +477,61 @@ impl LifecycleEvent {
             Event::WorkflowStarted { node_count, .. } => {
                 require(*node_count == count, "node count mismatch")?
             }
+            Event::LoopPassStarted { path, .. } | Event::LoopPassFinished { path, .. } => {
+                require(loop_schema, "old event schema cannot contain Loop passes")?;
+                let static_path: Vec<_> = path.iter().map(|entry| entry.loop_id.clone()).collect();
+                let body = graph
+                    .loop_body(&static_path)
+                    .ok_or_else(|| crate::invalid("unknown Loop pass path"))?;
+                if let Event::LoopPassFinished {
+                    visited_node_count, ..
+                } = &self.event
+                {
+                    require(
+                        visited_node_count.get() <= body.nodes.len() as i64,
+                        "Loop pass visited prefix exceeds body",
+                    )?;
+                }
+            }
             Event::WorkflowFinished {
                 visited_node_count,
+                top_level_visited_count,
                 failure_node_id,
                 failure,
                 outcome,
                 ..
             } => {
-                require(*visited_node_count <= count, "visited prefix exceeds graph")?;
+                let top_visited = if loop_schema {
+                    require(
+                        visited_node_count.get() <= crate::MAX_LOOP_SCHEDULED_STEPS,
+                        "visited steps exceed Loop budget",
+                    )?;
+                    top_level_visited_count
+                        .ok_or_else(|| crate::invalid("missing top-level visited count"))?
+                } else {
+                    require(
+                        top_level_visited_count.is_none(),
+                        "old event has top-level visited count",
+                    )?;
+                    *visited_node_count
+                };
+                require(
+                    top_visited <= graph.node_count()?,
+                    "visited prefix exceeds graph",
+                )?;
+                if loop_schema {
+                    require(
+                        top_visited <= *visited_node_count,
+                        "top-level visited count exceeds total visited steps",
+                    )?;
+                }
                 if *outcome == Outcome::Succeeded
                     || failure
                         .as_ref()
                         .is_some_and(|f| f.phase == FailurePhase::OutputSelection)
                 {
                     require(
-                        *visited_node_count == count,
+                        top_visited == graph.node_count()?,
                         "output selection requires all steps visited",
                     )?;
                 }
@@ -362,7 +545,7 @@ impl LifecycleEvent {
                                 | FailurePhase::Publication
                         )
                     }) {
-                        let index = usize::try_from(visited_node_count.get() - 1)
+                        let index = usize::try_from(top_visited.get() - 1)
                             .map_err(|_| crate::invalid("invalid visited prefix"))?;
                         require(
                             graph.execution_order.get(index) == Some(id),
@@ -387,11 +570,15 @@ pub struct EventSequence {
 
 impl EventSequence {
     pub fn new(node_count: Count) -> Result<Self, ContractError> {
-        Ok(Self {
+        Ok(Self::with_maximum(maximum_event_count(node_count)?))
+    }
+
+    pub fn with_maximum(maximum: Count) -> Self {
+        Self {
             next: 1,
-            maximum: maximum_event_count(node_count)?.get(),
+            maximum: maximum.get(),
             closed: false,
-        })
+        }
     }
 
     pub fn reserve(&mut self) -> Result<Count, ContractError> {

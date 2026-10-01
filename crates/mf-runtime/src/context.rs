@@ -1,24 +1,71 @@
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use mf_telemetry::{
-    event::{FailurePhase, NodeIdentity, SkipCause},
-    observation::{
-        BodyNodeObservation, BodyObservation, IterationObservation, NodeObservation, RunObservation,
-    },
+    event::{FailurePhase, LoopPathEntry, LoopSummary, SkipCause},
+    observation::{BodyNodeObservation, BodyObservation, NodeObservation, RunObservation},
 };
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
+
+#[derive(Debug)]
+pub struct ExecutionScope {
+    node_id: String,
+    source_id: String,
+    variables: BTreeMap<String, Value>,
+    types: BTreeMap<String, crate::ValueType>,
+    index: usize,
+    exit_requested: bool,
+    visited_steps: usize,
+}
+
+impl ExecutionScope {
+    pub fn new(
+        node_id: impl Into<String>,
+        source_id: impl Into<String>,
+        index: usize,
+        variables: Outputs,
+        types: BTreeMap<String, crate::ValueType>,
+    ) -> Result<Self, NodeExecutionError> {
+        i64::try_from(index).map_err(|_| NodeExecutionError::ExecutionFailed {
+            message: "scope index exceeds the signed 64-bit range".into(),
+        })?;
+        Ok(Self {
+            node_id: node_id.into(),
+            source_id: source_id.into(),
+            variables,
+            types,
+            index,
+            exit_requested: false,
+            visited_steps: 0,
+        })
+    }
+}
+
+struct ScopeGuard<'a> {
+    context: &'a mut ExecutionContext,
+    parent_outputs: BTreeMap<String, Option<Value>>,
+    depth: usize,
+}
+
+impl Drop for ScopeGuard<'_> {
+    fn drop(&mut self) {
+        self.context.scopes.truncate(self.depth);
+        self.context.outputs = std::mem::take(&mut self.parent_outputs);
+        self.context.pending_loop_write = None;
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct NodeResult {
     pub outputs: Outputs,
     pub skipped: BTreeSet<String>,
+    pub loop_summary: Option<LoopSummary>,
 }
 
 impl From<Outputs> for NodeResult {
     fn from(outputs: Outputs) -> Self {
         Self {
             outputs,
-            skipped: BTreeSet::new(),
+            ..Self::default()
         }
     }
 }
@@ -30,48 +77,55 @@ pub enum ContextValue<'a> {
 }
 
 /// Completed output values for one run. Nodes receive an immutable reference.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ExecutionContext {
     // A present None is an explicit skip; an absent key is a missing output.
     outputs: BTreeMap<String, Option<Value>>,
     observation: Option<RunObservation>,
     body_observation: Option<BodyObservation>,
+    scopes: Vec<ExecutionScope>,
+    pending_loop_write: Option<(String, Value)>,
+    remaining_steps: usize,
+}
+
+impl Default for ExecutionContext {
+    fn default() -> Self {
+        Self {
+            outputs: BTreeMap::new(),
+            observation: None,
+            body_observation: None,
+            scopes: Vec::new(),
+            pending_loop_write: None,
+            remaining_steps: crate::MAX_SCHEDULED_STEPS,
+        }
+    }
 }
 
 impl ExecutionContext {
-    pub fn for_iteration(item: Value, index: usize) -> Result<Self, NodeExecutionError> {
-        Self::for_iteration_with_observation(item, index, None)
-    }
-
-    pub fn for_iteration_with_observation(
-        item: Value,
-        index: usize,
-        body_observation: Option<BodyObservation>,
-    ) -> Result<Self, NodeExecutionError> {
-        let index = i64::try_from(index).map_err(|_| NodeExecutionError::ExecutionFailed {
-            message: "iteration index exceeds the signed 64-bit range".into(),
-        })?;
-        Ok(Self {
-            outputs: BTreeMap::from([
-                (crate::iteration::ITERATION_SEED_ITEM.into(), Some(item)),
-                (
-                    crate::iteration::ITERATION_SEED_INDEX.into(),
-                    Some(Value::from(index)),
-                ),
-            ]),
-            observation: None,
+    pub fn for_body(body_observation: Option<BodyObservation>) -> Self {
+        Self {
             body_observation,
-        })
+            ..Self::default()
+        }
     }
 
-    pub fn iteration_observation(
-        &self,
-        id: &str,
-        body_nodes: &[NodeIdentity],
-    ) -> Option<IterationObservation> {
-        self.observation
-            .as_ref()?
-            .iteration_observation(id, body_nodes.to_vec())
+    pub fn observation(&self) -> Option<&RunObservation> {
+        self.observation.as_ref()
+    }
+
+    pub fn observation_mut(&mut self) -> Option<&mut RunObservation> {
+        self.observation.as_mut()
+    }
+
+    pub fn scope_path(&self) -> Vec<LoopPathEntry> {
+        self.scopes
+            .iter()
+            .map(|scope| LoopPathEntry {
+                loop_id: scope.node_id.clone(),
+                index: mf_telemetry::Count::try_from(scope.index as i64)
+                    .expect("scope index is bounded"),
+            })
+            .collect()
     }
 
     /// Runs a synchronous execution scope without changing its result or installing providers.
@@ -81,8 +135,7 @@ impl ExecutionContext {
     ) -> Result<T, E> {
         let mut state = Self {
             observation,
-            body_observation: None,
-            outputs: BTreeMap::new(),
+            ..Self::default()
         };
         let _context = state.observation.as_ref().map(RunObservation::enter);
         let result = execute(&mut state);
@@ -109,6 +162,35 @@ impl ExecutionContext {
             self.preparation_failed(id, error);
         }
         result
+    }
+
+    pub fn prepare_node_in_loop(
+        &mut self,
+        registry: &crate::NodeRegistry,
+        id: &str,
+        kind: &str,
+        config: &str,
+        scope: &[&str],
+    ) -> Result<FlowNode, WorkflowRunError> {
+        let result = crate::instantiate_node_with_metadata(registry, id, kind, config);
+        if let Err(error) = &result {
+            self.preparation_failed_in_loop(scope, id, error);
+        }
+        result
+    }
+
+    pub fn preparation_failed_in_loop(
+        &mut self,
+        scope: &[&str],
+        id: &str,
+        error: &dyn std::fmt::Display,
+    ) {
+        if let Some(run) = self.observation.as_mut() {
+            run.preparation_failed_unattributed(format!(
+                "Loop scope {} node `{id}`: {error}",
+                serde_json::to_string(scope).expect("scope IDs serialize")
+            ));
+        }
     }
 
     pub fn preparation_failed(&mut self, id: &str, error: &dyn std::fmt::Display) {
@@ -139,6 +221,100 @@ impl ExecutionContext {
                 message: format!("missing context output `{id}`"),
             }),
         }
+    }
+
+    pub(crate) fn scope_values(&self) -> Result<Outputs, NodeExecutionError> {
+        let frame = self
+            .scopes
+            .last()
+            .ok_or_else(|| NodeExecutionError::ExecutionFailed {
+                message: "scope source is outside an execution scope".into(),
+            })?;
+        let mut values = frame.variables.clone();
+        values.insert("index".into(), Value::from(frame.index as i64));
+        Ok(values)
+    }
+
+    pub(crate) fn request_scope_exit(&mut self) -> Result<(), NodeExecutionError> {
+        let frame = self
+            .scopes
+            .last_mut()
+            .ok_or_else(|| NodeExecutionError::ExecutionFailed {
+                message: "scope exit is outside an execution scope".into(),
+            })?;
+        frame.exit_requested = true;
+        Ok(())
+    }
+
+    pub fn scope_exit_requested(&self) -> bool {
+        self.scopes.last().is_some_and(|frame| frame.exit_requested)
+    }
+
+    pub fn scope_visited_steps(&self) -> usize {
+        self.scopes.last().map_or(0, |scope| scope.visited_steps)
+    }
+
+    pub(crate) fn stage_scope_write(
+        &mut self,
+        variable: &str,
+        value: Value,
+    ) -> Result<(), NodeExecutionError> {
+        let frame = self
+            .scopes
+            .last()
+            .ok_or_else(|| NodeExecutionError::ExecutionFailed {
+                message: "Loop assignment is outside a Loop frame".into(),
+            })?;
+        let value_type =
+            frame
+                .types
+                .get(variable)
+                .ok_or_else(|| NodeExecutionError::ExecutionFailed {
+                    message: format!("unknown Loop variable `{variable}`"),
+                })?;
+        value_type
+            .validate_value(&value)
+            .map_err(|error| NodeExecutionError::ExecutionFailed {
+                message: format!("Loop variable `{variable}`: {error}"),
+            })?;
+        self.pending_loop_write = Some((variable.to_owned(), value));
+        Ok(())
+    }
+
+    pub fn run_scope<T>(
+        &mut self,
+        scope: ExecutionScope,
+        run: impl FnOnce(&mut Self) -> Result<T, WorkflowRunError>,
+    ) -> Result<(T, Outputs, bool), WorkflowRunError> {
+        let depth = self.scopes.len();
+        let parent_outputs = std::mem::take(&mut self.outputs);
+        self.scopes.push(scope);
+        let guard = ScopeGuard {
+            context: self,
+            parent_outputs,
+            depth,
+        };
+        let state = &mut *guard.context;
+        let result = run(state);
+        let frame = state.scopes.pop().expect("execution scope was just pushed");
+        result.map(|output| (output, frame.variables, frame.exit_requested))
+    }
+
+    fn reserve_step(&mut self, id: &str) -> Result<(), WorkflowRunError> {
+        if self.remaining_steps == 0 {
+            return Err(state_error(
+                id,
+                format!(
+                    "scheduled-step budget of {} exhausted",
+                    crate::MAX_SCHEDULED_STEPS
+                ),
+            ));
+        }
+        self.remaining_steps -= 1;
+        if let Some(frame) = self.scopes.last_mut() {
+            frame.visited_steps += 1;
+        }
+        Ok(())
     }
 
     fn publish(
@@ -202,6 +378,16 @@ impl ExecutionContext {
                     .map(|port| (output_id(id, &port.name), None)),
             ),
         }
+        if let Some((variable, value)) = self.pending_loop_write.take() {
+            let frame = self
+                .scopes
+                .last_mut()
+                .expect("validated Loop write has a frame");
+            frame.variables.insert(variable.clone(), value.clone());
+            // Later body steps read the current state through the synthetic source.
+            self.outputs
+                .insert(output_id(&frame.source_id, &variable), Some(value));
+        }
         Ok(())
     }
 }
@@ -249,13 +435,19 @@ impl StepObservation {
         ctx: &mut ExecutionContext,
         produced_ports: Vec<String>,
         skipped_ports: Vec<String>,
+        loop_summary: Option<LoopSummary>,
     ) {
         match self {
-            Self::Root(step) => ctx.observation.as_mut().unwrap().node_succeeded(
-                step,
-                produced_ports,
-                skipped_ports,
-            ),
+            Self::Root(step) => ctx
+                .observation
+                .as_mut()
+                .unwrap()
+                .node_succeeded_with_loop_summary(
+                    step,
+                    produced_ports,
+                    skipped_ports,
+                    loop_summary,
+                ),
             Self::Body(step) => step.succeeded(produced_ports, skipped_ports),
         }
     }
@@ -285,8 +477,15 @@ pub fn execute_node_in_context(
     ctx: &mut ExecutionContext,
 ) -> Result<(), WorkflowRunError> {
     let id = node.definition_id.as_str();
+    ctx.reserve_step(id)?;
+    ctx.pending_loop_write = None;
+    let path = ctx.scope_path();
     let mut step = if let Some(run) = ctx.observation.as_mut() {
-        run.begin_node(id).map(StepObservation::Root)
+        if path.is_empty() {
+            run.begin_node(id).map(StepObservation::Root)
+        } else {
+            run.begin_invocation(path, id).map(StepObservation::Root)
+        }
     } else {
         ctx.body_observation
             .as_ref()
@@ -371,7 +570,7 @@ pub fn execute_node_in_context(
         }
         let result = node
             .node
-            .execute_with_context(inputs, ctx)
+            .execute_with_context_mut(inputs, ctx)
             .map_err(|source| WorkflowRunError::NodeExecution {
                 definition_id: node.definition_id.clone(),
                 source,
@@ -397,12 +596,15 @@ pub fn execute_node_in_context(
             skipped_ports.sort();
         }
     }
+    let loop_summary = result
+        .as_ref()
+        .and_then(|result| result.loop_summary.clone());
     let result = ctx.publish(node, result);
     if let Some(step) = step.take() {
         match &result {
             Err(error) => step.failed(ctx, FailurePhase::Publication, error.to_string()),
             Ok(()) if skipped => step.skipped(ctx, causes.into_iter().collect(), skipped_ports),
-            Ok(()) => step.succeeded(ctx, produced_ports, skipped_ports),
+            Ok(()) => step.succeeded(ctx, produced_ports, skipped_ports, loop_summary),
         }
     }
     result
@@ -461,6 +663,54 @@ mod tests {
 
     fn port(name: &str, value_type: ValueType, required: bool) -> PortSpec {
         PortSpec::owned(name, value_type, required)
+    }
+
+    #[test]
+    fn scoped_execution_restores_parent_state_after_failure_and_unwind() {
+        for unwinds in [false, true] {
+            let mut state = ExecutionContext::default();
+            state.outputs.insert("parent.value".into(), Some(json!(9)));
+            let parent_outputs = state.outputs.clone();
+            let types = BTreeMap::from([("count".into(), ValueType::Int64)]);
+            let source = crate::prepared_scope_source("input", &types);
+            let scope = ExecutionScope::new(
+                "scope",
+                "input",
+                0,
+                Outputs::from([("count".into(), json!(7))]),
+                types,
+            )
+            .unwrap();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                state.run_scope(scope, |state| {
+                    assert!(state.output("parent.value").is_err());
+                    execute_node_in_context(&source, &[], state)?;
+                    let nested = ExecutionScope::new(
+                        "nested",
+                        "nested_input",
+                        0,
+                        Outputs::new(),
+                        BTreeMap::new(),
+                    )
+                    .unwrap();
+                    state.run_scope(nested, |_| {
+                        if unwinds {
+                            panic!("body panicked");
+                        }
+                        Err::<(), _>(state_error("body", "body failed"))
+                    })?;
+                    Ok(())
+                })
+            }));
+            if unwinds {
+                assert!(result.is_err());
+            } else {
+                assert!(result.unwrap().is_err());
+            }
+            assert_eq!(state.outputs, parent_outputs);
+            assert!(state.scopes.is_empty());
+            assert_eq!(state.remaining_steps, crate::MAX_SCHEDULED_STEPS - 1);
+        }
     }
 
     #[test]

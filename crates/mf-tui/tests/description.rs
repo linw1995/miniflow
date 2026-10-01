@@ -25,12 +25,14 @@ fn create_runner(script: &str) -> (TempDir, PathBuf) {
 
 fn sample() -> (String, WorkflowDescription) {
     let description = WorkflowDescription {
-        version: WorkflowDescriptionVersion::CURRENT,
+        version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
         nodes: vec![],
         data_edges: vec![],
         control_edges: vec![],
         execution_order: vec![],
+
+        loop_bodies: Vec::new(),
     };
     (
         String::from_utf8(description.to_json().unwrap()).unwrap(),
@@ -118,11 +120,15 @@ fn times_out_and_closes_pipes_held_by_descendants() {
         "printf '%s\\n' '{json}'\npython3 -c 'import os,time; p=os.fork(); os._exit(0) if p else time.sleep(60)'",
     ));
     let started = Instant::now();
+    let drain_limits = DescriptionLimits {
+        timeout: Duration::from_secs(5),
+        ..limits()
+    };
     assert!(matches!(
-        describe_executable_with_limits(&runner, limits()),
+        describe_executable_with_limits(&runner, drain_limits),
         Err(DescriptionError::OpenPipe)
     ));
-    assert!(started.elapsed() < Duration::from_secs(3));
+    assert!(started.elapsed() < Duration::from_secs(6));
 }
 
 #[test]

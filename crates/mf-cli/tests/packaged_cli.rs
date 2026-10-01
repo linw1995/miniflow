@@ -155,6 +155,44 @@ fn packaged_cli_acceptance() {
         expected
     );
 
+    let mut loop_flow: Value =
+        serde_json::from_str(include_str!("../../../examples/loop.json")).unwrap();
+    loop_flow["dependencies"] = json!({
+        "core": {"package":"mfn-core","version":format!("={}", env!("CARGO_PKG_VERSION"))},
+        "code": {"package":"mfn-code","version":format!("={}", env!("CARGO_PKG_VERSION"))}
+    });
+    let loop_definition = project.join("loop.json");
+    let loop_output = project.join("loop");
+    let loop_build = fixture.root().join("loop-build");
+    fs::write(&loop_definition, loop_flow.to_string()).unwrap();
+    fixture.compile(&loop_definition, &loop_output, &loop_build, false, false);
+    let described = checked(Command::new(&loop_output).arg("--describe"));
+    let description: Value = serde_json::from_slice(&described.stdout).unwrap();
+    assert_eq!(description["version"], "2026-09-29");
+    assert_eq!(description["loop_bodies"].as_array().unwrap().len(), 1);
+    let loop_result = checked(Command::new(&loop_output).env_clear().env("PATH", ""));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&loop_result.stdout).unwrap(),
+        json!({"count": 3})
+    );
+    let loop_runtime = fixture.root().join("loop-runtime");
+    fs::create_dir(&loop_runtime).unwrap();
+    let standalone_loop = loop_runtime.join("flow");
+    fs::rename(&loop_output, &standalone_loop).unwrap();
+    fs::remove_file(&loop_definition).unwrap();
+    fs::remove_file(loop_definition.with_extension("lock")).unwrap();
+    fs::remove_dir_all(&loop_build).unwrap();
+    let portable_loop = checked(
+        Command::new(&standalone_loop)
+            .current_dir(&loop_runtime)
+            .env_clear()
+            .env("PATH", ""),
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&portable_loop.stdout).unwrap(),
+        json!({"count": 3})
+    );
+
     let local = project.join("local-nodes");
     let repository = fixture.root().join("git-nodes");
     copy_directory(&fixture.fixture_source, &local);

@@ -5,14 +5,14 @@ use crate::{
 };
 use crate::{DefinitionId, WorkflowDefinition};
 use mf_runtime::{
-    ExecutionContext, ITERATION_INPUT_KIND, ITERATION_KIND, IterationNode, NodeExecutionError,
-    iteration_input_flow_node,
+    ITERATION_INPUT_KIND, ITERATION_KIND, PreparedSubgraph, iteration_input_flow_node,
 };
 use mf_runtime::{OutputDerivation, TypeCompatibility, TypeMismatch};
 use mf_telemetry::{
     ContractError,
     description::{
-        ControlEdge, DataEdge, NodeDescription, WorkflowDescription, WorkflowDescriptionVersion,
+        ControlEdge, DataEdge, LoopBodyDescription, NodeDescription, WorkflowDescription,
+        WorkflowDescriptionVersion,
     },
     event::NodeIdentity,
     identity::WorkflowId,
@@ -164,6 +164,8 @@ pub enum WorkflowCompileError {
         to_node: DefinitionId,
         message: String,
     },
+    #[snafu(display("invalid Loop at {path}: {message}"))]
+    InvalidLoop { path: String, message: String },
     #[snafu(display("invalid iteration node `{definition_id}`: {message}"))]
     InvalidIteration {
         definition_id: DefinitionId,
@@ -332,16 +334,21 @@ fn prepare_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
-    prepare_definition_in_scope(definition, registry, false)
+    crate::loops::validate_structure(definition)?;
+    prepare_graph(definition, registry, None, false)
 }
 
-fn prepare_definition_in_scope(
+fn prepare_graph(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
+    enclosing: Option<&BTreeMap<String, ValueType>>,
     allow_iteration_input: bool,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
-    let order = structural_order(definition)?;
-    let mut nodes = resolve_nodes_in_scope(definition, registry, allow_iteration_input)?;
+    if allow_iteration_input {
+        crate::loops::validate_structure(definition)?;
+    }
+    let order = structural_order_graph(definition)?;
+    let mut nodes = resolve_nodes_in_scope(definition, registry, enclosing, allow_iteration_input)?;
     validate_base_metadata(definition, &nodes, &order)?;
 
     let indices: BTreeMap<_, _> = nodes
@@ -624,6 +631,13 @@ fn dependency_pairs(definition: &WorkflowDefinition) -> BTreeSet<(DefinitionId, 
 pub fn structural_order(
     definition: &WorkflowDefinition,
 ) -> Result<Vec<DefinitionId>, WorkflowCompileError> {
+    crate::loops::validate_structure(definition)?;
+    structural_order_graph(definition)
+}
+
+pub fn structural_order_graph(
+    definition: &WorkflowDefinition,
+) -> Result<Vec<DefinitionId>, WorkflowCompileError> {
     validate_structure(definition)?;
     let mut indegree = BTreeMap::new();
     let mut outgoing: BTreeMap<DefinitionId, Vec<DefinitionId>> = BTreeMap::new();
@@ -737,28 +751,11 @@ pub fn plan_definition(
             }
             .fail();
         }
-        if node.kind == ITERATION_KIND {
-            let config =
-                parse_config(node).map_err(|message| WorkflowCompileError::InvalidIteration {
-                    definition_id: node.id.clone(),
-                    message,
-                })?;
-            let body = body_definition(definition, &config).map_err(|message| {
-                WorkflowCompileError::InvalidIteration {
-                    definition_id: node.id.clone(),
-                    message,
-                }
-            })?;
-            structural_order(&body).map_err(|error| WorkflowCompileError::InvalidIteration {
-                definition_id: node.id.clone(),
-                message: error.to_string(),
-            })?;
-        }
     }
     normalize_plan(definition, structural_order(definition)?)
 }
 
-fn normalize_plan(
+pub fn normalize_plan(
     definition: &WorkflowDefinition,
     execution_order: Vec<DefinitionId>,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
@@ -767,21 +764,21 @@ fn normalize_plan(
         .iter()
         .map(|node| (node.id.clone(), node))
         .collect();
-    let nodes = execution_order
+    let mut nodes: Vec<crate::NodeDefinition> = execution_order
         .iter()
-        .map(|id| {
-            let mut node = (*nodes_by_id[id]).clone();
-            if node.kind == ITERATION_KIND {
-                node.config = normalize_config(definition, &node).map_err(|message| {
-                    WorkflowCompileError::InvalidIteration {
-                        definition_id: node.id.clone(),
-                        message,
-                    }
-                })?;
-            }
-            Ok(node)
-        })
-        .collect::<Result<Vec<_>, WorkflowCompileError>>()?;
+        .map(|id| (*nodes_by_id[id]).clone())
+        .collect();
+    for node in &mut nodes {
+        normalize_loop_node(node, &definition.dependencies)?;
+        if node.kind == ITERATION_KIND {
+            node.config = normalize_config(definition, node).map_err(|message| {
+                WorkflowCompileError::InvalidIteration {
+                    definition_id: node.id.clone(),
+                    message,
+                }
+            })?;
+        }
+    }
     let mut edges = definition.edges.clone();
     edges.sort_by(|left, right| {
         (
@@ -815,6 +812,24 @@ fn normalize_plan(
         },
         execution_order,
     })
+}
+
+fn normalize_loop_node(
+    node: &mut crate::NodeDefinition,
+    dependencies: &BTreeMap<String, crate::NodeDependency>,
+) -> Result<(), WorkflowCompileError> {
+    let Some(loop_definition) = &mut node.loop_definition else {
+        return Ok(());
+    };
+    let body = crate::loops::body_definition(&loop_definition.body, dependencies);
+    let mut normalized = normalize_plan(&body, structural_order_graph(&body)?)?.definition;
+    normalized
+        .nodes
+        .retain(|node| node.id.as_str() != crate::LOOP_SOURCE_ID);
+    loop_definition.body.nodes = normalized.nodes;
+    loop_definition.body.edges = normalized.edges;
+    loop_definition.body.control_edges = normalized.control_edges;
+    Ok(())
 }
 
 pub fn instantiate_compiled(
@@ -885,8 +900,17 @@ pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription,
         .iter()
         .map(ToString::to_string)
         .collect();
+    let mut loop_bodies = Vec::new();
+    describe_loop_bodies(&plan.definition, &mut Vec::new(), &mut loop_bodies)?;
     let description = WorkflowDescription {
-        version: WorkflowDescriptionVersion::CURRENT,
+        version: match plan.definition.version {
+            mf_runtime::WorkflowDefinitionVersion::V2026_09_26 => {
+                WorkflowDescriptionVersion::V2026_09_27
+            }
+            mf_runtime::WorkflowDefinitionVersion::V2026_09_29 => {
+                WorkflowDescriptionVersion::V2026_09_29
+            }
+        },
         workflow_id: WorkflowId::from_definition(&plan.definition, &order)
             .context(ContractSnafu)?,
         nodes,
@@ -912,9 +936,62 @@ pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription,
             })
             .collect(),
         execution_order: order,
+        loop_bodies,
     };
     description.validate().context(ContractSnafu)?;
     Ok(description)
+}
+
+fn describe_loop_bodies(
+    definition: &WorkflowDefinition,
+    path: &mut Vec<String>,
+    bodies: &mut Vec<LoopBodyDescription>,
+) -> Result<(), DescriptionError> {
+    for node in &definition.nodes {
+        let Some(loop_definition) = &node.loop_definition else {
+            continue;
+        };
+        path.push(node.id.to_string());
+        let body = crate::loops::body_definition(&loop_definition.body, &definition.dependencies);
+        let order = structural_order_graph(&body).map_err(|_| DescriptionError::InvalidPlan)?;
+        let nodes_by_id: BTreeMap<_, _> = body.nodes.iter().map(|node| (&node.id, node)).collect();
+        bodies.push(LoopBodyDescription {
+            path: path.clone(),
+            nodes: order
+                .iter()
+                .map(|id| {
+                    let node = nodes_by_id[id];
+                    NodeDescription {
+                        id: id.to_string(),
+                        kind: node.kind.clone(),
+                    }
+                })
+                .collect(),
+            data_edges: body
+                .edges
+                .iter()
+                .map(|edge| DataEdge {
+                    from_node: edge.from_node.to_string(),
+                    from_output: edge.from_output.clone(),
+                    to_node: edge.to_node.to_string(),
+                    to_input: edge.to_input.clone(),
+                })
+                .collect(),
+            control_edges: body
+                .control_edges
+                .iter()
+                .map(|edge| ControlEdge {
+                    from_node: edge.from_node.to_string(),
+                    from_output: edge.from_output.clone(),
+                    to_node: edge.to_node.to_string(),
+                })
+                .collect(),
+            execution_order: order.iter().map(ToString::to_string).collect(),
+        });
+        describe_loop_bodies(&body, path, bodies)?;
+        path.pop();
+    }
+    Ok(())
 }
 
 /// Observes construction and execution together; validation-only callers keep using instantiate_compiled.
@@ -943,18 +1020,143 @@ pub fn resolve_nodes(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
-    resolve_nodes_in_scope(definition, registry, false)
+    crate::loops::validate_structure(definition)?;
+    resolve_nodes_in_scope(definition, registry, None, false)
+}
+
+fn instantiate_registered(
+    node: &crate::NodeDefinition,
+    registry: &NodeRegistry,
+) -> Result<(&'static crate::NodeRegistration, Box<dyn crate::Node>), WorkflowCompileError> {
+    let Some(registration) = registry.get(&node.kind) else {
+        return UnknownNodeKindSnafu {
+            definition_id: node.id.clone(),
+            kind: node.kind.clone(),
+        }
+        .fail();
+    };
+    let instance =
+        registration
+            .instantiate(node.config.clone())
+            .context(NodeConstructionSnafu {
+                definition_id: node.id.clone(),
+                kind: node.kind.clone(),
+            })?;
+    Ok((registration, instance))
+}
+
+fn bind_subgraph_node(
+    node: &crate::NodeDefinition,
+    registry: &NodeRegistry,
+    body: &WorkflowDefinition,
+    enclosing: Option<&BTreeMap<String, ValueType>>,
+    allow_iteration_input: bool,
+    options: Value,
+) -> Result<FlowNode, WorkflowCompileError> {
+    let (registration, declaration) = instantiate_registered(node, registry)?;
+    let (nodes, order) =
+        prepare_graph(body, registry, enclosing, allow_iteration_input).map_err(|error| {
+            if node.kind == crate::LOOP_KIND {
+                WorkflowCompileError::InvalidLoop {
+                    path: format!("{:?}", node.id),
+                    message: error.to_string(),
+                }
+            } else {
+                WorkflowCompileError::InvalidIteration {
+                    definition_id: node.id.clone(),
+                    message: error.to_string(),
+                }
+            }
+        })?;
+    let outputs = body
+        .outputs
+        .iter()
+        .map(|output| {
+            let port = nodes
+                .iter()
+                .find(|node| node.definition_id == output.node)
+                .and_then(|node| {
+                    node.ports
+                        .outputs
+                        .iter()
+                        .find(|port| port.name == output.port)
+                })
+                .expect("validated body output");
+            crate::PortSpec::owned(&output.name, port.value_type.clone(), !output.optional)
+        })
+        .collect();
+    let identities = body
+        .nodes
+        .iter()
+        .filter(|node| node.kind != ITERATION_INPUT_KIND && node.kind != crate::LOOP_SOURCE_ID)
+        .map(|node| NodeIdentity {
+            id: node.id.to_string(),
+            kind: node.kind.clone(),
+            path: Vec::new(),
+        })
+        .collect();
+    let flow = Flow::new(nodes, body.edges.clone(), order, body.outputs.clone())
+        .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
+        .context(FlowConstructionSnafu)?;
+    let body = PreparedSubgraph::new(identities, outputs, move |state| {
+        flow.execute_in_context(state)
+    });
+    let instance = declaration
+        .with_subgraph(node.id.as_str(), options, body)
+        .context(NodeConstructionSnafu {
+            definition_id: node.id.clone(),
+            kind: node.kind.clone(),
+        })?;
+    let ports = registration.effective_ports(instance.as_ref());
+    Ok(FlowNode::new(node.id.clone(), instance, ports))
 }
 
 fn resolve_nodes_in_scope(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
+    enclosing: Option<&BTreeMap<String, ValueType>>,
     allow_iteration_input: bool,
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
     definition
         .nodes
         .iter()
         .map(|node| {
+            match node.kind.as_str() {
+                crate::LOOP_KIND => {
+                    let loop_definition = node.loop_definition.as_deref().expect("validated Loop");
+                    let types = mf_runtime::loop_variable_types(&loop_definition.variables)
+                        .expect("validated Loop variables");
+                    let body = crate::loops::body_definition(
+                        &loop_definition.body,
+                        &definition.dependencies,
+                    );
+                    let options = serde_json::json!({
+                        "max_iterations": loop_definition.max_iterations,
+                        "variables": loop_definition.variables,
+                        "until": loop_definition.until,
+                    });
+                    return bind_subgraph_node(node, registry, &body, Some(&types), false, options);
+                }
+                crate::LOOP_ASSIGN_KIND => {
+                    let target = crate::loops::assignment_target(&node.config)
+                        .expect("validated assignment");
+                    let value_type = enclosing.expect("assignment has a Loop")[&target].clone();
+                    return Ok(mf_runtime::prepared_loop_assign(
+                        node.id.as_str(),
+                        &target,
+                        value_type,
+                    ));
+                }
+                crate::EXIT_LOOP_KIND => {
+                    return Ok(mf_runtime::prepared_loop_exit(node.id.as_str()));
+                }
+                crate::LOOP_SOURCE_ID => {
+                    return Ok(mf_runtime::prepared_loop_source_types(
+                        enclosing.expect("Loop source has variables"),
+                    ));
+                }
+                _ => {}
+            }
             if node.kind == ITERATION_INPUT_KIND {
                 if allow_iteration_input && node.id.as_str() == mf_runtime::ITERATION_INPUT_ID {
                     return Ok(iteration_input_flow_node());
@@ -973,118 +1175,21 @@ fn resolve_nodes_in_scope(
                     }
                     .fail();
                 }
-                let Some(registration) = registry.get(ITERATION_KIND) else {
-                    return UnknownNodeKindSnafu {
-                        definition_id: node.id.clone(),
-                        kind: node.kind.clone(),
-                    }
-                    .fail();
-                };
-                // The selected node package owns the kind; orchestration uses the compiled body.
-                registration
-                    .instantiate(node.config.clone())
-                    .context(NodeConstructionSnafu {
-                        definition_id: node.id.clone(),
-                        kind: node.kind.clone(),
-                    })?;
                 let config = parse_config(node).map_err(|message| {
                     WorkflowCompileError::InvalidIteration {
                         definition_id: node.id.clone(),
                         message,
                     }
                 })?;
-                let body_definition = body_definition(definition, &config).map_err(|message| {
+                let body = body_definition(definition, &config).map_err(|message| {
                     WorkflowCompileError::InvalidIteration {
                         definition_id: node.id.clone(),
                         message,
                     }
                 })?;
-                let (body_nodes, order) =
-                    prepare_definition_in_scope(&body_definition, registry, true).map_err(
-                        |error| WorkflowCompileError::InvalidIteration {
-                            definition_id: node.id.clone(),
-                            message: error.to_string(),
-                        },
-                    )?;
-                let result_type = body_nodes
-                    .iter()
-                    .find(|candidate| candidate.definition_id == config.body.result.node)
-                    .and_then(|candidate| {
-                        candidate
-                            .ports
-                            .outputs
-                            .iter()
-                            .find(|port| port.name == config.body.result.port)
-                    })
-                    .map(|port| port.value_type.clone())
-                    .ok_or_else(|| WorkflowCompileError::InvalidIteration {
-                        definition_id: node.id.clone(),
-                        message: format!(
-                            "body result `{}`.`{}` is unavailable",
-                            config.body.result.node, config.body.result.port
-                        ),
-                    })?;
-                let flow = Flow::new(
-                    body_nodes,
-                    body_definition.edges,
-                    order,
-                    body_definition.outputs,
-                )
-                .and_then(|flow| flow.with_control_edges(body_definition.control_edges))
-                .map_err(|error| WorkflowCompileError::InvalidIteration {
-                    definition_id: node.id.clone(),
-                    message: error.to_string(),
-                })?;
-                let instance = IterationNode::new(
-                    node.id.as_str(),
-                    config
-                        .body
-                        .nodes
-                        .iter()
-                        .map(|body_node| NodeIdentity {
-                            id: body_node.id.to_string(),
-                            kind: body_node.kind.clone(),
-                        })
-                        .collect(),
-                    config.mode,
-                    config.on_error,
-                    result_type,
-                    move |item, index, observation| {
-                        let mut state = ExecutionContext::for_iteration_with_observation(
-                            item,
-                            index,
-                            observation,
-                        )?;
-                        let mut outputs =
-                            flow.execute_in_context(&mut state).map_err(|source| {
-                                NodeExecutionError::PluginFailed {
-                                    source: Box::new(source),
-                                }
-                            })?;
-                        outputs.remove("result").ok_or_else(|| {
-                            NodeExecutionError::ExecutionFailed {
-                                message: "iteration body did not produce `result`".into(),
-                            }
-                        })
-                    },
-                );
-                let ports = instance.ports();
-                return Ok(FlowNode::new(node.id.clone(), Box::new(instance), ports));
+                return bind_subgraph_node(node, registry, &body, None, true, Value::Null);
             }
-            let Some(registration) = registry.get(&node.kind) else {
-                return UnknownNodeKindSnafu {
-                    definition_id: node.id.clone(),
-                    kind: node.kind.clone(),
-                }
-                .fail();
-            };
-            let instance =
-                registration
-                    .instantiate(node.config.clone())
-                    .context(NodeConstructionSnafu {
-                        definition_id: node.id.clone(),
-                        kind: node.kind.clone(),
-                    })?;
+            let (registration, instance) = instantiate_registered(node, registry)?;
             let ports = registration.effective_ports(instance.as_ref());
             Ok(FlowNode::new(node.id.clone(), instance, ports))
         })

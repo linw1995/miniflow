@@ -4,6 +4,7 @@ mod compiler;
 mod dependency_project;
 mod inputs;
 mod iteration;
+mod loops;
 mod pipeline;
 mod plan;
 mod state;
@@ -19,16 +20,18 @@ pub use dependency_project::{DependencyProjectError, SupportPackages, write_depe
 pub use inputs::{BuildInputs, InputError};
 pub use mf_runtime::{
     ContextReference, ContextValue, ControlEdgeDefinition, DefinitionId, DefinitionParseError,
-    EdgeDefinition, ExecutionContext, ExecutionDependency, Flow, FlowBuildError, FlowConnection,
-    FlowNode, FlowOutput, FlowOutputs, Inputs, Node, NodeBuildError, NodeDefinition,
-    NodeDependency, NodeExecutionError, NodeFactory, NodeId, NodePorts, NodeRegistration,
-    NodeRegistry, NodeRegistryError, NodeResult, OutputDerivation, OutputDerivationError, Outputs,
-    PortSpec, RunObservation, TypeCompatibility, TypeDepthError, TypeMismatch, ValueType,
-    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition, WorkflowRunError,
-    deserialize_config, execute_node_in_context, instantiate_node_with_metadata, output_id,
-    select_context_output,
+    EXIT_LOOP_KIND, EdgeDefinition, ExecutionContext, ExecutionDependency, Flow, FlowBuildError,
+    FlowConnection, FlowNode, FlowOutput, FlowOutputs, Inputs, LOOP_ASSIGN_KIND, LOOP_KIND,
+    LOOP_SOURCE_ID, LoopBodyDefinition, LoopComparisonOperator, LoopConditionDefinition,
+    LoopDefinition, LoopVariableDefinition, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS,
+    MAX_SCHEDULED_STEPS, Node, NodeBuildError, NodeDefinition, NodeDependency, NodeExecutionError,
+    NodeFactory, NodeId, NodePorts, NodeRegistration, NodeRegistry, NodeRegistryError, NodeResult,
+    OutputDerivation, OutputDerivationError, Outputs, PortSpec, RunObservation, TypeCompatibility,
+    TypeDepthError, TypeMismatch, ValueType, WorkflowDefinition, WorkflowDefinitionVersion,
+    WorkflowOutputDefinition, WorkflowRunError, deserialize_config, execute_node_in_context,
+    instantiate_node_with_metadata, output_id, select_context_output,
 };
-pub use mf_runtime::{IterationErrorPolicy, IterationMode, IterationNode};
+pub use mf_runtime::{IterationErrorPolicy, IterationMode};
 pub use pipeline::{
     CompileRequest, PipelineError, cargo_command, compile_project, resolve_project,
 };

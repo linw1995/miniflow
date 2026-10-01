@@ -10,6 +10,8 @@ explicitly; `mfn-core` does not register this kind. See the [CEL examples](workf
 
 A plugin crate depends on `mf-runtime`, implements `Node::execute`, provides a factory, and submits a `NodeRegistration` through `inventory::submit!`. The registration declares a unique `kind` and its input and output `PortSpec` values. See [constant](../crates/builtin-nodes/core/src/constant.rs) and [identity](../crates/builtin-nodes/core/src/identity.rs) for working registrations.
 
+`mfn-core` registers the `workflow.loop` declaration. The compiler replaces it with an engine-prepared subgraph executor, so a Flow using Loop must declare `mfn-core` in its top-level `dependencies`. `workflow.loop_assign`, `workflow.exit_loop`, and the synthetic `$loop` source remain reserved engine kinds. Ordinary nodes inside a Loop body also require their packages in `dependencies`.
+
 ## Registration contract
 
 A plugin can register several unique kinds from one crate. Dependency aliases do not change these names. Linking must explicitly retain each plugin crate, for example with `extern crate plugin_alias as _;`; a `kind()` function is not required by the runtime API. The [external multi-node fixture](../crates/mf-compiler/tests/fixtures/multi-nodes/src/lib.rs) demonstrates this contract.
@@ -73,6 +75,8 @@ Override `Node::execute_with_context` to read declared outputs through `ctx.outp
 `Skipped`; unavailable outputs, including reads before production and unexpected omissions, are errors. Reference
 declarations support compile-time dependency checks; the context does not enforce a runtime read whitelist. The runtime
 publishes results only after successful execution and starts with fresh context for each run.
+
+The executor calls `Node::execute_with_context_mut`, whose default implementation delegates to the read-only `execute_with_context` method. Loop assignment and exit use engine-owned operations behind this adapter; plugins cannot write Loop variables or publish outputs directly. A Loop body has its own output scope for every pass. A context reference inside that body resolves only within its scope, including the synthetic `$loop` outputs, and still requires an explicit ancestor dependency.
 
 Keep output names local in node results. Runtime publication qualifies them with the instance ID. Explicit skipped names must be declared non-required outputs and cannot also be produced. A scheduler-skipped node propagates skipping through every output, including required ones. Context references alone never activate or skip a node.
 

@@ -1,11 +1,14 @@
 //! Bounded, transport-independent state reduction for one workflow run.
 
 use mf_telemetry::{
-    ContractError, Count,
-    description::WorkflowDescription,
-    event::{Event, Failure, FailurePhase, LifecycleEvent, Outcome, SkipCause},
+    ContractError, Count, EVENT_SCHEMA_VERSION, LOOP_EVENT_SCHEMA_VERSION,
+    description::{NodeDescription, WorkflowDescription, WorkflowDescriptionVersion},
+    event::{
+        Event, Failure, FailurePhase, LifecycleEvent, LoopPassOutcome, LoopPathEntry,
+        LoopStopReason, LoopSummary, Outcome, SkipCause,
+    },
     identity::RunId,
-    maximum_event_count,
+    maximum_event_count, maximum_loop_event_count,
 };
 use sha2::{Digest, Sha256};
 use snafu::Snafu;
@@ -19,6 +22,7 @@ const MAX_PORT_NAME_BYTES: usize = 128;
 const MAX_FAILURE_MESSAGE_BYTES: usize = 4096;
 const MAX_MISSING_RANGES: usize = 64;
 pub const MAX_SESSION_NODES: usize = 10_000;
+const MAX_RECENT_LOOP_PASSES: usize = 64;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeStatus {
@@ -111,6 +115,73 @@ pub struct StateSnapshot {
     pub traces: TraceAvailability,
     pub diagnostic_bytes_dropped: u64,
     pub diagnostics: Vec<String>,
+    pub loop_passes: Vec<LoopPassObservation>,
+    pub total_loop_passes: usize,
+    pub hidden_loop_passes: usize,
+    pub loop_overviews: Vec<LoopOverview>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoopPassObservation {
+    pub path: Vec<LoopPathEntry>,
+    pub nodes: Vec<NodeObservation>,
+    pub started: bool,
+    pub outcome: Option<LoopPassOutcome>,
+    pub visited_node_count: Option<Count>,
+    pub interrupted: bool,
+}
+
+impl LoopPassObservation {
+    pub fn display_nodes<'a>(
+        &self,
+        order: impl IntoIterator<Item = (&'a str, &'a str)>,
+    ) -> Vec<NodeObservation> {
+        let observed: BTreeMap<_, _> = self
+            .nodes
+            .iter()
+            .map(|node| (node.id.as_str(), node))
+            .collect();
+        order
+            .into_iter()
+            .enumerate()
+            .map(|(position, (id, kind))| {
+                let mut node = observed.get(id).map_or_else(
+                    || NodeObservation::pending(id, kind),
+                    |node| (*node).clone(),
+                );
+                if self
+                    .visited_node_count
+                    .is_some_and(|visited| position as i64 >= visited.get())
+                    && node.status == NodeStatus::Pending
+                {
+                    node.status = NodeStatus::NotRun;
+                } else if self.interrupted {
+                    if node.status == NodeStatus::Pending {
+                        node.status = NodeStatus::Unknown;
+                    } else if node.status == NodeStatus::Running {
+                        node.last_known = Some(NodeStatus::Running);
+                        node.status = NodeStatus::Interrupted;
+                    }
+                }
+                node
+            })
+            .collect()
+    }
+}
+
+impl NodeObservation {
+    pub fn pending(id: &str, kind: &str) -> Self {
+        pending_node_parts(id, kind)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoopOverview {
+    pub parent_path: Vec<LoopPathEntry>,
+    pub loop_id: String,
+    pub completed_passes: usize,
+    pub active_index: Option<Count>,
+    pub stop_reason: Option<LoopStopReason>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,13 +222,26 @@ pub struct SessionState {
     traces: TraceAvailability,
     diagnostic_bytes_dropped: u64,
     diagnostics: VecDeque<String>,
+    pass_states: BTreeMap<Vec<LoopPathEntry>, PassState>,
+    loop_summaries: BTreeMap<(Vec<LoopPathEntry>, String), LoopSummary>,
     closed: bool,
+}
+
+#[derive(Default)]
+struct PassState {
+    first_sequence: Option<Count>,
+    started_sequence: Option<Count>,
+    terminal_sequence: Option<Count>,
+    visited_node_count: Option<Count>,
+    outcome: Option<LoopPassOutcome>,
+    nodes: BTreeMap<String, NodeObservation>,
 }
 
 #[derive(Clone)]
 struct FinalBoundary {
     sequence: Count,
     visited: Count,
+    visited_steps: Option<Count>,
     outcome: Outcome,
     failure_node_id: Option<String>,
     failure: Option<Failure>,
@@ -165,7 +249,7 @@ struct FinalBoundary {
 
 struct SequenceWitness {
     signature: [u8; 32],
-    node_id: Option<String>,
+    node: Option<(Vec<LoopPathEntry>, String)>,
 }
 
 impl SessionState {
@@ -173,17 +257,26 @@ impl SessionState {
         description
             .validate()
             .map_err(|source| StateError::Description { source })?;
-        if description.nodes.len() > MAX_SESSION_NODES {
+        if description
+            .static_node_count()
+            .map_err(|source| StateError::Description { source })?
+            .get()
+            > MAX_SESSION_NODES as i64
+        {
             return Err(StateError::TooManyNodes {
                 limit: MAX_SESSION_NODES,
             });
         }
-        let max_sequence = maximum_event_count(
-            description
-                .node_count()
-                .map_err(|source| StateError::Description { source })?,
-        )
-        .map_err(|source| StateError::Description { source })?;
+        let max_sequence = if description.version == WorkflowDescriptionVersion::V2026_09_29 {
+            maximum_loop_event_count()
+        } else {
+            maximum_event_count(
+                description
+                    .node_count()
+                    .map_err(|source| StateError::Description { source })?,
+            )
+            .map_err(|source| StateError::Description { source })?
+        };
         let described: BTreeMap<_, _> = description
             .nodes
             .iter()
@@ -197,25 +290,7 @@ impl SessionState {
             .map(|(position, id)| {
                 let node = described[id.as_str()];
                 node_positions.insert(id.clone(), position);
-                NodeObservation {
-                    id: node.id.clone(),
-                    kind: node.kind.clone(),
-                    status: NodeStatus::Pending,
-                    last_known: None,
-                    conflicted: false,
-                    possibly_missing_events: false,
-                    started_elapsed_ns: None,
-                    terminal_elapsed_ns: None,
-                    duration_ns: None,
-                    produced_ports: Vec::new(),
-                    skipped_ports: Vec::new(),
-                    skip_causes: Vec::new(),
-                    failure: None,
-                    omitted_port_names: 0,
-                    omitted_skip_causes: 0,
-                    started_sequence: None,
-                    terminal_sequence: None,
-                }
+                pending_node(node)
             })
             .collect();
         Ok(Self {
@@ -232,8 +307,18 @@ impl SessionState {
             traces: TraceAvailability::default(),
             diagnostic_bytes_dropped: 0,
             diagnostics: VecDeque::new(),
+            pass_states: BTreeMap::new(),
+            loop_summaries: BTreeMap::new(),
             closed: false,
         })
+    }
+
+    pub fn expected_event_schema_version(&self) -> i64 {
+        if self.description.version == WorkflowDescriptionVersion::V2026_09_29 {
+            LOOP_EVENT_SCHEMA_VERSION
+        } else {
+            EVENT_SCHEMA_VERSION
+        }
     }
 
     pub fn apply(&mut self, event: LifecycleEvent) -> Result<Admission, StateError> {
@@ -252,7 +337,7 @@ impl SessionState {
             });
         }
         event
-            .validate_for(&self.description)
+            .validate_for_validated_description(&self.description)
             .map_err(|source| StateError::Event { source })?;
         let encoded =
             serde_json::to_vec(&event.event).map_err(|source| StateError::Serialize { source })?;
@@ -267,15 +352,23 @@ impl SessionState {
             if existing.signature == signature {
                 return Ok(Admission::Duplicate);
             }
-            let previous_node = existing.node_id.clone();
+            let previous_node = existing.node.clone();
             self.conflict(
                 "same sequence carried conflicting lifecycle records",
                 event.event.node(),
             );
-            if let Some(previous_node) = previous_node
-                && let Some(&position) = self.node_positions.get(&previous_node)
-            {
-                self.nodes[position].conflicted = true;
+            if let Some((path, id)) = previous_node {
+                if path.is_empty() {
+                    if let Some(&position) = self.node_positions.get(&id) {
+                        self.nodes[position].conflicted = true;
+                    }
+                } else if let Some(node) = self
+                    .pass_states
+                    .get_mut(&path)
+                    .and_then(|pass| pass.nodes.get_mut(&id))
+                {
+                    node.conflicted = true;
+                }
             }
             return Ok(Admission::Conflict);
         }
@@ -291,10 +384,34 @@ impl SessionState {
             sequence,
             SequenceWitness {
                 signature,
-                node_id: event.event.node().map(|(node, _)| node.id.clone()),
+                node: event
+                    .event
+                    .node()
+                    .map(|(node, _)| (node.path.clone(), node.id.clone())),
             },
         );
-        let conflicted = self.apply_event(event.sequence, &event.event);
+        let conflicted = if matches!(
+            &event.event,
+            Event::LoopPassStarted { .. } | Event::LoopPassFinished { .. }
+        ) || event
+            .event
+            .node()
+            .is_some_and(|(node, _)| !node.path.is_empty())
+        {
+            self.apply_loop_event(event.sequence, &event.event)
+        } else {
+            self.apply_event(event.sequence, &event.event)
+        };
+        if !conflicted
+            && let Event::NodeFinished {
+                node,
+                loop_summary: Some(summary),
+                ..
+            } = &event.event
+        {
+            self.loop_summaries
+                .insert((node.path.clone(), node.id.clone()), summary.clone());
+        }
         if conflicted {
             Ok(Admission::Conflict)
         } else {
@@ -373,7 +490,69 @@ impl SessionState {
             traces: self.traces,
             diagnostic_bytes_dropped: self.diagnostic_bytes_dropped,
             diagnostics: self.diagnostics.iter().cloned().collect(),
+            loop_passes: self.recent_loop_pass_snapshots(),
+            total_loop_passes: self.pass_states.len(),
+            hidden_loop_passes: self
+                .pass_states
+                .len()
+                .saturating_sub(MAX_RECENT_LOOP_PASSES),
+            loop_overviews: self.loop_overviews(),
         }
+    }
+
+    fn recent_loop_pass_snapshots(&self) -> Vec<LoopPassObservation> {
+        let mut passes: Vec<_> = self.pass_states.iter().collect();
+        passes.sort_by_key(|(_, state)| state.first_sequence);
+        passes
+            .into_iter()
+            .rev()
+            .take(MAX_RECENT_LOOP_PASSES)
+            .rev()
+            .map(|(path, state)| LoopPassObservation {
+                path: path.clone(),
+                nodes: state.nodes.values().cloned().collect(),
+                started: state.started_sequence.is_some(),
+                outcome: state.outcome,
+                visited_node_count: state.visited_node_count,
+                interrupted: self.closed && self.final_boundary.is_none(),
+            })
+            .collect()
+    }
+
+    fn loop_overviews(&self) -> Vec<LoopOverview> {
+        let mut overviews: BTreeMap<(Vec<LoopPathEntry>, String), LoopOverview> = BTreeMap::new();
+        for (path, state) in &self.pass_states {
+            let Some((last, parent)) = path.split_last() else {
+                continue;
+            };
+            let key = (parent.to_vec(), last.loop_id.clone());
+            let overview = overviews.entry(key).or_insert_with(|| LoopOverview {
+                parent_path: parent.to_vec(),
+                loop_id: last.loop_id.clone(),
+                completed_passes: 0,
+                active_index: None,
+                stop_reason: None,
+            });
+            if state.terminal_sequence.is_some() {
+                overview.completed_passes += 1;
+            } else if overview.active_index.is_none_or(|index| last.index > index) {
+                overview.active_index = Some(last.index);
+            }
+        }
+        for ((parent, id), summary) in &self.loop_summaries {
+            let key = (parent.clone(), id.clone());
+            let overview = overviews.entry(key).or_insert_with(|| LoopOverview {
+                parent_path: parent.clone(),
+                loop_id: id.clone(),
+                completed_passes: 0,
+                active_index: None,
+                stop_reason: None,
+            });
+            overview.stop_reason = Some(summary.reason);
+            overview.completed_passes = summary.pass_count.get() as usize;
+            overview.active_index = None;
+        }
+        overviews.into_values().collect()
     }
 
     pub fn integrity(&self) -> LifecycleIntegrity {
@@ -410,7 +589,7 @@ impl SessionState {
                 &mut known_missing_count,
             );
         }
-        let unresolved_visited_nodes = self.final_boundary.as_ref().map_or(0, |boundary| {
+        let mut unresolved_visited_nodes = self.final_boundary.as_ref().map_or(0, |boundary| {
             self.nodes
                 .iter()
                 .take(boundary.visited.get() as usize)
@@ -422,6 +601,51 @@ impl SessionState {
                 })
                 .count()
         });
+        if self.final_boundary.is_some() {
+            for (path, state) in &self.pass_states {
+                if state.started_sequence.is_none()
+                    || (path.len() > 1 && !self.pass_states.contains_key(&path[..path.len() - 1]))
+                {
+                    unresolved_visited_nodes += 1;
+                }
+                let static_path: Vec<_> = path.iter().map(|entry| entry.loop_id.clone()).collect();
+                let body = self
+                    .description
+                    .loop_body(&static_path)
+                    .expect("validated pass path has a body");
+                if let Some(visited) = state.visited_node_count {
+                    unresolved_visited_nodes += body
+                        .execution_order
+                        .iter()
+                        .take(visited.get() as usize)
+                        .filter(|id| {
+                            state.nodes.get(*id).is_none_or(|node| {
+                                !matches!(
+                                    node.status,
+                                    NodeStatus::Succeeded
+                                        | NodeStatus::Failed
+                                        | NodeStatus::Skipped
+                                )
+                            })
+                        })
+                        .count();
+                } else {
+                    unresolved_visited_nodes += 1;
+                }
+            }
+            if let Some(boundary) = &self.final_boundary
+                && let Some(expected) = boundary.visited_steps
+            {
+                let observed = boundary.visited.get()
+                    + self
+                        .pass_states
+                        .values()
+                        .filter_map(|pass| pass.visited_node_count)
+                        .map(Count::get)
+                        .sum::<i64>();
+                unresolved_visited_nodes += expected.get().abs_diff(observed) as usize;
+            }
+        }
         let completeness = match (&self.final_boundary, self.closed) {
             (None, true) => Completeness::UnverifiedTail,
             (None, false) => Completeness::Collecting,
@@ -453,9 +677,181 @@ impl SessionState {
         }
     }
 
+    fn ensure_pass(&mut self, path: &[LoopPathEntry], sequence: Count) -> &mut PassState {
+        let pass = self.pass_states.entry(path.to_vec()).or_default();
+        pass.first_sequence = Some(
+            pass.first_sequence
+                .map_or(sequence, |first| first.min(sequence)),
+        );
+        pass
+    }
+
+    fn apply_loop_event(&mut self, sequence: Count, event: &Event) -> bool {
+        let path = match event {
+            Event::LoopPassStarted { path, .. } | Event::LoopPassFinished { path, .. } => path,
+            Event::NodeStarted { node, .. }
+            | Event::NodeFinished { node, .. }
+            | Event::NodeSkipped { node, .. } => &node.path,
+            _ => return false,
+        };
+        let body_path: Vec<_> = path.iter().map(|entry| entry.loop_id.clone()).collect();
+        let body_len = self
+            .description
+            .loop_body(&body_path)
+            .expect("validated event has a body")
+            .nodes
+            .len();
+        let mut violation = None;
+        let pass = self.ensure_pass(path, sequence);
+        match event {
+            Event::LoopPassStarted { .. } => {
+                if pass.started_sequence.is_some()
+                    || pass
+                        .terminal_sequence
+                        .is_some_and(|finished| sequence > finished)
+                {
+                    violation = Some("Loop pass started more than once or after completion");
+                } else {
+                    pass.started_sequence = Some(sequence);
+                }
+            }
+            Event::LoopPassFinished {
+                visited_node_count,
+                outcome,
+                ..
+            } => {
+                if pass.terminal_sequence.is_some()
+                    || pass
+                        .started_sequence
+                        .is_some_and(|started| sequence < started)
+                    || (*outcome == LoopPassOutcome::Completed
+                        && visited_node_count.get() != body_len as i64)
+                {
+                    violation = Some("Loop pass has a conflicting finish boundary");
+                } else {
+                    pass.terminal_sequence = Some(sequence);
+                    pass.visited_node_count = Some(*visited_node_count);
+                    pass.outcome = Some(*outcome);
+                }
+            }
+            Event::NodeStarted {
+                node, elapsed_ns, ..
+            } => {
+                if pass
+                    .terminal_sequence
+                    .is_some_and(|finished| sequence > finished)
+                {
+                    violation = Some("body node started after pass completion");
+                } else {
+                    let observed = pass
+                        .nodes
+                        .entry(node.id.clone())
+                        .or_insert_with(|| pending_node_parts(&node.id, &node.kind));
+                    if observed.started_sequence.is_some()
+                        || observed
+                            .terminal_sequence
+                            .is_some_and(|finished| sequence > finished)
+                    {
+                        violation = Some("body node started more than once or after completion");
+                    } else {
+                        observed.started_sequence = Some(sequence);
+                        observed.started_elapsed_ns = Some(*elapsed_ns);
+                        if observed.terminal_sequence.is_none() {
+                            observed.status = NodeStatus::Running;
+                        }
+                    }
+                }
+            }
+            Event::NodeFinished {
+                node,
+                elapsed_ns,
+                duration_ns,
+                outcome,
+                produced_ports,
+                skipped_ports,
+                failure,
+                ..
+            } => {
+                if pass
+                    .terminal_sequence
+                    .is_some_and(|finished| sequence > finished)
+                {
+                    violation = Some("body node finished after pass completion");
+                } else {
+                    let observed = pass
+                        .nodes
+                        .entry(node.id.clone())
+                        .or_insert_with(|| pending_node_parts(&node.id, &node.kind));
+                    if observed.terminal_sequence.is_some()
+                        || observed
+                            .started_sequence
+                            .is_some_and(|started| sequence < started)
+                    {
+                        violation = Some("body node received conflicting outcomes");
+                    } else {
+                        observed.status = if *outcome == Outcome::Succeeded {
+                            NodeStatus::Succeeded
+                        } else {
+                            NodeStatus::Failed
+                        };
+                        observed.terminal_sequence = Some(sequence);
+                        observed.terminal_elapsed_ns = Some(*elapsed_ns);
+                        observed.duration_ns = *duration_ns;
+                        let (produced, omitted_produced) = bounded_ports(produced_ports);
+                        let (skipped, omitted_skipped) = bounded_ports(skipped_ports);
+                        observed.produced_ports = produced;
+                        observed.skipped_ports = skipped;
+                        observed.omitted_port_names = omitted_produced + omitted_skipped;
+                        observed.failure = failure.as_ref().map(bounded_failure);
+                    }
+                }
+            }
+            Event::NodeSkipped {
+                node,
+                elapsed_ns,
+                causes,
+                skipped_ports,
+                ..
+            } => {
+                if pass
+                    .terminal_sequence
+                    .is_some_and(|finished| sequence > finished)
+                {
+                    violation = Some("body node skipped after pass completion");
+                } else {
+                    let observed = pass
+                        .nodes
+                        .entry(node.id.clone())
+                        .or_insert_with(|| pending_node_parts(&node.id, &node.kind));
+                    if observed.started_sequence.is_some() || observed.terminal_sequence.is_some() {
+                        violation = Some("body node skipped after another outcome");
+                    } else {
+                        observed.status = NodeStatus::Skipped;
+                        observed.terminal_sequence = Some(sequence);
+                        observed.terminal_elapsed_ns = Some(*elapsed_ns);
+                        let (visible_causes, omitted_causes) = bounded_causes(causes);
+                        observed.skip_causes = visible_causes;
+                        observed.omitted_skip_causes = omitted_causes;
+                        let (ports, omitted) = bounded_ports(skipped_ports);
+                        observed.skipped_ports = ports;
+                        observed.omitted_port_names = omitted;
+                    }
+                }
+            }
+            _ => {}
+        }
+        if let Some(message) = violation {
+            self.conflict(message, event.node());
+            true
+        } else {
+            false
+        }
+    }
+
     fn apply_event(&mut self, sequence: Count, event: &Event) -> bool {
         match event {
             Event::WorkflowStarted { .. } => false,
+            Event::LoopPassStarted { .. } | Event::LoopPassFinished { .. } => false,
             Event::NodeStarted {
                 node, elapsed_ns, ..
             } => {
@@ -572,6 +968,7 @@ impl SessionState {
             Event::WorkflowFinished {
                 final_sequence,
                 visited_node_count,
+                top_level_visited_count,
                 outcome,
                 failure_node_id,
                 failure,
@@ -583,7 +980,8 @@ impl SessionState {
                 }
                 self.final_boundary = Some(FinalBoundary {
                     sequence: *final_sequence,
-                    visited: *visited_node_count,
+                    visited: top_level_visited_count.unwrap_or(*visited_node_count),
+                    visited_steps: top_level_visited_count.map(|_| *visited_node_count),
                     outcome: *outcome,
                     failure_node_id: failure_node_id.clone(),
                     failure: failure.clone(),
@@ -652,10 +1050,18 @@ impl SessionState {
         node: Option<(&mf_telemetry::event::NodeIdentity, Count)>,
     ) {
         self.protocol_conflicts = self.protocol_conflicts.saturating_add(1);
-        if let Some((identity, _)) = node
-            && let Some(&position) = self.node_positions.get(&identity.id)
-        {
-            self.nodes[position].conflicted = true;
+        if let Some((identity, _)) = node {
+            if identity.path.is_empty() {
+                if let Some(&position) = self.node_positions.get(&identity.id) {
+                    self.nodes[position].conflicted = true;
+                }
+            } else if let Some(observed) = self
+                .pass_states
+                .get_mut(&identity.path)
+                .and_then(|pass| pass.nodes.get_mut(&identity.id))
+            {
+                observed.conflicted = true;
+            }
         }
         self.note(message);
     }
@@ -672,6 +1078,32 @@ impl SessionState {
                 .saturating_add(evicted.len() as u64);
         }
         self.diagnostics.push_back(message);
+    }
+}
+
+fn pending_node(node: &NodeDescription) -> NodeObservation {
+    pending_node_parts(&node.id, &node.kind)
+}
+
+fn pending_node_parts(id: &str, kind: &str) -> NodeObservation {
+    NodeObservation {
+        id: id.into(),
+        kind: kind.into(),
+        status: NodeStatus::Pending,
+        last_known: None,
+        conflicted: false,
+        possibly_missing_events: false,
+        started_elapsed_ns: None,
+        terminal_elapsed_ns: None,
+        duration_ns: None,
+        produced_ports: Vec::new(),
+        skipped_ports: Vec::new(),
+        skip_causes: Vec::new(),
+        failure: None,
+        omitted_port_names: 0,
+        omitted_skip_causes: 0,
+        started_sequence: None,
+        terminal_sequence: None,
     }
 }
 
