@@ -244,6 +244,7 @@ fn generate_scope(
         let mut #inference_ident = mf_compiler::TypeInferenceState::default();
     }];
     let mut statements = Vec::new();
+    let incoming = crate::compiler::incoming_dependencies(definition);
     for (index, id) in order.iter().enumerate() {
         let scope_literals: Vec<_> = static_scope
             .iter()
@@ -255,7 +256,7 @@ fn generate_scope(
         let node_ident = format_ident!("node_{scope}_{index}");
         let id_lit = LitStr::new(id.as_str(), Span::call_site());
         let kind_lit = LitStr::new(&node.kind, Span::call_site());
-        let bindings = dependency_tokens(definition, id);
+        let bindings = dependency_tokens(incoming.get(id.as_str()).map_or(&[], Vec::as_slice));
         if matches!(node.kind.as_str(), crate::LOOP_KIND | ITERATION_KIND) {
             preparations.push(subgraph_preparation(
                 definition,
@@ -368,24 +369,19 @@ fn generate_scope(
     Ok((preparations, statements))
 }
 
-fn dependency_tokens(definition: &WorkflowDefinition, id: &DefinitionId) -> Vec<TokenStream> {
-    let mut bindings = Vec::new();
-    for edge in definition.edges.iter().filter(|edge| &edge.to_node == id) {
-        let source = LitStr::new(edge.from_node.as_str(), Span::call_site());
-        let port = LitStr::new(&edge.from_output, Span::call_site());
-        let input = LitStr::new(&edge.to_input, Span::call_site());
-        bindings.push(quote! { mf_runtime::ExecutionDependency { input: Some(#input), source_node: #source, source_output: #port } });
-    }
-    for edge in definition
-        .control_edges
-        .iter()
-        .filter(|edge| &edge.to_node == id)
-    {
-        let source = LitStr::new(edge.from_node.as_str(), Span::call_site());
-        let port = LitStr::new(&edge.from_output, Span::call_site());
-        bindings.push(quote! { mf_runtime::ExecutionDependency { input: None, source_node: #source, source_output: #port } });
-    }
-    bindings
+fn dependency_tokens(dependencies: &[mf_runtime::ExecutionDependency<'_>]) -> Vec<TokenStream> {
+    dependencies.iter().map(|dependency| {
+        let source = LitStr::new(dependency.source_node, Span::call_site());
+        let port = LitStr::new(dependency.source_output, Span::call_site());
+        let input = match dependency.input {
+            Some(input) => {
+                let input = LitStr::new(input, Span::call_site());
+                quote! { Some(#input) }
+            }
+            None => quote! { None },
+        };
+        quote! { mf_runtime::ExecutionDependency { input: #input, source_node: #source, source_output: #port } }
+    }).collect()
 }
 
 fn subgraph_preparation(

@@ -63,6 +63,19 @@ nix develop --command bash scripts/run-cov.sh
 
 Reports are written to `target/coverage/result/`, including `lcov.info`.
 
+## Performance
+
+Measure planning, preparation, execution, and source generation separately with a Constant/Identity chain:
+
+```sh
+nix develop --command cargo run --release -p mf-compiler --example benchmark_graph -- 4000 0
+nix develop --command cargo run --release -p mf-compiler --example benchmark_graph -- 256 1048576
+```
+
+The arguments select the node count and string payload size in bytes; zero selects a scalar value.
+Run the built executable repeatedly when comparing timings or measuring peak memory, so Cargo compilation is excluded.
+Keep machine-specific measurements and ablation reports under the ignored `target/` directory.
+
 ## Code layout
 
 | Path | Responsibility |

@@ -106,6 +106,30 @@ fn rejects_missing_and_unordered_context_references() {
     value["nodes"][0]["config"]["reference"] = json!("c.yes");
     assert!(error(value).contains("explicit dependency"));
 }
+
+#[test]
+fn validates_sparse_references_in_a_deep_shared_graph() {
+    let mut nodes = Vec::new();
+    let mut controls = Vec::new();
+    for index in 0..4000 {
+        let id = format!("n{index:04}");
+        nodes.push(json!({"id": id, "kind": "test.dynamic", "config": {"ports": ["value"]}}));
+        if index > 0 {
+            controls.push(json!({
+                "from_node": format!("n{:04}", index - 1), "from_output": "value", "to_node": id
+            }));
+        }
+    }
+    nodes.push(json!({"id": "isolated", "kind": "test.dynamic", "config": {"ports": ["value"]}}));
+    for index in [2000, 3999] {
+        nodes[index]["config"]["reference"] = json!("n0000.value");
+    }
+    let mut value = json!({"version": "2026-09-26", "dependencies": {}, "nodes": nodes, "control_edges": controls});
+    let registry = NodeRegistry::from_inventory().unwrap();
+    validate_definition(&definition(value.clone()), &registry).unwrap();
+    value["nodes"][3999]["config"]["reference"] = json!("isolated.value");
+    assert!(error(value).contains("explicit dependency"));
+}
 #[test]
 fn rejects_port_collisions_and_invalid_descriptors() {
     for ports in [json!([""]), json!(["value", "value"])] {

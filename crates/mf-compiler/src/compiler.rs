@@ -349,7 +349,8 @@ fn prepare_graph(
     }
     let order = structural_order_graph(definition)?;
     let mut nodes = resolve_nodes_in_scope(definition, registry, enclosing, allow_iteration_input)?;
-    validate_base_metadata(definition, &nodes, &order)?;
+    let incoming = incoming_dependencies(definition);
+    validate_base_metadata(definition, &nodes, &incoming)?;
 
     let indices: BTreeMap<_, _> = nodes
         .iter()
@@ -358,25 +359,43 @@ fn prepare_graph(
         .collect();
     let mut inference = TypeInferenceState::default();
     for id in &order {
-        let dependencies: Vec<_> = definition
-            .edges
-            .iter()
-            .filter(|edge| &edge.to_node == id)
-            .map(|edge| ExecutionDependency {
-                input: Some(edge.to_input.as_str()),
-                source_node: edge.from_node.as_str(),
-                source_output: &edge.from_output,
-            })
-            .collect();
-        inference.resolve_node(&mut nodes[indices[id]], &dependencies)?;
+        let dependencies = incoming.get(id.as_str()).map_or(&[][..], Vec::as_slice);
+        inference.resolve_node(&mut nodes[indices[id]], dependencies)?;
     }
     Ok((nodes, order))
+}
+
+pub fn incoming_dependencies(
+    definition: &WorkflowDefinition,
+) -> BTreeMap<&str, Vec<ExecutionDependency<'_>>> {
+    let mut incoming: BTreeMap<&str, Vec<ExecutionDependency<'_>>> = BTreeMap::new();
+    for edge in &definition.edges {
+        incoming
+            .entry(edge.to_node.as_str())
+            .or_default()
+            .push(ExecutionDependency {
+                input: Some(&edge.to_input),
+                source_node: edge.from_node.as_str(),
+                source_output: &edge.from_output,
+            });
+    }
+    for edge in &definition.control_edges {
+        incoming
+            .entry(edge.to_node.as_str())
+            .or_default()
+            .push(ExecutionDependency {
+                input: None,
+                source_node: edge.from_node.as_str(),
+                source_output: &edge.from_output,
+            });
+    }
+    incoming
 }
 
 fn validate_base_metadata(
     definition: &WorkflowDefinition,
     nodes: &[FlowNode],
-    order: &[DefinitionId],
+    incoming: &BTreeMap<&str, Vec<ExecutionDependency<'_>>>,
 ) -> Result<(), WorkflowCompileError> {
     let registrations: BTreeMap<_, _> = nodes
         .iter()
@@ -421,19 +440,20 @@ fn validate_base_metadata(
             }
         }
     }
-    let pairs = dependency_pairs(definition);
-    let mut ancestors: BTreeMap<DefinitionId, BTreeSet<DefinitionId>> = BTreeMap::new();
-    for id in order {
-        let mut sources = BTreeSet::new();
-        for (from, to) in &pairs {
-            if to == id {
-                sources.insert(from.clone());
-                sources.extend(ancestors[from].iter().cloned());
+    for node in nodes {
+        if node.references.is_empty() {
+            continue;
+        }
+        // Only reference consumers need reachability, and their sets need not outlive validation.
+        let mut ancestors = BTreeSet::new();
+        let mut pending = vec![node.definition_id.as_str()];
+        while let Some(id) = pending.pop() {
+            for dependency in incoming.get(id).into_iter().flatten() {
+                if ancestors.insert(dependency.source_node) {
+                    pending.push(dependency.source_node);
+                }
             }
         }
-        ancestors.insert(id.clone(), sources);
-    }
-    for node in nodes {
         for reference in &node.references {
             let Some((producer, _)) = output_index.get(&reference.output) else {
                 return Err(invalid(
@@ -444,7 +464,7 @@ fn validate_base_metadata(
                     ),
                 ));
             };
-            if !ancestors[&node.definition_id].contains(*producer) {
+            if !ancestors.contains(producer.as_str()) {
                 return Err(invalid(
                     &node.definition_id,
                     format!(
