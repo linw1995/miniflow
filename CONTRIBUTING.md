@@ -62,6 +62,10 @@ nix develop --command bash scripts/run-cov.sh
 ```
 
 Reports are written to `target/coverage/result/`, including `lcov.info`.
+Coverage dependencies are retained under `target/coverage/build/`. Each run clears raw profiles and reports and rebuilds
+workspace packages so stale executable mappings cannot affect the report. A toolchain, instrumentation, or workspace
+membership change resets the build cache. CI caches the dependency build directory separately from Nix; per-run nested
+runner targets are excluded from that cache. Remove `target/coverage/build/` to force a completely fresh coverage build.
 
 ## Performance
 
