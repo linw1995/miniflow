@@ -329,7 +329,6 @@ impl SessionState {
     }
 
     pub fn apply(&mut self, event: LifecycleEvent) -> Result<Admission, StateError> {
-        self.invalidate_snapshot();
         if self.closed {
             return Err(StateError::Closed);
         }
@@ -388,6 +387,7 @@ impl SessionState {
             self.conflict("event followed the final sequence", event.event.node());
             return Ok(Admission::Conflict);
         }
+        self.invalidate_snapshot();
         self.received.insert(
             sequence,
             SequenceWitness {
@@ -445,8 +445,11 @@ impl SessionState {
     }
 
     pub fn record_diagnostic_truncation(&mut self, bytes: u64) {
-        self.invalidate_snapshot();
-        self.diagnostic_bytes_dropped = self.diagnostic_bytes_dropped.saturating_add(bytes);
+        let total = self.diagnostic_bytes_dropped.saturating_add(bytes);
+        if total != self.diagnostic_bytes_dropped {
+            self.invalidate_snapshot();
+            self.diagnostic_bytes_dropped = total;
+        }
     }
 
     pub fn record_diagnostic(&mut self, message: &str) {
@@ -461,10 +464,10 @@ impl SessionState {
     }
 
     pub fn close(&mut self) {
-        self.invalidate_snapshot();
         if self.closed {
             return;
         }
+        self.invalidate_snapshot();
         self.closed = true;
         if self.final_boundary.is_none() {
             for node in &mut self.nodes {
@@ -1113,6 +1116,7 @@ impl SessionState {
     }
 
     fn note(&mut self, message: &str) {
+        self.invalidate_snapshot();
         let (message, dropped) = truncate_utf8(message, MAX_DIAGNOSTIC_ENTRY_BYTES);
         self.diagnostic_bytes_dropped =
             self.diagnostic_bytes_dropped.saturating_add(dropped as u64);

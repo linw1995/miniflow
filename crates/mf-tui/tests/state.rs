@@ -1208,3 +1208,25 @@ fn late_node_failure_cannot_confirm_a_successful_final_boundary() {
     state.close();
     assert_eq!(state.integrity().completeness, Completeness::Incomplete);
 }
+
+#[test]
+fn unchanged_admissions_and_repeated_close_reuse_the_snapshot() {
+    use std::sync::Arc;
+    let mut state = state();
+    state.apply(start()).unwrap();
+    let before = state.snapshot_shared();
+    assert_eq!(state.apply(start()).unwrap(), Admission::Duplicate);
+    assert!(Arc::ptr_eq(&before, &state.snapshot_shared()));
+    state.record_diagnostic_truncation(0);
+    assert!(Arc::ptr_eq(&before, &state.snapshot_shared()));
+    let mut invalid = node_start(2, "a", "fixture.source", 0);
+    invalid.sequence = count(10000);
+    assert!(state.apply(invalid).is_err());
+    assert!(Arc::ptr_eq(&before, &state.snapshot_shared()));
+    state.close();
+    let closed = state.snapshot_shared();
+    assert!(!Arc::ptr_eq(&before, &closed));
+    state.close();
+    assert!(state.apply(start()).is_err());
+    assert!(Arc::ptr_eq(&closed, &state.snapshot_shared()));
+}
