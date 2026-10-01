@@ -23,14 +23,14 @@ struct WrongType;
 
 impl Node for WrongType {
     fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::from([("value".into(), json!("wrong"))]))
+        Ok(Outputs::from([("value".into(), json!("wrong").into())]))
     }
 }
 
 impl Node for OmitOnSecond {
     fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
         if inputs["index"] == json!(0) {
-            Ok(Outputs::from([("value".into(), json!(1))]))
+            Ok(Outputs::from([("value".into(), json!(1).into())]))
         } else {
             Ok(Outputs::new())
         }

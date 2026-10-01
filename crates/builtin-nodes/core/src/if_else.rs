@@ -195,7 +195,7 @@ impl Node for IfElse {
             }
         }
         Ok(NodeResult {
-            outputs: Outputs::from([(selected.to_owned(), Value::Bool(true))]),
+            outputs: Outputs::from([(selected.to_owned(), Value::Bool(true).into())]),
             skipped: self
                 .branches
                 .iter()

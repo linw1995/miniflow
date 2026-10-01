@@ -77,7 +77,7 @@ pub fn json_to_cel(
             Ok(CelValue::list(values))
         }
         (ValueType::Map(inner), ValueKind::Object(entries)) => {
-            budget.consume(entries.size(), path)?;
+            budget.consume(entries.len(), path)?;
             let values = entries
                 .iter()
                 .map(|(key, item)| {

@@ -500,11 +500,11 @@ mod tests {
 
             match self.action {
                 Action::Emit { output, value } => {
-                    Ok(Outputs::from([(output.to_owned(), json!(value))]))
+                    Ok(Outputs::from([(output.to_owned(), json!(value).into())]))
                 }
                 Action::Increment { input, output } => {
                     let value = inputs[input].as_i64().unwrap() + 1;
-                    Ok(Outputs::from([(output.to_owned(), json!(value))]))
+                    Ok(Outputs::from([(output.to_owned(), json!(value).into())]))
                 }
                 Action::Sum {
                     left,
@@ -512,7 +512,7 @@ mod tests {
                     output,
                 } => {
                     let value = inputs[left].as_i64().unwrap() + inputs[right].as_i64().unwrap();
-                    Ok(Outputs::from([(output.to_owned(), json!(value))]))
+                    Ok(Outputs::from([(output.to_owned(), json!(value).into())]))
                 }
                 Action::Fail => Err(NodeExecutionError::ExecutionFailed {
                     message: "deliberate failure".to_owned(),
@@ -731,7 +731,7 @@ mod tests {
 
         assert_eq!(
             flow.execute().unwrap(),
-            FlowOutputs::from([("result".to_owned(), json!(4))])
+            FlowOutputs::from([("result".to_owned(), json!(4).into())])
         );
         assert_eq!(*trace.lock().unwrap(), ["source", "increment"]);
     }
@@ -788,7 +788,7 @@ mod tests {
 
         assert_eq!(
             flow.execute().unwrap(),
-            FlowOutputs::from([("total".to_owned(), json!(22))])
+            FlowOutputs::from([("total".to_owned(), json!(22).into())])
         );
         assert_eq!(*trace.lock().unwrap(), ["source", "left", "right", "sum"]);
     }

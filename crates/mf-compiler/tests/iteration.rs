@@ -25,7 +25,10 @@ impl Node for MapItem {
             });
         }
         let index = inputs["index"].as_i64().unwrap();
-        Ok(Outputs::from([("value".into(), json!(item * 2 + index))]))
+        Ok(Outputs::from([(
+            "value".into(),
+            json!(item * 2 + index).into(),
+        )]))
     }
 }
 
@@ -54,7 +57,7 @@ impl Node for TraceProbe {
             .span_context()
             .span_id()
             .to_string();
-        Ok(Outputs::from([("span".into(), json!(span))]))
+        Ok(Outputs::from([("span".into(), json!(span).into())]))
     }
 }
 
