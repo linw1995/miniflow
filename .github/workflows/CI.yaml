@@ -74,6 +74,8 @@ jobs:
           restore-keys: |
             coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
       - name: Run native coverage
+        env:
+          NEXTEST_PROFILE: ci
         run: nix develop --command bash scripts/run-cov.sh
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v7

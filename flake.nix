@@ -105,7 +105,7 @@
           });
           test = craneLib.cargoNextest (cargoArgs // {
             inherit cargoArtifacts;
-            cargoNextestExtraArgs = "--locked --workspace --all-targets --all-features";
+            cargoNextestExtraArgs = "--locked --workspace --all-targets --all-features --profile ci";
             nativeBuildInputs = [ pkgs.cmake pkgs.git pkgs.jq pkgs.python3 ];
           });
           workflows = pkgs.runCommand "check-workflows" {

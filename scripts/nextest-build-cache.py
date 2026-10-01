@@ -36,12 +36,19 @@ def main():
         '\n[workspace]\n\n[dependencies]\n'
         f'serde_json = {json.dumps(compiler_manifest["dependencies"]["serde_json"])}\n'
     )
+    # Match the feature graph emitted for telemetry-enabled runners.
     for name, path in [
         ("mf-runtime", "crates/mf-runtime"),
         ("mf-compiler", "crates/mf-compiler"),
+        ("mf-telemetry", "crates/mf-telemetry"),
         ("mfn-core", "crates/builtin-nodes/core"),
+        ("mfn-code", "crates/builtin-nodes/code"),
     ]:
-        manifest += f"{name} = {{ path = {json.dumps(str(workspace / path))} }}\n"
+        features = ', features = ["otlp", "snapshot"]' if name == "mf-telemetry" else ""
+        manifest += (
+            f"{name} = {{ path = {json.dumps(str(workspace / path))}, "
+            f"default-features = false{features} }}\n"
+        )
     (project / "Cargo.toml").write_text(manifest)
     (project / "src/main.rs").write_text("fn main() {}\n")
     env = dict(os.environ, CARGO_TARGET_DIR=str(target))

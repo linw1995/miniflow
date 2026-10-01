@@ -83,3 +83,44 @@ filter = 'test(=packaged_cli_acceptance)'
 # The acceptance test performs several Cargo builds in isolated directories.
 threads-required = "num-test-threads"
 slow-timeout = { period = "60s", terminate-after = 20 }
+
+[profile.ci]
+inherits = "default"
+
+# Reuse the shared target for more generated builds on constrained CI workers.
+[[profile.ci.scripts]]
+platform = 'cfg(unix)'
+filter = '''
+(binary_id(=mf-cli::runner_observability) &
+    test(=generated_loop_runner_exports_complete_per_pass_observations)) |
+(binary_id(=mf-compiler::code_validation) &
+    test(=runner_validation_rejects_inactive_code_without_replacing_output)) |
+(binary_id(=mf-compiler::loop_planning) & (
+    test(=generated_loop_matches_in_memory_without_build_inputs) |
+    test(=invalid_loop_edit_preserves_installed_binary_and_lock)
+)) |
+(binary_id(=mf-compiler::iteration) & (
+    test(=generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node) |
+    test(=loop_and_iteration_share_a_workflow_in_memory_and_generated_runners)
+))
+'''
+setup = "build-cache"
+
+[[profile.ci.overrides]]
+platform = 'cfg(unix)'
+# Keep this selection identical to the CI setup rule above.
+filter = '''
+(binary_id(=mf-cli::runner_observability) &
+    test(=generated_loop_runner_exports_complete_per_pass_observations)) |
+(binary_id(=mf-compiler::code_validation) &
+    test(=runner_validation_rejects_inactive_code_without_replacing_output)) |
+(binary_id(=mf-compiler::loop_planning) & (
+    test(=generated_loop_matches_in_memory_without_build_inputs) |
+    test(=invalid_loop_edit_preserves_installed_binary_and_lock)
+)) |
+(binary_id(=mf-compiler::iteration) & (
+    test(=generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node) |
+    test(=loop_and_iteration_share_a_workflow_in_memory_and_generated_runners)
+))
+'''
+test-group = "shared-cargo"
