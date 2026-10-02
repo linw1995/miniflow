@@ -16,13 +16,6 @@ mod tests {
     use mf_runtime::{Inputs, NodeRegistry, OutputDerivation, ValueType};
     use serde_json::json;
 
-    fn task(node: &mf_runtime::PreparedNode) -> &dyn mf_runtime::TaskNode {
-        match &node.execution {
-            mf_runtime::NodeExecution::Task(task) => task.as_ref(),
-            _ => panic!("expected task execution"),
-        }
-    }
-
     #[test]
     fn one_package_preserves_constant_and_identity_values() {
         let registry = NodeRegistry::from_inventory().unwrap();
@@ -37,11 +30,17 @@ mod tests {
                 .unwrap()
                 .instantiate(json!({}))
                 .unwrap();
-            let produced = task(&constant)
+            let produced = constant
+                .execution
+                .as_task_node()
+                .expect("expected task execution")
                 .execute(Inputs::new(), &mut mf_runtime::ExecutionContext::default())
                 .unwrap()
                 .outputs;
-            let result = task(&identity)
+            let result = identity
+                .execution
+                .as_task_node()
+                .expect("expected task execution")
                 .execute(
                     Inputs::from([("input".into(), produced["value"].clone())]),
                     &mut mf_runtime::ExecutionContext::default(),

@@ -153,6 +153,10 @@ Lifecycle events are emitted by the runtime independently of plugin diagnostic l
 `PreparedNode::event(state, metadata)` selects `NodeExecution::Event`. Event providers implement
 `EventNode` directly; they do not implement `TaskNode` or create a second state object later.
 
+Use `prepared.execution.as_task_node()` to borrow a task executor or
+`prepared.execution.into_task_node()` to take ownership of it. Both return `None` for event execution.
+The consuming conversion moves only the execution field, leaving `prepared.metadata` available.
+
 `EventNode::on_event` receives `Input`, `Timer`, or `UpstreamClosed` and returns zero or more complete
 emissions with a `TimerUpdate`. `EventContext.now` is monotonic elapsed time. Retained logical values
 are reported through `retained_bytes`. Event state requires `Send`; mutable access is exclusive and
