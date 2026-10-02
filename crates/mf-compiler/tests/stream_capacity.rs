@@ -110,14 +110,10 @@ inventory::submit! {
                     block: config["block"].as_bool().unwrap_or(false),
                     fail_at: config["fail_at"].as_i64(),
                 },
-                mf_runtime::NodeMetadata {
-                    ports: mf_runtime::NodePorts {
+                mf_runtime::NodePorts {
                         inputs: vec![PortSpec::new("input", ValueType::Any, true)],
                         outputs: vec![PortSpec::new("value", ValueType::Any, true)],
                     },
-                    output_derivations: Vec::new(),
-                    ..Default::default()
-                },
             ))
         }),
     }
@@ -492,14 +488,10 @@ inventory::submit! {
         factory: mf_runtime::NodeFactory::Plain(|_| {
             Ok(mf_runtime::PreparedNode::new(
                 Cooperative(Arc::clone(&probes().lock().unwrap()["cooperative"])),
-                mf_runtime::NodeMetadata {
-                    ports: mf_runtime::NodePorts {
+                mf_runtime::NodePorts {
                         inputs: vec![PortSpec::new("input", ValueType::Any, true)],
                         outputs: vec![PortSpec::new("value", ValueType::Any, true)],
                     },
-                    output_derivations: Vec::new(),
-                    ..Default::default()
-                },
             ))
         }),
     }
@@ -568,14 +560,10 @@ inventory::submit! {
         factory: mf_runtime::NodeFactory::Plain(|_| {
             Ok(mf_runtime::PreparedNode::new(
                 Spill,
-                mf_runtime::NodeMetadata {
-                    ports: mf_runtime::NodePorts {
+                mf_runtime::NodePorts {
                         inputs: vec![],
                         outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
                     },
-                    output_derivations: Vec::new(),
-                    ..Default::default()
-                },
             ))
         }),
     }

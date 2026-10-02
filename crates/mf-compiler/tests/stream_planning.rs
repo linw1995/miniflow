@@ -23,13 +23,10 @@ inventory::submit! {
         factory: mf_runtime::NodeFactory::Plain(|_| {
             Ok(mf_runtime::PreparedNode::event(
                 Collector,
-                mf_runtime::NodeMetadata {
-                    ports: mf_runtime::NodePorts {
+                mf_runtime::NodePorts {
                         inputs: vec![PortSpec::new("item", ValueType::Any, true)],
                         outputs: vec![PortSpec::new("items", ValueType::Array, true)],
                     },
-                    ..Default::default()
-                },
             ))
         }),
     }
@@ -51,17 +48,13 @@ inventory::submit! {
         factory: mf_runtime::NodeFactory::Plain(|_| {
             Ok(mf_runtime::PreparedNode::new(
                 Join,
-                mf_runtime::NodeMetadata {
-                    ports: mf_runtime::NodePorts {
+                mf_runtime::NodePorts {
                         inputs: vec![
                             PortSpec::new("left", ValueType::Any, true),
                             PortSpec::new("right", ValueType::Any, true),
                         ],
                         outputs: vec![PortSpec::new("value", ValueType::Any, true)],
                     },
-                    output_derivations: Vec::new(),
-                    ..Default::default()
-                },
             ))
         }),
     }

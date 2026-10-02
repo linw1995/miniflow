@@ -72,14 +72,10 @@ inventory::submit! {
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
                 },
-                mf_runtime::NodeMetadata {
-                    ports: mf_runtime::NodePorts {
+                mf_runtime::NodePorts {
                         inputs: vec![PortSpec::new("input", ValueType::Any, true)],
                         outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
                     },
-                    output_derivations: Vec::new(),
-                    ..Default::default()
-                },
             ))
         }),
     }
@@ -131,14 +127,10 @@ inventory::submit! {
                 Slow(Arc::clone(
                     &gates().lock().unwrap()[config["gate"].as_str().unwrap()],
                 )),
-                mf_runtime::NodeMetadata {
-                    ports: mf_runtime::NodePorts {
+                mf_runtime::NodePorts {
                         inputs: vec![PortSpec::new("input", ValueType::Any, true)],
                         outputs: vec![PortSpec::new("value", ValueType::Any, true)],
                     },
-                    output_derivations: Vec::new(),
-                    ..Default::default()
-                },
             ))
         }),
     }
@@ -393,14 +385,10 @@ inventory::submit! {
         factory: mf_runtime::NodeFactory::Plain(|_| {
             Ok(mf_runtime::PreparedNode::new(
                 Exhaust,
-                mf_runtime::NodeMetadata {
-                    ports: mf_runtime::NodePorts {
+                mf_runtime::NodePorts {
                         inputs: vec![PortSpec::new("input", ValueType::Any, true)],
                         outputs: vec![],
                     },
-                    output_derivations: Vec::new(),
-                    ..Default::default()
-                },
             ))
         }),
     }
