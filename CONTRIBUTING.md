@@ -39,6 +39,8 @@ both provided by `nix develop`. Warmup preserves Cargo wrappers, compiler flags,
 Each run gets its own directory under the Cargo target's `nextest-build-cache/`, so concurrent runs cannot overwrite
 each other's runners. These build artifacts remain until removed or cleaned with `cargo clean`.
 
+Nix checks and CI coverage use the `ci` nextest profile. It shares the prewarmed Cargo target across additional generated-runner tests while serializing access to their executable. The default local profile retains more test parallelism. To reproduce CI scheduling locally, run `nix develop --command cargo nextest run --profile ci --workspace --all-features`.
+
 To run only these integration tests:
 
 ```sh

@@ -7,7 +7,7 @@ use mf_compiler::{
     compile_project, instantiate_compiled,
 };
 use serde_json::{Value, json};
-use std::{env, fs, process::Command};
+use std::{fs, process::Command};
 
 fn graph(expression: &str) -> Value {
     json!({
@@ -103,9 +103,7 @@ fn runner_validation_rejects_inactive_code_without_replacing_output() {
     assert_eq!(fs::read(&output).unwrap(), installed);
     assert_eq!(fs::read(definition.with_extension("lock")).unwrap(), lock);
 
-    let executable = build
-        .join("target/release")
-        .join(format!("mf-generated-workflow{}", env::consts::EXE_SUFFIX));
+    let executable = common::runner_executable(&build, "release");
     let validation = Command::new(&executable)
         .arg("--validate")
         .output()
