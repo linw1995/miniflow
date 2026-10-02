@@ -1,7 +1,7 @@
 use cel_core::{MapKey, Value as CelValue};
 use mf_runtime::{ValueKind, ValueRef, ValueType};
 use serde_json::Number;
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 pub const MAX_JSON_BYTES: usize = 1024 * 1024;
 pub const MAX_COLLECTION_ENTRIES: usize = 10_000;
@@ -12,7 +12,7 @@ pub struct Budget {
 }
 
 impl Budget {
-    fn consume(&mut self, count: usize, path: &str) -> Result<(), String> {
+    fn consume(&mut self, count: usize, path: &Path<'_>) -> Result<(), String> {
         if count > MAX_COLLECTION_ENTRIES - self.entries {
             return Err(format!(
                 "path `{path}` exceeds the collection entry limit of {MAX_COLLECTION_ENTRIES}"
@@ -23,11 +23,34 @@ impl Budget {
     }
 }
 
-fn child_path(path: &str, segment: &str) -> String {
-    format!("{path}/{}", segment.replace('~', "~0").replace('/', "~1"))
+enum Path<'a> {
+    Root(&'a str),
+    Index(&'a Path<'a>, usize),
+    Key(&'a Path<'a>, &'a str),
 }
 
-fn check_depth(depth: usize, path: &str) -> Result<(), String> {
+impl fmt::Display for Path<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use fmt::Write as _;
+        match self {
+            Self::Root(root) => formatter.write_str(root),
+            Self::Index(parent, index) => write!(formatter, "{parent}/{index}"),
+            Self::Key(parent, key) => {
+                write!(formatter, "{parent}/")?;
+                for character in key.chars() {
+                    match character {
+                        '~' => formatter.write_str("~0")?,
+                        '/' => formatter.write_str("~1")?,
+                        _ => formatter.write_char(character)?,
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn check_depth(depth: usize, path: &Path<'_>) -> Result<(), String> {
     if depth > ValueType::MAX_DEPTH {
         Err(format!(
             "path `{path}` exceeds nesting depth {}",
@@ -43,6 +66,16 @@ pub fn json_to_cel(
     value_type: &ValueType,
     budget: &mut Budget,
     path: &str,
+    depth: usize,
+) -> Result<CelValue, String> {
+    json_to_cel_at(value, value_type, budget, &Path::Root(path), depth)
+}
+
+fn json_to_cel_at(
+    value: &ValueRef,
+    value_type: &ValueType,
+    budget: &mut Budget,
+    path: &Path<'_>,
     depth: usize,
 ) -> Result<CelValue, String> {
     check_depth(depth, path)?;
@@ -65,13 +98,7 @@ pub fn json_to_cel(
                 .iter()
                 .enumerate()
                 .map(|(index, item)| {
-                    json_to_cel(
-                        item,
-                        inner,
-                        budget,
-                        &child_path(path, &index.to_string()),
-                        depth + 1,
-                    )
+                    json_to_cel_at(item, inner, budget, &Path::Index(path, index), depth + 1)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(CelValue::list(values))
@@ -81,7 +108,7 @@ pub fn json_to_cel(
             let values = entries
                 .iter()
                 .map(|(key, item)| {
-                    json_to_cel(item, inner, budget, &child_path(path, key), depth + 1)
+                    json_to_cel_at(item, inner, budget, &Path::Key(path, key), depth + 1)
                         .map(|converted| (Arc::clone(key), converted))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
@@ -112,6 +139,16 @@ pub fn cel_to_json(
     path: &str,
     depth: usize,
 ) -> Result<ValueRef, String> {
+    cel_to_json_at(value, value_type, budget, &Path::Root(path), depth)
+}
+
+fn cel_to_json_at(
+    value: &CelValue,
+    value_type: &ValueType,
+    budget: &mut Budget,
+    path: &Path<'_>,
+    depth: usize,
+) -> Result<ValueRef, String> {
     check_depth(depth, path)?;
     match (value_type, value) {
         (ValueType::Null, CelValue::Null) => Ok(ValueRef::null()),
@@ -129,13 +166,7 @@ pub fn cel_to_json(
                 .iter()
                 .enumerate()
                 .map(|(index, item)| {
-                    cel_to_json(
-                        item,
-                        inner,
-                        budget,
-                        &child_path(path, &index.to_string()),
-                        depth + 1,
-                    )
+                    cel_to_json_at(item, inner, budget, &Path::Index(path, index), depth + 1)
                 })
                 .collect::<Result<Vec<_>, _>>()
                 .map(ValueRef::array)
@@ -147,10 +178,10 @@ pub fn cel_to_json(
                 let MapKey::String(key) = key else {
                     return Err(format!("path `{path}`: map key must be a string"));
                 };
-                let path = child_path(path, key);
+                let path = Path::Key(path, key);
                 result.push((
                     Arc::clone(key),
-                    cel_to_json(item, inner, budget, &path, depth + 1)?,
+                    cel_to_json_at(item, inner, budget, &path, depth + 1)?,
                 ));
             }
             Ok(ValueRef::object(result))
@@ -181,6 +212,22 @@ mod tests {
         .unwrap();
         let result = cel_to_json(&cel, &value_type, &mut Budget::default(), "", 1).unwrap();
         assert_eq!(result, original);
+    }
+
+    #[test]
+    fn preserves_root_prefix_and_escaped_paths_in_both_directions() {
+        let value_type = ValueType::List(Box::new(ValueType::Map(Box::new(ValueType::Int64))));
+        let value = ValueRef::from(json!([{"ok": 1}, {"a~/b": false}]));
+        let error =
+            json_to_cel(&value, &value_type, &mut Budget::default(), "root", 1).unwrap_err();
+        assert_eq!(error, "path `root/1/a~0~1b`: expected int64");
+        let value = CelValue::list([
+            CelValue::map([("ok", CelValue::Int(1))]),
+            CelValue::map([("a~/b", CelValue::Bool(false))]),
+        ]);
+        let error =
+            cel_to_json(&value, &value_type, &mut Budget::default(), "root", 1).unwrap_err();
+        assert_eq!(error, "path `root/1/a~0~1b`: expected int64, found boolean");
     }
 
     #[test]
