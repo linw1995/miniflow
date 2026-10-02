@@ -158,8 +158,8 @@ Use `prepared.execution.as_task_node()` to borrow a task executor or
 The consuming conversion moves only the execution field, leaving `prepared.metadata` available.
 
 `EventNode::on_event` receives `Input`, `Timer`, or `UpstreamClosed` and returns zero or more complete
-emissions with a `TimerUpdate`. `EventContext.now` is monotonic elapsed time. Retained logical values
-are reported through `retained_bytes`. Event state requires `Send`; mutable access is exclusive and
+emissions with a `TimerUpdate`. `EventContext.now` is monotonic elapsed time.
+Event state requires `Send`; mutable access is exclusive and
 `Sync` is not required.
 
 `Flow::new` rejects event nodes during synchronous preparation. Direct callers of task execution

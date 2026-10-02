@@ -10,7 +10,7 @@ pub enum NodeEvent {
 
 pub struct EventContext<'a> {
     pub now: Duration,
-    /// Read current-frame references without bypassing emission validation and accounting.
+    /// Read current-frame references; publish through returned emissions.
     pub input: Option<&'a ExecutionContext>,
 }
 
@@ -47,9 +47,4 @@ pub trait EventNode: Send {
         event: NodeEvent,
         context: &EventContext<'_>,
     ) -> Result<EventEffects, NodeExecutionError>;
-
-    /// Report retained logical value bytes, excluding values returned as emissions.
-    fn retained_bytes(&self) -> usize {
-        0
-    }
 }
