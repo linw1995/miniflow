@@ -9,5 +9,5 @@
 ## 2. Verification and delivery
 
 - [x] 2.1 Verify type inference, conditional execution, Loop/Iteration, generated runners, and observation through the existing behavior suites.
-- [ ] 2.2 Review the implementation, update plugin migration documentation, and complete hooks, coverage, Nix, and OpenSpec validation.
-- [ ] 2.3 Finalize the migration documentation and confirm the base remains independently buildable without streaming code before publishing it.
+- [x] 2.2 Review the implementation, update plugin migration documentation, and complete hooks, coverage, Nix, and OpenSpec validation.
+- [x] 2.3 Finalize the migration documentation and confirm the base remains independently buildable without streaming code before publishing it.
