@@ -24,6 +24,8 @@ filter = '''
     test(=repairs_partial_projects_and_updates_configuration) |
     test(=unknown_plugin_reports_node_and_kind)
 )) |
+(binary_id(=mf-cli::examples) &
+    test(=documented_examples_compile_and_produce_expected_outputs)) |
 (binary_id(=mf-compiler::runner_validation) &
     test(=one_runner_validates_without_execution_and_reports_plugin_errors)) |
 (binary_id(=mf-compiler::typed_ports) & (
@@ -58,6 +60,8 @@ filter = '''
     test(=repairs_partial_projects_and_updates_configuration) |
     test(=unknown_plugin_reports_node_and_kind)
 )) |
+(binary_id(=mf-cli::examples) &
+    test(=documented_examples_compile_and_produce_expected_outputs)) |
 (binary_id(=mf-compiler::runner_validation) &
     test(=one_runner_validates_without_execution_and_reports_plugin_errors)) |
 (binary_id(=mf-compiler::typed_ports) & (
