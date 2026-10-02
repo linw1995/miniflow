@@ -372,6 +372,10 @@ pub enum OutputDerivation {
         output: String,
         input: String,
     },
+    CollectInput {
+        output: String,
+        input: String,
+    },
 }
 
 impl OutputDerivation {
@@ -391,7 +395,16 @@ impl OutputDerivation {
 
     pub fn output(&self) -> &str {
         match self {
-            Self::Literal { output, .. } | Self::ForwardInput { output, .. } => output,
+            Self::Literal { output, .. }
+            | Self::ForwardInput { output, .. }
+            | Self::CollectInput { output, .. } => output,
+        }
+    }
+
+    pub fn collect_input(output: impl Into<String>, input: impl Into<String>) -> Self {
+        Self::CollectInput {
+            output: output.into(),
+            input: input.into(),
         }
     }
 }
@@ -450,6 +463,7 @@ impl NodePorts {
                     })?
                 }
                 OutputDerivation::ForwardInput { input, .. }
+                | OutputDerivation::CollectInput { input, .. }
                     if !self.inputs.iter().any(|port| port.name == *input) =>
                 {
                     return Err(OutputDerivationError::UnknownInput {
@@ -458,7 +472,7 @@ impl NodePorts {
                         input: input.clone(),
                     });
                 }
-                OutputDerivation::ForwardInput { .. } => {}
+                OutputDerivation::ForwardInput { .. } | OutputDerivation::CollectInput { .. } => {}
             }
         }
         Ok(())

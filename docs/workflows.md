@@ -330,3 +330,21 @@ The host submits one value per message, consumes outputs independently, and expl
 An array remains one input value. See [the instance API](node-development.md#in-memory-streaming-instances)
 for admission, backpressure, drain, and cancellation. Standalone runner generation does not yet support
 streaming definitions.
+
+### Batch collection
+
+Link `mfn-core` and insert `builtin.batch` into a streaming graph. Its required configuration fields
+are positive `max_items` and `max_wait_ms`. Connect an upstream value to `item`; `items` emits the entire
+ordered array, with inferred type `List(T)` for input type `T`.
+
+The first item starts the timeout. Later items do not extend it. Reaching the count threshold emits a
+full batch; timeout or upstream close emits a nonempty partial batch. An item arriving at the deadline
+belongs to a new batch. Empty buffers emit nothing. A skipped input adds no item, while existing
+buffered items retain their deadline. Arrays and null remain individual elements.
+
+Downstream nodes receive one invocation per emitted batch. Input and batch values belong to different
+message domains. The aggregate output remains subject to the runtime payload limit; choose count and
+byte limits together. Cancellation or failure discards a partial buffer without flushing or retrying.
+
+Batch runs through the in-memory streaming API and is rejected inside synchronous Loop/Iteration
+bodies. Its state is independent for every workflow instance.

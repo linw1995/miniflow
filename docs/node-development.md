@@ -195,3 +195,11 @@ before startup. Standalone generation and stream-specific description and observ
 unsupported; the streaming API is available in memory.
 
 Run the producer/consumer example with `cargo run -p mf-compiler --example stream` inside `nix develop`.
+
+## Collection type derivation
+
+Use `OutputDerivation::collect_input("items", "item")` when an output collects values from a named
+input. Inference wraps its input type as `List(T)` and retains checks for broad element types. It adds
+one level to the shared type-depth limit and discards exact-value evidence for the collected array.
+The derivation must reference declared ports and fit the output declaration. Runtime publication still
+validates every actual emitted value.

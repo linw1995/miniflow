@@ -295,6 +295,22 @@ impl TypeInferenceState {
                         exact: None,
                     }),
 
+                Some(OutputDerivation::CollectInput { input, .. }) => TypeFact {
+                    value_type: ValueType::List(Box::new(inputs.get(input.as_str()).map_or_else(
+                        || {
+                            node.metadata
+                                .ports
+                                .inputs
+                                .iter()
+                                .find(|port| port.name == input.as_str())
+                                .expect("derivation input was validated")
+                                .value_type
+                                .clone()
+                        },
+                        |fact| fact.value_type.clone(),
+                    ))),
+                    exact: None,
+                },
                 None => TypeFact {
                     value_type: declared.clone(),
                     exact: None,

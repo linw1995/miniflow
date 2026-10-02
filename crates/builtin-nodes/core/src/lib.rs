@@ -1,9 +1,11 @@
+mod batch;
 mod constant;
 mod identity;
 mod if_else;
 mod iteration;
 mod loop_declaration;
 
+pub use batch::KIND as BATCH_KIND;
 pub use constant::{KIND as CONSTANT_KIND, kind as constant_kind};
 pub use identity::{KIND as IDENTITY_KIND, kind as identity_kind};
 pub use if_else::KIND as IF_ELSE_KIND;
