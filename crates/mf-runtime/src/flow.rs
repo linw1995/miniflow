@@ -333,6 +333,9 @@ impl Flow {
         mut self,
         controls: Vec<crate::ControlEdgeDefinition>,
     ) -> Result<Self, FlowBuildError> {
+        if self.controls == controls {
+            return Ok(self);
+        }
         let positions: BTreeMap<_, _> = self
             .execution_order
             .iter()
