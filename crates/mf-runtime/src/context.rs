@@ -44,6 +44,7 @@ struct ScopeGuard<'a> {
     context: &'a mut ExecutionContext,
     parent_outputs: BTreeMap<String, Option<Value>>,
     depth: usize,
+    parent_limits: Option<FrameLimits>,
 }
 
 impl Drop for ScopeGuard<'_> {
@@ -51,6 +52,7 @@ impl Drop for ScopeGuard<'_> {
         self.context.scopes.truncate(self.depth);
         self.context.outputs = std::mem::take(&mut self.parent_outputs);
         self.context.pending_loop_write = None;
+        self.context.frame_limits = self.parent_limits;
     }
 }
 
@@ -76,6 +78,12 @@ pub enum ContextValue<'a> {
     Skipped,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct FrameLimits {
+    payload: usize,
+    context: usize,
+}
+
 /// Completed output values for one run. Nodes receive an immutable reference.
 #[derive(Debug)]
 pub struct ExecutionContext {
@@ -88,6 +96,8 @@ pub struct ExecutionContext {
     remaining_steps: usize,
     snapshots: Option<crate::SnapshotRecorder>,
     snapshot_prefix: Vec<LoopPathEntry>,
+    cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    frame_limits: Option<FrameLimits>,
 }
 
 impl Default for ExecutionContext {
@@ -101,11 +111,112 @@ impl Default for ExecutionContext {
             remaining_steps: crate::MAX_SCHEDULED_STEPS,
             snapshots: None,
             snapshot_prefix: Vec::new(),
+            cancellation: None,
+            frame_limits: None,
         }
     }
 }
 
 impl ExecutionContext {
+    pub(super) fn set_stream_limits(&mut self, payload: usize, context: usize) {
+        self.frame_limits = Some(FrameLimits { payload, context });
+    }
+
+    pub fn set_cancellation(
+        &mut self,
+        cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        self.cancellation = Some(cancellation);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    pub fn retained_bytes(&self, limit: usize) -> Result<usize, crate::StreamError> {
+        let mut bytes = crate::MESSAGE_OVERHEAD;
+        for (key, value) in &self.outputs {
+            bytes = crate::stream_limits::add(bytes, crate::stream_limits::binding_bytes(key)?)?;
+            if bytes > limit {
+                return Err(crate::StreamError::Resource {
+                    message: "message context exceeds its frame reservation".into(),
+                });
+            }
+            if let Some(value) = value {
+                bytes =
+                    crate::stream_limits::add(bytes, crate::encoded_size(value, limit - bytes)?)?;
+            }
+        }
+        if bytes > limit {
+            return Err(crate::StreamError::Resource {
+                message: "message context exceeds its frame reservation".into(),
+            });
+        }
+        Ok(bytes)
+    }
+
+    pub fn for_message<N>(
+        source: &FlowNode<N>,
+        result: NodeResult,
+    ) -> Result<Self, WorkflowRunError> {
+        let mut context = Self::default();
+        context.publish(source, Some(result))?;
+        Ok(context)
+    }
+
+    pub fn event_inputs<N>(
+        &mut self,
+        node: &FlowNode<N>,
+        dependencies: &[crate::StreamDependency],
+    ) -> Result<Option<Inputs>, WorkflowRunError> {
+        let id = node.definition_id.as_str();
+        self.reserve_step(id)?;
+        let mut inputs = Inputs::new();
+        let mut skipped = false;
+        for dependency in dependencies {
+            let value = self
+                .output(&output_id(
+                    &dependency.source_node,
+                    &dependency.source_output,
+                ))
+                .map_err(|error| {
+                    state_error(
+                        id,
+                        format!(
+                            "dependency {}: {error}",
+                            dependency.input.as_deref().unwrap_or("<control>")
+                        ),
+                    )
+                })?;
+            match value {
+                ContextValue::Value(value) => {
+                    if let Some(input) = &dependency.input {
+                        inputs.insert(input.clone(), value.clone());
+                    }
+                }
+                ContextValue::Skipped => skipped = true,
+            }
+        }
+        if skipped {
+            return Ok(None);
+        }
+        for (name, value) in &inputs {
+            let port = node
+                .metadata
+                .ports
+                .inputs
+                .iter()
+                .find(|port| port.name == *name)
+                .ok_or_else(|| state_error(id, format!("received undeclared input `{name}`")))?;
+            port.value_type
+                .validate_shared(value)
+                .map_err(|error| state_error(id, format!("input `{name}`: {error}")))?;
+        }
+        Ok(Some(inputs))
+    }
+
     pub fn set_snapshot_recorder(&mut self, recorder: crate::SnapshotRecorder) {
         self.snapshots = Some(recorder);
     }
@@ -116,6 +227,7 @@ impl ExecutionContext {
 
     pub fn fork_body(&self, observation: Option<BodyObservation>) -> Self {
         let mut child = Self::for_body(observation);
+        child.cancellation = self.cancellation.clone();
         if self.snapshots.is_some() {
             child.snapshots = self.snapshots.clone();
             child.snapshot_prefix = self.snapshot_path();
@@ -129,9 +241,9 @@ impl ExecutionContext {
         path
     }
 
-    fn capture_node(
+    fn capture_node<N>(
         &self,
-        node: &crate::TaskFlowNode,
+        node: &FlowNode<N>,
         inputs: &Inputs,
         result: Option<&NodeResult>,
         outcome: crate::SnapshotOutcome,
@@ -355,11 +467,13 @@ impl ExecutionContext {
     ) -> Result<(T, Outputs, bool), WorkflowRunError> {
         let depth = self.scopes.len();
         let parent_outputs = std::mem::take(&mut self.outputs);
+        let parent_limits = self.frame_limits.take();
         self.scopes.push(scope);
         let guard = ScopeGuard {
             context: self,
             parent_outputs,
             depth,
+            parent_limits,
         };
         let state = &mut *guard.context;
         let result = run(state);
@@ -368,6 +482,9 @@ impl ExecutionContext {
     }
 
     fn reserve_step(&mut self, id: &str) -> Result<(), WorkflowRunError> {
+        if self.is_cancelled() {
+            return Err(state_error(id, "execution cancelled"));
+        }
         if self.remaining_steps == 0 {
             return Err(state_error(
                 id,
@@ -384,9 +501,9 @@ impl ExecutionContext {
         Ok(())
     }
 
-    fn publish(
+    fn publish<N>(
         &mut self,
-        node: &crate::TaskFlowNode,
+        node: &FlowNode<N>,
         result: Option<NodeResult>,
     ) -> Result<(), WorkflowRunError> {
         let id = node.definition_id.as_str();
@@ -429,6 +546,13 @@ impl ExecutionContext {
                     .map_err(|error| state_error(id, format!("output `{name}`: {error}")))?;
             }
         }
+        if let Some(limits) = self.frame_limits {
+            self.validate_stream_publication(node, result.as_ref(), limits)
+                .map_err(|error| WorkflowRunError::Resource {
+                    definition_id: node.definition_id.clone(),
+                    message: error.to_string(),
+                })?;
+        }
         // Validate the complete result before making any values visible.
         match result {
             Some(result) => {
@@ -462,6 +586,61 @@ impl ExecutionContext {
             // Later body steps read the current state through the synthetic source.
             self.outputs
                 .insert(output_id(&frame.source_id, &variable), Some(value));
+        }
+        Ok(())
+    }
+
+    fn validate_stream_publication<N>(
+        &self,
+        node: &FlowNode<N>,
+        result: Option<&NodeResult>,
+        limits: FrameLimits,
+    ) -> Result<(), crate::StreamError> {
+        let id = node.definition_id.as_str();
+        let updates: Vec<_> = match result {
+            Some(result) => {
+                crate::stream_limits::output_bytes(&result.outputs, limits.payload)?;
+                result
+                    .outputs
+                    .iter()
+                    .map(|(port, value)| (output_id(id, port), Some(value)))
+                    .chain(
+                        result
+                            .skipped
+                            .iter()
+                            .map(|port| (output_id(id, port), None)),
+                    )
+                    .collect()
+            }
+            None => node
+                .metadata
+                .ports
+                .outputs
+                .iter()
+                .map(|port| (output_id(id, &port.name), None))
+                .collect(),
+        };
+        let changed: BTreeSet<_> = updates.iter().map(|(name, _)| name.as_str()).collect();
+        let entries = self
+            .outputs
+            .iter()
+            .filter(|(name, _)| !changed.contains(name.as_str()))
+            .map(|(name, value)| (name.as_str(), value.as_ref()))
+            .chain(updates.iter().map(|(name, value)| (name.as_str(), *value)));
+        let mut bytes = crate::MESSAGE_OVERHEAD;
+        for (key, value) in entries {
+            bytes = crate::stream_limits::add(bytes, crate::stream_limits::binding_bytes(key)?)?;
+            if bytes > limits.context {
+                return Err(crate::StreamError::Resource {
+                    message: "message context exceeds its frame reservation".into(),
+                });
+            }
+            if let Some(value) = value {
+                bytes = crate::stream_limits::add(
+                    bytes,
+                    crate::encoded_size(value, limits.context - bytes)?,
+                )?;
+            }
         }
         Ok(())
     }
@@ -563,6 +742,15 @@ pub fn execute_node_in_context(
 
 pub fn execute_ordered_node_in_context<'a>(
     node: &crate::TaskFlowNode,
+    dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
+    ctx: &mut ExecutionContext,
+) -> Result<(), WorkflowRunError> {
+    execute_ordered_task_in_context(node, node.node.as_ref(), dependencies, ctx)
+}
+
+pub(super) fn execute_ordered_task_in_context<'a, N>(
+    node: &FlowNode<N>,
+    task: &dyn crate::TaskNode,
     dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
     ctx: &mut ExecutionContext,
 ) -> Result<(), WorkflowRunError> {
@@ -674,13 +862,12 @@ pub fn execute_ordered_node_in_context<'a>(
         if let Some(step) = step.as_mut() {
             step.started(ctx);
         }
-        let result =
-            node.node
-                .execute(inputs, ctx)
-                .map_err(|source| WorkflowRunError::NodeExecution {
-                    definition_id: node.definition_id.clone(),
-                    source,
-                });
+        let result = task
+            .execute(inputs, ctx)
+            .map_err(|source| WorkflowRunError::NodeExecution {
+                definition_id: node.definition_id.clone(),
+                source,
+            });
         match result {
             Ok(result) => Some(result),
             Err(error) => {
@@ -700,6 +887,22 @@ pub fn execute_ordered_node_in_context<'a>(
             }
         }
     };
+    if ctx.is_cancelled() {
+        let error = state_error(id, "execution cancelled before publication");
+        if let Some(step) = step.take() {
+            step.failed(ctx, FailurePhase::Publication, error.to_string());
+        }
+        if let Some(inputs) = &snapshot_inputs {
+            ctx.capture_node(
+                node,
+                inputs,
+                None,
+                crate::SnapshotOutcome::Failed,
+                Some(&error),
+            );
+        }
+        return Err(error);
+    }
     let mut produced_ports = Vec::new();
     let mut skipped_ports = Vec::new();
     if step.is_some() {

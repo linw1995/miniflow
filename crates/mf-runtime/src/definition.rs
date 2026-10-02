@@ -38,9 +38,11 @@ impl fmt::Display for DefinitionId {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawWorkflowDefinition")]
 pub struct WorkflowDefinition {
     pub version: WorkflowDefinitionVersion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<crate::StreamExecution>,
     #[serde(deserialize_with = "deserialize_dependencies")]
     pub dependencies: BTreeMap<String, NodeDependency>,
     pub nodes: Vec<NodeDefinition>,
@@ -52,7 +54,62 @@ pub struct WorkflowDefinition {
     pub outputs: Vec<WorkflowOutputDefinition>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWorkflowDefinition {
+    version: WorkflowDefinitionVersion,
+    #[serde(default, deserialize_with = "deserialize_execution")]
+    execution: Option<crate::StreamExecution>,
+    #[serde(deserialize_with = "deserialize_dependencies")]
+    dependencies: BTreeMap<String, NodeDependency>,
+    nodes: Vec<NodeDefinition>,
+    #[serde(default)]
+    edges: Vec<EdgeDefinition>,
+    #[serde(default)]
+    control_edges: Vec<ControlEdgeDefinition>,
+    #[serde(default)]
+    outputs: Vec<WorkflowOutputDefinition>,
+}
+
+fn deserialize_execution<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<crate::StreamExecution>, D::Error> {
+    crate::StreamExecution::deserialize(deserializer).map(Some)
+}
+
+impl TryFrom<RawWorkflowDefinition> for WorkflowDefinition {
+    type Error = String;
+
+    fn try_from(raw: RawWorkflowDefinition) -> Result<Self, Self::Error> {
+        let definition = Self {
+            version: raw.version,
+            execution: raw.execution,
+            dependencies: raw.dependencies,
+            nodes: raw.nodes,
+            edges: raw.edges,
+            control_edges: raw.control_edges,
+            outputs: raw.outputs,
+        };
+        definition.validate_execution()?;
+        Ok(definition)
+    }
+}
+
 impl WorkflowDefinition {
+    pub fn validate_execution(&self) -> Result<(), String> {
+        if let Some(execution) = &self.execution {
+            if self.version != WorkflowDefinitionVersion::V2026_10_02 {
+                return Err("stream execution requires workflow schema 2026-10-02".into());
+            }
+            execution
+                .input_type
+                .check_depth()
+                .map_err(|error| error.to_string())?;
+            execution.limits.validate()?;
+        }
+        Ok(())
+    }
+
     pub fn from_json(input: &str) -> Result<Self, DefinitionParseError> {
         let value: Value = serde_json::from_str(input).context(JsonParseSnafu)?;
         if value.get("version").and_then(Value::as_str) == Some("2026-09-24") {
@@ -68,10 +125,12 @@ pub enum WorkflowDefinitionVersion {
     V2026_09_26,
     #[serde(rename = "2026-09-29")]
     V2026_09_29,
+    #[serde(rename = "2026-10-02")]
+    V2026_10_02,
 }
 
 impl WorkflowDefinitionVersion {
-    pub const CURRENT: Self = Self::V2026_09_29;
+    pub const CURRENT: Self = Self::V2026_10_02;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

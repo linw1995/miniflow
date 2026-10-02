@@ -39,6 +39,7 @@ fn definition(count: usize, payload: usize) -> WorkflowDefinition {
     }
     WorkflowDefinition {
         version: WorkflowDefinitionVersion::CURRENT,
+        execution: None,
         dependencies: BTreeMap::new(),
         nodes,
         edges,

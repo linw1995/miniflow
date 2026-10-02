@@ -27,7 +27,7 @@ impl From<usize> for NodeId {
     }
 }
 
-pub struct FlowNode<N = crate::NodeExecution> {
+pub struct FlowNode<N = Option<crate::NodeExecution>> {
     /// The definition-facing node ID, retained for diagnostics.
     pub definition_id: DefinitionId,
     pub node: N,
@@ -41,13 +41,13 @@ impl FlowNode {
         Self {
             definition_id: definition_id.into(),
             metadata: prepared.metadata,
-            node: prepared.execution,
+            node: Some(prepared.execution),
         }
     }
 
     pub fn into_task(self) -> Result<TaskFlowNode, FlowBuildError> {
         match self.node {
-            crate::NodeExecution::Task(task) => Ok(FlowNode {
+            Some(crate::NodeExecution::Task(task)) => Ok(FlowNode {
                 definition_id: self.definition_id,
                 metadata: self.metadata,
                 node: task,
@@ -203,7 +203,7 @@ impl PreparedDependency {
     }
 }
 
-impl Flow<crate::NodeExecution> {
+impl Flow<Option<crate::NodeExecution>> {
     pub fn into_tasks(self) -> Result<Flow, FlowBuildError> {
         Ok(Flow {
             nodes: self
@@ -217,6 +217,47 @@ impl Flow<crate::NodeExecution> {
             outputs: self.outputs,
             controls: self.controls,
         })
+    }
+
+    pub fn into_stream(
+        self,
+        execution: crate::StreamExecution,
+    ) -> Result<crate::PreparedStream, crate::StreamBuildError> {
+        let outputs = self
+            .outputs
+            .iter()
+            .map(|output| WorkflowOutputDefinition {
+                name: output.name.clone(),
+                node: self.nodes[output.node_id.index()].definition_id.clone(),
+                port: output.port.clone(),
+                optional: output.optional,
+            })
+            .collect();
+        let mut nodes: Vec<_> = self.nodes.into_iter().map(Some).collect();
+        let ordered = self
+            .execution_order
+            .into_iter()
+            .map(|id| {
+                nodes[id.index()]
+                    .take()
+                    .expect("validated unique execution order")
+            })
+            .collect();
+        let dependencies = self
+            .dependencies
+            .into_iter()
+            .map(|dependencies| {
+                dependencies
+                    .into_iter()
+                    .map(|dependency| crate::StreamDependency {
+                        input: dependency.input,
+                        source_node: dependency.source_node,
+                        source_output: dependency.source_output,
+                    })
+                    .collect()
+            })
+            .collect();
+        crate::PreparedStream::new(execution, ordered, dependencies, outputs)
     }
 }
 

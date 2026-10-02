@@ -1,5 +1,81 @@
-use crate::{ExecutionContext, Inputs, NodeExecutionError, NodeResult};
+use crate::{ExecutionContext, Inputs, NodeExecutionError, NodeResult, ValueType};
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
+
+pub const STREAM_INPUT_ID: &str = "%input";
+pub const MESSAGE_OVERHEAD: usize = 64;
+
+pub fn stream_input_node(value_type: ValueType) -> crate::FlowNode {
+    crate::FlowNode {
+        definition_id: STREAM_INPUT_ID.into(),
+        node: None,
+        metadata: crate::NodePorts {
+            inputs: Vec::new(),
+            outputs: vec![crate::PortSpec::new("item", value_type, true)],
+        }
+        .into(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamMode {
+    Stream,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamExecution {
+    pub mode: StreamMode,
+    pub input_type: ValueType,
+    #[serde(default)]
+    pub limits: StreamLimits,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StreamLimits {
+    pub max_pending_messages: usize,
+    pub max_buffered_bytes: usize,
+    pub max_message_bytes: usize,
+    pub workers: usize,
+}
+
+impl Default for StreamLimits {
+    fn default() -> Self {
+        Self {
+            max_pending_messages: 64,
+            max_buffered_bytes: 64 * 1024 * 1024,
+            max_message_bytes: 1024 * 1024,
+            workers: 4,
+        }
+    }
+}
+
+impl StreamLimits {
+    pub fn validate(&self) -> Result<(), String> {
+        if [
+            self.max_pending_messages,
+            self.max_buffered_bytes,
+            self.max_message_bytes,
+            self.workers,
+        ]
+        .contains(&0)
+        {
+            return Err("stream limits must be positive".into());
+        }
+        if self
+            .max_message_bytes
+            .checked_add(MESSAGE_OVERHEAD)
+            .is_none_or(|minimum| self.max_buffered_bytes < minimum)
+        {
+            return Err(format!(
+                "max_buffered_bytes must accommodate max_message_bytes and {MESSAGE_OVERHEAD} bytes of envelope overhead"
+            ));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 pub enum NodeEvent {

@@ -161,3 +161,37 @@ are reported through `retained_bytes`. Event state requires `Send`; mutable acce
 `Flow::new` rejects event nodes during synchronous preparation. Direct callers of task execution
 helpers convert a prepared `FlowNode` with `into_task()` first. Generated synchronous bodies perform
 that conversion before capturing their task executors.
+
+## In-memory streaming instances
+
+Schema `2026-10-02` accepts `execution: {"mode": "stream", "input_type": "int"}`. An absent
+`execution` field retains single-run behavior. Each root node needs an explicit data or control path
+from the engine's `%input.item` source. Task edges preserve message identity; event emissions start a
+new message domain. Cross-domain joins and context reads are rejected during preparation.
+
+Use `mf_compiler::instantiate_stream` to prepare an instance and inspect its immutable graph through
+`plan()`. Consume the prepared instance with `start` or `start_with_options`. Each preparation creates
+independent plugin state. The coordinator serializes events; ordinary tasks run on bounded workers.
+
+`instance.input()` returns a cloneable sender. `send` waits for admission capacity and completes once
+the input is accepted. Consume `instance.recv()` concurrently with production, close input when done,
+and call `join` after draining outputs. `try_send` borrows a value and reports capacity pressure without
+accepting it. `receive` returns a delivery that must be acknowledged or failed by an external sink.
+
+Every message has fresh context bindings and a step budget. Frames execute in FIFO order within each
+domain, while different domains can progress independently. Close propagates after admitted work and
+emissions; success waits for output delivery. Cancellation discards pending work and retained values,
+then waits for synchronous calls already running. Tasks can inspect `ExecutionContext::is_cancelled()`.
+
+Limits default to 64 pending messages, 64 MiB of retained logical values, a 1 MiB payload limit, and four
+workers. Positive overrides live in `execution.limits`. Preparation reserves capacity for timer,
+closure, and downstream progress. Oversized payloads and impossible frame budgets fail explicitly.
+Event nodes must report retained logical values through `retained_bytes`. These bounds do not measure
+process RSS or arbitrary allocations inside plugins.
+
+A custom `StreamClock` must advance monotonically and wake registered instances. Deadline expiry
+makes an emission ready; downstream execution remains subject to capacity. Snapshot capture is rejected
+before startup. Standalone generation and stream-specific description and observation are currently
+unsupported; the streaming API is available in memory.
+
+Run the producer/consumer example with `cargo run -p mf-compiler --example stream` inside `nix develop`.

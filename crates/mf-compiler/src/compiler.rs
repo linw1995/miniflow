@@ -45,6 +45,8 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
+    #[snafu(display("invalid streaming workflow: {message}"))]
+    InvalidStream { message: String },
     #[snafu(display("node at position {position} has a blank definition ID"))]
     InvalidNodeId { position: usize },
     #[snafu(display("node definition ID `{definition_id}` is used more than once"))]
@@ -292,11 +294,18 @@ impl TypeInferenceState {
                             .clone(),
                         exact: None,
                     }),
+
                 None => TypeFact {
                     value_type: declared.clone(),
                     exact: None,
                 },
             };
+            fact.value_type.check_depth().map_err(|error| {
+                WorkflowCompileError::InvalidNodeMetadata {
+                    definition_id: id.clone(),
+                    message: format!("output `{}`: {error}", output.name),
+                }
+            })?;
             if let Some(value) = &fact.exact {
                 declared.validate_shared(value).map_err(|error| {
                     WorkflowCompileError::InvalidNodeMetadata {
@@ -330,15 +339,16 @@ pub fn validate_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<(), WorkflowCompileError> {
-    prepare_definition(definition, registry).map(|_| ())
+    compile_definition(definition, registry).map(|_| ())
 }
 
-fn prepare_definition(
+pub fn prepare_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    prepare_graph(definition, registry, None, false)
+    let expanded = crate::streaming::expanded_definition(definition)?;
+    prepare_graph(&expanded, registry, None, false)
 }
 
 fn prepare_graph(
@@ -352,6 +362,18 @@ fn prepare_graph(
     }
     let order = structural_order_graph(definition)?;
     let mut nodes = resolve_nodes_in_scope(definition, registry, enclosing, allow_iteration_input)?;
+    if definition.execution.is_none()
+        && let Some(node) = nodes
+            .iter()
+            .find(|node| matches!(&node.node, Some(mf_runtime::NodeExecution::Event(_))))
+    {
+        return Err(WorkflowCompileError::InvalidStream {
+            message: format!(
+                "node `{}` requires streaming execution and is not supported in a synchronous scope",
+                node.definition_id
+            ),
+        });
+    }
     let incoming = incoming_dependencies(definition);
     validate_base_metadata(definition, &nodes, &incoming)?;
 
@@ -553,7 +575,7 @@ pub fn topological_order(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<Vec<DefinitionId>, WorkflowCompileError> {
-    prepare_definition(definition, registry).map(|(_, order)| order)
+    compile_definition(definition, registry).map(|plan| plan.execution_order)
 }
 
 fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCompileError> {
@@ -655,7 +677,12 @@ pub fn structural_order(
     definition: &WorkflowDefinition,
 ) -> Result<Vec<DefinitionId>, WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    structural_order_graph(definition)
+    let expanded = crate::streaming::expanded_definition(definition)?;
+    let mut order = structural_order_graph(&expanded)?;
+    if definition.execution.is_some() {
+        order.retain(|id| id.as_str() != mf_runtime::STREAM_INPUT_ID);
+    }
+    Ok(order)
 }
 
 pub fn structural_order_graph(
@@ -749,8 +776,8 @@ pub fn compile_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
-    let (nodes, execution_order) = prepare_definition(definition, registry)?;
-    Flow::new(
+    let (nodes, mut execution_order) = prepare_definition(definition, registry)?;
+    let flow = Flow::prepare(
         nodes,
         definition.edges.clone(),
         execution_order.clone(),
@@ -758,6 +785,17 @@ pub fn compile_definition(
     )
     .and_then(|flow| flow.with_control_edges(definition.control_edges.clone()))
     .context(FlowConstructionSnafu)?;
+
+    if let Some(execution) = &definition.execution {
+        flow.into_stream(execution.clone()).map_err(|error| {
+            WorkflowCompileError::InvalidStream {
+                message: error.to_string(),
+            }
+        })?;
+        execution_order.retain(|id| id.as_str() != mf_runtime::STREAM_INPUT_ID);
+    } else {
+        flow.into_tasks().context(FlowConstructionSnafu)?;
+    }
 
     normalize_plan(definition, execution_order)
 }
@@ -827,6 +865,7 @@ pub fn normalize_plan(
     Ok(CompiledWorkflow {
         definition: WorkflowDefinition {
             version: definition.version,
+            execution: definition.execution.clone(),
             dependencies: definition.dependencies.clone(),
             nodes,
             edges,
@@ -859,6 +898,11 @@ pub fn instantiate_compiled(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<Flow, WorkflowCompileError> {
+    if plan.definition.execution.is_some() {
+        return Err(WorkflowCompileError::InvalidStream {
+            message: "use instantiate_stream for streaming workflows".into(),
+        });
+    }
     let (nodes, canonical_order) = prepare_definition(&plan.definition, registry)?;
     if plan.execution_order != canonical_order {
         return NonCanonicalPlanOrderSnafu.fail();
@@ -894,6 +938,13 @@ pub enum DescriptionError {
 }
 
 pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription, DescriptionError> {
+    if plan.definition.execution.is_some() {
+        return Err(DescriptionError::Contract {
+            source: ContractError::Invalid {
+                message: "streaming descriptions are not supported".into(),
+            },
+        });
+    }
     let definitions: BTreeMap<_, _> = plan
         .definition
         .nodes
@@ -930,7 +981,8 @@ pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription,
             mf_runtime::WorkflowDefinitionVersion::V2026_09_26 => {
                 WorkflowDescriptionVersion::V2026_09_27
             }
-            mf_runtime::WorkflowDefinitionVersion::V2026_09_29 => {
+            mf_runtime::WorkflowDefinitionVersion::V2026_09_29
+            | mf_runtime::WorkflowDefinitionVersion::V2026_10_02 => {
                 WorkflowDescriptionVersion::V2026_09_29
             }
         },
@@ -1044,7 +1096,8 @@ pub fn resolve_nodes(
     registry: &NodeRegistry,
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    resolve_nodes_in_scope(definition, registry, None, false)
+    let expanded = crate::streaming::expanded_definition(definition)?;
+    resolve_nodes_in_scope(&expanded, registry, None, false)
 }
 
 fn registration_for(
@@ -1137,6 +1190,14 @@ fn resolve_nodes_in_scope(
         .nodes
         .iter()
         .map(|node| {
+            if node.kind == mf_runtime::STREAM_INPUT_ID {
+                if let Some(execution) = &definition.execution {
+                    return Ok(mf_runtime::stream_input_node(execution.input_type.clone()));
+                }
+                return Err(WorkflowCompileError::InvalidStream {
+                    message: "%input is only available in a streaming root graph".into(),
+                });
+            }
             match node.kind.as_str() {
                 crate::LOOP_KIND => {
                     let loop_definition = node.loop_definition.as_deref().expect("validated Loop");

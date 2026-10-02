@@ -116,7 +116,7 @@ fn parse(value: Value) -> WorkflowDefinition {
 #[test]
 fn plans_and_type_checks_nested_loop_body() {
     let definition = parse(definition());
-    assert_eq!(definition.version, WorkflowDefinitionVersion::CURRENT);
+    assert_eq!(definition.version, WorkflowDefinitionVersion::V2026_09_29);
     let plan = plan_definition(&definition).unwrap();
     let body = &plan.definition.nodes[1]
         .loop_definition

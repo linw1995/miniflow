@@ -126,6 +126,11 @@ impl IterationNode {
         observation: Option<IterationObservation>,
         parent: &ExecutionContext,
     ) -> Result<Outputs, NodeExecutionError> {
+        if parent.is_cancelled() {
+            return Err(NodeExecutionError::ExecutionFailed {
+                message: "iteration cancelled".into(),
+            });
+        }
         let items = inputs.remove("items");
         let Some(items) = items.as_ref().and_then(mf_runtime::ValueRef::as_array) else {
             return Err(NodeExecutionError::ExecutionFailed {
@@ -136,6 +141,9 @@ impl IterationNode {
         match self.mode {
             IterationMode::Sequential => {
                 for (index, item) in items.iter().cloned().enumerate() {
+                    if parent.is_cancelled() {
+                        break;
+                    }
                     results.push(self.run_item(item, index, observation.as_ref(), parent));
                     if matches!(self.on_error, IterationErrorPolicy::Terminate)
                         && results.last().is_some_and(Result::is_err)
@@ -160,7 +168,8 @@ impl IterationNode {
                                 loop {
                                     let next = {
                                         let mut queue = queue.lock().unwrap();
-                                        if stopped.load(Ordering::Acquire) {
+                                        if stopped.load(Ordering::Acquire) || parent.is_cancelled()
+                                        {
                                             None
                                         } else {
                                             queue.pop_front()
@@ -190,6 +199,11 @@ impl IterationNode {
                 completed.sort_by_key(|(index, _)| *index);
                 results.extend(completed.into_iter().map(|(_, result)| result));
             }
+        }
+        if parent.is_cancelled() {
+            return Err(NodeExecutionError::ExecutionFailed {
+                message: "iteration cancelled".into(),
+            });
         }
         let mut values = Vec::with_capacity(results.len());
         for result in results {

@@ -5,6 +5,11 @@ use snafu::{ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowRunError {
+    #[snafu(display("node `{definition_id}` resource limit: {message}"))]
+    Resource {
+        definition_id: DefinitionId,
+        message: String,
+    },
     #[snafu(display("node `{definition_id}`: {message}"))]
     Context {
         definition_id: DefinitionId,

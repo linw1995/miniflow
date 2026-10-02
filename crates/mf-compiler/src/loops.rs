@@ -49,6 +49,7 @@ pub fn body_definition(
     nodes.extend(body.nodes.iter().cloned());
     WorkflowDefinition {
         version: WorkflowDefinitionVersion::V2026_09_29,
+        execution: None,
         dependencies: dependencies.clone(),
         nodes,
         edges: body.edges.clone(),
