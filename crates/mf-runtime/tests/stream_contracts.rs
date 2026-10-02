@@ -5,7 +5,7 @@ use serde_json::json;
 fn streaming_schema_validates_versions_types_and_limits() {
     let original = json!({"version":"2026-10-02", "dependencies":{}, "nodes":[],
         "execution":{"mode":"stream", "input_type":{"list":"int"}}});
-    let definition: WorkflowDefinition = serde_json::from_value(original.clone()).unwrap();
+    let definition = WorkflowDefinition::from_json(&original.to_string()).unwrap();
     let execution = definition.execution.as_ref().unwrap();
     assert_eq!(
         execution.input_type,
@@ -26,14 +26,14 @@ fn streaming_schema_validates_versions_types_and_limits() {
         ] {
             let mut value = original.clone();
             value["execution"]["limits"] = json!({field: invalid});
-            assert!(serde_json::from_value::<WorkflowDefinition>(value).is_err());
+            assert!(WorkflowDefinition::from_json(&value.to_string()).is_err());
         }
     }
     for version in ["2026-09-26", "2026-09-29"] {
         let mut value = original.clone();
         value["version"] = json!(version);
         assert!(
-            serde_json::from_value::<WorkflowDefinition>(value.clone())
+            WorkflowDefinition::from_json(&value.to_string())
                 .unwrap_err()
                 .to_string()
                 .contains("2026-10-02")
@@ -48,6 +48,7 @@ fn streaming_schema_validates_versions_types_and_limits() {
         );
     }
     for execution in [
+        json!(null),
         json!({"mode":"stream"}),
         json!({"mode":"unknown", "input_type":"int"}),
         json!({"mode":"stream", "input_type":"invalid"}),
@@ -57,6 +58,6 @@ fn streaming_schema_validates_versions_types_and_limits() {
     ] {
         let mut value = original.clone();
         value["execution"] = execution;
-        assert!(serde_json::from_value::<WorkflowDefinition>(value).is_err());
+        assert!(WorkflowDefinition::from_json(&value.to_string()).is_err());
     }
 }

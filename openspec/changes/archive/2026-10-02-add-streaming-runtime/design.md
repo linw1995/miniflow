@@ -2,6 +2,10 @@
 
 ## Ownership and message domains
 
+`WorkflowDefinition` is the single definition model. Its JSON entry point and the compiled-plan JSON
+entry point validate execution settings after parsing. Compilation repeats this validation for
+definitions constructed or deserialized directly by callers.
+
 Schema `2026-10-02` opts into streaming through `execution`. The engine supplies `%input.item` and
 requires an explicit activation path for every root node. Ordinary tasks preserve message identity;
 event emissions start a new domain. Dependencies, context references, and selected outputs must respect

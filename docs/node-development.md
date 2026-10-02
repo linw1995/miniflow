@@ -168,6 +168,10 @@ that conversion before capturing their task executors.
 
 ## In-memory streaming instances
 
+`WorkflowDefinition::from_json` and `CompiledWorkflow::from_json` validate execution settings after
+parsing. Direct Serde deserialization checks the document shape; compilation validates execution
+settings for definitions constructed or deserialized by the host.
+
 Schema `2026-10-02` accepts `execution: {"mode": "stream", "input_type": "int"}`. An absent
 `execution` field retains single-run behavior. Each root node needs an explicit data or control path
 from the engine's `%input.item` source. Task edges preserve message identity; event emissions start a
