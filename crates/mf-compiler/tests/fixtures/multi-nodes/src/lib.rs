@@ -82,4 +82,5 @@ inventory::submit! {
 }
 
 mod context_fixture;
+mod stream_fixture;
 mod typed_fixture;

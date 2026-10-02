@@ -45,6 +45,10 @@ impl Default for DescriptionLimits {
 
 #[derive(Debug, Snafu)]
 pub enum DescriptionError {
+    #[snafu(display(
+        "streaming workflows require JSON Lines input; run the standalone executable with piped input instead of --tui"
+    ))]
+    UnsupportedStream,
     #[snafu(display("could not start workflow description from {path:?}: {source}"))]
     Spawn { path: PathBuf, source: io::Error },
     #[snafu(display("could not read workflow description: {source}"))]
@@ -180,7 +184,12 @@ pub fn describe_executable_with_limits(
     let json = bytes
         .strip_suffix(b"\n")
         .ok_or(DescriptionError::MissingTerminator)?;
-    WorkflowDescription::from_json(json).map_err(|source| DescriptionError::Invalid { source })
+    let description = WorkflowDescription::from_json(json)
+        .map_err(|source| DescriptionError::Invalid { source })?;
+    if description.version.is_streaming() {
+        return Err(DescriptionError::UnsupportedStream);
+    }
+    Ok(description)
 }
 
 enum ReadResult {

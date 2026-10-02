@@ -135,9 +135,7 @@ impl CompiledWorkflow {
     #[cfg(feature = "codegen")]
     pub fn generate_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
         if self.definition.execution.is_some() {
-            return Err(PlanError::Stream {
-                message: "standalone streaming runners are not supported".into(),
-            });
+            return generate_stream_artifacts(self);
         }
         if self.execution_order.len() != self.definition.nodes.len() {
             return InvalidExecutionOrderSnafu.fail();
@@ -252,6 +250,57 @@ impl CompiledWorkflow {
 }
 
 #[cfg(feature = "codegen")]
+fn generate_stream_artifacts(
+    plan: &CompiledWorkflow,
+) -> Result<GeneratedWorkflowArtifacts, PlanError> {
+    let invalid = |error: crate::WorkflowCompileError| PlanError::Stream {
+        message: error.to_string(),
+    };
+    if crate::structural_order(&plan.definition).map_err(invalid)? != plan.execution_order {
+        return InvalidExecutionOrderSnafu.fail();
+    }
+    let definition = crate::streaming::expanded_definition(&plan.definition).map_err(invalid)?;
+    let mut order = vec![mf_runtime::STREAM_INPUT_ID.into()];
+    order.extend(plan.execution_order.iter().cloned());
+    let (preparations, _) = generate_scope(&definition, &order, "stream", &[], None, None)?;
+    let nodes = (0..order.len()).map(|index| format_ident!("node_stream_{index}"));
+    let bindings = (0..order.len()).map(|index| {
+        let name = format_ident!("DEPENDENCIES_STREAM_{index}");
+        quote! { #name.iter().map(|dependency| mf_runtime::StreamDependency {
+            input: dependency.input.map(str::to_owned),
+            source_node: dependency.source_node.to_owned(),
+            source_output: dependency.source_output.to_owned(),
+        }).collect() }
+    });
+    let outputs = definition.outputs.iter().map(|output| {
+        let name = LitStr::new(&output.name, Span::call_site());
+        let node = LitStr::new(output.node.as_str(), Span::call_site());
+        let port = LitStr::new(&output.port, Span::call_site());
+        let optional = output.optional;
+        quote! { mf_runtime::WorkflowOutputDefinition { name: #name.into(), node: #node.into(), port: #port.into(), optional: #optional } }
+    });
+    let execution = LitStr::new(
+        &serde_json::to_string(definition.execution.as_ref().unwrap()).context(SerializeSnafu)?,
+        Span::call_site(),
+    );
+    let generated = quote! {
+        pub fn prepare_stream(registry: &mf_runtime::NodeRegistry) -> Result<mf_runtime::PreparedStream, Box<dyn std::error::Error>> {
+            let mut preparation = mf_runtime::ExecutionContext::default();
+            let state = &mut preparation;
+            #(#preparations)*
+            Ok(mf_runtime::PreparedStream::new(
+                serde_json::from_str(#execution)?, vec![#(#nodes),*], vec![#(#bindings),*], vec![#(#outputs),*],
+            )?)
+        }
+    };
+    let syntax: syn::File = syn::parse2(generated).context(GeneratedSyntaxSnafu)?;
+    Ok(GeneratedWorkflowArtifacts {
+        rust_source: prettyplease::unparse(&syntax),
+        plan_json: plan.to_json()?,
+    })
+}
+
+#[cfg(feature = "codegen")]
 fn generate_scope(
     definition: &WorkflowDefinition,
     order: &[DefinitionId],
@@ -329,6 +378,20 @@ fn generate_scope(
             }
         });
         let constructor = match node.kind.as_str() {
+            mf_runtime::STREAM_INPUT_ID => {
+                let execution = definition
+                    .execution
+                    .as_ref()
+                    .ok_or_else(|| PlanError::Stream {
+                        message: "input source is outside a stream root".into(),
+                    })?;
+                let input_type = LitStr::new(
+                    &serde_json::to_string(&execution.input_type).context(SerializeSnafu)?,
+                    Span::call_site(),
+                );
+                quote! { mf_runtime::stream_input_node(serde_json::from_str(#input_type)
+                .map_err(|source| mf_runtime::WorkflowRunError::InvalidEmbeddedConfig { definition_id: #id_lit.into(), source })?) }
+            }
             crate::LOOP_ASSIGN_KIND => {
                 let target = crate::loops::assignment_target(&node.config).map_err(|message| {
                     PlanError::InvalidLoopConfig {
@@ -382,12 +445,17 @@ fn generate_scope(
                 }
             }
         };
+        let task = definition.execution.is_none().then(|| {
+            quote! {
+                let #node_ident = #node_ident.into_task().map_err(|error| { #preparation_error })?;
+            }
+        });
         preparations.push(quote! {
             let mut #node_ident = #constructor;
             #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*]).map_err(|error| {
                 #preparation_error
             })?;
-            let #node_ident = #node_ident.into_task().map_err(|error| { #preparation_error })?;
+            #task
         });
         let exit_check = enclosing.map(|_| {
             quote! {
@@ -542,6 +610,16 @@ fn subgraph_preparation(
     } else {
         quote! { state.preparation_failed_in_loop(&[#(#scopes),*], #outer_id, &error); }
     };
+    let task = parent.execution.is_none().then(|| {
+        quote! {
+            let #node_ident = #node_ident.into_task().map_err(|error| {
+                #report
+                mf_runtime::WorkflowRunError::Context {
+                    definition_id: #outer_id.into(), message: error.to_string(),
+                }
+            })?;
+        }
+    });
     Ok(quote! {
         #(#preparations)*
         let #body_ident = mf_runtime::PreparedSubgraph::new(
@@ -562,12 +640,7 @@ fn subgraph_preparation(
                     definition_id: #outer_id.into(), message: error.to_string(),
                 }
             })?;
-        let #node_ident = #node_ident.into_task().map_err(|error| {
-            #report
-            mf_runtime::WorkflowRunError::Context {
-                definition_id: #outer_id.into(), message: error.to_string(),
-            }
-        })?;
+        #task
     })
 }
 

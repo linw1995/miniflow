@@ -10,6 +10,7 @@ mod runner;
 mod snapshot;
 mod stream;
 mod stream_instance;
+mod stream_io;
 mod stream_limits;
 mod stream_plan;
 mod subgraph;
@@ -60,6 +61,7 @@ pub use stream_instance::{
     MessageId, MonotonicClock, StreamClock, StreamDelivery, StreamError, StreamInstance,
     StreamMetrics, StreamOptions, StreamOutput, StreamSender, StreamSummary,
 };
+pub use stream_io::StreamStdio;
 pub use stream_limits::encoded_size;
 pub use stream_plan::{
     PreparedStream, StreamBuildError, StreamDependency, StreamDomain, StreamPlan,

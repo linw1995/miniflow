@@ -191,8 +191,8 @@ process RSS or arbitrary allocations inside plugins.
 
 A custom `StreamClock` must advance monotonically and wake registered instances. Deadline expiry
 makes an emission ready; downstream execution remains subject to capacity. Snapshot capture is rejected
-before startup. Standalone generation and stream-specific description and observation are currently
-unsupported; the streaming API is available in memory.
+before startup. Streaming definitions also compile to standalone JSON Lines runners; stream-specific
+observation is currently unsupported. See [streaming runners](compiling.md#streaming-runners).
 
 Run the producer/consumer example with `cargo run -p mf-compiler --example stream` inside `nix develop`.
 

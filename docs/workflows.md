@@ -328,8 +328,8 @@ respect the same domain boundary. Event nodes are rejected in single-run graphs 
 
 The host submits one value per message, consumes outputs independently, and explicitly closes input.
 An array remains one input value. See [the instance API](node-development.md#in-memory-streaming-instances)
-for admission, backpressure, drain, and cancellation. Standalone runner generation does not yet support
-streaming definitions.
+for admission, backpressure, drain, and cancellation. Compile streaming definitions as standalone
+JSON Lines runners using the [runner instructions](compiling.md#streaming-runners).
 
 ### Batch collection
 
@@ -346,5 +346,6 @@ Downstream nodes receive one invocation per emitted batch. Input and batch value
 message domains. The aggregate output remains subject to the runtime payload limit; choose count and
 byte limits together. Cancellation or failure discards a partial buffer without flushing or retrying.
 
-Batch runs through the in-memory streaming API and is rejected inside synchronous Loop/Iteration
-bodies. Its state is independent for every workflow instance.
+Batch runs through the in-memory API and standalone runners, and is rejected inside synchronous
+Loop/Iteration bodies. Its state is independent for every workflow instance.
+The [streaming Batch example](../examples/stream-batch.json) demonstrates the standalone input and output contract.

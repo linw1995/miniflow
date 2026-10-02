@@ -12,26 +12,7 @@ impl StreamClock for FixedClock {
 }
 
 fn definition() -> WorkflowDefinition {
-    serde_json::from_value(json!({
-  "version": "2026-10-02",
-  "execution": { "mode": "stream", "input_type": "int" },
-  "dependencies": {
-    "core": { "package": "mfn-core", "path": "../crates/builtin-nodes/core" }
-  },
-  "nodes": [
-    {
-      "id": "collect",
-      "kind": "builtin.batch",
-      "config": { "max_items": 3, "max_wait_ms": 250 }
-    },
-    { "id": "consume", "kind": "builtin.identity" }
-  ],
-  "edges": [
-    { "from_node": "%input", "from_output": "item", "to_node": "collect", "to_input": "item" },
-    { "from_node": "collect", "from_output": "items", "to_node": "consume", "to_input": "input" }
-  ],
-  "outputs": [{ "name": "batch", "node": "consume", "port": "value" }]
-})).unwrap()
+    WorkflowDefinition::from_json(include_str!("../../../examples/stream-batch.json")).unwrap()
 }
 
 #[test]

@@ -62,18 +62,37 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if args.len() == 1 && args[0] == "--validate" {
         let registry = mf_runtime::NodeRegistry::from_inventory()?;
         let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
-        mf_compiler::instantiate_compiled(&plan, &registry)?;
+        if plan.definition.execution.is_some() {
+            mf_compiler::instantiate_stream(&plan, &registry)?;
+        } else {
+            mf_compiler::instantiate_compiled(&plan, &registry)?;
+        }
         return Ok(());
     }
     if !args.is_empty() {
         return Err("usage: workflow [--validate|--describe]".into());
     }
-    let outputs = execute()?;
-    println!("{}", serde_json::to_string(&outputs)?);
+    #[cfg(feature = "streaming")]
+    { execute_stream() }
+    #[cfg(not(feature = "streaming"))]
+    {
+        let outputs = execute()?;
+        println!("{}", serde_json::to_string(&outputs)?);
+        Ok(())
+    }
+}
+
+#[cfg(feature = "streaming")]
+fn execute_stream() -> Result<(), Box<dyn std::error::Error>> {
+    if capture_requested() { return Err("snapshot capture is unsupported for streaming instances".into()); }
+    let stdio = mf_runtime::StreamStdio::claim()?;
+    let registry = mf_runtime::NodeRegistry::from_inventory()?;
+    let prepared = workflow::prepare_stream(&registry)?;
+    stdio.run(prepared.start()?)?;
     Ok(())
 }
 
-#[cfg(feature = "telemetry")]
+#[cfg(all(feature = "telemetry", not(feature = "streaming")))]
 fn run_id() -> mf_telemetry::identity::RunId {
     match std::env::var("MF_RUN_ID") {
         Ok(value) => match mf_telemetry::identity::RunId::try_from(value) {
@@ -95,7 +114,7 @@ fn capture_requested() -> bool {
     std::env::var(mf_telemetry::SNAPSHOT_CAPTURE_ENV).is_ok_and(|value| value == "1")
 }
 
-#[cfg(not(feature = "telemetry"))]
+#[cfg(all(not(feature = "telemetry"), not(feature = "streaming")))]
 fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     if capture_requested() {
         eprintln!("data history unavailable: recompile the runner without --no-telemetry");
@@ -103,7 +122,7 @@ fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     execute_workflow(None, None)
 }
 
-#[cfg(feature = "telemetry")]
+#[cfg(all(feature = "telemetry", not(feature = "streaming")))]
 fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
@@ -134,7 +153,7 @@ fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     result
 }
 
-#[cfg(feature = "telemetry")]
+#[cfg(all(feature = "telemetry", not(feature = "streaming")))]
 fn snapshot_recorder(plan: &mf_compiler::CompiledWorkflow, run_id: mf_telemetry::identity::RunId) -> Result<mf_runtime::SnapshotRecorder, String> {
     let description = mf_compiler::describe_compiled(plan).map_err(|error| error.to_string())?;
     let mut exporter = mf_telemetry::otlp::SnapshotExporter::from_env(description.workflow_id, run_id)?;
@@ -145,6 +164,7 @@ fn snapshot_recorder(plan: &mf_compiler::CompiledWorkflow, run_id: mf_telemetry:
     })
 }
 
+#[cfg(not(feature = "streaming"))]
 fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: Option<mf_runtime::SnapshotRecorder>) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     let result = mf_runtime::ExecutionContext::run(observation, |state| -> Result<_, Box<dyn std::error::Error>> {
         if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.clone()); }
@@ -191,13 +211,16 @@ pub fn write_dependency_project_with_options(
 ) -> Result<(), DependencyProjectError> {
     let artifacts = plan.generate_artifacts().context(PlanSnafu)?;
     let definition = &plan.definition;
-    let default_features = if options.telemetry {
-        "\"telemetry\""
-    } else {
-        ""
-    };
+    let mut features = Vec::new();
+    if options.telemetry {
+        features.push("\"telemetry\"");
+    }
+    if definition.execution.is_some() {
+        features.push("\"streaming\"");
+    }
+    let default_features = features.join(", ");
     let mut manifest = format!(
-        "[package]\nname = \"mf-generated-workflow\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[features]\ndefault = [{default_features}]\ntelemetry = [\"mf-telemetry/otlp\"]\n\n[dependencies]\nserde_json = \"1.0.151\"\n"
+        "[package]\nname = \"mf-generated-workflow\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[features]\ndefault = [{default_features}]\ntelemetry = [\"mf-telemetry/otlp\"]\nstreaming = []\n\n[dependencies]\nserde_json = \"1.0.151\"\n"
     );
     for package in ["mf-runtime", "mf-compiler", "mf-telemetry"] {
         let source = match support {

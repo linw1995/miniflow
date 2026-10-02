@@ -10,10 +10,17 @@ pub enum WorkflowDescriptionVersion {
     V2026_09_27,
     #[serde(rename = "2026-09-29")]
     V2026_09_29,
+    #[serde(rename = "2026-10-02")]
+    V2026_10_02,
 }
 
 impl WorkflowDescriptionVersion {
+    /// Default protocol for finite workflow observations.
     pub const CURRENT: Self = Self::V2026_09_29;
+
+    pub fn is_streaming(self) -> bool {
+        self == Self::V2026_10_02
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -103,7 +110,21 @@ impl WorkflowDescription {
     }
 
     pub fn validate(&self) -> Result<(), ContractError> {
-        crate::maximum_event_count(self.node_count()?)?;
+        if self.version.is_streaming() {
+            self.node_count()?;
+            require(
+                self.execution_order
+                    .first()
+                    .is_some_and(|id| id == "%input")
+                    && self
+                        .nodes
+                        .iter()
+                        .any(|node| node.id == "%input" && node.kind == "%input"),
+                "stream description omits its input source",
+            )?;
+        } else {
+            crate::maximum_event_count(self.node_count()?)?;
+        }
         if self.version == WorkflowDescriptionVersion::V2026_09_27 {
             require(
                 self.loop_bodies.is_empty(),
