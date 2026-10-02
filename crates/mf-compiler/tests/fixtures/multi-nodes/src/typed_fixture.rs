@@ -1,30 +1,38 @@
 use mf_runtime::{
-    Inputs, Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration,
-    OutputDerivation, Outputs, PortSpec, ValueType, deserialize_config,
+    Inputs, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, OutputDerivation,
+    Outputs, PortSpec, TaskNode, ValueType, deserialize_config,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 struct IntegerSource;
 
-impl Node for IntegerSource {
-    fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::from([("value".into(), json!(7).into())]))
+impl TaskNode for IntegerSource {
+    fn execute(
+        &self,
+        _inputs: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
+        Ok((Outputs::from([("value".into(), json!(7).into())])).into())
     }
 }
 
-fn integer_source(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+fn integer_source(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let _: serde_json::Map<String, Value> = deserialize_config(config)?;
-    Ok(Box::new(IntegerSource))
+    let node = IntegerSource;
+    let metadata = mf_runtime::NodeMetadata {
+        ports: mf_runtime::NodePorts {
+            inputs: vec![],
+            outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
+        },
+        output_derivations: Vec::new(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "fixture.integer_source",
-        inputs: &[],
-        outputs: &[PortSpec::new("value", ValueType::Int64, true)],
-        factory: integer_source,
-    }
+    NodeRegistration { kind: "fixture.integer_source", factory: mf_runtime::NodeFactory::Plain(integer_source) }
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -77,37 +85,40 @@ struct SourceConfig {
 
 struct TypedSource(SourceConfig);
 
-impl Node for TypedSource {
-    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::from([(
-            "value".into(),
-            self.0.value.clone().into(),
-        )]))
+impl TaskNode for TypedSource {
+    fn execute(
+        &self,
+        _: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
+        Ok((Outputs::from([("value".into(), self.0.value.clone().into())])).into())
     }
-
-    fn ports(&self) -> Option<NodePorts> {
-        Some(NodePorts {
+}
+impl TypedSource {
+    fn ports(&self) -> NodePorts {
+        NodePorts {
             inputs: vec![],
             outputs: vec![PortSpec::owned(
                 "value",
                 self.0.value_type.value_type(),
                 true,
             )],
-        })
+        }
     }
 }
 
-fn typed_source(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    Ok(Box::new(TypedSource(deserialize_config(config)?)))
+fn typed_source(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    let node = TypedSource(deserialize_config(config)?);
+    let metadata = mf_runtime::NodeMetadata {
+        ports: node.ports(),
+        output_derivations: Vec::new(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "fixture.typed_source",
-        inputs: &[],
-        outputs: &[],
-        factory: typed_source,
-    }
+    NodeRegistration { kind: "fixture.typed_source", factory: mf_runtime::NodeFactory::Plain(typed_source) }
 }
 
 #[derive(Deserialize)]
@@ -119,18 +130,23 @@ struct EchoConfig {
 
 struct TypedEcho(EchoConfig);
 
-impl Node for TypedEcho {
-    fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
+impl TaskNode for TypedEcho {
+    fn execute(
+        &self,
+        inputs: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
         let value = inputs
             .get("input")
             .ok_or_else(|| NodeExecutionError::ExecutionFailed {
                 message: "missing typed fixture input".into(),
             })?;
-        Ok(Outputs::from([("value".into(), value.clone())]))
+        Ok((Outputs::from([("value".into(), value.clone())])).into())
     }
-
-    fn ports(&self) -> Option<NodePorts> {
-        Some(NodePorts {
+}
+impl TypedEcho {
+    fn ports(&self) -> NodePorts {
+        NodePorts {
             inputs: vec![PortSpec::owned(
                 "input",
                 self.0.value_type.value_type(),
@@ -141,45 +157,55 @@ impl Node for TypedEcho {
                 self.0.value_type.value_type(),
                 true,
             )],
-        })
+        }
     }
 }
 
-fn typed_echo(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    Ok(Box::new(TypedEcho(deserialize_config(config)?)))
+fn typed_echo(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    let node = TypedEcho(deserialize_config(config)?);
+    let metadata = mf_runtime::NodeMetadata {
+        ports: node.ports(),
+        output_derivations: Vec::new(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "fixture.typed_echo",
-        inputs: &[],
-        outputs: &[],
-        factory: typed_echo,
-    }
+    NodeRegistration { kind: "fixture.typed_echo", factory: mf_runtime::NodeFactory::Plain(typed_echo) }
 }
 
 struct DishonestForward;
 
-impl Node for DishonestForward {
-    fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::from([("value".into(), json!("wrong").into())]))
+impl TaskNode for DishonestForward {
+    fn execute(
+        &self,
+        _inputs: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
+        Ok((Outputs::from([("value".into(), json!("wrong").into())])).into())
     }
-
+}
+impl DishonestForward {
     fn output_derivations(&self) -> Vec<OutputDerivation> {
         vec![OutputDerivation::forward_input("value", "input")]
     }
 }
 
-fn dishonest_forward(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+fn dishonest_forward(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let _: serde_json::Map<String, Value> = deserialize_config(config)?;
-    Ok(Box::new(DishonestForward))
+    let node = DishonestForward;
+    let metadata = mf_runtime::NodeMetadata {
+        ports: mf_runtime::NodePorts {
+            inputs: vec![PortSpec::new("input", ValueType::Any, true)],
+            outputs: vec![PortSpec::new("value", ValueType::Any, true)],
+        },
+        output_derivations: node.output_derivations(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "fixture.dishonest_forward",
-        inputs: &[PortSpec::new("input", ValueType::Any, true)],
-        outputs: &[PortSpec::new("value", ValueType::Any, true)],
-        factory: dishonest_forward,
-    }
+    NodeRegistration { kind: "fixture.dishonest_forward", factory: mf_runtime::NodeFactory::Plain(dishonest_forward) }
 }

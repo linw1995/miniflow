@@ -1,7 +1,7 @@
 use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, LoopComparisonOperator, LoopConditionDefinition,
-    LoopVariableDefinition, Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration,
-    NodeResult, Outputs, PortSpec, PreparedSubgraph, ValueType, compare_json_numbers,
+    LoopVariableDefinition, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration,
+    NodeResult, Outputs, PortSpec, PreparedSubgraph, TaskNode, ValueType, compare_json_numbers,
     deserialize_config, loop_variable_types,
 };
 use mf_telemetry::{
@@ -18,60 +18,42 @@ pub const KIND: &str = mf_runtime::LOOP_KIND;
 #[serde(deny_unknown_fields)]
 struct Config {}
 
-struct LoopDeclaration;
-
-impl Node for LoopDeclaration {
-    fn with_subgraph(
-        self: Box<Self>,
-        id: &str,
-        options: Value,
-        body: PreparedSubgraph,
-    ) -> Result<Box<dyn Node>, NodeBuildError> {
-        let config: ExecutionConfig = deserialize_config(options)?;
-        if !(1..=mf_runtime::MAX_LOOP_ITERATIONS).contains(&config.max_iterations) {
-            return Err(NodeBuildError::InvalidSubgraph {
-                message: "max_iterations must be in 1..=1000".into(),
-            });
-        }
-        let types = loop_variable_types(&config.variables)
-            .map_err(|message| NodeBuildError::InvalidSubgraph { message })?;
-        let ports: Vec<_> = types
-            .iter()
-            .map(|(name, value_type)| PortSpec::owned(name, value_type.clone(), true))
-            .collect();
-        Ok(Box::new(LoopNode {
+fn factory(
+    id: &str,
+    config: Value,
+    options: Value,
+    body: PreparedSubgraph,
+) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    let _: Config = deserialize_config(config)?;
+    let config: ExecutionConfig = deserialize_config(options)?;
+    if !(1..=mf_runtime::MAX_LOOP_ITERATIONS).contains(&config.max_iterations) {
+        return Err(NodeBuildError::InvalidSubgraph {
+            message: "max_iterations must be in 1..=1000".into(),
+        });
+    }
+    let types = loop_variable_types(&config.variables)
+        .map_err(|message| NodeBuildError::InvalidSubgraph { message })?;
+    let ports: Vec<_> = types
+        .iter()
+        .map(|(name, value_type)| PortSpec::owned(name, value_type.clone(), true))
+        .collect();
+    Ok(mf_runtime::PreparedNode::new(
+        LoopNode {
             id: id.into(),
             max_iterations: config.max_iterations,
             until: config.until,
             types,
             body,
-            ports: NodePorts {
-                inputs: ports.clone(),
-                outputs: ports,
-            },
-        }))
-    }
-
-    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Err(NodeExecutionError::ExecutionFailed {
-            message: "Loop requires a compiled body".into(),
-        })
-    }
+        },
+        NodePorts {
+            inputs: ports.clone(),
+            outputs: ports,
+        },
+    ))
 }
 
-fn factory(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    let _: Config = deserialize_config(config)?;
-    Ok(Box::new(LoopDeclaration))
-}
-
-// Typed ports are supplied when execution settings and the prepared body are bound.
 inventory::submit! {
-    NodeRegistration {
-        kind: KIND,
-        inputs: &[],
-        outputs: &[],
-        factory,
-    }
+    NodeRegistration { kind: KIND, factory: mf_runtime::NodeFactory::Subgraph(factory) }
 }
 
 #[cfg(test)]
@@ -81,14 +63,23 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn registers_loop_declaration_and_requires_an_empty_config() {
+    fn registers_loop_factory_and_requires_a_body_and_empty_config() {
         let registration = NodeRegistry::from_inventory().unwrap().get(KIND).unwrap();
         assert!(
             registration
                 .instantiate(json!({"unexpected": true}))
                 .is_err()
         );
-        assert!(registration.instantiate(json!({})).is_ok());
+        assert!(registration.instantiate(json!({})).is_err());
+        for (config, valid) in [(json!({}), true), (json!({"unexpected": true}), false)] {
+            let prepared = registration.instantiate_subgraph(
+                "repeat",
+                config,
+                json!({"max_iterations":1, "variables":[{"name":"x", "type":"int"}]}),
+                PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
+            );
+            assert_eq!(prepared.is_ok(), valid);
+        }
     }
 }
 
@@ -112,22 +103,11 @@ struct LoopNode {
     max_iterations: u16,
     until: Option<LoopConditionDefinition>,
     types: BTreeMap<String, ValueType>,
-    ports: NodePorts,
     body: PreparedSubgraph,
 }
 
-impl Node for LoopNode {
-    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Err(structural_error(
-            "Loop requires a workflow execution context",
-        ))
-    }
-
-    fn ports(&self) -> Option<NodePorts> {
-        Some(self.ports.clone())
-    }
-
-    fn execute_with_context_mut(
+impl TaskNode for LoopNode {
+    fn execute(
         &self,
         inputs: Inputs,
         ctx: &mut ExecutionContext,

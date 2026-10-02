@@ -1,6 +1,6 @@
 use mf_runtime::{
-    ContextReference, ContextValue, ExecutionContext, Inputs, Node, NodeBuildError,
-    NodeExecutionError, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, ValueType,
+    ContextReference, ContextValue, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError,
+    NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, TaskNode, ValueType,
     deserialize_config,
 };
 use serde::{Deserialize, Deserializer};
@@ -141,34 +141,11 @@ impl Condition {
 struct IfElse {
     branches: Vec<Branch>,
 }
-impl Node for IfElse {
-    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Err(execution_error(
-            "if-else requires a workflow execution context",
-        ))
-    }
-    fn ports(&self) -> Option<NodePorts> {
-        Some(NodePorts {
-            inputs: vec![],
-            outputs: self
-                .branches
-                .iter()
-                .map(|branch| branch.id.as_str())
-                .chain(["else"])
-                .map(|name| PortSpec::owned(name, ValueType::Boolean, false))
-                .collect(),
-        })
-    }
-    fn context_references(&self) -> Vec<ContextReference> {
-        self.branches
-            .iter()
-            .map(|branch| ContextReference::new(&branch.condition.source.output, &branch.id))
-            .collect()
-    }
-    fn execute_with_context(
+impl TaskNode for IfElse {
+    fn execute(
         &self,
         _: Inputs,
-        ctx: &ExecutionContext,
+        ctx: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
         let mut selected = "else";
         for branch in &self.branches {
@@ -208,7 +185,27 @@ impl Node for IfElse {
         })
     }
 }
-fn factory(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+impl IfElse {
+    fn ports(&self) -> NodePorts {
+        NodePorts {
+            inputs: vec![],
+            outputs: self
+                .branches
+                .iter()
+                .map(|branch| branch.id.as_str())
+                .chain(["else"])
+                .map(|name| PortSpec::owned(name, ValueType::Boolean, false))
+                .collect(),
+        }
+    }
+    fn context_references(&self) -> Vec<ContextReference> {
+        self.branches
+            .iter()
+            .map(|branch| ContextReference::new(&branch.condition.source.output, &branch.id))
+            .collect()
+    }
+}
+fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let config: Config = deserialize_config(config)?;
     if config.branches.is_empty() {
         return Err(invalid("branches must contain at least one condition"));
@@ -240,9 +237,15 @@ fn factory(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
             .map_err(|message| invalid(format!("branch `{}`: {message}", branch.id)))?;
         branches.push(branch);
     }
-    Ok(Box::new(IfElse { branches }))
+    let node = IfElse { branches };
+    let metadata = mf_runtime::NodeMetadata {
+        ports: node.ports(),
+        output_derivations: Vec::new(),
+        context_references: node.context_references(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
-inventory::submit! { NodeRegistration { kind: KIND, inputs: &[], outputs: &[], factory } }
+inventory::submit! { NodeRegistration { kind: KIND, factory: mf_runtime::NodeFactory::Plain(factory) } }
 
 #[cfg(test)]
 mod tests {
@@ -291,14 +294,8 @@ mod tests {
             assert!(factory(value).is_err());
         }
         let node = factory(config()).unwrap();
-        assert!(node.ports().unwrap().inputs.is_empty());
-        assert_eq!(node.ports().unwrap().outputs.len(), 2);
-        assert!(
-            node.execute(Inputs::new())
-                .unwrap_err()
-                .to_string()
-                .contains("context")
-        );
+        assert!(node.metadata.ports.inputs.is_empty());
+        assert_eq!(node.metadata.ports.outputs.len(), 2);
     }
     #[test]
     fn evaluates_typed_scalars_presence_and_json_pointers() {

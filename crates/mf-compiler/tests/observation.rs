@@ -299,7 +299,7 @@ fn missing_dependency_takes_precedence_over_a_skip_without_invocation() {
 
 #[test]
 fn a_running_plugin_exposes_start_before_end_and_inherits_the_node_context() {
-    use mf_runtime::{Flow, FlowNode, Inputs, Node, NodeExecutionError, NodePorts, Outputs};
+    use mf_runtime::{Flow, FlowNode, Inputs, NodeExecutionError, NodePorts, Outputs, TaskNode};
     use opentelemetry::{
         Context,
         trace::{Span, TraceContextExt, Tracer, TracerProvider},
@@ -310,8 +310,12 @@ fn a_running_plugin_exposes_start_before_end_and_inherits_the_node_context() {
         entered: mpsc::SyncSender<()>,
         release: Mutex<mpsc::Receiver<()>>,
     }
-    impl Node for BlockingPlugin {
-        fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
+    impl TaskNode for BlockingPlugin {
+        fn execute(
+            &self,
+            _: Inputs,
+            _ctx: &mut mf_runtime::ExecutionContext,
+        ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
             let mut child = self.tracer.start("fixture.operation");
             self.entered.send(()).unwrap();
             self.release
@@ -320,7 +324,7 @@ fn a_running_plugin_exposes_start_before_end_and_inherits_the_node_context() {
                 .recv_timeout(std::time::Duration::from_secs(5))
                 .unwrap();
             child.end();
-            Ok(Outputs::new())
+            Ok(Outputs::new().into())
         }
     }
     let harness = Harness::new(true);
@@ -333,12 +337,14 @@ fn a_running_plugin_exposes_start_before_end_and_inherits_the_node_context() {
     let flow = Flow::new(
         vec![FlowNode::new(
             "blocking",
-            Box::new(BlockingPlugin {
-                tracer,
-                entered: entered_tx,
-                release: Mutex::new(release_rx),
-            }),
-            NodePorts::default(),
+            mf_runtime::PreparedNode::new(
+                BlockingPlugin {
+                    tracer,
+                    entered: entered_tx,
+                    release: Mutex::new(release_rx),
+                },
+                NodePorts::default(),
+            ),
         )],
         vec![],
         vec!["blocking".into()],
@@ -465,11 +471,15 @@ fn dropped_logs_leave_sequence_gaps_without_changing_execution_or_provider_owner
 
 #[test]
 fn unwinding_restores_context_without_fabricating_completion() {
-    use mf_runtime::{Flow, FlowNode, Inputs, Node, NodeExecutionError, NodePorts, Outputs};
+    use mf_runtime::{Flow, FlowNode, Inputs, NodeExecutionError, NodePorts, TaskNode};
     use opentelemetry::{Context, trace::TraceContextExt};
     struct PanicPlugin;
-    impl Node for PanicPlugin {
-        fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
+    impl TaskNode for PanicPlugin {
+        fn execute(
+            &self,
+            _: Inputs,
+            _ctx: &mut mf_runtime::ExecutionContext,
+        ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
             panic!("plugin panic sentinel")
         }
     }
@@ -490,8 +500,7 @@ fn unwinding_restores_context_without_fabricating_completion() {
     let flow = Flow::new(
         vec![FlowNode::new(
             "a",
-            Box::new(PanicPlugin),
-            NodePorts::default(),
+            mf_runtime::PreparedNode::new(PanicPlugin, NodePorts::default()),
         )],
         vec![],
         vec!["a".into()],

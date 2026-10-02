@@ -1,7 +1,7 @@
 use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, IterationConfig, IterationErrorPolicy, IterationMode,
-    Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, NodeResult, Outputs,
-    PortSpec, PreparedSubgraph, ValueType, deserialize_config,
+    NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec,
+    PreparedSubgraph, TaskNode, ValueType, deserialize_config,
 };
 use mf_telemetry::observation::{ItemObservation, IterationObservation};
 use std::{
@@ -16,49 +16,20 @@ use serde_json::Value;
 
 pub const KIND: &str = mf_runtime::ITERATION_KIND;
 
-// Body binding preserves the ordinary registry factory contract.
-struct IterationDeclaration {
-    mode: IterationMode,
-    on_error: IterationErrorPolicy,
-}
-
-impl Node for IterationDeclaration {
-    fn with_subgraph(
-        self: Box<Self>,
-        id: &str,
-        _: Value,
-        body: PreparedSubgraph,
-    ) -> Result<Box<dyn Node>, NodeBuildError> {
-        Ok(Box::new(IterationNode::new(
-            id,
-            self.mode,
-            self.on_error,
-            body,
-        )?))
-    }
-
-    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Err(NodeExecutionError::ExecutionFailed {
-            message: "iteration requires a compiled body".into(),
-        })
-    }
-}
-
-fn factory(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+fn factory(
+    id: &str,
+    config: Value,
+    _: Value,
+    body: PreparedSubgraph,
+) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let config: IterationConfig = deserialize_config(config)?;
-    Ok(Box::new(IterationDeclaration {
-        mode: config.mode,
-        on_error: config.on_error,
-    }))
+    let node = IterationNode::new(id, config.mode, config.on_error, body)?;
+    let ports = node.ports();
+    Ok(mf_runtime::PreparedNode::new(node, ports))
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: KIND,
-        inputs: &[PortSpec::new("items", ValueType::Array, true)],
-        outputs: &[PortSpec::new("results", ValueType::Array, true)],
-        factory,
-    }
+    NodeRegistration { kind: KIND, factory: mf_runtime::NodeFactory::Subgraph(factory) }
 }
 
 pub struct IterationNode {
@@ -238,19 +209,11 @@ impl IterationNode {
     }
 }
 
-impl Node for IterationNode {
-    fn ports(&self) -> Option<NodePorts> {
-        Some(IterationNode::ports(self))
-    }
-
-    fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        self.execute_items(inputs, None, &ExecutionContext::default())
-    }
-
-    fn execute_with_context(
+impl TaskNode for IterationNode {
+    fn execute(
         &self,
         inputs: Inputs,
-        ctx: &ExecutionContext,
+        ctx: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
         self.execute_items(
             inputs,
@@ -308,11 +271,12 @@ mod tests {
         .unwrap();
         let items: Vec<_> = (0..64).map(Value::from).collect();
         let output = node
-            .execute(Inputs::from([(
-                "items".into(),
-                Value::Array(items.clone()).into(),
-            )]))
-            .unwrap();
+            .execute(
+                Inputs::from([("items".into(), Value::Array(items.clone()).into())]),
+                &mut mf_runtime::ExecutionContext::default(),
+            )
+            .unwrap()
+            .outputs;
         assert_eq!(output["results"], Value::Array(items));
         assert!((2..=MAX_PARALLEL_ITEMS).contains(&peak.load(Ordering::SeqCst)));
         assert_eq!(active.load(Ordering::SeqCst), 0);
@@ -322,14 +286,23 @@ mod tests {
         let registration = NodeRegistry::from_inventory().unwrap().get(KIND).unwrap();
         assert!(registration.instantiate(json!({})).is_err());
         let node = registration
-            .instantiate(json!({
-                "body": {
-                    "nodes": [],
-                    "result": {"node": "%iteration", "port": "items"}
-                }
-            }))
+            .instantiate_subgraph(
+                "iteration",
+                json!({
+                    "body": {
+                        "nodes": [],
+                        "result": {"node": "%iteration", "port": "items"}
+                    }
+                }),
+                Value::Null,
+                PreparedSubgraph::new(
+                    Vec::new(),
+                    vec![PortSpec::new("result", ValueType::Any, true)],
+                    |_| Ok(Outputs::new()),
+                ),
+            )
             .unwrap();
-        let ports = registration.effective_ports(node.as_ref());
+        let ports = &node.metadata.ports;
         assert_eq!(ports.inputs[0].name, "items");
         assert_eq!(ports.outputs[0].name, "results");
     }

@@ -1,19 +1,25 @@
 use mf_compiler::{
-    ContextReference, Inputs, Node, NodeBuildError, NodeExecutionError, NodePorts,
-    NodeRegistration, NodeRegistry, Outputs, PortSpec, ValueType, WorkflowDefinition,
-    compile_definition, instantiate_compiled, plan_definition, validate_definition,
+    ContextReference, Inputs, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration,
+    NodeRegistry, Outputs, PortSpec, TaskNode, ValueType, WorkflowDefinition, compile_definition,
+    instantiate_compiled, plan_definition, validate_definition,
 };
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static CONSTRUCTIONS: AtomicUsize = AtomicUsize::new(0);
 struct Dynamic(Value);
-impl Node for Dynamic {
-    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::new())
+impl TaskNode for Dynamic {
+    fn execute(
+        &self,
+        _: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
+        Ok(Outputs::new().into())
     }
-    fn ports(&self) -> Option<NodePorts> {
-        Some(NodePorts {
+}
+impl Dynamic {
+    fn ports(&self) -> NodePorts {
+        NodePorts {
             inputs: vec![],
             outputs: self.0["ports"]
                 .as_array()
@@ -21,7 +27,7 @@ impl Node for Dynamic {
                 .iter()
                 .map(|name| PortSpec::owned(name.as_str().unwrap(), ValueType::Any, false))
                 .collect(),
-        })
+        }
     }
     fn context_references(&self) -> Vec<ContextReference> {
         self.0
@@ -31,15 +37,19 @@ impl Node for Dynamic {
             .unwrap_or_default()
     }
 }
-fn factory(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     if config["count"] == true {
         CONSTRUCTIONS.fetch_add(1, Ordering::SeqCst);
     }
-    Ok(Box::new(Dynamic(config)))
+    let node = Dynamic(config);
+    let metadata = mf_runtime::NodeMetadata {
+        ports: node.ports(),
+        output_derivations: Vec::new(),
+        context_references: node.context_references(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
-inventory::submit! { NodeRegistration {
-    kind: "test.dynamic", inputs: &[], outputs: &[], factory,
-} }
+inventory::submit! { NodeRegistration { kind: "test.dynamic", factory: mf_runtime::NodeFactory::Plain(factory) } }
 fn definition(value: Value) -> WorkflowDefinition {
     serde_json::from_value(value).unwrap()
 }

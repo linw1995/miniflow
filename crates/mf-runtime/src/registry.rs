@@ -64,53 +64,87 @@ impl NodeRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Inputs, Node, NodeBuildError, NodeExecutionError, Outputs, ValueType};
+    use crate::{Inputs, NodeBuildError, NodeExecutionError, Outputs, TaskNode, ValueType};
     use serde_json::Value;
 
     struct FirstTestNode;
 
-    impl Node for FirstTestNode {
-        fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-            Ok(Outputs::new())
+    impl TaskNode for FirstTestNode {
+        fn execute(
+            &self,
+            _inputs: Inputs,
+            _ctx: &mut crate::ExecutionContext,
+        ) -> Result<crate::NodeResult, NodeExecutionError> {
+            Ok(Outputs::new().into())
         }
     }
 
     struct SecondTestNode;
 
-    impl Node for SecondTestNode {
-        fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-            Ok(Outputs::new())
+    impl TaskNode for SecondTestNode {
+        fn execute(
+            &self,
+            _inputs: Inputs,
+            _ctx: &mut crate::ExecutionContext,
+        ) -> Result<crate::NodeResult, NodeExecutionError> {
+            Ok(Outputs::new().into())
         }
     }
 
-    fn first_factory(_config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-        Ok(Box::new(FirstTestNode))
+    fn first_factory(_config: Value) -> Result<crate::PreparedNode, NodeBuildError> {
+        let node = FirstTestNode;
+        let metadata = crate::NodeMetadata {
+            ports: crate::NodePorts {
+                inputs: vec![],
+                outputs: vec![],
+            },
+            output_derivations: Vec::new(),
+            context_references: Vec::new(),
+        };
+        Ok(crate::PreparedNode::new(node, metadata))
     }
 
-    fn second_factory(_config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-        Ok(Box::new(SecondTestNode))
+    fn second_factory(_config: Value) -> Result<crate::PreparedNode, NodeBuildError> {
+        let node = SecondTestNode;
+        let metadata = crate::NodeMetadata {
+            ports: crate::NodePorts {
+                inputs: vec![],
+                outputs: vec![crate::PortSpec::new("value", ValueType::Any, false)],
+            },
+            output_derivations: Vec::new(),
+            context_references: Vec::new(),
+        };
+        Ok(crate::PreparedNode::new(node, metadata))
     }
 
     static FIRST: NodeRegistration = NodeRegistration {
         kind: "test.duplicate",
-        inputs: &[],
-        outputs: &[],
-        factory: first_factory,
+        factory: crate::NodeFactory::Plain(first_factory),
     };
 
     static SECOND: NodeRegistration = NodeRegistration {
         kind: "test.duplicate",
-        inputs: &[],
-        outputs: &[crate::PortSpec::new("value", ValueType::Any, false)],
-        factory: second_factory,
+        factory: crate::NodeFactory::Plain(second_factory),
     };
 
     static RESERVED: NodeRegistration = NodeRegistration {
         kind: crate::LOOP_ASSIGN_KIND,
-        inputs: &[],
-        outputs: &[],
-        factory: first_factory,
+        factory: crate::NodeFactory::Plain(first_factory),
     };
+
+    #[test]
+    fn plain_factory_rejects_a_subgraph_during_preparation() {
+        let body = crate::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new()));
+        let error = FIRST
+            .instantiate_subgraph("node", Value::Null, Value::Null, body)
+            .err()
+            .unwrap();
+        assert!(
+            error
+                .to_string()
+                .contains("does not accept a prepared body")
+        );
+    }
 
     #[test]
     fn rejects_duplicate_node_kinds() {

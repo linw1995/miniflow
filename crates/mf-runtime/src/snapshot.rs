@@ -557,6 +557,17 @@ mod tests {
     }
 
     #[test]
+    fn node_records_preserve_the_published_wire_format() {
+        let wire = json!({
+            "record": "node", "scope": [], "node": "step", "inputs": 0,
+            "outputs": 1, "skipped": [], "outcome": "succeeded"
+        });
+        let record: SnapshotRecord = serde_json::from_value(wire.clone()).unwrap();
+        assert!(matches!(record, SnapshotRecord::Node { .. }));
+        assert_eq!(serde_json::to_value(record).unwrap(), wire);
+    }
+
+    #[test]
     fn structured_number_definitions_preserve_json_numeric_types() {
         for text in ["0", "0.0", "-0.0", "18446744073709551615", "1.5"] {
             let number: Number = text.parse().unwrap();

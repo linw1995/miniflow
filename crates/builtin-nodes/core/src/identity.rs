@@ -1,6 +1,6 @@
 use mf_runtime::{
-    Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistration, OutputDerivation, Outputs,
-    PortSpec, ValueType,
+    Inputs, NodeBuildError, NodeExecutionError, NodeRegistration, OutputDerivation, Outputs,
+    PortSpec, TaskNode, ValueType,
 };
 use serde_json::Value;
 
@@ -12,30 +12,39 @@ pub fn kind() -> &'static str {
 
 struct IdentityNode;
 
-impl Node for IdentityNode {
-    fn execute(&self, mut inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
+impl TaskNode for IdentityNode {
+    fn execute(
+        &self,
+        mut inputs: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
         let Some(value) = inputs.remove("input") else {
             return Err(NodeExecutionError::ExecutionFailed {
                 message: "required input `input` was not provided".to_owned(),
             });
         };
-        Ok(Outputs::from([("value".to_owned(), value)]))
+        Ok((Outputs::from([("value".to_owned(), value)])).into())
     }
-
+}
+impl IdentityNode {
     fn output_derivations(&self) -> Vec<OutputDerivation> {
         vec![OutputDerivation::forward_input("value", "input")]
     }
 }
 
-fn identity_factory(_config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    Ok(Box::new(IdentityNode))
+fn identity_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    let node = IdentityNode;
+    let metadata = mf_runtime::NodeMetadata {
+        ports: mf_runtime::NodePorts {
+            inputs: vec![PortSpec::new("input", ValueType::Any, true)],
+            outputs: vec![PortSpec::new("value", ValueType::Any, true)],
+        },
+        output_derivations: node.output_derivations(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: KIND,
-        inputs: &[PortSpec::new("input", ValueType::Any, true)],
-        outputs: &[PortSpec::new("value", ValueType::Any, true)],
-        factory: identity_factory,
-    }
+    NodeRegistration { kind: KIND, factory: mf_runtime::NodeFactory::Plain(identity_factory) }
 }

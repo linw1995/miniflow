@@ -5,10 +5,10 @@ extern crate mfn_code as _;
 extern crate mfn_core as _;
 
 use mf_compiler::{
-    CompileRequest, ExecutionContext, Inputs, Node, NodeBuildError, NodeExecutionError,
-    NodeRegistration, NodeRegistry, Outputs, PortSpec, SupportPackages, ValueType,
-    WorkflowDefinition, WorkflowDefinitionVersion, compile_definition, compile_project,
-    execute_compiled, instantiate_compiled, plan_definition,
+    CompileRequest, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeRegistration,
+    NodeRegistry, Outputs, PortSpec, SupportPackages, TaskNode, ValueType, WorkflowDefinition,
+    WorkflowDefinitionVersion, compile_definition, compile_project, execute_compiled,
+    instantiate_compiled, plan_definition,
 };
 use mf_telemetry::{
     event::{Event, LoopPassOutcome, LoopStopReason},
@@ -21,43 +21,59 @@ struct OmitOnSecond;
 
 struct WrongType;
 
-impl Node for WrongType {
-    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::from([("value".into(), json!("wrong").into())]))
+impl TaskNode for WrongType {
+    fn execute(
+        &self,
+        _: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
+        Ok((Outputs::from([("value".into(), json!("wrong").into())])).into())
     }
 }
 
-impl Node for OmitOnSecond {
-    fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
+impl TaskNode for OmitOnSecond {
+    fn execute(
+        &self,
+        inputs: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
         if inputs["index"] == json!(0) {
-            Ok(Outputs::from([("value".into(), json!(1).into())]))
+            Ok((Outputs::from([("value".into(), json!(1).into())])).into())
         } else {
-            Ok(Outputs::new())
+            Ok(Outputs::new().into())
         }
     }
 }
 
-fn omit_factory(_: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    Ok(Box::new(OmitOnSecond))
+fn omit_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    let node = OmitOnSecond;
+    let metadata = mf_runtime::NodeMetadata {
+        ports: mf_runtime::NodePorts {
+            inputs: vec![PortSpec::new("index", ValueType::Int64, true)],
+            outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
+        },
+        output_derivations: Vec::new(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
-fn wrong_type_factory(_: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    Ok(Box::new(WrongType))
+fn wrong_type_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    let node = WrongType;
+    let metadata = mf_runtime::NodeMetadata {
+        ports: mf_runtime::NodePorts {
+            inputs: vec![],
+            outputs: vec![PortSpec::new("value", ValueType::Any, true)],
+        },
+        output_derivations: Vec::new(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
-inventory::submit! { NodeRegistration {
-    kind: "test.omit_on_second",
-    inputs: &[PortSpec::new("index", ValueType::Int64, true)],
-    outputs: &[PortSpec::new("value", ValueType::Int64, true)],
-    factory: omit_factory,
-} }
+inventory::submit! { NodeRegistration { kind: "test.omit_on_second", factory: mf_runtime::NodeFactory::Plain(omit_factory) } }
 
-inventory::submit! { NodeRegistration {
-    kind: "test.wrong_type",
-    inputs: &[],
-    outputs: &[PortSpec::new("value", ValueType::Any, true)],
-    factory: wrong_type_factory,
-} }
+inventory::submit! { NodeRegistration { kind: "test.wrong_type", factory: mf_runtime::NodeFactory::Plain(wrong_type_factory) } }
 
 fn definition() -> Value {
     json!({
@@ -211,14 +227,11 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
             "max_iterations": 5,
             "variables": variables,
         });
-        let error = mf_runtime::instantiate_node_with_metadata(
+        let error = mf_runtime::instantiate_subgraph_with_metadata(
             &NodeRegistry::from_inventory().unwrap(),
             "repeat",
             mf_runtime::LOOP_KIND,
             "{}",
-        )
-        .unwrap()
-        .with_subgraph_from_json(
             &config.to_string(),
             mf_runtime::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
         )
@@ -229,19 +242,16 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
     }
 
     let complete_definition = definition()["nodes"][1]["loop"].to_string();
-    let prepared = mf_runtime::instantiate_node_with_metadata(
+    let prepared = mf_runtime::instantiate_subgraph_with_metadata(
         &NodeRegistry::from_inventory().unwrap(),
         "repeat",
         mf_runtime::LOOP_KIND,
         "{}",
-    )
-    .unwrap()
-    .with_subgraph_from_json(
         &complete_definition,
         mf_runtime::PreparedSubgraph::new(Vec::new(), Vec::new(), |_| Ok(Outputs::new())),
     )
     .unwrap();
-    assert_eq!(prepared.ports.inputs[0].name, "count");
+    assert_eq!(prepared.metadata.ports.inputs[0].name, "count");
 }
 
 #[test]

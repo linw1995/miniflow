@@ -191,8 +191,9 @@ impl TypeInferenceState {
         dependencies: &[ExecutionDependency<'_>],
     ) -> Result<(), WorkflowCompileError> {
         let id = &node.definition_id;
-        let derivations = node.node.output_derivations();
-        node.ports
+        let derivations = node.metadata.output_derivations.clone();
+        node.metadata
+            .ports
             .validate_derivations(id.as_str(), &derivations)
             .map_err(|error| WorkflowCompileError::InvalidNodeMetadata {
                 definition_id: id.clone(),
@@ -205,6 +206,7 @@ impl TypeInferenceState {
                 continue;
             };
             let input = node
+                .metadata
                 .ports
                 .inputs
                 .iter()
@@ -268,7 +270,7 @@ impl TypeInferenceState {
             .into_iter()
             .map(|derivation| (derivation.output().to_owned(), derivation))
             .collect();
-        for output in &mut node.ports.outputs {
+        for output in &mut node.metadata.ports.outputs {
             let declared = output.value_type.clone();
             let mut fact = match derivations.get(output.name.as_ref()) {
                 Some(OutputDerivation::Literal { value, .. }) => TypeFact {
@@ -280,6 +282,7 @@ impl TypeInferenceState {
                     .cloned()
                     .unwrap_or_else(|| TypeFact {
                         value_type: node
+                            .metadata
                             .ports
                             .inputs
                             .iter()
@@ -399,7 +402,7 @@ fn validate_base_metadata(
 ) -> Result<(), WorkflowCompileError> {
     let registrations: BTreeMap<_, _> = nodes
         .iter()
-        .map(|node| (node.definition_id.clone(), &node.ports))
+        .map(|node| (node.definition_id.clone(), &node.metadata.ports))
         .collect();
     let invalid = |id: &DefinitionId, message: String| WorkflowCompileError::InvalidNodeMetadata {
         definition_id: id.clone(),
@@ -441,7 +444,7 @@ fn validate_base_metadata(
         }
     }
     for node in nodes {
-        if node.references.is_empty() {
+        if node.metadata.context_references.is_empty() {
             continue;
         }
         // Only reference consumers need reachability, and their sets need not outlive validation.
@@ -454,7 +457,7 @@ fn validate_base_metadata(
                 }
             }
         }
-        for reference in &node.references {
+        for reference in &node.metadata.context_references {
             let Some((producer, _)) = output_index.get(&reference.output) else {
                 return Err(invalid(
                     &node.definition_id,
@@ -1044,10 +1047,10 @@ pub fn resolve_nodes(
     resolve_nodes_in_scope(definition, registry, None, false)
 }
 
-fn instantiate_registered(
+fn registration_for(
     node: &crate::NodeDefinition,
     registry: &NodeRegistry,
-) -> Result<(&'static crate::NodeRegistration, Box<dyn crate::Node>), WorkflowCompileError> {
+) -> Result<&'static crate::NodeRegistration, WorkflowCompileError> {
     let Some(registration) = registry.get(&node.kind) else {
         return UnknownNodeKindSnafu {
             definition_id: node.id.clone(),
@@ -1055,14 +1058,7 @@ fn instantiate_registered(
         }
         .fail();
     };
-    let instance =
-        registration
-            .instantiate(node.config.clone())
-            .context(NodeConstructionSnafu {
-                definition_id: node.id.clone(),
-                kind: node.kind.clone(),
-            })?;
-    Ok((registration, instance))
+    Ok(registration)
 }
 
 fn bind_subgraph_node(
@@ -1073,7 +1069,7 @@ fn bind_subgraph_node(
     allow_iteration_input: bool,
     options: Value,
 ) -> Result<FlowNode, WorkflowCompileError> {
-    let (registration, declaration) = instantiate_registered(node, registry)?;
+    let registration = registration_for(node, registry)?;
     let (nodes, order) =
         prepare_graph(body, registry, enclosing, allow_iteration_input).map_err(|error| {
             if node.kind == crate::LOOP_KIND {
@@ -1096,7 +1092,8 @@ fn bind_subgraph_node(
                 .iter()
                 .find(|node| node.definition_id == output.node)
                 .and_then(|node| {
-                    node.ports
+                    node.metadata
+                        .ports
                         .outputs
                         .iter()
                         .find(|port| port.name == output.port)
@@ -1121,14 +1118,13 @@ fn bind_subgraph_node(
     let body = PreparedSubgraph::new(identities, outputs, move |state| {
         flow.execute_in_context(state)
     });
-    let instance = declaration
-        .with_subgraph(node.id.as_str(), options, body)
+    let instance = registration
+        .instantiate_subgraph(node.id.as_str(), node.config.clone(), options, body)
         .context(NodeConstructionSnafu {
             definition_id: node.id.clone(),
             kind: node.kind.clone(),
         })?;
-    let ports = registration.effective_ports(instance.as_ref());
-    Ok(FlowNode::new(node.id.clone(), instance, ports))
+    Ok(FlowNode::new(node.id.clone(), instance))
 }
 
 fn resolve_nodes_in_scope(
@@ -1209,9 +1205,13 @@ fn resolve_nodes_in_scope(
                 })?;
                 return bind_subgraph_node(node, registry, &body, None, true, Value::Null);
             }
-            let (registration, instance) = instantiate_registered(node, registry)?;
-            let ports = registration.effective_ports(instance.as_ref());
-            Ok(FlowNode::new(node.id.clone(), instance, ports))
+            let instance = registration_for(node, registry)?
+                .instantiate(node.config.clone())
+                .context(NodeConstructionSnafu {
+                    definition_id: node.id.clone(),
+                    kind: node.kind.clone(),
+                })?;
+            Ok(FlowNode::new(node.id.clone(), instance))
         })
         .collect()
 }

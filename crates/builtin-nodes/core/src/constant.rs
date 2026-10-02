@@ -1,6 +1,6 @@
 use mf_runtime::{
-    Inputs, Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration,
-    OutputDerivation, Outputs, PortSpec, ValueType, deserialize_config,
+    Inputs, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, OutputDerivation,
+    Outputs, PortSpec, TaskNode, ValueType, deserialize_config,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -20,39 +20,44 @@ struct ConstantNode {
     value: mf_runtime::ValueRef,
 }
 
-impl Node for ConstantNode {
-    fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::from([("value".to_owned(), self.value.clone())]))
+impl TaskNode for ConstantNode {
+    fn execute(
+        &self,
+        _inputs: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
+        Ok((Outputs::from([("value".to_owned(), self.value.clone())])).into())
     }
-
-    fn ports(&self) -> Option<NodePorts> {
-        Some(NodePorts {
+}
+impl ConstantNode {
+    fn ports(&self) -> NodePorts {
+        NodePorts {
             inputs: Vec::new(),
             outputs: vec![PortSpec::new(
                 "value",
                 ValueType::infer_shared(&self.value),
                 true,
             )],
-        })
+        }
     }
-
     fn output_derivations(&self) -> Vec<OutputDerivation> {
         vec![OutputDerivation::literal("value", self.value.clone())]
     }
 }
 
-fn constant_factory(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+fn constant_factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let config: ConstantConfig = deserialize_config(config)?;
-    Ok(Box::new(ConstantNode {
+    let node = ConstantNode {
         value: config.value.into(),
-    }))
+    };
+    let metadata = mf_runtime::NodeMetadata {
+        ports: node.ports(),
+        output_derivations: node.output_derivations(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: KIND,
-        inputs: &[],
-        outputs: &[PortSpec::new("value", ValueType::Any, true)],
-        factory: constant_factory,
-    }
+    NodeRegistration { kind: KIND, factory: mf_runtime::NodeFactory::Plain(constant_factory) }
 }

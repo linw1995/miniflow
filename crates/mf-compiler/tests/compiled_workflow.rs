@@ -1,6 +1,6 @@
 use mf_compiler::{
-    CompiledWorkflow, Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistration,
-    NodeRegistry, Outputs, PortSpec, ValueType, WorkflowCompileError, compile_definition,
+    CompiledWorkflow, Inputs, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry,
+    Outputs, PortSpec, TaskNode, ValueType, WorkflowCompileError, compile_definition,
     deserialize_config, instantiate_compiled,
 };
 use mf_compiler::{DefinitionId, WorkflowDefinition};
@@ -17,51 +17,64 @@ struct ConstantNode {
     value: i64,
 }
 
-impl Node for ConstantNode {
-    fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::from([(
-            "value".to_owned(),
-            json!(self.value).into(),
-        )]))
+impl TaskNode for ConstantNode {
+    fn execute(
+        &self,
+        _inputs: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
+        Ok((Outputs::from([("value".to_owned(), json!(self.value).into())])).into())
     }
 }
 
 struct IncrementNode;
 
-impl Node for IncrementNode {
-    fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
+impl TaskNode for IncrementNode {
+    fn execute(
+        &self,
+        inputs: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
         let value = inputs["input"].as_i64().unwrap() + 1;
-        Ok(Outputs::from([("value".to_owned(), json!(value).into())]))
+        Ok((Outputs::from([("value".to_owned(), json!(value).into())])).into())
     }
 }
 
-fn constant_factory(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+fn constant_factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let config: ConstantConfig = deserialize_config(config)?;
-    Ok(Box::new(ConstantNode {
+    let node = ConstantNode {
         value: config.value,
-    }))
+    };
+    let metadata = mf_runtime::NodeMetadata {
+        ports: mf_runtime::NodePorts {
+            inputs: vec![],
+            outputs: vec![PortSpec::new("value", ValueType::Number, true)],
+        },
+        output_derivations: Vec::new(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
-fn increment_factory(_config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    Ok(Box::new(IncrementNode))
+fn increment_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    let node = IncrementNode;
+    let metadata = mf_runtime::NodeMetadata {
+        ports: mf_runtime::NodePorts {
+            inputs: vec![PortSpec::new("input", ValueType::Number, true)],
+            outputs: vec![PortSpec::new("value", ValueType::Number, true)],
+        },
+        output_derivations: Vec::new(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "example.constant",
-        inputs: &[],
-        outputs: &[PortSpec::new("value", ValueType::Number, true)],
-        factory: constant_factory,
-    }
+    NodeRegistration { kind: "example.constant", factory: mf_runtime::NodeFactory::Plain(constant_factory) }
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "example.increment",
-        inputs: &[PortSpec::new("input", ValueType::Number, true)],
-        outputs: &[PortSpec::new("value", ValueType::Number, true)],
-        factory: increment_factory,
-    }
+    NodeRegistration { kind: "example.increment", factory: mf_runtime::NodeFactory::Plain(increment_factory) }
 }
 
 fn definition() -> WorkflowDefinition {

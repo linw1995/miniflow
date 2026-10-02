@@ -5,8 +5,8 @@ extern crate mfn_code as _;
 extern crate mfn_core as _;
 
 use mf_compiler::{
-    CompileRequest, Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistration,
-    NodeRegistry, Outputs, PortSpec, SupportPackages, ValueType, WorkflowDefinition,
+    CompileRequest, Inputs, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry,
+    Outputs, PortSpec, SupportPackages, TaskNode, ValueType, WorkflowDefinition,
     compile_definition, compile_project, execute_compiled, instantiate_compiled, plan_definition,
 };
 use mf_telemetry::identity::RunId;
@@ -16,8 +16,12 @@ use std::{fs, path::Path, process::Command};
 
 struct MapItem;
 
-impl Node for MapItem {
-    fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
+impl TaskNode for MapItem {
+    fn execute(
+        &self,
+        inputs: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
         let item = inputs["item"].as_i64().unwrap();
         if item == 0 {
             return Err(NodeExecutionError::ExecutionFailed {
@@ -25,53 +29,62 @@ impl Node for MapItem {
             });
         }
         let index = inputs["index"].as_i64().unwrap();
-        Ok(Outputs::from([(
-            "value".into(),
-            json!(item * 2 + index).into(),
-        )]))
+        Ok((Outputs::from([("value".into(), json!(item * 2 + index).into())])).into())
     }
 }
 
-fn map_factory(_: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    Ok(Box::new(MapItem))
+fn map_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    let node = MapItem;
+    let metadata = mf_runtime::NodeMetadata {
+        ports: mf_runtime::NodePorts {
+            inputs: vec![
+                PortSpec::new("item", ValueType::Int64, true),
+                PortSpec::new("index", ValueType::Int64, true),
+            ],
+            outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
+        },
+        output_derivations: Vec::new(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "test.iteration_map",
-        inputs: &[
-            PortSpec::new("item", ValueType::Int64, true),
-            PortSpec::new("index", ValueType::Int64, true),
-        ],
-        outputs: &[PortSpec::new("value", ValueType::Int64, true)],
-        factory: map_factory,
-    }
+    NodeRegistration { kind: "test.iteration_map", factory: mf_runtime::NodeFactory::Plain(map_factory) }
 }
 
 struct TraceProbe;
 
-impl Node for TraceProbe {
-    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
+impl TaskNode for TraceProbe {
+    fn execute(
+        &self,
+        _: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
         let span = opentelemetry::Context::current()
             .span()
             .span_context()
             .span_id()
             .to_string();
-        Ok(Outputs::from([("span".into(), json!(span).into())]))
+        Ok((Outputs::from([("span".into(), json!(span).into())])).into())
     }
 }
 
-fn trace_probe_factory(_: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    Ok(Box::new(TraceProbe))
+fn trace_probe_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    let node = TraceProbe;
+    let metadata = mf_runtime::NodeMetadata {
+        ports: mf_runtime::NodePorts {
+            inputs: vec![],
+            outputs: vec![PortSpec::new("span", ValueType::String, true)],
+        },
+        output_derivations: Vec::new(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "test.iteration_trace_probe",
-        inputs: &[],
-        outputs: &[PortSpec::new("span", ValueType::String, true)],
-        factory: trace_probe_factory,
-    }
+    NodeRegistration { kind: "test.iteration_trace_probe", factory: mf_runtime::NodeFactory::Plain(trace_probe_factory) }
 }
 
 fn definition(items: Value, mode: &str, on_error: &str) -> Value {
