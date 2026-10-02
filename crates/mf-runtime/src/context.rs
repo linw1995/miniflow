@@ -148,7 +148,8 @@ impl ExecutionContext {
                         |result| crate::snapshot::ports_snapshot(&result.outputs),
                     ),
                     skipped: if outcome == crate::SnapshotOutcome::Skipped {
-                        node.ports
+                        node.metadata
+                            .ports
                             .outputs
                             .iter()
                             .map(|port| port.name.to_string())
@@ -398,6 +399,7 @@ impl ExecutionContext {
                     ));
                 }
                 if !node
+                    .metadata
                     .ports
                     .outputs
                     .iter()
@@ -410,7 +412,13 @@ impl ExecutionContext {
                 }
             }
             for (name, value) in &result.outputs {
-                let Some(port) = node.ports.outputs.iter().find(|port| port.name == *name) else {
+                let Some(port) = node
+                    .metadata
+                    .ports
+                    .outputs
+                    .iter()
+                    .find(|port| port.name == *name)
+                else {
                     return Err(state_error(
                         id,
                         format!("produced undeclared output `{name}`"),
@@ -438,7 +446,8 @@ impl ExecutionContext {
                 );
             }
             None => self.outputs.extend(
-                node.ports
+                node.metadata
+                    .ports
                     .outputs
                     .iter()
                     .map(|port| (output_id(id, &port.name), None)),
@@ -636,6 +645,7 @@ pub fn execute_ordered_node_in_context<'a>(
     } else {
         for (name, value) in &inputs {
             let validation = node
+                .metadata
                 .ports
                 .inputs
                 .iter()
@@ -664,13 +674,13 @@ pub fn execute_ordered_node_in_context<'a>(
         if let Some(step) = step.as_mut() {
             step.started(ctx);
         }
-        let result = node
-            .node
-            .execute_with_context_mut(inputs, ctx)
-            .map_err(|source| WorkflowRunError::NodeExecution {
-                definition_id: node.definition_id.clone(),
-                source,
-            });
+        let result =
+            node.node
+                .execute(inputs, ctx)
+                .map_err(|source| WorkflowRunError::NodeExecution {
+                    definition_id: node.definition_id.clone(),
+                    source,
+                });
         match result {
             Ok(result) => Some(result),
             Err(error) => {
@@ -697,7 +707,13 @@ pub fn execute_ordered_node_in_context<'a>(
             produced_ports.extend(result.outputs.keys().cloned());
             skipped_ports.extend(result.skipped.iter().cloned());
         } else {
-            skipped_ports.extend(node.ports.outputs.iter().map(|port| port.name.to_string()));
+            skipped_ports.extend(
+                node.metadata
+                    .ports
+                    .outputs
+                    .iter()
+                    .map(|port| port.name.to_string()),
+            );
             skipped_ports.sort();
         }
     }
@@ -762,7 +778,7 @@ pub fn select_context_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Flow, Node, NodePorts, PortSpec, ValueType, WorkflowOutputDefinition};
+    use crate::{Flow, NodePorts, PortSpec, TaskNode, ValueType, WorkflowOutputDefinition};
     use serde_json::json;
     use std::sync::{
         Arc,
@@ -771,18 +787,26 @@ mod tests {
 
     struct EmitNode(Outputs);
 
-    impl Node for EmitNode {
-        fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-            Ok(self.0.clone())
+    impl TaskNode for EmitNode {
+        fn execute(
+            &self,
+            _: Inputs,
+            _ctx: &mut crate::ExecutionContext,
+        ) -> Result<crate::NodeResult, NodeExecutionError> {
+            Ok((self.0.clone()).into())
         }
     }
 
     struct CountNode(Arc<AtomicUsize>);
 
-    impl Node for CountNode {
-        fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
+    impl TaskNode for CountNode {
+        fn execute(
+            &self,
+            _: Inputs,
+            _ctx: &mut crate::ExecutionContext,
+        ) -> Result<crate::NodeResult, NodeExecutionError> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(Outputs::from([("value".into(), json!(true).into())]))
+            Ok((Outputs::from([("value".into(), json!(true).into())])).into())
         }
     }
 
@@ -844,17 +868,19 @@ mod tests {
     fn rejects_a_bad_output_without_publishing_any_result() {
         let node = FlowNode::new(
             "producer",
-            Box::new(EmitNode(Outputs::from([
-                ("good".into(), json!(1).into()),
-                ("bad".into(), json!("wrong").into()),
-            ]))),
-            NodePorts {
-                inputs: vec![],
-                outputs: vec![
-                    port("good", ValueType::Int64, true),
-                    port("bad", ValueType::Int64, true),
-                ],
-            },
+            crate::PreparedNode::new(
+                EmitNode(Outputs::from([
+                    ("good".into(), json!(1).into()),
+                    ("bad".into(), json!("wrong").into()),
+                ])),
+                NodePorts {
+                    inputs: vec![],
+                    outputs: vec![
+                        port("good", ValueType::Int64, true),
+                        port("bad", ValueType::Int64, true),
+                    ],
+                },
+            ),
         );
         let mut context = ExecutionContext::default();
         let error = execute_node_in_context(&node, &[], &mut context)
@@ -871,15 +897,17 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let node = FlowNode::new(
             "consumer",
-            Box::new(CountNode(Arc::clone(&calls))),
-            NodePorts {
-                inputs: vec![port(
-                    "payload",
-                    ValueType::List(Box::new(ValueType::Map(Box::new(ValueType::Int64)))),
-                    true,
-                )],
-                outputs: vec![port("value", ValueType::Boolean, true)],
-            },
+            crate::PreparedNode::new(
+                CountNode(Arc::clone(&calls)),
+                NodePorts {
+                    inputs: vec![port(
+                        "payload",
+                        ValueType::List(Box::new(ValueType::Map(Box::new(ValueType::Int64)))),
+                        true,
+                    )],
+                    outputs: vec![port("value", ValueType::Boolean, true)],
+                },
+            ),
         );
         let mut context = ExecutionContext::default();
         context.outputs.insert(
@@ -905,11 +933,13 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let node = FlowNode::new(
             "consumer",
-            Box::new(CountNode(Arc::clone(&calls))),
-            NodePorts {
-                inputs: vec![],
-                outputs: vec![port("value", ValueType::Boolean, true)],
-            },
+            crate::PreparedNode::new(
+                CountNode(Arc::clone(&calls)),
+                NodePorts {
+                    inputs: vec![],
+                    outputs: vec![port("value", ValueType::Boolean, true)],
+                },
+            ),
         );
         let mut context = ExecutionContext::default();
         context
@@ -933,11 +963,13 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let node = FlowNode::new(
             "consumer",
-            Box::new(CountNode(Arc::clone(&calls))),
-            NodePorts {
-                inputs: vec![port("payload", ValueType::Int64, true)],
-                outputs: vec![port("value", ValueType::Boolean, true)],
-            },
+            crate::PreparedNode::new(
+                CountNode(Arc::clone(&calls)),
+                NodePorts {
+                    inputs: vec![port("payload", ValueType::Int64, true)],
+                    outputs: vec![port("value", ValueType::Boolean, true)],
+                },
+            ),
         );
         let skipped = ExecutionDependency {
             input: Some("payload"),
@@ -968,14 +1000,18 @@ mod tests {
 
     struct AlternatingNode(AtomicUsize);
 
-    impl Node for AlternatingNode {
-        fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
+    impl TaskNode for AlternatingNode {
+        fn execute(
+            &self,
+            _: Inputs,
+            _ctx: &mut crate::ExecutionContext,
+        ) -> Result<crate::NodeResult, NodeExecutionError> {
             let value = if self.0.fetch_add(1, Ordering::SeqCst) == 0 {
                 json!("wrong")
             } else {
                 json!(42)
             };
-            Ok(Outputs::from([("value".into(), value.into())]))
+            Ok((Outputs::from([("value".into(), value.into())])).into())
         }
     }
 
@@ -984,11 +1020,13 @@ mod tests {
         let flow = Flow::new(
             vec![FlowNode::new(
                 "source",
-                Box::new(AlternatingNode(AtomicUsize::new(0))),
-                NodePorts {
-                    inputs: vec![],
-                    outputs: vec![port("value", ValueType::Int64, true)],
-                },
+                crate::PreparedNode::new(
+                    AlternatingNode(AtomicUsize::new(0)),
+                    NodePorts {
+                        inputs: vec![],
+                        outputs: vec![port("value", ValueType::Int64, true)],
+                    },
+                ),
             )],
             vec![],
             vec!["source".into()],
@@ -1017,19 +1055,23 @@ mod tests {
                 vec![
                     FlowNode::new(
                         "source",
-                        Box::new(EmitNode(Outputs::from([("value".into(), value.into())]))),
-                        NodePorts {
-                            inputs: vec![],
-                            outputs: vec![port("value", ValueType::Any, true)],
-                        },
+                        crate::PreparedNode::new(
+                            EmitNode(Outputs::from([("value".into(), value.into())])),
+                            NodePorts {
+                                inputs: vec![],
+                                outputs: vec![port("value", ValueType::Any, true)],
+                            },
+                        ),
                     ),
                     FlowNode::new(
                         "consumer",
-                        Box::new(CountNode(Arc::clone(&calls))),
-                        NodePorts {
-                            inputs: vec![port("payload", ValueType::Int64, true)],
-                            outputs: vec![port("value", ValueType::Boolean, true)],
-                        },
+                        crate::PreparedNode::new(
+                            CountNode(Arc::clone(&calls)),
+                            NodePorts {
+                                inputs: vec![port("payload", ValueType::Int64, true)],
+                                outputs: vec![port("value", ValueType::Boolean, true)],
+                            },
+                        ),
                     ),
                 ],
                 vec![crate::EdgeDefinition {

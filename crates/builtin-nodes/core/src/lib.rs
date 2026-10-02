@@ -30,10 +30,19 @@ mod tests {
                 .unwrap()
                 .instantiate(json!({}))
                 .unwrap();
-            let produced = constant.execute(Inputs::new()).unwrap();
+            let produced = constant
+                .task
+                .execute(Inputs::new(), &mut mf_runtime::ExecutionContext::default())
+                .unwrap()
+                .outputs;
             let result = identity
-                .execute(Inputs::from([("input".into(), produced["value"].clone())]))
-                .unwrap();
+                .task
+                .execute(
+                    Inputs::from([("input".into(), produced["value"].clone())]),
+                    &mut mf_runtime::ExecutionContext::default(),
+                )
+                .unwrap()
+                .outputs;
             assert_eq!(result["value"], value);
             assert!(result["value"].ptr_eq(&produced["value"]));
         }
@@ -52,27 +61,27 @@ mod tests {
         ] {
             let registration = registry.get(CONSTANT_KIND).unwrap();
             let node = registration.instantiate(json!({"value": value})).unwrap();
-            let ports = registration.effective_ports(node.as_ref());
+            let ports = &node.metadata.ports;
             assert_eq!(ports.outputs[0].value_type, expected);
             assert_eq!(
-                node.output_derivations(),
+                node.metadata.output_derivations,
                 vec![OutputDerivation::literal("value", value)]
             );
             ports
-                .validate_derivations("constant", &node.output_derivations())
+                .validate_derivations("constant", &node.metadata.output_derivations)
                 .unwrap();
         }
 
         let registration = registry.get(IDENTITY_KIND).unwrap();
         let node = registration.instantiate(json!({})).unwrap();
-        let ports = registration.effective_ports(node.as_ref());
+        let ports = &node.metadata.ports;
         assert_eq!(ports.outputs[0].value_type, ValueType::Any);
         assert_eq!(
-            node.output_derivations(),
+            node.metadata.output_derivations,
             vec![OutputDerivation::forward_input("value", "input")]
         );
         ports
-            .validate_derivations("identity", &node.output_derivations())
+            .validate_derivations("identity", &node.metadata.output_derivations)
             .unwrap();
     }
 }

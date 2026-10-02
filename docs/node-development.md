@@ -8,9 +8,16 @@ The optional [`mfn-code`](../crates/builtin-nodes/code/) package registers `buil
 instance-specific typed inputs, and output types inferred by the CEL checker. A Flow must select the package
 explicitly; `mfn-core` does not register this kind. See the [CEL examples](workflows.md#built-in-nodes).
 
-A plugin crate depends on `mf-runtime`, implements `Node::execute`, provides a factory, and submits a `NodeRegistration` through `inventory::submit!`. The registration declares a unique `kind` and its input and output `PortSpec` values. See [constant](../crates/builtin-nodes/core/src/constant.rs) and [identity](../crates/builtin-nodes/core/src/identity.rs) for working registrations.
+A plugin crate depends on `mf-runtime`, implements `TaskNode::execute`, and registers a factory through
+`inventory::submit!`. `NodeRegistration` declares a unique `kind` and its construction requirements.
+The factory returns a `PreparedNode` containing the executor and its `NodeMetadata`. See
+[constant](../crates/builtin-nodes/core/src/constant.rs) and
+[identity](../crates/builtin-nodes/core/src/identity.rs) for working registrations.
 
-`mfn-core` registers the `workflow.loop` declaration. The compiler replaces it with an engine-prepared subgraph executor, so a Flow using Loop must declare `mfn-core` in its top-level `dependencies`. `workflow.loop_assign`, `workflow.exit_loop`, and the synthetic `%loop` source remain reserved engine kinds. Ordinary nodes inside a Loop body also require their packages in `dependencies`.
+`mfn-core` registers a subgraph factory for `workflow.loop`. The compiler prepares its body and passes
+it to that factory, which constructs the complete Loop executor. A Flow using Loop must declare
+`mfn-core` in its dependencies. `workflow.loop_assign`, `workflow.exit_loop`, and `%loop` remain reserved
+engine kinds. Ordinary nodes inside a Loop body also require their packages in `dependencies`.
 
 ## Registration contract
 
@@ -18,13 +25,18 @@ A plugin can register several unique kinds from one crate. Dependency aliases do
 
 All plugins and the consumer must resolve the same `mf-runtime` package identity, including its version and source. Registrations from a different runtime identity are not entries in the consumer's inventory.
 
-Factories validate configuration and construct instances during build validation and execution. Keep external I/O and business side effects in `Node::execute`; validation and `--describe` must not execute the workflow. Description mode reads the embedded graph without calling factories, so factory diagnostics cannot enter its JSON output. Building a Rust plugin can execute its build scripts and procedural macros with the build user's permissions.
+Factories validate configuration and construct instances during build validation and execution. Keep external I/O and business side effects in `TaskNode::execute`; validation and `--describe` must not execute the workflow. Description mode reads the embedded graph without calling factories, so factory diagnostics cannot enter its JSON output. Building a Rust plugin can execute its build scripts and procedural macros with the build user's permissions.
+
+Use `NodeFactory::Plain` for a factory taking configuration and returning `PreparedNode`.
+Use `NodeFactory::Subgraph` when construction also needs the occurrence ID, execution options, and a
+`PreparedSubgraph`. The compiler supplies Loop and Iteration bodies through this second form. Missing
+or inappropriate body arguments fail during preparation; an executor is returned only after binding.
 
 ## Select dependencies in a Flow
 
 Declare plugin crates in the Flow's top-level `dependencies` object. The CLI generates imports for those packages and compiles a runner that validates and executes against the same registry. No predefined bundle or CLI rebuild is needed. See [workflow definitions](workflows.md) for registry, pinned Git, local-path, and feature syntax.
 
-The CLI first checks graph structure, then builds the runner and invokes its `--validate` mode. Unknown kinds, duplicate registrations, invalid configuration, and incompatible ports fail before installation. The runner's normal mode executes generated node calls; validation never calls `Node::execute`.
+The CLI first checks graph structure, then builds the runner and invokes its `--validate` mode. Unknown kinds, duplicate registrations, invalid configuration, and incompatible ports fail before installation. The runner's normal mode executes generated node calls; validation never calls `TaskNode::execute`.
 
 The [multi-node fixture](../crates/mf-compiler/tests/fixtures/multi-nodes/) demonstrates one external crate registering several kinds. The packaged CLI acceptance script in [release prerequisites](releases.md) builds it from a packaged registry source outside the checkout.
 
@@ -32,14 +44,16 @@ See the [contribution guide](../CONTRIBUTING.md) for local checks and [dependenc
 
 ## Instance metadata
 
-Nodes with configurable ports can override `Node::ports()` with `NodePorts` using `PortSpec::owned` for dynamic names; this replaces both static port lists for that instance. Ordinary registrations remain unchanged. Names must be nonempty and unique within each direction. Metadata must depend only on configuration.
+Factories supply input and output `NodePorts` in `NodeMetadata.ports`, using `PortSpec::owned` for
+dynamic names. Names must be nonempty and unique within each direction. Metadata depends on
+configuration and prepared-body output types, and is available before task execution.
 
 The [Code node](../crates/builtin-nodes/code/src/lib.rs) uses this interface to expose ports from its declared inputs and checked CEL expressions.
 
-Nodes whose outputs are fixed or directly copy an input can also override `Node::output_derivations()`. Return
+Factories can populate `NodeMetadata.output_derivations` for fixed or forwarded outputs. Use
 `OutputDerivation::literal("value", value)` for a configured JSON value, or
-`OutputDerivation::forward_input("value", "input")` when the output always equals that input. The default method returns
-no derivations, so ordinary plugins retain their declared port types. Derivations must depend only on configuration and
+`OutputDerivation::forward_input("value", "input")` when the output always equals that input. An empty derivation list
+retains declared port types. Derivations must depend only on configuration and
 must describe the actual result whenever the output is produced. Validation rejects references to undeclared ports,
 duplicate output derivations, and literal values that conflict with the output's declared type. A plugin that advertises
 an inaccurate derivation can cause an incorrect compile-time decision; runtime port checks still reject values outside
@@ -51,7 +65,7 @@ descriptor is unavailable. Known JSON values remain available as separate eviden
 compile-time mismatch on a typed target. The [constant](../crates/builtin-nodes/core/src/constant.rs) and
 [identity](../crates/builtin-nodes/core/src/identity.rs) nodes demonstrate both derivation forms.
 
-Port types include the broad JSON categories `Any`, `Null`, `Boolean`, `Number`, `String`, `Array`, and `Object`, plus `Int64`, `Float64`, and recursive `List(T)` and `Map(T)`. `Map(T)` describes an object with string keys and values of type `T`. Existing `PortSpec::new` registrations remain valid for static broad or scalar ports. Construct typed collection ports from `Node::ports()`:
+Port types include the broad JSON categories `Any`, `Null`, `Boolean`, `Number`, `String`, `Array`, and `Object`, plus `Int64`, `Float64`, and recursive `List(T)` and `Map(T)`. `Map(T)` describes an object with string keys and values of type `T`. Use `PortSpec::new` for static names and `PortSpec::owned` for generated names when constructing metadata:
 
 ```rust
 let items = ValueType::List(Box::new(ValueType::Int64));
@@ -66,12 +80,12 @@ Concrete conflicts such as `String` to `Int64` are rejected during compilation. 
 `WorkflowCompileError::IncompatiblePortTypes` now receive boxed `ValueType` fields and can dereference or clone them.
 Rebuild plugins against the matching runtime package and correct declarations that do not describe their produced values.
 
-Declare context reads with `Node::context_references()`. Each `ContextReference` contains a qualified output ID and a diagnostic label, such as a branch ID. Validation resolves exact `${node_id}.${output_name}` keys and requires the producer to be a strict ancestor through explicit dependencies. References do not add edges. Ambiguous qualified IDs are rejected with both source pairs.
+Declare context reads in `NodeMetadata.context_references`. Each `ContextReference` contains a qualified output ID and a diagnostic label, such as a branch ID. Validation resolves exact `${node_id}.${output_name}` keys and requires the producer to be a strict ancestor through explicit dependencies. References do not add edges. Ambiguous qualified IDs are rejected with both source pairs.
 
 ## Context-aware execution
 
-Override `Node::execute_with_context` to read declared outputs through `ctx.output("source.value")` and return
-`NodeResult`. The default adapter calls ordinary `execute` once. `ContextValue` distinguishes a produced JSON value from
+Implement `TaskNode::execute(inputs, &mut ExecutionContext)` and return `NodeResult`. Tasks can read
+declared outputs through `ctx.output("source.value")`. `ContextValue` distinguishes a produced JSON value from
 `Skipped`; unavailable outputs, including reads before production and unexpected omissions, are errors. Reference
 declarations support compile-time dependency checks; the context does not enforce a runtime read whitelist. The runtime
 publishes results only after successful execution and starts with fresh context for each run.
@@ -94,7 +108,10 @@ Iteration items retain separate scope paths. Generated runners enable capture on
 other explicit consumers; records define each value once and reference its ID.
 `--validate` and `--describe` do not capture data. Call `finish()` after an explicitly recorded run.
 
-The executor calls `Node::execute_with_context_mut`, whose default implementation delegates to the read-only `execute_with_context` method. Loop assignment and exit use engine-owned operations behind this adapter; plugins cannot write Loop variables or publish outputs directly. A Loop body has its own output scope for every pass. A context reference inside that body resolves only within its scope, including the synthetic `%loop` outputs, and still requires an explicit ancestor dependency.
+The runtime calls the task's single execution method. Loop assignment and exit use engine-owned scope
+operations; publication remains validated by the runtime. A Loop body has its own output scope for
+every pass. Context references inside that body resolve within the scope, including `%loop` outputs,
+and still require an explicit ancestor dependency.
 
 Keep output names local in node results. Runtime publication qualifies them with the instance ID. Explicit skipped names must be declared non-required outputs and cannot also be produced. A scheduler-skipped node propagates skipping through every output, including required ones. Context references alone never activate or skip a node.
 
@@ -108,7 +125,21 @@ carries multiple JSON types; a specific declaration must match every produced va
 
 ## Prepared execution nodes
 
-`FlowNode::new` requires resolved `NodePorts`. Compiler preparation supplies these from the instance or static registration. Both in-memory execution and generated runners return `WorkflowRunError`. Context-aware implementations take `&ExecutionContext`; generated step helpers assume a validated plan and its execution order.
+`PreparedNode::new(task, metadata)` accepts `NodeMetadata` or plain `NodePorts` when no derivations or
+references are needed. `FlowNode::new(id, prepared)` binds the definition identity. Compiler preparation
+resolves the metadata before execution. Both in-memory execution and generated runners return
+`WorkflowRunError`; generated step helpers assume a validated plan and its execution order.
+
+## Migrate an existing plugin
+
+- Replace `impl Node` with `impl TaskNode`. Keep one `execute` implementation taking inputs and a
+  mutable context. Convert ordinary output maps with `.into()` to return `NodeResult`.
+- Move port declarations, output derivations, and context references into the factory's `NodeMetadata`.
+- Return `PreparedNode` from factories and register them through `NodeFactory::Plain` or
+  `NodeFactory::Subgraph`. Static input/output fields on `NodeRegistration` have moved into metadata.
+- Construct container nodes with their prepared body. Remove declaration objects and `with_subgraph`
+  methods that previously replaced them after construction.
+- Rebuild the plugin and consumers against the same runtime package identity.
 
 ## Workflow observation context
 

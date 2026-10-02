@@ -1,7 +1,7 @@
 use mf_compiler::WorkflowDefinition;
 use mf_compiler::{
-    Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry, Outputs,
-    PortSpec, ValueType, WorkflowCompileError, deserialize_config, resolve_nodes,
+    Inputs, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry, Outputs, PortSpec,
+    TaskNode, ValueType, WorkflowCompileError, deserialize_config, resolve_nodes,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -16,29 +16,34 @@ struct ConstantNode {
     value: i64,
 }
 
-impl Node for ConstantNode {
-    fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::from([(
-            "value".to_owned(),
-            json!(self.value).into(),
-        )]))
+impl TaskNode for ConstantNode {
+    fn execute(
+        &self,
+        _inputs: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
+        Ok((Outputs::from([("value".to_owned(), json!(self.value).into())])).into())
     }
 }
 
-fn constant_factory(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+fn constant_factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let config: ConstantConfig = deserialize_config(config)?;
-    Ok(Box::new(ConstantNode {
+    let node = ConstantNode {
         value: config.value,
-    }))
+    };
+    let metadata = mf_runtime::NodeMetadata {
+        ports: mf_runtime::NodePorts {
+            inputs: vec![],
+            outputs: vec![PortSpec::new("value", ValueType::Number, true)],
+        },
+        output_derivations: Vec::new(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "test.constant",
-        inputs: &[],
-        outputs: &[PortSpec::new("value", ValueType::Number, true)],
-        factory: constant_factory,
-    }
+    NodeRegistration { kind: "test.constant", factory: mf_runtime::NodeFactory::Plain(constant_factory) }
 }
 
 #[test]
@@ -60,11 +65,19 @@ fn resolves_registered_nodes_in_definition_order() {
     assert_eq!(nodes[0].definition_id.as_str(), "first");
     assert_eq!(nodes[1].definition_id.as_str(), "second");
     assert_eq!(
-        nodes[0].node.execute(Inputs::new()).unwrap()["value"],
+        nodes[0]
+            .node
+            .execute(Inputs::new(), &mut mf_runtime::ExecutionContext::default())
+            .unwrap()
+            .outputs["value"],
         json!(7)
     );
     assert_eq!(
-        nodes[1].node.execute(Inputs::new()).unwrap()["value"],
+        nodes[1]
+            .node
+            .execute(Inputs::new(), &mut mf_runtime::ExecutionContext::default())
+            .unwrap()
+            .outputs["value"],
         json!(11)
     );
 }

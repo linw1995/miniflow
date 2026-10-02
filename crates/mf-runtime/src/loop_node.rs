@@ -1,6 +1,6 @@
 use crate::{
-    ExecutionContext, FlowNode, Inputs, LoopVariableDefinition, Node, NodeExecutionError,
-    NodePorts, NodeResult, Outputs, PortSpec, ValueType, WorkflowRunError,
+    ExecutionContext, FlowNode, Inputs, LoopVariableDefinition, NodeExecutionError, NodePorts,
+    NodeResult, Outputs, PortSpec, TaskNode, ValueType, WorkflowRunError,
 };
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -36,14 +36,8 @@ pub fn loop_variable_types(
 
 struct ScopeSourceNode;
 
-impl Node for ScopeSourceNode {
-    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Err(structural_error(
-            "scope source requires an execution context",
-        ))
-    }
-
-    fn execute_with_context_mut(
+impl TaskNode for ScopeSourceNode {
+    fn execute(
         &self,
         _: Inputs,
         ctx: &mut ExecutionContext,
@@ -81,19 +75,15 @@ pub fn prepared_scope_source(id: &str, types: &BTreeMap<String, ValueType>) -> F
         inputs: Vec::new(),
         outputs,
     };
-    FlowNode::new(id, Box::new(ScopeSourceNode), ports)
+    FlowNode::new(id, crate::PreparedNode::new(ScopeSourceNode, ports))
 }
 
 struct LoopAssignNode {
     variable: String,
 }
 
-impl Node for LoopAssignNode {
-    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Err(structural_error("Loop assignment requires a Loop frame"))
-    }
-
-    fn execute_with_context_mut(
+impl TaskNode for LoopAssignNode {
+    fn execute(
         &self,
         mut inputs: Inputs,
         ctx: &mut ExecutionContext,
@@ -113,10 +103,12 @@ pub fn prepared_loop_assign(id: &str, variable: &str, value_type: ValueType) -> 
     };
     FlowNode::new(
         id,
-        Box::new(LoopAssignNode {
-            variable: variable.to_owned(),
-        }),
-        ports,
+        crate::PreparedNode::new(
+            LoopAssignNode {
+                variable: variable.to_owned(),
+            },
+            ports,
+        ),
     )
 }
 
@@ -141,12 +133,8 @@ pub fn prepared_loop_assign_from_json(
 
 struct ExitLoopNode;
 
-impl Node for ExitLoopNode {
-    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Err(structural_error("Loop exit requires a Loop frame"))
-    }
-
-    fn execute_with_context_mut(
+impl TaskNode for ExitLoopNode {
+    fn execute(
         &self,
         _: Inputs,
         ctx: &mut ExecutionContext,
@@ -157,5 +145,8 @@ impl Node for ExitLoopNode {
 }
 
 pub fn prepared_loop_exit(id: &str) -> FlowNode {
-    FlowNode::new(id, Box::new(ExitLoopNode), NodePorts::default())
+    FlowNode::new(
+        id,
+        crate::PreparedNode::new(ExitLoopNode, NodePorts::default()),
+    )
 }

@@ -3,8 +3,8 @@ mod value;
 use cel_core::types::{Expr, SpannedExpr};
 use cel_core::{CelType, Env, MapActivation, Program, Value as CelValue};
 use mf_runtime::{
-    Inputs, Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, Outputs,
-    PortSpec, ValueType, deserialize_config,
+    Inputs, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, Outputs, PortSpec,
+    TaskNode, ValueType, deserialize_config,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -156,8 +156,12 @@ struct CodeNode {
     programs: BTreeMap<String, Program>,
 }
 
-impl Node for CodeNode {
-    fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
+impl TaskNode for CodeNode {
+    fn execute(
+        &self,
+        inputs: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
         let input_size = json_size(&inputs)
             .map_err(|error| execution_error(format!("could not measure inputs: {error}")))?;
         if input_size > MAX_JSON_BYTES {
@@ -203,15 +207,16 @@ impl Node for CodeNode {
             }
             outputs.insert(name.to_owned(), converted);
         }
-        Ok(outputs)
+        Ok(outputs.into())
     }
-
-    fn ports(&self) -> Option<NodePorts> {
-        Some(self.ports.clone())
+}
+impl CodeNode {
+    fn ports(&self) -> NodePorts {
+        self.ports.clone()
     }
 }
 
-fn factory(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
+fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let config: Config = deserialize_config(config)?;
     if config.language != "cel" {
         return Err(invalid(format!(
@@ -273,19 +278,20 @@ fn factory(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
         outputs.push(PortSpec::owned(name, value_type, true));
         programs.insert(name.clone(), program);
     }
-    Ok(Box::new(CodeNode {
+    let node = CodeNode {
         ports: NodePorts { inputs, outputs },
         programs,
-    }))
+    };
+    let metadata = mf_runtime::NodeMetadata {
+        ports: node.ports(),
+        output_derivations: Vec::new(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: KIND,
-        inputs: &[],
-        outputs: &[],
-        factory,
-    }
+    NodeRegistration { kind: KIND, factory: mf_runtime::NodeFactory::Plain(factory) }
 }
 
 #[cfg(test)]
@@ -330,7 +336,7 @@ mod tests {
             ),
         ] {
             let node = registration.instantiate(config).unwrap();
-            let ports = registration.effective_ports(node.as_ref());
+            let ports = &node.metadata.ports;
             assert_eq!(ports.inputs[0].value_type, expected_input);
             assert_eq!(ports.outputs[0].value_type, expected_output);
         }
@@ -407,7 +413,7 @@ mod tests {
                 "code": {"result": expression}
             }))
             .unwrap();
-            assert_eq!(node.ports().unwrap().outputs[0].value_type, expected);
+            assert_eq!(node.metadata.ports.outputs[0].value_type, expected);
         }
         let node = factory(json!({
             "language": "cel",
@@ -416,7 +422,7 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(
-            node.ports().unwrap().outputs[0].value_type,
+            node.metadata.ports.outputs[0].value_type,
             ValueType::Map(Box::new(ValueType::Int64))
         );
     }
@@ -455,13 +461,18 @@ mod tests {
         }))
         .unwrap();
         let outputs = node
-            .execute(Inputs::from([
-                ("amount".into(), json!(21).into()),
-                ("items".into(), json!([1, 2]).into()),
-                ("values".into(), json!({"a": 3}).into()),
-                ("nothing".into(), Value::Null.into()),
-            ]))
-            .unwrap();
+            .task
+            .execute(
+                Inputs::from([
+                    ("amount".into(), json!(21).into()),
+                    ("items".into(), json!([1, 2]).into()),
+                    ("values".into(), json!({"a": 3}).into()),
+                    ("nothing".into(), Value::Null.into()),
+                ]),
+                &mut mf_runtime::ExecutionContext::default(),
+            )
+            .unwrap()
+            .outputs;
         assert_eq!(outputs["doubled"], json!(42));
         assert_eq!(outputs["list"], json!([2, 4]));
         assert_eq!(outputs["map"], json!({"a": 3}));
@@ -495,7 +506,11 @@ mod tests {
                 "path `/0/a`",
             ),
         ] {
-            let error = node.execute(inputs).unwrap_err().to_string();
+            let error = node
+                .task
+                .execute(inputs, &mut mf_runtime::ExecutionContext::default())
+                .unwrap_err()
+                .to_string();
             assert!(error.contains(expected), "{error}");
         }
         let int_node = factory(json!({
@@ -505,7 +520,11 @@ mod tests {
         }))
         .unwrap();
         let error = int_node
-            .execute(Inputs::from([("amount".into(), json!(u64::MAX).into())]))
+            .task
+            .execute(
+                Inputs::from([("amount".into(), json!(u64::MAX).into())]),
+                &mut mf_runtime::ExecutionContext::default(),
+            )
             .unwrap_err()
             .to_string();
         assert!(error.contains("input `amount`") && error.contains("expected int64"));
@@ -520,7 +539,11 @@ mod tests {
         }))
         .unwrap();
         let error = node
-            .execute(Inputs::from([("divisor".into(), json!(0).into())]))
+            .task
+            .execute(
+                Inputs::from([("divisor".into(), json!(0).into())]),
+                &mut mf_runtime::ExecutionContext::default(),
+            )
             .unwrap_err()
             .to_string();
         assert!(error.contains("output `second`"), "{error}");
@@ -546,18 +569,23 @@ mod tests {
         }))
         .unwrap();
         let error = node
-            .execute(Inputs::from([(
-                "payload".into(),
-                json!("x".repeat(MAX_JSON_BYTES + 1)).into(),
-            )]))
+            .task
+            .execute(
+                Inputs::from([(
+                    "payload".into(),
+                    json!("x".repeat(MAX_JSON_BYTES + 1)).into(),
+                )]),
+                &mut mf_runtime::ExecutionContext::default(),
+            )
             .unwrap_err()
             .to_string();
         assert!(error.contains("inputs exceed"), "{error}");
         let error = node
-            .execute(Inputs::from([(
-                "payload".into(),
-                json!("x".repeat(600_000)).into(),
-            )]))
+            .task
+            .execute(
+                Inputs::from([("payload".into(), json!("x".repeat(600_000)).into())]),
+                &mut mf_runtime::ExecutionContext::default(),
+            )
             .unwrap_err()
             .to_string();
         assert!(error.contains("output `result`: outputs exceed"), "{error}");
@@ -569,10 +597,11 @@ mod tests {
         }))
         .unwrap();
         let error = node
-            .execute(Inputs::from([(
-                "items".into(),
-                json!(vec![1; 4_000]).into(),
-            )]))
+            .task
+            .execute(
+                Inputs::from([("items".into(), json!(vec![1; 4_000]).into())]),
+                &mut mf_runtime::ExecutionContext::default(),
+            )
             .unwrap_err()
             .to_string();
         assert!(error.contains("output `second`"), "{error}");
@@ -603,10 +632,18 @@ mod tests {
                 .len();
             let exact = payload(MAX_JSON_BYTES - overhead);
             let inputs = Inputs::from([(input.into(), exact.clone().into())]);
-            let outputs = node.execute(inputs).unwrap();
+            let outputs = node
+                .task
+                .execute(inputs, &mut mf_runtime::ExecutionContext::default())
+                .unwrap()
+                .outputs;
             assert_eq!(outputs[output].as_str(), Some(exact.as_str()));
             let error = node
-                .execute(Inputs::from([(input.into(), format!("{exact}x").into())]))
+                .task
+                .execute(
+                    Inputs::from([(input.into(), format!("{exact}x").into())]),
+                    &mut mf_runtime::ExecutionContext::default(),
+                )
                 .unwrap_err()
                 .to_string();
             let expected = if input_limited {
@@ -629,7 +666,7 @@ mod tests {
             }
         }))
         .unwrap();
-        let ports = node.ports().unwrap();
+        let ports = node.metadata.ports;
         let types: BTreeMap<_, _> = ports
             .outputs
             .iter()

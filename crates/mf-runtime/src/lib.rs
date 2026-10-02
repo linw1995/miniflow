@@ -35,13 +35,16 @@ pub use loop_node::{
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
 pub use node::{
-    ContextReference, Inputs, Node, NodeBuildError, NodeExecutionError, NodeFactory, NodePorts,
-    NodeRegistration, OutputDerivation, OutputDerivationError, Outputs, PortSpec,
-    TypeCompatibility, TypeDepthError, TypeMismatch, ValueType, deserialize_config, output_id,
+    ContextReference, Inputs, NodeBuildError, NodeExecutionError, NodeFactory, NodeMetadata,
+    NodePorts, NodeRegistration, OutputDerivation, OutputDerivationError, Outputs, PortSpec,
+    PreparedNode, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, ValueType,
+    deserialize_config, output_id,
 };
 pub use number::compare_json_numbers;
 pub use registry::{NodeRegistry, NodeRegistryError};
-pub use runner::{WorkflowRunError, instantiate_node_with_metadata};
+pub use runner::{
+    WorkflowRunError, instantiate_node_with_metadata, instantiate_subgraph_with_metadata,
+};
 pub use subgraph::PreparedSubgraph;
 
 pub use value::{ValueKind, ValueRef};

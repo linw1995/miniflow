@@ -1,97 +1,91 @@
 use mf_compiler::WorkflowDefinition;
 use mf_compiler::{
-    Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry, Outputs,
-    PortSpec, ValueType, WorkflowCompileError, validate_definition,
+    Inputs, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry, Outputs, PortSpec,
+    TaskNode, ValueType, WorkflowCompileError, validate_definition,
 };
 use serde_json::{Value, json};
 
 struct NoopNode;
 
-impl Node for NoopNode {
-    fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::new())
+impl TaskNode for NoopNode {
+    fn execute(
+        &self,
+        _inputs: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
+        Ok(Outputs::new().into())
     }
 }
 
 struct DeepTypeNode;
 
-impl Node for DeepTypeNode {
-    fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::new())
+impl TaskNode for DeepTypeNode {
+    fn execute(
+        &self,
+        _inputs: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
+        Ok(Outputs::new().into())
     }
-
-    fn ports(&self) -> Option<mf_compiler::NodePorts> {
+}
+impl DeepTypeNode {
+    fn ports(&self) -> mf_compiler::NodePorts {
         let mut value_type = ValueType::Int64;
         for _ in 0..ValueType::MAX_DEPTH {
             value_type = ValueType::List(Box::new(value_type));
         }
-        Some(mf_compiler::NodePorts {
+        mf_compiler::NodePorts {
             inputs: vec![],
             outputs: vec![PortSpec::owned("value", value_type, true)],
-        })
+        }
     }
 }
 
-fn noop_factory(_config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    Ok(Box::new(NoopNode))
+fn noop_factory(
+    _config: Value,
+    declared_ports: mf_runtime::NodePorts,
+) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    let node = NoopNode;
+    let metadata = mf_runtime::NodeMetadata {
+        ports: declared_ports,
+        output_derivations: Vec::new(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
-fn deep_type_factory(_config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    Ok(Box::new(DeepTypeNode))
+fn deep_type_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    let node = DeepTypeNode;
+    let metadata = mf_runtime::NodeMetadata {
+        ports: node.ports(),
+        output_derivations: Vec::new(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "source.deep_type",
-        inputs: &[],
-        outputs: &[],
-        factory: deep_type_factory,
-    }
+    NodeRegistration { kind: "source.deep_type", factory: mf_runtime::NodeFactory::Plain(deep_type_factory) }
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "source.number",
-        inputs: &[],
-        outputs: &[PortSpec::new("value", ValueType::Number, true)],
-        factory: noop_factory,
-    }
+    NodeRegistration { kind: "source.number", factory: mf_runtime::NodeFactory::Plain(|config| noop_factory(config, mf_runtime::NodePorts { inputs: vec![], outputs: vec![PortSpec::new("value", ValueType::Number, true)] })) }
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "source.string",
-        inputs: &[],
-        outputs: &[PortSpec::new("value", ValueType::String, true)],
-        factory: noop_factory,
-    }
+    NodeRegistration { kind: "source.string", factory: mf_runtime::NodeFactory::Plain(|config| noop_factory(config, mf_runtime::NodePorts { inputs: vec![], outputs: vec![PortSpec::new("value", ValueType::String, true)] })) }
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "source.any",
-        inputs: &[],
-        outputs: &[PortSpec::new("value", ValueType::Any, true)],
-        factory: noop_factory,
-    }
+    NodeRegistration { kind: "source.any", factory: mf_runtime::NodeFactory::Plain(|config| noop_factory(config, mf_runtime::NodePorts { inputs: vec![], outputs: vec![PortSpec::new("value", ValueType::Any, true)] })) }
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "sink.number",
-        inputs: &[PortSpec::new("input", ValueType::Number, true)],
-        outputs: &[PortSpec::new("result", ValueType::Number, true)],
-        factory: noop_factory,
-    }
+    NodeRegistration { kind: "sink.number", factory: mf_runtime::NodeFactory::Plain(|config| noop_factory(config, mf_runtime::NodePorts { inputs: vec![PortSpec::new("input", ValueType::Number, true)], outputs: vec![PortSpec::new("result", ValueType::Number, true)] })) }
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "sink.any",
-        inputs: &[PortSpec::new("input", ValueType::Any, true)],
-        outputs: &[PortSpec::new("result", ValueType::Any, true)],
-        factory: noop_factory,
-    }
+    NodeRegistration { kind: "sink.any", factory: mf_runtime::NodeFactory::Plain(|config| noop_factory(config, mf_runtime::NodePorts { inputs: vec![PortSpec::new("input", ValueType::Any, true)], outputs: vec![PortSpec::new("result", ValueType::Any, true)] })) }
 }
 
 fn valid_definition() -> Value {

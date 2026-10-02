@@ -756,12 +756,13 @@ fn blocked_otel_export_does_not_block_flow_execution() {
     }
 
     struct EmptyNode;
-    impl mf_compiler::Node for EmptyNode {
+    impl mf_compiler::TaskNode for EmptyNode {
         fn execute(
             &self,
             _: mf_compiler::Inputs,
-        ) -> Result<mf_compiler::Outputs, mf_compiler::NodeExecutionError> {
-            Ok(mf_compiler::Outputs::new())
+            _: &mut mf_compiler::ExecutionContext,
+        ) -> Result<mf_compiler::NodeResult, mf_compiler::NodeExecutionError> {
+            Ok(mf_compiler::Outputs::new().into())
         }
     }
 
@@ -775,8 +776,7 @@ fn blocked_otel_export_does_not_block_flow_execution() {
         .map(|id| {
             mf_compiler::FlowNode::new(
                 id.clone(),
-                Box::new(EmptyNode),
-                mf_compiler::NodePorts::default(),
+                mf_compiler::PreparedNode::new(EmptyNode, mf_compiler::NodePorts::default()),
             )
         })
         .collect();

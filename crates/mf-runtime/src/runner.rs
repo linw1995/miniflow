@@ -53,6 +53,38 @@ pub fn instantiate_node_with_metadata(
         .context(NodeConstructionSnafu {
             definition_id: DefinitionId::from(definition_id),
         })?;
-    let ports = registration.effective_ports(node.as_ref());
-    Ok(crate::FlowNode::new(definition_id, node, ports))
+    Ok(crate::FlowNode::new(definition_id, node))
+}
+
+pub fn instantiate_subgraph_with_metadata(
+    registry: &NodeRegistry,
+    definition_id: &str,
+    kind: &str,
+    config_json: &str,
+    options_json: &str,
+    body: crate::PreparedSubgraph,
+) -> Result<crate::FlowNode, WorkflowRunError> {
+    let Some(registration) = registry.get(kind) else {
+        return UnknownKindSnafu {
+            definition_id: DefinitionId::from(definition_id),
+            kind: kind.to_owned(),
+        }
+        .fail();
+    };
+    let parse = |value| {
+        serde_json::from_str(value).context(InvalidEmbeddedConfigSnafu {
+            definition_id: DefinitionId::from(definition_id),
+        })
+    };
+    let prepared = registration
+        .instantiate_subgraph(
+            definition_id,
+            parse(config_json)?,
+            parse(options_json)?,
+            body,
+        )
+        .context(NodeConstructionSnafu {
+            definition_id: DefinitionId::from(definition_id),
+        })?;
+    Ok(crate::FlowNode::new(definition_id, prepared))
 }

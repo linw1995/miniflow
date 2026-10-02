@@ -1,50 +1,48 @@
 use mf_compiler::{DefinitionId, WorkflowDefinition};
 use mf_compiler::{
-    Flow, Inputs, Node, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry,
-    Outputs, PortSpec, ValueType, WorkflowCompileError, resolve_nodes, topological_order,
+    Flow, Inputs, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry, Outputs,
+    PortSpec, TaskNode, ValueType, WorkflowCompileError, resolve_nodes, topological_order,
 };
 use serde_json::{Value, json};
 
 struct NoopNode;
 
-impl Node for NoopNode {
-    fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::new())
+impl TaskNode for NoopNode {
+    fn execute(
+        &self,
+        _inputs: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
+        Ok(Outputs::new().into())
     }
 }
 
-fn noop_factory(_config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    Ok(Box::new(NoopNode))
+fn noop_factory(
+    _config: Value,
+    declared_ports: mf_runtime::NodePorts,
+) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    let node = NoopNode;
+    let metadata = mf_runtime::NodeMetadata {
+        ports: declared_ports,
+        output_derivations: Vec::new(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "plan.source",
-        inputs: &[],
-        outputs: &[PortSpec::new("value", ValueType::Number, true)],
-        factory: noop_factory,
-    }
+    NodeRegistration { kind: "plan.source", factory: mf_runtime::NodeFactory::Plain(|config| noop_factory(config, mf_runtime::NodePorts { inputs: vec![], outputs: vec![PortSpec::new("value", ValueType::Number, true)] })) }
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "plan.pass",
-        inputs: &[PortSpec::new("input", ValueType::Number, true)],
-        outputs: &[PortSpec::new("value", ValueType::Number, true)],
-        factory: noop_factory,
-    }
+    NodeRegistration { kind: "plan.pass", factory: mf_runtime::NodeFactory::Plain(|config| noop_factory(config, mf_runtime::NodePorts { inputs: vec![PortSpec::new("input", ValueType::Number, true)], outputs: vec![PortSpec::new("value", ValueType::Number, true)] })) }
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "plan.join",
-        inputs: &[
+    NodeRegistration { kind: "plan.join", factory: mf_runtime::NodeFactory::Plain(|config| noop_factory(config, mf_runtime::NodePorts { inputs: vec![
             PortSpec::new("left", ValueType::Number, true),
             PortSpec::new("right", ValueType::Number, true),
-        ],
-        outputs: &[PortSpec::new("result", ValueType::Number, true)],
-        factory: noop_factory,
-    }
+        ], outputs: vec![PortSpec::new("result", ValueType::Number, true)] })) }
 }
 
 fn diamond_definition() -> Value {

@@ -476,69 +476,81 @@ where
     serde_json::from_value(value).context(InvalidConfigurationSnafu)
 }
 
-pub trait Node: Send + Sync {
-    fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError>;
-
-    fn with_subgraph(
-        self: Box<Self>,
-        _id: &str,
-        _options: Value,
-        _body: crate::PreparedSubgraph,
-    ) -> Result<Box<dyn Node>, NodeBuildError> {
-        Err(NodeBuildError::InvalidSubgraph {
-            message: "node does not support prepared subgraphs".into(),
-        })
-    }
-
-    fn execute_with_context(
-        &self,
-        inputs: Inputs,
-        _ctx: &crate::ExecutionContext,
-    ) -> Result<crate::NodeResult, NodeExecutionError> {
-        self.execute(inputs).map(Into::into)
-    }
-
-    fn execute_with_context_mut(
+pub trait TaskNode: Send + Sync {
+    fn execute(
         &self,
         inputs: Inputs,
         ctx: &mut crate::ExecutionContext,
-    ) -> Result<crate::NodeResult, NodeExecutionError> {
-        self.execute_with_context(inputs, ctx)
-    }
+    ) -> Result<crate::NodeResult, NodeExecutionError>;
+}
 
-    fn ports(&self) -> Option<NodePorts> {
-        None
-    }
+#[derive(Clone, Debug, Default)]
+pub struct NodeMetadata {
+    pub ports: NodePorts,
+    pub output_derivations: Vec<OutputDerivation>,
+    pub context_references: Vec<ContextReference>,
+}
 
-    fn output_derivations(&self) -> Vec<OutputDerivation> {
-        Vec::new()
-    }
-
-    fn context_references(&self) -> Vec<ContextReference> {
-        Vec::new()
+impl From<NodePorts> for NodeMetadata {
+    fn from(ports: NodePorts) -> Self {
+        Self {
+            ports,
+            ..Self::default()
+        }
     }
 }
 
-pub type NodeFactory = fn(Value) -> Result<Box<dyn Node>, NodeBuildError>;
+pub struct PreparedNode {
+    pub metadata: NodeMetadata,
+    pub task: Box<dyn TaskNode>,
+}
+
+impl PreparedNode {
+    pub fn new(task: impl TaskNode + 'static, metadata: impl Into<NodeMetadata>) -> Self {
+        Self {
+            metadata: metadata.into(),
+            task: Box::new(task),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum NodeFactory {
+    Plain(fn(Value) -> Result<PreparedNode, NodeBuildError>),
+    Subgraph(
+        fn(&str, Value, Value, crate::PreparedSubgraph) -> Result<PreparedNode, NodeBuildError>,
+    ),
+}
 
 #[derive(Clone, Copy, Debug)]
 pub struct NodeRegistration {
     pub kind: &'static str,
-    pub inputs: &'static [PortSpec],
-    pub outputs: &'static [PortSpec],
     pub factory: NodeFactory,
 }
 
 impl NodeRegistration {
-    pub fn instantiate(&self, config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-        (self.factory)(config)
+    pub fn instantiate(&self, config: Value) -> Result<PreparedNode, NodeBuildError> {
+        match self.factory {
+            NodeFactory::Plain(factory) => factory(config),
+            NodeFactory::Subgraph(_) => Err(NodeBuildError::InvalidSubgraph {
+                message: format!("node `{}` requires a prepared body", self.kind),
+            }),
+        }
     }
 
-    pub fn effective_ports(&self, node: &dyn Node) -> NodePorts {
-        node.ports().unwrap_or_else(|| NodePorts {
-            inputs: self.inputs.to_vec(),
-            outputs: self.outputs.to_vec(),
-        })
+    pub fn instantiate_subgraph(
+        &self,
+        id: &str,
+        config: Value,
+        options: Value,
+        body: crate::PreparedSubgraph,
+    ) -> Result<PreparedNode, NodeBuildError> {
+        match self.factory {
+            NodeFactory::Subgraph(factory) => factory(id, config, options, body),
+            NodeFactory::Plain(_) => Err(NodeBuildError::InvalidSubgraph {
+                message: format!("node `{}` does not accept a prepared body", self.kind),
+            }),
+        }
     }
 }
 

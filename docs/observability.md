@@ -60,7 +60,7 @@ caller-supplied processors/exporters can still discard data, and those losses re
 missing final boundary. Use background batch processors for network export because instrumentation invokes the
 configured OTel processors synchronously. Custom processors must be nonblocking and must not panic.
 
-The run context is active during preparation/execution and a node context is active during each shared step. A plugin using a caller-provided OTel tracer can start a child span with the ordinary current-context API without changing `Node::execute` or `execute_with_context`. The library does not choose plugin tracers or propagate context into plugin-created threads; plugins must explicitly attach a captured context there. Context guards restore the prior caller context on return or unwind.
+The run context is active during preparation/execution and a node context is active during each shared step. A plugin using a caller-provided OTel tracer can start a child span with the ordinary current-context API inside `TaskNode::execute`. The library does not choose plugin tracers or propagate context into plugin-created threads; plugins must explicitly attach a captured context there. Context guards restore the prior caller context on return or unwind.
 
 No library call shuts down the application's providers. Panic/unwind preserves the original panic and ends held spans without fabricating a workflow finish or successful node outcome. An abandoned scope therefore has no terminal boundary. Handled errors retain the original execution result; dropped or unencodable telemetry never becomes a workflow error.
 OTel lifecycle events contain execution metadata. Optional input/output history uses the snapshot events described below;

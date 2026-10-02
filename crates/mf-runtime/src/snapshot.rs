@@ -74,7 +74,7 @@ pub enum SnapshotRecord {
         id: ValueId,
         value: ValueDefinition,
     },
-    Node {
+    TaskNode {
         scope: Vec<LoopPathEntry>,
         node: Arc<str>,
         inputs: ValueId,
@@ -162,7 +162,7 @@ impl SnapshotStore {
                 self.values.push(value);
                 Ok(false)
             }
-            SnapshotRecord::Node {
+            SnapshotRecord::TaskNode {
                 scope,
                 node,
                 inputs,
@@ -455,7 +455,7 @@ impl SnapshotRecorder {
         let result = (|| {
             let inputs = recording.intern(&snapshot.inputs)?;
             let outputs = recording.intern(&snapshot.outputs)?;
-            recording.append(SnapshotRecord::Node {
+            recording.append(SnapshotRecord::TaskNode {
                 scope,
                 node: node.into(),
                 inputs,

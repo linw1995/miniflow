@@ -1,6 +1,6 @@
 use mf_runtime::{
-    ContextReference, ContextValue, ExecutionContext, Inputs, Node, NodeBuildError,
-    NodeExecutionError, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, ValueType,
+    ContextReference, ContextValue, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError,
+    NodePorts, NodeRegistration, NodeResult, PortSpec, TaskNode, ValueType,
 };
 use serde_json::Value;
 use std::io::Write;
@@ -11,39 +11,11 @@ fn failure(message: impl Into<String>) -> NodeExecutionError {
         message: message.into(),
     }
 }
-impl Node for ContextNode {
-    fn execute(&self, _: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Err(failure("context required"))
-    }
-    fn ports(&self) -> Option<NodePorts> {
-        Some(NodePorts {
-            inputs: self.0["inputs"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|v| PortSpec::owned(v.as_str().unwrap(), ValueType::Any, false))
-                .collect(),
-            outputs: self.0["ports"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|v| {
-                    let name = v.as_str().unwrap();
-                    PortSpec::owned(name, ValueType::Any, self.0["required"] == name)
-                })
-                .collect(),
-        })
-    }
-    fn context_references(&self) -> Vec<ContextReference> {
-        self.0["read"]
-            .as_str()
-            .map(|v| vec![ContextReference::new(v, "fixture")])
-            .unwrap_or_default()
-    }
-    fn execute_with_context(
+impl TaskNode for ContextNode {
+    fn execute(
         &self,
         _: Inputs,
-        ctx: &ExecutionContext,
+        ctx: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
         if let Some(path) = self.0["trace"].as_str() {
             let mut file = std::fs::OpenOptions::new()
@@ -82,8 +54,41 @@ impl Node for ContextNode {
         Ok(result)
     }
 }
-fn factory(config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    let config: serde_json::Map<String, Value> = mf_runtime::deserialize_config(config)?;
-    Ok(Box::new(ContextNode(Value::Object(config))))
+impl ContextNode {
+    fn ports(&self) -> NodePorts {
+        NodePorts {
+            inputs: self.0["inputs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|v| PortSpec::owned(v.as_str().unwrap(), ValueType::Any, false))
+                .collect(),
+            outputs: self.0["ports"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|v| {
+                    let name = v.as_str().unwrap();
+                    PortSpec::owned(name, ValueType::Any, self.0["required"] == name)
+                })
+                .collect(),
+        }
+    }
+    fn context_references(&self) -> Vec<ContextReference> {
+        self.0["read"]
+            .as_str()
+            .map(|v| vec![ContextReference::new(v, "fixture")])
+            .unwrap_or_default()
+    }
 }
-inventory::submit! { NodeRegistration { kind: "fixture.context", inputs: &[], outputs: &[], factory } }
+fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    let config: serde_json::Map<String, Value> = mf_runtime::deserialize_config(config)?;
+    let node = ContextNode(Value::Object(config));
+    let metadata = mf_runtime::NodeMetadata {
+        ports: node.ports(),
+        output_derivations: Vec::new(),
+        context_references: node.context_references(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
+}
+inventory::submit! { NodeRegistration { kind: "fixture.context", factory: mf_runtime::NodeFactory::Plain(factory) } }

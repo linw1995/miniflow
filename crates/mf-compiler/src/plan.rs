@@ -419,7 +419,6 @@ fn subgraph_preparation(
 ) -> Result<TokenStream, PlanError> {
     let node_ident = format_ident!("node_{scope}_{index}");
     let inference_ident = format_ident!("inference_{scope}");
-    let declaration_ident = format_ident!("declaration_{scope}_{index}");
     let body_ident = format_ident!("body_{scope}_{index}");
     let outer_id = LitStr::new(node.id.as_str(), Span::call_site());
     let kind = LitStr::new(&node.kind, Span::call_site());
@@ -504,7 +503,7 @@ fn subgraph_preparation(
         let source = LitStr::new(output.node.as_str(), Span::call_site());
         let required = !output.optional;
         quote! {
-            mf_runtime::PortSpec::owned(#name, #result.ports.outputs.iter()
+            mf_runtime::PortSpec::owned(#name, #result.metadata.ports.outputs.iter()
                 .find(|port| port.name == #port)
                 .ok_or_else(|| {
                     let error = mf_runtime::WorkflowRunError::Context {
@@ -525,18 +524,12 @@ fn subgraph_preparation(
         .iter()
         .map(|id| LitStr::new(id, Span::call_site()))
         .collect();
-    let declaration = if static_scope.is_empty() {
-        quote! { state.prepare_node(registry, #outer_id, #kind, #config)? }
-    } else {
-        quote! { state.prepare_node_in_loop(registry, #outer_id, #kind, #config, &[#(#scopes),*])? }
-    };
     let report = if static_scope.is_empty() {
         quote! { state.preparation_failed(#outer_id, &error); }
     } else {
         quote! { state.preparation_failed_in_loop(&[#(#scopes),*], #outer_id, &error); }
     };
     Ok(quote! {
-        let #declaration_ident = #declaration;
         #(#preparations)*
         let #body_ident = mf_runtime::PreparedSubgraph::new(
             vec![#(#nodes),*], vec![#(#outputs),*],
@@ -545,7 +538,9 @@ fn subgraph_preparation(
                 #body_outputs
             },
         );
-        let mut #node_ident = #declaration_ident.with_subgraph_from_json(#options, #body_ident)
+        let mut #node_ident = mf_runtime::instantiate_subgraph_with_metadata(
+            registry, #outer_id, #kind, #config, #options, #body_ident,
+        )
             .map_err(|error| { #report error })?;
         #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*])
             .map_err(|error| {

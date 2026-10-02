@@ -4,9 +4,9 @@ mod fixture;
 extern crate mfn_core as _;
 
 use mf_compiler::{
-    Inputs, Node, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, NodeRegistry,
-    OutputDerivation, Outputs, PortSpec, ValueType, WorkflowDefinition, compile_definition,
-    instantiate_compiled,
+    Inputs, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, NodeRegistry,
+    OutputDerivation, Outputs, PortSpec, TaskNode, ValueType, WorkflowDefinition,
+    compile_definition, instantiate_compiled,
 };
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -114,34 +114,39 @@ fn propagates_declared_plugin_types_without_a_known_value() {
 
 struct ForwardingNode;
 
-impl Node for ForwardingNode {
-    fn execute(&self, inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
-        Ok(Outputs::from([("value".into(), inputs["input"].clone())]))
+impl TaskNode for ForwardingNode {
+    fn execute(
+        &self,
+        inputs: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
+        Ok((Outputs::from([("value".into(), inputs["input"].clone())])).into())
     }
-
-    fn ports(&self) -> Option<NodePorts> {
-        Some(NodePorts {
+}
+impl ForwardingNode {
+    fn ports(&self) -> NodePorts {
+        NodePorts {
             inputs: vec![PortSpec::new("input", ValueType::Any, true)],
             outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
-        })
+        }
     }
-
     fn output_derivations(&self) -> Vec<OutputDerivation> {
         vec![OutputDerivation::forward_input("value", "input")]
     }
 }
 
-fn forwarding_factory(_config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    Ok(Box::new(ForwardingNode))
+fn forwarding_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    let node = ForwardingNode;
+    let metadata = mf_runtime::NodeMetadata {
+        ports: node.ports(),
+        output_derivations: node.output_derivations(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "fixture.forwarding",
-        inputs: &[],
-        outputs: &[],
-        factory: forwarding_factory,
-    }
+    NodeRegistration { kind: "fixture.forwarding", factory: mf_runtime::NodeFactory::Plain(forwarding_factory) }
 }
 
 #[test]
@@ -210,28 +215,37 @@ static INVALID_EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
 
 struct InvalidMetadataNode;
 
-impl Node for InvalidMetadataNode {
-    fn execute(&self, _inputs: Inputs) -> Result<Outputs, NodeExecutionError> {
+impl TaskNode for InvalidMetadataNode {
+    fn execute(
+        &self,
+        _inputs: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
         INVALID_EXECUTIONS.fetch_add(1, Ordering::Relaxed);
-        Ok(Outputs::from([("value".into(), json!("wrong").into())]))
+        Ok((Outputs::from([("value".into(), json!("wrong").into())])).into())
     }
-
+}
+impl InvalidMetadataNode {
     fn output_derivations(&self) -> Vec<OutputDerivation> {
         vec![OutputDerivation::forward_input("value", "missing")]
     }
 }
 
-fn invalid_metadata_factory(_config: Value) -> Result<Box<dyn Node>, NodeBuildError> {
-    Ok(Box::new(InvalidMetadataNode))
+fn invalid_metadata_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
+    let node = InvalidMetadataNode;
+    let metadata = mf_runtime::NodeMetadata {
+        ports: mf_runtime::NodePorts {
+            inputs: vec![],
+            outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
+        },
+        output_derivations: node.output_derivations(),
+        context_references: Vec::new(),
+    };
+    Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 inventory::submit! {
-    NodeRegistration {
-        kind: "fixture.invalid_metadata",
-        inputs: &[],
-        outputs: &[PortSpec::new("value", ValueType::Int64, true)],
-        factory: invalid_metadata_factory,
-    }
+    NodeRegistration { kind: "fixture.invalid_metadata", factory: mf_runtime::NodeFactory::Plain(invalid_metadata_factory) }
 }
 
 #[test]

@@ -37,12 +37,13 @@ pub use mf_runtime::{
     FlowConnection, FlowNode, FlowOutput, FlowOutputs, Inputs, LOOP_ASSIGN_KIND, LOOP_KIND,
     LOOP_SOURCE_ID, LoopBodyDefinition, LoopComparisonOperator, LoopConditionDefinition,
     LoopDefinition, LoopVariableDefinition, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS,
-    MAX_SCHEDULED_STEPS, Node, NodeBuildError, NodeDefinition, NodeDependency, NodeExecutionError,
-    NodeFactory, NodeId, NodePorts, NodeRegistration, NodeRegistry, NodeRegistryError, NodeResult,
-    OutputDerivation, OutputDerivationError, Outputs, PortSpec, RunObservation, TypeCompatibility,
-    TypeDepthError, TypeMismatch, ValueKind, ValueRef, ValueType, WorkflowDefinition,
-    WorkflowDefinitionVersion, WorkflowOutputDefinition, WorkflowRunError, deserialize_config,
-    execute_node_in_context, instantiate_node_with_metadata, output_id, select_context_output,
+    MAX_SCHEDULED_STEPS, NodeBuildError, NodeDefinition, NodeDependency, NodeExecutionError,
+    NodeFactory, NodeId, NodeMetadata, NodePorts, NodeRegistration, NodeRegistry,
+    NodeRegistryError, NodeResult, OutputDerivation, OutputDerivationError, Outputs, PortSpec,
+    PreparedNode, RunObservation, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch,
+    ValueKind, ValueRef, ValueType, WorkflowDefinition, WorkflowDefinitionVersion,
+    WorkflowOutputDefinition, WorkflowRunError, deserialize_config, execute_node_in_context,
+    instantiate_node_with_metadata, output_id, select_context_output,
 };
 pub use mf_runtime::{IterationErrorPolicy, IterationMode};
 #[cfg(feature = "codegen")]
