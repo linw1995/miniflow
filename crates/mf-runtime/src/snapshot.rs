@@ -74,7 +74,7 @@ pub enum SnapshotRecord {
         id: ValueId,
         value: ValueDefinition,
     },
-    TaskNode {
+    Node {
         scope: Vec<LoopPathEntry>,
         node: Arc<str>,
         inputs: ValueId,
@@ -162,7 +162,7 @@ impl SnapshotStore {
                 self.values.push(value);
                 Ok(false)
             }
-            SnapshotRecord::TaskNode {
+            SnapshotRecord::Node {
                 scope,
                 node,
                 inputs,
@@ -455,7 +455,7 @@ impl SnapshotRecorder {
         let result = (|| {
             let inputs = recording.intern(&snapshot.inputs)?;
             let outputs = recording.intern(&snapshot.outputs)?;
-            recording.append(SnapshotRecord::TaskNode {
+            recording.append(SnapshotRecord::Node {
                 scope,
                 node: node.into(),
                 inputs,
@@ -554,6 +554,17 @@ mod tests {
         recorder.finish();
         recorder.record(vec![], "node", completed(2.into()));
         assert!(root.ptr_eq(&recorder.current()));
+    }
+
+    #[test]
+    fn node_records_preserve_the_published_wire_format() {
+        let wire = json!({
+            "record": "node", "scope": [], "node": "step", "inputs": 0,
+            "outputs": 1, "skipped": [], "outcome": "succeeded"
+        });
+        let record: SnapshotRecord = serde_json::from_value(wire.clone()).unwrap();
+        assert!(matches!(record, SnapshotRecord::Node { .. }));
+        assert_eq!(serde_json::to_value(record).unwrap(), wire);
     }
 
     #[test]
