@@ -8,7 +8,7 @@ The optional [`mfn-code`](../crates/builtin-nodes/code/) package registers `buil
 instance-specific typed inputs, and output types inferred by the CEL checker. A Flow must select the package
 explicitly; `mfn-core` does not register this kind. See the [CEL examples](workflows.md#built-in-nodes).
 
-A plugin crate depends on `mf-runtime`, implements `TaskNode::execute`, and registers a factory through
+A task provider depends on `mf-runtime`, implements `TaskNode::execute`, and registers a factory through
 `inventory::submit!`. `NodeRegistration` declares a unique `kind` and its construction requirements.
 The factory returns a `PreparedNode` containing the executor and its `NodeMetadata`. See
 [constant](../crates/builtin-nodes/core/src/constant.rs) and
