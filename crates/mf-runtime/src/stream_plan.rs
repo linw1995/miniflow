@@ -9,9 +9,9 @@ type EventStates = Vec<Option<Box<dyn crate::EventNode>>>;
 
 #[derive(Debug, Snafu)]
 pub enum StreamBuildError {
-    #[snafu(display("invalid streaming workflow: {message}"))]
+    #[snafu(display("invalid streaming workflow: {message}"), visibility(pub))]
     InvalidPlan { message: String },
-    #[snafu(display("invalid stream input type: {source}"))]
+    #[snafu(display("invalid stream input type: {source}"), visibility(pub))]
     InputType { source: crate::TypeDepthError },
 }
 

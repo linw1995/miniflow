@@ -514,7 +514,7 @@ pub enum NodeBuildError {
 pub enum NodeExecutionError {
     #[snafu(display("node execution failed: {message}"))]
     ExecutionFailed { message: String },
-    #[snafu(display("node plugin failed: {source}"))]
+    #[snafu(display("node plugin failed: {source}"), visibility(pub))]
     PluginFailed {
         source: Box<dyn Error + Send + Sync + 'static>,
     },

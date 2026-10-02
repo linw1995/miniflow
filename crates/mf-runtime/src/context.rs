@@ -1,5 +1,5 @@
 use crate::ValueRef as Value;
-use crate::runner::{DependencySnafu, InputTypeSnafu};
+use crate::runner::{DependencySnafu, InputTypeSnafu, NodeExecutionSnafu};
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use mf_telemetry::{
     event::{FailurePhase, LoopPathEntry, LoopSummary, SkipCause},
@@ -745,9 +745,8 @@ pub(super) fn execute_ordered_task_in_context<'a, N>(
         }
         let result = task
             .execute(inputs, ctx)
-            .map_err(|source| WorkflowRunError::NodeExecution {
+            .with_context(|_| NodeExecutionSnafu {
                 definition_id: node.definition_id.clone(),
-                source,
             });
         match result {
             Ok(result) => Some(result),
