@@ -65,16 +65,22 @@ fn deserialize_execution<'de, D: serde::Deserializer<'de>>(
 }
 
 impl WorkflowDefinition {
-    pub fn validate_execution(&self) -> Result<(), String> {
+    pub fn validate_execution(&self) -> Result<(), crate::StreamBuildError> {
         if let Some(execution) = &self.execution {
             if self.version != WorkflowDefinitionVersion::V2026_10_02 {
-                return Err("stream execution requires workflow schema 2026-10-02".into());
+                return crate::stream_plan::InvalidPlanSnafu {
+                    message: "stream execution requires workflow schema 2026-10-02",
+                }
+                .fail();
             }
             execution
                 .input_type
                 .check_depth()
-                .map_err(|error| error.to_string())?;
-            execution.limits.validate()?;
+                .context(crate::stream_plan::InputTypeSnafu)?;
+            execution
+                .limits
+                .validate()
+                .map_err(|message| crate::stream_plan::InvalidPlanSnafu { message }.build())?;
         }
         Ok(())
     }

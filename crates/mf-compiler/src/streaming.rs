@@ -20,7 +20,7 @@ pub fn expanded_definition(
 ) -> Result<Cow<'_, WorkflowDefinition>, WorkflowCompileError> {
     definition
         .validate_execution()
-        .map_err(|message| InvalidStreamSnafu { message }.build())?;
+        .context(StreamConstructionSnafu)?;
     if definition.nodes.iter().any(|node| {
         node.kind == STREAM_INPUT_ID
             || (definition.execution.is_some() && node.id.as_str() == STREAM_INPUT_ID)
