@@ -329,7 +329,7 @@ respect the same domain boundary. Event nodes are rejected in single-run graphs 
 
 The host submits one value per message, consumes outputs independently, and explicitly closes input.
 An array remains one input value. See [the instance API](node-development.md#in-memory-streaming-instances)
-for admission, backpressure, drain, and cancellation. Compile streaming definitions as standalone
+for admission, backpressure, drain, and failure handling. Compile streaming definitions as standalone
 JSON Lines runners using the [runner instructions](compiling.md#streaming-runners).
 
 ### Batch collection
@@ -345,7 +345,7 @@ buffered items retain their deadline. Arrays and null remain individual elements
 
 Downstream nodes receive one invocation per emitted batch. Input and batch values belong to different
 message domains. The aggregate output remains subject to the runtime payload limit; choose count and
-byte limits together. Cancellation or failure discards a partial buffer without flushing or retrying.
+byte limits together. Failure discards a partial buffer without flushing or retrying.
 
 Batch runs through the in-memory API and standalone runners, and is rejected inside synchronous
 Loop/Iteration bodies. Its state is independent for every workflow instance.

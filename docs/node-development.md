@@ -175,7 +175,8 @@ new message domain. Cross-domain joins and context reads are rejected during pre
 
 Use `mf_compiler::instantiate_stream` to prepare an instance and inspect its immutable graph through
 `plan()`. Consume the prepared instance with `start` or `start_with_options`. Each preparation creates
-independent plugin state. The coordinator serializes events; ordinary tasks run on bounded workers.
+independent plugin state. Task and event executors are reused across messages for the instance lifetime.
+The coordinator serializes events; ordinary tasks run on bounded workers.
 
 `instance.input()` returns a cloneable sender. `send` waits for admission capacity and completes once
 the input is accepted. Consume `instance.recv()` concurrently with production, close input when done,
@@ -184,8 +185,10 @@ accepting it. `receive` returns a delivery that must be acknowledged or failed b
 
 Every message has fresh context bindings and a step budget. Frames execute in FIFO order within each
 domain, while different domains can progress independently. Close propagates after admitted work and
-emissions; success waits for output delivery. Cancellation discards pending work and retained values,
-then waits for synchronous calls already running. Tasks can inspect `ExecutionContext::is_cancelled()`.
+emissions; success waits for output delivery. Failure stops scheduling and waits for task calls already
+running before releasing pending work, retained values, and nodes. A running task completes its
+synchronous bodies normally.
+Dropping an unfinished instance follows the same failure cleanup before releasing its nodes.
 
 Limits default to 64 pending messages, 64 MiB of retained logical values, a 1 MiB payload limit, and four
 workers. Positive overrides live in `execution.limits`. Preparation reserves capacity for timer,

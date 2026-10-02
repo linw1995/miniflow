@@ -63,8 +63,8 @@ mod unix {
                     }));
                     match result {
                         Ok(Ok(())) => {}
-                        Ok(Err(error)) => reader_input.abort(error),
-                        Err(_) => reader_input.abort(StreamError::Input {
+                        Ok(Err(error)) => reader_input.fail(error),
+                        Err(_) => reader_input.fail(StreamError::Input {
                             message: "input reader panicked".into(),
                         }),
                     }
@@ -73,7 +73,7 @@ mod unix {
                     let error = StreamError::Preparation {
                         message: error.to_string(),
                     };
-                    input.abort(error.clone());
+                    input.fail(error.clone());
                     error
                 })?;
             loop {
@@ -100,8 +100,8 @@ mod unix {
                 }
             }
             let result = instance.join();
-            if result.is_err() {
-                input.cancel();
+            if let Err(error) = &result {
+                input.fail(error.clone());
             }
             if reader.join().is_err() {
                 return result.and(Err(StreamError::Input {
@@ -114,7 +114,7 @@ mod unix {
 
     fn wait_ready(file: &File, events: libc::c_short, input: &StreamSender) -> io::Result<bool> {
         loop {
-            if input.is_cancelled() {
+            if input.failure().is_some() {
                 return Ok(false);
             }
             let mut descriptor = libc::pollfd {
@@ -158,7 +158,7 @@ mod unix {
         let mut line = 1u64;
         loop {
             if !wait_ready(&file, libc::POLLIN, input).map_err(|error| input_error(line, error))? {
-                return Err(StreamError::Cancelled);
+                return Err(input.failure().expect("instance failure stops I/O"));
             }
             let read = match file.read(&mut chunk) {
                 Ok(read) => read,
@@ -240,7 +240,7 @@ mod unix {
         let mut remaining = bytes.as_slice();
         while !remaining.is_empty() {
             if !wait_ready(file, libc::POLLOUT, input).map_err(output_error)? {
-                return Err(StreamError::Cancelled);
+                return Err(input.failure().expect("instance failure stops I/O"));
             }
             // A single writer uses at most the POSIX minimum PIPE_BUF after polling.
             let written = match file.write(&remaining[..remaining.len().min(512)]) {
@@ -270,10 +270,11 @@ impl StreamStdio {
         })
     }
     pub fn run(self, instance: StreamInstance) -> Result<StreamSummary, StreamError> {
-        instance.cancel();
-        let _ = instance.join();
-        Err(StreamError::Preparation {
+        let error = StreamError::Preparation {
             message: "stream stdio requires Linux or macOS".into(),
-        })
+        };
+        instance.input().fail(error.clone());
+        let _ = instance.join();
+        Err(error)
     }
 }

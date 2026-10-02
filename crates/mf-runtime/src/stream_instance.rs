@@ -8,11 +8,7 @@ use snafu::Snafu;
 use std::{
     collections::VecDeque,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{
-        Arc, Condvar, Mutex, Weak,
-        atomic::{AtomicBool, Ordering},
-        mpsc,
-    },
+    sync::{Arc, Condvar, Mutex, Weak, mpsc},
     task::{Wake, Waker},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -34,8 +30,6 @@ pub enum StreamError {
     Capacity,
     #[snafu(display("stream input is closed"))]
     Closed,
-    #[snafu(display("stream was cancelled"))]
-    Cancelled,
 }
 
 pub trait StreamClock: Send + Sync {
@@ -158,7 +152,16 @@ struct Shared {
     execution: StreamExecution,
     resources: StreamResources,
     input_capacity: usize,
-    cancellation: Arc<AtomicBool>,
+}
+
+impl Shared {
+    fn fail(&self, error: StreamError) {
+        let mut state = self.state.lock().unwrap();
+        if !state.done && state.failure.is_none() {
+            state.failure = Some(error);
+        }
+        self.changed.notify_all();
+    }
 }
 
 struct ClockWake(Weak<Shared>);
@@ -257,21 +260,12 @@ impl StreamSender {
         self.0.changed.notify_all();
     }
 
-    pub fn abort(&self, error: StreamError) {
-        let mut state = self.0.state.lock().unwrap();
-        if !state.done && state.failure.is_none() {
-            state.failure = Some(error);
-            self.0.cancellation.store(true, Ordering::Release);
-        }
-        self.0.changed.notify_all();
+    pub(super) fn fail(&self, error: StreamError) {
+        self.0.fail(error);
     }
 
-    pub fn cancel(&self) {
-        self.abort(StreamError::Cancelled);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.0.cancellation.load(Ordering::Acquire)
+    pub(super) fn failure(&self) -> Option<StreamError> {
+        self.0.state.lock().unwrap().failure.clone()
     }
 }
 
@@ -304,14 +298,14 @@ impl StreamDelivery {
     }
     pub fn fail(mut self, error: StreamError) {
         self.output.take();
-        StreamSender(Arc::clone(&self.shared)).abort(error);
+        self.shared.fail(error);
     }
 }
 
 impl Drop for StreamDelivery {
     fn drop(&mut self) {
         if self.output.is_some() {
-            StreamSender(Arc::clone(&self.shared)).abort(StreamError::Output {
+            self.shared.fail(StreamError::Output {
                 message: "delivery was dropped before acknowledgement".into(),
             });
         }
@@ -395,7 +389,6 @@ impl PreparedStream {
             execution: plan.execution().clone(),
             resources,
             input_capacity,
-            cancellation: Arc::new(AtomicBool::new(false)),
         });
         options
             .clock
@@ -438,10 +431,6 @@ impl StreamInstance {
     pub fn close_input(&self) {
         self.input().close();
     }
-    pub fn cancel(&self) {
-        self.input().cancel();
-    }
-
     pub fn recv(&self) -> Result<Option<StreamOutput>, StreamError> {
         self.receive()?.map(StreamDelivery::acknowledge).transpose()
     }
@@ -515,7 +504,9 @@ impl StreamInstance {
 impl Drop for StreamInstance {
     fn drop(&mut self) {
         if let Some(coordinator) = self.coordinator.take() {
-            self.cancel();
+            self.shared.fail(StreamError::Execution {
+                message: "stream instance dropped before completion".into(),
+            });
             let _ = coordinator.join();
         }
     }
@@ -559,13 +550,18 @@ impl Workers {
                             let job = { receiver.lock().unwrap().recv() };
                             let Ok(mut frame) = job else { break };
                             let index = plan.domains()[frame.message.domain].steps[frame.cursor];
-                            let result = catch_unwind(AssertUnwindSafe(|| {
-                                plan.execute_step(index, &mut frame.context)
-                            }))
-                            .map_err(panic_error)
-                            .and_then(|result| {
-                                result.map_err(|error| workflow_error(error, frame.message))
-                            });
+                            let failure = shared.state.lock().unwrap().failure.clone();
+                            let result = if let Some(error) = failure {
+                                Err(error)
+                            } else {
+                                catch_unwind(AssertUnwindSafe(|| {
+                                    plan.execute_step(index, &mut frame.context)
+                                }))
+                                .map_err(panic_error)
+                                .and_then(|result| {
+                                    result.map_err(|error| workflow_error(error, frame.message))
+                                })
+                            };
                             if result.is_ok() {
                                 frame.cursor += 1;
                             } else {
@@ -613,23 +609,9 @@ fn coordinate(shared: &Arc<Shared>, plan: &StreamPlan, clock: &dyn StreamClock, 
             }
         }
         if state.failure.is_some() {
-            shared.cancellation.store(true, Ordering::Release);
             state.input_closed = true;
-            state.inputs.clear();
-            state.output = None;
-            for domain in &mut state.domains {
-                domain.frame = None;
-                domain.occupied = domain.running;
-            }
-            for operator in &mut state.operators {
-                *operator = None;
-            }
-            state.dynamic_bytes = 0;
-            state.event_credits = 0;
-            state.root_live = usize::from(state.domains[0].running);
-            state.delivered = None;
-            state.delivery_pending = false;
             if state.active_workers == 0 {
+                clear_retained(&mut state);
                 state.done = true;
 
                 shared.changed.notify_all();
@@ -761,7 +743,6 @@ fn tick(
             Outputs::from([("item".into(), value)]).into(),
         )
         .map_err(execution_error)?;
-        context.set_cancellation(Arc::clone(&shared.cancellation));
         context.set_stream_limits(
             plan.execution().limits.max_message_bytes,
             resources.frame_bytes[context_domain],
@@ -804,7 +785,6 @@ fn tick(
         let mut context =
             ExecutionContext::for_message(&plan.nodes()[source], queued.emission.result)
                 .map_err(execution_error)?;
-        context.set_cancellation(Arc::clone(&shared.cancellation));
         context.set_stream_limits(
             plan.execution().limits.max_message_bytes,
             resources.frame_bytes[context_domain],

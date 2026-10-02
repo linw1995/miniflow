@@ -143,7 +143,7 @@ records fail with a line number. An empty stream produces no result records.
 
 The process reserves stdin for workflow input and stdout for result records before constructing plugins.
 Plugin stdout diagnostics are directed to stderr. Private protocol descriptors are not inherited by plugin
-subprocesses. A stalled stdout backpressures the workflow; a broken output pipe aborts execution and stops
+subprocesses. A stalled stdout backpressures the workflow; a broken output pipe fails execution and stops
 an idle input reader. The final record must be written successfully before the instance reports completion.
 Input and output framing retain bounded buffers in addition to the runtime's logical-data budget.
 A failed run can end with an incomplete final output line; fully delivered earlier lines remain valid.

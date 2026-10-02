@@ -2,8 +2,10 @@
 
 The runtime is exercised with event fixtures that have no dependency on Batch or stream observation.
 Cases cover isolated instances and frames, idle deadlines, bounded workers, full admission, reserved
-progress, oversized payloads, delayed upstream completion, chained closure, cancellation, retained
+progress, oversized payloads, delayed upstream completion, chained closure, input failure, retained
 plugin cleanup, output acknowledgement, snapshot rejection, and unsupported runner entry points.
+
+Validation recorded at the initial split checkpoint:
 
 - Runtime/core/planning/lifecycle suites: 67 tests passed.
 - Coverage for runtime and stream integration targets: 60 tests passed; reports remain under `target/`.

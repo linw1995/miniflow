@@ -10,7 +10,7 @@ after the deadline first seals the old buffer, then starts a new one. Count thre
 Empty buffers emit nothing, and sealing cancels the old deadline.
 
 Values retain their immutable handles. Logical retained bytes participate in runtime accounting.
-Failure and cancellation remain runtime policies and do not flush a tail. The node has no task
+Failure cleanup is a runtime policy and does not flush a tail. The node has no task
 execution method, scheduler, worker pool, or transport implementation.
 
 Controlled-clock node tests establish deadline boundaries. Integration tests verify collection type
