@@ -57,8 +57,9 @@ pub use stream::{
     StreamExecution, StreamLimits, StreamMode, TimerUpdate,
 };
 pub use stream_instance::{
-    MessageId, MonotonicClock, StreamClock, StreamDelivery, StreamError, StreamInstance,
-    StreamMetrics, StreamOptions, StreamOutput, StreamSender, StreamSummary,
+    CompilationSnafu as StreamCompilationSnafu, MessageId, MonotonicClock, StreamClock,
+    StreamDelivery, StreamError, StreamInstance, StreamMetrics, StreamOptions, StreamOutput,
+    StreamSender, StreamSummary,
 };
 pub use stream_io::StreamStdio;
 pub use stream_plan::{

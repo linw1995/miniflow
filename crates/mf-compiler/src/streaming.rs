@@ -1,5 +1,7 @@
+use crate::compiler::{FlowConstructionSnafu, InvalidStreamSnafu, StreamConstructionSnafu};
 use crate::{CompiledWorkflow, Flow, NodeRegistry, WorkflowCompileError, WorkflowDefinition};
 use mf_runtime::{NodeDefinition, PreparedStream, STREAM_INPUT_ID};
+use snafu::{OptionExt, ResultExt};
 use std::borrow::Cow;
 
 pub fn start_stream(
@@ -7,11 +9,9 @@ pub fn start_stream(
     registry: &NodeRegistry,
     options: mf_runtime::StreamOptions,
 ) -> Result<mf_runtime::StreamInstance, mf_runtime::StreamError> {
-    let prepared = instantiate_stream(plan, registry).map_err(|error| {
-        mf_runtime::StreamError::Preparation {
-            message: error.to_string(),
-        }
-    })?;
+    let prepared = instantiate_stream(plan, registry)
+        .boxed()
+        .context(mf_runtime::StreamCompilationSnafu)?;
     prepared.start_with_options(options)
 }
 
@@ -20,7 +20,7 @@ pub fn expanded_definition(
 ) -> Result<Cow<'_, WorkflowDefinition>, WorkflowCompileError> {
     definition
         .validate_execution()
-        .map_err(|message| WorkflowCompileError::InvalidStream { message })?;
+        .map_err(|message| InvalidStreamSnafu { message }.build())?;
     if definition.nodes.iter().any(|node| {
         node.kind == STREAM_INPUT_ID
             || (definition.execution.is_some() && node.id.as_str() == STREAM_INPUT_ID)
@@ -49,13 +49,13 @@ pub fn instantiate_stream(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<PreparedStream, WorkflowCompileError> {
-    let execution =
-        plan.definition
-            .execution
-            .clone()
-            .ok_or_else(|| WorkflowCompileError::InvalidStream {
-                message: "workflow does not declare streaming execution".into(),
-            })?;
+    let execution = plan
+        .definition
+        .execution
+        .clone()
+        .context(InvalidStreamSnafu {
+            message: "workflow does not declare streaming execution",
+        })?;
     let (nodes, order) = crate::compiler::prepare_definition(&plan.definition, registry)?;
     if order
         .iter()
@@ -71,9 +71,7 @@ pub fn instantiate_stream(
         plan.definition.outputs.clone(),
     )
     .and_then(|flow| flow.with_control_edges(plan.definition.control_edges.clone()))
-    .map_err(|source| WorkflowCompileError::FlowConstruction { source })?
+    .context(FlowConstructionSnafu)?
     .into_stream(execution)
-    .map_err(|error| WorkflowCompileError::InvalidStream {
-        message: error.to_string(),
-    })
+    .context(StreamConstructionSnafu)
 }

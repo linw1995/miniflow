@@ -3,7 +3,7 @@ use crate::{
     Outputs, PreparedStream, StreamExecution, StreamPlan, TimerUpdate, ValueRef,
 };
 use serde::Serialize;
-use snafu::Snafu;
+use snafu::{IntoError, OptionExt, ResultExt, Snafu};
 use std::{
     collections::VecDeque,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -13,16 +13,71 @@ use std::{
     time::{Duration, Instant},
 };
 
-#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
+#[derive(Clone, Debug, Snafu)]
 pub enum StreamError {
     #[snafu(display("stream preparation failed: {message}"))]
     Preparation { message: String },
-    #[snafu(display("invalid stream input: {message}"))]
-    Input { message: String },
+    #[snafu(display("could not claim stream stdio: {source}"), visibility(pub))]
+    Stdio {
+        #[snafu(source(from(std::io::Error, Arc::new)))]
+        source: Arc<std::io::Error>,
+    },
+    #[snafu(display("stream preparation failed: {source}"), visibility(pub))]
+    Compilation {
+        #[snafu(source(from(Box<dyn std::error::Error + Send + Sync>, Arc::from)))]
+        source: Arc<dyn std::error::Error + Send + Sync>,
+    },
+    #[snafu(
+        display("could not start stream thread `{thread}`: {source}"),
+        visibility(pub)
+    )]
+    ThreadSpawn {
+        thread: String,
+        #[snafu(source(from(std::io::Error, Arc::new)))]
+        source: Arc<std::io::Error>,
+    },
+    #[snafu(display("invalid stream input: {source}"))]
+    Input { source: crate::TypeMismatch },
+    #[snafu(display("invalid stream input: {message}"), visibility(pub))]
+    InputFailure { message: String },
+    #[snafu(
+        display("invalid stream input at line {line}: {source}"),
+        visibility(pub)
+    )]
+    InputRecord {
+        line: u64,
+        #[snafu(source(from(Box<dyn std::error::Error + Send + Sync>, Arc::from)))]
+        source: Arc<dyn std::error::Error + Send + Sync>,
+    },
     #[snafu(display("stream output failed: {message}"))]
     Output { message: String },
+    #[snafu(display("stream output failed: {source}"), visibility(pub))]
+    OutputWrite {
+        #[snafu(source(from(std::io::Error, Arc::new)))]
+        source: Arc<std::io::Error>,
+    },
+    #[snafu(display("stream output failed: {source}"), visibility(pub))]
+    OutputEncode {
+        #[snafu(source(from(serde_json::Error, Arc::new)))]
+        source: Arc<serde_json::Error>,
+    },
     #[snafu(display("stream execution failed: {message}"))]
     Execution { message: String },
+    #[snafu(display(
+        "stream execution failed in domain {} message {}: {source}",
+        message.domain, message.sequence
+    ))]
+    Workflow {
+        message: MessageId,
+        #[snafu(source(from(crate::WorkflowRunError, Arc::new)))]
+        source: Arc<crate::WorkflowRunError>,
+    },
+    #[snafu(display("stream event node `{definition_id}` failed: {source}"))]
+    Event {
+        definition_id: crate::DefinitionId,
+        #[snafu(source(from(crate::NodeExecutionError, Arc::new)))]
+        source: Arc<crate::NodeExecutionError>,
+    },
     #[snafu(display("stream resource limit: {message}"))]
     Resource { message: String },
     #[snafu(display("stream input capacity is full"))]
@@ -191,9 +246,7 @@ impl StreamSender {
             .execution
             .input_type
             .validate_shared(&value)
-            .map_err(|error| StreamError::Input {
-                message: error.to_string(),
-            })
+            .context(InputSnafu)
         {
             state.failure = Some(error.clone());
             self.0.changed.notify_all();
@@ -308,7 +361,7 @@ impl PreparedStream {
             .max_pending_messages
             .checked_sub(domain_count - 1)
             .filter(|capacity| *capacity > 0)
-            .ok_or_else(|| StreamError::Preparation {
+            .with_context(|| PreparationSnafu {
                 message: format!(
                     "max_pending_messages must reserve at least {domain_count} domain slots"
                 ),
@@ -370,8 +423,8 @@ impl PreparedStream {
                     coordinator_shared.changed.notify_all();
                 }
             })
-            .map_err(|error| StreamError::Preparation {
-                message: error.to_string(),
+            .context(ThreadSpawnSnafu {
+                thread: "workflow-stream",
             })?;
         Ok(StreamInstance {
             shared,
@@ -511,7 +564,9 @@ impl Workers {
                                 }))
                                 .map_err(panic_error)
                                 .and_then(|result| {
-                                    result.map_err(|error| workflow_error(error, frame.message))
+                                    result.context(WorkflowSnafu {
+                                        message: frame.message,
+                                    })
                                 })
                             };
                             if result.is_ok() {
@@ -528,8 +583,8 @@ impl Workers {
                             shared.changed.notify_all();
                         }
                     })
-                    .map_err(|error| StreamError::Preparation {
-                        message: error.to_string(),
+                    .with_context(|_| ThreadSpawnSnafu {
+                        thread: format!("workflow-worker-{index}"),
                     })?,
             );
         }
@@ -666,7 +721,7 @@ fn tick(
             &plan.nodes()[0],
             Outputs::from([("item".into(), value)]).into(),
         )
-        .map_err(execution_error)?;
+        .context(WorkflowSnafu { message })?;
         state.domains[0].frame = Some(Frame {
             message,
             context,
@@ -689,7 +744,9 @@ fn tick(
             continue;
         };
         let context = ExecutionContext::for_message(&plan.nodes()[source], queued.emission.result)
-            .map_err(execution_error)?;
+            .context(WorkflowSnafu {
+                message: queued.message,
+            })?;
         state.domains[domain].frame = Some(Frame {
             message: queued.message,
             context,
@@ -716,7 +773,9 @@ fn tick(
                             &output.port,
                             output.optional,
                         )
-                        .map_err(execution_error)?
+                        .context(WorkflowSnafu {
+                            message: frame.message,
+                        })?
                     {
                         outputs.insert(output.name.clone(), value);
                     }
@@ -754,7 +813,10 @@ fn tick(
                 )?,
                 Ok(None) => {}
                 Err(error) => {
-                    return Err(workflow_error(error, frame.message));
+                    return Err(WorkflowSnafu {
+                        message: frame.message,
+                    }
+                    .into_error(error));
                 }
             }
             frame.cursor += 1;
@@ -766,8 +828,12 @@ fn tick(
                 .as_ref()
                 .unwrap()
                 .try_send(frame)
-                .map_err(|_| StreamError::Execution {
-                    message: "worker queue unavailable".into(),
+                // A failed send owns the frame; release its values instead of retaining them.
+                .map_err(|_| {
+                    ExecutionSnafu {
+                        message: "worker queue unavailable",
+                    }
+                    .build()
                 })?;
             state.active_workers += 1;
             state.domains[domain].running = true;
@@ -835,8 +901,8 @@ fn invoke_event(
             .on_event(event, &context)
     }))
     .map_err(panic_error)?
-    .map_err(|error| StreamError::Execution {
-        message: format!("node `{}`: {error}", plan.nodes()[index].definition_id),
+    .with_context(|_| EventSnafu {
+        definition_id: plan.nodes()[index].definition_id.clone(),
     })?;
     apply_effects(state, plan, index, effects, context.now)?;
     Ok(())
@@ -865,8 +931,14 @@ fn apply_effects(
         });
     }
     for emission in effects.emissions {
-        ExecutionContext::for_message(&plan.nodes()[index], emission.result.clone())
-            .map_err(execution_error)?;
+        ExecutionContext::for_message(&plan.nodes()[index], emission.result.clone()).context(
+            WorkflowSnafu {
+                message: MessageId {
+                    domain,
+                    sequence: state.sequences[domain],
+                },
+            },
+        )?;
         let sequence = take_sequence(&mut state.sequences[domain])?;
         take_sequence(&mut state.summary.emitted_messages)?;
         operator.pending.push_back(QueuedEmission {
@@ -928,25 +1000,10 @@ fn clear_retained(state: &mut State) {
 
 fn take_sequence(sequence: &mut u64) -> Result<u64, StreamError> {
     let current = *sequence;
-    *sequence = current
-        .checked_add(1)
-        .ok_or_else(|| StreamError::Resource {
-            message: "sequence counter exhausted".into(),
-        })?;
+    *sequence = current.checked_add(1).context(ResourceSnafu {
+        message: "sequence counter exhausted",
+    })?;
     Ok(current)
-}
-
-fn workflow_error(error: crate::WorkflowRunError, message: MessageId) -> StreamError {
-    execution_error(format!(
-        "domain {} message {}: {error}",
-        message.domain, message.sequence
-    ))
-}
-
-fn execution_error(error: impl std::fmt::Display) -> StreamError {
-    StreamError::Execution {
-        message: error.to_string(),
-    }
 }
 
 fn panic_error(payload: Box<dyn std::any::Any + Send>) -> StreamError {
@@ -959,7 +1016,7 @@ fn panic_error(payload: Box<dyn std::any::Any + Send>) -> StreamError {
                 .map(|value| (*value).to_owned())
         })
         .unwrap_or_else(|| "node panicked".into());
-    execution_error(message)
+    ExecutionSnafu { message }.build()
 }
 
 #[cfg(test)]

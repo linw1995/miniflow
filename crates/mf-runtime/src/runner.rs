@@ -5,6 +5,24 @@ use snafu::{ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowRunError {
+    #[snafu(
+        display("node `{definition_id}` dependency `{input}`: {source}"),
+        visibility(pub)
+    )]
+    Dependency {
+        definition_id: DefinitionId,
+        input: String,
+        source: NodeExecutionError,
+    },
+    #[snafu(
+        display("node `{definition_id}` input `{input}`: {source}"),
+        visibility(pub)
+    )]
+    InputType {
+        definition_id: DefinitionId,
+        input: String,
+        source: crate::TypeMismatch,
+    },
     #[snafu(display("node `{definition_id}`: {message}"))]
     Context {
         definition_id: DefinitionId,
