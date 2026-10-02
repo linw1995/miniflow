@@ -11,3 +11,7 @@ observation fields.
 
 The existing module entry points expose the types. No compatibility adapter or placeholder task
 implementation is required. Metadata inference remains independent of executor kind.
+
+`NodeExecution::as_task_node` borrows a task executor, while `into_task_node` moves it out. Both return
+`None` for event execution. These inherent methods centralize variant checks without a new trait.
+`FlowNode::into_task` retains the definition identity and metadata and supplies the contextual error.

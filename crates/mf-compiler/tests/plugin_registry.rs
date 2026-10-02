@@ -68,9 +68,10 @@ fn discovers_linked_node_registrations_and_creates_nodes() {
 
     let source = registry.get("test.source").unwrap();
     let source_node = source.instantiate(Value::Null).unwrap();
-    let mf_runtime::NodeExecution::Task(source_node) = source_node.execution else {
-        panic!("expected task")
-    };
+    let source_node = source_node
+        .execution
+        .into_task_node()
+        .expect("expected task");
     let source_outputs = source_node
         .execute(Inputs::new(), &mut mf_runtime::ExecutionContext::default())
         .unwrap()
@@ -79,9 +80,7 @@ fn discovers_linked_node_registrations_and_creates_nodes() {
 
     let sink = registry.get("test.sink").unwrap();
     let sink_node = sink.instantiate(Value::Null).unwrap();
-    let mf_runtime::NodeExecution::Task(sink_node) = sink_node.execution else {
-        panic!("expected task")
-    };
+    let sink_node = sink_node.execution.into_task_node().expect("expected task");
     let sink_outputs = sink_node
         .execute(
             Inputs::from([("value".to_owned(), source_outputs["value"].clone())]),
