@@ -46,16 +46,16 @@ impl FlowNode {
     }
 
     pub fn into_task(self) -> Result<TaskFlowNode, FlowBuildError> {
-        match self.node {
-            crate::NodeExecution::Task(task) => Ok(FlowNode {
+        let Some(task) = self.node.into_task_node() else {
+            return Err(FlowBuildError::NonTaskNode {
                 definition_id: self.definition_id,
-                metadata: self.metadata,
-                node: task,
-            }),
-            _ => Err(FlowBuildError::NonTaskNode {
-                definition_id: self.definition_id,
-            }),
-        }
+            });
+        };
+        Ok(FlowNode {
+            definition_id: self.definition_id,
+            metadata: self.metadata,
+            node: task,
+        })
     }
 }
 

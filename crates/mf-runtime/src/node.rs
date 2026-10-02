@@ -510,6 +510,22 @@ pub enum NodeExecution {
     Event(Box<dyn crate::EventNode>),
 }
 
+impl NodeExecution {
+    pub fn as_task_node(&self) -> Option<&dyn TaskNode> {
+        match self {
+            Self::Task(task) => Some(task.as_ref()),
+            Self::Event(_) => None,
+        }
+    }
+
+    pub fn into_task_node(self) -> Option<Box<dyn TaskNode>> {
+        match self {
+            Self::Task(task) => Some(task),
+            Self::Event(_) => None,
+        }
+    }
+}
+
 impl PreparedNode {
     pub fn new(task: impl TaskNode + 'static, metadata: impl Into<NodeMetadata>) -> Self {
         Self {
