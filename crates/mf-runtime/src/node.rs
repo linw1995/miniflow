@@ -205,18 +205,14 @@ impl ValueType {
     }
 
     pub fn validate_value(&self, value: &Value) -> Result<(), TypeMismatch> {
-        self.validate_at(value, &mut String::new())
+        self.validate_at(value)
     }
 
     pub fn validate_shared(&self, value: &crate::ValueRef) -> Result<(), TypeMismatch> {
-        self.validate_at(value, &mut String::new())
+        self.validate_at(value)
     }
 
-    fn validate_at<V: crate::value::JsonView>(
-        &self,
-        value: &V,
-        path: &mut String,
-    ) -> Result<(), TypeMismatch> {
+    fn validate_at<V: crate::value::JsonView>(&self, value: &V) -> Result<(), TypeMismatch> {
         let valid = match (self, value.shape()) {
             (Self::Any, _) => true,
             (Self::Null, "null")
@@ -235,30 +231,20 @@ impl ValueType {
             },
             (Self::List(inner), "array") => {
                 for (index, item) in value.array_items().enumerate() {
-                    let previous = path.len();
-                    path.push('/');
-                    use fmt::Write as _;
-                    write!(path, "{index}").expect("writing to a String cannot fail");
-                    let result = inner.validate_at(item, path);
-                    path.truncate(previous);
-                    result?;
+                    inner.validate_at(item).map_err(|mut error| {
+                        error.path = format!("/{index}{}", error.path);
+                        error
+                    })?;
                 }
                 true
             }
             (Self::Map(inner), "object") => {
                 for (key, item) in value.object_items() {
-                    let previous = path.len();
-                    path.push('/');
-                    for character in key.chars() {
-                        match character {
-                            '~' => path.push_str("~0"),
-                            '/' => path.push_str("~1"),
-                            _ => path.push(character),
-                        }
-                    }
-                    let result = inner.validate_at(item, path);
-                    path.truncate(previous);
-                    result?;
+                    inner.validate_at(item).map_err(|mut error| {
+                        let key = key.replace('~', "~0").replace('/', "~1");
+                        error.path = format!("/{key}{}", error.path);
+                        error
+                    })?;
                 }
                 true
             }
@@ -268,7 +254,7 @@ impl ValueType {
             Ok(())
         } else {
             Err(TypeMismatch {
-                path: path.clone(),
+                path: String::new(),
                 expected: self.clone(),
                 actual: actual_type(value),
             })
@@ -635,12 +621,27 @@ mod tests {
     #[test]
     fn reports_nested_paths_and_preserves_null() {
         let expected = list(map(ValueType::Int64));
-        let error = expected
-            .validate_value(&json!([{"a/b": 1}, {"a~b": "wrong"}]))
-            .unwrap_err();
-        assert_eq!(error.path, "/1/a~0b");
-        assert_eq!(error.expected, ValueType::Int64);
-        assert_eq!(error.actual, "string");
+        for (value, path, actual) in [
+            (json!([{"a/b": 1}, {"a~b": "wrong"}]), "/1/a~0b", "string"),
+            (
+                json!([{"a/b": false, "z": null}, {"later": "wrong"}]),
+                "/0/a~1b",
+                "boolean",
+            ),
+            (json!([{"": false}]), "/0/", "boolean"),
+        ] {
+            let error = expected.validate_value(&value).unwrap_err();
+            assert_eq!(error.path, path);
+            assert_eq!(error.expected, ValueType::Int64);
+            assert_eq!(error.actual, actual);
+            assert_eq!(
+                expected
+                    .validate_shared(&crate::ValueRef::from(value))
+                    .unwrap_err(),
+                error
+            );
+        }
+        assert_eq!(expected.validate_value(&json!(null)).unwrap_err().path, "");
         assert!(
             map(ValueType::Null)
                 .validate_value(&json!({"value": null}))
