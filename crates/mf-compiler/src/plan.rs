@@ -142,7 +142,12 @@ impl CompiledWorkflow {
     }
 
     pub fn from_json(input: &str) -> Result<Self, PlanError> {
-        serde_json::from_str(input).context(ParseSnafu)
+        let plan: Self = serde_json::from_str(input).context(ParseSnafu)?;
+        plan.definition
+            .validate_execution()
+            .map_err(<serde_json::Error as serde::de::Error>::custom)
+            .context(ParseSnafu)?;
+        Ok(plan)
     }
 
     #[cfg(feature = "codegen")]

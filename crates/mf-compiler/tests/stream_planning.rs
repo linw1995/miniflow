@@ -104,6 +104,24 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
     assert_eq!(prepared.plan().selected_domain(), Some(1));
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let plan = plan_definition(&definition).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for (version, workers, expected) in [
+        ("2026-09-29", 4, "requires workflow schema 2026-10-02"),
+        ("2026-10-02", 0, "stream limits must be positive"),
+    ] {
+        let mut value = serde_json::to_value(&plan).unwrap();
+        value["definition"]["version"] = json!(version);
+        value["definition"]["execution"]["limits"]["workers"] = json!(workers);
+        let definition = serde_json::from_value(value["definition"].clone()).unwrap();
+        let error = compile_definition(&definition, &registry)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{error}");
+        let error = CompiledWorkflow::from_json(&value.to_string())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(expected), "{error}");
+    }
 
     assert_eq!(plan.definition.nodes.len(), 2);
     assert_eq!(
