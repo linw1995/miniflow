@@ -10,13 +10,15 @@ Expose workflow execution through correlated OpenTelemetry traces and lifecycle 
 
 Lifecycle events SHALL carry an observation schema version, workflow identity, unique run identity,
 event timestamp, and monotonically increasing per-run sequence. Node events SHALL include a local
-definition node ID, kind, and structured Loop path with pass indices. A node invocation SHALL have
+definition node ID, kind, and structured Loop path with pass indices. In single-run protocols, a node invocation SHALL have
 one lifecycle identified by run ID, Loop path, and local node ID; repeated passes SHALL be separate
 invocations, not retry attempts. Top-level nodes SHALL use an empty Loop path. Applicable events
 SHALL carry native OTel trace/span correlation. Workflow identity MUST agree with the runner
 description; separate invocations MUST have distinct run identities even when they share a
 distributed trace. Existing protocol versions SHALL keep their prior single-invocation
 interpretation.
+
+Streaming records SHALL use a new protocol version and additionally identify the invocation sequence and its domain/message identity when applicable. Timer and close callbacks MUST have distinct invocation identities even without an input message. Nested Loop and Iteration observations MUST retain their containing stream invocation identity so repeated body paths cannot alias across messages.
 
 #### Scenario: Observe repeated invocations
 
@@ -42,6 +44,21 @@ interpretation.
 
 - **WHEN** an event is redelivered and the body node also runs in another pass
 - **THEN** the redelivery is deduplicated by sequence while the later pass remains a separate invocation
+
+#### Scenario: Observe repeated stream messages
+
+- **WHEN** one root node executes for two messages in the same workflow instance
+- **THEN** its events share a run and definition ID but identify two separate invocations and messages
+
+#### Scenario: Distinguish transport duplicates from batch invocations
+
+- **WHEN** a batch invocation event is redelivered and another batch later invokes the same node
+- **THEN** the duplicate is identified by its existing sequence and the new work retains its own invocation and message identity
+
+#### Scenario: Correlate repeated nested work
+
+- **WHEN** two emitted batches each invoke the same Loop or Iteration body
+- **THEN** their body observations remain distinguishable through the containing stream invocation even when inner paths and item indices match
 
 ### Requirement: Export live lifecycle events independently of completed spans
 
@@ -69,6 +86,8 @@ success MUST follow output validation and publication. Construction and dependen
 and node when known, without requiring a preceding node start. Generated and in-memory execution MUST produce equivalent
 lifecycle meanings and retain existing execution order, skip rules, output values, and error precedence.
 
+For streaming execution, the workflow boundary SHALL finish only after drain or abort cleanup. An event-driven node start SHALL identify its input, timer, or close trigger; completion follows state transition and validation of any emissions. Successful buffering with zero emissions MUST NOT imply downstream execution or workflow completion. Observation MUST distinguish admission from completion of the accepted input.
+
 #### Scenario: Reject invalid node outputs
 
 - **WHEN** a node returns outputs that fail publication validation
@@ -88,6 +107,16 @@ lifecycle meanings and retain existing execution order, skip rules, output value
 
 - **WHEN** all invoked nodes succeed but a required selected workflow output is skipped
 - **THEN** the workflow reports output-selection failure while preserving the successful node outcomes
+
+#### Scenario: Remain active during tail drain
+
+- **WHEN** stdin closes while a tail batch or its downstream operation remains pending
+- **THEN** no successful workflow terminal event is emitted until the tail and selected output delivery have completed
+
+#### Scenario: Observe buffering without an output
+
+- **WHEN** Batch accepts one item without a flush
+- **THEN** its input callback can finish with zero emissions while downstream nodes remain uninvoked
 
 ### Requirement: Distinguish conditional skips from unreached nodes
 
@@ -124,6 +153,8 @@ execution is active, completeness SHALL remain unconfirmed; immediate detection 
 suffix without later evidence is not required. Future Loop passes that never started SHALL NOT be
 classified as skipped invocations. Missing outcomes inside a visited pass SHALL remain unknown even
 when a later pass or the workflow succeeds.
+
+Streaming protocol validation SHALL use checked sequence counters and bounded retained detail instead of deriving a total event bound from static node count or the single-run step budget. The terminal record SHALL report final sequence and aggregate execution counts without an unbounded invocation list. Detail eviction MUST be distinguishable from lifecycle transport loss, and no streaming lifecycle event may follow the terminal record.
 
 #### Scenario: Detect an interior loss
 
@@ -164,6 +195,16 @@ when a later pass or the workflow succeeds.
 
 - **WHEN** a Loop runner exits and no valid workflow finish record arrives before draining ends
 - **THEN** the consumer marks the tail unverified and does not claim complete body observations
+
+#### Scenario: Observe a long-lived instance
+
+- **WHEN** a valid stream produces more lifecycle events than a legacy finite-run bound
+- **THEN** compatible export continues with bounded buffering and correct sequence identity without retaining all earlier invocations
+
+#### Scenario: Lose a batch completion event
+
+- **WHEN** a node completion for one batch is lost and a later batch completes
+- **THEN** the earlier outcome remains unknown and the later success does not repair the missing observation
 
 ### Requirement: Export without altering workflow results
 
@@ -255,3 +296,26 @@ including in parallel workers. Automatically exported metadata MUST NOT include 
 
 - **WHEN** Iteration detail logs reach the terminal UI receiver alongside the ordinary workflow lifecycle records
 - **THEN** the detail logs do not consume outer sequence numbers or make the outer lifecycle appear incomplete
+
+### Requirement: Report batch flushes without exporting their values
+
+Streaming observation SHALL distinguish buffered item count from emitted batches. Each flush SHALL report the Batch node, output message identity, item count, and reason `size_exceed`, `timeout_exceed`, or `upstream_closed`. Automatic metadata MUST NOT include the collected values or an unbounded list of constituent input identities.
+
+#### Scenario: Explain a partial batch
+
+- **WHEN** a partial buffer flushes on its deadline
+- **THEN** observation identifies its item count and `timeout_exceed` reason without serializing the elements
+
+#### Scenario: Keep buffering separate from downstream success
+
+- **WHEN** a batch is sealed but its business operation remains queued
+- **THEN** observation records the flush while leaving that downstream invocation pending
+
+### Requirement: Gate unsupported streaming snapshot capture
+
+Streaming instances SHALL reject the current whole-run snapshot recorder before accepting input. Generated runners MUST reject `MF_CAPTURE_SNAPSHOTS=1` in streaming mode with an actionable diagnostic. Ordinary bounded-run capture SHALL retain its existing behavior.
+
+#### Scenario: Request stream snapshot history
+
+- **WHEN** snapshot capture is enabled for a streaming runner or attached programmatically to a streaming instance
+- **THEN** startup rejects the unsupported mode before input admission or node execution
