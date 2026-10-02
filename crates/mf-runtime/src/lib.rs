@@ -10,7 +10,6 @@ mod runner;
 mod snapshot;
 mod stream;
 mod stream_instance;
-mod stream_limits;
 mod stream_plan;
 mod subgraph;
 mod value;
@@ -53,14 +52,13 @@ pub use runner::{
 };
 pub use stream::stream_input_node;
 pub use stream::{
-    EventContext, EventEffects, EventEmission, EventNode, MESSAGE_OVERHEAD, NodeEvent,
-    STREAM_INPUT_ID, StreamExecution, StreamLimits, StreamMode, TimerUpdate,
+    EventContext, EventEffects, EventEmission, EventNode, NodeEvent, STREAM_INPUT_ID,
+    StreamExecution, StreamLimits, StreamMode, TimerUpdate,
 };
 pub use stream_instance::{
     MessageId, MonotonicClock, StreamClock, StreamDelivery, StreamError, StreamInstance,
     StreamMetrics, StreamOptions, StreamOutput, StreamSender, StreamSummary,
 };
-pub use stream_limits::encoded_size;
 pub use stream_plan::{
     PreparedStream, StreamBuildError, StreamDependency, StreamDomain, StreamPlan,
 };

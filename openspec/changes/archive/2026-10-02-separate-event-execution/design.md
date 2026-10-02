@@ -2,7 +2,7 @@
 
 `PreparedNode` pairs metadata with `NodeExecution::Task` or `NodeExecution::Event`. `TaskNode` keeps
 its single execution entry point. `EventNode` receives input, timer, and upstream-close events through
-an exclusive mutable reference and reports retained logical data. Factory output is the state itself.
+an exclusive mutable reference. Factory output is the state itself.
 
 Graph construction retains executor ownership. Conversion to a synchronous `Flow` extracts only tasks
 and rejects event executors before execution. Generated task bodies perform the same conversion before

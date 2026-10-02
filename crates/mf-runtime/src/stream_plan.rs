@@ -237,8 +237,12 @@ impl PreparedStream {
             outputs,
             selected_domain,
         };
-        crate::stream_limits::StreamResources::new(&plan)
-            .map_err(|error| invalid(error.to_string()))?;
+        if plan.execution().limits.max_pending_messages < plan.domains().len() {
+            return Err(invalid(format!(
+                "max_pending_messages must reserve at least {} domain slots",
+                plan.domains().len()
+            )));
+        }
         Ok(Self { plan, event_states })
     }
 

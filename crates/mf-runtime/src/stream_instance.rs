@@ -1,7 +1,6 @@
-use crate::stream_limits::{StreamResources, add, output_bytes};
 use crate::{
     EventContext, EventEffects, EventEmission, EventNode, ExecutionContext, FlowOutputs, NodeEvent,
-    Outputs, PreparedStream, StreamExecution, StreamPlan, TimerUpdate, ValueRef, encoded_size,
+    Outputs, PreparedStream, StreamExecution, StreamPlan, TimerUpdate, ValueRef,
 };
 use serde::Serialize;
 use snafu::Snafu;
@@ -87,16 +86,12 @@ pub struct StreamSummary {
 pub struct StreamMetrics {
     pub pending_frames: usize,
     pub active_workers: usize,
-    pub queued_and_buffered_bytes: usize,
-    pub reserved_bytes: usize,
-    pub accounted_bytes: usize,
 }
 
 struct Frame {
     message: MessageId,
     context: ExecutionContext,
     cursor: usize,
-    credits: usize,
 }
 
 #[derive(Default)]
@@ -110,15 +105,12 @@ struct Domain {
 struct QueuedEmission {
     message: MessageId,
     emission: EventEmission,
-    bytes: usize,
 }
 
 struct Operator {
     state: Box<dyn EventNode>,
     deadline: Option<Duration>,
     pending: VecDeque<QueuedEmission>,
-    pending_bytes: usize,
-    retained_bytes: usize,
     closed: bool,
 }
 
@@ -128,7 +120,7 @@ struct Completion {
 }
 
 struct State {
-    inputs: VecDeque<(MessageId, ValueRef, usize)>,
+    inputs: VecDeque<(MessageId, ValueRef)>,
     output: Option<StreamOutput>,
     delivered: Option<usize>,
     delivery_pending: bool,
@@ -137,8 +129,6 @@ struct State {
     operators: Vec<Option<Operator>>,
     sequences: Vec<u64>,
     root_live: usize,
-    dynamic_bytes: usize,
-    event_credits: usize,
     active_workers: usize,
     input_closed: bool,
     failure: Option<StreamError>,
@@ -150,7 +140,6 @@ struct Shared {
     state: Mutex<State>,
     changed: Condvar,
     execution: StreamExecution,
-    resources: StreamResources,
     input_capacity: usize,
 }
 
@@ -197,7 +186,7 @@ impl StreamSender {
         if state.input_closed || state.done {
             return Err(StreamError::Closed);
         }
-        let validation = self
+        if let Err(error) = self
             .0
             .execution
             .input_type
@@ -205,18 +194,11 @@ impl StreamSender {
             .map_err(|error| StreamError::Input {
                 message: error.to_string(),
             })
-            .and_then(|()| {
-                encoded_size(&value, self.0.execution.limits.max_message_bytes)
-                    .and_then(|bytes| add(bytes, self.0.resources.source_overhead))
-            });
-        let bytes = match validation {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                state.failure = Some(error.clone());
-                self.0.changed.notify_all();
-                return Err(error);
-            }
-        };
+        {
+            state.failure = Some(error.clone());
+            self.0.changed.notify_all();
+            return Err(error);
+        }
         loop {
             if let Some(error) = &state.failure {
                 return Err(error.clone());
@@ -224,12 +206,7 @@ impl StreamSender {
             if state.input_closed || state.done {
                 return Err(StreamError::Closed);
             }
-            if state.root_live < self.0.input_capacity
-                && state
-                    .dynamic_bytes
-                    .checked_add(bytes)
-                    .is_some_and(|total| total <= self.0.resources.soft_bytes)
-            {
+            if state.root_live < self.0.input_capacity {
                 let sequence =
                     take_sequence(&mut state.summary.accepted_inputs).inspect_err(|error| {
                         state.failure = Some(error.clone());
@@ -241,9 +218,7 @@ impl StreamSender {
                         sequence,
                     },
                     value,
-                    bytes,
                 ));
-                state.dynamic_bytes += bytes;
                 state.root_live += 1;
                 self.0.changed.notify_all();
                 return Ok(());
@@ -269,9 +244,6 @@ pub struct StreamDelivery {
 impl StreamDelivery {
     pub fn output(&self) -> &StreamOutput {
         self.output.as_ref().expect("delivery is pending")
-    }
-    pub fn max_record_bytes(&self) -> usize {
-        self.shared.resources.frame_bytes[self.output().message.domain]
     }
     pub fn acknowledge(mut self) -> Result<StreamOutput, StreamError> {
         let output = self.output.take().expect("delivery is acknowledged once");
@@ -333,30 +305,17 @@ impl PreparedStream {
                     "max_pending_messages must reserve at least {domain_count} domain slots"
                 ),
             })?;
-        let resources = StreamResources::new(&prepared)?;
-        let mut dynamic_bytes = 0usize;
-        let mut operators = Vec::with_capacity(prepared.nodes().len());
-        for event_state in event_states {
-            operators.push(if let Some(event_state) = event_state {
-                let retained_bytes = event_state.retained_bytes();
-                dynamic_bytes = add(dynamic_bytes, retained_bytes)?;
-                Some(Operator {
-                    state: event_state,
-                    retained_bytes,
+        let operators = event_states
+            .into_iter()
+            .map(|state| {
+                state.map(|state| Operator {
+                    state,
                     deadline: None,
                     pending: VecDeque::new(),
-                    pending_bytes: 0,
                     closed: false,
                 })
-            } else {
-                None
-            });
-        }
-        if add(dynamic_bytes, resources.source_bytes)? > resources.soft_bytes {
-            return Err(StreamError::Preparation {
-                message: "initial retained node state exceeds available byte capacity".into(),
-            });
-        }
+            })
+            .collect();
         let plan = Arc::new(prepared);
         let shared = Arc::new(Shared {
             state: Mutex::new(State {
@@ -369,8 +328,6 @@ impl PreparedStream {
                 operators,
                 sequences: vec![0; domain_count],
                 root_live: 0,
-                dynamic_bytes,
-                event_credits: 0,
                 active_workers: 0,
                 input_closed: false,
                 failure: None,
@@ -379,7 +336,6 @@ impl PreparedStream {
             }),
             changed: Condvar::new(),
             execution: plan.execution().clone(),
-            resources,
             input_capacity,
         });
         options
@@ -465,7 +421,6 @@ impl StreamInstance {
         if state.done {
             return StreamMetrics::default();
         }
-        let reserved_bytes = self.shared.resources.fixed_bytes + state.event_credits;
         StreamMetrics {
             pending_frames: state.root_live
                 + state
@@ -475,9 +430,6 @@ impl StreamInstance {
                     .filter(|domain| domain.occupied)
                     .count(),
             active_workers: state.active_workers,
-            queued_and_buffered_bytes: state.dynamic_bytes,
-            reserved_bytes,
-            accounted_bytes: reserved_bytes + state.dynamic_bytes,
         }
     }
 
@@ -615,7 +567,7 @@ fn coordinate(shared: &Arc<Shared>, plan: &StreamPlan, clock: &dyn StreamClock, 
         if let Some(domain) = state.delivered.take() {
             release_domain(&mut state, domain);
         }
-        match tick(&mut state, plan, &workers, clock, shared) {
+        match tick(&mut state, plan, &workers, clock) {
             Ok(progress) => {
                 shared.changed.notify_all();
                 if state.domains.iter().all(|domain| domain.closed)
@@ -655,25 +607,6 @@ fn coordinate(shared: &Arc<Shared>, plan: &StreamPlan, clock: &dyn StreamClock, 
                     .map(|deadline| deadline.saturating_sub(clock.now()))
             })
             .min();
-        if wait.is_none()
-            && state.active_workers == 0
-            && state.output.is_none()
-            && !state.delivery_pending
-            && (state.dynamic_bytes > shared.resources.soft_bytes
-                || !state.inputs.is_empty()
-                || state.domains.iter().any(|domain| domain.frame.is_some())
-                || state
-                    .operators
-                    .iter()
-                    .flatten()
-                    .any(|operator| !operator.pending.is_empty()))
-        {
-            state.failure = Some(StreamError::Resource {
-                message: "retained state prevents progress within the configured byte budget"
-                    .into(),
-            });
-            continue;
-        }
         state = match wait {
             Some(wait) => shared.changed.wait_timeout(state, wait).unwrap().0,
             None => shared.changed.wait(state).unwrap(),
@@ -688,9 +621,7 @@ fn tick(
     plan: &StreamPlan,
     workers: &Workers,
     clock: &dyn StreamClock,
-    shared: &Shared,
 ) -> Result<bool, StreamError> {
-    let resources = &shared.resources;
     let mut progress = false;
     for source in plan.domains().iter().skip(1) {
         let index = source.source;
@@ -716,36 +647,22 @@ fn tick(
                     now: clock.now(),
                     input: None,
                 },
-                resources,
             )?;
             progress = true;
         }
     }
     if !state.domains[0].occupied
-        && let Some((_, _, bytes)) = state.inputs.front()
-        && can_begin(state, resources, 0, *bytes)?
+        && let Some((message, value)) = state.inputs.pop_front()
     {
-        let (message, value, bytes) = state.inputs.pop_front().unwrap();
-        state.dynamic_bytes -= bytes;
-        let credits = resources.domain_credits[0];
-        state.event_credits = add(state.event_credits, credits)?;
-        let context_domain = 0;
-        let mut context = ExecutionContext::for_message(
+        let context = ExecutionContext::for_message(
             &plan.nodes()[0],
             Outputs::from([("item".into(), value)]).into(),
         )
         .map_err(execution_error)?;
-        context.set_stream_limits(
-            plan.execution().limits.max_message_bytes,
-            resources.frame_bytes[context_domain],
-        );
-
-        context.retained_bytes(resources.frame_bytes[0])?;
         state.domains[0].frame = Some(Frame {
             message,
             context,
             cursor: 0,
-            credits,
         });
         state.domains[0].occupied = true;
         progress = true;
@@ -755,39 +672,20 @@ fn tick(
             continue;
         }
         let source = plan.domains()[domain].source;
-        let operator = state.operators[source].as_ref().unwrap();
-        let Some(queued) = operator.pending.front() else {
+        let Some(queued) = state.operators[source]
+            .as_mut()
+            .unwrap()
+            .pending
+            .pop_front()
+        else {
             continue;
         };
-        let remaining = operator.pending_bytes - queued.bytes;
-        let release = operator
-            .pending_bytes
-            .saturating_sub(resources.seal_bytes[source])
-            - remaining.saturating_sub(resources.seal_bytes[source]);
-        if !can_begin(state, resources, domain, release)? {
-            continue;
-        }
-        let operator = state.operators[source].as_mut().unwrap();
-        let queued = operator.pending.pop_front().unwrap();
-        operator.pending_bytes = remaining;
-        state.dynamic_bytes -= release;
-        let credits = resources.domain_credits[domain];
-        state.event_credits = add(state.event_credits, credits)?;
-        let context_domain = domain;
-        let mut context =
-            ExecutionContext::for_message(&plan.nodes()[source], queued.emission.result)
-                .map_err(execution_error)?;
-        context.set_stream_limits(
-            plan.execution().limits.max_message_bytes,
-            resources.frame_bytes[context_domain],
-        );
-
-        context.retained_bytes(resources.frame_bytes[domain])?;
+        let context = ExecutionContext::for_message(&plan.nodes()[source], queued.emission.result)
+            .map_err(execution_error)?;
         state.domains[domain].frame = Some(Frame {
             message: queued.message,
             context,
             cursor: 0,
-            credits,
         });
         state.domains[domain].occupied = true;
         progress = true;
@@ -798,7 +696,6 @@ fn tick(
         };
         let steps = &plan.domains()[domain].steps;
         if frame.cursor == steps.len() {
-            state.event_credits -= frame.credits;
             take_sequence(&mut state.summary.completed_frames)?;
             if plan.selected_domain() == Some(domain) {
                 let mut outputs = FlowOutputs::new();
@@ -816,14 +713,6 @@ fn tick(
                         outputs.insert(output.name.clone(), value);
                     }
                 }
-                output_bytes(&outputs, plan.execution().limits.max_message_bytes).map_err(
-                    |error| StreamError::Resource {
-                        message: format!(
-                            "selected outputs for domain {domain} message {}: {error}",
-                            frame.message.sequence
-                        ),
-                    },
-                )?;
                 state.output = Some(StreamOutput {
                     message: frame.message,
                     outputs,
@@ -840,8 +729,6 @@ fn tick(
                 state.domains[domain].frame = Some(frame);
                 continue;
             }
-            state.event_credits -= resources.event_bytes[index];
-            frame.credits -= resources.event_bytes[index];
 
             match frame
                 .context
@@ -856,7 +743,6 @@ fn tick(
                         now: clock.now(),
                         input: Some(&frame.context),
                     },
-                    resources,
                 )?,
                 Ok(None) => {}
                 Err(error) => {
@@ -906,7 +792,6 @@ fn tick(
                             now: clock.now(),
                             input: None,
                         },
-                        resources,
                     )?;
                     let operator = state.operators[index].as_mut().unwrap();
                     operator.closed = true;
@@ -927,37 +812,13 @@ fn tick(
     Ok(progress)
 }
 
-fn can_begin(
-    state: &State,
-    resources: &StreamResources,
-    domain: usize,
-    released: usize,
-) -> Result<bool, StreamError> {
-    let bytes = state
-        .dynamic_bytes
-        .checked_sub(released)
-        .ok_or_else(|| execution_error("invalid retained-byte accounting"))?;
-    Ok(add(
-        add(bytes, state.event_credits)?,
-        resources.domain_credits[domain],
-    )? <= resources.hard_bytes)
-}
-
 fn invoke_event(
     state: &mut State,
     plan: &StreamPlan,
     index: usize,
     event: NodeEvent,
     context: EventContext<'_>,
-    resources: &StreamResources,
 ) -> Result<(), StreamError> {
-    let operator = state.operators[index].as_ref().unwrap();
-    let previous = add(
-        operator.retained_bytes,
-        operator
-            .pending_bytes
-            .saturating_sub(resources.seal_bytes[index]),
-    )?;
     let effects = catch_unwind(AssertUnwindSafe(|| {
         state.operators[index]
             .as_mut()
@@ -969,30 +830,7 @@ fn invoke_event(
     .map_err(|error| StreamError::Execution {
         message: format!("node `{}`: {error}", plan.nodes()[index].definition_id),
     })?;
-    apply_effects(state, plan, index, effects, context.now, resources)?;
-    let operator = state.operators[index].as_mut().unwrap();
-    operator.retained_bytes = operator.state.retained_bytes();
-    let current = add(
-        operator.retained_bytes,
-        operator
-            .pending_bytes
-            .saturating_sub(resources.seal_bytes[index]),
-    )?;
-    state.dynamic_bytes = add(
-        state
-            .dynamic_bytes
-            .checked_sub(previous)
-            .ok_or_else(|| execution_error("invalid operator byte accounting"))?,
-        current,
-    )?;
-    if add(state.dynamic_bytes, state.event_credits)? > resources.hard_bytes {
-        return Err(StreamError::Resource {
-            message: format!(
-                "node `{}` retained more data than the available byte budget",
-                plan.nodes()[index].definition_id
-            ),
-        });
-    }
+    apply_effects(state, plan, index, effects, context.now)?;
     Ok(())
 }
 
@@ -1002,7 +840,6 @@ fn apply_effects(
     index: usize,
     effects: EventEffects,
     now: Duration,
-    resources: &StreamResources,
 ) -> Result<(), StreamError> {
     let domain = plan.output_domain(index);
     let operator = state.operators[index].as_mut().unwrap();
@@ -1020,26 +857,13 @@ fn apply_effects(
         });
     }
     for emission in effects.emissions {
-        output_bytes(
-            &emission.result.outputs,
-            plan.execution().limits.max_message_bytes,
-        )
-        .map_err(|error| StreamError::Resource {
-            message: format!(
-                "node `{}` output: {error}",
-                plan.nodes()[index].definition_id
-            ),
-        })?;
-        let context = ExecutionContext::for_message(&plan.nodes()[index], emission.result.clone())
+        ExecutionContext::for_message(&plan.nodes()[index], emission.result.clone())
             .map_err(execution_error)?;
-        let bytes = context.retained_bytes(resources.seal_bytes[index] / 2)?;
         let sequence = take_sequence(&mut state.sequences[domain])?;
         take_sequence(&mut state.summary.emitted_messages)?;
-        operator.pending_bytes = add(operator.pending_bytes, bytes)?;
         operator.pending.push_back(QueuedEmission {
             message: MessageId { domain, sequence },
             emission,
-            bytes,
         });
     }
     match effects.timer {
@@ -1091,8 +915,6 @@ fn clear_retained(state: &mut State) {
     for operator in &mut state.operators {
         *operator = None;
     }
-    state.dynamic_bytes = 0;
-    state.event_credits = 0;
     state.root_live = 0;
 }
 
@@ -1107,26 +929,10 @@ fn take_sequence(sequence: &mut u64) -> Result<u64, StreamError> {
 }
 
 fn workflow_error(error: crate::WorkflowRunError, message: MessageId) -> StreamError {
-    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
-    let mut resource = false;
-    while let Some(error) = source {
-        if matches!(
-            error.downcast_ref::<crate::WorkflowRunError>(),
-            Some(crate::WorkflowRunError::Resource { .. })
-        ) {
-            resource = true;
-        }
-        source = error.source();
-    }
-    let message = format!(
+    execution_error(format!(
         "domain {} message {}: {error}",
         message.domain, message.sequence
-    );
-    if resource {
-        StreamError::Resource { message }
-    } else {
-        StreamError::Execution { message }
-    }
+    ))
 }
 
 fn execution_error(error: impl std::fmt::Display) -> StreamError {
@@ -1152,12 +958,10 @@ fn panic_error(payload: Box<dyn std::any::Any + Send>) -> StreamError {
 mod tests {
     use super::*;
     #[test]
-    fn identities_fail_before_wraparound_and_size_counting_stops_at_the_limit() {
+    fn identities_fail_before_wraparound() {
         let mut sequence = u64::MAX;
         assert!(take_sequence(&mut sequence).is_err());
         assert_eq!(sequence, u64::MAX);
-        assert_eq!(encoded_size(&"hello", 7).unwrap(), 7);
-        assert!(encoded_size(&"hello", 6).is_err());
     }
 
     #[test]
