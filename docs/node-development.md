@@ -158,8 +158,8 @@ Use `prepared.execution.as_task_node()` to borrow a task executor or
 The consuming conversion moves only the execution field, leaving `prepared.metadata` available.
 
 `EventNode::on_event` receives `Input`, `Timer`, or `UpstreamClosed` and returns zero or more complete
-emissions with a `TimerUpdate`. `EventContext.now` is monotonic elapsed time. Retained logical values
-are reported through `retained_bytes`. Event state requires `Send`; mutable access is exclusive and
+emissions with a `TimerUpdate`. `EventContext.now` is monotonic elapsed time.
+Event state requires `Send`; mutable access is exclusive and
 `Sync` is not required.
 
 `Flow::new` rejects event nodes during synchronous preparation. Direct callers of task execution
@@ -194,11 +194,10 @@ running before releasing pending work, retained values, and nodes. A running tas
 synchronous bodies normally.
 Dropping an unfinished instance follows the same failure cleanup before releasing its nodes.
 
-Limits default to 64 pending messages, 64 MiB of retained logical values, a 1 MiB payload limit, and four
-workers. Positive overrides live in `execution.limits`. Preparation reserves capacity for timer,
-closure, and downstream progress. Oversized payloads and impossible frame budgets fail explicitly.
-Event nodes must report retained logical values through `retained_bytes`. These bounds do not measure
-process RSS or arbitrary allocations inside plugins.
+Limits default to 64 pending messages and four workers. Positive overrides live in `execution.limits`.
+Preparation reserves one frame slot per downstream domain; the remaining slots bound input admission.
+Each event node's pending emissions are also limited by `max_pending_messages`. A full downstream
+queue propagates pressure to input admission. Payload sizes and plugin buffers have no byte quota.
 
 A custom `StreamClock` must advance monotonically and wake registered instances. Deadline expiry
 makes an emission ready; downstream execution remains subject to capacity. Snapshot capture is rejected

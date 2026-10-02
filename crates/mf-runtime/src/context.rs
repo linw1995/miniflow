@@ -44,7 +44,6 @@ struct ScopeGuard<'a> {
     context: &'a mut ExecutionContext,
     parent_outputs: BTreeMap<String, Option<Value>>,
     depth: usize,
-    parent_limits: Option<FrameLimits>,
 }
 
 impl Drop for ScopeGuard<'_> {
@@ -52,7 +51,6 @@ impl Drop for ScopeGuard<'_> {
         self.context.scopes.truncate(self.depth);
         self.context.outputs = std::mem::take(&mut self.parent_outputs);
         self.context.pending_loop_write = None;
-        self.context.frame_limits = self.parent_limits;
     }
 }
 
@@ -78,12 +76,6 @@ pub enum ContextValue<'a> {
     Skipped,
 }
 
-#[derive(Clone, Copy, Debug)]
-struct FrameLimits {
-    payload: usize,
-    context: usize,
-}
-
 /// Completed output values for one run. Nodes receive an immutable reference.
 #[derive(Debug)]
 pub struct ExecutionContext {
@@ -96,7 +88,6 @@ pub struct ExecutionContext {
     remaining_steps: usize,
     snapshots: Option<crate::SnapshotRecorder>,
     snapshot_prefix: Vec<LoopPathEntry>,
-    frame_limits: Option<FrameLimits>,
 }
 
 impl Default for ExecutionContext {
@@ -110,38 +101,11 @@ impl Default for ExecutionContext {
             remaining_steps: crate::MAX_SCHEDULED_STEPS,
             snapshots: None,
             snapshot_prefix: Vec::new(),
-            frame_limits: None,
         }
     }
 }
 
 impl ExecutionContext {
-    pub(super) fn set_stream_limits(&mut self, payload: usize, context: usize) {
-        self.frame_limits = Some(FrameLimits { payload, context });
-    }
-
-    pub fn retained_bytes(&self, limit: usize) -> Result<usize, crate::StreamError> {
-        let mut bytes = crate::MESSAGE_OVERHEAD;
-        for (key, value) in &self.outputs {
-            bytes = crate::stream_limits::add(bytes, crate::stream_limits::binding_bytes(key)?)?;
-            if bytes > limit {
-                return Err(crate::StreamError::Resource {
-                    message: "message context exceeds its frame reservation".into(),
-                });
-            }
-            if let Some(value) = value {
-                bytes =
-                    crate::stream_limits::add(bytes, crate::encoded_size(value, limit - bytes)?)?;
-            }
-        }
-        if bytes > limit {
-            return Err(crate::StreamError::Resource {
-                message: "message context exceeds its frame reservation".into(),
-            });
-        }
-        Ok(bytes)
-    }
-
     pub fn for_message<N>(
         source: &FlowNode<N>,
         result: NodeResult,
@@ -451,13 +415,11 @@ impl ExecutionContext {
     ) -> Result<(T, Outputs, bool), WorkflowRunError> {
         let depth = self.scopes.len();
         let parent_outputs = std::mem::take(&mut self.outputs);
-        let parent_limits = self.frame_limits.take();
         self.scopes.push(scope);
         let guard = ScopeGuard {
             context: self,
             parent_outputs,
             depth,
-            parent_limits,
         };
         let state = &mut *guard.context;
         let result = run(state);
@@ -527,13 +489,6 @@ impl ExecutionContext {
                     .map_err(|error| state_error(id, format!("output `{name}`: {error}")))?;
             }
         }
-        if let Some(limits) = self.frame_limits {
-            self.validate_stream_publication(node, result.as_ref(), limits)
-                .map_err(|error| WorkflowRunError::Resource {
-                    definition_id: node.definition_id.clone(),
-                    message: error.to_string(),
-                })?;
-        }
         // Validate the complete result before making any values visible.
         match result {
             Some(result) => {
@@ -567,61 +522,6 @@ impl ExecutionContext {
             // Later body steps read the current state through the synthetic source.
             self.outputs
                 .insert(output_id(&frame.source_id, &variable), Some(value));
-        }
-        Ok(())
-    }
-
-    fn validate_stream_publication<N>(
-        &self,
-        node: &FlowNode<N>,
-        result: Option<&NodeResult>,
-        limits: FrameLimits,
-    ) -> Result<(), crate::StreamError> {
-        let id = node.definition_id.as_str();
-        let updates: Vec<_> = match result {
-            Some(result) => {
-                crate::stream_limits::output_bytes(&result.outputs, limits.payload)?;
-                result
-                    .outputs
-                    .iter()
-                    .map(|(port, value)| (output_id(id, port), Some(value)))
-                    .chain(
-                        result
-                            .skipped
-                            .iter()
-                            .map(|port| (output_id(id, port), None)),
-                    )
-                    .collect()
-            }
-            None => node
-                .metadata
-                .ports
-                .outputs
-                .iter()
-                .map(|port| (output_id(id, &port.name), None))
-                .collect(),
-        };
-        let changed: BTreeSet<_> = updates.iter().map(|(name, _)| name.as_str()).collect();
-        let entries = self
-            .outputs
-            .iter()
-            .filter(|(name, _)| !changed.contains(name.as_str()))
-            .map(|(name, value)| (name.as_str(), value.as_ref()))
-            .chain(updates.iter().map(|(name, value)| (name.as_str(), *value)));
-        let mut bytes = crate::MESSAGE_OVERHEAD;
-        for (key, value) in entries {
-            bytes = crate::stream_limits::add(bytes, crate::stream_limits::binding_bytes(key)?)?;
-            if bytes > limits.context {
-                return Err(crate::StreamError::Resource {
-                    message: "message context exceeds its frame reservation".into(),
-                });
-            }
-            if let Some(value) = value {
-                bytes = crate::stream_limits::add(
-                    bytes,
-                    crate::encoded_size(value, limits.context - bytes)?,
-                )?;
-            }
         }
         Ok(())
     }

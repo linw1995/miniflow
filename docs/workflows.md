@@ -344,8 +344,7 @@ belongs to a new batch. Empty buffers emit nothing. A skipped input adds no item
 buffered items retain their deadline. Arrays and null remain individual elements.
 
 Downstream nodes receive one invocation per emitted batch. Input and batch values belong to different
-message domains. The aggregate output remains subject to the runtime payload limit; choose count and
-byte limits together. Failure discards a partial buffer without flushing or retrying.
+message domains. Failure discards a partial buffer without flushing or retrying.
 
 Batch runs through the in-memory API and standalone runners, and is rejected inside synchronous
 Loop/Iteration bodies. Its state is independent for every workflow instance.

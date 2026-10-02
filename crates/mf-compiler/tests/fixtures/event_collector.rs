@@ -48,15 +48,6 @@ impl EventNode for Collector {
             timer: TimerUpdate::Cancel,
         })
     }
-
-    fn retained_bytes(&self) -> usize {
-        self.values
-            .iter()
-            .map(|value| {
-                mf_runtime::encoded_size(value, usize::MAX).unwrap() + mf_runtime::MESSAGE_OVERHEAD
-            })
-            .sum()
-    }
 }
 
 fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
