@@ -395,7 +395,7 @@ inventory::submit! {
 }
 
 #[test]
-fn one_over_budget_frame_fails_and_cancellation_wakes_an_idle_instance() {
+fn one_over_budget_frame_fails() {
     let value = graph(
         json!([{"id":"exhaust", "kind":"test.exhaust"}]),
         vec![edge("%input", "item", "exhaust", "input")],
@@ -410,9 +410,4 @@ fn one_over_budget_frame_fails_and_cancellation_wakes_an_idle_instance() {
         "{error}"
     );
     assert!(instance.join().is_err());
-
-    let instance = start(accumulating(), Arc::new(ManualClock::default()));
-    instance.cancel();
-    assert!(matches!(instance.recv(), Err(StreamError::Cancelled)));
-    assert!(matches!(instance.join(), Err(StreamError::Cancelled)));
 }

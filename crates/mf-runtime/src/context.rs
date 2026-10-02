@@ -96,7 +96,6 @@ pub struct ExecutionContext {
     remaining_steps: usize,
     snapshots: Option<crate::SnapshotRecorder>,
     snapshot_prefix: Vec<LoopPathEntry>,
-    cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     frame_limits: Option<FrameLimits>,
 }
 
@@ -111,7 +110,6 @@ impl Default for ExecutionContext {
             remaining_steps: crate::MAX_SCHEDULED_STEPS,
             snapshots: None,
             snapshot_prefix: Vec::new(),
-            cancellation: None,
             frame_limits: None,
         }
     }
@@ -120,19 +118,6 @@ impl Default for ExecutionContext {
 impl ExecutionContext {
     pub(super) fn set_stream_limits(&mut self, payload: usize, context: usize) {
         self.frame_limits = Some(FrameLimits { payload, context });
-    }
-
-    pub fn set_cancellation(
-        &mut self,
-        cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    ) {
-        self.cancellation = Some(cancellation);
-    }
-
-    pub fn is_cancelled(&self) -> bool {
-        self.cancellation
-            .as_ref()
-            .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire))
     }
 
     pub fn retained_bytes(&self, limit: usize) -> Result<usize, crate::StreamError> {
@@ -227,7 +212,6 @@ impl ExecutionContext {
 
     pub fn fork_body(&self, observation: Option<BodyObservation>) -> Self {
         let mut child = Self::for_body(observation);
-        child.cancellation = self.cancellation.clone();
         if self.snapshots.is_some() {
             child.snapshots = self.snapshots.clone();
             child.snapshot_prefix = self.snapshot_path();
@@ -482,9 +466,6 @@ impl ExecutionContext {
     }
 
     fn reserve_step(&mut self, id: &str) -> Result<(), WorkflowRunError> {
-        if self.is_cancelled() {
-            return Err(state_error(id, "execution cancelled"));
-        }
         if self.remaining_steps == 0 {
             return Err(state_error(
                 id,
@@ -887,22 +868,6 @@ pub(super) fn execute_ordered_task_in_context<'a, N>(
             }
         }
     };
-    if ctx.is_cancelled() {
-        let error = state_error(id, "execution cancelled before publication");
-        if let Some(step) = step.take() {
-            step.failed(ctx, FailurePhase::Publication, error.to_string());
-        }
-        if let Some(inputs) = &snapshot_inputs {
-            ctx.capture_node(
-                node,
-                inputs,
-                None,
-                crate::SnapshotOutcome::Failed,
-                Some(&error),
-            );
-        }
-        return Err(error);
-    }
     let mut produced_ports = Vec::new();
     let mut skipped_ports = Vec::new();
     if step.is_some() {
