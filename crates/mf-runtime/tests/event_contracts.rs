@@ -1,7 +1,6 @@
 use mf_runtime::{
     EventContext, EventEffects, EventNode, Flow, FlowBuildError, FlowNode, NodeBuildError,
-    NodeEvent, NodeExecution, NodeExecutionError, NodeFactory, NodePorts, NodeRegistration,
-    PreparedNode,
+    NodeEvent, NodeExecutionError, NodeFactory, NodePorts, NodeRegistration, PreparedNode,
 };
 use serde_json::Value;
 use std::cell::Cell;
@@ -36,7 +35,7 @@ fn prepares_send_only_event_state_and_rejects_synchronous_execution() {
         factory: NodeFactory::Plain(factory),
     };
     let prepared = registration.instantiate(Value::Null).unwrap();
-    assert!(matches!(&prepared.execution, NodeExecution::Event(_)));
+    assert!(prepared.execution.as_task_node().is_none());
     let error = Flow::new(
         vec![FlowNode::new("collector", prepared)],
         Vec::new(),
