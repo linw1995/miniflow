@@ -10,6 +10,8 @@ use proc_macro2::{Span, TokenStream};
 #[cfg(feature = "codegen")]
 use quote::{format_ident, quote};
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "codegen")]
+use snafu::OptionExt;
 use snafu::{ResultExt, Snafu};
 use std::collections::BTreeMap;
 #[cfg(feature = "codegen")]
@@ -32,8 +34,13 @@ pub struct GeneratedWorkflowArtifacts {
 
 #[derive(Debug, Snafu)]
 pub enum PlanError {
-    #[snafu(display("invalid streaming plan: {message}"))]
-    Stream { message: String },
+    #[snafu(display("stream input source is outside a stream root"))]
+    StreamInputOutsideRoot,
+    #[snafu(display("invalid streaming plan: {source}"))]
+    Stream {
+        #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
+        source: Box<crate::WorkflowCompileError>,
+    },
     #[snafu(display("could not serialize compiled workflow: {source}"))]
     Serialize { source: serde_json::Error },
     #[snafu(display("could not parse compiled workflow: {source}"))]
@@ -69,13 +76,11 @@ impl CompiledWorkflow {
         &self,
         observer: &mf_telemetry::observation::Observer,
         run_id: mf_telemetry::identity::RunId,
-    ) -> Result<mf_runtime::StreamObservation, mf_telemetry::ContractError> {
-        let description = crate::describe_compiled(self).map_err(|error| {
-            mf_telemetry::ContractError::Invalid {
-                message: error.to_string(),
-            }
-        })?;
-        observer.start_stream(description, run_id)
+    ) -> Result<mf_runtime::StreamObservation, crate::DescriptionError> {
+        let description = crate::describe_compiled(self)?;
+        observer
+            .start_stream(description, run_id)
+            .context(crate::compiler::ContractSnafu)
     }
 
     pub fn start_observation(
@@ -271,13 +276,11 @@ impl CompiledWorkflow {
 fn generate_stream_artifacts(
     plan: &CompiledWorkflow,
 ) -> Result<GeneratedWorkflowArtifacts, PlanError> {
-    let invalid = |error: crate::WorkflowCompileError| PlanError::Stream {
-        message: error.to_string(),
-    };
-    if crate::structural_order(&plan.definition).map_err(invalid)? != plan.execution_order {
+    if crate::structural_order(&plan.definition).context(StreamSnafu)? != plan.execution_order {
         return InvalidExecutionOrderSnafu.fail();
     }
-    let definition = crate::streaming::expanded_definition(&plan.definition).map_err(invalid)?;
+    let definition =
+        crate::streaming::expanded_definition(&plan.definition).context(StreamSnafu)?;
     let mut order = vec![mf_runtime::STREAM_INPUT_ID.into()];
     order.extend(plan.execution_order.iter().cloned());
     let (preparations, _) = generate_scope(&definition, &order, "stream", &[], None, None)?;
@@ -400,9 +403,7 @@ fn generate_scope(
                 let execution = definition
                     .execution
                     .as_ref()
-                    .ok_or_else(|| PlanError::Stream {
-                        message: "input source is outside a stream root".into(),
-                    })?;
+                    .context(StreamInputOutsideRootSnafu)?;
                 let input_type = LitStr::new(
                     &serde_json::to_string(&execution.input_type).context(SerializeSnafu)?,
                     Span::call_site(),
