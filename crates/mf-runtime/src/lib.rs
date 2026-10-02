@@ -44,8 +44,8 @@ pub use mf_telemetry::observation::StreamObservation;
 pub use node::{
     ContextReference, Inputs, NodeBuildError, NodeExecution, NodeExecutionError, NodeFactory,
     NodeMetadata, NodePorts, NodeRegistration, OutputDerivation, OutputDerivationError, Outputs,
-    PortSpec, PreparedNode, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, ValueType,
-    deserialize_config, output_id,
+    PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, TaskNode,
+    TypeCompatibility, TypeDepthError, TypeMismatch, ValueType, deserialize_config, output_id,
 };
 pub use number::compare_json_numbers;
 pub use registry::{NodeRegistry, NodeRegistryError};
@@ -58,8 +58,9 @@ pub use stream::{
     STREAM_INPUT_ID, StreamExecution, StreamLimits, StreamMode, TimerUpdate,
 };
 pub use stream_instance::{
-    MessageId, MonotonicClock, StreamClock, StreamDelivery, StreamError, StreamInstance,
-    StreamMetrics, StreamOptions, StreamOutput, StreamSender, StreamSummary,
+    CompilationSnafu as StreamCompilationSnafu, MessageId, MonotonicClock, StreamClock,
+    StreamDelivery, StreamError, StreamInstance, StreamMetrics, StreamOptions, StreamOutput,
+    StreamSender, StreamSummary,
 };
 pub use stream_io::StreamStdio;
 pub use stream_plan::{

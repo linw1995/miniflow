@@ -1,9 +1,11 @@
 use crate::ValueRef as Value;
+use crate::runner::{DependencySnafu, InputTypeSnafu, NodeExecutionSnafu};
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use mf_telemetry::{
     event::{FailurePhase, LoopPathEntry, LoopSummary, SkipCause},
     observation::{BodyNodeObservation, BodyObservation, NodeObservation, RunObservation},
 };
+use snafu::ResultExt;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
@@ -134,14 +136,9 @@ impl ExecutionContext {
                     &dependency.source_node,
                     &dependency.source_output,
                 ))
-                .map_err(|error| {
-                    state_error(
-                        id,
-                        format!(
-                            "dependency {}: {error}",
-                            dependency.input.as_deref().unwrap_or("<control>")
-                        ),
-                    )
+                .with_context(|_| DependencySnafu {
+                    definition_id: id,
+                    input: dependency.input.as_deref().unwrap_or("<control>"),
                 })?;
             match value {
                 ContextValue::Value(value) => {
@@ -165,7 +162,10 @@ impl ExecutionContext {
                 .ok_or_else(|| state_error(id, format!("received undeclared input `{name}`")))?;
             port.value_type
                 .validate_shared(value)
-                .map_err(|error| state_error(id, format!("input `{name}`: {error}")))?;
+                .with_context(|_| InputTypeSnafu {
+                    definition_id: id,
+                    input: name,
+                })?;
         }
         Ok(Some(inputs))
     }
@@ -749,9 +749,8 @@ pub(super) fn execute_ordered_task_in_context<'a, N>(
         }
         let result = task
             .execute(inputs, ctx)
-            .map_err(|source| WorkflowRunError::NodeExecution {
+            .with_context(|_| NodeExecutionSnafu {
                 definition_id: node.definition_id.clone(),
-                source,
             });
         match result {
             Ok(result) => Some(result),

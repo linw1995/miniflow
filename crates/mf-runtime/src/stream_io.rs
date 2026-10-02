@@ -3,7 +3,12 @@ use crate::{StreamError, StreamInstance, StreamSummary};
 #[cfg(unix)]
 mod unix {
     use super::*;
+    use crate::stream_instance::{
+        InputFailureSnafu, InputRecordSnafu, OutputEncodeSnafu, OutputWriteSnafu, StdioSnafu,
+        ThreadSpawnSnafu,
+    };
     use crate::{StreamSender, ValueRef, ValueType};
+    use snafu::{IntoError, ResultExt};
     use std::{
         fs::File,
         io::{self, Read, Write},
@@ -45,9 +50,7 @@ mod unix {
                 redirect(libc::STDERR_FILENO, libc::STDOUT_FILENO)?;
                 Ok(Self { input, output })
             };
-            claim().map_err(|error| StreamError::Preparation {
-                message: format!("could not claim stream stdio: {error}"),
-            })
+            claim().context(StdioSnafu)
         }
 
         pub fn run(mut self, instance: StreamInstance) -> Result<StreamSummary, StreamError> {
@@ -63,17 +66,19 @@ mod unix {
                     match result {
                         Ok(Ok(())) => {}
                         Ok(Err(error)) => reader_input.fail(error),
-                        Err(_) => reader_input.fail(StreamError::Input {
-                            message: "input reader panicked".into(),
-                        }),
+                        Err(_) => reader_input.fail(
+                            InputFailureSnafu {
+                                message: "input reader panicked",
+                            }
+                            .build(),
+                        ),
                     }
                 })
-                .map_err(|error| {
-                    let error = StreamError::Preparation {
-                        message: error.to_string(),
-                    };
+                .context(ThreadSpawnSnafu {
+                    thread: "workflow-input",
+                })
+                .inspect_err(|error| {
                     input.fail(error.clone());
-                    error
                 })?;
             loop {
                 let delivery = match instance.receive() {
@@ -98,9 +103,12 @@ mod unix {
                 input.fail(error.clone());
             }
             if reader.join().is_err() {
-                return result.and(Err(StreamError::Input {
-                    message: "input reader stopped unexpectedly".into(),
-                }));
+                return result.and(
+                    InputFailureSnafu {
+                        message: "input reader stopped unexpectedly",
+                    }
+                    .fail(),
+                );
             }
             result
         }
@@ -150,13 +158,16 @@ mod unix {
         let mut record = Vec::new();
         let mut line = 1u64;
         loop {
-            if !wait_ready(&file, libc::POLLIN, input).map_err(|error| input_error(line, error))? {
+            if !wait_ready(&file, libc::POLLIN, input)
+                .boxed()
+                .context(InputRecordSnafu { line })?
+            {
                 return Err(input.failure().expect("instance failure stops I/O"));
             }
             let read = match file.read(&mut chunk) {
                 Ok(read) => read,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(input_error(line, error)),
+                Err(error) => return Err(InputRecordSnafu { line }.into_error(Box::new(error))),
             };
             if read == 0 {
                 if !record.is_empty() {
@@ -191,20 +202,23 @@ mod unix {
             return Err(input_error(line, "blank JSON Lines record"));
         }
         let value: ValueRef = serde_json::from_slice::<serde_json::Value>(record)
-            .map_err(|error| input_error(line, error))?
+            .boxed()
+            .context(InputRecordSnafu { line })?
             .into();
         value_type
             .validate_shared(&value)
-            .map_err(|error| input_error(line, error))?;
+            .boxed()
+            .context(InputRecordSnafu { line })?;
         input.send(value)?;
         record.clear();
         Ok(())
     }
 
-    fn input_error(line: u64, error: impl std::fmt::Display) -> StreamError {
-        StreamError::Input {
-            message: format!("line {line}: {error}"),
+    fn input_error(line: u64, message: &str) -> StreamError {
+        InputFailureSnafu {
+            message: format!("line {line}: {message}"),
         }
+        .build()
     }
 
     fn write_record(
@@ -212,29 +226,27 @@ mod unix {
         output: &crate::StreamOutput,
         input: &StreamSender,
     ) -> Result<(), StreamError> {
-        let output_error = |error: io::Error| StreamError::Output {
-            message: error.to_string(),
-        };
-        let mut bytes =
-            serde_json::to_vec(&output.outputs).map_err(|error| StreamError::Output {
-                message: error.to_string(),
-            })?;
+        let mut bytes = serde_json::to_vec(&output.outputs).context(OutputEncodeSnafu)?;
         bytes.push(b'\n');
         let mut remaining = bytes.as_slice();
         while !remaining.is_empty() {
-            if !wait_ready(file, libc::POLLOUT, input).map_err(output_error)? {
+            if !wait_ready(file, libc::POLLOUT, input).context(OutputWriteSnafu)? {
                 return Err(input.failure().expect("instance failure stops I/O"));
             }
             // A single writer uses at most the POSIX minimum PIPE_BUF after polling.
             let written = match file.write(&remaining[..remaining.len().min(512)]) {
-                Ok(0) => return Err(output_error(io::Error::from(io::ErrorKind::WriteZero))),
+                Ok(0) => {
+                    return Err(
+                        OutputWriteSnafu.into_error(io::Error::from(io::ErrorKind::WriteZero))
+                    );
+                }
                 Ok(written) => written,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(output_error(error)),
+                Err(error) => return Err(OutputWriteSnafu.into_error(error)),
             };
             remaining = &remaining[written..];
         }
-        file.flush().map_err(output_error)
+        file.flush().context(OutputWriteSnafu)
     }
 }
 

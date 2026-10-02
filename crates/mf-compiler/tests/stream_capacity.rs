@@ -10,6 +10,7 @@ use mf_runtime::{
 use serde_json::{Value, json};
 use std::{
     collections::BTreeMap,
+    error::Error,
     sync::{
         Arc, Condvar, Mutex, OnceLock,
         atomic::{AtomicUsize, Ordering},
@@ -351,14 +352,29 @@ fn a_later_failure_preserves_the_delivered_prefix_and_never_retries() {
         instance.recv().unwrap().unwrap().outputs["batch"],
         json!([1])
     );
-    assert!(
-        instance
-            .recv()
-            .unwrap_err()
-            .to_string()
-            .contains("deliberate batch failure")
-    );
-    assert!(instance.join().is_err());
+    let error = instance.recv().unwrap_err();
+    assert!(error.to_string().contains("deliberate batch failure"));
+    let cause = error.source().unwrap();
+    assert!(cause.is::<Arc<mf_runtime::WorkflowRunError>>());
+    assert!(cause.source().unwrap().is::<NodeExecutionError>());
+    let input = instance.input();
+    let StreamError::Workflow { source, message } = error else {
+        panic!("expected a workflow error");
+    };
+    for error in [
+        input.send(json!(4)).unwrap_err(),
+        instance.join().unwrap_err(),
+    ] {
+        let StreamError::Workflow {
+            source: shared,
+            message: failed_message,
+        } = error
+        else {
+            panic!("expected the same terminal error");
+        };
+        assert!(Arc::ptr_eq(&source, &shared));
+        assert_eq!(message, failed_message);
+    }
     assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
     probes().lock().unwrap().remove("fail-prefix");
 }
@@ -412,8 +428,9 @@ fn rejects_snapshot_capture_and_insufficient_domain_capacity() {
 
     let mut value = definition();
     value["execution"]["limits"] = json!({"max_pending_messages":1});
-    let error = prepare(value).unwrap_err().to_string();
-    assert!(error.contains("reserve"), "{error}");
+    let error = prepare(value).unwrap_err();
+    assert!(error.to_string().contains("reserve"), "{error}");
+    assert!(error.source().unwrap().is::<mf_runtime::StreamBuildError>());
 }
 
 #[test]

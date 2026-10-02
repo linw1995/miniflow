@@ -45,8 +45,15 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
-    #[snafu(display("invalid streaming workflow: {message}"))]
+    #[snafu(display("invalid streaming workflow: {message}"), visibility(pub))]
     InvalidStream { message: String },
+    #[snafu(
+        display("could not prepare streaming workflow: {source}"),
+        visibility(pub)
+    )]
+    StreamConstruction {
+        source: mf_runtime::StreamBuildError,
+    },
     #[snafu(display("node at position {position} has a blank definition ID"))]
     InvalidNodeId { position: usize },
     #[snafu(display("node definition ID `{definition_id}` is used more than once"))]
@@ -148,7 +155,10 @@ pub enum WorkflowCompileError {
     DuplicateWorkflowOutputName { name: String },
     #[snafu(display("workflow contains a cycle: {path}"))]
     Cycle { path: CyclePath },
-    #[snafu(display("validated workflow could not be constructed: {source}"))]
+    #[snafu(
+        display("validated workflow could not be constructed: {source}"),
+        visibility(pub)
+    )]
     FlowConstruction { source: FlowBuildError },
     #[snafu(display("compiled workflow execution order does not match its definition"))]
     NonCanonicalPlanOrder,
@@ -156,6 +166,12 @@ pub enum WorkflowCompileError {
     InvalidNodeMetadata {
         definition_id: DefinitionId,
         message: String,
+    },
+    #[snafu(display("invalid inferred output `{output}` for node `{definition_id}`: {source}"))]
+    InferredOutputDepth {
+        definition_id: DefinitionId,
+        output: String,
+        source: mf_runtime::TypeDepthError,
     },
     #[snafu(display(
         "invalid control edge `{from_node}`.`{from_output}` -> `{to_node}`: {message}"
@@ -315,12 +331,12 @@ impl TypeInferenceState {
                     exact: None,
                 },
             };
-            fact.value_type.check_depth().map_err(|error| {
-                WorkflowCompileError::InvalidNodeMetadata {
+            fact.value_type
+                .check_depth()
+                .with_context(|_| InferredOutputDepthSnafu {
                     definition_id: id.clone(),
-                    message: format!("output `{}`: {error}", output.name),
-                }
-            })?;
+                    output: output.name.as_ref(),
+                })?;
             if let Some(value) = &fact.exact {
                 declared.validate_shared(value).map_err(|error| {
                     WorkflowCompileError::InvalidNodeMetadata {
@@ -802,11 +818,8 @@ pub fn compile_definition(
     .context(FlowConstructionSnafu)?;
 
     if let Some(execution) = &definition.execution {
-        flow.into_stream(execution.clone()).map_err(|error| {
-            WorkflowCompileError::InvalidStream {
-                message: error.to_string(),
-            }
-        })?;
+        flow.into_stream(execution.clone())
+            .context(StreamConstructionSnafu)?;
         execution_order.retain(|id| id.as_str() != mf_runtime::STREAM_INPUT_ID);
     } else {
         flow.into_tasks().context(FlowConstructionSnafu)?;
