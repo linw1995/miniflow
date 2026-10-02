@@ -1,7 +1,7 @@
 use mf_runtime::{
-    BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, MESSAGE_OVERHEAD,
-    NodeBuildError, NodeEvent, NodeExecutionError, NodeRegistration, NodeResult, OutputDerivation,
-    Outputs, PortSpec, TimerUpdate, ValueRef, ValueType, deserialize_config, encoded_size,
+    BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeBuildError,
+    NodeEvent, NodeExecutionError, NodeRegistration, NodeResult, OutputDerivation, Outputs,
+    PortSpec, TimerUpdate, ValueRef, ValueType, deserialize_config,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -66,7 +66,6 @@ inventory::submit! { NodeRegistration {
 struct BatchState {
     config: Config,
     items: Vec<ValueRef>,
-    bytes: usize,
     deadline: Option<Duration>,
 }
 
@@ -75,7 +74,6 @@ impl BatchState {
         Self {
             config,
             items: Vec::new(),
-            bytes: 0,
             deadline: None,
         }
     }
@@ -90,7 +88,6 @@ impl BatchState {
         }
         let item_count = self.items.len();
         let items = ValueRef::array(std::mem::take(&mut self.items));
-        self.bytes = 0;
         self.deadline = None;
         emissions.push(EventEmission {
             result: NodeResult::from(Outputs::from([("items".into(), items)])),
@@ -111,17 +108,9 @@ impl EventNode for BatchState {
                 let item = inputs
                     .remove("item")
                     .ok_or_else(|| failure("required input `item` was not provided"))?;
-                let item_bytes = encoded_size(&item, usize::MAX)
-                    .map_err(|error| failure(error.to_string()))?
-                    .checked_add(MESSAGE_OVERHEAD)
-                    .ok_or_else(|| failure("batch byte count exhausted"))?;
                 if self.due(context.now) {
                     self.seal(FlushReason::TimeoutExceed, &mut emissions);
                 }
-                let bytes = self
-                    .bytes
-                    .checked_add(item_bytes)
-                    .ok_or_else(|| failure("batch byte count exhausted"))?;
                 if self.items.is_empty() {
                     let at = context
                         .now
@@ -130,7 +119,6 @@ impl EventNode for BatchState {
                     self.deadline = Some(at);
                 }
                 self.items.push(item);
-                self.bytes = bytes;
                 if self.items.len() >= self.config.max_items {
                     self.seal(FlushReason::SizeExceed, &mut emissions);
                 }
@@ -157,10 +145,6 @@ impl EventNode for BatchState {
                 .unwrap_or(TimerUpdate::Cancel),
         })
     }
-    fn retained_bytes(&self) -> usize {
-        self.bytes
-    }
-
     fn buffered_items(&self) -> Option<usize> {
         Some(self.items.len())
     }
@@ -245,7 +229,6 @@ mod tests {
                 .unwrap()[0]
                 .ptr_eq(&original)
         );
-        assert_eq!(state.retained_bytes(), 0);
         assert!(
             event(&mut state, NodeEvent::UpstreamClosed, 30)
                 .emissions
@@ -347,8 +330,6 @@ mod tests {
         for value in [json!([1, 2]), json!(null)] {
             first.on_event(input(value), &context).unwrap();
         }
-        assert!(first.retained_bytes() > 2 * MESSAGE_OVERHEAD);
-        assert_eq!(second.retained_bytes(), 0);
         let effects = first.on_event(input(json!([3])), &context).unwrap();
         assert_eq!(values(&effects), [json!([[1, 2], null, [3]])]);
         assert!(
@@ -358,7 +339,6 @@ mod tests {
                 .emissions
                 .is_empty()
         );
-        assert_eq!(first.retained_bytes(), 0);
     }
 
     #[test]

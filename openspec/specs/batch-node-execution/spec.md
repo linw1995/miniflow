@@ -123,11 +123,6 @@ A sealed batch SHALL retain its assigned membership, order, and output identity 
 - **WHEN** a batch is sealed while the downstream domain is busy
 - **THEN** the batch remains unchanged until delivery, and later input is either buffered separately within limits or backpressured
 
-#### Scenario: Exceed the aggregate payload limit
-
-- **WHEN** collected elements would produce an array larger than the configured message limit
-- **THEN** publication fails with the Batch node identity instead of emitting an oversized array or inventing another flush trigger
-
 ### Requirement: Exclude skipped inputs from accumulation
 
 A Batch input with a resolved skipped data or control dependency SHALL contribute no item and MUST NOT start or reset a deadline. It MUST NOT turn an existing buffer into a skipped batch. Unexpectedly missing dependencies SHALL remain errors under ordinary dependency rules.

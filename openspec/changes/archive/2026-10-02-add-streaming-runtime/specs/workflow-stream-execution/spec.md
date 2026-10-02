@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Execute a workflow over an input sequence with instance-owned node state, isolated message contexts, independent timer progress, and bounded resources through explicit close and drain boundaries.
+Execute a workflow over an input sequence with instance-owned node state, isolated message contexts, independent timer progress, and bounded scheduling through explicit close and drain boundaries.
 
 ## ADDED Requirements
 
@@ -124,28 +124,18 @@ Idle input and running ordinary plugin calls MUST NOT prevent the runtime from s
 - **WHEN** a previous batch is executing a blocking business operation
 - **THEN** the collector's next due batch can be sealed while downstream execution remains queued
 
-### Requirement: Bound retained runtime work
+### Requirement: Bound pending messages and worker concurrency
 
-Instances SHALL enforce finite limits on pending frames, retained logical value bytes, payload size, and worker concurrency. Queued, running, buffered, completed-but-undelivered, and selected-output data MUST participate in accounting. Source admission SHALL apply backpressure. Oversized values and impossible per-frame allocations MUST fail explicitly instead of waiting forever or silently dropping data.
+Instances SHALL enforce finite limits on admitted input frames, per-operator pending emissions, and worker concurrency. Source admission SHALL apply backpressure. Each downstream message domain SHALL have a reserved frame slot so it can make progress while input admission is full. These count limits do not bound payload size or data retained inside a plugin.
 
 #### Scenario: Stop consuming workflow output
 
 - **WHEN** an output consumer stops reading while inputs continue
 - **THEN** output pressure eventually reaches input admission without unbounded queues or discarded results
 
-#### Scenario: Exceed one payload limit
-
-- **WHEN** an input or collected output exceeds the configured payload limit
-- **THEN** execution fails with the input or producing node identity before accepting or publishing that payload
-
-#### Scenario: Retain too much intermediate context
-
-- **WHEN** one frame cannot retain its required context within the configured byte budget
-- **THEN** it reports a resource failure rather than waiting for its own completion to free the same budget
-
 ### Requirement: Preserve progress when admission is full
 
-Capacity limits SHALL reserve progress for timer handling, closure, worker completion, and downstream handoff. Configurations too small for the validated graph's reserves MUST fail before admission. A flush MUST NOT require another external input permit. Pending sealed batches MUST remain bounded and charged until handed off.
+Capacity limits SHALL reserve progress for timer handling, closure, worker completion, and downstream handoff. Configurations with fewer pending-message slots than message domains MUST fail before admission. A flush MUST NOT require another external input permit. Pending emissions MUST stay within each operator's configured message-count limit until handed off.
 
 #### Scenario: Use a batch count larger than input capacity
 
@@ -154,7 +144,7 @@ Capacity limits SHALL reserve progress for timer handling, closure, worker compl
 
 #### Scenario: Reject an unusable capacity configuration
 
-- **WHEN** configured capacity cannot provide the graph's required progress reserves
+- **WHEN** max_pending_messages is smaller than the number of message domains
 - **THEN** startup fails with a limit diagnostic before accepting input
 
 ### Requirement: Drain after closing input

@@ -9,7 +9,7 @@ after the deadline first seals the old buffer, then starts a new one. Count thre
 `len >= max_items`. Timer callbacks flush only when due; upstream closure flushes a nonempty tail.
 Empty buffers emit nothing, and sealing cancels the old deadline.
 
-Values retain their immutable handles. Logical retained bytes participate in runtime accounting.
+Values retain their immutable handles until the batch is emitted.
 Failure cleanup is a runtime policy and does not flush a tail. The node has no task
 execution method, scheduler, worker pool, or transport implementation.
 

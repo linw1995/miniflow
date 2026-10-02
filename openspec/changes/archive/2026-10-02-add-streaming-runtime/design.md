@@ -16,16 +16,15 @@ An instance owns its prepared executors, deadlines, and retained state until dra
 executors, while the coordinator invokes events serially. Each frame has isolated outputs, skips, and
 a fresh step budget. Synchronous bodies remain task-only.
 
-## Progress and resource bounds
+## Progress and scheduling bounds
 
 One FIFO frame executes per domain. A bounded worker pool keeps synchronous business calls off the
 coordinator, allowing idle deadlines to progress. Each operator has one replaceable
 deadline, cleared before timer delivery.
 
-Admission, running contexts, retained event values, sealed emissions, and pending outputs are charged
-to finite budgets. Preparation reserves capacity for downstream progress and rejects impossible
-configurations. No flush needs another host admission permit. Plugins report logical retained bytes;
-these limits do not describe process RSS or arbitrary plugin allocations.
+Admission and worker concurrency have finite count limits. Preparation reserves a frame slot for each
+downstream domain, and each operator's emission queue has a message-count limit. No flush needs another
+host admission permit. Byte accounting, payload limits, and plugin-buffer budgets are a separate feature.
 
 ## Completion and failure
 

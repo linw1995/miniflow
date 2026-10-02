@@ -18,12 +18,7 @@ fn streaming_schema_validates_versions_types_and_limits() {
     );
 
     for invalid in [json!(0), json!(-1), json!(1.5), json!("4")] {
-        for field in [
-            "max_pending_messages",
-            "max_buffered_bytes",
-            "max_message_bytes",
-            "workers",
-        ] {
+        for field in ["max_pending_messages", "workers"] {
             let mut value = original.clone();
             value["execution"]["limits"] = json!({field: invalid});
             assert!(WorkflowDefinition::from_json(&value.to_string()).is_err());
@@ -54,7 +49,6 @@ fn streaming_schema_validates_versions_types_and_limits() {
         json!({"mode":"stream", "input_type":"invalid"}),
         json!({"mode":"stream", "input_type":"int", "unknown":true}),
         json!({"mode":"stream", "input_type":"int", "limits":{"unknown":1}}),
-        json!({"mode":"stream", "input_type":"int", "limits":{"max_buffered_bytes":10}}),
     ] {
         let mut value = original.clone();
         value["execution"] = execution;

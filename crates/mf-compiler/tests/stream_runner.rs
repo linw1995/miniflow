@@ -198,13 +198,6 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
     assert!(String::from_utf8_lossy(&broken.stderr).contains("output failed"));
     drop(open_input);
 
-    definition["execution"]["limits"] = json!({"max_message_bytes":64, "max_buffered_bytes":8192});
-    compile(&definition, true).unwrap();
-    let oversized = run(&executable, &[b'1'; 80]);
-    assert!(!oversized.status.success());
-    assert!(String::from_utf8_lossy(&oversized.stderr).contains("line 1"));
-    assert!(String::from_utf8_lossy(&oversized.stderr).contains("max_message_bytes"));
-
     definition["execution"]["input_type"] = json!({"list":"int"});
     definition["nodes"][0]["config"]["max_wait_ms"] = json!(3_600_000);
     compile(&definition, true).unwrap();
@@ -229,8 +222,6 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
 
     let mut stalled_definition = definition.clone();
     stalled_definition["execution"]["input_type"] = json!("string");
-    stalled_definition["execution"]["limits"] =
-        json!({"max_message_bytes":262144, "max_buffered_bytes":16777216});
     stalled_definition["nodes"][0]["config"]["max_items"] = json!(1);
     compile(&stalled_definition, true).unwrap();
     let mut stalled = Process::spawn(&executable, &[]);

@@ -196,16 +196,20 @@ fn timers_have_no_input_message_and_terminal_events_wait_for_delivery() {
 }
 
 #[test]
-fn resource_failures_never_publish_success_and_snapshot_requests_fail_before_input() {
+fn task_failures_never_publish_success_and_snapshot_requests_fail_before_input() {
     let harness = Harness::new(true);
     let mut value = definition();
     value["nodes"][0]["config"]["max_items"] = json!(1);
-    value["nodes"][1] =
-        json!({"id":"consume", "kind":"builtin.constant", "config":{"value":"x".repeat(100)}});
+    value["nodes"][1] = json!({
+        "id":"consume", "kind":"builtin.if_else",
+        "config":{"branches":[{"id":"hit", "condition":{
+            "source":{"output":"collect.items", "path":""}, "operator":"gt", "value":0
+        }}]}
+    });
+    value["outputs"][0]["port"] = json!("hit");
     value["edges"].as_array_mut().unwrap().pop();
     value["control_edges"] =
         json!([{"from_node":"collect", "from_output":"items", "to_node":"consume"}]);
-    value["execution"]["limits"] = json!({"max_message_bytes":32, "max_buffered_bytes":8192});
     let plan = plan(value);
     let observation = plan
         .start_stream_observation(&harness.observer(), RunId::new())

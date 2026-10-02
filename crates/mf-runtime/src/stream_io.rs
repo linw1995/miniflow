@@ -3,7 +3,7 @@ use crate::{StreamError, StreamInstance, StreamSummary};
 #[cfg(unix)]
 mod unix {
     use super::*;
-    use crate::{StreamSender, ValueRef, ValueType, encoded_size};
+    use crate::{StreamSender, ValueRef, ValueType};
     use std::{
         fs::File,
         io::{self, Read, Write},
@@ -54,12 +54,11 @@ mod unix {
             let input = instance.input();
             let reader_input = input.clone();
             let value_type = instance.execution().input_type.clone();
-            let limit = instance.execution().limits.max_message_bytes;
             let reader = thread::Builder::new()
                 .name("workflow-input".into())
                 .spawn(move || {
                     let result = catch_unwind(AssertUnwindSafe(|| {
-                        read_lines(self.input, &reader_input, &value_type, limit)
+                        read_lines(self.input, &reader_input, &value_type)
                     }));
                     match result {
                         Ok(Ok(())) => {}
@@ -81,12 +80,7 @@ mod unix {
                     Ok(Some(delivery)) => delivery,
                     Ok(None) | Err(_) => break,
                 };
-                let result = write_record(
-                    &mut self.output,
-                    delivery.output(),
-                    delivery.max_record_bytes(),
-                    &input,
-                );
+                let result = write_record(&mut self.output, delivery.output(), &input);
                 match result {
                     Ok(()) => {
                         if delivery.acknowledge().is_err() {
@@ -151,7 +145,6 @@ mod unix {
         mut file: File,
         input: &StreamSender,
         value_type: &ValueType,
-        limit: usize,
     ) -> Result<(), StreamError> {
         let mut chunk = [0; 8192];
         let mut record = Vec::new();
@@ -167,21 +160,18 @@ mod unix {
             };
             if read == 0 {
                 if !record.is_empty() {
-                    accept_record(&mut record, line, input, value_type, limit)?;
+                    accept_record(&mut record, line, input, value_type)?;
                 }
                 input.close();
                 return Ok(());
             }
             for &byte in &chunk[..read] {
                 if byte == b'\n' {
-                    accept_record(&mut record, line, input, value_type, limit)?;
+                    accept_record(&mut record, line, input, value_type)?;
                     line = line
                         .checked_add(1)
                         .ok_or_else(|| input_error(line, "line counter exhausted"))?;
                 } else {
-                    if record.len() > limit {
-                        return Err(input_error(line, "record exceeds max_message_bytes"));
-                    }
                     record.push(byte);
                 }
             }
@@ -193,13 +183,9 @@ mod unix {
         line: u64,
         input: &StreamSender,
         value_type: &ValueType,
-        limit: usize,
     ) -> Result<(), StreamError> {
         if record.last() == Some(&b'\r') {
             record.pop();
-        }
-        if record.len() > limit {
-            return Err(input_error(line, "record exceeds max_message_bytes"));
         }
         if record.iter().all(u8::is_ascii_whitespace) {
             return Err(input_error(line, "blank JSON Lines record"));
@@ -210,7 +196,6 @@ mod unix {
         value_type
             .validate_shared(&value)
             .map_err(|error| input_error(line, error))?;
-        encoded_size(&value, limit).map_err(|error| input_error(line, error))?;
         input.send(value)?;
         record.clear();
         Ok(())
@@ -225,13 +210,11 @@ mod unix {
     fn write_record(
         file: &mut File,
         output: &crate::StreamOutput,
-        limit: usize,
         input: &StreamSender,
     ) -> Result<(), StreamError> {
         let output_error = |error: io::Error| StreamError::Output {
             message: error.to_string(),
         };
-        encoded_size(&output.outputs, limit)?;
         let mut bytes =
             serde_json::to_vec(&output.outputs).map_err(|error| StreamError::Output {
                 message: error.to_string(),

@@ -138,14 +138,14 @@ printf '1\n2\n3\n4\n5\n' | target/stream-batch
 
 The result is one object per emitted batch, such as `{"batch":[1,2,3]}` followed by `{"batch":[4,5]}`.
 Results are written as they become available, including a timeout batch while stdin stays open. LF,
-CRLF, and a final record without a newline are accepted. Blank, malformed, oversized, and type-invalid
+CRLF, and a final record without a newline are accepted. Blank, malformed, and type-invalid
 records fail with a line number. An empty stream produces no result records.
 
 The process reserves stdin for workflow input and stdout for result records before constructing plugins.
 Plugin stdout diagnostics are directed to stderr. Private protocol descriptors are not inherited by plugin
 subprocesses. A stalled stdout backpressures the workflow; a broken output pipe fails execution and stops
 an idle input reader. The final record must be written successfully before the instance reports completion.
-Input and output framing retain bounded buffers in addition to the runtime's logical-data budget.
+Message-count limits bound admission; individual JSON records have no byte quota in this layer.
 A failed run can end with an incomplete final output line; fully delivered earlier lines remain valid.
 
 `--validate` and `--describe` do not read stdin or execute callbacks. Streaming descriptions use protocol

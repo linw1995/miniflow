@@ -118,9 +118,9 @@ Generated runners SHALL retain generated node preparation and fixed port binding
 - **WHEN** a changed streaming graph fails type or domain validation during a warm build
 - **THEN** the existing installed executable remains intact
 
-### Requirement: Read bounded JSON Lines input while timers progress
+### Requirement: Read JSON Lines input while timers progress
 
-Normal streaming runner mode SHALL read one UTF-8 JSON value per stdin line and validate it against the declared input type. It SHALL accept LF, CRLF, and a final nonempty record without a newline. Empty, malformed, oversized, or type-invalid records MUST fail with their line number. EOF SHALL close input; idle reads MUST NOT block timers.
+Normal streaming runner mode SHALL read one UTF-8 JSON value per stdin line and validate it against the declared input type. It SHALL accept LF, CRLF, and a final nonempty record without a newline. Empty, malformed, or type-invalid records MUST fail with their line number. EOF SHALL close input; idle reads MUST NOT block timers.
 
 #### Scenario: Flush while a pipe stays open
 
@@ -139,7 +139,7 @@ Normal streaming runner mode SHALL read one UTF-8 JSON value per stdin line and 
 
 ### Requirement: Deliver streaming results without waiting for EOF
 
-Each selected stream result SHALL be written and flushed as one JSON line without building a final aggregate. Slow output MUST apply bounded backpressure, and output failure MUST fail execution. In stream mode, runner transport MUST reserve result stdout and direct plugin stdout diagnostics to stderr, including construction diagnostics.
+Each selected stream result SHALL be written and flushed as one JSON line without building a final aggregate. Slow output MUST apply message-count backpressure, and output failure MUST fail execution. In stream mode, runner transport MUST reserve result stdout and direct plugin stdout diagnostics to stderr, including construction diagnostics.
 
 #### Scenario: Deliver a complete batch early
 
