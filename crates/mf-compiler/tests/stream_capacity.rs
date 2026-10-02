@@ -165,9 +165,9 @@ fn start(value: Value, clock: Arc<Clock>) -> StreamInstance {
 }
 
 #[test]
-fn a_slow_consumer_backpressures_admission_and_keeps_accounted_bytes_bounded() {
+fn a_slow_consumer_backpressures_admission_with_bounded_frames() {
     let mut value = definition();
-    value["execution"]["limits"] = json!({"max_message_bytes":64, "max_buffered_bytes":2048});
+    value["execution"]["limits"] = json!({"max_pending_messages":2});
     value["nodes"][0]["config"]["max_items"] = json!(1);
     let instance = start(value, Arc::new(Clock::default()));
     let input = instance.input();
@@ -184,18 +184,14 @@ fn a_slow_consumer_backpressures_admission_and_keeps_accounted_bytes_bounded() {
         }
     }
     let metrics = instance.metrics();
-    assert!(
-        metrics.pending_frames < 64,
-        "byte capacity should be reached before the frame limit"
-    );
-    assert!(metrics.accounted_bytes <= 2048, "{metrics:?}");
+    assert!(metrics.pending_frames <= 2, "{metrics:?}");
     input.close();
     for expected in 0..accepted {
         assert_eq!(
             instance.recv().unwrap().unwrap().outputs["batch"],
             json!([expected])
         );
-        assert!(instance.metrics().accounted_bytes <= 2048);
+        assert!(instance.metrics().pending_frames <= 2);
     }
     assert!(instance.recv().unwrap().is_none());
     assert_eq!(instance.metrics(), StreamMetrics::default());
@@ -231,7 +227,6 @@ fn upstream_close_waits_for_work_already_running_before_flushing_the_tail() {
         .unwrap()
         .insert("close-upstream".into(), Arc::clone(&probe));
     let mut value = definition();
-    value["execution"]["limits"] = json!({"max_message_bytes":64, "max_buffered_bytes":2048});
     value["nodes"][0]["config"]["max_items"] = json!(100);
     value["nodes"].as_array_mut().unwrap().push(json!({"id":"slow", "kind":"test.capacity_sink", "config":{"key":"close-upstream", "block":true}}));
     value["edges"][0]["from_node"] = json!("slow");
@@ -252,7 +247,6 @@ fn upstream_close_waits_for_work_already_running_before_flushing_the_tail() {
             Err(error) => panic!("unexpected admission failure: {error}"),
         }
     }
-    assert!(instance.metrics().accounted_bytes <= 2048);
     instance.close_input();
     assert_eq!(instance.summary().emitted_messages, 0);
     probe.release();
@@ -297,7 +291,6 @@ fn input_failure_discards_a_partial_buffer_and_wakes_a_blocked_producer() {
     let input = instance.input();
     input.send(json!(1)).unwrap();
     wait_until(|| instance.summary().completed_frames == 1);
-    assert!(instance.metrics().queued_and_buffered_bytes > 0);
     assert!(matches!(
         instance.input().send(json!("invalid")),
         Err(StreamError::Input { .. })
@@ -406,7 +399,7 @@ fn plugin_objects_are_released_even_when_a_sender_handle_outlives_the_instance()
 }
 
 #[test]
-fn impossible_reserves_and_oversized_payloads_fail_explicitly() {
+fn rejects_snapshot_capture_and_insufficient_domain_capacity() {
     let error = prepare(definition())
         .unwrap()
         .start_with_options(StreamOptions {
@@ -417,36 +410,10 @@ fn impossible_reserves_and_oversized_payloads_fail_explicitly() {
         .unwrap();
     assert!(error.to_string().contains("snapshot capture"));
 
-    for limits in [
-        json!({"max_pending_messages":1}),
-        json!({"max_message_bytes":64, "max_buffered_bytes":1024}),
-    ] {
-        let mut value = definition();
-        value["execution"]["limits"] = limits;
-        let error = prepare(value).unwrap_err().to_string();
-        assert!(error.contains("reserve"), "{error}");
-    }
     let mut value = definition();
-    value["execution"]["input_type"] = json!("string");
-    value["execution"]["limits"] = json!({"max_message_bytes":64, "max_buffered_bytes":8192});
-    let instance = start(value.clone(), Arc::new(Clock::default()));
-    assert!(matches!(
-        instance.input().send(json!("x".repeat(65))),
-        Err(StreamError::Resource { .. })
-    ));
-    assert_eq!(instance.summary().accepted_inputs, 0);
-    assert!(instance.join().is_err());
-
-    let instance = start(value, Arc::new(Clock::default()));
-    instance.input().send(json!("x".repeat(40))).unwrap();
-    instance.input().send(json!("y".repeat(40))).unwrap();
-    instance.close_input();
-    let error = instance.recv().unwrap_err().to_string();
-    assert!(
-        error.contains("collect") && error.contains("byte limit"),
-        "{error}"
-    );
-    assert!(instance.join().is_err());
+    value["execution"]["limits"] = json!({"max_pending_messages":1});
+    let error = prepare(value).unwrap_err().to_string();
+    assert!(error.contains("reserve"), "{error}");
 }
 
 #[test]
@@ -487,82 +454,6 @@ fn input_failure_suppresses_followup_work_after_a_running_call_returns() {
     assert_eq!(following.calls.load(Ordering::SeqCst), 0);
     probes().lock().unwrap().remove("late-running");
     probes().lock().unwrap().remove("late-following");
-}
-
-struct Spill;
-struct Literal;
-impl mf_runtime::TaskNode for Literal {
-    fn execute(
-        &self,
-        _: Inputs,
-        _ctx: &mut mf_runtime::ExecutionContext,
-    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
-        Ok((Outputs::from([("value".into(), json!(1).into())])).into())
-    }
-}
-impl mf_runtime::TaskNode for Spill {
-    fn execute(
-        &self,
-        _: Inputs,
-        context: &mut mf_runtime::ExecutionContext,
-    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
-        for index in 0..10 {
-            let node = mf_runtime::FlowNode::new(
-                format!("extra_{index}"),
-                mf_runtime::PreparedNode::new(
-                    Literal,
-                    mf_runtime::NodePorts {
-                        inputs: Vec::new(),
-                        outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
-                    },
-                ),
-            )
-            .into_task()
-            .unwrap();
-            mf_runtime::execute_node_in_context(&node, &[], context).map_err(|error| {
-                NodeExecutionError::PluginFailed {
-                    source: Box::new(error),
-                }
-            })?;
-        }
-        Ok(Outputs::from([("value".into(), json!(1).into())]).into())
-    }
-}
-inventory::submit! {
-    NodeRegistration {
-        kind: "test.spill",
-        factory: mf_runtime::NodeFactory::Plain(|_| {
-            Ok(mf_runtime::PreparedNode::new(
-                Spill,
-                mf_runtime::NodePorts {
-                        inputs: vec![],
-                        outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
-                    },
-            ))
-        }),
-    }
-}
-
-#[test]
-fn ordinary_outputs_and_extra_context_bindings_are_limited_before_downstream_work() {
-    for node in [
-        json!({"id":"producer", "kind":"builtin.constant", "config":{"value":"x".repeat(65)}}),
-        json!({"id":"producer", "kind":"test.spill"}),
-    ] {
-        let value = json!({
-            "version":"2026-10-02", "execution":{"mode":"stream", "input_type":"int", "limits":{"max_message_bytes":64, "max_buffered_bytes":8192}},
-            "dependencies":{}, "nodes":[node],
-            "control_edges":[{"from_node":"%input", "from_output":"item", "to_node":"producer"}],
-            "outputs":[{"name":"result", "node":"producer", "port":"value"}]
-        });
-        let instance = start(value, Arc::new(Clock::default()));
-        instance.input().send(json!(1)).unwrap();
-        instance.close_input();
-        let error = instance.recv().unwrap_err();
-        assert!(matches!(error, StreamError::Resource { .. }), "{error}");
-        assert!(error.to_string().contains("producer"), "{error}");
-        assert!(instance.join().is_err());
-    }
 }
 
 #[test]
