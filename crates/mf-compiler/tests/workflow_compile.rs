@@ -60,7 +60,11 @@ fn resolves_registered_nodes_in_definition_order() {
     .unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
 
-    let nodes = resolve_nodes(&definition, &registry).unwrap();
+    let nodes: Vec<_> = resolve_nodes(&definition, &registry)
+        .unwrap()
+        .into_iter()
+        .map(|node| node.into_task().unwrap())
+        .collect();
 
     assert_eq!(nodes[0].definition_id.as_str(), "first");
     assert_eq!(nodes[1].definition_id.as_str(), "second");

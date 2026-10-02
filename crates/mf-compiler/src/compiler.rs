@@ -185,9 +185,9 @@ pub struct TypeInferenceState {
 }
 
 impl TypeInferenceState {
-    pub fn resolve_node(
+    pub fn resolve_node<N>(
         &mut self,
-        node: &mut FlowNode,
+        node: &mut FlowNode<N>,
         dependencies: &[ExecutionDependency<'_>],
     ) -> Result<(), WorkflowCompileError> {
         let id = &node.definition_id;

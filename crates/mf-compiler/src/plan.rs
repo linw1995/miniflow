@@ -375,6 +375,7 @@ fn generate_scope(
             #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*]).map_err(|error| {
                 #preparation_error
             })?;
+            let #node_ident = #node_ident.into_task().map_err(|error| { #preparation_error })?;
         });
         let exit_check = enclosing.map(|_| {
             quote! {
@@ -549,6 +550,12 @@ fn subgraph_preparation(
                     definition_id: #outer_id.into(), message: error.to_string(),
                 }
             })?;
+        let #node_ident = #node_ident.into_task().map_err(|error| {
+            #report
+            mf_runtime::WorkflowRunError::Context {
+                definition_id: #outer_id.into(), message: error.to_string(),
+            }
+        })?;
     })
 }
 

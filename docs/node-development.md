@@ -146,3 +146,18 @@ resolves the metadata before execution. Both in-memory execution and generated r
 Observed execution activates the workflow's OTel context and a node span around dependency resolution, invocation, and output publication. A node using an application-provided OTel tracer can create child spans through the current context without changing its execution interface. The runtime does not install a global provider or configure a plugin's tracer. Threads created by plugins require explicit context propagation.
 
 Lifecycle events are emitted by the runtime independently of plugin diagnostic logs. Plugins continue to return values and explicit skipped ports normally; the runtime records success only after validating and publishing those results. See [observation contracts](observability.md) for provider ownership, failure phases, and a runnable SDK example.
+
+## Event execution contract
+
+`PreparedNode::new(task, metadata)` selects `NodeExecution::Task`.
+`PreparedNode::event(state, metadata)` selects `NodeExecution::Event`. Event providers implement
+`EventNode` directly; they do not implement `TaskNode` or create a second state object later.
+
+`EventNode::on_event` receives `Input`, `Timer`, or `UpstreamClosed` and returns zero or more complete
+emissions with a `TimerUpdate`. `EventContext.now` is monotonic elapsed time. Retained logical values
+are reported through `retained_bytes`. Event state requires `Send`; mutable access is exclusive and
+`Sync` is not required.
+
+`Flow::new` rejects event nodes during synchronous preparation. Direct callers of task execution
+helpers convert a prepared `FlowNode` with `into_task()` first. Generated synchronous bodies perform
+that conversion before capturing their task executors.

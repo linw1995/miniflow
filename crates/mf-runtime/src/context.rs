@@ -131,7 +131,7 @@ impl ExecutionContext {
 
     fn capture_node(
         &self,
-        node: &FlowNode,
+        node: &crate::TaskFlowNode,
         inputs: &Inputs,
         result: Option<&NodeResult>,
         outcome: crate::SnapshotOutcome,
@@ -386,7 +386,7 @@ impl ExecutionContext {
 
     fn publish(
         &mut self,
-        node: &FlowNode,
+        node: &crate::TaskFlowNode,
         result: Option<NodeResult>,
     ) -> Result<(), WorkflowRunError> {
         let id = node.definition_id.as_str();
@@ -547,7 +547,7 @@ impl StepObservation {
 
 /// Executes one step of a validated plan, in its topological order.
 pub fn execute_node_in_context(
-    node: &FlowNode,
+    node: &crate::TaskFlowNode,
     dependencies: &[ExecutionDependency<'_>],
     ctx: &mut ExecutionContext,
 ) -> Result<(), WorkflowRunError> {
@@ -562,7 +562,7 @@ pub fn execute_node_in_context(
 }
 
 pub fn execute_ordered_node_in_context<'a>(
-    node: &FlowNode,
+    node: &crate::TaskFlowNode,
     dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
     ctx: &mut ExecutionContext,
 ) -> Result<(), WorkflowRunError> {
@@ -823,7 +823,9 @@ mod tests {
                 .insert("parent.value".into(), Some(json!(9).into()));
             let parent_outputs = state.outputs.clone();
             let types = BTreeMap::from([("count".into(), ValueType::Int64)]);
-            let source = crate::prepared_scope_source("input", &types);
+            let source = crate::prepared_scope_source("input", &types)
+                .into_task()
+                .unwrap();
             let scope = ExecutionScope::new(
                 "scope",
                 "input",
@@ -881,7 +883,9 @@ mod tests {
                     ],
                 },
             ),
-        );
+        )
+        .into_task()
+        .unwrap();
         let mut context = ExecutionContext::default();
         let error = execute_node_in_context(&node, &[], &mut context)
             .unwrap_err()
@@ -908,7 +912,9 @@ mod tests {
                     outputs: vec![port("value", ValueType::Boolean, true)],
                 },
             ),
-        );
+        )
+        .into_task()
+        .unwrap();
         let mut context = ExecutionContext::default();
         context.outputs.insert(
             "source.value".into(),
@@ -940,7 +946,9 @@ mod tests {
                     outputs: vec![port("value", ValueType::Boolean, true)],
                 },
             ),
-        );
+        )
+        .into_task()
+        .unwrap();
         let mut context = ExecutionContext::default();
         context
             .outputs
@@ -970,7 +978,9 @@ mod tests {
                     outputs: vec![port("value", ValueType::Boolean, true)],
                 },
             ),
-        );
+        )
+        .into_task()
+        .unwrap();
         let skipped = ExecutionDependency {
             input: Some("payload"),
             source_node: "branch",

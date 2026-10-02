@@ -502,14 +502,29 @@ impl From<NodePorts> for NodeMetadata {
 
 pub struct PreparedNode {
     pub metadata: NodeMetadata,
-    pub task: Box<dyn TaskNode>,
+    pub execution: NodeExecution,
+}
+
+pub enum NodeExecution {
+    Task(Box<dyn TaskNode>),
+    Event(Box<dyn crate::EventNode>),
 }
 
 impl PreparedNode {
     pub fn new(task: impl TaskNode + 'static, metadata: impl Into<NodeMetadata>) -> Self {
         Self {
             metadata: metadata.into(),
-            task: Box::new(task),
+            execution: NodeExecution::Task(Box::new(task)),
+        }
+    }
+
+    pub fn event(
+        state: impl crate::EventNode + 'static,
+        metadata: impl Into<NodeMetadata>,
+    ) -> Self {
+        Self {
+            metadata: metadata.into(),
+            execution: NodeExecution::Event(Box::new(state)),
         }
     }
 }
