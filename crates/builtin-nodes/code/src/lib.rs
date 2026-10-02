@@ -300,13 +300,6 @@ mod tests {
     use cel_core::{MapActivation, Value as CelValue};
     use serde_json::json;
 
-    fn task(node: &mf_runtime::PreparedNode) -> &dyn mf_runtime::TaskNode {
-        match &node.execution {
-            mf_runtime::NodeExecution::Task(task) => task.as_ref(),
-            _ => panic!("expected task execution"),
-        }
-    }
-
     fn assert_send_sync<T: Send + Sync>() {}
 
     #[test]
@@ -467,7 +460,10 @@ mod tests {
             }
         }))
         .unwrap();
-        let outputs = task(&node)
+        let outputs = node
+            .execution
+            .as_task_node()
+            .expect("expected task execution")
             .execute(
                 Inputs::from([
                     ("amount".into(), json!(21).into()),
@@ -512,7 +508,10 @@ mod tests {
                 "path `/0/a`",
             ),
         ] {
-            let error = task(&node)
+            let error = node
+                .execution
+                .as_task_node()
+                .expect("expected task execution")
                 .execute(inputs, &mut mf_runtime::ExecutionContext::default())
                 .unwrap_err()
                 .to_string();
@@ -524,7 +523,10 @@ mod tests {
             "code": {"result": "amount"}
         }))
         .unwrap();
-        let error = task(&int_node)
+        let error = int_node
+            .execution
+            .as_task_node()
+            .expect("expected task execution")
             .execute(
                 Inputs::from([("amount".into(), json!(u64::MAX).into())]),
                 &mut mf_runtime::ExecutionContext::default(),
@@ -542,7 +544,10 @@ mod tests {
             "code": {"first": "1", "second": "1 / divisor"}
         }))
         .unwrap();
-        let error = task(&node)
+        let error = node
+            .execution
+            .as_task_node()
+            .expect("expected task execution")
             .execute(
                 Inputs::from([("divisor".into(), json!(0).into())]),
                 &mut mf_runtime::ExecutionContext::default(),
@@ -571,7 +576,10 @@ mod tests {
             "code": {"result": "payload + payload"}
         }))
         .unwrap();
-        let error = task(&node)
+        let error = node
+            .execution
+            .as_task_node()
+            .expect("expected task execution")
             .execute(
                 Inputs::from([(
                     "payload".into(),
@@ -582,7 +590,10 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("inputs exceed"), "{error}");
-        let error = task(&node)
+        let error = node
+            .execution
+            .as_task_node()
+            .expect("expected task execution")
             .execute(
                 Inputs::from([("payload".into(), json!("x".repeat(600_000)).into())]),
                 &mut mf_runtime::ExecutionContext::default(),
@@ -597,7 +608,10 @@ mod tests {
             "code": {"first": "items", "second": "items"}
         }))
         .unwrap();
-        let error = task(&node)
+        let error = node
+            .execution
+            .as_task_node()
+            .expect("expected task execution")
             .execute(
                 Inputs::from([("items".into(), json!(vec![1; 4_000]).into())]),
                 &mut mf_runtime::ExecutionContext::default(),
@@ -632,12 +646,18 @@ mod tests {
                 .len();
             let exact = payload(MAX_JSON_BYTES - overhead);
             let inputs = Inputs::from([(input.into(), exact.clone().into())]);
-            let outputs = task(&node)
+            let outputs = node
+                .execution
+                .as_task_node()
+                .expect("expected task execution")
                 .execute(inputs, &mut mf_runtime::ExecutionContext::default())
                 .unwrap()
                 .outputs;
             assert_eq!(outputs[output].as_str(), Some(exact.as_str()));
-            let error = task(&node)
+            let error = node
+                .execution
+                .as_task_node()
+                .expect("expected task execution")
                 .execute(
                     Inputs::from([(input.into(), format!("{exact}x").into())]),
                     &mut mf_runtime::ExecutionContext::default(),
