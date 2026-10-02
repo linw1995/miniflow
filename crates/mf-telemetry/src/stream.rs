@@ -84,7 +84,6 @@ pub struct StreamIdentity {
 pub enum StreamOutcome {
     Succeeded,
     Failed,
-    Cancelled,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,7 +278,6 @@ impl StreamRecord {
                                     | "publication"
                                     | "output"
                                     | "resource"
-                                    | "cancellation"
                             ),
                         "invalid stream failure",
                     )?;

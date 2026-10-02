@@ -1,6 +1,4 @@
-use mf_runtime::{
-    Inputs, NodeExecutionError, Outputs, StreamLimits, ValueType, WorkflowDefinition,
-};
+use mf_runtime::{StreamLimits, ValueType, WorkflowDefinition};
 use serde_json::json;
 
 #[test]
@@ -61,41 +59,4 @@ fn streaming_schema_validates_versions_types_and_limits() {
         value["execution"] = execution;
         assert!(serde_json::from_value::<WorkflowDefinition>(value).is_err());
     }
-}
-
-#[test]
-fn cancellation_during_a_call_prevents_publication_of_its_returned_values() {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    };
-    struct CancelOnReturn(Arc<AtomicBool>);
-    impl mf_runtime::TaskNode for CancelOnReturn {
-        fn execute(
-            &self,
-            _: Inputs,
-            _ctx: &mut mf_runtime::ExecutionContext,
-        ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
-            self.0.store(true, Ordering::Release);
-            Ok((Outputs::from([("value".into(), json!(42).into())])).into())
-        }
-    }
-    let flag = Arc::new(AtomicBool::new(false));
-    let mut context = mf_runtime::ExecutionContext::default();
-    context.set_cancellation(Arc::clone(&flag));
-    let node = mf_runtime::FlowNode::new(
-        "cancel",
-        mf_runtime::PreparedNode::new(
-            CancelOnReturn(flag),
-            mf_runtime::NodePorts {
-                inputs: Vec::new(),
-                outputs: vec![mf_runtime::PortSpec::new("value", ValueType::Int64, true)],
-            },
-        ),
-    )
-    .into_task()
-    .unwrap();
-    let error = mf_runtime::execute_node_in_context(&node, &[], &mut context).unwrap_err();
-    assert!(error.to_string().contains("cancelled before publication"));
-    assert!(context.output("cancel.value").is_err());
 }

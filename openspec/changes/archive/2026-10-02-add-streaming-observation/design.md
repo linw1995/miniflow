@@ -12,7 +12,7 @@ values or a growing list of contributing input identities.
 Frame observations share immutable description and node metadata. Export queues and protocol reducers
 retain bounded state. Sequence checks and loss diagnostics do not control batching or request retries.
 Late records from closed invocations are ignored. The final workflow event follows acknowledged drain
-or abort cleanup, including already started synchronous calls.
+or failure cleanup, including already started synchronous calls.
 
 Standalone runners initialize and shut down optional providers around the instance. Preparation,
 execution, resource, and output-delivery failures report their actual lifecycle phase. Existing finite

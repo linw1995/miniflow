@@ -381,7 +381,7 @@ Iteration item/body logs retain their existing `mf.iteration` scope and outer-se
 and gain the containing stream identity. Body nodes receive distinct invocation IDs, including when
 item indices or Loop paths repeat in a later message. Native span parentage remains workflow/node/item/body.
 
-The final workflow outcome is `succeeded`, `failed`, or `cancelled`, with aggregate accepted-input,
+The final workflow outcome is `succeeded` or `failed`, with aggregate accepted-input,
 emitted-message, completed-frame, and delivered-output counters. Completion follows drain and output
 acknowledgement, including the final stdout record. Failure preserves its phase and available node
 identity. An earlier missing node outcome remains unknown when a later message succeeds. Consumers

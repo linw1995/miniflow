@@ -118,9 +118,6 @@ pub fn drive(prepared: PreparedStream, scenario: &str) -> Value {
         }
         Ok(())
     })();
-    if result.is_err() {
-        instance.cancel();
-    }
     let joined = instance.join();
     let error = result
         .err()

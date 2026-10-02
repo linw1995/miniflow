@@ -8,7 +8,7 @@ unbounded event history. Streaming needs message-aware observation with independ
 ## What Changes
 
 - Add a versioned stream event protocol with invocation, domain, message, and nested-scope identity.
-- Observe buffering, Batch flushes, acknowledged completion, and abort cleanup.
+- Observe buffering, Batch flushes, acknowledged completion, and failure cleanup.
 - Bound retained observation state and preserve legacy protocol decoding.
 - Connect in-memory instances and standalone runners to optional stream observation.
 

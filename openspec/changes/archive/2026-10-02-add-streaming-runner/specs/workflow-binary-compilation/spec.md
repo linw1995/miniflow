@@ -154,7 +154,7 @@ Each selected stream result SHALL be written and flushed as one JSON line withou
 #### Scenario: Fail a broken output pipe
 
 - **WHEN** the result sink closes before the runner has delivered all selected outputs
-- **THEN** the instance aborts and the runner exits unsuccessfully
+- **THEN** the instance fails and the runner exits unsuccessfully
 
 ### Requirement: Describe streaming requirements without starting an instance
 

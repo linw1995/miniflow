@@ -344,8 +344,8 @@ fn stream_sequences_outlive_the_legacy_run_budget_and_close_exactly_once() {
         call.started();
         call.succeeded(0, Vec::new());
     }
-    observation.finish(StreamCounts::default(), None, false);
-    observation.finish(StreamCounts::default(), None, false);
+    observation.finish(StreamCounts::default(), None);
+    observation.finish(StreamCounts::default(), None);
     assert!(
         observation
             .callback("collect", None, StreamTrigger::Timer)
@@ -399,10 +399,10 @@ fn a_nested_workflow_does_not_reuse_another_runs_invocation_identity() {
             .unwrap();
         call.started();
         call.succeeded(0, Vec::new());
-        inner.finish(StreamCounts::default(), None, false);
+        inner.finish(StreamCounts::default(), None);
     }
     callback.succeeded(0, Vec::new());
-    outer.finish(StreamCounts::default(), None, false);
+    outer.finish(StreamCounts::default(), None);
     let events = records(&harness);
     let inner = events
         .iter()

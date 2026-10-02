@@ -64,7 +64,7 @@ success MUST follow output validation and publication. Construction and dependen
 and node when known, without requiring a preceding node start. Generated and in-memory execution MUST produce equivalent
 lifecycle meanings and retain existing execution order, skip rules, output values, and error precedence.
 
-For streaming execution, the workflow boundary SHALL finish only after drain or abort cleanup. An event-driven node start SHALL identify its input, timer, or close trigger; completion follows state transition and validation of any emissions. Successful buffering with zero emissions MUST NOT imply downstream execution or workflow completion. Observation MUST distinguish admission from completion of the accepted input.
+For streaming execution, the workflow boundary SHALL finish only after drain or failure cleanup. An event-driven node start SHALL identify its input, timer, or close trigger; completion follows state transition and validation of any emissions. Successful buffering with zero emissions MUST NOT imply downstream execution or workflow completion. Observation MUST distinguish admission from completion of the accepted input.
 
 #### Scenario: Reject invalid node outputs
 

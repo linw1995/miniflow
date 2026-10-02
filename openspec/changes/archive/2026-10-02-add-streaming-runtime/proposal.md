@@ -9,7 +9,7 @@ must retain state while message outputs remain isolated, with timer progress and
 
 - Add an opt-in stream schema, a typed input source, and message-domain validation.
 - Add in-memory instances with independent admission and output consumption.
-- Keep scheduling, timers, capacity reserves, drain, and cancellation in one runtime implementation.
+- Keep scheduling, timers, capacity reserves, drain, and failure cleanup in one runtime implementation.
 - Reject unsupported standalone generation, stream observation, and snapshot capture explicitly.
 
 ## Impact

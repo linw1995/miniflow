@@ -246,15 +246,13 @@ impl StreamObservation {
         }
     }
 
-    pub fn finish(&self, counts: StreamCounts, failure: Option<StreamFailure>, cancelled: bool) {
+    pub fn finish(&self, counts: StreamCounts, failure: Option<StreamFailure>) {
         let mut counters = self.0.counters.lock().unwrap();
         if counters.closed {
             return;
         }
         counters.closed = true;
-        let outcome = if cancelled {
-            StreamOutcome::Cancelled
-        } else if failure.is_some() {
+        let outcome = if failure.is_some() {
             StreamOutcome::Failed
         } else {
             StreamOutcome::Succeeded
@@ -270,7 +268,6 @@ impl StreamObservation {
             match outcome {
                 StreamOutcome::Succeeded => "succeeded",
                 StreamOutcome::Failed => "failed",
-                StreamOutcome::Cancelled => "cancelled",
             },
         ));
         if !counters.exhausted
@@ -303,7 +300,6 @@ impl StreamObservation {
                 message: message.into(),
                 node: None,
             }),
-            false,
         );
     }
 }
@@ -573,7 +569,7 @@ mod tests {
             .unwrap();
         callback.started();
         callback.succeeded(0, Vec::new());
-        observation.finish(StreamCounts::default(), None, false);
+        observation.finish(StreamCounts::default(), None);
         assert_eq!(records.load(Ordering::SeqCst), 1);
         assert_eq!(observation.0.counters.lock().unwrap().sequence, i64::MAX);
 
@@ -585,7 +581,7 @@ mod tests {
                 .invocation(None, StreamTrigger::Timer, None)
                 .is_none()
         );
-        observation.finish(StreamCounts::default(), None, false);
+        observation.finish(StreamCounts::default(), None);
         assert_eq!(records.load(Ordering::SeqCst), 1);
         assert_eq!(observation.0.counters.lock().unwrap().invocation, u64::MAX);
     }
