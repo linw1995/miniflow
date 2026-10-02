@@ -41,6 +41,7 @@ pub use loop_node::{
 };
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
+pub use mf_telemetry::observation::StreamObservation;
 pub use node::{
     ContextReference, Inputs, NodeBuildError, NodeExecution, NodeExecutionError, NodeFactory,
     NodeMetadata, NodePorts, NodeRegistration, OutputDerivation, OutputDerivationError, Outputs,
@@ -54,8 +55,8 @@ pub use runner::{
 };
 pub use stream::stream_input_node;
 pub use stream::{
-    EventContext, EventEffects, EventEmission, EventNode, MESSAGE_OVERHEAD, NodeEvent,
-    STREAM_INPUT_ID, StreamExecution, StreamLimits, StreamMode, TimerUpdate,
+    BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, MESSAGE_OVERHEAD,
+    NodeEvent, STREAM_INPUT_ID, StreamExecution, StreamLimits, StreamMode, TimerUpdate,
 };
 pub use stream_instance::{
     MessageId, MonotonicClock, StreamClock, StreamDelivery, StreamError, StreamInstance,

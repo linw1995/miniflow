@@ -99,14 +99,32 @@ pub enum TimerUpdate {
     Set(Duration),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlushReason {
+    SizeExceed,
+    TimeoutExceed,
+    UpstreamClosed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BatchInfo {
+    pub item_count: usize,
+    pub reason: FlushReason,
+}
+
 #[derive(Clone, Debug)]
 pub struct EventEmission {
     pub result: NodeResult,
+    pub batch: Option<BatchInfo>,
 }
 
 impl From<NodeResult> for EventEmission {
     fn from(result: NodeResult) -> Self {
-        Self { result }
+        Self {
+            result,
+            batch: None,
+        }
     }
 }
 
@@ -127,5 +145,9 @@ pub trait EventNode: Send {
     /// Report retained logical value bytes, excluding values returned as emissions.
     fn retained_bytes(&self) -> usize {
         0
+    }
+
+    fn buffered_items(&self) -> Option<usize> {
+        None
     }
 }

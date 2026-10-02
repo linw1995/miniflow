@@ -1,7 +1,7 @@
 use mf_runtime::{
-    EventContext, EventEffects, EventEmission, EventNode, MESSAGE_OVERHEAD, NodeBuildError,
-    NodeEvent, NodeExecutionError, NodeRegistration, NodeResult, OutputDerivation, Outputs,
-    PortSpec, TimerUpdate, ValueRef, ValueType, deserialize_config, encoded_size,
+    BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, MESSAGE_OVERHEAD,
+    NodeBuildError, NodeEvent, NodeExecutionError, NodeRegistration, NodeResult, OutputDerivation,
+    Outputs, PortSpec, TimerUpdate, ValueRef, ValueType, deserialize_config, encoded_size,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -84,15 +84,17 @@ impl BatchState {
         self.deadline.is_some_and(|deadline| deadline <= now)
     }
 
-    fn seal(&mut self, emissions: &mut Vec<EventEmission>) {
+    fn seal(&mut self, reason: FlushReason, emissions: &mut Vec<EventEmission>) {
         if self.items.is_empty() {
             return;
         }
+        let item_count = self.items.len();
         let items = ValueRef::array(std::mem::take(&mut self.items));
         self.bytes = 0;
         self.deadline = None;
         emissions.push(EventEmission {
             result: NodeResult::from(Outputs::from([("items".into(), items)])),
+            batch: Some(BatchInfo { item_count, reason }),
         });
     }
 }
@@ -114,7 +116,7 @@ impl EventNode for BatchState {
                     .checked_add(MESSAGE_OVERHEAD)
                     .ok_or_else(|| failure("batch byte count exhausted"))?;
                 if self.due(context.now) {
-                    self.seal(&mut emissions);
+                    self.seal(FlushReason::TimeoutExceed, &mut emissions);
                 }
                 let bytes = self
                     .bytes
@@ -130,15 +132,22 @@ impl EventNode for BatchState {
                 self.items.push(item);
                 self.bytes = bytes;
                 if self.items.len() >= self.config.max_items {
-                    self.seal(&mut emissions);
+                    self.seal(FlushReason::SizeExceed, &mut emissions);
                 }
             }
             NodeEvent::Timer => {
                 if self.due(context.now) {
-                    self.seal(&mut emissions);
+                    self.seal(FlushReason::TimeoutExceed, &mut emissions);
                 }
             }
-            NodeEvent::UpstreamClosed => self.seal(&mut emissions),
+            NodeEvent::UpstreamClosed => {
+                let reason = if self.due(context.now) {
+                    FlushReason::TimeoutExceed
+                } else {
+                    FlushReason::UpstreamClosed
+                };
+                self.seal(reason, &mut emissions);
+            }
         }
         Ok(EventEffects {
             emissions,
@@ -150,6 +159,10 @@ impl EventNode for BatchState {
     }
     fn retained_bytes(&self) -> usize {
         self.bytes
+    }
+
+    fn buffered_items(&self) -> Option<usize> {
+        Some(self.items.len())
     }
 }
 
@@ -219,7 +232,13 @@ mod tests {
         let original = state.items[0].clone();
         let effects = event(&mut state, input(json!(3)), 20);
         assert_eq!(values(&effects), [json!([1, 2, 3])]);
-
+        assert_eq!(
+            effects.emissions[0].batch.unwrap(),
+            BatchInfo {
+                item_count: 3,
+                reason: FlushReason::SizeExceed
+            }
+        );
         assert!(
             effects.emissions[0].result.outputs["items"]
                 .as_array()
@@ -249,7 +268,10 @@ mod tests {
         assert_eq!(early.timer, first.timer);
         let effects = event(&mut state, NodeEvent::Timer, 110);
         assert_eq!(values(&effects), [json!([1, 2])]);
-
+        assert_eq!(
+            effects.emissions[0].batch.unwrap().reason,
+            FlushReason::TimeoutExceed
+        );
         assert_eq!(effects.timer, TimerUpdate::Cancel);
     }
 
@@ -260,10 +282,17 @@ mod tests {
         event(&mut state, input(json!(2)), 50);
         let effects = event(&mut state, input(json!(3)), 100);
         assert_eq!(values(&effects), [json!([1, 2])]);
-
+        assert_eq!(
+            effects.emissions[0].batch.unwrap().reason,
+            FlushReason::TimeoutExceed
+        );
         assert_eq!(effects.timer, TimerUpdate::Set(Duration::from_millis(200)));
         let tail = event(&mut state, NodeEvent::UpstreamClosed, 160);
         assert_eq!(values(&tail), [json!([3])]);
+        assert_eq!(
+            tail.emissions[0].batch.unwrap().reason,
+            FlushReason::UpstreamClosed
+        );
     }
 
     #[test]
@@ -279,7 +308,10 @@ mod tests {
         );
         let tail = event(&mut state, NodeEvent::UpstreamClosed, 120);
         assert_eq!(values(&tail), [json!([3])]);
-
+        assert_eq!(
+            tail.emissions[0].batch.unwrap().reason,
+            FlushReason::TimeoutExceed
+        );
         assert!(
             event(&mut state, NodeEvent::UpstreamClosed, 120)
                 .emissions

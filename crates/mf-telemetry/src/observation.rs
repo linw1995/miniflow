@@ -23,6 +23,11 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+#[path = "stream_observation.rs"]
+mod stream_observation;
+pub use stream_observation::{StreamCallback, StreamObservation};
+use stream_observation::{StreamFrame, StreamInvocation};
+
 type EmitLog = dyn Fn(&WireRecord) -> Result<(), ContractError> + Send + Sync;
 type EmitNestedLog = dyn Fn(NestedLog) + Send + Sync;
 
@@ -78,7 +83,14 @@ impl Observer {
                 record.set_event_name(log.name);
                 record.set_timestamp(SystemTime::now());
                 record.set_body(AnyValue::String(log.name.into()));
-                record.add_attributes(log.attributes);
+                let mut attributes = log.attributes;
+                if let Some(invocation) = log.context.get::<StreamInvocation>() {
+                    if invocation.is_closed() {
+                        return;
+                    }
+                    attributes.extend(invocation.attributes());
+                }
+                record.add_attributes(attributes);
                 let span = log.context.span();
                 let correlation = span.span_context();
                 if correlation.is_valid() {
@@ -185,15 +197,16 @@ impl Observer {
             backend: self.0.clone(),
             workflow_id,
             run_id,
-            nodes: index,
+            nodes: Arc::new(index),
             sequence,
             started,
             context,
             visited: Count::ZERO,
             visited_steps: Count::ZERO,
-            description,
+            description: description.map(Arc::new),
             failure: None,
             closed: false,
+            stream: None,
         };
         run.record(
             Event::WorkflowStarted {
@@ -210,15 +223,16 @@ pub struct RunObservation {
     backend: Arc<Backend>,
     workflow_id: WorkflowId,
     run_id: RunId,
-    nodes: BTreeMap<String, (Count, NodeIdentity)>,
+    nodes: Arc<BTreeMap<String, (Count, NodeIdentity)>>,
     sequence: EventSequence,
     started: Instant,
     context: Context,
     visited: Count,
     visited_steps: Count,
-    description: Option<WorkflowDescription>,
+    description: Option<Arc<WorkflowDescription>>,
     failure: Option<(Option<String>, Failure)>,
     closed: bool,
+    stream: Option<StreamFrame>,
 }
 
 impl fmt::Debug for RunObservation {
@@ -300,11 +314,16 @@ impl RunObservation {
                 KeyValue::new("mf.node.kind", node.kind.clone()),
             ])
             .start_with_context(&self.backend.tracer, &parent);
+        let mut context = parent.with_span(span);
+        if let Some(stream) = &self.stream {
+            context = stream.attach(context);
+        }
         NodeObservation {
             node,
             position,
-            context: parent.with_span(span),
+            context,
             invoked: None,
+            finished: false,
         }
     }
 
@@ -366,11 +385,12 @@ impl RunObservation {
 
     pub fn node_succeeded_with_loop_summary(
         &mut self,
-        step: NodeObservation,
+        mut step: NodeObservation,
         produced_ports: Vec<String>,
         skipped_ports: Vec<String>,
         loop_summary: Option<LoopSummary>,
     ) {
+        step.finished = true;
         step.context
             .span()
             .set_attribute(KeyValue::new("mf.outcome", "succeeded"));
@@ -393,10 +413,11 @@ impl RunObservation {
 
     pub fn node_skipped(
         &mut self,
-        step: NodeObservation,
+        mut step: NodeObservation,
         causes: Vec<SkipCause>,
         skipped_ports: Vec<String>,
     ) {
+        step.finished = true;
         step.context
             .span()
             .set_attribute(KeyValue::new("mf.outcome", "skipped"));
@@ -412,7 +433,8 @@ impl RunObservation {
         );
     }
 
-    pub fn node_failed(&mut self, step: NodeObservation, phase: FailurePhase, message: String) {
+    pub fn node_failed(&mut self, mut step: NodeObservation, phase: FailurePhase, message: String) {
+        step.finished = true;
         let failure = Failure { phase, message };
         mark_failed(&step.context, &failure);
         self.failure = Some((Some(step.node.id.clone()), failure.clone()));
@@ -498,6 +520,10 @@ impl RunObservation {
 
     /// Ends a handled run. Encoding or delivery failures never become workflow errors.
     pub fn finish(&mut self, error: Option<&dyn fmt::Display>) {
+        if self.stream.is_some() {
+            self.closed = true;
+            return;
+        }
         if self.closed {
             return;
         }
@@ -552,6 +578,13 @@ impl RunObservation {
     }
 
     fn record(&mut self, event: Event, context: Option<&Context>) {
+        if self.closed {
+            return;
+        }
+        if let Some(stream) = &self.stream {
+            stream.record(event, context.unwrap_or(&self.context));
+            return;
+        }
         if let Ok(sequence) = self.sequence.reserve() {
             self.emit(sequence, event, context.unwrap_or(&self.context));
         }
@@ -592,6 +625,9 @@ impl RunObservation {
 
 impl Drop for RunObservation {
     fn drop(&mut self) {
+        if self.stream.is_some() {
+            return;
+        }
         if !self.closed {
             // An abandoned scope has no trustworthy terminal event, including during unwinding.
             self.context
@@ -607,6 +643,7 @@ pub struct NodeObservation {
     position: Count,
     context: Context,
     invoked: Option<Instant>,
+    finished: bool,
 }
 
 impl NodeObservation {
@@ -617,6 +654,11 @@ impl NodeObservation {
 
 impl Drop for NodeObservation {
     fn drop(&mut self) {
+        if !self.finished
+            && let Some(invocation) = self.context.get::<StreamInvocation>()
+        {
+            invocation.abandoned(&self.node, self.position, self.invoked, &self.context);
+        }
         self.context.span().end();
     }
 }
@@ -655,6 +697,9 @@ impl IterationObservation {
             started: Instant::now(),
             finished: false,
         };
+        if let Some(invocation) = item.context.get::<StreamInvocation>() {
+            invocation.annotate(&item.context);
+        }
         item.emit("mf.iteration.item.started", Vec::new());
         Some(item)
     }
@@ -787,6 +832,10 @@ impl BodyObservation {
                 KeyValue::new("mf.node.kind", node.kind.clone()),
             ])
             .start_with_context(&self.backend.tracer, &self.context);
+        let mut context = self.context.with_span(span);
+        if let Some(parent) = self.context.get::<StreamInvocation>() {
+            context = parent.child_context(context);
+        }
         Some(BodyNodeObservation {
             backend: Arc::clone(&self.backend),
             workflow_id: self.workflow_id.clone(),
@@ -794,7 +843,7 @@ impl BodyObservation {
             iteration_id: self.iteration_id.clone(),
             index: self.index,
             node,
-            context: self.context.with_span(span),
+            context,
             invoked: None,
             finished: false,
         })

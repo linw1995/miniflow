@@ -65,6 +65,19 @@ pub enum PlanError {
 }
 
 impl CompiledWorkflow {
+    pub fn start_stream_observation(
+        &self,
+        observer: &mf_telemetry::observation::Observer,
+        run_id: mf_telemetry::identity::RunId,
+    ) -> Result<mf_runtime::StreamObservation, mf_telemetry::ContractError> {
+        let description = crate::describe_compiled(self).map_err(|error| {
+            mf_telemetry::ContractError::Invalid {
+                message: error.to_string(),
+            }
+        })?;
+        observer.start_stream(description, run_id)
+    }
+
     pub fn start_observation(
         &self,
         observer: &mf_telemetry::observation::Observer,
@@ -72,7 +85,7 @@ impl CompiledWorkflow {
     ) -> Result<mf_runtime::RunObservation, mf_telemetry::ContractError> {
         if self.definition.execution.is_some() {
             return Err(mf_telemetry::ContractError::Invalid {
-                message: "streaming observation is not supported".into(),
+                message: "use start_stream_observation for streaming workflows".into(),
             });
         }
         if self.definition.version != mf_runtime::WorkflowDefinitionVersion::V2026_09_26 {

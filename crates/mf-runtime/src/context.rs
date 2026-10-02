@@ -122,6 +122,9 @@ impl ExecutionContext {
         self.frame_limits = Some(FrameLimits { payload, context });
     }
 
+    pub(super) fn set_frame_observation(&mut self, observation: RunObservation) {
+        self.observation = Some(observation);
+    }
     pub fn set_cancellation(
         &mut self,
         cancellation: std::sync::Arc<std::sync::atomic::AtomicBool>,

@@ -3,6 +3,11 @@ use crate::{
     EventContext, EventEffects, EventEmission, EventNode, ExecutionContext, FlowOutputs, NodeEvent,
     Outputs, PreparedStream, StreamExecution, StreamPlan, TimerUpdate, ValueRef, encoded_size,
 };
+use mf_telemetry::{
+    event::{FailurePhase, SkipCause},
+    observation::{StreamCallback, StreamObservation},
+    stream::{StreamCounts, StreamFailure, StreamMessage, StreamTrigger},
+};
 use serde::Serialize;
 use snafu::Snafu;
 use std::{
@@ -58,12 +63,14 @@ impl StreamClock for MonotonicClock {
 
 pub struct StreamOptions {
     pub clock: Arc<dyn StreamClock>,
+    pub observation: Option<StreamObservation>,
     pub snapshots: Option<crate::SnapshotRecorder>,
 }
 impl Default for StreamOptions {
     fn default() -> Self {
         Self {
             clock: Arc::new(MonotonicClock::default()),
+            observation: None,
             snapshots: None,
         }
     }
@@ -148,6 +155,7 @@ struct State {
     active_workers: usize,
     input_closed: bool,
     failure: Option<StreamError>,
+    failure_node: Option<String>,
     done: bool,
     summary: StreamSummary,
 }
@@ -159,6 +167,7 @@ struct Shared {
     resources: StreamResources,
     input_capacity: usize,
     cancellation: Arc<AtomicBool>,
+    observation: Option<StreamObservation>,
 }
 
 struct ClockWake(Weak<Shared>);
@@ -329,6 +338,15 @@ impl PreparedStream {
     }
 
     pub fn start_with_options(self, options: StreamOptions) -> Result<StreamInstance, StreamError> {
+        let observation = options.observation.clone();
+        let result = self.start_inner(options);
+        if let (Err(error), Some(observation)) = (&result, observation) {
+            observation.preparation_failed(error.to_string());
+        }
+        result
+    }
+
+    fn start_inner(self, options: StreamOptions) -> Result<StreamInstance, StreamError> {
         if options.snapshots.is_some() {
             return Err(StreamError::Preparation {
                 message: "snapshot capture is unsupported for streaming instances".into(),
@@ -388,6 +406,7 @@ impl PreparedStream {
                 active_workers: 0,
                 input_closed: false,
                 failure: None,
+                failure_node: None,
                 done: false,
                 summary: StreamSummary::default(),
             }),
@@ -396,6 +415,7 @@ impl PreparedStream {
             resources,
             input_capacity,
             cancellation: Arc::new(AtomicBool::new(false)),
+            observation: options.observation,
         });
         options
             .clock
@@ -417,7 +437,7 @@ impl PreparedStream {
                     state.failure.get_or_insert_with(|| panic_error(payload));
                     clear_retained(&mut state);
                     state.done = true;
-
+                    finish_observation(&coordinator_shared, &state);
                     coordinator_shared.changed.notify_all();
                 }
             })
@@ -559,6 +579,10 @@ impl Workers {
                             let job = { receiver.lock().unwrap().recv() };
                             let Ok(mut frame) = job else { break };
                             let index = plan.domains()[frame.message.domain].steps[frame.cursor];
+                            let _context = frame
+                                .context
+                                .observation()
+                                .map(crate::RunObservation::enter);
                             let result = catch_unwind(AssertUnwindSafe(|| {
                                 plan.execute_step(index, &mut frame.context)
                             }))
@@ -606,6 +630,10 @@ fn coordinate(shared: &Arc<Shared>, plan: &StreamPlan, clock: &dyn StreamClock, 
             let domain = completion.frame.message.domain;
             state.domains[domain].running = false;
             if let Err(error) = completion.result {
+                if state.failure.is_none() {
+                    let index = plan.domains()[domain].steps[completion.frame.cursor];
+                    state.failure_node = Some(plan.nodes()[index].definition_id.to_string());
+                }
                 state.failure.get_or_insert(error);
             }
             if state.failure.is_none() {
@@ -631,7 +659,7 @@ fn coordinate(shared: &Arc<Shared>, plan: &StreamPlan, clock: &dyn StreamClock, 
             state.delivery_pending = false;
             if state.active_workers == 0 {
                 state.done = true;
-
+                finish_observation(shared, &state);
                 shared.changed.notify_all();
                 break;
             }
@@ -650,7 +678,7 @@ fn coordinate(shared: &Arc<Shared>, plan: &StreamPlan, clock: &dyn StreamClock, 
                 {
                     clear_retained(&mut state);
                     state.done = true;
-
+                    finish_observation(shared, &state);
                     shared.changed.notify_all();
                     break;
                 }
@@ -743,6 +771,7 @@ fn tick(
                     input: None,
                 },
                 resources,
+                event_callback(shared, plan, index, None, StreamTrigger::Timer),
             )?;
             progress = true;
         }
@@ -766,7 +795,9 @@ fn tick(
             plan.execution().limits.max_message_bytes,
             resources.frame_bytes[context_domain],
         );
-
+        if let Some(observation) = &shared.observation {
+            context.set_frame_observation(observation.frame(stream_message(message)));
+        }
         context.retained_bytes(resources.frame_bytes[0])?;
         state.domains[0].frame = Some(Frame {
             message,
@@ -809,7 +840,9 @@ fn tick(
             plan.execution().limits.max_message_bytes,
             resources.frame_bytes[context_domain],
         );
-
+        if let Some(observation) = &shared.observation {
+            context.set_frame_observation(observation.frame(stream_message(queued.message)));
+        }
         context.retained_bytes(resources.frame_bytes[domain])?;
         state.domains[domain].frame = Some(Frame {
             message: queued.message,
@@ -870,7 +903,14 @@ fn tick(
             }
             state.event_credits -= resources.event_bytes[index];
             frame.credits -= resources.event_bytes[index];
-
+            let callback = event_callback(
+                shared,
+                plan,
+                index,
+                Some(frame.message),
+                StreamTrigger::Input,
+            );
+            let _context = callback.as_ref().map(StreamCallback::enter);
             match frame
                 .context
                 .event_inputs(&plan.nodes()[index], plan.dependencies(index))
@@ -885,9 +925,35 @@ fn tick(
                         input: Some(&frame.context),
                     },
                     resources,
+                    callback,
                 )?,
-                Ok(None) => {}
+                Ok(None) => {
+                    if let Some(callback) = callback {
+                        let causes: std::collections::BTreeSet<_> = plan
+                            .dependencies(index)
+                            .iter()
+                            .filter(|dependency| {
+                                matches!(
+                                    frame.context.output(&crate::output_id(
+                                        &dependency.source_node,
+                                        &dependency.source_output
+                                    )),
+                                    Ok(crate::ContextValue::Skipped)
+                                )
+                            })
+                            .map(|dependency| SkipCause {
+                                source_node: dependency.source_node.clone(),
+                                source_output: dependency.source_output.clone(),
+                            })
+                            .collect();
+                        callback.skipped(causes.into_iter().collect());
+                    }
+                }
                 Err(error) => {
+                    if let Some(callback) = callback {
+                        callback.failed(FailurePhase::Dependency, error.to_string());
+                    }
+                    state.failure_node = Some(plan.nodes()[index].definition_id.to_string());
                     return Err(workflow_error(error, frame.message));
                 }
             }
@@ -935,6 +1001,7 @@ fn tick(
                             input: None,
                         },
                         resources,
+                        event_callback(shared, plan, index, None, StreamTrigger::UpstreamClosed),
                     )?;
                     let operator = state.operators[index].as_mut().unwrap();
                     operator.closed = true;
@@ -971,6 +1038,20 @@ fn can_begin(
     )? <= resources.hard_bytes)
 }
 
+fn event_callback(
+    shared: &Shared,
+    plan: &StreamPlan,
+    index: usize,
+    message: Option<MessageId>,
+    trigger: StreamTrigger,
+) -> Option<StreamCallback> {
+    shared.observation.as_ref()?.callback(
+        plan.nodes()[index].definition_id.as_str(),
+        message.map(stream_message),
+        trigger,
+    )
+}
+
 fn invoke_event(
     state: &mut State,
     plan: &StreamPlan,
@@ -978,50 +1059,95 @@ fn invoke_event(
     event: NodeEvent,
     context: EventContext<'_>,
     resources: &StreamResources,
+    mut callback: Option<StreamCallback>,
 ) -> Result<(), StreamError> {
-    let operator = state.operators[index].as_ref().unwrap();
-    let previous = add(
-        operator.retained_bytes,
-        operator
-            .pending_bytes
-            .saturating_sub(resources.seal_bytes[index]),
-    )?;
-    let effects = catch_unwind(AssertUnwindSafe(|| {
-        state.operators[index]
-            .as_mut()
-            .unwrap()
-            .state
-            .on_event(event, &context)
-    }))
-    .map_err(panic_error)?
-    .map_err(|error| StreamError::Execution {
-        message: format!("node `{}`: {error}", plan.nodes()[index].definition_id),
-    })?;
-    apply_effects(state, plan, index, effects, context.now, resources)?;
-    let operator = state.operators[index].as_mut().unwrap();
-    operator.retained_bytes = operator.state.retained_bytes();
-    let current = add(
-        operator.retained_bytes,
-        operator
-            .pending_bytes
-            .saturating_sub(resources.seal_bytes[index]),
-    )?;
-    state.dynamic_bytes = add(
-        state
-            .dynamic_bytes
-            .checked_sub(previous)
-            .ok_or_else(|| execution_error("invalid operator byte accounting"))?,
-        current,
-    )?;
-    if add(state.dynamic_bytes, state.event_credits)? > resources.hard_bytes {
-        return Err(StreamError::Resource {
-            message: format!(
-                "node `{}` retained more data than the available byte budget",
-                plan.nodes()[index].definition_id
-            ),
-        });
+    let _span = callback.as_ref().map(StreamCallback::enter);
+    if let Some(callback) = callback.as_mut() {
+        callback.started();
     }
-    Ok(())
+    let mut phase = FailurePhase::Execution;
+    let old_pending = state.operators[index].as_ref().unwrap().pending.len();
+    let result = (|| -> Result<(usize, Vec<String>), StreamError> {
+        let operator = state.operators[index].as_ref().unwrap();
+        let previous = add(
+            operator.retained_bytes,
+            operator
+                .pending_bytes
+                .saturating_sub(resources.seal_bytes[index]),
+        )?;
+        let effects = catch_unwind(AssertUnwindSafe(|| {
+            state.operators[index]
+                .as_mut()
+                .unwrap()
+                .state
+                .on_event(event, &context)
+        }))
+        .map_err(panic_error)?
+        .map_err(|error| StreamError::Execution {
+            message: format!("node `{}`: {error}", plan.nodes()[index].definition_id),
+        })?;
+        phase = FailurePhase::Publication;
+        let count = effects.emissions.len();
+        let ports: std::collections::BTreeSet<_> = effects
+            .emissions
+            .iter()
+            .flat_map(|emission| emission.result.outputs.keys().cloned())
+            .collect();
+        apply_effects(state, plan, index, effects, context.now, resources)?;
+        let operator = state.operators[index].as_mut().unwrap();
+        operator.retained_bytes = operator.state.retained_bytes();
+        let current = add(
+            operator.retained_bytes,
+            operator
+                .pending_bytes
+                .saturating_sub(resources.seal_bytes[index]),
+        )?;
+        state.dynamic_bytes = add(
+            state
+                .dynamic_bytes
+                .checked_sub(previous)
+                .ok_or_else(|| execution_error("invalid operator byte accounting"))?,
+            current,
+        )?;
+        if add(state.dynamic_bytes, state.event_credits)? > resources.hard_bytes {
+            return Err(StreamError::Resource {
+                message: format!(
+                    "node `{}` retained more data than the available byte budget",
+                    plan.nodes()[index].definition_id
+                ),
+            });
+        }
+        Ok((count, ports.into_iter().collect()))
+    })();
+    match result {
+        Ok((count, ports)) => {
+            if let Some(callback) = callback {
+                let operator = state.operators[index].as_ref().unwrap();
+                if let Some(items) = operator.state.buffered_items() {
+                    callback.buffered(items);
+                }
+                for emitted in operator.pending.iter().skip(old_pending) {
+                    if let Some(batch) = emitted.emission.batch {
+                        let reason = match batch.reason {
+                            crate::FlushReason::SizeExceed => "size_exceed",
+                            crate::FlushReason::TimeoutExceed => "timeout_exceed",
+                            crate::FlushReason::UpstreamClosed => "upstream_closed",
+                        };
+                        callback.flushed(stream_message(emitted.message), batch.item_count, reason);
+                    }
+                }
+                callback.succeeded(count, ports);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            state.failure_node = Some(plan.nodes()[index].definition_id.to_string());
+            if let Some(callback) = callback {
+                callback.failed(phase, error.to_string());
+            }
+            Err(error)
+        }
+    }
 }
 
 fn apply_effects(
@@ -1097,6 +1223,41 @@ fn apply_effects(
         }
     }
     Ok(())
+}
+
+fn stream_message(message: MessageId) -> StreamMessage {
+    StreamMessage {
+        domain: message.domain,
+        sequence: message.sequence,
+    }
+}
+
+fn finish_observation(shared: &Shared, state: &State) {
+    if let Some(observation) = &shared.observation {
+        let failure = state.failure.as_ref().map(|error| StreamFailure {
+            phase: match error {
+                StreamError::Preparation { .. } => "preparation",
+                StreamError::Input { .. } => "input",
+                StreamError::Output { .. } => "output",
+                StreamError::Resource { .. } | StreamError::Capacity => "resource",
+                StreamError::Cancelled => "cancellation",
+                _ => "execution",
+            }
+            .into(),
+            message: error.to_string(),
+            node: state.failure_node.clone(),
+        });
+        observation.finish(
+            StreamCounts {
+                accepted_inputs: state.summary.accepted_inputs,
+                emitted_messages: state.summary.emitted_messages,
+                completed_frames: state.summary.completed_frames,
+                delivered_outputs: state.summary.delivered_outputs,
+            },
+            failure,
+            matches!(state.failure, Some(StreamError::Cancelled)),
+        );
+    }
 }
 
 fn release_domain(state: &mut State, domain: usize) {

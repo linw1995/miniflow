@@ -8,6 +8,9 @@ pub fn start_stream(
     options: mf_runtime::StreamOptions,
 ) -> Result<mf_runtime::StreamInstance, mf_runtime::StreamError> {
     let prepared = instantiate_stream(plan, registry).map_err(|error| {
+        if let Some(observation) = &options.observation {
+            observation.preparation_failed(error.to_string());
+        }
         mf_runtime::StreamError::Preparation {
             message: error.to_string(),
         }

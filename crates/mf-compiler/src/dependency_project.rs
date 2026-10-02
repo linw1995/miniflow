@@ -86,13 +86,40 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 fn execute_stream() -> Result<(), Box<dyn std::error::Error>> {
     if capture_requested() { return Err("snapshot capture is unsupported for streaming instances".into()); }
     let stdio = mf_runtime::StreamStdio::claim()?;
-    let registry = mf_runtime::NodeRegistry::from_inventory()?;
-    let prepared = workflow::prepare_stream(&registry)?;
-    stdio.run(prepared.start()?)?;
-    Ok(())
+    #[cfg(feature = "telemetry")]
+    let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
+        Ok(providers) => providers,
+        Err(error) => { eprintln!("telemetry export unavailable: {error}"); None }
+    };
+    #[cfg(feature = "telemetry")]
+    let observation = providers.as_ref().and_then(|providers| {
+        let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"));
+        match plan.map_err(|error| error.to_string()).and_then(|plan| plan.start_stream_observation(&providers.observer(), run_id()).map_err(|error| error.to_string())) {
+            Ok(observation) => Some(observation),
+            Err(error) => { eprintln!("telemetry observation unavailable: {error}"); None }
+        }
+    });
+    #[cfg(not(feature = "telemetry"))]
+    let observation: Option<mf_runtime::StreamObservation> = None;
+    let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+        let _context = observation.as_ref().map(mf_runtime::StreamObservation::enter);
+        let registry = mf_runtime::NodeRegistry::from_inventory()?;
+        let prepared = workflow::prepare_stream(&registry).inspect_err(|error| {
+            if let Some(observation) = &observation { observation.preparation_failed(error.to_string()); }
+        })?;
+        let instance = prepared.start_with_options(mf_runtime::StreamOptions { observation: observation.clone(), ..Default::default() })?;
+        stdio.run(instance)?;
+        Ok(())
+    })();
+    if let (Err(error), Some(observation)) = (&result, &observation) { observation.preparation_failed(error.to_string()); }
+    #[cfg(feature = "telemetry")]
+    if let Some(providers) = providers {
+        for diagnostic in providers.shutdown() { eprintln!("telemetry export incomplete: {diagnostic}"); }
+    }
+    result
 }
 
-#[cfg(all(feature = "telemetry", not(feature = "streaming")))]
+#[cfg(feature = "telemetry")]
 fn run_id() -> mf_telemetry::identity::RunId {
     match std::env::var("MF_RUN_ID") {
         Ok(value) => match mf_telemetry::identity::RunId::try_from(value) {

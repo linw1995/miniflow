@@ -197,6 +197,8 @@ pub enum Admission {
 
 #[derive(Debug, Snafu)]
 pub enum StateError {
+    #[snafu(display("streaming observation requires a compatible streaming consumer"))]
+    UnsupportedStream,
     #[snafu(display("invalid workflow description: {source}"))]
     Description { source: ContractError },
     #[snafu(display("invalid lifecycle event: {source}"))]
@@ -259,6 +261,9 @@ struct SequenceWitness {
 
 impl SessionState {
     pub fn new(description: WorkflowDescription, run_id: RunId) -> Result<Self, StateError> {
+        if description.version.is_streaming() {
+            return Err(StateError::UnsupportedStream);
+        }
         description
             .validate()
             .map_err(|source| StateError::Description { source })?;
