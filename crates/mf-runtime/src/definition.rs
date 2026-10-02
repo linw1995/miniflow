@@ -38,10 +38,14 @@ impl fmt::Display for DefinitionId {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(try_from = "RawWorkflowDefinition")]
+#[serde(deny_unknown_fields)]
 pub struct WorkflowDefinition {
     pub version: WorkflowDefinitionVersion,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "deserialize_execution",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub execution: Option<crate::StreamExecution>,
     #[serde(deserialize_with = "deserialize_dependencies")]
     pub dependencies: BTreeMap<String, NodeDependency>,
@@ -54,45 +58,10 @@ pub struct WorkflowDefinition {
     pub outputs: Vec<WorkflowOutputDefinition>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RawWorkflowDefinition {
-    version: WorkflowDefinitionVersion,
-    #[serde(default, deserialize_with = "deserialize_execution")]
-    execution: Option<crate::StreamExecution>,
-    #[serde(deserialize_with = "deserialize_dependencies")]
-    dependencies: BTreeMap<String, NodeDependency>,
-    nodes: Vec<NodeDefinition>,
-    #[serde(default)]
-    edges: Vec<EdgeDefinition>,
-    #[serde(default)]
-    control_edges: Vec<ControlEdgeDefinition>,
-    #[serde(default)]
-    outputs: Vec<WorkflowOutputDefinition>,
-}
-
 fn deserialize_execution<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<Option<crate::StreamExecution>, D::Error> {
     crate::StreamExecution::deserialize(deserializer).map(Some)
-}
-
-impl TryFrom<RawWorkflowDefinition> for WorkflowDefinition {
-    type Error = String;
-
-    fn try_from(raw: RawWorkflowDefinition) -> Result<Self, Self::Error> {
-        let definition = Self {
-            version: raw.version,
-            execution: raw.execution,
-            dependencies: raw.dependencies,
-            nodes: raw.nodes,
-            edges: raw.edges,
-            control_edges: raw.control_edges,
-            outputs: raw.outputs,
-        };
-        definition.validate_execution()?;
-        Ok(definition)
-    }
 }
 
 impl WorkflowDefinition {
@@ -115,7 +84,12 @@ impl WorkflowDefinition {
         if value.get("version").and_then(Value::as_str) == Some("2026-09-24") {
             return LegacyVersionSnafu.fail();
         }
-        serde_json::from_str(input).context(JsonParseSnafu)
+        let definition: Self = serde_json::from_str(input).context(JsonParseSnafu)?;
+        definition
+            .validate_execution()
+            .map_err(<serde_json::Error as serde::de::Error>::custom)
+            .context(JsonParseSnafu)?;
+        Ok(definition)
     }
 }
 
