@@ -45,8 +45,15 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
-    #[snafu(display("invalid streaming workflow: {message}"))]
+    #[snafu(display("invalid streaming workflow: {message}"), visibility(pub))]
     InvalidStream { message: String },
+    #[snafu(
+        display("could not prepare streaming workflow: {source}"),
+        visibility(pub)
+    )]
+    StreamConstruction {
+        source: mf_runtime::StreamBuildError,
+    },
     #[snafu(display("node at position {position} has a blank definition ID"))]
     InvalidNodeId { position: usize },
     #[snafu(display("node definition ID `{definition_id}` is used more than once"))]
@@ -148,7 +155,10 @@ pub enum WorkflowCompileError {
     DuplicateWorkflowOutputName { name: String },
     #[snafu(display("workflow contains a cycle: {path}"))]
     Cycle { path: CyclePath },
-    #[snafu(display("validated workflow could not be constructed: {source}"))]
+    #[snafu(
+        display("validated workflow could not be constructed: {source}"),
+        visibility(pub)
+    )]
     FlowConstruction { source: FlowBuildError },
     #[snafu(display("compiled workflow execution order does not match its definition"))]
     NonCanonicalPlanOrder,
@@ -803,11 +813,8 @@ pub fn compile_definition(
     .context(FlowConstructionSnafu)?;
 
     if let Some(execution) = &definition.execution {
-        flow.into_stream(execution.clone()).map_err(|error| {
-            WorkflowCompileError::InvalidStream {
-                message: error.to_string(),
-            }
-        })?;
+        flow.into_stream(execution.clone())
+            .context(StreamConstructionSnafu)?;
         execution_order.retain(|id| id.as_str() != mf_runtime::STREAM_INPUT_ID);
     } else {
         flow.into_tasks().context(FlowConstructionSnafu)?;

@@ -2,15 +2,17 @@ use crate::{
     ExecutionDependency, FlowNode, NodeExecution, STREAM_INPUT_ID, StreamExecution, TaskNode,
     WorkflowOutputDefinition, output_id,
 };
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 use std::collections::{BTreeMap, BTreeSet};
 
 type EventStates = Vec<Option<Box<dyn crate::EventNode>>>;
 
 #[derive(Debug, Snafu)]
-#[snafu(display("invalid streaming workflow: {message}"))]
-pub struct StreamBuildError {
-    pub message: String,
+pub enum StreamBuildError {
+    #[snafu(display("invalid streaming workflow: {message}"))]
+    InvalidPlan { message: String },
+    #[snafu(display("invalid stream input type: {source}"))]
+    InputType { source: crate::TypeDepthError },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,12 +71,9 @@ impl PreparedStream {
         dependencies: Vec<Vec<StreamDependency>>,
         outputs: Vec<WorkflowOutputDefinition>,
     ) -> Result<Self, StreamBuildError> {
-        let invalid = |message: String| StreamBuildError { message };
+        let invalid = |message: String| InvalidPlanSnafu { message }.build();
         execution.limits.validate().map_err(invalid)?;
-        execution
-            .input_type
-            .check_depth()
-            .map_err(|error| invalid(error.to_string()))?;
+        execution.input_type.check_depth().context(InputTypeSnafu)?;
         if nodes.len() != dependencies.len()
             || nodes
                 .first()
