@@ -167,6 +167,16 @@ pub enum FlowBuildError {
     },
     #[snafu(display("node definition ID `{definition_id}` is used more than once"))]
     DuplicateDefinitionId { definition_id: DefinitionId },
+    #[snafu(display(
+        "output ID `{output_id}` collides between `{first_node}`.`{first_port}` and `{second_node}`.`{second_port}`"
+    ))]
+    OutputIdCollision {
+        output_id: String,
+        first_node: DefinitionId,
+        first_port: Box<str>,
+        second_node: DefinitionId,
+        second_port: Box<str>,
+    },
     #[snafu(display("invalid control connection: {message}"))]
     InvalidControlConnection { message: String },
     #[snafu(display("workflow output name `{name}` is selected more than once"))]
@@ -222,6 +232,25 @@ impl Flow {
                     definition_id: node.definition_id.clone(),
                 }
                 .fail();
+            }
+        }
+
+        let mut output_ids = BTreeMap::new();
+        for node in &nodes {
+            for port in &node.ports.outputs {
+                let output_id = crate::output_id(node.definition_id.as_str(), &port.name);
+                if let Some((first_node, first_port)) =
+                    output_ids.insert(output_id.clone(), (&node.definition_id, &port.name))
+                {
+                    return OutputIdCollisionSnafu {
+                        output_id,
+                        first_node: first_node.clone(),
+                        first_port: first_port.to_string().into_boxed_str(),
+                        second_node: node.definition_id.clone(),
+                        second_port: port.name.to_string().into_boxed_str(),
+                    }
+                    .fail();
+                }
             }
         }
 
@@ -580,6 +609,46 @@ mod tests {
             from_output: from_output.to_owned(),
             to_node: to_node.into(),
             to_input: to_input.to_owned(),
+        }
+    }
+
+    #[test]
+    fn rejects_ambiguous_output_ids_before_direct_execution() {
+        for required in [false, true] {
+            for reverse in [false, true] {
+                let source = |id, port| {
+                    FlowNode::new(
+                        id,
+                        Box::new(EmptyNode),
+                        crate::NodePorts {
+                            inputs: Vec::new(),
+                            outputs: vec![crate::PortSpec::new(
+                                port,
+                                crate::ValueType::Any,
+                                required,
+                            )],
+                        },
+                    )
+                };
+                let mut nodes = vec![source("a.b", "c"), source("a", "b.c")];
+                if reverse {
+                    nodes.reverse();
+                }
+                let error = Flow::new(
+                    nodes,
+                    Vec::new(),
+                    vec!["a".into(), "a.b".into()],
+                    Vec::new(),
+                )
+                .err()
+                .unwrap();
+                assert!(matches!(
+                    &error,
+                    FlowBuildError::OutputIdCollision { output_id, .. } if output_id == "a.b.c"
+                ));
+                let message = error.to_string();
+                assert!(message.contains("`a.b`.`c`") && message.contains("`a`.`b.c`"));
+            }
         }
     }
 

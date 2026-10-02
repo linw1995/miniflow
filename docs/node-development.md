@@ -98,6 +98,8 @@ The executor calls `Node::execute_with_context_mut`, whose default implementatio
 
 Keep output names local in node results. Runtime publication qualifies them with the instance ID. Explicit skipped names must be declared non-required outputs and cannot also be produced. A scheduler-skipped node propagates skipping through every output, including required ones. Context references alone never activate or skip a node.
 
+Qualified output IDs must be unique. Both compiler validation and direct `Flow::new` construction reject collisions such as node `a.b` / output `c` and node `a` / output `b.c`, including optional outputs.
+
 The shared executor checks every produced JSON value against its declared output type before publishing the node's result,
 even when no downstream edge reads that port. It checks each bound input against its declared type before invoking an
 active node. Nested list and map errors include a JSON Pointer path. A skipped node is not type-checked, and an
