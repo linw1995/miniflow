@@ -5,6 +5,7 @@ use mf_runtime::{
     StreamInstance, StreamOptions, ValueType,
 };
 use serde_json::{Value, json};
+use snafu::ResultExt;
 use std::{
     collections::BTreeMap,
     sync::{
@@ -370,11 +371,9 @@ impl mf_runtime::TaskNode for Exhaust {
         .into_task()
         .unwrap();
         for _ in 0..mf_runtime::MAX_SCHEDULED_STEPS {
-            mf_runtime::execute_node_in_context(&inner, &[], context).map_err(|error| {
-                NodeExecutionError::ExecutionFailed {
-                    message: error.to_string(),
-                }
-            })?;
+            mf_runtime::execute_node_in_context(&inner, &[], context)
+                .boxed()
+                .context(mf_runtime::NodePluginFailedSnafu)?;
         }
         Ok(mf_runtime::NodeResult::default())
     }

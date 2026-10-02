@@ -43,7 +43,7 @@ pub enum WorkflowRunError {
         source: NodeBuildError,
         definition_id: DefinitionId,
     },
-    #[snafu(display("node `{definition_id}` failed: {source}"))]
+    #[snafu(display("node `{definition_id}` failed: {source}"), visibility(pub))]
     NodeExecution {
         source: NodeExecutionError,
         definition_id: DefinitionId,

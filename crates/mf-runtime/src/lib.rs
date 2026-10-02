@@ -42,8 +42,8 @@ pub use mf_telemetry::observation::RunObservation;
 pub use node::{
     ContextReference, Inputs, NodeBuildError, NodeExecution, NodeExecutionError, NodeFactory,
     NodeMetadata, NodePorts, NodeRegistration, OutputDerivation, OutputDerivationError, Outputs,
-    PortSpec, PreparedNode, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, ValueType,
-    deserialize_config, output_id,
+    PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, TaskNode,
+    TypeCompatibility, TypeDepthError, TypeMismatch, ValueType, deserialize_config, output_id,
 };
 pub use number::compare_json_numbers;
 pub use registry::{NodeRegistry, NodeRegistryError};

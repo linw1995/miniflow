@@ -167,6 +167,12 @@ pub enum WorkflowCompileError {
         definition_id: DefinitionId,
         message: String,
     },
+    #[snafu(display("invalid inferred output `{output}` for node `{definition_id}`: {source}"))]
+    InferredOutputDepth {
+        definition_id: DefinitionId,
+        output: String,
+        source: mf_runtime::TypeDepthError,
+    },
     #[snafu(display(
         "invalid control edge `{from_node}`.`{from_output}` -> `{to_node}`: {message}"
     ))]
@@ -326,12 +332,12 @@ impl TypeInferenceState {
                     exact: None,
                 },
             };
-            fact.value_type.check_depth().map_err(|error| {
-                WorkflowCompileError::InvalidNodeMetadata {
+            fact.value_type
+                .check_depth()
+                .with_context(|_| InferredOutputDepthSnafu {
                     definition_id: id.clone(),
-                    message: format!("output `{}`: {error}", output.name),
-                }
-            })?;
+                    output: output.name.as_ref(),
+                })?;
             if let Some(value) = &fact.exact {
                 declared.validate_shared(value).map_err(|error| {
                     WorkflowCompileError::InvalidNodeMetadata {
