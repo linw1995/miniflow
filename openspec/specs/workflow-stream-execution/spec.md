@@ -25,6 +25,11 @@ A streaming workflow SHALL retain its node state from instance startup through d
 - **WHEN** a frame has completed and no consumer references its context values
 - **THEN** those values can be released while the instance remains open
 
+#### Scenario: Reuse task and event executors
+
+- **WHEN** one instance processes multiple messages
+- **THEN** it reuses its prepared task and event nodes until the instance ends, while each message has a fresh execution context
+
 ### Requirement: Distinguish admission from processing completion
 
 Streaming input admission SHALL complete when the instance accepts ownership of the input. It MUST NOT wait for that input to produce a batch or finish downstream processing. Output delivery SHALL be independently consumable. The API MUST distinguish capacity pressure, closed admission, invalid input, and terminal failure.
@@ -107,7 +112,7 @@ A streaming instance SHALL process frames in FIFO order within each message doma
 
 ### Requirement: Drive deadlines independently of data and business work
 
-Idle input and running ordinary plugin calls MUST NOT prevent the runtime from servicing due timers and cancellation. Deadline expiry SHALL make an emission ready; actual downstream execution remains subject to capacity and earlier work in its domain.
+Idle input and running ordinary plugin calls MUST NOT prevent the runtime from servicing due timers. Deadline expiry SHALL make an emission ready; actual downstream execution remains subject to capacity and earlier work in its domain.
 
 #### Scenario: Wait for another input indefinitely
 
@@ -185,23 +190,18 @@ An operator's output sequence SHALL close only after all its emissions are deliv
 - **WHEN** every upstream frame skips the branch feeding a collector
 - **THEN** that collector still receives closure and the instance can finish without inventing downstream messages
 
-### Requirement: Abort explicitly on failure or cancellation
+### Requirement: Stop scheduling on failure
 
-Failure or cancellation SHALL stop admission and new scheduling, cancel deadlines, discard unstarted work and buffers, and suppress later publication from already running work. Abort MUST NOT flush a tail or retry automatically. Previously published results and side effects remain effective. Completion waits for started synchronous plugin calls to settle; hard preemption is not guaranteed.
+Failure SHALL stop admission and new runtime scheduling, clear deadlines, discard pending work and buffers, and suppress later workflow outputs from already running work. Failure cleanup MUST NOT flush a tail or retry automatically. Previously delivered results and side effects remain effective. Already started task calls, including synchronous bodies, run to completion before the instance releases their executors.
 
 #### Scenario: Fail after an earlier batch succeeded
 
 - **WHEN** a later batch operation fails after an earlier result was delivered
 - **THEN** the instance fails, retains the delivered prefix, and neither replays that prefix nor reports rollback
 
-#### Scenario: Cancel a partial batch
-
-- **WHEN** the caller cancels with buffered items below the count threshold
-- **THEN** those items are not flushed and the instance reports cancellation rather than success
-
 #### Scenario: Receive a late worker result after failure
 
-- **WHEN** already running work returns after abort begins
+- **WHEN** already running work returns after the instance fails
 - **THEN** its result does not schedule new downstream work or produce a new selected output
 
 ### Requirement: Bound execution per message without limiting instance age

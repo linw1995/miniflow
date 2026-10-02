@@ -328,5 +328,5 @@ respect the same domain boundary. Event nodes are rejected in single-run graphs 
 
 The host submits one value per message, consumes outputs independently, and explicitly closes input.
 An array remains one input value. See [the instance API](node-development.md#in-memory-streaming-instances)
-for admission, backpressure, drain, and cancellation. Standalone runner generation does not yet support
+for admission, backpressure, drain, and failure handling. Standalone runner generation does not yet support
 streaming definitions.

@@ -15,7 +15,7 @@ a fresh step budget. Synchronous bodies remain task-only.
 ## Progress and resource bounds
 
 One FIFO frame executes per domain. A bounded worker pool keeps synchronous business calls off the
-coordinator, allowing idle deadlines and cancellation to progress. Each operator has one replaceable
+coordinator, allowing idle deadlines to progress. Each operator has one replaceable
 deadline, cleared before timer delivery.
 
 Admission, running contexts, retained event values, sealed emissions, and pending outputs are charged
@@ -26,9 +26,11 @@ these limits do not describe process RSS or arbitrary plugin allocations.
 ## Completion and failure
 
 Input close stops admission, then propagates after admitted work and prior emissions reach downstream
-nodes. Successful completion waits for output acknowledgement. Failure and cancellation discard
+nodes. Successful completion waits for output acknowledgement. Failures discard
 unstarted work and suppress later publications while waiting for started synchronous calls to finish.
-They preserve already delivered results and do not retry or flush a tail automatically.
+They preserve already delivered results and do not retry or flush a tail automatically. Tasks finish
+their synchronous bodies before cleanup releases task and event executors together. Both kinds of
+executor are retained across messages until the instance ends.
 
 ## Independent delivery
 

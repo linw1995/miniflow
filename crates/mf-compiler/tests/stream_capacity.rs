@@ -291,19 +291,25 @@ fn chained_collectors_seal_all_tails_before_output_is_consumed() {
 }
 
 #[test]
-fn cancellation_discards_a_partial_buffer_and_wakes_a_blocked_producer() {
+fn input_failure_discards_a_partial_buffer_and_wakes_a_blocked_producer() {
     let clock = Arc::new(Clock::default());
     let instance = start(definition(), clock);
     let input = instance.input();
     input.send(json!(1)).unwrap();
     wait_until(|| instance.summary().completed_frames == 1);
     assert!(instance.metrics().queued_and_buffered_bytes > 0);
-    instance.cancel();
-    assert!(matches!(instance.recv(), Err(StreamError::Cancelled)));
+    assert!(matches!(
+        instance.input().send(json!("invalid")),
+        Err(StreamError::Input { .. })
+    ));
+    assert!(matches!(instance.recv(), Err(StreamError::Input { .. })));
     wait_until(|| instance.metrics() == StreamMetrics::default());
     assert_eq!(instance.summary().emitted_messages, 0);
-    assert!(matches!(instance.join(), Err(StreamError::Cancelled)));
-    assert!(matches!(input.send(json!(2)), Err(StreamError::Cancelled)));
+    assert!(matches!(instance.join(), Err(StreamError::Input { .. })));
+    assert!(matches!(
+        input.send(json!(2)),
+        Err(StreamError::Input { .. })
+    ));
 
     let mut value = definition();
     value["execution"]["limits"] = json!({"max_pending_messages":2});
@@ -321,10 +327,13 @@ fn cancellation_discards_a_partial_buffer_and_wakes_a_blocked_producer() {
     ));
     thread::scope(|scope| {
         let producer = scope.spawn(move || input.send(json!(3)));
-        instance.cancel();
+        assert!(matches!(
+            instance.input().send(json!("invalid")),
+            Err(StreamError::Input { .. })
+        ));
         assert!(matches!(
             producer.join().unwrap(),
-            Err(StreamError::Cancelled)
+            Err(StreamError::Input { .. })
         ));
     });
     assert!(instance.join().is_err());
@@ -371,7 +380,7 @@ fn plugin_objects_are_released_even_when_a_sender_handle_outlives_the_instance()
     let mut value = definition();
     value["nodes"][1] =
         json!({"id":"consume", "kind":"test.capacity_sink", "config":{"key":"release-nodes"}});
-    let instance = start(value, Arc::new(Clock::default()));
+    let instance = start(value.clone(), Arc::new(Clock::default()));
     let before = probe.drops.load(Ordering::SeqCst);
     let input = instance.input();
     input.send(json!(1)).unwrap();
@@ -381,6 +390,18 @@ fn plugin_objects_are_released_even_when_a_sender_handle_outlives_the_instance()
     instance.join().unwrap();
     assert_eq!(probe.drops.load(Ordering::SeqCst), before + 1);
     assert!(matches!(input.send(json!(2)), Err(StreamError::Closed)));
+    let instance = start(value, Arc::new(Clock::default()));
+    let before = probe.drops.load(Ordering::SeqCst);
+    let input = instance.input();
+    input.send(json!(1)).unwrap();
+    wait_until(|| instance.summary().completed_frames == 1);
+    drop(instance);
+    assert_eq!(probe.drops.load(Ordering::SeqCst), before + 1);
+    assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
+    assert!(matches!(
+        input.send(json!(2)),
+        Err(StreamError::Execution { .. })
+    ));
     probes().lock().unwrap().remove("release-nodes");
 }
 
@@ -429,7 +450,7 @@ fn impossible_reserves_and_oversized_payloads_fail_explicitly() {
 }
 
 #[test]
-fn cancellation_suppresses_followup_work_after_a_running_call_returns() {
+fn input_failure_suppresses_followup_work_after_a_running_call_returns() {
     let running = Arc::new(Probe::default());
     let following = Arc::new(Probe::default());
     probes()
@@ -454,65 +475,18 @@ fn cancellation_suppresses_followup_work_after_a_running_call_returns() {
     wait_until(|| running.calls.load(Ordering::SeqCst) == 1);
     instance.input().send(json!(2)).unwrap();
     wait_until(|| instance.summary().emitted_messages == 2);
-    instance.cancel();
-    assert!(matches!(instance.recv(), Err(StreamError::Cancelled)));
+    assert!(matches!(
+        instance.input().send(json!("invalid")),
+        Err(StreamError::Input { .. })
+    ));
+    assert!(matches!(instance.recv(), Err(StreamError::Input { .. })));
     assert_eq!(instance.metrics().active_workers, 1);
     running.release();
-    assert!(matches!(instance.join(), Err(StreamError::Cancelled)));
+    assert!(matches!(instance.join(), Err(StreamError::Input { .. })));
     assert_eq!(running.calls.load(Ordering::SeqCst), 1);
     assert_eq!(following.calls.load(Ordering::SeqCst), 0);
     probes().lock().unwrap().remove("late-running");
     probes().lock().unwrap().remove("late-following");
-}
-
-struct Cooperative(Arc<Probe>);
-impl mf_runtime::TaskNode for Cooperative {
-    fn execute(
-        &self,
-        _: Inputs,
-        context: &mut mf_runtime::ExecutionContext,
-    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
-        self.0.calls.fetch_add(1, Ordering::SeqCst);
-        let child = context.fork_body(None);
-        while !child.is_cancelled() {
-            thread::yield_now();
-        }
-        Err(NodeExecutionError::ExecutionFailed {
-            message: "cooperative cancellation".into(),
-        })
-    }
-}
-inventory::submit! {
-    NodeRegistration {
-        kind: "test.cooperative",
-        factory: mf_runtime::NodeFactory::Plain(|_| {
-            Ok(mf_runtime::PreparedNode::new(
-                Cooperative(Arc::clone(&probes().lock().unwrap()["cooperative"])),
-                mf_runtime::NodePorts {
-                        inputs: vec![PortSpec::new("input", ValueType::Any, true)],
-                        outputs: vec![PortSpec::new("value", ValueType::Any, true)],
-                    },
-            ))
-        }),
-    }
-}
-
-#[test]
-fn a_plugin_and_its_child_context_can_observe_cancellation() {
-    let probe = Arc::new(Probe::default());
-    probes()
-        .lock()
-        .unwrap()
-        .insert("cooperative".into(), Arc::clone(&probe));
-    let mut value = definition();
-    value["nodes"][0]["config"]["max_items"] = json!(1);
-    value["nodes"][1] = json!({"id":"consume", "kind":"test.cooperative"});
-    let instance = start(value, Arc::new(Clock::default()));
-    instance.input().send(json!(1)).unwrap();
-    wait_until(|| probe.calls.load(Ordering::SeqCst) == 1);
-    instance.cancel();
-    assert!(matches!(instance.join(), Err(StreamError::Cancelled)));
-    probes().lock().unwrap().remove("cooperative");
 }
 
 struct Spill;
