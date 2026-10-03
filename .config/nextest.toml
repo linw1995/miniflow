@@ -1,4 +1,4 @@
-nextest-version = { required = "0.9.133" }
+nextest-version = { required = "0.9.145" }
 experimental = ["setup-scripts"]
 
 [test-groups.shared-cargo]
