@@ -110,6 +110,21 @@ A streaming instance SHALL process frames in FIFO order within each message doma
 - **WHEN** a batch-domain operation is running and upstream capacity remains available
 - **THEN** the input domain can continue filling a later batch
 
+### Requirement: Run consecutive synchronous tasks in one dispatch
+
+A worker SHALL execute consecutive ordinary task steps of a frame in validated topological order within one dispatch. It SHALL return the frame to the coordinator before an event node or at the end of the frame. The runtime SHALL check for an existing instance failure between task calls and preserve the identity of the task that fails. Branches within a frame retain their validated order.
+
+#### Scenario: Execute a chain before an event boundary
+
+- **WHEN** a frame reaches consecutive ordinary tasks followed by an event node
+- **THEN** one worker dispatch executes those tasks and returns the frame before delivering the event
+- **AND** the coordinator remains available for timers in other domains
+
+#### Scenario: Observe failure between consecutive calls
+
+- **WHEN** an instance failure is recorded while a task in the current dispatch is running
+- **THEN** that task finishes normally and the worker does not start the following task
+
 ### Requirement: Drive deadlines independently of data and business work
 
 Idle input and running ordinary plugin calls MUST NOT prevent the runtime from servicing due timers. Deadline expiry SHALL make an emission ready; actual downstream execution remains subject to capacity and earlier work in its domain.

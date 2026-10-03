@@ -242,6 +242,17 @@ fn blocking_business_work_does_not_stop_input_or_timer_progress() {
     let mut value = accumulating();
     value["nodes"][1] =
         json!({"id":"copy", "kind":"test.slow", "config":{"gate":"timer-progress"}});
+    value["nodes"].as_array_mut().unwrap().extend([
+        json!({"id":"before", "kind":"builtin.identity"}),
+        json!({"id":"after", "kind":"builtin.identity"}),
+    ]);
+    value["edges"] = json!([
+        edge("%input", "item", "collect", "item"),
+        edge("collect", "items", "before", "input"),
+        edge("before", "value", "copy", "input"),
+        edge("copy", "value", "after", "input"),
+    ]);
+    value["outputs"][0]["node"] = json!("after");
     let clock = Arc::new(ManualClock::default());
     let instance = start(value, clock.clone());
     let _release = ReleaseGate(Arc::clone(&gate));
@@ -306,11 +317,22 @@ fn worker_concurrency_is_bounded_across_independent_domains() {
 
 #[test]
 fn per_message_budgets_allow_a_long_lived_instance_and_preserve_fifo() {
-    let value = graph(
-        json!([{"id":"copy", "kind":"builtin.identity"}]),
-        vec![edge("%input", "item", "copy", "input")],
+    let mut value = graph(
+        json!([
+            {"id":"left", "kind":"builtin.identity"},
+            {"id":"right", "kind":"builtin.identity"},
+            {"id":"copy", "kind":"builtin.identity"},
+        ]),
+        vec![
+            edge("%input", "item", "left", "input"),
+            edge("%input", "item", "right", "input"),
+            edge("left", "value", "copy", "input"),
+        ],
         json!([{"name":"value", "node":"copy", "port":"value"}]),
     );
+    value["control_edges"] = json!([
+        {"from_node":"right", "from_output":"value", "to_node":"copy"}
+    ]);
     let instance = start(value, Arc::new(ManualClock::default()));
     let count = mf_runtime::MAX_SCHEDULED_STEPS + 1;
     thread::scope(|scope| {
