@@ -34,8 +34,8 @@ share a Cargo target directory and run serially through validation and execution
 its duration is included in the overall run, but not in individual test durations. Cache invalidation, cold rebuild,
 and packaged acceptance tests keep isolated targets. Plain `cargo test` also keeps its existing isolated builds.
 
-This uses nextest's experimental setup scripts and requires nextest 0.9.133 or newer and Python 3.11 or newer,
-both provided by `nix develop`. Warmup preserves Cargo wrappers, compiler flags, and coverage instrumentation.
+This uses nextest's experimental setup scripts, with nextest and Python provided by `nix develop`.
+Warmup preserves Cargo wrappers, compiler flags, and coverage instrumentation.
 Each run gets its own directory under the Cargo target's `nextest-build-cache/`, so concurrent runs cannot overwrite
 each other's runners. These build artifacts remain until removed or cleaned with `cargo clean`.
 
