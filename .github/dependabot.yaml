@@ -8,7 +8,7 @@ updates:
     schedule:
       interval: "monthly"
     commit-message:
-      prefix: "ci(ci)"
+      prefix: "build(deps)"
 
   - package-ecosystem: "cargo"
     directories:
@@ -17,11 +17,11 @@ updates:
     schedule:
       interval: "monthly"
     commit-message:
-      prefix: "build(bundle)"
+      prefix: "build(deps)"
 
   - package-ecosystem: "nix"
     directory: "/"
     schedule:
       interval: "monthly"
     commit-message:
-      prefix: "build(ci)"
+      prefix: "build(deps)"

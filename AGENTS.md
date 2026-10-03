@@ -19,8 +19,10 @@
 
 - Keep ablation reports local under the Git-ignored `target/` directory; do not include them in commits.
 - Use `<type>(<scope>)[!]: <description>` for commit messages and PR titles.
-- Allowed types: `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, `test`.
-- Allowed scopes: `cli`, `runtime`, `compiler`, `bundle`, `nodes`, `ci`, `docs`.
+- Allowed types: `build`, `chore`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, `test`.
+- Allowed scopes: `cli`, `runtime`, `compiler`, `bundle`, `nodes`, `ci`, `deps`, `docs`.
+- Use `deps` for dependency version updates.
+- Use `chore(ci)` for CI configuration changes.
 - Use `.github/pull_request_template.md` for every pull request and complete its AI Disclosure section.
 
 ## Releases

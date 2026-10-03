@@ -106,8 +106,11 @@ See [node development](docs/node-development.md) for adding nodes.
 
 Use `<type>(<scope>)[!]: <description>` for commit messages and pull request titles. The optional `!` marks a breaking change.
 
-- Types: `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, `test`.
-- Scopes: `cli`, `runtime`, `compiler`, `bundle`, `nodes`, `ci`, `docs`.
+- Types: `build`, `chore`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, `test`.
+- Scopes: `cli`, `runtime`, `compiler`, `bundle`, `nodes`, `ci`, `deps`, `docs`.
+
+Use `deps` for dependency version updates, including Cargo, GitHub Actions, and Nix flake inputs.
+Use `chore(ci)` for CI configuration changes; `ci` is only a scope.
 
 For example:
 
