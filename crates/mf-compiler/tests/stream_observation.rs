@@ -203,13 +203,17 @@ fn task_failures_never_publish_success_and_snapshot_requests_fail_before_input()
     value["nodes"][1] = json!({
         "id":"consume", "kind":"builtin.if_else",
         "config":{"branches":[{"id":"hit", "condition":{
-            "source":{"output":"collect.items", "path":""}, "operator":"gt", "value":0
+            "source":{"output":"before.value", "path":""}, "operator":"gt", "value":0
         }}]}
     });
+    value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"before", "kind":"builtin.identity"}));
     value["outputs"][0]["port"] = json!("hit");
-    value["edges"].as_array_mut().unwrap().pop();
+    value["edges"][1] = json!({"from_node":"collect", "from_output":"items", "to_node":"before", "to_input":"input"});
     value["control_edges"] =
-        json!([{"from_node":"collect", "from_output":"items", "to_node":"consume"}]);
+        json!([{"from_node":"before", "from_output":"value", "to_node":"consume"}]);
     let plan = plan(value);
     let observation = plan
         .start_stream_observation(&harness.observer(), RunId::new())
@@ -228,8 +232,14 @@ fn task_failures_never_publish_success_and_snapshot_requests_fail_before_input()
     assert!(instance.recv().is_err());
     assert!(instance.join().is_err());
     let events = records(&harness);
+    assert!(events.iter().any(|event| matches!(&event.payload, StreamPayload::Execution(Event::NodeFinished { node, outcome: Outcome::Succeeded, .. }) if node.id == "before")));
     assert!(events.iter().any(|event| matches!(&event.payload, StreamPayload::Execution(Event::NodeFinished { node, outcome: Outcome::Failed, .. }) if node.id == "consume")));
     assert!(!events.iter().any(|event| matches!(&event.payload, StreamPayload::Execution(Event::NodeFinished { node, outcome: Outcome::Succeeded, .. }) if node.id == "consume")));
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        StreamPayload::Control(StreamEvent::Finished { failure: Some(failure), .. })
+            if failure.node.as_deref() == Some("consume")
+    )));
 
     let harness = Harness::new(true);
     let observation = plan

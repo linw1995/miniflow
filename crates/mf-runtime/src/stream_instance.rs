@@ -574,28 +574,35 @@ impl Workers {
                         loop {
                             let job = { receiver.lock().unwrap().recv() };
                             let Ok(mut frame) = job else { break };
-                            let index = plan.domains()[frame.message.domain].steps[frame.cursor];
                             let _context = frame
                                 .context
                                 .observation()
                                 .map(crate::RunObservation::enter);
-                            let failure = shared.state.lock().unwrap().failure.clone();
-                            let result = if let Some(error) = failure {
-                                Err(error)
-                            } else {
-                                catch_unwind(AssertUnwindSafe(|| {
-                                    plan.execute_step(index, &mut frame.context)
-                                }))
-                                .map_err(panic_error)
-                                .and_then(|result| {
-                                    result.context(WorkflowSnafu {
-                                        message: frame.message,
-                                    })
-                                })
-                            };
-                            if result.is_ok() {
-                                frame.cursor += 1;
-                            } else {
+                            let steps = &plan.domains()[frame.message.domain].steps;
+                            let result = (|| -> Result<(), StreamError> {
+                                while let Some(&index) = steps.get(frame.cursor) {
+                                    if plan.nodes()[index].node.is_none() {
+                                        break;
+                                    }
+                                    if let Some(error) =
+                                        shared.state.lock().unwrap().failure.clone()
+                                    {
+                                        return Err(error);
+                                    }
+                                    catch_unwind(AssertUnwindSafe(|| {
+                                        plan.execute_step(index, &mut frame.context)
+                                    }))
+                                    .map_err(panic_error)?
+                                    .context(
+                                        WorkflowSnafu {
+                                            message: frame.message,
+                                        },
+                                    )?;
+                                    frame.cursor += 1;
+                                }
+                                Ok(())
+                            })();
+                            if result.is_err() {
                                 frame.context = ExecutionContext::default();
                             }
                             shared
