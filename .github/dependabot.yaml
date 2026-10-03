@@ -18,3 +18,10 @@ updates:
       interval: "monthly"
     commit-message:
       prefix: "build(bundle)"
+
+  - package-ecosystem: "nix"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "build(ci)"
