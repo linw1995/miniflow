@@ -88,8 +88,8 @@ names. Description mode excludes Loop configuration, variable values, predicates
 configuration. The graph does not include the full effective port table. Compile validation checks
 those contracts by constructing plugin instances.
 
-Version `2026-10-03` adds `execution` metadata with the execution mode, lifecycle schema, and interface
-inspection support. The separate `--describe-interface` document exposes initial-node input types,
+Version `2026-10-03` adds `execution` metadata with the execution mode and lifecycle schema, and requires
+interface inspection. The separate `--describe-interface` document exposes initial-node input types,
 required flags, and runtime resource declarations. Graph inspection stays factory-free; interface
 inspection performs validated preparation without executing a node or consuming source input.
 

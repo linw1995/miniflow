@@ -1108,7 +1108,6 @@ pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription,
                 } else {
                     mf_telemetry::LOOP_EVENT_SCHEMA_VERSION
                 },
-                interface: true,
             }
         }),
         workflow_id: WorkflowId::from_definition(&plan.definition, &order)

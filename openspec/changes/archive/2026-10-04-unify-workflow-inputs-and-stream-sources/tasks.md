@@ -108,3 +108,12 @@ deleted together with its callers and transports so no compatibility scheduler o
   limitations before submitting implementation.
 - [x] 5.3 Review every delta scenario against implementation evidence, confirm examples contain no implicit
   `%input` source, and archive only after the implementation tasks are complete.
+
+## 6. Ablation and implementation review
+
+- [x] 6.1 Establish a baseline and run independent deletion experiments for redundant protocol fields,
+  source dispatch, launch transport, observation state, and tests; keep reports under ignored `target/`.
+- [x] 6.2 Apply simplifications supported by the experiments and preserve the startup, resource,
+  cancellation, observation integrity, and terminal execution contracts.
+- [x] 6.3 Review the resulting implementation, run pinned validation, update the design and main specs,
+  and archive only after all review findings are resolved.

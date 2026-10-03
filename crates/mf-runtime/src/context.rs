@@ -91,7 +91,7 @@ pub struct ExecutionContext {
     snapshots: Option<crate::SnapshotRecorder>,
     snapshot_prefix: Vec<LoopPathEntry>,
     workflow_arguments: crate::WorkflowArguments,
-    startup_inputs: BTreeMap<String, Inputs>,
+    startup_inputs_bound: bool,
     resources: std::sync::Arc<crate::ExecutionResources>,
     cancellation: crate::StreamCancellation,
     active_node: Option<String>,
@@ -109,7 +109,7 @@ impl Default for ExecutionContext {
             snapshots: None,
             snapshot_prefix: Vec::new(),
             workflow_arguments: crate::WorkflowArguments::default(),
-            startup_inputs: BTreeMap::new(),
+            startup_inputs_bound: false,
             resources: std::sync::Arc::new(crate::ExecutionResources::default()),
             cancellation: crate::StreamCancellation::default(),
             active_node: None,
@@ -185,28 +185,33 @@ impl ExecutionContext {
 
     pub fn set_workflow_arguments(&mut self, arguments: crate::WorkflowArguments) {
         self.workflow_arguments = arguments;
-        self.startup_inputs.clear();
+        self.startup_inputs_bound = false;
     }
 
     pub fn bind_workflow_inputs(
         &mut self,
         schema: &crate::WorkflowInputSchema,
     ) -> Result<(), WorkflowRunError> {
+        self.startup_inputs_bound = false;
         schema
             .validate(&self.workflow_arguments)
             .map_err(|source| WorkflowRunError::WorkflowInputs { source })?;
         schema
             .validate_resources(|node, resource| self.resources.available(node, resource))
             .map_err(|source| WorkflowRunError::WorkflowInputs { source })?;
-        self.startup_inputs = self.workflow_arguments.0.clone();
+        self.startup_inputs_bound = true;
         Ok(())
     }
 
     fn initial_inputs(&self, node: &str) -> Inputs {
-        if !self.scopes.is_empty() {
+        if !self.startup_inputs_bound || !self.scopes.is_empty() {
             return Inputs::new();
         }
-        self.startup_inputs.get(node).cloned().unwrap_or_default()
+        self.workflow_arguments
+            .0
+            .get(node)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub(super) fn set_frame_observation(&mut self, observation: RunObservation) {
