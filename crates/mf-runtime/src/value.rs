@@ -20,13 +20,39 @@ pub enum ValueKind {
     Object(BTreeMap<Arc<str>, ValueRef>),
 }
 
+pub struct ValueData {
+    kind: ValueKind,
+    heap_bytes: usize,
+}
+
 /// An immutable JSON value whose descendants are shared between versions.
-#[derive(Clone, Debug)]
-pub struct ValueRef(Arc<ValueKind>);
+#[derive(Clone)]
+pub struct ValueRef(Arc<ValueData>);
+
+const ARC_HEADER_BYTES: usize = 2 * size_of::<usize>();
+pub const VALUE_HEAP_BYTES: usize = size_of::<ValueData>() + ARC_HEADER_BYTES;
 
 impl ValueRef {
     pub fn new(kind: ValueKind) -> Self {
-        Self(Arc::new(kind))
+        let extra = match &kind {
+            ValueKind::Null | ValueKind::Bool(_) | ValueKind::Number(_) => 0,
+            ValueKind::String(value) => string_heap_bytes(value),
+            ValueKind::Array(items) => items.iter().fold(
+                items.capacity().saturating_mul(size_of::<Self>()),
+                |bytes, item| bytes.saturating_add(item.estimated_heap_bytes()),
+            ),
+            ValueKind::Object(entries) => entries.iter().fold(0usize, |bytes, (key, value)| {
+                // BTreeMap does not expose node capacity; allow two tree links per entry.
+                bytes
+                    .saturating_add(size_of::<(Arc<str>, Self)>() + 2 * size_of::<usize>())
+                    .saturating_add(string_heap_bytes(key))
+                    .saturating_add(value.estimated_heap_bytes())
+            }),
+        };
+        Self(Arc::new(ValueData {
+            kind,
+            heap_bytes: VALUE_HEAP_BYTES.saturating_add(extra),
+        }))
     }
     pub fn null() -> Self {
         Self::new(ValueKind::Null)
@@ -38,10 +64,15 @@ impl ValueRef {
         Self::new(ValueKind::Object(entries.into_iter().collect()))
     }
     pub fn kind(&self) -> &ValueKind {
-        &self.0
+        &self.0.kind
     }
-    pub(super) fn downgrade(&self) -> Weak<ValueKind> {
+    pub(super) fn downgrade(&self) -> Weak<ValueData> {
         Arc::downgrade(&self.0)
+    }
+    /// Estimated transitive heap bytes, excluding this handle and allocator overhead.
+    /// Shared children are charged per reference; clones reuse the cached estimate.
+    pub fn estimated_heap_bytes(&self) -> usize {
+        self.0.heap_bytes
     }
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
@@ -131,6 +162,14 @@ impl ValueRef {
                 }
             })
     }
+}
+
+fn string_heap_bytes(value: &str) -> usize {
+    value
+        .len()
+        .saturating_add(ARC_HEADER_BYTES)
+        .checked_next_multiple_of(align_of::<usize>())
+        .unwrap_or(usize::MAX)
 }
 
 fn unescape(segment: &str) -> Option<std::borrow::Cow<'_, str>> {
@@ -269,6 +308,11 @@ impl Index<usize> for ValueRef {
             .unwrap_or(&NULL)
     }
 }
+impl fmt::Debug for ValueRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ValueRef").field(self.kind()).finish()
+    }
+}
 impl fmt::Display for ValueRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&serde_json::to_string(self).map_err(|_| fmt::Error)?)
@@ -363,6 +407,41 @@ impl JsonView for ValueRef {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn heap_estimates_include_capacity_and_charge_shared_children_per_reference() {
+        let plain = ValueRef::from("xxxxxxxx");
+        let escaped = ValueRef::from("\n".repeat(8));
+        assert_eq!(plain.estimated_heap_bytes(), escaped.estimated_heap_bytes());
+        assert_ne!(
+            serde_json::to_vec(&plain).unwrap().len(),
+            serde_json::to_vec(&escaped).unwrap().len()
+        );
+
+        let compact = ValueRef::array([plain.clone(), plain.clone()]);
+        let mut items = Vec::with_capacity(64);
+        items.extend([plain.clone(), plain.clone()]);
+        let capacity = items.capacity();
+        let spare = ValueRef::new(ValueKind::Array(items));
+        assert_eq!(compact, spare);
+        assert_eq!(
+            spare.estimated_heap_bytes() - compact.estimated_heap_bytes(),
+            (capacity - 2) * size_of::<ValueRef>()
+        );
+        assert!(compact.estimated_heap_bytes() > 2 * plain.estimated_heap_bytes());
+        assert_eq!(
+            spare.clone().estimated_heap_bytes(),
+            spare.estimated_heap_bytes()
+        );
+
+        let object = ValueRef::object([(Arc::from("key"), spare.clone())]);
+        assert!(object.estimated_heap_bytes() > spare.estimated_heap_bytes() + 3);
+        let mut nested = plain;
+        for _ in 0..usize::BITS {
+            nested = ValueRef::array([nested.clone(), nested]);
+        }
+        assert_eq!(nested.estimated_heap_bytes(), usize::MAX);
+    }
 
     #[test]
     fn pointers_decode_escapes_and_reject_invalid_array_indices() {

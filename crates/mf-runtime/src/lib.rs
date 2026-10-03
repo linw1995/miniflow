@@ -12,6 +12,7 @@ mod snapshot;
 mod stream;
 mod stream_instance;
 mod stream_io;
+mod stream_limits;
 mod stream_plan;
 mod subgraph;
 mod value;
@@ -58,8 +59,8 @@ pub use runner::{
 };
 pub use stream::stream_input_node;
 pub use stream::{
-    BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
-    STREAM_INPUT_ID, StreamExecution, StreamLimits, StreamMode, TimerUpdate,
+    BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, MESSAGE_OVERHEAD,
+    NodeEvent, STREAM_INPUT_ID, StreamExecution, StreamLimits, StreamMode, TimerUpdate,
 };
 pub use stream_instance::{
     CompilationSnafu as StreamCompilationSnafu, MessageId, MonotonicClock, StreamClock,

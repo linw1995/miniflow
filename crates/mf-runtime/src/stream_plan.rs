@@ -14,6 +14,8 @@ pub enum StreamBuildError {
     InvalidPlan { message: String },
     #[snafu(display("invalid stream input type: {source}"), visibility(pub))]
     InputType { source: crate::TypeDepthError },
+    #[snafu(display("invalid stream resources: {source}"))]
+    Resources { source: crate::StreamError },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -120,6 +122,8 @@ impl PreparedStream {
                 ),
             }
         );
+        crate::stream_limits::StreamResources::new(&plan).context(ResourcesSnafu)?;
+
         Ok(Self { plan, event_states })
     }
 

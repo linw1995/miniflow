@@ -6,11 +6,12 @@ use crate::{StreamError, StreamInstance, StreamSummary};
 mod unix {
     use super::*;
     use crate::stream_instance::{
-        InputFailureSnafu, InputRecordSnafu, OutputEncodeSnafu, OutputWriteSnafu, StdioSnafu,
-        ThreadSpawnSnafu,
+        InputFailureSnafu, InputRecordSnafu, OutputWriteSnafu, StdioSnafu, ThreadSpawnSnafu,
     };
-    use crate::{StreamSender, ValueRef, ValueType};
+    use crate::stream_limits::encode_json;
+    use crate::{StreamLimits, StreamSender, ValueRef, ValueType};
     use snafu::{IntoError, OptionExt, ResultExt, ensure};
+
     use std::{
         fs::File,
         io::{self, Read, Write},
@@ -59,11 +60,12 @@ mod unix {
             let input = instance.input();
             let reader_input = input.clone();
             let value_type = instance.execution().input_type.clone();
+            let limits = instance.execution().limits.clone();
             let reader = thread::Builder::new()
                 .name("workflow-input".into())
                 .spawn(move || {
                     let result = catch_unwind(AssertUnwindSafe(|| {
-                        read_lines(self.input, &reader_input, &value_type)
+                        read_lines(self.input, &reader_input, &value_type, &limits)
                     }));
                     match result {
                         Ok(Ok(())) => {}
@@ -87,7 +89,12 @@ mod unix {
                     Ok(Some(delivery)) => delivery,
                     Ok(None) | Err(_) => break,
                 };
-                let result = write_record(&mut self.output, delivery.output(), &input);
+                let result = write_record(
+                    &mut self.output,
+                    delivery.output(),
+                    delivery.max_record_bytes(),
+                    &input,
+                );
                 match result {
                     Ok(()) => {
                         if delivery.acknowledge().is_err() {
@@ -155,6 +162,7 @@ mod unix {
         mut file: File,
         input: &StreamSender,
         value_type: &ValueType,
+        limits: &StreamLimits,
     ) -> Result<(), StreamError> {
         let mut chunk = [0; 8192];
         let mut record = Vec::new();
@@ -173,18 +181,24 @@ mod unix {
             };
             if read == 0 {
                 if !record.is_empty() {
-                    accept_record(&mut record, line, input, value_type)?;
+                    accept_record(&mut record, line, input, value_type, limits)?;
                 }
                 input.close();
                 return Ok(());
             }
             for &byte in &chunk[..read] {
                 if byte == b'\n' {
-                    accept_record(&mut record, line, input, value_type)?;
+                    accept_record(&mut record, line, input, value_type, limits)?;
                     line = line.checked_add(1).with_context(|| InputFailureSnafu {
                         message: format!("line {line}: line counter exhausted"),
                     })?;
                 } else {
+                    ensure!(
+                        record.len() <= limits.max_record_bytes,
+                        InputFailureSnafu {
+                            message: format!("line {line}: record exceeds max_record_bytes"),
+                        }
+                    );
                     record.push(byte);
                 }
             }
@@ -196,22 +210,33 @@ mod unix {
         line: u64,
         input: &StreamSender,
         value_type: &ValueType,
+        limits: &StreamLimits,
     ) -> Result<(), StreamError> {
         if record.last() == Some(&b'\r') {
             record.pop();
         }
+        ensure!(
+            record.len() <= limits.max_record_bytes,
+            InputFailureSnafu {
+                message: format!("line {line}: record exceeds max_record_bytes"),
+            }
+        );
         ensure!(
             !record.iter().all(u8::is_ascii_whitespace),
             InputFailureSnafu {
                 message: format!("line {line}: blank JSON Lines record"),
             }
         );
+
         let value: ValueRef = serde_json::from_slice::<serde_json::Value>(record)
             .boxed()
             .context(InputRecordSnafu { line })?
             .into();
         value_type
             .validate_shared(&value)
+            .boxed()
+            .context(InputRecordSnafu { line })?;
+        crate::stream_limits::memory_size(&value, limits.max_message_bytes)
             .boxed()
             .context(InputRecordSnafu { line })?;
         input.send(value)?;
@@ -222,9 +247,10 @@ mod unix {
     fn write_record(
         file: &mut File,
         output: &crate::StreamOutput,
+        limit: usize,
         input: &StreamSender,
     ) -> Result<(), StreamError> {
-        let mut bytes = serde_json::to_vec(&output.outputs).context(OutputEncodeSnafu)?;
+        let mut bytes = encode_json(&output.outputs, limit)?;
         bytes.push(b'\n');
         let mut remaining = bytes.as_slice();
         while !remaining.is_empty() {

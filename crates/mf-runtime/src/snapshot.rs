@@ -1,3 +1,4 @@
+use crate::value::ValueData;
 use crate::{ValueKind, ValueRef};
 use mf_telemetry::event::LoopPathEntry;
 use rpds::RedBlackTreeMapSync;
@@ -256,7 +257,7 @@ type SnapshotSink = Box<dyn FnMut(&SnapshotRecord) -> Result<(), String> + Send>
 struct Recording {
     store: SnapshotStore,
     interned: HashMap<u64, Vec<ValueId>>,
-    aliases: HashMap<usize, (Weak<ValueKind>, ValueId)>,
+    aliases: HashMap<usize, (Weak<ValueData>, ValueId)>,
     sink: Option<SnapshotSink>,
     error: Option<String>,
 }
@@ -354,7 +355,7 @@ impl Recording {
         }
         Ok(id)
     }
-    fn remember(&mut self, alias: Option<Weak<ValueKind>>, id: ValueId) {
+    fn remember(&mut self, alias: Option<Weak<ValueData>>, id: ValueId) {
         if let Some(alias) = alias {
             self.aliases.insert(alias.as_ptr() as usize, (alias, id));
         }

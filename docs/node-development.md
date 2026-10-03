@@ -199,7 +199,8 @@ Dropping an unfinished instance follows the same failure cleanup before releasin
 Limits default to 64 pending messages and four workers. Positive overrides live in `execution.limits`.
 Preparation reserves one frame slot per downstream domain; the remaining slots bound input admission.
 Each event node's pending emissions are also limited by `max_pending_messages`. A full downstream
-queue propagates pressure to input admission. Payload sizes and plugin buffers have no byte quota.
+queue propagates pressure to input admission. Additional byte quotas are described in
+[streaming byte budgets](#streaming-byte-budgets).
 
 A custom `StreamClock` must advance monotonically and wake registered instances. Deadline expiry
 makes an emission ready; downstream execution remains subject to capacity. Snapshot capture is rejected
@@ -228,3 +229,24 @@ without exposing retained values. Transport and export queues remain bounded, an
 do not change workflow results or request retries. Terminal events follow drain or failure cleanup.
 
 The current terminal launcher and snapshot recorder remain unavailable for stream mode.
+
+## Streaming byte budgets
+
+Streaming byte limits default to 1 MiB per JSON record, 1 MiB of estimated heap memory per
+publication, and 64 MiB of accounted retained memory. Positive overrides use
+`execution.limits.max_record_bytes`, `max_message_bytes`, and `max_buffered_bytes`. Preparation
+reserves bytes for message contexts, event-input handoff, and sealed emissions so admitted work can
+progress when source admission is full. These limits apply in addition to message-count and worker
+limits. `StreamMetrics` reports queued/buffered, reserved, and total accounted bytes.
+
+Event providers report estimated heap use with `EventNode::retained_bytes`, excluding returned
+emissions. Batch counts retained item heaps and vector capacity. Task outputs and retained message contexts
+are checked before publication. Temporary byte pressure blocks admission; oversized payloads and
+impossible graph reservations fail explicitly. These bounds do not measure process RSS or arbitrary
+allocations inside plugins.
+
+`ValueRef::estimated_heap_bytes` caches an estimate at construction, composing cached child sizes.
+It includes value and Arc allocations, string storage, vector capacity, and estimated tree entries.
+The outer handle belongs to its retaining container. Shared children are charged per reference;
+there is no global allocation registry. Tree node slack and allocator bookkeeping are not measured
+exactly. JSON escaping affects the record limit without changing the memory estimate.

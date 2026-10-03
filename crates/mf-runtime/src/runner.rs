@@ -6,6 +6,14 @@ use snafu::{ResultExt, Snafu};
 #[derive(Debug, Snafu)]
 pub enum WorkflowRunError {
     #[snafu(
+        display("node `{definition_id}` resource limit: {source}"),
+        visibility(pub)
+    )]
+    Resource {
+        definition_id: DefinitionId,
+        source: crate::StreamError,
+    },
+    #[snafu(
         display("node `{definition_id}` dependency `{input}`: {source}"),
         visibility(pub)
     )]

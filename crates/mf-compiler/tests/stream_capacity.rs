@@ -8,6 +8,7 @@ use mf_runtime::{
     StreamError, StreamInstance, StreamMetrics, StreamOptions, ValueRef, ValueType,
 };
 use serde_json::{Value, json};
+use snafu::ResultExt;
 use std::{
     collections::BTreeMap,
     error::Error,
@@ -228,6 +229,7 @@ fn upstream_close_waits_for_work_already_running_before_flushing_the_tail() {
         .unwrap()
         .insert("close-upstream".into(), Arc::clone(&probe));
     let mut value = definition();
+    value["execution"]["limits"] = json!({"max_message_bytes":1024, "max_buffered_bytes":10000});
     value["nodes"][0]["config"]["max_items"] = json!(100);
     value["nodes"].as_array_mut().unwrap().push(json!({"id":"slow", "kind":"test.capacity_sink", "config":{"key":"close-upstream", "block":true}}));
     value["edges"][0]["from_node"] = json!("slow");
@@ -248,6 +250,7 @@ fn upstream_close_waits_for_work_already_running_before_flushing_the_tail() {
             Err(error) => panic!("unexpected admission failure: {error}"),
         }
     }
+    assert!(instance.metrics().accounted_bytes <= 10000);
     instance.close_input();
     assert_eq!(instance.summary().emitted_messages, 0);
     probe.release();
@@ -292,6 +295,7 @@ fn input_failure_discards_a_partial_buffer_and_wakes_a_blocked_producer() {
     let input = instance.input();
     input.send(json!(1)).unwrap();
     wait_until(|| instance.summary().completed_frames == 1);
+    assert!(instance.metrics().queued_and_buffered_bytes > 0);
     assert!(matches!(
         instance.input().send(json!("invalid")),
         Err(StreamError::Input { .. })
@@ -498,4 +502,178 @@ fn final_output_failure_is_reported_before_the_instance_can_complete() {
             .to_string()
             .contains("before acknowledgement")
     );
+}
+
+#[test]
+fn a_slow_consumer_backpressures_admission_and_keeps_accounted_bytes_bounded() {
+    let mut value = definition();
+    value["execution"]["limits"] = json!({"max_message_bytes":256, "max_buffered_bytes":4096});
+    value["nodes"][0]["config"]["max_items"] = json!(1);
+    let instance = start(value, Arc::new(Clock::default()));
+    let input = instance.input();
+    input.send(json!(0)).unwrap();
+    wait_until(|| instance.summary().completed_frames == 2);
+    let mut accepted = 1;
+    loop {
+        assert!(accepted < 100, "output pressure did not reach admission");
+        let item: ValueRef = json!(accepted).into();
+        match input.try_send(&item) {
+            Ok(()) => accepted += 1,
+            Err(StreamError::Capacity) => break,
+            Err(error) => panic!("unexpected admission failure: {error}"),
+        }
+    }
+    let metrics = instance.metrics();
+    assert!(
+        metrics.pending_frames < 64,
+        "byte capacity should be reached before the frame limit"
+    );
+    assert!(metrics.accounted_bytes <= 4096, "{metrics:?}");
+    input.close();
+    for expected in 0..accepted {
+        assert_eq!(
+            instance.recv().unwrap().unwrap().outputs["batch"],
+            json!([expected])
+        );
+        assert!(instance.metrics().accounted_bytes <= 4096);
+    }
+    assert!(instance.recv().unwrap().is_none());
+    assert_eq!(instance.metrics(), StreamMetrics::default());
+    assert_eq!(instance.join().unwrap().accepted_inputs, accepted);
+}
+
+#[test]
+fn byte_reserves_and_oversized_payloads_fail_explicitly() {
+    let mut value = definition();
+    value["execution"]["limits"] = json!({"max_message_bytes":256, "max_buffered_bytes":1024});
+    let error = prepare(value).unwrap_err().to_string();
+    assert!(error.contains("reserve"), "{error}");
+
+    let mut value = definition();
+    value["execution"]["input_type"] = json!("array");
+    value["execution"]["limits"] =
+        json!({"max_record_bytes":64, "max_message_bytes":256, "max_buffered_bytes":8192});
+    let instance = start(value, Arc::new(Clock::default()));
+    let value = ValueRef::new(mf_runtime::ValueKind::Array(Vec::with_capacity(64)));
+    assert_eq!(serde_json::to_vec(&value).unwrap(), b"[]");
+    assert!(matches!(
+        instance.input().send(value),
+        Err(StreamError::MemorySize { .. })
+    ));
+    assert_eq!(instance.summary().accepted_inputs, 0);
+    assert!(instance.join().is_err());
+
+    let mut value = definition();
+    value["execution"]["input_type"] = json!("string");
+    value["execution"]["limits"] =
+        json!({"max_record_bytes":64, "max_message_bytes":256, "max_buffered_bytes":8192});
+    let instance = start(value.clone(), Arc::new(Clock::default()));
+    assert!(matches!(
+        instance.input().send(json!("x".repeat(257))),
+        Err(StreamError::MemorySize { .. })
+    ));
+    assert_eq!(instance.summary().accepted_inputs, 0);
+    assert!(instance.join().is_err());
+
+    let instance = start(value, Arc::new(Clock::default()));
+    instance.input().send(json!("x".repeat(40))).unwrap();
+    instance.input().send(json!("y".repeat(40))).unwrap();
+    instance.close_input();
+    let error = instance.recv().unwrap_err().to_string();
+    assert!(
+        error.contains("collect") && error.contains("byte limit"),
+        "{error}"
+    );
+    assert!(instance.join().is_err());
+}
+
+struct Spill;
+struct Literal;
+impl mf_runtime::TaskNode for Literal {
+    fn execute(
+        &self,
+        _: Inputs,
+        _ctx: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
+        Ok((Outputs::from([("value".into(), json!(1).into())])).into())
+    }
+}
+impl mf_runtime::TaskNode for Spill {
+    fn execute(
+        &self,
+        _: Inputs,
+        context: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
+        for index in 0..10 {
+            let node = mf_runtime::FlowNode::new(
+                format!("extra_{index}"),
+                mf_runtime::PreparedNode::new(
+                    Literal,
+                    mf_runtime::NodePorts {
+                        inputs: Vec::new(),
+                        outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
+                    },
+                ),
+            )
+            .into_task()
+            .unwrap();
+            mf_runtime::execute_node_in_context(&node, &[], context)
+                .boxed()
+                .context(mf_runtime::NodePluginFailedSnafu)?;
+        }
+        Ok(Outputs::from([("value".into(), json!(1).into())]).into())
+    }
+}
+inventory::submit! {
+    NodeRegistration {
+        kind: "test.spill",
+        factory: mf_runtime::NodeFactory::Plain(|_| {
+            Ok(mf_runtime::PreparedNode::new(
+                Spill,
+                mf_runtime::NodePorts {
+                        inputs: vec![],
+                        outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
+                    },
+            ))
+        }),
+    }
+}
+
+#[test]
+fn ordinary_outputs_and_extra_context_bindings_are_limited_before_downstream_work() {
+    for node in [
+        json!({"id":"producer", "kind":"builtin.constant", "config":{"value":"x".repeat(257)}}),
+        json!({"id":"producer", "kind":"test.spill"}),
+    ] {
+        let value = json!({
+            "version":"2026-10-02", "execution":{"mode":"stream", "input_type":"int", "limits":{"max_message_bytes":256, "max_buffered_bytes":8192}},
+            "dependencies":{}, "nodes":[
+                {"id":"before", "kind":"builtin.identity"}, node,
+                {"id":"after", "kind":"builtin.identity"}
+            ],
+            "edges":[
+                {"from_node":"%input", "from_output":"item", "to_node":"before", "to_input":"input"},
+                {"from_node":"producer", "from_output":"value", "to_node":"after", "to_input":"input"}
+            ],
+            "control_edges":[{"from_node":"before", "from_output":"value", "to_node":"producer"}],
+            "outputs":[{"name":"result", "node":"after", "port":"value"}]
+        });
+        let instance = start(value, Arc::new(Clock::default()));
+        instance.input().send(json!(1)).unwrap();
+        instance.close_input();
+        let error = instance.recv().unwrap_err();
+        let StreamError::Workflow { source, .. } = &error else {
+            panic!("expected a workflow error: {error}");
+        };
+        assert!(
+            snafu::ChainCompat::new(source.as_ref() as &(dyn Error + 'static)).any(
+                |cause| matches!(
+                    cause.downcast_ref::<mf_runtime::WorkflowRunError>(),
+                    Some(mf_runtime::WorkflowRunError::Resource { .. })
+                )
+            )
+        );
+        assert!(error.to_string().contains("producer"), "{error}");
+        assert!(instance.join().is_err());
+    }
 }

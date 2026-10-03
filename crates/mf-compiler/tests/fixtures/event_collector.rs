@@ -48,6 +48,13 @@ impl EventNode for Collector {
             timer: TimerUpdate::Cancel,
         })
     }
+
+    fn retained_bytes(&self) -> usize {
+        self.values.iter().fold(
+            self.values.capacity().saturating_mul(size_of::<ValueRef>()),
+            |bytes, value| bytes.saturating_add(value.estimated_heap_bytes()),
+        )
+    }
 }
 
 fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
