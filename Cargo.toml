@@ -10,9 +10,64 @@ license = "Apache-2.0"
 repository = "https://github.com/linw1995/miniflow"
 
 [workspace.dependencies]
+# Keep versions and default-feature policy here; crates select features and optionality.
+
+# Workspace crates.
 mf-compiler = { path = "crates/mf-compiler", version = "0.1.0" }
 mf-runtime = { path = "crates/mf-runtime", version = "0.1.0" }
 mf-telemetry = { path = "crates/mf-telemetry", version = "0.1.0", default-features = false }
 mf-tui = { path = "crates/mf-tui", version = "0.1.0" }
-mfn-core = { path = "crates/builtin-nodes/core", version = "0.1.0" }
 mfn-code = { path = "crates/builtin-nodes/code", version = "0.1.0" }
+mfn-core = { path = "crates/builtin-nodes/core", version = "0.1.0" }
+
+# Serialization and error reporting.
+serde = "1.0.229"
+serde_json = "1.0.151"
+snafu = "0.9.2"
+
+# Node registration, expressions, and persistent runtime state.
+cel-core = "=0.5.1"
+inventory = "0.3.24"
+rpds = "1.2.1"
+
+# Rust code generation.
+prettyplease = "0.3.0"
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
+syn = { version = "3.0.6", default-features = false }
+
+# Telemetry APIs, exporters, and protobuf messages.
+opentelemetry = { version = "0.33.0", default-features = false }
+opentelemetry-otlp = { version = "0.33.0", default-features = false }
+opentelemetry-proto = { version = "0.33.0", default-features = false }
+opentelemetry_sdk = { version = "0.33.0", default-features = false }
+prost = "0.14.4"
+
+# Async execution and HTTP transport.
+http-body-util = "0.1.5"
+hyper = { version = "1.11.1", default-features = false }
+hyper-util = { version = "0.1.21", default-features = false }
+reqwest = { version = "0.13.5", default-features = false }
+tokio = { version = "1.53.1", default-features = false }
+
+# Command parsing, terminal rendering, and graph layout.
+clap = "4.6.7"
+crossterm = "0.29.0"
+ratatui = { version = "0.30.2", default-features = false }
+rust-sugiyama = "0.4.0"
+
+# Process control, signals, and terminal I/O.
+libc = "0.2.189"
+nix = "0.31.3"
+process-wrap = { version = "10.0.1", default-features = false }
+rustix = "1.1.5"
+signal-hook = "0.3.18"
+
+# Content hashes and run identifiers.
+sha2 = "0.11.0"
+uuid = "1.26.1"
+
+# Package archives and temporary files.
+flate2 = "1.1.10"
+tar = "0.4.46"
+tempfile = "3.27.0"

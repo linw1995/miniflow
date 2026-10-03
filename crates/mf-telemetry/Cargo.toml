@@ -12,15 +12,21 @@ snapshot = ["dep:opentelemetry-proto", "dep:prost"]
 otlp = ["snapshot", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:reqwest"]
 
 [dependencies]
-opentelemetry = { version = "0.33.0", default-features = false, features = ["logs", "trace"] }
-opentelemetry_sdk = { version = "0.33.0", default-features = false, features = ["logs", "trace"], optional = true }
-opentelemetry-otlp = { version = "0.33.0", default-features = false, features = ["logs", "trace", "http-proto", "reqwest-blocking-client"], optional = true }
-reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls"], optional = true }
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-sha2 = "0.11.0"
-snafu = "0.9.2"
-uuid = { version = "1.26.1", features = ["v4", "serde"] }
+# Observation APIs and wire contracts.
+opentelemetry = { workspace = true, features = ["logs", "trace"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+snafu.workspace = true
 
-opentelemetry-proto = { version = "0.33.0", default-features = false, features = ["gen-tonic-messages", "logs"], optional = true }
-prost = { version = "0.14.4", optional = true }
+# Workflow hashes, snapshot integrity, and run identifiers.
+sha2.workspace = true
+uuid = { workspace = true, features = ["v4", "serde"] }
+
+# Snapshot protobuf encoding, enabled by the snapshot feature.
+opentelemetry-proto = { workspace = true, features = ["gen-tonic-messages", "logs"], optional = true }
+prost = { workspace = true, optional = true }
+
+# OTLP export over HTTPS, enabled by the otlp feature.
+opentelemetry-otlp = { workspace = true, features = ["logs", "trace", "http-proto", "reqwest-blocking-client"], optional = true }
+opentelemetry_sdk = { workspace = true, features = ["logs", "trace"], optional = true }
+reqwest = { workspace = true, features = ["blocking", "rustls"], optional = true }

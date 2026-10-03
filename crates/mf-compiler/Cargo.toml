@@ -15,20 +15,30 @@ name = "benchmark_graph"
 required-features = ["codegen"]
 
 [dependencies]
+# Runtime contracts and workflow observation.
 mf-runtime.workspace = true
 mf-telemetry.workspace = true
-prettyplease = { version = "0.3.0", optional = true }
-proc-macro2 = { version = "1.0.107", optional = true }
-quote = { version = "1.0.47", optional = true }
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-snafu = "0.9.2"
-syn = { version = "3.0.6", default-features = false, features = ["full", "parsing", "printing"], optional = true }
+
+# Rust source generation, enabled by the codegen feature.
+prettyplease = { workspace = true, optional = true }
+proc-macro2 = { workspace = true, optional = true }
+quote = { workspace = true, optional = true }
+syn = { workspace = true, features = ["full", "parsing", "printing"], optional = true }
+
+# Workflow definitions, compiled plans, and diagnostics.
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+snafu.workspace = true
 
 [dev-dependencies]
-opentelemetry = { version = "0.33.0", default-features = false, features = ["logs", "trace"] }
-opentelemetry_sdk = { version = "0.33.0", default-features = false, features = ["logs", "trace", "testing"] }
-mfn-core.workspace = true
+# Built-in nodes and test node registration.
+inventory.workspace = true
 mfn-code.workspace = true
-inventory = "0.3.24"
-tempfile = "3.27.0"
+mfn-core.workspace = true
+
+# Observation assertions and tracing examples.
+opentelemetry = { workspace = true, features = ["logs", "trace"] }
+opentelemetry_sdk = { workspace = true, features = ["logs", "trace", "testing"] }
+
+# Isolated generated projects and build artifacts.
+tempfile.workspace = true
