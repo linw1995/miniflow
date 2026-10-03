@@ -92,11 +92,11 @@ pub enum StreamError {
     },
     #[snafu(display("stream resource limit: {message}"), visibility(pub))]
     Resource { message: String },
-    #[snafu(display("stream resource limit: {source}"), visibility(pub))]
-    PayloadSize {
-        #[snafu(source(from(serde_json::Error, Arc::new)))]
-        source: Arc<serde_json::Error>,
-    },
+    #[snafu(
+        display("stream resource limit: encoded payload exceeds its byte limit ({limit} bytes)"),
+        visibility(pub)
+    )]
+    PayloadSize { limit: usize },
     #[snafu(display("stream resource limit: {message}: {source}"))]
     ResourceContext {
         message: String,

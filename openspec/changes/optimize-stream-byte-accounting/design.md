@@ -19,11 +19,11 @@ line-size checks, resource-error classification, and acknowledged delivery behav
 
 ## Incremental context accounting
 
-Each tracked binding records its byte charge, and its context records their total. Publication
-validates a tentative total by removing replaced charges and adding new values or skip markers,
-then commits the values and accounting together. It does not scan unchanged outputs. Scope guards
-save and restore accounting with the output map; untracked synchronous scopes do not inherit a
-frame's byte ledger. Every task publication remains checked before downstream execution.
+A frame budget records the retained-byte total alongside its limits. Publication removes replaced
+payload charges using cached value lengths, retains existing key charges, and adds new bindings.
+It validates the tentative total before committing values and accounting together, without scanning
+unchanged outputs or maintaining a second binding map. Scope guards save and restore the budget
+with the output map. Every task publication remains checked before downstream execution.
 
 Queued emissions retain the context already prepared for validation. Promotion attaches frame limits
 and observation while retaining the existing credit reservation and message-sequence ordering.

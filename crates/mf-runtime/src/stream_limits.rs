@@ -1,4 +1,7 @@
-use crate::stream_instance::{PayloadSizeSnafu, PreparationSnafu, ResourceSnafu};
+use crate::stream_instance::{
+    OutputEncodeSnafu, PayloadSizeSnafu, PreparationSnafu, ResourceSnafu,
+};
+use crate::value::json_string_len;
 use crate::{MESSAGE_OVERHEAD, Outputs, StreamError, StreamPlan, ValueRef, ValueType, output_id};
 use serde::Serialize;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -174,7 +177,12 @@ fn type_bound(ty: &ValueType, limit: usize) -> usize {
 }
 
 pub fn binding_bytes(name: &str) -> Result<usize, StreamError> {
-    add(MESSAGE_OVERHEAD, encoded_size(&name, usize::MAX)?)
+    add(
+        MESSAGE_OVERHEAD,
+        json_string_len(name, usize::MAX).context(ResourceSnafu {
+            message: "byte accounting overflow",
+        })?,
+    )
 }
 
 pub fn output_bytes(outputs: &Outputs, limit: usize) -> Result<usize, StreamError> {
@@ -196,37 +204,90 @@ pub fn add(left: usize, right: usize) -> Result<usize, StreamError> {
     })
 }
 
-pub fn encoded_size(value: &impl Serialize, limit: usize) -> Result<usize, StreamError> {
-    struct Counter {
-        length: usize,
+pub fn encoded_size(value: &ValueRef, limit: usize) -> Result<usize, StreamError> {
+    value.json_len(limit).context(PayloadSizeSnafu { limit })
+}
+
+pub fn encode_json(value: &impl Serialize, limit: usize) -> Result<Vec<u8>, StreamError> {
+    struct Buffer {
+        bytes: Vec<u8>,
         limit: usize,
+        exceeded: bool,
     }
-    impl Write for Counter {
+    impl Write for Buffer {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            let length = self
-                .length
+            if self
+                .bytes
+                .len()
                 .checked_add(bytes.len())
-                .filter(|length| *length <= self.limit)
-                .ok_or_else(|| io::Error::other("encoded payload exceeds its byte limit"))?;
-            self.length = length;
+                .is_none_or(|length| length > self.limit)
+            {
+                self.exceeded = true;
+                return Err(io::Error::other("encoded payload exceeds its byte limit"));
+            }
+            self.bytes.extend_from_slice(bytes);
             Ok(bytes.len())
         }
         fn flush(&mut self) -> io::Result<()> {
             Ok(())
         }
     }
-    let mut counter = Counter { length: 0, limit };
-    serde_json::to_writer(&mut counter, value).context(PayloadSizeSnafu)?;
-    Ok(counter.length)
+    let mut buffer = Buffer {
+        bytes: Vec::new(),
+        limit,
+        exceeded: false,
+    };
+    let result = serde_json::to_writer(&mut buffer, value);
+    ensure!(!buffer.exceeded, PayloadSizeSnafu { limit });
+    result.context(OutputEncodeSnafu)?;
+    Ok(buffer.bytes)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::encoded_size;
+    use super::{encode_json, encoded_size};
+    use crate::{StreamError, ValueRef};
+    use serde::Serialize;
+    use std::cell::Cell;
 
     #[test]
     fn counts_encoded_values_up_to_the_limit() {
-        assert_eq!(encoded_size(&"hello", 7).unwrap(), 7);
-        assert!(encoded_size(&"hello", 6).is_err());
+        let value = ValueRef::from("hello");
+        assert_eq!(encoded_size(&value, 7).unwrap(), 7);
+        assert!(matches!(
+            encoded_size(&value, 6),
+            Err(StreamError::PayloadSize { limit: 6 })
+        ));
+    }
+
+    #[test]
+    fn output_encoding_is_single_pass_and_bounded() {
+        struct Record<'a>(&'a Cell<usize>);
+        impl Serialize for Record<'_> {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                self.0.set(self.0.get() + 1);
+                serializer.serialize_str("hello")
+            }
+        }
+        let calls = Cell::new(0);
+        let record = Record(&calls);
+        assert_eq!(encode_json(&record, 7).unwrap(), br#""hello""#);
+        assert_eq!(calls.get(), 1);
+        assert!(matches!(
+            encode_json(&record, 6),
+            Err(StreamError::PayloadSize { limit: 6 })
+        ));
+        assert_eq!(calls.get(), 2);
+
+        struct Invalid;
+        impl Serialize for Invalid {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("invalid output"))
+            }
+        }
+        let error = encode_json(&Invalid, 64).unwrap_err();
+        assert!(
+            matches!(&error, StreamError::OutputEncode { source } if source.to_string() == "invalid output")
+        );
     }
 }

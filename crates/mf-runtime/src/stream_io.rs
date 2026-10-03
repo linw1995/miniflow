@@ -6,9 +6,9 @@ use crate::{StreamError, StreamInstance, StreamSummary};
 mod unix {
     use super::*;
     use crate::stream_instance::{
-        InputFailureSnafu, InputRecordSnafu, OutputEncodeSnafu, OutputWriteSnafu, StdioSnafu,
-        ThreadSpawnSnafu,
+        InputFailureSnafu, InputRecordSnafu, OutputWriteSnafu, StdioSnafu, ThreadSpawnSnafu,
     };
+    use crate::stream_limits::encode_json;
     use crate::{StreamSender, ValueRef, ValueType, encoded_size};
     use snafu::{IntoError, OptionExt, ResultExt, ensure};
 
@@ -250,8 +250,7 @@ mod unix {
         limit: usize,
         input: &StreamSender,
     ) -> Result<(), StreamError> {
-        encoded_size(&output.outputs, limit)?;
-        let mut bytes = serde_json::to_vec(&output.outputs).context(OutputEncodeSnafu)?;
+        let mut bytes = encode_json(&output.outputs, limit)?;
         bytes.push(b'\n');
         let mut remaining = bytes.as_slice();
         while !remaining.is_empty() {
