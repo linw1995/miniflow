@@ -8,6 +8,7 @@ mod number;
 mod registry;
 mod runner;
 mod snapshot;
+mod stream;
 mod subgraph;
 mod value;
 
@@ -22,7 +23,9 @@ pub use definition::{
     MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition, NodeDependency, WorkflowDefinition,
     WorkflowDefinitionVersion, WorkflowOutputDefinition,
 };
-pub use flow::{Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowOutputs, NodeId};
+pub use flow::{
+    Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowOutputs, NodeId, TaskFlowNode,
+};
 pub use iteration::{
     ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
     IterationConfig, IterationErrorPolicy, IterationMode, IterationResultDefinition,
@@ -35,9 +38,9 @@ pub use loop_node::{
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
 pub use node::{
-    ContextReference, Inputs, NodeBuildError, NodeExecutionError, NodeFactory, NodeMetadata,
-    NodePorts, NodeRegistration, OutputDerivation, OutputDerivationError, Outputs, PortSpec,
-    PreparedNode, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, ValueType,
+    ContextReference, Inputs, NodeBuildError, NodeExecution, NodeExecutionError, NodeFactory,
+    NodeMetadata, NodePorts, NodeRegistration, OutputDerivation, OutputDerivationError, Outputs,
+    PortSpec, PreparedNode, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, ValueType,
     deserialize_config, output_id,
 };
 pub use number::compare_json_numbers;
@@ -45,6 +48,7 @@ pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::{
     WorkflowRunError, instantiate_node_with_metadata, instantiate_subgraph_with_metadata,
 };
+pub use stream::{EventContext, EventEffects, EventEmission, EventNode, NodeEvent, TimerUpdate};
 pub use subgraph::PreparedSubgraph;
 
 pub use value::{ValueKind, ValueRef};

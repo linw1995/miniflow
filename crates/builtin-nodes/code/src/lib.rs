@@ -461,7 +461,9 @@ mod tests {
         }))
         .unwrap();
         let outputs = node
-            .task
+            .execution
+            .as_task_node()
+            .expect("expected task execution")
             .execute(
                 Inputs::from([
                     ("amount".into(), json!(21).into()),
@@ -507,7 +509,9 @@ mod tests {
             ),
         ] {
             let error = node
-                .task
+                .execution
+                .as_task_node()
+                .expect("expected task execution")
                 .execute(inputs, &mut mf_runtime::ExecutionContext::default())
                 .unwrap_err()
                 .to_string();
@@ -520,7 +524,9 @@ mod tests {
         }))
         .unwrap();
         let error = int_node
-            .task
+            .execution
+            .as_task_node()
+            .expect("expected task execution")
             .execute(
                 Inputs::from([("amount".into(), json!(u64::MAX).into())]),
                 &mut mf_runtime::ExecutionContext::default(),
@@ -539,7 +545,9 @@ mod tests {
         }))
         .unwrap();
         let error = node
-            .task
+            .execution
+            .as_task_node()
+            .expect("expected task execution")
             .execute(
                 Inputs::from([("divisor".into(), json!(0).into())]),
                 &mut mf_runtime::ExecutionContext::default(),
@@ -569,7 +577,9 @@ mod tests {
         }))
         .unwrap();
         let error = node
-            .task
+            .execution
+            .as_task_node()
+            .expect("expected task execution")
             .execute(
                 Inputs::from([(
                     "payload".into(),
@@ -581,7 +591,9 @@ mod tests {
             .to_string();
         assert!(error.contains("inputs exceed"), "{error}");
         let error = node
-            .task
+            .execution
+            .as_task_node()
+            .expect("expected task execution")
             .execute(
                 Inputs::from([("payload".into(), json!("x".repeat(600_000)).into())]),
                 &mut mf_runtime::ExecutionContext::default(),
@@ -597,7 +609,9 @@ mod tests {
         }))
         .unwrap();
         let error = node
-            .task
+            .execution
+            .as_task_node()
+            .expect("expected task execution")
             .execute(
                 Inputs::from([("items".into(), json!(vec![1; 4_000]).into())]),
                 &mut mf_runtime::ExecutionContext::default(),
@@ -633,13 +647,17 @@ mod tests {
             let exact = payload(MAX_JSON_BYTES - overhead);
             let inputs = Inputs::from([(input.into(), exact.clone().into())]);
             let outputs = node
-                .task
+                .execution
+                .as_task_node()
+                .expect("expected task execution")
                 .execute(inputs, &mut mf_runtime::ExecutionContext::default())
                 .unwrap()
                 .outputs;
             assert_eq!(outputs[output].as_str(), Some(exact.as_str()));
             let error = node
-                .task
+                .execution
+                .as_task_node()
+                .expect("expected task execution")
                 .execute(
                     Inputs::from([(input.into(), format!("{exact}x").into())]),
                     &mut mf_runtime::ExecutionContext::default(),

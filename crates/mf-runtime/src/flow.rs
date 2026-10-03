@@ -27,20 +27,35 @@ impl From<usize> for NodeId {
     }
 }
 
-pub struct FlowNode {
+pub struct FlowNode<N = crate::NodeExecution> {
     /// The definition-facing node ID, retained for diagnostics.
     pub definition_id: DefinitionId,
-    pub node: Box<dyn TaskNode>,
+    pub node: N,
     pub metadata: NodeMetadata,
 }
+
+pub type TaskFlowNode = FlowNode<Box<dyn TaskNode>>;
 
 impl FlowNode {
     pub fn new(definition_id: impl Into<DefinitionId>, prepared: PreparedNode) -> Self {
         Self {
             definition_id: definition_id.into(),
             metadata: prepared.metadata,
-            node: prepared.task,
+            node: prepared.execution,
         }
+    }
+
+    pub fn into_task(self) -> Result<TaskFlowNode, FlowBuildError> {
+        let Some(task) = self.node.into_task_node() else {
+            return Err(FlowBuildError::NonTaskNode {
+                definition_id: self.definition_id,
+            });
+        };
+        Ok(FlowNode {
+            definition_id: self.definition_id,
+            metadata: self.metadata,
+            node: task,
+        })
     }
 }
 
@@ -96,6 +111,8 @@ pub type FlowOutputs = crate::Outputs;
 
 #[derive(Debug, Snafu)]
 pub enum FlowBuildError {
+    #[snafu(display("node `{definition_id}` cannot execute in a synchronous flow"))]
+    NonTaskNode { definition_id: DefinitionId },
     #[snafu(display("execution plan entry {position} references unknown node `{definition_id}`"))]
     UnknownNodeInExecutionOrder {
         definition_id: DefinitionId,
@@ -160,8 +177,8 @@ pub enum FlowBuildError {
     },
 }
 
-pub struct Flow {
-    nodes: Vec<FlowNode>,
+pub struct Flow<N = Box<dyn TaskNode>> {
+    nodes: Vec<FlowNode<N>>,
     connections: Vec<FlowConnection>,
     dependencies: Vec<Vec<PreparedDependency>>,
     execution_order: Vec<NodeId>,
@@ -186,10 +203,38 @@ impl PreparedDependency {
     }
 }
 
+impl Flow<crate::NodeExecution> {
+    pub fn into_tasks(self) -> Result<Flow, FlowBuildError> {
+        Ok(Flow {
+            nodes: self
+                .nodes
+                .into_iter()
+                .map(FlowNode::into_task)
+                .collect::<Result<_, _>>()?,
+            connections: self.connections,
+            dependencies: self.dependencies,
+            execution_order: self.execution_order,
+            outputs: self.outputs,
+            controls: self.controls,
+        })
+    }
+}
+
 impl Flow {
-    /// Resolves definition IDs into runtime node indices and validates the flow.
     pub fn new(
         nodes: Vec<FlowNode>,
+        connections: Vec<EdgeDefinition>,
+        execution_order: Vec<DefinitionId>,
+        outputs: Vec<WorkflowOutputDefinition>,
+    ) -> Result<Self, FlowBuildError> {
+        Flow::prepare(nodes, connections, execution_order, outputs)?.into_tasks()
+    }
+}
+
+impl<N> Flow<N> {
+    /// Validates graph structure while retaining ownership of each prepared execution kind.
+    pub fn prepare(
+        nodes: Vec<FlowNode<N>>,
         connections: Vec<EdgeDefinition>,
         execution_order: Vec<DefinitionId>,
         outputs: Vec<WorkflowOutputDefinition>,
@@ -396,10 +441,6 @@ impl Flow {
         self.dependencies = incoming;
     }
 
-    pub fn node(&self, id: &NodeId) -> Option<&dyn TaskNode> {
-        self.nodes.get(id.index()).map(|node| node.node.as_ref())
-    }
-
     pub fn definition_node_id(&self, id: &NodeId) -> Option<&str> {
         self.nodes
             .get(id.index())
@@ -416,6 +457,12 @@ impl Flow {
 
     pub fn execution_order(&self) -> &[NodeId] {
         &self.execution_order
+    }
+}
+
+impl Flow {
+    pub fn node(&self, id: &NodeId) -> Option<&dyn TaskNode> {
+        self.nodes.get(id.index()).map(|node| node.node.as_ref())
     }
 
     pub fn execute(&self) -> Result<FlowOutputs, crate::WorkflowRunError> {

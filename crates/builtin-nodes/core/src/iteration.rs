@@ -248,7 +248,7 @@ mod tests {
                 {
                     let active = Arc::clone(&active);
                     let peak = Arc::clone(&peak);
-                    let source = mf_runtime::iteration_input_flow_node();
+                    let source = mf_runtime::iteration_input_flow_node().into_task().unwrap();
                     move |state| {
                         execute_node_in_context(&source, &[], state)?;
                         let item = state

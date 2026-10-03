@@ -31,12 +31,16 @@ mod tests {
                 .instantiate(json!({}))
                 .unwrap();
             let produced = constant
-                .task
+                .execution
+                .as_task_node()
+                .expect("expected task execution")
                 .execute(Inputs::new(), &mut mf_runtime::ExecutionContext::default())
                 .unwrap()
                 .outputs;
             let result = identity
-                .task
+                .execution
+                .as_task_node()
+                .expect("expected task execution")
                 .execute(
                     Inputs::from([("input".into(), produced["value"].clone())]),
                     &mut mf_runtime::ExecutionContext::default(),
