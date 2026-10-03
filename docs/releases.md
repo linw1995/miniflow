@@ -6,6 +6,11 @@ A distributed CLI resolves exact-version `mf-runtime` and `mf-compiler` packages
 
 The refined port-type API changes `ValueType` from `Copy` to `Clone` and enforces declared output types during execution. Publish matching runtime and compiler versions before rebuilding node packages; review plugin port declarations before distributing runners built with the new runtime.
 
+The Iteration body source renames `items` to `item` without a compatibility alias. This is a breaking change to
+the runtime and built-in node contracts and must be published with a breaking dependency version update.
+Release the CLI, runtime, compiler, and built-in node packages together, and migrate body references when upgrading.
+Existing compiled runners retain their behavior; rebuilding old definitions requires their original CLI and package versions.
+
 ## Verify packages through nextest
 
 ```sh

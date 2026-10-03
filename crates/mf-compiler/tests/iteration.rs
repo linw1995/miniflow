@@ -99,7 +99,7 @@ fn definition(items: Value, mode: &str, on_error: &str) -> Value {
                 "body":{
                     "nodes":[{"id":"map","kind":"test.iteration_map"}],
                     "edges":[
-                        {"from_node":"%iteration","from_output":"items","to_node":"map","to_input":"item"},
+                        {"from_node":"%iteration","from_output":"item","to_node":"map","to_input":"item"},
                         {"from_node":"%iteration","from_output":"index","to_node":"map","to_input":"index"}
                     ],
                     "result":{"node":"map","port":"value"}
@@ -135,19 +135,106 @@ fn iteration_collects_values_in_input_order_and_isolates_item_contexts() {
 }
 
 #[test]
+fn iteration_collects_map_values_in_key_order() {
+    for mode in ["sequential", "parallel"] {
+        assert_eq!(
+            execute(definition(
+                json!({"2": 2, "a": 3, "10": 1}),
+                mode,
+                "terminate"
+            ))
+            .unwrap(),
+            json!({"results": [2, 5, 8]})
+        );
+        for on_error in ["terminate", "continue_on_error", "remove_failed"] {
+            assert_eq!(
+                execute(definition(json!({}), mode, on_error)).unwrap(),
+                json!({"results": []})
+            );
+        }
+    }
+}
+
+#[test]
+fn iteration_binds_map_keys_values_and_indices_in_each_body() {
+    for mode in ["sequential", "parallel"] {
+        let mut value = definition(json!({"2": 3, "a/~": 4, "10": 2, "": 1}), mode, "terminate");
+        let body = &mut value["nodes"][1]["config"]["body"];
+        body["nodes"][0] = json!({
+            "id": "map", "kind": "builtin.code",
+            "config": {
+                "language": "cel",
+                "inputs": {"item": "int", "index": "int", "key": "string"},
+                "code": {"value": "key + ':' + string(item * 2 + index)"}
+            }
+        });
+        body["edges"].as_array_mut().unwrap().push(json!({
+            "from_node": "%iteration", "from_output": "key", "to_node": "map", "to_input": "key"
+        }));
+        assert_eq!(
+            execute(value).unwrap(),
+            json!({"results": [":2", "10:5", "2:8", "a/~:11"]})
+        );
+    }
+}
+
+#[test]
+fn iteration_exposes_null_keys_for_arrays_and_preserves_mixed_map_values() {
+    for mode in ["sequential", "parallel"] {
+        for (items, port, expected) in [
+            (json!([1, 2]), "key", json!([null, null])),
+            (
+                json!({"c": {"nested": [2]}, "a": null, "b": true}),
+                "item",
+                json!([null, true, {"nested": [2]}]),
+            ),
+            (json!({"b": 2, "a": 1}), "key", json!(["a", "b"])),
+        ] {
+            let mut value = definition(items, mode, "terminate");
+            value["nodes"][1]["config"]["body"] = json!({
+                "nodes": [], "result": {"node": "%iteration", "port": port}
+            });
+            assert_eq!(execute(value).unwrap(), json!({"results": expected}));
+        }
+    }
+}
+
+#[test]
 fn iteration_error_policies_preserve_positions_or_remove_failures() {
     for mode in ["sequential", "parallel"] {
-        let input = json!([1, 0, 3]);
-        let error = execute(definition(input.clone(), mode, "terminate")).unwrap_err();
-        assert!(error.contains("iteration item 1") && error.contains("zero is not accepted"));
-        assert_eq!(
-            execute(definition(input.clone(), mode, "continue_on_error")).unwrap(),
-            json!({"results":[2, null, 8]})
-        );
-        assert_eq!(
-            execute(definition(input, mode, "remove_failed")).unwrap(),
-            json!({"results":[2, 8]})
-        );
+        for input in [json!([1, 0, 3]), json!({"c": 3, "a": 1, "b": 0})] {
+            let error = execute(definition(input.clone(), mode, "terminate")).unwrap_err();
+            assert!(error.contains("iteration item 1") && error.contains("zero is not accepted"));
+            assert_eq!(
+                execute(definition(input.clone(), mode, "continue_on_error")).unwrap(),
+                json!({"results":[2, null, 8]})
+            );
+            assert_eq!(
+                execute(definition(input, mode, "remove_failed")).unwrap(),
+                json!({"results":[2, 8]})
+            );
+        }
+    }
+}
+
+#[test]
+fn iteration_rejects_scalar_inputs_under_every_error_policy() {
+    for mode in ["sequential", "parallel"] {
+        for on_error in ["terminate", "continue_on_error", "remove_failed"] {
+            for input in [
+                json!(null),
+                json!(true),
+                json!(42),
+                json!(1.5),
+                json!("items"),
+            ] {
+                let error = execute(definition(input, mode, on_error)).unwrap_err();
+                assert!(
+                    error.contains("iteration requires an array or object input `items`"),
+                    "{error}"
+                );
+            }
+        }
     }
 }
 
@@ -202,6 +289,43 @@ fn iteration_rejects_invalid_body_structure_and_result_ports() {
         error.contains("iteration") && error.contains("missing port"),
         "{error}"
     );
+}
+
+#[test]
+fn iteration_rejects_legacy_item_references_for_all_definition_versions() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for version in ["2026-09-26", "2026-09-29", "2026-10-02"] {
+        let mut value = definition(json!([1]), "sequential", "terminate");
+        value["version"] = json!(version);
+        assert_eq!(execute(value.clone()).unwrap(), json!({"results": [2]}));
+
+        let mut edge = value.clone();
+        edge["nodes"][1]["config"]["body"]["edges"][0]["from_output"] = json!("items");
+        let mut output = value.clone();
+        output["nodes"][1]["config"]["body"]["result"] =
+            json!({"node": "%iteration", "port": "items"});
+        let mut control = value.clone();
+        control["nodes"][1]["config"]["body"]["control_edges"] = json!([
+            {"from_node": "%iteration", "from_output": "items", "to_node": "map"}
+        ]);
+        value["nodes"][1]["config"]["body"] = json!({
+            "nodes": [{"id": "route", "kind": "builtin.if_else", "config": {"branches": [{
+                "id": "one", "condition": {"source": {"output": "%iteration.items", "path": ""}, "operator": "eq", "value": 1}
+            }]}}],
+            "control_edges": [{"from_node": "%iteration", "from_output": "item", "to_node": "route"}],
+            "result": {"node": "route", "port": "one"}
+        });
+        for invalid in [edge, output, control, value] {
+            let definition: WorkflowDefinition = serde_json::from_value(invalid).unwrap();
+            let error = compile_definition(&definition, &registry)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("%iteration") && error.contains("items"),
+                "{error}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -399,7 +523,7 @@ fn body_plugins_inherit_the_correlated_node_span() {
         "nodes":[{"id":"probe","kind":"test.iteration_trace_probe"}],
         "control_edges":[{
             "from_node":"%iteration",
-            "from_output":"items",
+            "from_output":"item",
             "to_node":"probe"
         }],
         "result":{"node":"probe","port":"span"}
@@ -459,7 +583,7 @@ fn skipped_body_nodes_report_their_item_and_dependency() {
             {"id":"route","kind":"builtin.if_else","config":{"branches":[{
                 "id":"one",
                 "condition":{
-                    "source":{"output":"%iteration.items","path":""},
+                    "source":{"output":"%iteration.item","path":""},
                     "operator":"eq",
                     "value":1
                 }
@@ -467,10 +591,10 @@ fn skipped_body_nodes_report_their_item_and_dependency() {
             {"id":"copy","kind":"builtin.identity"}
         ],
         "edges":[
-            {"from_node":"%iteration","from_output":"items","to_node":"copy","to_input":"input"}
+            {"from_node":"%iteration","from_output":"item","to_node":"copy","to_input":"input"}
         ],
         "control_edges":[
-            {"from_node":"%iteration","from_output":"items","to_node":"route"},
+            {"from_node":"%iteration","from_output":"item","to_node":"route"},
             {"from_node":"route","from_output":"one","to_node":"copy"}
         ],
         "result":{"node":"copy","port":"value"}
@@ -626,6 +750,29 @@ fn generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node(
     assert!(!failed.status.success());
     assert_eq!(String::from_utf8_lossy(&failed.stderr).trim(), expected);
 
+    value["nodes"][0]["config"]["value"] = json!({"c": 2, "a": 1, "b": 0});
+    value["nodes"][1]["config"]["on_error"] = json!("continue_on_error");
+    let body = &mut value["nodes"][1]["config"]["body"];
+    body["nodes"][0]["config"]["inputs"]["key"] = json!("string");
+    body["nodes"][0]["config"]["code"]["value"] = json!("key + ':' + string(10 / item + position)");
+    body["edges"].as_array_mut().unwrap().push(json!({
+        "from_node": "%iteration", "from_output": "key", "to_node": "transform", "to_input": "key"
+    }));
+    let expected = execute(value.clone()).unwrap();
+    assert_eq!(expected, json!({"results": ["a:10", null, "c:7"]}));
+    fs::write(&path, value.to_string()).unwrap();
+    compile_project(&request).unwrap();
+    let actual = Command::new(&output).output().unwrap();
+    assert!(
+        actual.status.success(),
+        "{}",
+        String::from_utf8_lossy(&actual.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&actual.stdout).unwrap(),
+        expected
+    );
+
     let installed = fs::read(&output).unwrap();
     let lock = fs::read(path.with_extension("lock")).unwrap();
     value["dependencies"]
@@ -639,7 +786,7 @@ fn generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node(
     });
     value["nodes"][1]["config"]["body"] = json!({
         "nodes":[],
-        "result":{"node":"%iteration","port":"items"}
+        "result":{"node":"%iteration","port":"item"}
     });
     value["edges"][0]["from_output"] = json!("values");
     fs::write(&path, value.to_string()).unwrap();

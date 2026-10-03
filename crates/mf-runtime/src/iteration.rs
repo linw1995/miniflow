@@ -56,6 +56,9 @@ pub struct IterationResultDefinition {
 pub fn iteration_input_flow_node() -> FlowNode {
     crate::prepared_scope_source(
         ITERATION_INPUT_ID,
-        &BTreeMap::from([("items".into(), ValueType::Any)]),
+        &BTreeMap::from([
+            ("item".into(), ValueType::Any),
+            ("key".into(), ValueType::Any),
+        ]),
     )
 }

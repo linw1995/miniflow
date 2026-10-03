@@ -305,7 +305,7 @@ fn rejects_event_nodes_in_single_runs_and_synchronous_bodies() {
 
     let iteration = json!({"id":"iterate", "kind":"builtin.iteration", "config":{"body":{
         "nodes":[{"id":"collect", "kind":"test.collect"}],
-        "edges":[edge("%iteration", "items", "collect", "item")],
+        "edges":[edge("%iteration", "item", "collect", "item")],
         "result":{"node":"collect", "port":"items"}
     }}});
     let mut value = graph(

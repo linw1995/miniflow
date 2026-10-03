@@ -1,7 +1,7 @@
 use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, IterationConfig, IterationErrorPolicy, IterationMode,
     NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec,
-    PreparedSubgraph, TaskNode, ValueType, deserialize_config,
+    PreparedSubgraph, TaskNode, ValueKind, ValueRef, ValueType, deserialize_config,
 };
 use mf_telemetry::observation::{ItemObservation, IterationObservation};
 use std::{
@@ -72,7 +72,7 @@ impl IterationNode {
             self.result_type.clone()
         };
         NodePorts {
-            inputs: vec![PortSpec::new("items", ValueType::Array, true)],
+            inputs: vec![PortSpec::new("items", ValueType::Any, true)],
             outputs: vec![PortSpec::owned(
                 "results",
                 ValueType::List(Box::new(item_type)),
@@ -83,7 +83,8 @@ impl IterationNode {
 
     fn run_item(
         &self,
-        item: mf_runtime::ValueRef,
+        item: ValueRef,
+        key: ValueRef,
         index: usize,
         observation: Option<&IterationObservation>,
         parent: &ExecutionContext,
@@ -96,8 +97,11 @@ impl IterationNode {
             &self.id,
             mf_runtime::ITERATION_INPUT_ID,
             index,
-            Outputs::from([("items".into(), item)]),
-            BTreeMap::from([("items".into(), ValueType::Any)]),
+            Outputs::from([("item".into(), item), ("key".into(), key)]),
+            BTreeMap::from([
+                ("item".into(), ValueType::Any),
+                ("key".into(), ValueType::Any),
+            ]),
         )
         .and_then(|scope| {
             let (mut outputs, _, _) = state
@@ -127,16 +131,25 @@ impl IterationNode {
         parent: &ExecutionContext,
     ) -> Result<Outputs, NodeExecutionError> {
         let items = inputs.remove("items");
-        let Some(items) = items.as_ref().and_then(mf_runtime::ValueRef::as_array) else {
-            return Err(NodeExecutionError::ExecutionFailed {
-                message: "iteration requires an array input `items`".into(),
-            });
-        };
+        let items: Box<dyn ExactSizeIterator<Item = (ValueRef, ValueRef)>> =
+            match items.as_ref().map(ValueRef::kind) {
+                Some(ValueKind::Array(items)) => {
+                    Box::new(items.iter().map(|item| (ValueRef::null(), item.clone())))
+                }
+                Some(ValueKind::Object(items)) => Box::new(items.iter().map(|(key, item)| {
+                    (ValueRef::new(ValueKind::String(key.clone())), item.clone())
+                })),
+                _ => {
+                    return Err(NodeExecutionError::ExecutionFailed {
+                        message: "iteration requires an array or object input `items`".into(),
+                    });
+                }
+            };
         let mut results = Vec::with_capacity(items.len());
         match self.mode {
             IterationMode::Sequential => {
-                for (index, item) in items.iter().cloned().enumerate() {
-                    results.push(self.run_item(item, index, observation.as_ref(), parent));
+                for (index, (key, item)) in items.enumerate() {
+                    results.push(self.run_item(item, key, index, observation.as_ref(), parent));
                     if matches!(self.on_error, IterationErrorPolicy::Terminate)
                         && results.last().is_some_and(Result::is_err)
                     {
@@ -146,7 +159,7 @@ impl IterationNode {
             }
             IterationMode::Parallel => {
                 let worker_count = items.len().min(MAX_PARALLEL_ITEMS);
-                let queue = Mutex::new(items.iter().cloned().enumerate().collect::<VecDeque<_>>());
+                let queue = Mutex::new(items.enumerate().collect::<VecDeque<_>>());
                 let completed = Mutex::new(Vec::new());
                 let stopped = AtomicBool::new(false);
                 std::thread::scope(|scope| {
@@ -166,10 +179,11 @@ impl IterationNode {
                                             queue.pop_front()
                                         }
                                     };
-                                    let Some((index, item)) = next else {
+                                    let Some((index, (key, item))) = next else {
                                         break;
                                     };
-                                    let result = self.run_item(item, index, observation, parent);
+                                    let result =
+                                        self.run_item(item, key, index, observation, parent);
                                     if result.is_err()
                                         && matches!(self.on_error, IterationErrorPolicy::Terminate)
                                     {
@@ -236,51 +250,101 @@ mod tests {
 
     #[test]
     fn parallel_mode_is_bounded_and_returns_input_order() {
-        let active = Arc::new(AtomicUsize::new(0));
-        let peak = Arc::new(AtomicUsize::new(0));
-        let node = IterationNode::new(
-            "iteration",
-            IterationMode::Parallel,
-            IterationErrorPolicy::Terminate,
-            PreparedSubgraph::new(
-                Vec::new(),
-                vec![PortSpec::new("result", ValueType::Int64, true)],
-                {
-                    let active = Arc::clone(&active);
-                    let peak = Arc::clone(&peak);
-                    let source = mf_runtime::iteration_input_flow_node().into_task().unwrap();
+        let values: Vec<_> = (0..64).map(Value::from).collect();
+        for items in [
+            Value::Array(values.clone()),
+            Value::Object(
+                values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, item)| (format!("{index:02}"), item.clone()))
+                    .collect(),
+            ),
+        ] {
+            let active = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let node = IterationNode::new(
+                "iteration",
+                IterationMode::Parallel,
+                IterationErrorPolicy::Terminate,
+                PreparedSubgraph::new(
+                    Vec::new(),
+                    vec![PortSpec::new("result", ValueType::Int64, true)],
+                    {
+                        let active = Arc::clone(&active);
+                        let peak = Arc::clone(&peak);
+                        let source = mf_runtime::iteration_input_flow_node().into_task().unwrap();
+                        move |state| {
+                            execute_node_in_context(&source, &[], state)?;
+                            let item = state
+                                .select_output(
+                                    "result",
+                                    mf_runtime::ITERATION_INPUT_ID,
+                                    "item",
+                                    false,
+                                )?
+                                .unwrap();
+                            let concurrent = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(concurrent, Ordering::SeqCst);
+                            std::thread::sleep(Duration::from_millis(2));
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            Ok(Outputs::from([("result".into(), item)]))
+                        }
+                    },
+                ),
+            )
+            .unwrap();
+            let output = node
+                .execute(
+                    Inputs::from([("items".into(), items.into())]),
+                    &mut mf_runtime::ExecutionContext::default(),
+                )
+                .unwrap()
+                .outputs;
+            assert_eq!(output["results"], Value::Array(values.clone()));
+            assert!((2..=MAX_PARALLEL_ITEMS).contains(&peak.load(Ordering::SeqCst)));
+            assert_eq!(active.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    #[test]
+    fn map_iteration_shares_value_handles_and_rejects_missing_input() {
+        for mode in [IterationMode::Sequential, IterationMode::Parallel] {
+            let source = mf_runtime::iteration_input_flow_node().into_task().unwrap();
+            let node = IterationNode::new(
+                "iteration",
+                mode,
+                IterationErrorPolicy::Terminate,
+                PreparedSubgraph::new(
+                    Vec::new(),
+                    vec![PortSpec::new("result", ValueType::Any, true)],
                     move |state| {
                         execute_node_in_context(&source, &[], state)?;
                         let item = state
-                            .select_output(
-                                "result",
-                                mf_runtime::ITERATION_INPUT_ID,
-                                "items",
-                                false,
-                            )?
+                            .select_output("result", mf_runtime::ITERATION_INPUT_ID, "item", false)?
                             .unwrap();
-                        let concurrent = active.fetch_add(1, Ordering::SeqCst) + 1;
-                        peak.fetch_max(concurrent, Ordering::SeqCst);
-                        std::thread::sleep(Duration::from_millis(2));
-                        active.fetch_sub(1, Ordering::SeqCst);
                         Ok(Outputs::from([("result".into(), item)]))
-                    }
-                },
-            ),
-        )
-        .unwrap();
-        let items: Vec<_> = (0..64).map(Value::from).collect();
-        let output = node
-            .execute(
-                Inputs::from([("items".into(), Value::Array(items.clone()).into())]),
-                &mut mf_runtime::ExecutionContext::default(),
+                    },
+                ),
             )
-            .unwrap()
-            .outputs;
-        assert_eq!(output["results"], Value::Array(items));
-        assert!((2..=MAX_PARALLEL_ITEMS).contains(&peak.load(Ordering::SeqCst)));
-        assert_eq!(active.load(Ordering::SeqCst), 0);
+            .unwrap();
+            let items: ValueRef = json!({"b": [2, 3], "a": {"nested": [1]}}).into();
+            let output = node
+                .execute(
+                    Inputs::from([("items".into(), items.clone())]),
+                    &mut ExecutionContext::default(),
+                )
+                .unwrap()
+                .outputs;
+            assert!(output["results"][0].ptr_eq(&items["a"]));
+            assert!(output["results"][1].ptr_eq(&items["b"]));
+            let error = node
+                .execute(Inputs::new(), &mut ExecutionContext::default())
+                .unwrap_err();
+            assert!(error.to_string().contains("array or object input `items`"));
+        }
     }
+
     #[test]
     fn registers_iteration_and_checks_its_configuration_shape() {
         let registration = NodeRegistry::from_inventory().unwrap().get(KIND).unwrap();
@@ -291,7 +355,7 @@ mod tests {
                 json!({
                     "body": {
                         "nodes": [],
-                        "result": {"node": "%iteration", "port": "items"}
+                        "result": {"node": "%iteration", "port": "item"}
                     }
                 }),
                 Value::Null,
