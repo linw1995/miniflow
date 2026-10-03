@@ -71,14 +71,14 @@ deleted together with its callers and transports so no compatibility scheduler o
 
 ## 3. Streaming observation and bounded reduction
 
-- [ ] 3.1 Add protocol-aware receiver admission and a bounded stream reducer; verify repeated and nested
+- [x] 3.1 Add protocol-aware receiver admission and a bounded stream reducer; verify repeated and nested
   invocations, reordered/duplicate/conflicting records, graph/identity checks, invocation outcomes arriving
   before starts, and preservation of finite reducer behavior.
-- [ ] 3.2 Implement contiguous sequence compaction, the 4,096-record witness window, 64 recent completed
+- [x] 3.2 Implement contiguous sequence compaction, the 4,096-record witness window, 64 recent completed
   invocations, and bounded active/Loop details; verify large streams, ancient retransmissions, missing-record
   repair within retained state, visible uncertainty on overflow, and detail eviction independent of transport
   loss.
-- [ ] 3.3 Expose stream node activity, observed aggregates, batch state, and final workflow counts; verify
+- [x] 3.3 Expose stream node activity, observed aggregates, batch state, and final workflow counts; verify
   concurrent source/downstream status, zero-emission completion, missing telemetry, abrupt process death, and
   nested Loop paths across different messages; document schema and retention limits.
 

@@ -1,7 +1,10 @@
 //! Bounded, transport-independent state reduction for one workflow run.
 
+mod stream;
+pub use stream::{StreamInvocationObservation, StreamNodeMetrics, StreamSnapshot};
+
 use mf_telemetry::{
-    ContractError, Count, EVENT_SCHEMA_VERSION, LOOP_EVENT_SCHEMA_VERSION,
+    ContractError, Count,
     description::{NodeDescription, WorkflowDescription},
     event::{
         Event, Failure, FailurePhase, LifecycleEvent, LoopPassOutcome, LoopPathEntry,
@@ -122,6 +125,7 @@ pub struct StateSnapshot {
     pub total_loop_passes: usize,
     pub hidden_loop_passes: usize,
     pub loop_overviews: Vec<LoopOverview>,
+    pub stream: Option<StreamSnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,6 +136,8 @@ pub struct LoopPassObservation {
     pub outcome: Option<LoopPassOutcome>,
     pub visited_node_count: Option<Count>,
     pub interrupted: bool,
+    pub stream_invocation: Option<u64>,
+    pub compact_statuses: Vec<Option<NodeStatus>>,
 }
 
 impl LoopPassObservation {
@@ -152,6 +158,17 @@ impl LoopPassObservation {
                     || NodeObservation::pending(id, kind),
                     |node| (*node).clone(),
                 );
+                if !observed.contains_key(id) {
+                    if let Some(Some(status)) = self.compact_statuses.get(position) {
+                        node.status = *status;
+                    } else if self.stream_invocation.is_some()
+                        && self
+                            .visited_node_count
+                            .is_some_and(|visited| (position as i64) < visited.get())
+                    {
+                        node.status = NodeStatus::Unknown;
+                    }
+                }
                 if self
                     .visited_node_count
                     .is_some_and(|visited| position as i64 >= visited.get())
@@ -232,6 +249,7 @@ pub struct SessionState {
     loop_summaries: BTreeMap<(Vec<LoopPathEntry>, String), LoopSummary>,
     closed: bool,
     snapshot_cache: Mutex<Option<Arc<StateSnapshot>>>,
+    stream: Option<stream::StreamState>,
 }
 
 #[derive(Default)]
@@ -261,7 +279,9 @@ struct SequenceWitness {
 
 impl SessionState {
     pub fn new(description: WorkflowDescription, run_id: RunId) -> Result<Self, StateError> {
-        if description.is_streaming() {
+        if description.is_streaming()
+            && description.event_schema_version() != mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
+        {
             return Err(StateError::UnsupportedStream);
         }
         description
@@ -293,7 +313,7 @@ impl SessionState {
             .map(|node| (node.id.as_str(), node))
             .collect();
         let mut node_positions = BTreeMap::new();
-        let nodes = description
+        let nodes: Vec<NodeObservation> = description
             .execution_order
             .iter()
             .enumerate()
@@ -303,7 +323,11 @@ impl SessionState {
                 pending_node(node)
             })
             .collect();
+        let stream = description
+            .is_streaming()
+            .then(|| stream::StreamState::new(&nodes));
         Ok(Self {
+            stream,
             description,
             run_id,
             node_positions,
@@ -326,14 +350,37 @@ impl SessionState {
     }
 
     pub fn expected_event_schema_version(&self) -> i64 {
-        if self.description.version.supports_loops() {
-            LOOP_EVENT_SCHEMA_VERSION
-        } else {
-            EVENT_SCHEMA_VERSION
+        self.description.event_schema_version()
+    }
+
+    pub fn apply_stream(
+        &mut self,
+        record: mf_telemetry::stream::StreamRecord,
+    ) -> Result<Admission, StateError> {
+        if self.closed {
+            return Err(StateError::Closed);
         }
+        if record.run_id != self.run_id || record.workflow_id != self.description.workflow_id {
+            self.note("ignored stream record from another workflow or run");
+            return Ok(Admission::UnrelatedRun);
+        }
+        self.invalidate_snapshot();
+        let stream = self.stream.as_mut().ok_or_else(|| StateError::Event {
+            source: ContractError::Invalid {
+                message: "stream record in a finite session".into(),
+            },
+        })?;
+        stream.apply(&self.description, record)
     }
 
     pub fn apply(&mut self, event: LifecycleEvent) -> Result<Admission, StateError> {
+        if self.stream.is_some() {
+            return Err(StateError::Event {
+                source: ContractError::Invalid {
+                    message: "finite event in a stream session".into(),
+                },
+            });
+        }
         if self.closed {
             return Err(StateError::Closed);
         }
@@ -509,6 +556,9 @@ impl SessionState {
     }
 
     fn build_snapshot(&self) -> StateSnapshot {
+        if let Some(stream) = &self.stream {
+            return stream.snapshot(self);
+        }
         let lifecycle = self.integrity();
         let has_gap = lifecycle.known_missing_count != 0;
         let mut nodes = self.nodes.clone();
@@ -519,6 +569,7 @@ impl SessionState {
             }
         }
         StateSnapshot {
+            stream: None,
             nodes,
             workflow_outcome: self
                 .final_boundary
@@ -562,6 +613,8 @@ impl SessionState {
                     outcome: state.outcome,
                     visited_node_count: state.visited_node_count,
                     interrupted: self.closed && self.final_boundary.is_none(),
+                    stream_invocation: None,
+                    compact_statuses: Vec::new(),
                 }
             })
             .collect()
@@ -604,6 +657,9 @@ impl SessionState {
     }
 
     pub fn integrity(&self) -> LifecycleIntegrity {
+        if let Some(stream) = &self.stream {
+            return stream.integrity(self);
+        }
         let upper = self.final_boundary.as_ref().map_or_else(
             || {
                 self.received

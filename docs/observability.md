@@ -352,8 +352,8 @@ See [compiling workflows](compiling.md) for executable commands, endpoint settin
 
 New streaming runner descriptions use version `2026-10-03`. Their workflow lifecycle records use event
 schema `4`, decoded with `mf_telemetry::stream::StreamRecord`; the existing finite-run decoder keeps
-its original schema `1` and `2` contracts. The terminal launcher and finite-session reducer reject the
-streaming protocol before execution.
+its original schema `1` and `2` contracts. Session admission selects a reducer from the description
+protocol and rejects incompatible lifecycle records. Older schema-3 streams require recompilation for TUI use.
 
 A streaming instance has one workflow/run identity and a checked, monotonically increasing lifecycle
 sequence. A run can exceed the finite-run event budget. The producer retains counters and shared graph
@@ -395,6 +395,15 @@ retain their accepted-input interpretation and are never relabeled as schema 4. 
 acknowledgement, including the final stdout record. Failure preserves its phase and available node
 identity. An earlier missing node outcome remains unknown when a later message succeeds. Consumers
 should bound retained detail and distinguish local history eviction from lifecycle transport loss.
+
+The stream reducer retains 4,096 sequence witnesses, up to 4,096 unresolved invocations, 64 recent
+completed invocations, and 64 Loop pass details. Each retained pass has compact per-node status and up
+to 64 detailed node records. Contiguous verified sequences and completed Loop prefixes compact into
+counters. Losing old display detail does not invalidate lifecycle completeness. An ancient retransmission
+outside the witness window is ignored and counted as unverified; its payload cannot be compared with
+retired evidence. Exhausting an unresolved retention window permanently marks observation incomplete.
+Repeated node invocations keep separate identities; node totals describe observed activity, while final
+workflow totals come from the terminal record. Missing outcomes remain visible even after later successes.
 
 For in-memory execution, create an observation with `CompiledWorkflow::start_stream_observation`, then
 pass it in `StreamOptions.observation` to `mf_compiler::start_stream`. This includes preparation in the
