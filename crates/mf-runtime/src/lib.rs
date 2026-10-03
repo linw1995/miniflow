@@ -3,6 +3,7 @@ mod definition;
 mod flow;
 mod iteration;
 mod loop_node;
+mod message_domain;
 mod node;
 mod number;
 mod registry;
@@ -39,6 +40,7 @@ pub use loop_node::{
     loop_variable_types, prepared_loop_assign, prepared_loop_assign_from_json, prepared_loop_exit,
     prepared_loop_source_from_json, prepared_loop_source_types, prepared_scope_source,
 };
+pub use message_domain::StreamDomain;
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
 pub use node::{
@@ -63,9 +65,7 @@ pub use stream_instance::{
     StreamSender, StreamSummary,
 };
 pub use stream_io::StreamStdio;
-pub use stream_plan::{
-    PreparedStream, StreamBuildError, StreamDependency, StreamDomain, StreamPlan,
-};
+pub use stream_plan::{PreparedStream, StreamBuildError, StreamDependency, StreamPlan};
 pub use subgraph::PreparedSubgraph;
 
 pub use value::{ValueKind, ValueRef};

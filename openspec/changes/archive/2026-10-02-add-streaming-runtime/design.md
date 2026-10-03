@@ -11,6 +11,12 @@ requires an explicit activation path for every root node. Ordinary tasks preserv
 event emissions start a new domain. Dependencies, context references, and selected outputs must respect
 those boundaries.
 
+`MessageDomains` owns the domain partition, node-output ownership, and selected-output domain. Its
+construction validates dependencies and context references against those boundaries. `StreamPlan`
+combines this validated partition with executors and dependencies; it exposes the existing planning
+queries without maintaining separate domain tables. Each `StreamDomain` identifies its source and
+ordered consumer steps.
+
 An instance owns its prepared executors, deadlines, and retained state until drain or termination.
 `PreparedStream` separates mutable event state from the immutable `StreamPlan`. Workers share task
 executors, while the coordinator invokes events serially. Each frame has isolated outputs, skips, and
