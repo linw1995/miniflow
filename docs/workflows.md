@@ -64,6 +64,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input, with its known type |
 | `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by control edges | One boolean activation output per branch, plus `else` |
 | `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array | `results`: collected array |
+| `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
 | `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |
 
@@ -330,3 +331,20 @@ The host submits one value per message, consumes outputs independently, and expl
 An array remains one input value. See [the instance API](node-development.md#in-memory-streaming-instances)
 for admission, backpressure, drain, and failure handling. Standalone runner generation does not yet support
 streaming definitions.
+
+### Batch collection
+
+Link `mfn-core` and insert `builtin.batch` into a streaming graph. Its required configuration fields
+are positive `max_items` and `max_wait_ms`. Connect an upstream value to `item`; `items` emits the entire
+ordered array, with inferred type `List(T)` for input type `T`.
+
+The first item starts the timeout. Later items do not extend it. Reaching the count threshold emits a
+full batch; timeout or upstream close emits a nonempty partial batch. An item arriving at the deadline
+belongs to a new batch. Empty buffers emit nothing. A skipped input adds no item, while existing
+buffered items retain their deadline. Arrays and null remain individual elements.
+
+Downstream nodes receive one invocation per emitted batch. Input and batch values belong to different
+message domains. Failure discards a partial buffer without flushing or retrying.
+
+Batch runs through the in-memory streaming API and is rejected inside synchronous Loop/Iteration
+bodies. Its state is independent for every workflow instance.
