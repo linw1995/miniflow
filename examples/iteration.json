@@ -37,7 +37,7 @@
           "edges": [
             {
               "from_node": "%iteration",
-              "from_output": "items",
+              "from_output": "item",
               "to_node": "transform",
               "to_input": "item"
             },

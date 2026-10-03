@@ -272,7 +272,7 @@ fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
                 "nodes":[{"id":"copy", "kind":"builtin.identity"}], "edges":[{"from_node":"%loop", "from_output":"x", "to_node":"copy", "to_input":"input"}]}}},
             {"id":"collect", "kind":"builtin.batch", "config":{"max_items":1, "max_wait_ms":100}},
             {"id":"iterate", "kind":"builtin.iteration", "config":{"body":{"nodes":[{"id":"copy", "kind":"builtin.identity"}],
-                "edges":[{"from_node":"%iteration", "from_output":"items", "to_node":"copy", "to_input":"input"}], "result":{"node":"copy", "port":"value"}}}}
+                "edges":[{"from_node":"%iteration", "from_output":"item", "to_node":"copy", "to_input":"input"}], "result":{"node":"copy", "port":"value"}}}}
         ], "edges":[{"from_node":"%input", "from_output":"item", "to_node":"repeat", "to_input":"x"},
             {"from_node":"repeat", "from_output":"x", "to_node":"collect", "to_input":"item"},
             {"from_node":"collect", "from_output":"items", "to_node":"iterate", "to_input":"items"}],

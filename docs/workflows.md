@@ -52,7 +52,7 @@ Definitions with version `2026-09-24` are rejected with a migration diagnostic. 
 Built-in body sources use the `%` prefix: `%loop` for Loop variables and `%iteration` for Iteration
 items. In earlier definitions, replace `$loop` with `%loop` and `@iteration` with `%iteration` in
 edge endpoints, body result selections, and context output references before recompiling. For
-example, `$loop.count` becomes `%loop.count`, and `@iteration.items` becomes `%iteration.items`.
+example, `$loop.count` becomes `%loop.count`, and `@iteration.items` becomes `%iteration.item`.
 
 ## Built-in nodes
 
@@ -63,7 +63,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | `builtin.constant` | Required `value`: any JSON value | None | `value`: inferred from the configured value |
 | `mfn-core` | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input, with its known type |
 | `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by control edges | One boolean activation output per branch, plus `else` |
-| `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array | `results`: collected array |
+| `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array or object | `results`: collected array |
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
 | `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |
@@ -204,9 +204,10 @@ See [compiling workflows](compiling.md) to build and run a definition, or [node 
 
 The [iteration example](../examples/iteration.json) runs a body graph once per input array element and returns
 `{"results":[2,5,8]}`. It follows the array mapping, zero-based index, execution modes, and error policies described
-by the [Dify Iteration node](https://docs.dify.ai/en/cloud/use-dify/nodes/iteration). Add a `builtin.iteration` node to
-the outer graph, connect an array to its required `items` input, and read the collected array from its `results`
-output. An empty input returns an empty array after the body has passed validation.
+by the [Dify Iteration node](https://docs.dify.ai/en/cloud/use-dify/nodes/iteration). It also accepts maps represented
+as JSON objects. Add a `builtin.iteration` node to the outer graph, connect an array or object to its required
+`items` input, and read the collected array from its `results` output. An empty array or object returns an empty
+array after the body has passed validation. Other input shapes fail at execution before any body invocation.
 
 ```json
 {
@@ -218,7 +219,7 @@ output. An empty input returns an empty array after the body has passed validati
     "body": {
       "nodes": [{ "id": "copy", "kind": "builtin.identity" }],
       "edges": [
-        { "from_node": "%iteration", "from_output": "items", "to_node": "copy", "to_input": "input" }
+        { "from_node": "%iteration", "from_output": "item", "to_node": "copy", "to_input": "input" }
       ],
       "result": { "node": "copy", "port": "value" }
     }
@@ -227,15 +228,19 @@ output. An empty input returns an empty array after the body has passed validati
 ```
 
 The enclosing workflow must declare `mfn-core` for both `builtin.iteration` and `builtin.identity`. `%iteration` is a reserved body
-source with outputs `items` (the current JSON element) and `index` (a zero-based signed integer). Body
+source with outputs `item` (the current array element or map value), `key` (the map key, or JSON null for an array),
+and `index` (a zero-based signed integer). Maps are visited in lexicographic key order; their `index` and collected
+results use that order in both execution modes. The outer `items` input holds the complete collection.
+For example, the body above maps `{"b":2,"a":1}` to `[1,2]`.
+Connect `%iteration.key` to a body input to include the key in a transformation. Body
 nodes, data edges, and optional `control_edges` use the ordinary workflow graph rules. The required `result` selects
 one body port for each item. Body node IDs belong to the body scope; outer edges cannot address them. All body nodes
-are constructed and validated before the runner is installed, including when the input array is empty.
+are constructed and validated before the runner is installed, including when the input collection is empty.
 
 `mode` defaults to `sequential`. `parallel` uses at most ten workers, keeps results in input order, and is suitable
 when body operations are independent. Nodes in the body may be invoked repeatedly and concurrently, so a plugin with
 mutable internal state must synchronize it or use sequential mode. Each invocation gets fresh context values for
-`%iteration.items` and `%iteration.index`; body outputs from another item are never visible.
+`%iteration.item`, `%iteration.key`, and `%iteration.index`; body outputs from another item are never visible.
 
 `on_error` defaults to `terminate`. With `terminate`, the first failing item stops sequential execution and fails the
 iteration without publishing a partial result. Parallel execution stops scheduling new items after a failure, lets
@@ -245,7 +250,7 @@ A skipped body result counts as an item failure. `continue_on_error` exposes `Li
 null; the other policies expose a list of the selected body's output type.
 
 The current scope supports one iteration level. Body graphs cannot contain another Iteration node, a structured Loop construct, or access outer
-context outputs directly. Pass values through the input array or add nodes inside the body. The runner description and
+context outputs directly. Pass values through the input collection or add nodes inside the body. The runner description and
 terminal UI show the Iteration node as one outer graph node. OTel emits separate item and body-node spans and logs with
 the outer node ID and item index; failures remain visible even under `continue_on_error` and `remove_failed`. See
 [observation contracts](observability.md#iteration-observation). Answer-node streaming is outside the current workflow

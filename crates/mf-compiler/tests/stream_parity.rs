@@ -58,7 +58,7 @@ fn definition(scenario: &str) -> WorkflowDefinition {
                 json!({"id":"collect", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":100}}),
                 json!({"id":"consume", "kind":"builtin.iteration", "config":{"body":{
                     "nodes":[{"id":"double", "kind":"builtin.code", "config":{"language":"cel", "inputs":{"x":"int"}, "code":{"value":"x * 2"}}}],
-                    "edges":[edge("%iteration", "items", "double", "x")], "result":{"node":"double", "port":"value"}
+                    "edges":[edge("%iteration", "item", "double", "x")], "result":{"node":"double", "port":"value"}
                 }}}),
             ];
             edges = vec![
