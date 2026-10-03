@@ -114,7 +114,7 @@ impl MessageDomains {
                 ),
             })? {
                 NodeExecution::Task(_) => domain,
-                NodeExecution::Event(_) => {
+                NodeExecution::Event(_) | NodeExecution::Stream(_) => {
                     let new_domain = domains.len();
                     domains.push(StreamDomain {
                         source: index,

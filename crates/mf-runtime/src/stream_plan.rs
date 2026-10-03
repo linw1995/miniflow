@@ -6,7 +6,7 @@ use crate::{
 };
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 
-type EventStates = Vec<Option<Box<dyn crate::EventNode>>>;
+type OperatorStates = Vec<Option<NodeExecution>>;
 
 #[derive(Debug, Snafu)]
 pub enum StreamBuildError {
@@ -43,7 +43,7 @@ pub struct StreamPlan {
 
 pub struct PreparedStream {
     plan: StreamPlan,
-    event_states: EventStates,
+    operator_states: OperatorStates,
 }
 
 impl std::fmt::Debug for PreparedStream {
@@ -87,16 +87,18 @@ impl PreparedStream {
             }
         );
         let domains = MessageDomains::new(&nodes, &dependencies, &outputs)?;
-        let mut event_states = Vec::with_capacity(nodes.len());
+        let mut operator_states = Vec::with_capacity(nodes.len());
         let nodes = nodes
             .into_iter()
             .map(|node| {
                 let (task, state) = match node.node {
                     Some(NodeExecution::Task(task)) => (Some(task), None),
-                    Some(NodeExecution::Event(state)) => (None, Some(state)),
+                    Some(state @ (NodeExecution::Event(_) | NodeExecution::Stream(_))) => {
+                        (None, Some(state))
+                    }
                     None => (None, None),
                 };
-                event_states.push(state);
+                operator_states.push(state);
                 FlowNode {
                     definition_id: node.definition_id,
                     metadata: node.metadata,
@@ -120,15 +122,18 @@ impl PreparedStream {
                 ),
             }
         );
-        Ok(Self { plan, event_states })
+        Ok(Self {
+            plan,
+            operator_states,
+        })
     }
 
     pub fn plan(&self) -> &StreamPlan {
         &self.plan
     }
 
-    pub(super) fn into_parts(self) -> (StreamPlan, EventStates) {
-        (self.plan, self.event_states)
+    pub(super) fn into_parts(self) -> (StreamPlan, OperatorStates) {
+        (self.plan, self.operator_states)
     }
 }
 

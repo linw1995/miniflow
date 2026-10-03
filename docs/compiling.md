@@ -102,7 +102,9 @@ validation must succeed on every invocation; a previous executable is not eviden
 success. A lock persistence failure prevents installation. If installation fails after an unlocked
 build persists its dependency lock, the error states that the lock was updated.
 
-Building third-party Rust code executes build scripts, procedural macros, and configuration factories with the user's permissions. Factories should limit themselves to configuration validation and construction; external I/O belongs in `TaskNode::execute`. This is a native build process, not an untrusted-code sandbox.
+Building third-party Rust code executes build scripts, procedural macros, and configuration factories with the user's
+permissions. Factories should limit themselves to configuration validation and construction; external I/O belongs in
+`TaskNode::execute` or `StreamNode::execute`. This is a native build process, not an untrusted-code sandbox.
 
 ## Reuse build directories
 

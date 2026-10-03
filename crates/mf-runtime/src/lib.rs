@@ -59,10 +59,10 @@ pub use runner::{
 pub use stream::stream_input_node;
 pub use stream::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
-    STREAM_INPUT_ID, StreamExecution, StreamLimits, StreamMode, TimerUpdate,
+    STREAM_INPUT_ID, StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate,
 };
 pub use stream_instance::{
-    CompilationSnafu as StreamCompilationSnafu, MessageId, MonotonicClock, StreamClock,
+    CompilationSnafu as StreamCompilationSnafu, Emitter, MessageId, MonotonicClock, StreamClock,
     StreamDelivery, StreamError, StreamInstance, StreamMetrics, StreamOptions, StreamOutput,
     StreamSender, StreamSummary,
 };

@@ -25,7 +25,11 @@ A plugin can register several unique kinds from one crate. Dependency aliases do
 
 All plugins and the consumer must resolve the same `mf-runtime` package identity, including its version and source. Registrations from a different runtime identity are not entries in the consumer's inventory.
 
-Factories validate configuration and construct instances during build validation and execution. Keep external I/O and business side effects in `TaskNode::execute`; validation and `--describe` must not execute the workflow. Description mode reads the embedded graph without calling factories, so factory diagnostics cannot enter its JSON output. Building a Rust plugin can execute its build scripts and procedural macros with the build user's permissions.
+Factories validate configuration and construct instances during build validation and execution. Keep external I/O
+and business side effects in `TaskNode::execute` or `StreamNode::execute`; validation and `--describe` must not execute
+the workflow. Description mode reads the embedded graph without calling factories, so factory diagnostics cannot
+enter its JSON output. Building a Rust plugin can execute its build scripts and procedural macros with the build
+user's permissions.
 
 Use `NodeFactory::Plain` for a factory taking configuration and returning `PreparedNode`.
 Use `NodeFactory::Subgraph` when construction also needs the occurrence ID, execution options, and a
@@ -36,7 +40,9 @@ or inappropriate body arguments fail during preparation; an executor is returned
 
 Declare plugin crates in the Flow's top-level `dependencies` object. The CLI generates imports for those packages and compiles a runner that validates and executes against the same registry. No predefined bundle or CLI rebuild is needed. See [workflow definitions](workflows.md) for registry, pinned Git, local-path, and feature syntax.
 
-The CLI first checks graph structure, then builds the runner and invokes its `--validate` mode. Unknown kinds, duplicate registrations, invalid configuration, and incompatible ports fail before installation. The runner's normal mode executes generated node calls; validation never calls `TaskNode::execute`.
+The CLI first checks graph structure, then builds the runner and invokes its `--validate` mode. Unknown kinds,
+duplicate registrations, invalid configuration, and incompatible ports fail before installation. The runner's
+normal mode executes generated node calls; validation never calls `TaskNode::execute` or `StreamNode::execute`.
 
 The [multi-node fixture](../crates/mf-compiler/tests/fixtures/multi-nodes/) demonstrates one external crate registering several kinds. The packaged CLI acceptance script in [release prerequisites](releases.md) builds it from a packaged registry source outside the checkout.
 
@@ -154,7 +160,7 @@ Lifecycle events are emitted by the runtime independently of plugin diagnostic l
 `EventNode` directly; they do not implement `TaskNode` or create a second state object later.
 
 Use `prepared.execution.as_task_node()` to borrow a task executor or
-`prepared.execution.into_task_node()` to take ownership of it. Both return `None` for event execution.
+`prepared.execution.into_task_node()` to take ownership of it. Both return `None` for event and stream execution.
 The consuming conversion moves only the execution field, leaving `prepared.metadata` available.
 
 `EventNode::on_event` receives `Input`, `Timer`, or `UpstreamClosed` and returns zero or more complete
@@ -162,9 +168,60 @@ emissions with a `TimerUpdate`. `EventContext.now` is monotonic elapsed time.
 Event state requires `Send`; mutable access is exclusive and
 `Sync` is not required.
 
-`Flow::new` rejects event nodes during synchronous preparation. Direct callers of task execution
+`Flow::new` rejects event and stream nodes during synchronous preparation. Direct callers of task execution
 helpers convert a prepared `FlowNode` with `into_task()` first. Generated synchronous bodies perform
 that conversion before capturing their task executors.
+
+## Incremental stream producers
+
+`PreparedNode::stream(producer, metadata)` selects `NodeExecution::Stream`. Implement `StreamNode`
+when one input needs to produce many outputs incrementally, such as reading lines from a file.
+The instance owns the producer, which requires `Send` and exclusive mutable access, without `Sync`.
+
+```rust
+impl StreamNode for Expand {
+    fn execute(
+        &mut self,
+        inputs: Inputs,
+        _context: &mut ExecutionContext,
+        emitter: &mut Emitter<'_>,
+    ) -> Result<(), NodeExecutionError> {
+        for value in inputs["items"].as_array().expect("validated list input") {
+            emitter.send(Outputs::from([("item".into(), value.clone())]).into())?;
+        }
+        Ok(())
+    }
+}
+```
+
+Each `Emitter::send` validates one `NodeResult` and waits until the node's pending queue has capacity.
+Success transfers the result to the runtime; downstream processing can finish later. The queue limit
+is `execution.limits.max_pending_messages`, defaulting to 64. A producer can emit more total results
+than this limit. The emitter is borrowed for one invocation and cannot be cloned or retained afterward.
+Factories declare ports and validate configuration; file access and other business operations belong
+in `execute`. The [external line-producer fixture](../crates/mf-compiler/tests/fixtures/multi-nodes/src/line_producer.rs)
+shows file reading with this contract.
+
+The runtime lazily starts one dedicated worker for each producer that executes, then reuses that worker
+and producer state across inputs. These workers are separate from the ordinary task pool controlled by
+`execution.limits.workers`, so a blocked send cannot consume the worker needed to drain its output.
+Producer thread count is bounded by the graph's stream-node count. Timers remain coordinator-owned.
+
+An invocation retains its input frame and may read declared ancestor outputs through its context.
+Its emissions start a new message domain with FIFO order. Later inputs wait for that invocation to
+return. Returning without sending emits no message. Closing workflow input waits for admitted
+invocations, queued emissions, downstream close handling, and final sink acknowledgements.
+
+Failure or dropping an unfinished instance wakes blocked sends with an error and prevents further
+publication. Invalid emissions fail the instance even if the producer ignores a send error. Cleanup
+waits for running producer calls and releases their state and workers. Arbitrary blocking plugin I/O
+cannot be interrupted by the runtime; plugins should propagate send errors and return promptly.
+Previously delivered outputs remain effective if a later read or operation fails.
+
+Stream producers are supported in streaming workflows using schema `2026-10-02`, including generated
+runners. They are rejected in synchronous flows, Loop bodies, and Iteration bodies. Existing task and
+event interfaces retain their behavior; downstream exhaustive matches on `NodeExecution` must handle
+the new `Stream` variant.
 
 ## In-memory streaming instances
 
@@ -174,14 +231,14 @@ settings for definitions constructed or deserialized by the host.
 
 Schema `2026-10-02` accepts `execution: {"mode": "stream", "input_type": "int"}`. An absent
 `execution` field retains single-run behavior. Each root node needs an explicit data or control path
-from the engine's `%input.item` source. Task edges preserve message identity; event emissions start a
+from the engine's `%input.item` source. Task edges preserve message identity; event and producer emissions start a
 new message domain. Cross-domain joins and context reads are rejected during preparation.
 
 Use `mf_compiler::instantiate_stream` to prepare an instance and inspect its immutable graph through
 `plan()`. Consume the prepared instance with `start` or `start_with_options`. Each preparation creates
-independent plugin state. Task and event executors are reused across messages for the instance lifetime.
+independent plugin state. Task, event, and stream executors are reused across messages for the instance lifetime.
 The coordinator serializes events and submits frames to `WorkerPool`, which owns the reusable threads
-and bounded job queue. Each submitted frame runs consecutive ordinary tasks in validated order, returning the frame before the next event node or when
+and bounded job queue. Each submitted frame runs consecutive ordinary tasks in validated order, returning the frame before the next event or stream node or when
 it is complete. A recorded instance failure prevents the next task call within that dispatch.
 
 `instance.input()` returns a cloneable sender. `send` waits for admission capacity and completes once
@@ -198,7 +255,7 @@ Dropping an unfinished instance follows the same failure cleanup before releasin
 
 Limits default to 64 pending messages and four workers. Positive overrides live in `execution.limits`.
 Preparation reserves one frame slot per downstream domain; the remaining slots bound input admission.
-Each event node's pending emissions are also limited by `max_pending_messages`. A full downstream
+Each event or stream node's pending emissions are also limited by `max_pending_messages`. A full downstream
 queue propagates pressure to input admission. Payload sizes and plugin buffers have no byte quota.
 
 A custom `StreamClock` must advance monotonically and wake registered instances. Deadline expiry

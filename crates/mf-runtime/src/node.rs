@@ -559,20 +559,21 @@ pub struct PreparedNode {
 pub enum NodeExecution {
     Task(Box<dyn TaskNode>),
     Event(Box<dyn crate::EventNode>),
+    Stream(Box<dyn crate::StreamNode>),
 }
 
 impl NodeExecution {
     pub fn as_task_node(&self) -> Option<&dyn TaskNode> {
         match self {
             Self::Task(task) => Some(task.as_ref()),
-            Self::Event(_) => None,
+            Self::Event(_) | Self::Stream(_) => None,
         }
     }
 
     pub fn into_task_node(self) -> Option<Box<dyn TaskNode>> {
         match self {
             Self::Task(task) => Some(task),
-            Self::Event(_) => None,
+            Self::Event(_) | Self::Stream(_) => None,
         }
     }
 }
@@ -592,6 +593,16 @@ impl PreparedNode {
         Self {
             metadata: metadata.into(),
             execution: NodeExecution::Event(Box::new(state)),
+        }
+    }
+
+    pub fn stream(
+        producer: impl crate::StreamNode + 'static,
+        metadata: impl Into<NodeMetadata>,
+    ) -> Self {
+        Self {
+            metadata: metadata.into(),
+            execution: NodeExecution::Stream(Box::new(producer)),
         }
     }
 }

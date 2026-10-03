@@ -132,3 +132,14 @@ pub trait EventNode: Send {
         None
     }
 }
+
+/// An instance-owned producer invoked serially on a dedicated worker.
+pub trait StreamNode: Send {
+    /// Returning ends this input invocation; successful sends may still be draining.
+    fn execute(
+        &mut self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+        emitter: &mut crate::Emitter<'_>,
+    ) -> Result<(), NodeExecutionError>;
+}
