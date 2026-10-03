@@ -6,7 +6,7 @@ use mf_telemetry::{
     event::{FailurePhase, LoopPathEntry, LoopSummary, SkipCause},
     observation::{BodyNodeObservation, BodyObservation, NodeObservation, RunObservation},
 };
-use snafu::{ResultExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
@@ -47,7 +47,7 @@ struct ScopeGuard<'a> {
     context: &'a mut ExecutionContext,
     parent_outputs: BTreeMap<String, Option<Value>>,
     depth: usize,
-    parent_limits: Option<FrameLimits>,
+    parent_budget: Option<FrameBudget>,
 }
 
 impl Drop for ScopeGuard<'_> {
@@ -55,7 +55,7 @@ impl Drop for ScopeGuard<'_> {
         self.context.scopes.truncate(self.depth);
         self.context.outputs = std::mem::take(&mut self.parent_outputs);
         self.context.pending_loop_write = None;
-        self.context.frame_limits = self.parent_limits;
+        self.context.frame_budget = self.parent_budget;
     }
 }
 
@@ -82,9 +82,10 @@ pub enum ContextValue<'a> {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct FrameLimits {
+struct FrameBudget {
     payload: usize,
     context: usize,
+    retained: usize,
 }
 
 /// Completed output values for one run. Nodes receive an immutable reference.
@@ -99,7 +100,7 @@ pub struct ExecutionContext {
     remaining_steps: usize,
     snapshots: Option<crate::SnapshotRecorder>,
     snapshot_prefix: Vec<LoopPathEntry>,
-    frame_limits: Option<FrameLimits>,
+    frame_budget: Option<FrameBudget>,
 }
 
 impl Default for ExecutionContext {
@@ -113,14 +114,24 @@ impl Default for ExecutionContext {
             remaining_steps: crate::MAX_SCHEDULED_STEPS,
             snapshots: None,
             snapshot_prefix: Vec::new(),
-            frame_limits: None,
+            frame_budget: None,
         }
     }
 }
 
 impl ExecutionContext {
-    pub(super) fn set_stream_limits(&mut self, payload: usize, context: usize) {
-        self.frame_limits = Some(FrameLimits { payload, context });
+    pub(super) fn set_stream_limits(
+        &mut self,
+        payload: usize,
+        context: usize,
+    ) -> Result<(), crate::StreamError> {
+        let retained = self.retained_bytes(context)?;
+        self.frame_budget = Some(FrameBudget {
+            payload,
+            context,
+            retained,
+        });
+        Ok(())
     }
 
     pub(super) fn set_frame_observation(&mut self, observation: RunObservation) {
@@ -128,6 +139,15 @@ impl ExecutionContext {
     }
 
     pub fn retained_bytes(&self, limit: usize) -> Result<usize, crate::StreamError> {
+        if let Some(budget) = self.frame_budget {
+            ensure!(
+                budget.retained <= limit,
+                StreamResourceSnafu {
+                    message: "message context exceeds its frame reservation"
+                }
+            );
+            return Ok(budget.retained);
+        }
         let mut bytes = crate::MESSAGE_OVERHEAD;
         for (key, value) in &self.outputs {
             bytes = crate::stream_limits::add(bytes, crate::stream_limits::binding_bytes(key)?)?;
@@ -460,13 +480,13 @@ impl ExecutionContext {
     ) -> Result<(T, Outputs, bool), WorkflowRunError> {
         let depth = self.scopes.len();
         let parent_outputs = std::mem::take(&mut self.outputs);
-        let parent_limits = self.frame_limits.take();
+        let parent_budget = self.frame_budget.take();
         self.scopes.push(scope);
         let guard = ScopeGuard {
             context: self,
             parent_outputs,
             depth,
-            parent_limits,
+            parent_budget,
         };
         let state = &mut *guard.context;
         let result = run(state);
@@ -536,36 +556,39 @@ impl ExecutionContext {
                     .map_err(|error| state_error(id, format!("output `{name}`: {error}")))?;
             }
         }
-        if let Some(limits) = self.frame_limits {
-            self.validate_stream_publication(node, result.as_ref(), limits)
-                .with_context(|_| ResourceSnafu {
-                    definition_id: node.definition_id.clone(),
-                })?;
-        }
-        // Validate the complete result before making any values visible.
-        match result {
-            Some(result) => {
-                self.outputs.extend(
-                    result
-                        .outputs
-                        .into_iter()
-                        .map(|(port, value)| (output_id(id, &port), Some(value))),
-                );
-                self.outputs.extend(
+        let updates: Vec<_> = match result {
+            Some(result) => result
+                .outputs
+                .into_iter()
+                .map(|(port, value)| (output_id(id, &port), Some(value)))
+                .chain(
                     result
                         .skipped
                         .into_iter()
                         .map(|port| (output_id(id, &port), None)),
-                );
-            }
-            None => self.outputs.extend(
-                node.metadata
-                    .ports
-                    .outputs
-                    .iter()
-                    .map(|port| (output_id(id, &port.name), None)),
-            ),
-        }
+                )
+                .collect(),
+            None => node
+                .metadata
+                .ports
+                .outputs
+                .iter()
+                .map(|port| (output_id(id, &port.name), None))
+                .collect(),
+        };
+        let budget = self
+            .frame_budget
+            .map(|budget| {
+                self.validate_stream_publication(&updates, budget)
+                    .map(|retained| FrameBudget { retained, ..budget })
+            })
+            .transpose()
+            .with_context(|_| ResourceSnafu {
+                definition_id: node.definition_id.clone(),
+            })?;
+        // Validate the complete result before committing values and their charges together.
+        self.outputs.extend(updates);
+        self.frame_budget = budget;
         if let Some((variable, value)) = self.pending_loop_write.take() {
             let frame = self
                 .scopes
@@ -579,60 +602,42 @@ impl ExecutionContext {
         Ok(())
     }
 
-    fn validate_stream_publication<N>(
+    fn validate_stream_publication(
         &self,
-        node: &FlowNode<N>,
-        result: Option<&NodeResult>,
-        limits: FrameLimits,
-    ) -> Result<(), crate::StreamError> {
-        let id = node.definition_id.as_str();
-        let updates: Vec<_> = match result {
-            Some(result) => {
-                crate::stream_limits::output_bytes(&result.outputs, limits.payload)?;
-                result
-                    .outputs
-                    .iter()
-                    .map(|(port, value)| (output_id(id, port), Some(value)))
-                    .chain(
-                        result
-                            .skipped
-                            .iter()
-                            .map(|port| (output_id(id, port), None)),
-                    )
-                    .collect()
-            }
-            None => node
-                .metadata
-                .ports
-                .outputs
-                .iter()
-                .map(|port| (output_id(id, &port.name), None))
-                .collect(),
-        };
-        let changed: BTreeSet<_> = updates.iter().map(|(name, _)| name.as_str()).collect();
-        let entries = self
-            .outputs
-            .iter()
-            .filter(|(name, _)| !changed.contains(name.as_str()))
-            .map(|(name, value)| (name.as_str(), value.as_ref()))
-            .chain(updates.iter().map(|(name, value)| (name.as_str(), *value)));
-        let mut bytes = crate::MESSAGE_OVERHEAD;
-        for (key, value) in entries {
-            bytes = crate::stream_limits::add(bytes, crate::stream_limits::binding_bytes(key)?)?;
-            ensure!(
-                bytes <= limits.context,
-                StreamResourceSnafu {
-                    message: "message context exceeds its frame reservation"
-                }
-            );
-            if let Some(value) = value {
-                bytes = crate::stream_limits::add(
-                    bytes,
-                    crate::stream_limits::memory_size(value, limits.context - bytes)?,
+        updates: &[(String, Option<Value>)],
+        budget: FrameBudget,
+    ) -> Result<usize, crate::StreamError> {
+        crate::stream_limits::payload_bytes(
+            updates.iter().filter_map(|(_, value)| value.as_ref()),
+            budget.payload,
+        )?;
+        let mut bytes = budget.retained;
+        // Remove every replaced value before adding replacements, so swaps do not need extra room.
+        for (key, _) in updates {
+            if let Some(Some(value)) = self.outputs.get(key) {
+                bytes = bytes.checked_sub(value.estimated_heap_bytes()).context(
+                    StreamResourceSnafu {
+                        message: "invalid retained-byte accounting",
+                    },
                 )?;
             }
         }
-        Ok(())
+        for (key, value) in updates {
+            if !self.outputs.contains_key(key) {
+                bytes =
+                    crate::stream_limits::add(bytes, crate::stream_limits::binding_bytes(key)?)?;
+            }
+            if let Some(value) = value {
+                bytes = crate::stream_limits::add(bytes, value.estimated_heap_bytes())?;
+            }
+        }
+        ensure!(
+            bytes <= budget.context,
+            StreamResourceSnafu {
+                message: "message context exceeds its frame reservation",
+            }
+        );
+        Ok(bytes)
     }
 }
 
@@ -992,12 +997,14 @@ mod tests {
 
     #[test]
     fn scoped_execution_restores_parent_state_after_failure_and_unwind() {
-        for unwinds in [false, true] {
+        for exit in ["success", "error", "panic"] {
             let mut state = ExecutionContext::default();
             state
                 .outputs
                 .insert("parent.value".into(), Some(json!(9).into()));
             let parent_outputs = state.outputs.clone();
+            let parent_bytes = state.retained_bytes(usize::MAX).unwrap();
+            state.set_stream_limits(1024, parent_bytes).unwrap();
             let types = BTreeMap::from([("count".into(), ValueType::Int64)]);
             let source = crate::prepared_scope_source("input", &types)
                 .into_task()
@@ -1022,24 +1029,98 @@ mod tests {
                         BTreeMap::new(),
                     )
                     .unwrap();
-                    state.run_scope(nested, |_| {
-                        if unwinds {
-                            panic!("body panicked");
-                        }
-                        Err::<(), _>(state_error("body", "body failed"))
+                    state.run_scope(nested, |_| match exit {
+                        "panic" => panic!("body panicked"),
+                        "error" => Err(state_error("body", "body failed")),
+                        _ => Ok(()),
                     })?;
                     Ok(())
                 })
             }));
-            if unwinds {
+            if exit == "panic" {
                 assert!(result.is_err());
             } else {
-                assert!(result.unwrap().is_err());
+                assert_eq!(result.unwrap().is_err(), exit == "error");
             }
             assert_eq!(state.outputs, parent_outputs);
+            assert_eq!(state.retained_bytes(parent_bytes).unwrap(), parent_bytes);
+            assert_eq!(state.frame_budget.unwrap().retained, parent_bytes);
             assert!(state.scopes.is_empty());
             assert_eq!(state.remaining_steps, crate::MAX_SCHEDULED_STEPS - 1);
         }
+    }
+
+    #[test]
+    fn retained_budget_tracks_replacement_skip_and_failed_publication_atomically() {
+        let node = FlowNode::new(
+            "producer",
+            crate::PreparedNode::new(
+                EmitNode(Outputs::new()),
+                NodePorts {
+                    inputs: vec![],
+                    outputs: vec![
+                        port("left", ValueType::Any, false),
+                        port("right", ValueType::Any, false),
+                    ],
+                },
+            ),
+        );
+        let small = Value::from("a");
+        let large = Value::from("b".repeat(128));
+        let values = |left: Value, right: Value| {
+            NodeResult::from(Outputs::from([
+                ("left".into(), left),
+                ("right".into(), right),
+            ]))
+        };
+        let mut context =
+            ExecutionContext::for_message(&node, values(small.clone(), large.clone())).unwrap();
+        let original_bytes = context.retained_bytes(usize::MAX).unwrap();
+        context.set_stream_limits(4096, original_bytes).unwrap();
+        context
+            .publish(&node, Some(values(large.clone(), small.clone())))
+            .unwrap();
+        assert_eq!(
+            context.retained_bytes(original_bytes).unwrap(),
+            original_bytes
+        );
+        let before = context.outputs.clone();
+        assert!(
+            context
+                .publish(
+                    &node,
+                    Some(values(Value::from("c".repeat(1000)), small.clone())),
+                )
+                .is_err()
+        );
+        assert_eq!(context.outputs, before);
+        assert_eq!(
+            context.retained_bytes(original_bytes).unwrap(),
+            original_bytes
+        );
+        context
+            .publish(
+                &node,
+                Some(NodeResult {
+                    skipped: BTreeSet::from(["right".into()]),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        assert_eq!(
+            context.retained_bytes(original_bytes).unwrap(),
+            original_bytes - small.estimated_heap_bytes(),
+        );
+        context.publish(&node, None).unwrap();
+        assert_eq!(
+            context.retained_bytes(original_bytes).unwrap(),
+            original_bytes - small.estimated_heap_bytes() - large.estimated_heap_bytes(),
+        );
+        context.publish(&node, Some(values(small, large))).unwrap();
+        assert_eq!(
+            context.retained_bytes(original_bytes).unwrap(),
+            original_bytes
+        );
     }
 
     #[test]

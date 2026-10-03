@@ -1,7 +1,7 @@
 use crate::stream_limits::{StreamResources, add, memory_size, output_bytes};
 use crate::{
-    EventContext, EventEffects, EventEmission, EventNode, ExecutionContext, FlowOutputs, NodeEvent,
-    Outputs, PreparedStream, StreamExecution, StreamPlan, TimerUpdate, ValueRef, WorkerPool,
+    EventContext, EventEffects, EventNode, ExecutionContext, FlowOutputs, NodeEvent, Outputs,
+    PreparedStream, StreamExecution, StreamPlan, TimerUpdate, ValueRef, WorkerPool,
 };
 use mf_telemetry::{
     event::{FailurePhase, SkipCause},
@@ -194,7 +194,8 @@ struct Domain {
 
 struct QueuedEmission {
     message: MessageId,
-    emission: EventEmission,
+    context: ExecutionContext,
+    batch: Option<crate::BatchInfo>,
     bytes: usize,
 }
 
@@ -823,7 +824,6 @@ fn tick(
         state.dynamic_bytes -= bytes;
         let credits = resources.domain_credits[0];
         state.event_credits = add(state.event_credits, credits)?;
-        let context_domain = 0;
         let mut context = ExecutionContext::for_message(
             &plan.nodes()[0],
             Outputs::from([("item".into(), value)]).into(),
@@ -831,12 +831,11 @@ fn tick(
         .context(WorkflowSnafu { message })?;
         context.set_stream_limits(
             plan.execution().limits.max_message_bytes,
-            resources.frame_bytes[context_domain],
-        );
+            resources.frame_bytes[0],
+        )?;
         if let Some(observation) = &shared.observation {
             context.set_frame_observation(observation.frame(stream_message(message)));
         }
-        context.retained_bytes(resources.frame_bytes[0])?;
         state.domains[0].frame = Some(Frame {
             message,
             context,
@@ -869,21 +868,10 @@ fn tick(
         state.dynamic_bytes -= release;
         let credits = resources.domain_credits[domain];
         state.event_credits = add(state.event_credits, credits)?;
-        let context_domain = domain;
-        let mut context =
-            ExecutionContext::for_message(&plan.nodes()[source], queued.emission.result).context(
-                WorkflowSnafu {
-                    message: queued.message,
-                },
-            )?;
-        context.set_stream_limits(
-            plan.execution().limits.max_message_bytes,
-            resources.frame_bytes[context_domain],
-        );
+        let mut context = queued.context;
         if let Some(observation) = &shared.observation {
             context.set_frame_observation(observation.frame(stream_message(queued.message)));
         }
-        context.retained_bytes(resources.frame_bytes[domain])?;
         state.domains[domain].frame = Some(Frame {
             message: queued.message,
             context,
@@ -1174,7 +1162,7 @@ fn invoke_event(
                     callback.buffered(items);
                 }
                 for emitted in operator.pending.iter().skip(old_pending) {
-                    if let Some(batch) = emitted.emission.batch {
+                    if let Some(batch) = emitted.batch {
                         let reason = match batch.reason {
                             crate::FlushReason::SizeExceed => "size_exceed",
                             crate::FlushReason::TimeoutExceed => "timeout_exceed",
@@ -1228,20 +1216,25 @@ fn apply_effects(
         .with_context(|_| ResourceContextSnafu {
             message: format!("node `{}` output", plan.nodes()[index].definition_id),
         })?;
-        let context = ExecutionContext::for_message(&plan.nodes()[index], emission.result.clone())
+        let mut context = ExecutionContext::for_message(&plan.nodes()[index], emission.result)
             .context(WorkflowSnafu {
                 message: MessageId {
                     domain,
                     sequence: state.sequences[domain],
                 },
             })?;
+        context.set_stream_limits(
+            plan.execution().limits.max_message_bytes,
+            resources.frame_bytes[domain],
+        )?;
         let bytes = context.retained_bytes(resources.seal_bytes[index] / 2)?;
         let sequence = take_sequence(&mut state.sequences[domain])?;
         take_sequence(&mut state.summary.emitted_messages)?;
         operator.pending_bytes = add(operator.pending_bytes, bytes)?;
         operator.pending.push_back(QueuedEmission {
             message: MessageId { domain, sequence },
-            emission,
+            context,
+            batch: emission.batch,
             bytes,
         });
     }

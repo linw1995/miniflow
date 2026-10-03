@@ -41,12 +41,13 @@ It validates the tentative total before committing values and accounting togethe
 unchanged outputs or maintaining a second binding map. Scope guards save and restore the budget
 with the output map. Every task publication remains checked before downstream execution.
 
-Queued emissions retain the context already prepared for validation. Promotion attaches frame limits
-and observation while retaining the existing credit reservation and message-sequence ordering.
+Queued emissions retain the context and budget already prepared for validation. Promotion attaches
+observation while retaining the existing credit reservation and message-sequence ordering.
 
 ## Validation and ablation
 
 Check that memory charges reflect vector capacity, nested values, shared children, and Batch handoff.
 Exercise atomic failed publication, replacement, skip, scope unwind, and intermediate oversize errors.
-Compare baseline, cached sizing, and incremental accounting on forwarding chains and Batch flows.
+Compare the original JSON accounting, cached memory estimates, and incremental accounting on
+forwarding chains and Batch flows. Compare the latter two separately to isolate context scanning.
 Keep benchmark sources and reports under the ignored target directory.
