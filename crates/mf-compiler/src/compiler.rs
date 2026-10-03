@@ -965,7 +965,7 @@ pub enum DescriptionError {
     InvalidPlan,
     #[snafu(display("could not describe node `{definition_id}`"))]
     MissingNode { definition_id: DefinitionId },
-    #[snafu(display("invalid workflow description: {source}"))]
+    #[snafu(display("invalid workflow description: {source}"), visibility(pub))]
     Contract { source: ContractError },
 }
 

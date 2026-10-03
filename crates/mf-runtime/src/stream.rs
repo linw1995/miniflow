@@ -85,14 +85,32 @@ pub enum TimerUpdate {
     Set(Duration),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlushReason {
+    SizeExceed,
+    TimeoutExceed,
+    UpstreamClosed,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BatchInfo {
+    pub item_count: usize,
+    pub reason: FlushReason,
+}
+
 #[derive(Clone, Debug)]
 pub struct EventEmission {
     pub result: NodeResult,
+    pub batch: Option<BatchInfo>,
 }
 
 impl From<NodeResult> for EventEmission {
     fn from(result: NodeResult) -> Self {
-        Self { result }
+        Self {
+            result,
+            batch: None,
+        }
     }
 }
 
@@ -109,4 +127,8 @@ pub trait EventNode: Send {
         event: NodeEvent,
         context: &EventContext<'_>,
     ) -> Result<EventEffects, NodeExecutionError>;
+
+    fn buffered_items(&self) -> Option<usize> {
+        None
+    }
 }

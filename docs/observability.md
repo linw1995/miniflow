@@ -347,3 +347,53 @@ nix develop --command cargo run -p mf-tui --example graph_preview
 Arrow keys pan the graph, `f` returns to the origin, and `q` or Esc closes the preview. The preview uses fixture events and does not launch a compiled runner.
 
 See [compiling workflows](compiling.md) for executable commands, endpoint settings, lock migration, and build prerequisites. Automatically generated metadata excludes configuration and business values. Arbitrary plugin failure messages can contain sensitive text and are not automatically sanitized by this contract.
+
+## Streaming observations
+
+Streaming runner descriptions use version `2026-10-02`. Their workflow lifecycle records use event
+schema `3`, decoded with `mf_telemetry::stream::StreamRecord`; the existing finite-run decoder keeps
+its original schema `1` and `2` contracts. The terminal launcher and finite-session reducer reject the
+streaming protocol before execution.
+
+A streaming instance has one workflow/run identity and a checked, monotonically increasing lifecycle
+sequence. A run can exceed the finite-run event budget. The producer retains counters and shared graph
+metadata, while export buffering remains bounded; it does not retain prior message histories. A sequence
+is reserved before encoding or export, so failed delivery leaves a gap. A terminal event records its own
+final sequence. Counter exhaustion stops trustworthy lifecycle emission without wrapping identifiers or
+changing business execution; consumers cannot claim a complete terminal stream in that case.
+
+Node and Loop records include a structured `stream` body with an invocation ID, trigger, optional
+message identity, and optional parent invocation ID. Triggers are `message` for ordinary steps and
+`input`, `timer`, or `upstream_closed` for event callbacks. Timer and close invocations have no individual
+input message. Message identity combines a domain with that domain's sequence. Invocation IDs and
+message sequences are canonical unsigned decimal strings so OTel encoding cannot round large values.
+The lifecycle sequence retains the nonnegative signed OTel counter representation.
+
+Successful node completion includes `emission_count`. A Batch input can succeed with zero emissions;
+that does not imply downstream execution or completion of the accepted input's business processing.
+`mf.batch.buffered` reports the current item count. `mf.batch.flushed` reports the output message,
+item count, and `size_exceed`, `timeout_exceed`, or `upstream_closed` reason. Automatic metadata includes
+no collected values, node configuration, or unbounded list of constituent input IDs.
+
+Node spans carry `mf.stream.invocation`, and applicable `mf.stream.domain`, `mf.stream.message`, and
+`mf.stream.parent_invocation` attributes. Loop paths remain scoped to their containing message.
+Iteration item/body logs retain their existing `mf.iteration` scope and outer-sequence independence,
+and gain the containing stream identity. Body nodes receive distinct invocation IDs, including when
+item indices or Loop paths repeat in a later message. Native span parentage remains workflow/node/item/body.
+
+The final workflow outcome is `succeeded` or `failed`, with aggregate accepted-input,
+emitted-message, completed-frame, and delivered-output counters. Completion follows drain and output
+acknowledgement, including the final stdout record. Failure preserves its phase and available node
+identity. An earlier missing node outcome remains unknown when a later message succeeds. Consumers
+should bound retained detail and distinguish local history eviction from lifecycle transport loss.
+
+For in-memory execution, create an observation with `CompiledWorkflow::start_stream_observation`, then
+pass it in `StreamOptions.observation` to `mf_compiler::start_stream`. This includes preparation in the
+observed lifetime. Providers remain caller-owned; use bounded, nonblocking processors and shut them down
+after joining the instance. Generated runners configure the existing bounded OTLP/HTTP providers and
+attempt bounded shutdown on success and failure. Disabled export, queue pressure, and unreachable
+Collectors do not change workflow results or trigger retries.
+
+Whole-run snapshot capture is unavailable for streaming instances. `StreamOptions.snapshots` and
+`MF_CAPTURE_SNAPSHOTS=1` are rejected before input admission or node execution. Validation and description
+modes remain free of execution and ignore capture/export setup. Existing finite-run history is unchanged.

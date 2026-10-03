@@ -2,6 +2,11 @@ use crate::{
     EventContext, EventEffects, EventEmission, EventNode, ExecutionContext, FlowOutputs, NodeEvent,
     Outputs, PreparedStream, StreamExecution, StreamPlan, TimerUpdate, ValueRef, WorkerPool,
 };
+use mf_telemetry::{
+    event::{FailurePhase, SkipCause},
+    observation::{StreamCallback, StreamObservation},
+    stream::{StreamCounts, StreamFailure, StreamMessage, StreamTrigger},
+};
 use serde::Serialize;
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
@@ -111,12 +116,14 @@ impl StreamClock for MonotonicClock {
 
 pub struct StreamOptions {
     pub clock: Arc<dyn StreamClock>,
+    pub observation: Option<StreamObservation>,
     pub snapshots: Option<crate::SnapshotRecorder>,
 }
 impl Default for StreamOptions {
     fn default() -> Self {
         Self {
             clock: Arc::new(MonotonicClock::default()),
+            observation: None,
             snapshots: None,
         }
     }
@@ -192,6 +199,7 @@ struct State {
     active_workers: usize,
     input_closed: bool,
     failure: Option<StreamError>,
+    failure_node: Option<String>,
     done: bool,
     summary: StreamSummary,
 }
@@ -201,6 +209,7 @@ struct Shared {
     changed: Condvar,
     execution: StreamExecution,
     input_capacity: usize,
+    observation: Option<StreamObservation>,
 }
 
 impl Shared {
@@ -350,6 +359,15 @@ impl PreparedStream {
     }
 
     pub fn start_with_options(self, options: StreamOptions) -> Result<StreamInstance, StreamError> {
+        let observation = options.observation.clone();
+        let result = self.start_inner(options);
+        if let (Err(error), Some(observation)) = (&result, observation) {
+            observation.preparation_failed(error.to_string());
+        }
+        result
+    }
+
+    fn start_inner(self, options: StreamOptions) -> Result<StreamInstance, StreamError> {
         ensure!(
             options.snapshots.is_none(),
             PreparationSnafu {
@@ -395,12 +413,14 @@ impl PreparedStream {
                 active_workers: 0,
                 input_closed: false,
                 failure: None,
+                failure_node: None,
                 done: false,
                 summary: StreamSummary::default(),
             }),
             changed: Condvar::new(),
             execution: plan.execution().clone(),
             input_capacity,
+            observation: options.observation,
         });
         options
             .clock
@@ -422,7 +442,7 @@ impl PreparedStream {
                     state.failure.get_or_insert_with(|| panic_error(payload));
                     clear_retained(&mut state);
                     state.done = true;
-
+                    finish_observation(&coordinator_shared, &state);
                     coordinator_shared.changed.notify_all();
                 }
             })
@@ -541,6 +561,10 @@ fn start_workers(
     let shared = Arc::clone(shared);
     let plan = Arc::clone(plan);
     WorkerPool::new(count, move |mut frame: Frame| {
+        let _context = frame
+            .context
+            .observation()
+            .map(crate::RunObservation::enter);
         let steps = &plan.domains()[frame.message.domain].steps;
         let result = (|| -> Result<(), StreamError> {
             while let Some(&index) = steps.get(frame.cursor) {
@@ -588,6 +612,10 @@ fn coordinate(
             let domain = completion.frame.message.domain;
             state.domains[domain].running = false;
             if let Err(error) = completion.result {
+                if state.failure.is_none() {
+                    let index = plan.domains()[domain].steps[completion.frame.cursor];
+                    state.failure_node = Some(plan.nodes()[index].definition_id.to_string());
+                }
                 state.failure.get_or_insert(error);
             }
             if state.failure.is_none() {
@@ -599,7 +627,7 @@ fn coordinate(
             if state.active_workers == 0 {
                 clear_retained(&mut state);
                 state.done = true;
-
+                finish_observation(shared, &state);
                 shared.changed.notify_all();
                 break;
             }
@@ -609,7 +637,7 @@ fn coordinate(
         if let Some(domain) = state.delivered.take() {
             release_domain(&mut state, domain);
         }
-        match tick(&mut state, plan, &workers, clock) {
+        match tick(&mut state, plan, &workers, clock, shared) {
             Ok(progress) => {
                 shared.changed.notify_all();
                 if state.domains.iter().all(|domain| domain.closed)
@@ -618,7 +646,7 @@ fn coordinate(
                 {
                     clear_retained(&mut state);
                     state.done = true;
-
+                    finish_observation(shared, &state);
                     shared.changed.notify_all();
                     break;
                 }
@@ -663,6 +691,7 @@ fn tick(
     plan: &StreamPlan,
     workers: &WorkerPool<Frame>,
     clock: &dyn StreamClock,
+    shared: &Shared,
 ) -> Result<bool, StreamError> {
     let mut progress = false;
     for source in plan.domains().iter().skip(1) {
@@ -689,6 +718,7 @@ fn tick(
                     now: clock.now(),
                     input: None,
                 },
+                event_callback(shared, plan, index, None, StreamTrigger::Timer),
             )?;
             progress = true;
         }
@@ -696,11 +726,14 @@ fn tick(
     if !state.domains[0].occupied
         && let Some((message, value)) = state.inputs.pop_front()
     {
-        let context = ExecutionContext::for_message(
+        let mut context = ExecutionContext::for_message(
             &plan.nodes()[0],
             Outputs::from([("item".into(), value)]).into(),
         )
         .context(WorkflowSnafu { message })?;
+        if let Some(observation) = &shared.observation {
+            context.set_frame_observation(observation.frame(stream_message(message)));
+        }
         state.domains[0].frame = Some(Frame {
             message,
             context,
@@ -722,10 +755,15 @@ fn tick(
         else {
             continue;
         };
-        let context = ExecutionContext::for_message(&plan.nodes()[source], queued.emission.result)
-            .context(WorkflowSnafu {
-                message: queued.message,
-            })?;
+        let mut context =
+            ExecutionContext::for_message(&plan.nodes()[source], queued.emission.result).context(
+                WorkflowSnafu {
+                    message: queued.message,
+                },
+            )?;
+        if let Some(observation) = &shared.observation {
+            context.set_frame_observation(observation.frame(stream_message(queued.message)));
+        }
         state.domains[domain].frame = Some(Frame {
             message: queued.message,
             context,
@@ -775,14 +813,27 @@ fn tick(
                 state.domains[domain].frame = Some(frame);
                 continue;
             }
-
-            if let Some(inputs) = frame
+            let mut callback = event_callback(
+                shared,
+                plan,
+                index,
+                Some(frame.message),
+                StreamTrigger::Input,
+            );
+            let _context = callback.as_ref().map(StreamCallback::enter);
+            let inputs = frame
                 .context
                 .event_inputs(&plan.nodes()[index], plan.dependencies(index))
+                .inspect_err(|error| {
+                    if let Some(callback) = callback.take() {
+                        callback.failed(FailurePhase::Dependency, error.to_string());
+                    }
+                    state.failure_node = Some(plan.nodes()[index].definition_id.to_string());
+                })
                 .context(WorkflowSnafu {
                     message: frame.message,
-                })?
-            {
+                })?;
+            if let Some(inputs) = inputs {
                 invoke_event(
                     state,
                     plan,
@@ -792,7 +843,27 @@ fn tick(
                         now: clock.now(),
                         input: Some(&frame.context),
                     },
+                    callback,
                 )?;
+            } else if let Some(callback) = callback {
+                let causes: std::collections::BTreeSet<_> = plan
+                    .dependencies(index)
+                    .iter()
+                    .filter(|dependency| {
+                        matches!(
+                            frame.context.output(&crate::output_id(
+                                &dependency.source_node,
+                                &dependency.source_output
+                            )),
+                            Ok(crate::ContextValue::Skipped)
+                        )
+                    })
+                    .map(|dependency| SkipCause {
+                        source_node: dependency.source_node.clone(),
+                        source_output: dependency.source_output.clone(),
+                    })
+                    .collect();
+                callback.skipped(causes.into_iter().collect());
             }
             frame.cursor += 1;
             state.domains[domain].frame = Some(frame);
@@ -838,6 +909,7 @@ fn tick(
                             now: clock.now(),
                             input: None,
                         },
+                        event_callback(shared, plan, index, None, StreamTrigger::UpstreamClosed),
                     )?;
                     let operator = state.operators[index].as_mut().unwrap();
                     operator.closed = true;
@@ -858,26 +930,85 @@ fn tick(
     Ok(progress)
 }
 
+fn event_callback(
+    shared: &Shared,
+    plan: &StreamPlan,
+    index: usize,
+    message: Option<MessageId>,
+    trigger: StreamTrigger,
+) -> Option<StreamCallback> {
+    shared.observation.as_ref()?.callback(
+        plan.nodes()[index].definition_id.as_str(),
+        message.map(stream_message),
+        trigger,
+    )
+}
+
 fn invoke_event(
     state: &mut State,
     plan: &StreamPlan,
     index: usize,
     event: NodeEvent,
     context: EventContext<'_>,
+    mut callback: Option<StreamCallback>,
 ) -> Result<(), StreamError> {
-    let effects = catch_unwind(AssertUnwindSafe(|| {
-        state.operators[index]
-            .as_mut()
-            .unwrap()
-            .state
-            .on_event(event, &context)
-    }))
-    .map_err(panic_error)?
-    .with_context(|_| EventSnafu {
-        definition_id: plan.nodes()[index].definition_id.clone(),
-    })?;
-    apply_effects(state, plan, index, effects, context.now)?;
-    Ok(())
+    let _span = callback.as_ref().map(StreamCallback::enter);
+    if let Some(callback) = callback.as_mut() {
+        callback.started();
+    }
+    let mut phase = FailurePhase::Execution;
+    let old_pending = state.operators[index].as_ref().unwrap().pending.len();
+    let result = (|| -> Result<(usize, Vec<String>), StreamError> {
+        let effects = catch_unwind(AssertUnwindSafe(|| {
+            state.operators[index]
+                .as_mut()
+                .unwrap()
+                .state
+                .on_event(event, &context)
+        }))
+        .map_err(panic_error)?
+        .with_context(|_| EventSnafu {
+            definition_id: plan.nodes()[index].definition_id.clone(),
+        })?;
+        phase = FailurePhase::Publication;
+        let count = effects.emissions.len();
+        let ports: std::collections::BTreeSet<_> = effects
+            .emissions
+            .iter()
+            .flat_map(|emission| emission.result.outputs.keys().cloned())
+            .collect();
+        apply_effects(state, plan, index, effects, context.now)?;
+        Ok((count, ports.into_iter().collect()))
+    })();
+    match result {
+        Ok((count, ports)) => {
+            if let Some(callback) = callback {
+                let operator = state.operators[index].as_ref().unwrap();
+                if let Some(items) = operator.state.buffered_items() {
+                    callback.buffered(items);
+                }
+                for emitted in operator.pending.iter().skip(old_pending) {
+                    if let Some(batch) = emitted.emission.batch {
+                        let reason = match batch.reason {
+                            crate::FlushReason::SizeExceed => "size_exceed",
+                            crate::FlushReason::TimeoutExceed => "timeout_exceed",
+                            crate::FlushReason::UpstreamClosed => "upstream_closed",
+                        };
+                        callback.flushed(stream_message(emitted.message), batch.item_count, reason);
+                    }
+                }
+                callback.succeeded(count, ports);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            state.failure_node = Some(plan.nodes()[index].definition_id.to_string());
+            if let Some(callback) = callback {
+                callback.failed(phase, error.to_string());
+            }
+            Err(error)
+        }
+    }
 }
 
 fn apply_effects(
@@ -946,6 +1077,47 @@ fn apply_effects(
         }
     }
     Ok(())
+}
+
+fn stream_message(message: MessageId) -> StreamMessage {
+    StreamMessage {
+        domain: message.domain,
+        sequence: message.sequence,
+    }
+}
+
+fn finish_observation(shared: &Shared, state: &State) {
+    if let Some(observation) = &shared.observation {
+        let failure = state.failure.as_ref().map(|error| StreamFailure {
+            phase: match error {
+                StreamError::Preparation { .. }
+                | StreamError::Compilation { .. }
+                | StreamError::ThreadSpawn { .. }
+                | StreamError::WorkerStartup { .. }
+                | StreamError::Stdio { .. } => "preparation",
+                StreamError::Input { .. }
+                | StreamError::InputFailure { .. }
+                | StreamError::InputRecord { .. } => "input",
+                StreamError::Output { .. }
+                | StreamError::OutputWrite { .. }
+                | StreamError::OutputEncode { .. } => "output",
+                StreamError::Resource { .. } | StreamError::Capacity => "resource",
+                _ => "execution",
+            }
+            .into(),
+            message: error.to_string(),
+            node: state.failure_node.clone(),
+        });
+        observation.finish(
+            StreamCounts {
+                accepted_inputs: state.summary.accepted_inputs,
+                emitted_messages: state.summary.emitted_messages,
+                completed_frames: state.summary.completed_frames,
+                delivered_outputs: state.summary.delivered_outputs,
+            },
+            failure,
+        );
+    }
 }
 
 fn release_domain(state: &mut State, domain: usize) {

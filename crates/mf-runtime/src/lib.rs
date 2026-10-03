@@ -43,6 +43,7 @@ pub use loop_node::{
 pub use message_domain::StreamDomain;
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
+pub use mf_telemetry::observation::StreamObservation;
 pub use node::{
     ContextReference, ExecutionFailedSnafu as NodeExecutionFailedSnafu, Inputs, NodeBuildError,
     NodeExecution, NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration,
@@ -57,8 +58,8 @@ pub use runner::{
 };
 pub use stream::stream_input_node;
 pub use stream::{
-    EventContext, EventEffects, EventEmission, EventNode, NodeEvent, STREAM_INPUT_ID,
-    StreamExecution, StreamLimits, StreamMode, TimerUpdate,
+    BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
+    STREAM_INPUT_ID, StreamExecution, StreamLimits, StreamMode, TimerUpdate,
 };
 pub use stream_instance::{
     CompilationSnafu as StreamCompilationSnafu, MessageId, MonotonicClock, StreamClock,

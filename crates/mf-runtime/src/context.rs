@@ -108,6 +108,10 @@ impl Default for ExecutionContext {
 }
 
 impl ExecutionContext {
+    pub(super) fn set_frame_observation(&mut self, observation: RunObservation) {
+        self.observation = Some(observation);
+    }
+
     pub fn for_message<N>(
         source: &FlowNode<N>,
         result: NodeResult,

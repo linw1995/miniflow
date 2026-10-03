@@ -8,6 +8,7 @@ pub mod observation;
 pub mod otlp;
 #[cfg(feature = "snapshot")]
 pub mod snapshot;
+pub mod stream;
 pub mod wire;
 
 pub const SNAPSHOT_CAPTURE_ENV: &str = "MF_CAPTURE_SNAPSHOTS";
@@ -17,6 +18,7 @@ use snafu::Snafu;
 pub const INSTRUMENTATION_SCOPE: &str = "mf.workflow";
 pub const EVENT_SCHEMA_VERSION: i64 = 1;
 pub const LOOP_EVENT_SCHEMA_VERSION: i64 = 2;
+pub const STREAM_EVENT_SCHEMA_VERSION: i64 = 3;
 pub const MAX_LOOP_DEPTH: usize = 4;
 pub const MAX_LOOP_ITERATIONS: u16 = 1000;
 pub const MAX_LOOP_SCHEDULED_STEPS: i64 = 10_000;

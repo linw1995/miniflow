@@ -203,8 +203,8 @@ queue propagates pressure to input admission. Payload sizes and plugin buffers h
 
 A custom `StreamClock` must advance monotonically and wake registered instances. Deadline expiry
 makes an emission ready; downstream execution remains subject to capacity. Snapshot capture is rejected
-before startup. Streaming definitions also compile to standalone JSON Lines runners; stream-specific
-observation is currently unsupported. See [streaming runners](compiling.md#streaming-runners).
+before startup. Streaming definitions also compile to standalone JSON Lines runners and support
+stream-specific observation. See [streaming runners](compiling.md#streaming-runners).
 
 Run the producer/consumer example with `cargo run -p mf-compiler --example stream` inside `nix develop`.
 
@@ -215,3 +215,16 @@ input. Inference wraps its input type as `List(T)` and retains checks for broad 
 one level to the shared type-depth limit and discards exact-value evidence for the collected array.
 The derivation must reference declared ports and fit the output declaration. Runtime publication still
 validates every actual emitted value.
+
+## Stream observation
+
+Start a stream observation with `CompiledWorkflow::start_stream_observation` and pass it through
+`StreamOptions.observation`. Invocations include run, message-domain, message, node, and nested-scope
+identity. Timer and close callbacks have independent invocation identity even without an input frame.
+
+Successful buffering reports zero emissions. Batch emissions carry item count and `size_exceed`,
+`timeout_exceed`, or `upstream_closed` metadata. `EventNode::buffered_items` optionally reports a count
+without exposing retained values. Transport and export queues remain bounded, and telemetry failures
+do not change workflow results or request retries. Terminal events follow drain or failure cleanup.
+
+The current terminal launcher and snapshot recorder remain unavailable for stream mode.

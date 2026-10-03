@@ -1,10 +1,6 @@
-# workflow-observability Specification
+# Spec Delta
 
-## Purpose
-
-Expose workflow execution through correlated OpenTelemetry traces and lifecycle events so local and external consumers can observe progress without changing execution behavior.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Identify and correlate workflow observations
 
@@ -60,24 +56,6 @@ Streaming records SHALL use a new protocol version and additionally identify the
 - **WHEN** two emitted batches each invoke the same Loop or Iteration body
 - **THEN** their body observations remain distinguishable through the containing stream invocation even when inner paths and item indices match
 
-### Requirement: Export live lifecycle events independently of completed spans
-
-Observed execution SHALL emit OTel LogRecords named `mf.workflow.started`, `mf.workflow.finished`, `mf.node.started`,
-`mf.node.finished`, and `mf.node.skipped` at their defined boundaries. Live lifecycle delivery MUST NOT wait for the
-workflow or node span to finish. In TUI mode these events MUST NOT be suppressed by trace sampling or ordinary
-diagnostic log filters. Execution spans SHALL provide workflow/node durations and explicit outcomes; failures SHALL have
-error status and conditional skips MUST NOT be represented as errors.
-
-#### Scenario: Observe a long-running node
-
-- **WHEN** a node remains executing beyond the interactive export interval and the receiver is available
-- **THEN** its start event is delivered while it is still executing, allowing the consumer to display Running before the node span ends
-
-#### Scenario: Preserve live state with trace sampling
-
-- **WHEN** trace sampling omits a node span during an observed TUI run
-- **THEN** the node lifecycle records remain eligible for full delivery
-
 ### Requirement: Preserve execution boundaries and failure semantics
 
 A workflow observation scope SHALL start before preparation and finish after selected-output extraction or a handled
@@ -117,20 +95,6 @@ For streaming execution, the workflow boundary SHALL finish only after drain or 
 
 - **WHEN** Batch accepts one item without a flush
 - **THEN** its input callback can finish with zero emissions while downstream nodes remain uninvoked
-
-### Requirement: Distinguish conditional skips from unreached nodes
-
-A node skipped because of resolved conditional dependencies SHALL emit `mf.node.skipped` without a start event or implementation invocation. The event SHALL identify the causal source node and port. Node terminal metadata SHALL expose produced and explicitly skipped port names without business values. Nodes proven unreached by a handled failure's terminal execution boundary SHALL be classified as NotRun rather than Skipped.
-
-#### Scenario: Observe an unselected branch
-
-- **WHEN** a router activates one output and explicitly skips another
-- **THEN** its terminal metadata identifies both port outcomes, and a downstream node skipped by the inactive port identifies that dependency without executing
-
-#### Scenario: Stop after an earlier failure
-
-- **WHEN** workflow execution fails before a later node is visited
-- **THEN** the final execution boundary identifies that later node as NotRun without claiming it was conditionally skipped
 
 ### Requirement: Make lifecycle loss detectable without requiring recovery
 
@@ -206,96 +170,7 @@ Streaming protocol validation SHALL use checked sequence counters and bounded re
 - **WHEN** a node completion for one batch is lost and a later batch completes
 - **THEN** the earlier outcome remains unknown and the later success does not repair the missing observation
 
-### Requirement: Export without altering workflow results
-
-Runner export SHALL be disabled without configuration and SHALL support OTLP/HTTP export to a configured local receiver
-or external Collector. Export SHALL use bounded buffering and finite network/shutdown timeouts. Disabled export,
-unreachable endpoints, queue overflow, and export errors MUST NOT change node invocation order, selected results, or
-workflow success/failure. Both success and handled failure paths SHALL attempt bounded final flush after ending
-execution spans. Description and validation modes MUST NOT emit workflow execution events.
-
-#### Scenario: Run without telemetry configuration
-
-- **WHEN** a standalone runner executes with no exporter configured
-- **THEN** it opens no telemetry connection and preserves its usual output and exit behavior
-
-#### Scenario: Lose the receiver
-
-- **WHEN** the configured receiver becomes unreachable or the exporter queue fills
-- **THEN** workflow execution continues without waiting indefinitely or converting telemetry errors into workflow failures
-
-#### Scenario: Flush a short failed run
-
-- **WHEN** a runner fails before a normal batch interval elapses
-- **THEN** it ends the relevant spans and attempts to export buffered failure records within the shutdown deadline
-
-### Requirement: Limit automatically exported data
-
-Automatically generated observation metadata MUST exclude node configuration and input/output business values. It SHALL expose graph identities, states, timing, port names, and failure context needed to explain execution. This exclusion MUST NOT be presented as automatic sanitization of arbitrary plugin-provided diagnostic messages.
-
-#### Scenario: Observe a workflow containing configured credentials
-
-- **WHEN** a node configuration and its returned values contain credentials
-- **THEN** generated metadata and lifecycle attributes do not serialize those configuration fields or returned values
-
-### Requirement: Describe Loop structure without business data
-
-A Loop-capable runner description SHALL encode nested body graph structure, scope-local node IDs and
-edges, and the protocol version required to interpret repeated invocations. Lifecycle records SHALL
-emit `mf.loop.pass.started` and `mf.loop.pass.finished` boundaries, pass counts, and a stop reason
-of `condition`, `maximum`, or `exit` on successful Loop completion. Description and lifecycle fields
-MUST NOT expose Loop variable values, predicates, node configuration, or business inputs and
-outputs. Older runner description and event versions SHALL remain readable according to their
-original contracts.
-
-#### Scenario: Describe a nested Loop
-
-- **WHEN** a compiled runner describes a workflow with nested Loops
-- **THEN** the description distinguishes each scope and its local edges without invoking plugin factories or revealing configured values
-
-#### Scenario: Observe Loop termination
-
-- **WHEN** a Loop ends after an explicit exit
-- **THEN** its completion record identifies the number of passes and `exit` reason without carrying variable values
-
-### Requirement: Observe Iteration at its outer node boundary
-
-The workflow description and lifecycle SHALL identify an Iteration as one node in its containing graph. Its start and finish
-SHALL bracket all item execution. Repeated items and body nodes SHALL emit separate OTel spans and logs in the
-`mf.iteration` scope without consuming the bounded outer lifecycle sequence. Detail records SHALL identify the
-workflow, run, outer iteration node, and input index; body-node records SHALL also identify the inner node and kind.
-Item spans SHALL be children of the outer Iteration span, and body-node spans SHALL be children of their item spans,
-including in parallel workers. Automatically exported metadata MUST NOT include item or result values.
-
-#### Scenario: Describe a compiled Iteration workflow
-
-- **WHEN** a runner containing an Iteration node is invoked with `--describe`
-- **THEN** it reports the outer node and edges without expanding repeated body nodes into static lifecycle positions
-
-#### Scenario: Report an item failure
-
-- **WHEN** an item fails under `terminate`
-- **THEN** the item and failing body node report failed detail outcomes, the outer Iteration node fails once with an indexed diagnostic, and the workflow ends with a failure
-
-#### Scenario: Continue after an item failure
-
-- **WHEN** a body node fails under `continue_on_error`
-- **THEN** its node and item detail records remain failed while the outer Iteration node and workflow can succeed
-
-#### Scenario: Correlate parallel body execution
-
-- **WHEN** multiple items run in parallel
-- **THEN** every body-node span has the corresponding item span as parent, every item span has the outer Iteration span as parent, and detail records carry the input index and shared workflow/run identity
-
-#### Scenario: Report a skipped body node
-
-- **WHEN** an inner conditional dependency skips a body node
-- **THEN** its detail record identifies the item index, skipped node, and causal source output without reporting a node start
-
-#### Scenario: Preserve outer lifecycle completeness
-
-- **WHEN** Iteration detail logs reach the terminal UI receiver alongside the ordinary workflow lifecycle records
-- **THEN** the detail logs do not consume outer sequence numbers or make the outer lifecycle appear incomplete
+## ADDED Requirements
 
 ### Requirement: Report batch flushes without exporting their values
 

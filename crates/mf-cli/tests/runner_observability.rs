@@ -836,3 +836,151 @@ fn stalled_collector() -> (String, thread::JoinHandle<bool>) {
     });
     (endpoint, worker)
 }
+
+#[test]
+fn streaming_runner_exports_message_lifecycles_without_changing_results() {
+    use mf_telemetry::{
+        stream::{StreamEvent, StreamOutcome, StreamPayload, StreamRecord},
+        wire::WireRecord,
+    };
+    use std::process::Stdio;
+    if !loopback_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let mut value: Value =
+        serde_json::from_str(include_str!("../../../examples/stream-batch.json")).unwrap();
+    value["dependencies"]["core"]["path"] = json!(crates_dir().join("builtin-nodes/core"));
+    value["nodes"][0]["config"]["max_wait_ms"] = json!(3_600_000);
+    let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
+    let runner = build(
+        &root.path().join("build"),
+        &root.path().join("flow.lock"),
+        &definition,
+    );
+    let execute = |endpoint: Option<&str>| {
+        let mut command = command(&runner);
+        if let Some(endpoint) = endpoint {
+            command.env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint);
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"1\n2\n3\n4\n5\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    let plain = execute(None);
+    let (endpoint, collector) = collector(2);
+    let observed = execute(Some(&endpoint));
+    assert_eq!(observed.stdout, plain.stdout);
+    let requests = collector.join().unwrap();
+    let mut records = Vec::new();
+    let mut spans = Vec::new();
+    for (path, body) in requests {
+        if path == "/v1/logs" {
+            let export = ExportLogsServiceRequest::decode(body.as_slice()).unwrap();
+            for scope in export
+                .resource_logs
+                .into_iter()
+                .flat_map(|resource| resource.scope_logs)
+            {
+                let name = scope.scope.unwrap().name;
+                for record in scope.log_records {
+                    assert_eq!(record.trace_id.len(), 16);
+                    assert_eq!(record.span_id.len(), 8);
+                    let wire = WireRecord {
+                        scope: name.clone(),
+                        event_name: record.event_name,
+                        time_unix_nano: record.time_unix_nano,
+                        trace_context: None,
+                        attributes: record
+                            .attributes
+                            .into_iter()
+                            .map(|attribute| {
+                                (attribute.key, stream_proto_value(&attribute.value.unwrap()))
+                            })
+                            .collect(),
+                        body: stream_proto_value(&record.body.unwrap()),
+                    };
+                    records.push(StreamRecord::decode(&wire).unwrap());
+                }
+            }
+        } else if path == "/v1/traces" {
+            let export = ExportTraceServiceRequest::decode(body.as_slice()).unwrap();
+            spans.extend(
+                export
+                    .resource_spans
+                    .into_iter()
+                    .flat_map(|resource| resource.scope_spans)
+                    .flat_map(|scope| scope.spans),
+            );
+        } else {
+            panic!("unexpected exporter endpoint {path}");
+        }
+    }
+    for (index, record) in records.iter().enumerate() {
+        assert_eq!(record.sequence.get(), index as i64 + 1);
+    }
+    assert!(records.iter().any(|record| matches!(
+        record.payload,
+        StreamPayload::Control(StreamEvent::Flushed { .. })
+    )));
+    assert!(
+        matches!(&records.last().unwrap().payload, StreamPayload::Control(StreamEvent::Finished { outcome: StreamOutcome::Succeeded, counts, .. }) if counts.accepted_inputs == 5 && counts.delivered_outputs == 2)
+    );
+    assert!(
+        spans
+            .iter()
+            .filter(|span| span.name == "mf.node")
+            .all(|span| span
+                .attributes
+                .iter()
+                .any(|attribute| attribute.key == "mf.stream.invocation"))
+    );
+    let closed = TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap();
+    assert_eq!(
+        execute(Some(&format!("http://{closed}"))).stdout,
+        plain.stdout
+    );
+}
+
+fn stream_proto_value(value: &opentelemetry_proto::tonic::common::v1::AnyValue) -> Value {
+    match value.value.as_ref().unwrap() {
+        any_value::Value::StringValue(value) => json!(value),
+        any_value::Value::IntValue(value) => json!(value),
+        any_value::Value::BoolValue(value) => json!(value),
+        any_value::Value::ArrayValue(values) => {
+            values.values.iter().map(stream_proto_value).collect()
+        }
+        any_value::Value::KvlistValue(values) => Value::Object(
+            values
+                .values
+                .iter()
+                .map(|value| {
+                    (
+                        value.key.clone(),
+                        stream_proto_value(value.value.as_ref().unwrap()),
+                    )
+                })
+                .collect(),
+        ),
+        _ => panic!("unexpected stream metadata value"),
+    }
+}

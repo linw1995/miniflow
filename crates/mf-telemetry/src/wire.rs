@@ -21,6 +21,9 @@ pub struct TraceContext {
 }
 
 impl TraceContext {
+    pub fn validate(&self) -> Result<(), ContractError> {
+        self.ids().map(|_| ())
+    }
     fn ids(&self) -> Result<(TraceId, SpanId), ContractError> {
         let trace = TraceId::from_hex(&self.trace_id).map_err(|e| crate::invalid(e.to_string()))?;
         let span = SpanId::from_hex(&self.span_id).map_err(|e| crate::invalid(e.to_string()))?;
@@ -229,14 +232,26 @@ impl WireRecord {
     /// Fills a fresh record created by a logger with the `mf.workflow` scope.
     /// It does not install a provider or emit, enqueue, or export the record.
     pub fn write_to(&self, record: &mut impl LogRecord) -> Result<(), ContractError> {
-        let event = self.decode()?;
-        // Normalize known fields; additive fields from a newer producer are not re-emitted.
-        let normalized = Self::from_event_with_version(
-            &event,
-            self.schema_version()?,
-            self.time_unix_nano,
-            self.trace_context.clone(),
-        )?;
+        let (normalized, name) = if self.attributes.get("mf.schema.version")
+            == Some(&json!(crate::STREAM_EVENT_SCHEMA_VERSION))
+        {
+            let event = crate::stream::StreamRecord::decode(self)?;
+            (
+                event.to_wire(self.time_unix_nano, self.trace_context.clone())?,
+                event.payload.name(),
+            )
+        } else {
+            let event = self.decode()?;
+            (
+                Self::from_event_with_version(
+                    &event,
+                    self.schema_version()?,
+                    self.time_unix_nano,
+                    self.trace_context.clone(),
+                )?,
+                event.event.name(),
+            )
+        };
         let timestamp = UNIX_EPOCH
             .checked_add(Duration::from_nanos(self.time_unix_nano))
             .ok_or_else(|| crate::invalid("timestamp exceeds platform range"))?;
@@ -246,7 +261,7 @@ impl WireRecord {
             .into_iter()
             .map(|(key, value)| Ok((key, any_value(value)?)))
             .collect::<Result<Vec<_>, ContractError>>()?;
-        record.set_event_name(event.event.name());
+        record.set_event_name(name);
         record.set_timestamp(timestamp);
         record.set_body(body);
         record.add_attributes(attributes);
