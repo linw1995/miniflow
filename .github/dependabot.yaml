@@ -1,0 +1,27 @@
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+      - "/.github/actions/setup-nix"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: "cargo"
+    directories:
+      - "/"
+      - "/crates/mf-compiler/tests/fixtures/multi-nodes"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: "nix"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "build(deps)"

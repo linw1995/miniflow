@@ -11,7 +11,6 @@ import sys
 TYPES = (
     "build",
     "chore",
-    "ci",
     "docs",
     "feat",
     "fix",
@@ -21,7 +20,7 @@ TYPES = (
     "style",
     "test",
 )
-SCOPES = ("cli", "runtime", "compiler", "bundle", "nodes", "ci", "docs")
+SCOPES = ("cli", "runtime", "compiler", "bundle", "nodes", "ci", "deps", "docs")
 HEADER = re.compile(
     rf"(?:{'|'.join(TYPES)})\((?:{'|'.join(SCOPES)})\)!?: \S.*"
 )
