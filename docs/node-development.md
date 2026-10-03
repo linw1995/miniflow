@@ -232,18 +232,21 @@ The current terminal launcher and snapshot recorder remain unavailable for strea
 
 ## Streaming byte budgets
 
-Streaming byte limits default to a 1 MiB payload limit and 64 MiB of accounted logical values.
-Positive overrides use `execution.limits.max_message_bytes` and `max_buffered_bytes`. Preparation
+Streaming byte limits default to 1 MiB per JSON record, 1 MiB of estimated heap memory per
+publication, and 64 MiB of accounted retained memory. Positive overrides use
+`execution.limits.max_record_bytes`, `max_message_bytes`, and `max_buffered_bytes`. Preparation
 reserves bytes for message contexts, event-input handoff, and sealed emissions so admitted work can
 progress when source admission is full. These limits apply in addition to message-count and worker
 limits. `StreamMetrics` reports queued/buffered, reserved, and total accounted bytes.
 
-Event providers report retained logical values with `EventNode::retained_bytes`, excluding returned
-emissions. Batch maintains this total for retained items. Task outputs and retained message contexts
+Event providers report estimated heap use with `EventNode::retained_bytes`, excluding returned
+emissions. Batch counts retained item heaps and vector capacity. Task outputs and retained message contexts
 are checked before publication. Temporary byte pressure blocks admission; oversized payloads and
 impossible graph reservations fail explicitly. These bounds do not measure process RSS or arbitrary
 allocations inside plugins.
 
-The current implementation counts JSON encoding bytes and scans retained contexts on publication.
-Shared values may be counted repeatedly; byte budgeting therefore adds traversal cost even when values
-are not copied. Its accounting policy is reviewed separately from the base streaming scheduler.
+`ValueRef::estimated_heap_bytes` caches an estimate at construction, composing cached child sizes.
+It includes value and Arc allocations, string storage, vector capacity, and estimated tree entries.
+The outer handle belongs to its retaining container. Shared children are charged per reference;
+there is no global allocation registry. Tree node slack and allocator bookkeeping are not measured
+exactly. JSON escaping affects the record limit without changing the memory estimate.

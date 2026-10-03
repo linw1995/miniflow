@@ -10,7 +10,7 @@ contexts. Long task chains accumulate quadratic counting work.
 
 - Cache Rust heap estimates on immutable shared values, including container capacity and children.
 - Separate the JSON record limit from message and instance memory budgets.
-- Retain exact compact JSON length caching only for input record validation.
+- Measure JSON records only at transport boundaries, without a second value-size cache.
 - Encode output once into a bounded buffer before writing a complete JSON Lines record.
 - Maintain context byte totals incrementally, including replacement, skip, and scope restoration.
 - Reuse prepared emission contexts when handing them to downstream frames.

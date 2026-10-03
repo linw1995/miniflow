@@ -198,12 +198,13 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
     assert!(String::from_utf8_lossy(&broken.stderr).contains("output failed"));
     drop(open_input);
 
-    definition["execution"]["limits"] = json!({"max_message_bytes":64, "max_buffered_bytes":8192});
+    definition["execution"]["limits"] =
+        json!({"max_record_bytes":64, "max_message_bytes":1024, "max_buffered_bytes":16384});
     compile(&definition, true).unwrap();
     let oversized = run(&executable, &[b'1'; 80]);
     assert!(!oversized.status.success());
     assert!(String::from_utf8_lossy(&oversized.stderr).contains("line 1"));
-    assert!(String::from_utf8_lossy(&oversized.stderr).contains("max_message_bytes"));
+    assert!(String::from_utf8_lossy(&oversized.stderr).contains("max_record_bytes"));
 
     definition["execution"]["input_type"] = json!({"list":"int"});
     definition["nodes"][0]["config"]["max_wait_ms"] = json!(3_600_000);
@@ -211,6 +212,13 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
     assert_eq!(
         records(&run(&executable, b"[1,2]\n[3]\n")),
         [json!({"batch":[[1,2],[3]]})]
+    );
+    let memory_oversized = run(&executable, b"[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]\n");
+    assert!(!memory_oversized.status.success());
+    let error = String::from_utf8_lossy(&memory_oversized.stderr);
+    assert!(
+        error.contains("line 1") && error.contains("memory byte limit"),
+        "{error}"
     );
     let generated_time = fs::metadata(build.join("src/workflow.rs"))
         .unwrap()

@@ -9,7 +9,7 @@ mod unix {
         InputFailureSnafu, InputRecordSnafu, OutputWriteSnafu, StdioSnafu, ThreadSpawnSnafu,
     };
     use crate::stream_limits::encode_json;
-    use crate::{StreamSender, ValueRef, ValueType, encoded_size};
+    use crate::{StreamLimits, StreamSender, ValueRef, ValueType};
     use snafu::{IntoError, OptionExt, ResultExt, ensure};
 
     use std::{
@@ -60,12 +60,12 @@ mod unix {
             let input = instance.input();
             let reader_input = input.clone();
             let value_type = instance.execution().input_type.clone();
-            let limit = instance.execution().limits.max_message_bytes;
+            let limits = instance.execution().limits.clone();
             let reader = thread::Builder::new()
                 .name("workflow-input".into())
                 .spawn(move || {
                     let result = catch_unwind(AssertUnwindSafe(|| {
-                        read_lines(self.input, &reader_input, &value_type, limit)
+                        read_lines(self.input, &reader_input, &value_type, &limits)
                     }));
                     match result {
                         Ok(Ok(())) => {}
@@ -162,7 +162,7 @@ mod unix {
         mut file: File,
         input: &StreamSender,
         value_type: &ValueType,
-        limit: usize,
+        limits: &StreamLimits,
     ) -> Result<(), StreamError> {
         let mut chunk = [0; 8192];
         let mut record = Vec::new();
@@ -181,22 +181,22 @@ mod unix {
             };
             if read == 0 {
                 if !record.is_empty() {
-                    accept_record(&mut record, line, input, value_type, limit)?;
+                    accept_record(&mut record, line, input, value_type, limits)?;
                 }
                 input.close();
                 return Ok(());
             }
             for &byte in &chunk[..read] {
                 if byte == b'\n' {
-                    accept_record(&mut record, line, input, value_type, limit)?;
+                    accept_record(&mut record, line, input, value_type, limits)?;
                     line = line.checked_add(1).with_context(|| InputFailureSnafu {
                         message: format!("line {line}: line counter exhausted"),
                     })?;
                 } else {
                     ensure!(
-                        record.len() <= limit,
+                        record.len() <= limits.max_record_bytes,
                         InputFailureSnafu {
-                            message: format!("line {line}: record exceeds max_message_bytes"),
+                            message: format!("line {line}: record exceeds max_record_bytes"),
                         }
                     );
                     record.push(byte);
@@ -210,15 +210,15 @@ mod unix {
         line: u64,
         input: &StreamSender,
         value_type: &ValueType,
-        limit: usize,
+        limits: &StreamLimits,
     ) -> Result<(), StreamError> {
         if record.last() == Some(&b'\r') {
             record.pop();
         }
         ensure!(
-            record.len() <= limit,
+            record.len() <= limits.max_record_bytes,
             InputFailureSnafu {
-                message: format!("line {line}: record exceeds max_message_bytes"),
+                message: format!("line {line}: record exceeds max_record_bytes"),
             }
         );
         ensure!(
@@ -236,7 +236,7 @@ mod unix {
             .validate_shared(&value)
             .boxed()
             .context(InputRecordSnafu { line })?;
-        encoded_size(&value, limit)
+        crate::stream_limits::memory_size(&value, limits.max_message_bytes)
             .boxed()
             .context(InputRecordSnafu { line })?;
         input.send(value)?;

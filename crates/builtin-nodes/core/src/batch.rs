@@ -1,11 +1,11 @@
 use mf_runtime::{
-    BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, MESSAGE_OVERHEAD,
-    NodeBuildError, NodeEvent, NodeExecutionError, NodeRegistration, NodeResult, OutputDerivation,
-    Outputs, PortSpec, TimerUpdate, ValueRef, ValueType, deserialize_config, encoded_size,
+    BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeBuildError,
+    NodeEvent, NodeExecutionError, NodeRegistration, NodeResult, OutputDerivation, Outputs,
+    PortSpec, TimerUpdate, ValueRef, ValueType, deserialize_config,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use snafu::{OptionExt, ResultExt};
+use snafu::OptionExt;
 
 use std::time::{Duration, Instant};
 
@@ -115,13 +115,7 @@ impl EventNode for BatchState {
                     .context(mf_runtime::NodeExecutionFailedSnafu {
                         message: "required input `item` was not provided",
                     })?;
-                let item_bytes = encoded_size(&item, usize::MAX)
-                    .boxed()
-                    .context(mf_runtime::NodePluginFailedSnafu)?
-                    .checked_add(MESSAGE_OVERHEAD)
-                    .context(mf_runtime::NodeExecutionFailedSnafu {
-                        message: "batch byte count exhausted",
-                    })?;
+                let item_bytes = item.estimated_heap_bytes();
 
                 if self.due(context.now) {
                     self.seal(FlushReason::TimeoutExceed, &mut emissions);
@@ -170,6 +164,7 @@ impl EventNode for BatchState {
     }
     fn retained_bytes(&self) -> usize {
         self.bytes
+            .saturating_add(self.items.capacity().saturating_mul(size_of::<ValueRef>()))
     }
 
     fn buffered_items(&self) -> Option<usize> {
@@ -234,6 +229,15 @@ mod tests {
         let mut state = batch(3);
         assert!(event(&mut state, input(json!(1)), 0).emissions.is_empty());
         assert!(event(&mut state, input(json!(2)), 10).emissions.is_empty());
+        assert_eq!(
+            state.retained_bytes(),
+            state
+                .items
+                .iter()
+                .map(ValueRef::estimated_heap_bytes)
+                .sum::<usize>()
+                + state.items.capacity() * size_of::<ValueRef>()
+        );
         let original = state.items[0].clone();
         let effects = event(&mut state, input(json!(3)), 20);
         assert_eq!(values(&effects), [json!([1, 2, 3])]);
@@ -352,7 +356,7 @@ mod tests {
         for value in [json!([1, 2]), json!(null)] {
             first.on_event(input(value), &context).unwrap();
         }
-        assert!(first.retained_bytes() > 2 * MESSAGE_OVERHEAD);
+        assert!(first.retained_bytes() > 2 * size_of::<ValueRef>());
         assert_eq!(second.retained_bytes(), 0);
         let effects = first.on_event(input(json!([3])), &context).unwrap();
         assert_eq!(values(&effects), [json!([[1, 2], null, [3]])]);

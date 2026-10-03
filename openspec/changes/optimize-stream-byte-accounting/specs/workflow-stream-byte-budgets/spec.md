@@ -1,18 +1,15 @@
 ## ADDED Requirements
 
-### Requirement: Reuse exact byte measurements
+### Requirement: Reuse byte measurements
 
-Byte accounting SHALL reuse cached Rust heap estimates and successful compact JSON length
-measurements across shared immutable values, and SHALL update retained context totals from changed
-bindings. It MUST preserve
+Byte accounting SHALL reuse cached Rust heap estimates across shared immutable values and SHALL
+update retained context totals from changed bindings. It MUST preserve
 per-binding charges and reject every over-budget publication before exposing any of its outputs.
-Bounded measurements that stop early MUST NOT be reused as exact lengths.
 
 #### Scenario: Reuse a value with a different limit
 
 - **WHEN** a shared value is measured under one limit and then checked under another
-- **THEN** an exact cached length is compared against the new limit
-- **AND** an earlier over-limit attempt does not prevent a later valid measurement
+- **THEN** the cached heap estimate is compared against the new limit without traversing the value again
 
 #### Scenario: Retain a vector with spare capacity
 

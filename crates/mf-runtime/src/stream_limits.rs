@@ -1,7 +1,7 @@
 use crate::stream_instance::{
-    OutputEncodeSnafu, PayloadSizeSnafu, PreparationSnafu, ResourceSnafu,
+    MemorySizeSnafu, OutputEncodeSnafu, PayloadSizeSnafu, PreparationSnafu, ResourceSnafu,
 };
-use crate::value::json_string_len;
+use crate::value::VALUE_HEAP_BYTES;
 use crate::{MESSAGE_OVERHEAD, Outputs, StreamError, StreamPlan, ValueRef, ValueType, output_id};
 use serde::Serialize;
 use snafu::{OptionExt, ResultExt, ensure};
@@ -169,20 +169,13 @@ impl StreamResources {
 
 fn type_bound(ty: &ValueType, limit: usize) -> usize {
     match ty {
-        ValueType::Int64 => 20.min(limit),
-        ValueType::Boolean => 5.min(limit),
-        ValueType::Null => 4.min(limit),
+        ValueType::Int64 | ValueType::Boolean | ValueType::Null => VALUE_HEAP_BYTES.min(limit),
         _ => limit,
     }
 }
 
 pub fn binding_bytes(name: &str) -> Result<usize, StreamError> {
-    add(
-        MESSAGE_OVERHEAD,
-        json_string_len(name, usize::MAX).context(ResourceSnafu {
-            message: "byte accounting overflow",
-        })?,
-    )
+    add(MESSAGE_OVERHEAD, name.len())
 }
 
 pub fn output_bytes(outputs: &Outputs, limit: usize) -> Result<usize, StreamError> {
@@ -194,18 +187,20 @@ pub fn payload_bytes<'a>(
     limit: usize,
 ) -> Result<usize, StreamError> {
     values.into_iter().try_fold(0usize, |sum, value| {
-        add(sum, encoded_size(value, limit.saturating_sub(sum))?)
+        add(sum, memory_size(value, limit.saturating_sub(sum))?)
     })
+}
+
+pub fn memory_size(value: &ValueRef, limit: usize) -> Result<usize, StreamError> {
+    let bytes = value.estimated_heap_bytes();
+    ensure!(bytes <= limit, MemorySizeSnafu { limit });
+    Ok(bytes)
 }
 
 pub fn add(left: usize, right: usize) -> Result<usize, StreamError> {
     left.checked_add(right).context(ResourceSnafu {
         message: "byte accounting overflow",
     })
-}
-
-pub fn encoded_size(value: &ValueRef, limit: usize) -> Result<usize, StreamError> {
-    value.json_len(limit).context(PayloadSizeSnafu { limit })
 }
 
 pub fn encode_json(value: &impl Serialize, limit: usize) -> Result<Vec<u8>, StreamError> {
@@ -245,20 +240,10 @@ pub fn encode_json(value: &impl Serialize, limit: usize) -> Result<Vec<u8>, Stre
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_json, encoded_size};
-    use crate::{StreamError, ValueRef};
+    use super::encode_json;
+    use crate::StreamError;
     use serde::Serialize;
     use std::cell::Cell;
-
-    #[test]
-    fn counts_encoded_values_up_to_the_limit() {
-        let value = ValueRef::from("hello");
-        assert_eq!(encoded_size(&value, 7).unwrap(), 7);
-        assert!(matches!(
-            encoded_size(&value, 6),
-            Err(StreamError::PayloadSize { limit: 6 })
-        ));
-    }
 
     #[test]
     fn output_encoding_is_single_pass_and_bounded() {

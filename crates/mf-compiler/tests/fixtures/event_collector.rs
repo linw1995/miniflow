@@ -50,12 +50,10 @@ impl EventNode for Collector {
     }
 
     fn retained_bytes(&self) -> usize {
-        self.values
-            .iter()
-            .map(|value| {
-                mf_runtime::encoded_size(value, usize::MAX).unwrap() + mf_runtime::MESSAGE_OVERHEAD
-            })
-            .sum()
+        self.values.iter().fold(
+            self.values.capacity().saturating_mul(size_of::<ValueRef>()),
+            |bytes, value| bytes.saturating_add(value.estimated_heap_bytes()),
+        )
     }
 }
 

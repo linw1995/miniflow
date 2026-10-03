@@ -30,6 +30,7 @@ fn streaming_schema_validates_versions_types_and_limits() {
             "max_pending_messages",
             "max_buffered_bytes",
             "max_message_bytes",
+            "max_record_bytes",
             "workers",
         ] {
             let mut value = original.clone();

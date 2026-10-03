@@ -42,6 +42,7 @@ pub struct StreamLimits {
     pub max_pending_messages: usize,
     pub max_buffered_bytes: usize,
     pub max_message_bytes: usize,
+    pub max_record_bytes: usize,
     pub workers: usize,
 }
 
@@ -51,6 +52,7 @@ impl Default for StreamLimits {
             max_pending_messages: 64,
             max_buffered_bytes: 64 * 1024 * 1024,
             max_message_bytes: 1024 * 1024,
+            max_record_bytes: 1024 * 1024,
             workers: 4,
         }
     }
@@ -63,6 +65,7 @@ impl StreamLimits {
                 self.max_pending_messages,
                 self.max_buffered_bytes,
                 self.max_message_bytes,
+                self.max_record_bytes,
                 self.workers,
             ]
             .contains(&0),
@@ -149,7 +152,7 @@ pub trait EventNode: Send {
         context: &EventContext<'_>,
     ) -> Result<EventEffects, NodeExecutionError>;
 
-    /// Report retained logical value bytes, excluding values returned as emissions.
+    /// Report estimated retained heap bytes, including container capacity but excluding emissions.
     fn retained_bytes(&self) -> usize {
         0
     }

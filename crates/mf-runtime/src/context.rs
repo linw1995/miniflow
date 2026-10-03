@@ -138,8 +138,10 @@ impl ExecutionContext {
                 }
             );
             if let Some(value) = value {
-                bytes =
-                    crate::stream_limits::add(bytes, crate::encoded_size(value, limit - bytes)?)?;
+                bytes = crate::stream_limits::add(
+                    bytes,
+                    crate::stream_limits::memory_size(value, limit - bytes)?,
+                )?;
             }
         }
         ensure!(
@@ -626,7 +628,7 @@ impl ExecutionContext {
             if let Some(value) = value {
                 bytes = crate::stream_limits::add(
                     bytes,
-                    crate::encoded_size(value, limits.context - bytes)?,
+                    crate::stream_limits::memory_size(value, limits.context - bytes)?,
                 )?;
             }
         }

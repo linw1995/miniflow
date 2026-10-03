@@ -229,7 +229,7 @@ fn upstream_close_waits_for_work_already_running_before_flushing_the_tail() {
         .unwrap()
         .insert("close-upstream".into(), Arc::clone(&probe));
     let mut value = definition();
-    value["execution"]["limits"] = json!({"max_message_bytes":64, "max_buffered_bytes":2048});
+    value["execution"]["limits"] = json!({"max_message_bytes":1024, "max_buffered_bytes":10000});
     value["nodes"][0]["config"]["max_items"] = json!(100);
     value["nodes"].as_array_mut().unwrap().push(json!({"id":"slow", "kind":"test.capacity_sink", "config":{"key":"close-upstream", "block":true}}));
     value["edges"][0]["from_node"] = json!("slow");
@@ -250,7 +250,7 @@ fn upstream_close_waits_for_work_already_running_before_flushing_the_tail() {
             Err(error) => panic!("unexpected admission failure: {error}"),
         }
     }
-    assert!(instance.metrics().accounted_bytes <= 2048);
+    assert!(instance.metrics().accounted_bytes <= 10000);
     instance.close_input();
     assert_eq!(instance.summary().emitted_messages, 0);
     probe.release();
@@ -507,7 +507,7 @@ fn final_output_failure_is_reported_before_the_instance_can_complete() {
 #[test]
 fn a_slow_consumer_backpressures_admission_and_keeps_accounted_bytes_bounded() {
     let mut value = definition();
-    value["execution"]["limits"] = json!({"max_message_bytes":64, "max_buffered_bytes":2048});
+    value["execution"]["limits"] = json!({"max_message_bytes":256, "max_buffered_bytes":4096});
     value["nodes"][0]["config"]["max_items"] = json!(1);
     let instance = start(value, Arc::new(Clock::default()));
     let input = instance.input();
@@ -528,14 +528,14 @@ fn a_slow_consumer_backpressures_admission_and_keeps_accounted_bytes_bounded() {
         metrics.pending_frames < 64,
         "byte capacity should be reached before the frame limit"
     );
-    assert!(metrics.accounted_bytes <= 2048, "{metrics:?}");
+    assert!(metrics.accounted_bytes <= 4096, "{metrics:?}");
     input.close();
     for expected in 0..accepted {
         assert_eq!(
             instance.recv().unwrap().unwrap().outputs["batch"],
             json!([expected])
         );
-        assert!(instance.metrics().accounted_bytes <= 2048);
+        assert!(instance.metrics().accounted_bytes <= 4096);
     }
     assert!(instance.recv().unwrap().is_none());
     assert_eq!(instance.metrics(), StreamMetrics::default());
@@ -545,17 +545,32 @@ fn a_slow_consumer_backpressures_admission_and_keeps_accounted_bytes_bounded() {
 #[test]
 fn byte_reserves_and_oversized_payloads_fail_explicitly() {
     let mut value = definition();
-    value["execution"]["limits"] = json!({"max_message_bytes":64, "max_buffered_bytes":1024});
+    value["execution"]["limits"] = json!({"max_message_bytes":256, "max_buffered_bytes":1024});
     let error = prepare(value).unwrap_err().to_string();
     assert!(error.contains("reserve"), "{error}");
 
     let mut value = definition();
+    value["execution"]["input_type"] = json!("array");
+    value["execution"]["limits"] =
+        json!({"max_record_bytes":64, "max_message_bytes":256, "max_buffered_bytes":8192});
+    let instance = start(value, Arc::new(Clock::default()));
+    let value = ValueRef::new(mf_runtime::ValueKind::Array(Vec::with_capacity(64)));
+    assert_eq!(serde_json::to_vec(&value).unwrap(), b"[]");
+    assert!(matches!(
+        instance.input().send(value),
+        Err(StreamError::MemorySize { .. })
+    ));
+    assert_eq!(instance.summary().accepted_inputs, 0);
+    assert!(instance.join().is_err());
+
+    let mut value = definition();
     value["execution"]["input_type"] = json!("string");
-    value["execution"]["limits"] = json!({"max_message_bytes":64, "max_buffered_bytes":8192});
+    value["execution"]["limits"] =
+        json!({"max_record_bytes":64, "max_message_bytes":256, "max_buffered_bytes":8192});
     let instance = start(value.clone(), Arc::new(Clock::default()));
     assert!(matches!(
-        instance.input().send(json!("x".repeat(65))),
-        Err(StreamError::PayloadSize { .. })
+        instance.input().send(json!("x".repeat(257))),
+        Err(StreamError::MemorySize { .. })
     ));
     assert_eq!(instance.summary().accepted_inputs, 0);
     assert!(instance.join().is_err());
@@ -627,11 +642,11 @@ inventory::submit! {
 #[test]
 fn ordinary_outputs_and_extra_context_bindings_are_limited_before_downstream_work() {
     for node in [
-        json!({"id":"producer", "kind":"builtin.constant", "config":{"value":"x".repeat(65)}}),
+        json!({"id":"producer", "kind":"builtin.constant", "config":{"value":"x".repeat(257)}}),
         json!({"id":"producer", "kind":"test.spill"}),
     ] {
         let value = json!({
-            "version":"2026-10-02", "execution":{"mode":"stream", "input_type":"int", "limits":{"max_message_bytes":64, "max_buffered_bytes":8192}},
+            "version":"2026-10-02", "execution":{"mode":"stream", "input_type":"int", "limits":{"max_message_bytes":256, "max_buffered_bytes":8192}},
             "dependencies":{}, "nodes":[
                 {"id":"before", "kind":"builtin.identity"}, node,
                 {"id":"after", "kind":"builtin.identity"}

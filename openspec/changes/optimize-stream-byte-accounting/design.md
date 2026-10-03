@@ -13,15 +13,9 @@ children are charged per reference, without a global identity table. Saturating 
 unrepresentable estimates fail finite budgets. Batch includes its vector capacity and releases the
 charge when it moves the vector into an emitted array.
 
-An immutable value allocation owns its compact JSON length cache. Zero denotes an unmeasured value;
-every valid JSON encoding is nonempty. Concurrent measurements may duplicate initial work but can
-only publish the same exact length. A failed bounded traversal never stores a partial length.
-Arrays and objects compose cached child lengths, JSON delimiters, and escaped key lengths. Number
-formatting follows serde_json. Snapshot aliases refer to the same shared allocation as the cache.
-
-Only input record validation uses the JSON cache. Internal accounting reads the heap estimate in
-constant time. Resource-limit errors carry the applicable limit; actual encoding failures retain
-their serde_json source.
+Internal accounting reads the heap estimate in constant time. Snapshot aliases refer to the same
+allocation as the estimate. Resource-limit errors carry the applicable limit; actual encoding
+failures retain their serde_json source.
 
 ## Independent limits
 
@@ -36,6 +30,8 @@ provide a memory bound for an array with spare capacity, so the limits must rema
 A bounded buffer accepts each serialization write only while the record fits its limit. The runtime
 writes the buffer to the output descriptor only after serialization succeeds. It keeps the existing
 line-size checks, resource-error classification, and acknowledged delivery behavior.
+Input records are measured from their received bytes before parsing. In-process admission applies
+the memory limit. A separate JSON length cache and counting traversal are therefore unnecessary.
 
 ## Incremental context accounting
 
@@ -50,7 +46,6 @@ and observation while retaining the existing credit reservation and message-sequ
 
 ## Validation and ablation
 
-Compare JSON lengths against serde_json across escaping, numbers, shared subtrees, and changing limits.
 Check that memory charges reflect vector capacity, nested values, shared children, and Batch handoff.
 Exercise atomic failed publication, replacement, skip, scope unwind, and intermediate oversize errors.
 Compare baseline, cached sizing, and incremental accounting on forwarding chains and Batch flows.

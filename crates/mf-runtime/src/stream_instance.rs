@@ -1,8 +1,7 @@
-use crate::stream_limits::{StreamResources, add, output_bytes};
+use crate::stream_limits::{StreamResources, add, memory_size, output_bytes};
 use crate::{
     EventContext, EventEffects, EventEmission, EventNode, ExecutionContext, FlowOutputs, NodeEvent,
     Outputs, PreparedStream, StreamExecution, StreamPlan, TimerUpdate, ValueRef, WorkerPool,
-    encoded_size,
 };
 use mf_telemetry::{
     event::{FailurePhase, SkipCause},
@@ -97,6 +96,13 @@ pub enum StreamError {
         visibility(pub)
     )]
     PayloadSize { limit: usize },
+    #[snafu(
+        display(
+            "stream resource limit: retained value exceeds its memory byte limit ({limit} bytes)"
+        ),
+        visibility(pub)
+    )]
+    MemorySize { limit: usize },
     #[snafu(display("stream resource limit: {message}: {source}"))]
     ResourceContext {
         message: String,
@@ -283,8 +289,10 @@ impl StreamSender {
             .validate_shared(&value)
             .context(InputSnafu)
             .and_then(|()| {
-                encoded_size(&value, self.0.execution.limits.max_message_bytes)
-                    .and_then(|bytes| add(bytes, self.0.resources.source_overhead))
+                add(
+                    memory_size(&value, self.0.execution.limits.max_message_bytes)?,
+                    self.0.resources.source_overhead,
+                )
             });
         let bytes = match validation {
             Ok(bytes) => bytes,
@@ -352,7 +360,7 @@ impl StreamDelivery {
         self.output.as_ref().expect("delivery is pending")
     }
     pub fn max_record_bytes(&self) -> usize {
-        self.shared.resources.frame_bytes[self.output().message.domain]
+        self.shared.execution.limits.max_record_bytes
     }
     pub fn acknowledge(mut self) -> Result<StreamOutput, StreamError> {
         let output = self.output.take().expect("delivery is acknowledged once");
@@ -1350,6 +1358,7 @@ fn resource_failure(error: &StreamError) -> bool {
                 StreamError::Resource { .. }
                     | StreamError::ResourceContext { .. }
                     | StreamError::PayloadSize { .. }
+                    | StreamError::MemorySize { .. }
                     | StreamError::Capacity
             )
         ) || matches!(

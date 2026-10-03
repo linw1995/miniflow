@@ -7,10 +7,7 @@ use std::{
     collections::BTreeMap,
     fmt,
     ops::Index,
-    sync::{
-        Arc, LazyLock, Weak,
-        atomic::{AtomicUsize, Ordering},
-    },
+    sync::{Arc, LazyLock, Weak},
 };
 
 #[derive(Clone, Debug)]
@@ -25,19 +22,36 @@ pub enum ValueKind {
 
 pub struct ValueData {
     kind: ValueKind,
-    // Every JSON value is nonempty, so zero can represent an unmeasured length.
-    json_len: AtomicUsize,
+    heap_bytes: usize,
 }
 
 /// An immutable JSON value whose descendants are shared between versions.
 #[derive(Clone)]
 pub struct ValueRef(Arc<ValueData>);
 
+const ARC_HEADER_BYTES: usize = 2 * size_of::<usize>();
+pub const VALUE_HEAP_BYTES: usize = size_of::<ValueData>() + ARC_HEADER_BYTES;
+
 impl ValueRef {
     pub fn new(kind: ValueKind) -> Self {
+        let extra = match &kind {
+            ValueKind::Null | ValueKind::Bool(_) | ValueKind::Number(_) => 0,
+            ValueKind::String(value) => string_heap_bytes(value),
+            ValueKind::Array(items) => items.iter().fold(
+                items.capacity().saturating_mul(size_of::<Self>()),
+                |bytes, item| bytes.saturating_add(item.estimated_heap_bytes()),
+            ),
+            ValueKind::Object(entries) => entries.iter().fold(0usize, |bytes, (key, value)| {
+                // BTreeMap does not expose node capacity; allow two tree links per entry.
+                bytes
+                    .saturating_add(size_of::<(Arc<str>, Self)>() + 2 * size_of::<usize>())
+                    .saturating_add(string_heap_bytes(key))
+                    .saturating_add(value.estimated_heap_bytes())
+            }),
+        };
         Self(Arc::new(ValueData {
             kind,
-            json_len: AtomicUsize::new(0),
+            heap_bytes: VALUE_HEAP_BYTES.saturating_add(extra),
         }))
     }
     pub fn null() -> Self {
@@ -55,48 +69,10 @@ impl ValueRef {
     pub(super) fn downgrade(&self) -> Weak<ValueData> {
         Arc::downgrade(&self.0)
     }
-    /// Returns the compact JSON length, or None when it exceeds the limit.
-    /// Successful lengths are shared by clones; an early exit never caches a partial count.
-    pub fn json_len(&self, limit: usize) -> Option<usize> {
-        let cached = self.0.json_len.load(Ordering::Relaxed);
-        if cached != 0 {
-            return (cached <= limit).then_some(cached);
-        }
-        let length = match self.kind() {
-            ValueKind::Null => 4,
-            ValueKind::Bool(true) => 4,
-            ValueKind::Bool(false) => 5,
-            ValueKind::Number(value) => value.to_string().len(),
-            ValueKind::String(value) => json_string_len(value, limit)?,
-            ValueKind::Array(items) => {
-                let mut length = 2usize.checked_add(items.len().saturating_sub(1))?;
-                if length > limit {
-                    return None;
-                }
-                for item in items {
-                    length += item.json_len(limit - length)?;
-                }
-                length
-            }
-            ValueKind::Object(entries) => {
-                let mut length = 2usize.checked_add(entries.len().saturating_sub(1))?;
-                if length > limit {
-                    return None;
-                }
-                for (key, value) in entries {
-                    length += json_string_len(key, limit - length)?;
-                    length = length.checked_add(1).filter(|length| *length <= limit)?;
-                    length += value.json_len(limit - length)?;
-                }
-                length
-            }
-        };
-        if length > limit {
-            return None;
-        }
-        // The value is immutable; concurrent measurements can only store the same length.
-        self.0.json_len.store(length, Ordering::Relaxed);
-        Some(length)
+    /// Estimated transitive heap bytes, excluding this handle and allocator overhead.
+    /// Shared children are charged per reference; clones reuse the cached estimate.
+    pub fn estimated_heap_bytes(&self) -> usize {
+        self.0.heap_bytes
     }
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
@@ -188,20 +164,12 @@ impl ValueRef {
     }
 }
 
-pub fn json_string_len(value: &str, limit: usize) -> Option<usize> {
-    if limit < 2 {
-        return None;
-    }
-    value.bytes().try_fold(2usize, |length, byte| {
-        let encoded = match byte {
-            b'"' | b'\\' | b'\x08' | b'\x0c' | b'\n' | b'\r' | b'\t' => 2,
-            0..=0x1f => 6,
-            _ => 1,
-        };
-        length
-            .checked_add(encoded)
-            .filter(|length| *length <= limit)
-    })
+fn string_heap_bytes(value: &str) -> usize {
+    value
+        .len()
+        .saturating_add(ARC_HEADER_BYTES)
+        .checked_next_multiple_of(align_of::<usize>())
+        .unwrap_or(usize::MAX)
 }
 
 fn unescape(segment: &str) -> Option<std::borrow::Cow<'_, str>> {
@@ -441,46 +409,38 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn json_lengths_match_encoding_across_limits_and_escapes() {
-        let ascii: String = (0u8..=127).map(char::from).collect();
-        let values = [
-            json!(null),
-            json!([true, false, [], {}]),
-            json!([i64::MIN, i64::MAX, u64::MAX, 0.0, -0.0, 1e-100, 1e100]),
-            json!([f64::MIN_POSITIVE, f64::MAX, f64::EPSILON]),
-            json!(ascii),
-            json!({"\"\\\u{0000}\n": ["\u{00e9}\u{2028}\u{1f980}", ""]}),
-        ];
-        for json in values {
-            let length = serde_json::to_vec(&json).unwrap().len();
-            let value = ValueRef::from(json);
-            assert_eq!(value.json_len(0), None);
-            assert_eq!(value.json_len(length - 1), None);
-            assert_eq!(value.json_len(length), Some(length));
-            assert_eq!(value.clone().json_len(length + 1), Some(length));
-            assert_eq!(value.json_len(length - 1), None);
-            assert_eq!(serde_json::to_vec(&value).unwrap().len(), length);
-        }
-    }
-
-    #[test]
-    fn json_lengths_charge_shared_subtrees_for_each_occurrence() {
-        let item = ValueRef::from("shared\nvalue".repeat(128));
-        let pair = ValueRef::array([item.clone(), item.clone()]);
-        assert_eq!(pair.json_len(8), None);
-        let length = serde_json::to_vec(&pair).unwrap().len();
-        assert_eq!(pair.json_len(length), Some(length));
-        assert_eq!(
-            pair[0].0.json_len.load(Ordering::Relaxed),
-            item.json_len(length).unwrap()
+    fn heap_estimates_include_capacity_and_charge_shared_children_per_reference() {
+        let plain = ValueRef::from("xxxxxxxx");
+        let escaped = ValueRef::from("\n".repeat(8));
+        assert_eq!(plain.estimated_heap_bytes(), escaped.estimated_heap_bytes());
+        assert_ne!(
+            serde_json::to_vec(&plain).unwrap().len(),
+            serde_json::to_vec(&escaped).unwrap().len()
         );
-        assert!(pair[0].ptr_eq(&pair[1]));
-        assert_eq!(pair.clone().json_len(length), Some(length));
 
-        let weak = pair.downgrade();
-        drop(pair);
-        assert!(weak.upgrade().is_none());
-        assert_eq!(item.json_len(length).unwrap() * 2 + 3, length);
+        let compact = ValueRef::array([plain.clone(), plain.clone()]);
+        let mut items = Vec::with_capacity(64);
+        items.extend([plain.clone(), plain.clone()]);
+        let capacity = items.capacity();
+        let spare = ValueRef::new(ValueKind::Array(items));
+        assert_eq!(compact, spare);
+        assert_eq!(
+            spare.estimated_heap_bytes() - compact.estimated_heap_bytes(),
+            (capacity - 2) * size_of::<ValueRef>()
+        );
+        assert!(compact.estimated_heap_bytes() > 2 * plain.estimated_heap_bytes());
+        assert_eq!(
+            spare.clone().estimated_heap_bytes(),
+            spare.estimated_heap_bytes()
+        );
+
+        let object = ValueRef::object([(Arc::from("key"), spare.clone())]);
+        assert!(object.estimated_heap_bytes() > spare.estimated_heap_bytes() + 3);
+        let mut nested = plain;
+        for _ in 0..usize::BITS {
+            nested = ValueRef::array([nested.clone(), nested]);
+        }
+        assert_eq!(nested.estimated_heap_bytes(), usize::MAX);
     }
 
     #[test]

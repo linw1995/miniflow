@@ -437,11 +437,11 @@ fn byte_limit_publication_failures_never_report_success() {
     let mut value = definition();
     value["nodes"][0]["config"]["max_items"] = json!(1);
     value["nodes"][1] =
-        json!({"id":"consume", "kind":"builtin.constant", "config":{"value":"x".repeat(100)}});
+        json!({"id":"consume", "kind":"builtin.constant", "config":{"value":"x".repeat(300)}});
     value["edges"].as_array_mut().unwrap().pop();
     value["control_edges"] =
         json!([{"from_node":"collect", "from_output":"items", "to_node":"consume"}]);
-    value["execution"]["limits"] = json!({"max_message_bytes":32, "max_buffered_bytes":8192});
+    value["execution"]["limits"] = json!({"max_message_bytes":256, "max_buffered_bytes":8192});
     let plan = plan(value);
     let observation = plan
         .start_stream_observation(&harness.observer(), RunId::new())
