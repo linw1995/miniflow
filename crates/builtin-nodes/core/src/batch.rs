@@ -5,6 +5,7 @@ use mf_runtime::{
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
+use snafu::OptionExt;
 use std::time::{Duration, Instant};
 
 pub const KIND: &str = "builtin.batch";
@@ -107,7 +108,9 @@ impl EventNode for BatchState {
             NodeEvent::Input(mut inputs) => {
                 let item = inputs
                     .remove("item")
-                    .ok_or_else(|| failure("required input `item` was not provided"))?;
+                    .context(mf_runtime::NodeExecutionFailedSnafu {
+                        message: "required input `item` was not provided",
+                    })?;
                 if self.due(context.now) {
                     self.seal(FlushReason::TimeoutExceed, &mut emissions);
                 }
@@ -115,7 +118,9 @@ impl EventNode for BatchState {
                     let at = context
                         .now
                         .checked_add(Duration::from_millis(self.config.max_wait_ms))
-                        .ok_or_else(|| failure("batch deadline exhausted"))?;
+                        .context(mf_runtime::NodeExecutionFailedSnafu {
+                            message: "batch deadline exhausted",
+                        })?;
                     self.deadline = Some(at);
                 }
                 self.items.push(item);
@@ -147,12 +152,6 @@ impl EventNode for BatchState {
     }
     fn buffered_items(&self) -> Option<usize> {
         Some(self.items.len())
-    }
-}
-
-fn failure(message: impl Into<String>) -> NodeExecutionError {
-    NodeExecutionError::ExecutionFailed {
-        message: message.into(),
     }
 }
 

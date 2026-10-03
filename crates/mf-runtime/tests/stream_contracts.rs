@@ -1,4 +1,4 @@
-use mf_runtime::{StreamLimits, ValueType, WorkflowDefinition};
+use mf_runtime::{StreamBuildError, StreamLimits, ValueType, WorkflowDefinition};
 use serde_json::json;
 
 #[test]
@@ -12,6 +12,14 @@ fn streaming_schema_validates_versions_types_and_limits() {
         ValueType::List(Box::new(ValueType::Int64))
     );
     assert_eq!(execution.limits, StreamLimits::default());
+    let invalid_limits = StreamLimits {
+        workers: 0,
+        ..StreamLimits::default()
+    };
+    assert!(matches!(
+        invalid_limits.validate(),
+        Err(StreamBuildError::InvalidPlan { message }) if message == "stream limits must be positive"
+    ));
     assert_eq!(
         definition,
         serde_json::from_value(serde_json::to_value(&definition).unwrap()).unwrap()

@@ -1,7 +1,9 @@
-use crate::compiler::{FlowConstructionSnafu, InvalidStreamSnafu, StreamConstructionSnafu};
+use crate::compiler::{
+    FlowConstructionSnafu, InvalidStreamSnafu, NonCanonicalPlanOrderSnafu, StreamConstructionSnafu,
+};
 use crate::{CompiledWorkflow, Flow, NodeRegistry, WorkflowCompileError, WorkflowDefinition};
 use mf_runtime::{NodeDefinition, PreparedStream, STREAM_INPUT_ID};
-use snafu::{OptionExt, ResultExt};
+use snafu::{OptionExt, ResultExt, ensure};
 use std::borrow::Cow;
 
 pub fn start_stream(
@@ -26,14 +28,15 @@ pub fn expanded_definition(
     definition
         .validate_execution()
         .context(StreamConstructionSnafu)?;
-    if definition.nodes.iter().any(|node| {
-        node.kind == STREAM_INPUT_ID
-            || (definition.execution.is_some() && node.id.as_str() == STREAM_INPUT_ID)
-    }) {
-        return Err(WorkflowCompileError::InvalidStream {
-            message: "%input is reserved for the engine input source".into(),
-        });
-    }
+    ensure!(
+        !definition.nodes.iter().any(|node| {
+            node.kind == STREAM_INPUT_ID
+                || (definition.execution.is_some() && node.id.as_str() == STREAM_INPUT_ID)
+        }),
+        InvalidStreamSnafu {
+            message: "%input is reserved for the engine input source",
+        }
+    );
     if definition.execution.is_none() {
         return Ok(Cow::Borrowed(definition));
     }
@@ -62,13 +65,13 @@ pub fn instantiate_stream(
             message: "workflow does not declare streaming execution",
         })?;
     let (nodes, order) = crate::compiler::prepare_definition(&plan.definition, registry)?;
-    if order
-        .iter()
-        .filter(|id| id.as_str() != STREAM_INPUT_ID)
-        .ne(plan.execution_order.iter())
-    {
-        return Err(WorkflowCompileError::NonCanonicalPlanOrder);
-    }
+    ensure!(
+        order
+            .iter()
+            .filter(|id| id.as_str() != STREAM_INPUT_ID)
+            .eq(plan.execution_order.iter()),
+        NonCanonicalPlanOrderSnafu
+    );
     Flow::prepare(
         nodes,
         plan.definition.edges.clone(),

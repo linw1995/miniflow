@@ -1,13 +1,13 @@
 use crate::{
-    ContractError, Count, INSTRUMENTATION_SCOPE, LOOP_EVENT_SCHEMA_VERSION,
+    ContractError, Count, INSTRUMENTATION_SCOPE, InvalidSnafu, LOOP_EVENT_SCHEMA_VERSION,
     STREAM_EVENT_SCHEMA_VERSION,
     event::{Event, LifecycleEvent, NodeIdentity},
     identity::{RunId, WorkflowId},
-    require,
     wire::{TraceContext, WireRecord},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use snafu::{OptionExt, ensure};
 
 pub mod counter {
     use serde::{Deserialize, Deserializer, Serializer};
@@ -177,11 +177,13 @@ pub struct StreamRecord {
 
 impl StreamRecord {
     pub fn validate(&self) -> Result<(), ContractError> {
-        require(
+        ensure!(
             self.sequence.get() > 0,
-            "stream event sequence must be positive",
-        )?;
-        require(
+            InvalidSnafu {
+                message: "stream event sequence must be positive",
+            }
+        );
+        ensure!(
             self.emission_count.is_none()
                 || matches!(
                     self.payload,
@@ -192,48 +194,60 @@ impl StreamRecord {
                         } | Event::NodeSkipped { .. }
                     )
                 ),
-            "emission count requires a successful or skipped invocation",
-        )?;
+            InvalidSnafu {
+                message: "emission count requires a successful or skipped invocation",
+            }
+        );
         if let Some(identity) = &self.identity {
-            require(
+            ensure!(
                 identity
                     .parent
                     .is_none_or(|parent| parent < identity.invocation),
-                "stream invocation parent must precede its child",
-            )?;
-            require(
+                InvalidSnafu {
+                    message: "stream invocation parent must precede its child",
+                }
+            );
+            ensure!(
                 matches!(
                     identity.trigger,
                     StreamTrigger::Message | StreamTrigger::Input
                 ) == identity.message.is_some(),
-                "stream trigger and message identity disagree",
-            )?;
+                InvalidSnafu {
+                    message: "stream trigger and message identity disagree",
+                }
+            );
             if let Some(message) = identity.message {
                 validate_message(message)?;
             }
         }
         match &self.payload {
             StreamPayload::Execution(event) => {
-                require(
+                ensure!(
                     !matches!(
                         event,
                         Event::WorkflowStarted { .. } | Event::WorkflowFinished { .. }
                     ),
-                    "workflow boundaries use stream control records",
-                )?;
-                require(
+                    InvalidSnafu {
+                        message: "workflow boundaries use stream control records",
+                    }
+                );
+                ensure!(
                     self.sequence.get() > 1 && self.identity.is_some(),
-                    "stream execution requires invocation identity",
-                )?;
+                    InvalidSnafu {
+                        message: "stream execution requires invocation identity",
+                    }
+                );
                 event.validate()?;
             }
             StreamPayload::Control(StreamEvent::Started { elapsed_ns, .. }) => {
-                require(
+                ensure!(
                     self.sequence.get() == 1
                         && *elapsed_ns == Count::ZERO
                         && self.identity.is_none(),
-                    "invalid stream start boundary",
-                )?;
+                    InvalidSnafu {
+                        message: "invalid stream start boundary",
+                    }
+                );
             }
             StreamPayload::Control(StreamEvent::Finished {
                 final_sequence,
@@ -242,32 +256,40 @@ impl StreamRecord {
                 counts,
                 ..
             }) => {
-                require(
+                ensure!(
                     *final_sequence == self.sequence
                         && self.sequence.get() > 1
                         && self.identity.is_none(),
-                    "invalid stream terminal boundary",
-                )?;
-                require(
+                    InvalidSnafu {
+                        message: "invalid stream terminal boundary",
+                    }
+                );
+                ensure!(
                     (*outcome == StreamOutcome::Succeeded) == failure.is_none(),
-                    "stream failure must match outcome",
-                )?;
-                require(
+                    InvalidSnafu {
+                        message: "stream failure must match outcome",
+                    }
+                );
+                ensure!(
                     counts.delivered_outputs <= counts.completed_frames
                         && u128::from(counts.completed_frames)
                             <= u128::from(counts.accepted_inputs)
                                 + u128::from(counts.emitted_messages),
-                    "stream terminal counts are inconsistent",
-                )?;
+                    InvalidSnafu {
+                        message: "stream terminal counts are inconsistent",
+                    }
+                );
                 if let Some(failure) = failure {
-                    require(
+                    ensure!(
                         failure
                             .node
                             .as_ref()
                             .is_none_or(|node| !node.trim().is_empty()),
-                        "blank stream failure node",
-                    )?;
-                    require(
+                        InvalidSnafu {
+                            message: "blank stream failure node",
+                        }
+                    );
+                    ensure!(
                         !failure.message.trim().is_empty()
                             && matches!(
                                 failure.phase.as_str(),
@@ -279,21 +301,27 @@ impl StreamRecord {
                                     | "output"
                                     | "resource"
                             ),
-                        "invalid stream failure",
-                    )?;
+                        InvalidSnafu {
+                            message: "invalid stream failure",
+                        }
+                    );
                 }
             }
             StreamPayload::Control(
                 StreamEvent::Buffered { node, .. } | StreamEvent::Flushed { node, .. },
             ) => {
-                require(
+                ensure!(
                     self.identity.is_some() && self.sequence.get() > 1,
-                    "batch observation requires invocation identity",
-                )?;
-                require(
+                    InvalidSnafu {
+                        message: "batch observation requires invocation identity",
+                    }
+                );
+                ensure!(
                     !node.id.trim().is_empty() && !node.kind.trim().is_empty(),
-                    "blank batch node identity",
-                )?;
+                    InvalidSnafu {
+                        message: "blank batch node identity",
+                    }
+                );
                 if let StreamPayload::Control(StreamEvent::Flushed {
                     output,
                     item_count,
@@ -302,15 +330,17 @@ impl StreamRecord {
                 }) = &self.payload
                 {
                     validate_message(*output)?;
-                    require(
+                    ensure!(
                         output.domain > 0
                             && item_count.get() > 0
                             && matches!(
                                 reason.as_str(),
                                 "size_exceed" | "timeout_exceed" | "upstream_closed"
                             ),
-                        "invalid batch flush",
-                    )?;
+                        InvalidSnafu {
+                            message: "invalid batch flush",
+                        }
+                    );
                 }
             }
         }
@@ -382,12 +412,14 @@ impl StreamRecord {
     }
 
     pub fn decode(wire: &WireRecord) -> Result<Self, ContractError> {
-        require(
+        ensure!(
             wire.scope == INSTRUMENTATION_SCOPE
                 && wire.attributes.get("mf.schema.version")
                     == Some(&json!(STREAM_EVENT_SCHEMA_VERSION)),
-            "unsupported stream event schema",
-        )?;
+            InvalidSnafu {
+                message: "unsupported stream event schema",
+            }
+        );
         if let Some(trace) = &wire.trace_context {
             trace.validate()?;
         }
@@ -395,12 +427,16 @@ impl StreamRecord {
             wire.attributes
                 .get(name)
                 .cloned()
-                .ok_or_else(|| crate::invalid(format!("missing attribute {name}")))
+                .with_context(|| InvalidSnafu {
+                    message: format!("missing attribute {name}"),
+                })
         };
         let mut body = wire
             .body
             .as_object()
-            .ok_or_else(|| crate::invalid("stream event body must be a map"))?
+            .context(InvalidSnafu {
+                message: "stream event body must be a map",
+            })?
             .clone();
         let identity = body
             .remove("stream")
@@ -444,8 +480,11 @@ impl StreamRecord {
 }
 
 fn validate_message(message: StreamMessage) -> Result<(), ContractError> {
-    require(
+    ensure!(
         i64::try_from(message.domain).is_ok(),
-        "message domain exceeds the observation range",
-    )
+        InvalidSnafu {
+            message: "message domain exceeds the observation range",
+        }
+    );
+    Ok(())
 }
