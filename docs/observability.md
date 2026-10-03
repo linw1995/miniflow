@@ -369,6 +369,13 @@ input message. Message identity combines a domain with that domain's sequence. I
 message sequences are canonical unsigned decimal strings so OTel encoding cannot round large values.
 The lifecycle sequence retains the nonnegative signed OTel counter representation.
 
+Incremental producers use the `input` trigger for their complete invocation, including time waiting
+for output capacity. The runtime carries the node span onto the producer worker. Successful completion
+reports the number of admitted emissions and their produced ports; downstream messages have their own
+identities and can run before production ends. Send validation failures report the `publication` phase,
+while producer errors and panics report `execution`. Invalid sends fail the instance even when caught
+by plugin code. Terminal observation waits for producer cleanup and output delivery.
+
 Successful node completion includes `emission_count`. A Batch input can succeed with zero emissions;
 that does not imply downstream execution or completion of the accepted input's business processing.
 `mf.batch.buffered` reports the current item count. `mf.batch.flushed` reports the output message,

@@ -1,6 +1,7 @@
 use crate::{
-    EventContext, EventEffects, EventEmission, EventNode, ExecutionContext, FlowOutputs, NodeEvent,
-    Outputs, PreparedStream, StreamExecution, StreamPlan, TimerUpdate, ValueRef, WorkerPool,
+    EventContext, EventEffects, EventEmission, EventNode, ExecutionContext, FlowOutputs, Inputs,
+    NodeEvent, NodeExecution, NodeExecutionError, NodeResult, Outputs, PreparedStream,
+    StreamExecution, StreamNode, StreamPlan, TimerUpdate, ValueRef, WorkerPool,
 };
 use mf_telemetry::{
     event::{FailurePhase, SkipCause},
@@ -10,7 +11,7 @@ use mf_telemetry::{
 use serde::Serialize;
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Condvar, Mutex, Weak},
     task::{Wake, Waker},
@@ -87,6 +88,12 @@ pub enum StreamError {
         definition_id: crate::DefinitionId,
         #[snafu(source(from(crate::NodeExecutionError, Arc::new)))]
         source: Arc<crate::NodeExecutionError>,
+    },
+    #[snafu(display("stream producer node `{definition_id}` failed: {source}"))]
+    Producer {
+        definition_id: crate::DefinitionId,
+        #[snafu(source(from(NodeExecutionError, Arc::new)))]
+        source: Arc<NodeExecutionError>,
     },
     #[snafu(display("stream resource limit: {message}"), visibility(pub))]
     Resource { message: String },
@@ -165,7 +172,6 @@ struct Frame {
 struct Domain {
     frame: Option<Frame>,
     occupied: bool,
-    running: bool,
     closed: bool,
 }
 
@@ -175,15 +181,32 @@ struct QueuedEmission {
 }
 
 struct Operator {
-    state: Box<dyn EventNode>,
+    executor: OperatorExecutor,
     deadline: Option<Duration>,
     pending: VecDeque<QueuedEmission>,
     closed: bool,
 }
 
+enum OperatorExecutor {
+    Event(Box<dyn EventNode>),
+    Producer(Producer),
+}
+
+struct Producer {
+    node: Option<Box<dyn StreamNode>>,
+    worker: Option<WorkerPool<ProducerJob>>,
+}
+
+struct ProducerJob {
+    frame: Frame,
+    inputs: Inputs,
+    callback: Option<StreamCallback>,
+}
+
 struct Completion {
     frame: Frame,
     result: Result<(), StreamError>,
+    producer: bool,
 }
 
 struct State {
@@ -220,6 +243,159 @@ impl Shared {
         }
         self.changed.notify_all();
     }
+}
+
+/// A borrowed, non-cloneable output sink for one producer invocation.
+pub struct Emitter<'a> {
+    shared: &'a Shared,
+    plan: &'a StreamPlan,
+    index: usize,
+    emitted: usize,
+    ports: BTreeSet<String>,
+    publication_failed: bool,
+}
+
+impl Emitter<'_> {
+    /// Wait for queue capacity and transfer one validated result to the runtime.
+    /// Failure wakes waiting senders. Success does not imply downstream completion.
+    pub fn send(&mut self, result: NodeResult) -> Result<(), NodeExecutionError> {
+        self.admit(result)
+            .map_err(|source| NodeExecutionError::PluginFailed {
+                source: Box::new(source),
+            })
+    }
+
+    fn admit(&mut self, result: NodeResult) -> Result<(), StreamError> {
+        let mut state = self.shared.state.lock().unwrap();
+        loop {
+            if let Some(error) = &state.failure {
+                return Err(error.clone());
+            }
+            if state.operators[self.index].as_ref().unwrap().pending.len()
+                < self.plan.execution().limits.max_pending_messages
+            {
+                break;
+            }
+            state = self.shared.changed.wait(state).unwrap();
+        }
+        let ports = result.outputs.keys().cloned().collect::<Vec<_>>();
+        let admitted: Result<(), StreamError> = (|| {
+            let emitted = self.emitted.checked_add(1).context(ResourceSnafu {
+                message: "producer emission counter exhausted",
+            })?;
+            enqueue_emission(&mut state, self.plan, self.index, result.into())?;
+            self.emitted = emitted;
+            self.ports.extend(ports);
+            Ok(())
+        })();
+        if let Err(error) = &admitted {
+            self.publication_failed = true;
+            state.failure = Some(error.clone());
+            state.failure_node = Some(self.plan.nodes()[self.index].definition_id.to_string());
+        }
+        self.shared.changed.notify_all();
+        admitted
+    }
+}
+
+impl Producer {
+    fn submit(
+        &mut self,
+        job: ProducerJob,
+        shared: &Arc<Shared>,
+        plan: &Arc<StreamPlan>,
+    ) -> Result<(), StreamError> {
+        if self.worker.is_none() {
+            let node = Mutex::new(self.node.take().expect("producer has not started"));
+            let shared = Arc::clone(shared);
+            let plan = Arc::clone(plan);
+            self.worker = Some(
+                WorkerPool::new(1, move |job| {
+                    run_producer(&mut **node.lock().unwrap(), job, &shared, &plan);
+                })
+                .context(WorkerStartupSnafu)?,
+            );
+        }
+        self.worker.as_ref().unwrap().try_submit(job).map_err(|_| {
+            ExecutionSnafu {
+                message: "producer worker unavailable",
+            }
+            .build()
+        })
+    }
+}
+
+fn run_producer(
+    node: &mut dyn StreamNode,
+    mut job: ProducerJob,
+    shared: &Arc<Shared>,
+    plan: &Arc<StreamPlan>,
+) {
+    let index = plan.domains()[job.frame.message.domain].steps[job.frame.cursor];
+    let _span = job.callback.as_ref().map(StreamCallback::enter);
+    let mut emitter = Emitter {
+        shared,
+        plan,
+        index,
+        emitted: 0,
+        ports: BTreeSet::new(),
+        publication_failed: false,
+    };
+    let failure = shared.state.lock().unwrap().failure.clone();
+    let result = if let Some(error) = failure {
+        Err(error)
+    } else {
+        if let Some(callback) = job.callback.as_mut() {
+            callback.started();
+        }
+        catch_unwind(AssertUnwindSafe(|| {
+            node.execute(job.inputs, &mut job.frame.context, &mut emitter)
+        }))
+        .unwrap_or_else(|payload| {
+            Err(NodeExecutionError::ExecutionFailed {
+                message: panic_error(payload).to_string(),
+            })
+        })
+        .context(ProducerSnafu {
+            definition_id: plan.nodes()[index].definition_id.clone(),
+        })
+        .and_then(|()| {
+            shared
+                .state
+                .lock()
+                .unwrap()
+                .failure
+                .clone()
+                .map_or(Ok(()), Err)
+        })
+    };
+    if let Some(callback) = job.callback {
+        match &result {
+            Ok(()) => callback.succeeded(emitter.emitted, emitter.ports.into_iter().collect()),
+            Err(error) => callback.failed(
+                if emitter.publication_failed {
+                    FailurePhase::Publication
+                } else {
+                    FailurePhase::Execution
+                },
+                error.to_string(),
+            ),
+        }
+    }
+    if result.is_err() {
+        job.frame.context = ExecutionContext::default();
+    }
+    shared
+        .state
+        .lock()
+        .unwrap()
+        .completions
+        .push_back(Completion {
+            frame: job.frame,
+            result,
+            producer: true,
+        });
+    shared.changed.notify_all();
 }
 
 struct ClockWake(Weak<Shared>);
@@ -374,7 +550,7 @@ impl PreparedStream {
                 message: "snapshot capture is unsupported for streaming instances",
             }
         );
-        let (prepared, event_states) = self.into_parts();
+        let (prepared, operator_states) = self.into_parts();
         let domain_count = prepared.domains().len();
         let input_capacity = prepared
             .execution()
@@ -387,11 +563,18 @@ impl PreparedStream {
                     "max_pending_messages must reserve at least {domain_count} domain slots"
                 ),
             })?;
-        let operators = event_states
+        let operators = operator_states
             .into_iter()
             .map(|state| {
                 state.map(|state| Operator {
-                    state,
+                    executor: match state {
+                        NodeExecution::Event(state) => OperatorExecutor::Event(state),
+                        NodeExecution::Stream(node) => OperatorExecutor::Producer(Producer {
+                            node: Some(node),
+                            worker: None,
+                        }),
+                        NodeExecution::Task(_) => unreachable!("tasks remain in the plan"),
+                    },
                     deadline: None,
                     pending: VecDeque::new(),
                     closed: false,
@@ -431,7 +614,7 @@ impl PreparedStream {
             .name("workflow-stream".into())
             .spawn(move || {
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    coordinate(&coordinator_shared, &plan, options.clock.as_ref(), workers)
+                    coordinate(&coordinator_shared, &plan, options.clock.as_ref(), &workers)
                 }));
                 if let Err(payload) = result {
                     let mut state = coordinator_shared
@@ -440,11 +623,10 @@ impl PreparedStream {
                         .unwrap_or_else(|poison| poison.into_inner());
                     coordinator_shared.state.clear_poison();
                     state.failure.get_or_insert_with(|| panic_error(payload));
-                    clear_retained(&mut state);
-                    state.done = true;
-                    finish_observation(&coordinator_shared, &state);
                     coordinator_shared.changed.notify_all();
                 }
+                drop(workers);
+                finish_instance(&coordinator_shared);
             })
             .context(ThreadSpawnSnafu {
                 thread: "workflow-stream",
@@ -593,7 +775,11 @@ fn start_workers(
             .lock()
             .unwrap()
             .completions
-            .push_back(Completion { frame, result });
+            .push_back(Completion {
+                frame,
+                result,
+                producer: false,
+            });
         shared.changed.notify_all();
     })
     .context(WorkerStartupSnafu)
@@ -601,16 +787,17 @@ fn start_workers(
 
 fn coordinate(
     shared: &Arc<Shared>,
-    plan: &StreamPlan,
+    plan: &Arc<StreamPlan>,
     clock: &dyn StreamClock,
-    workers: WorkerPool<Frame>,
+    workers: &WorkerPool<Frame>,
 ) {
     let mut state = shared.state.lock().unwrap();
     loop {
-        while let Some(completion) = state.completions.pop_front() {
-            state.active_workers -= 1;
+        while let Some(mut completion) = state.completions.pop_front() {
+            if !completion.producer {
+                state.active_workers -= 1;
+            }
             let domain = completion.frame.message.domain;
-            state.domains[domain].running = false;
             if let Err(error) = completion.result {
                 if state.failure.is_none() {
                     let index = plan.domains()[domain].steps[completion.frame.cursor];
@@ -619,35 +806,24 @@ fn coordinate(
                 state.failure.get_or_insert(error);
             }
             if state.failure.is_none() {
+                if completion.producer {
+                    completion.frame.cursor += 1;
+                }
                 state.domains[domain].frame = Some(completion.frame);
             }
         }
         if state.failure.is_some() {
             state.input_closed = true;
-            if state.active_workers == 0 {
-                clear_retained(&mut state);
-                state.done = true;
-                finish_observation(shared, &state);
-                shared.changed.notify_all();
-                break;
-            }
-            state = shared.changed.wait(state).unwrap();
-            continue;
+            shared.changed.notify_all();
+            break;
         }
         if let Some(domain) = state.delivered.take() {
             release_domain(&mut state, domain);
         }
-        match tick(&mut state, plan, &workers, clock, shared) {
+        match tick(&mut state, plan, workers, clock, shared) {
             Ok(progress) => {
                 shared.changed.notify_all();
-                if state.domains.iter().all(|domain| domain.closed)
-                    && state.active_workers == 0
-                    && state.output.is_none()
-                {
-                    clear_retained(&mut state);
-                    state.done = true;
-                    finish_observation(shared, &state);
-                    shared.changed.notify_all();
+                if state.domains.iter().all(|domain| domain.closed) && state.output.is_none() {
                     break;
                 }
                 if progress {
@@ -682,16 +858,14 @@ fn coordinate(
             None => shared.changed.wait(state).unwrap(),
         };
     }
-    drop(state);
-    drop(workers);
 }
 
 fn tick(
     state: &mut State,
-    plan: &StreamPlan,
+    plan: &Arc<StreamPlan>,
     workers: &WorkerPool<Frame>,
     clock: &dyn StreamClock,
-    shared: &Shared,
+    shared: &Arc<Shared>,
 ) -> Result<bool, StreamError> {
     let mut progress = false;
     for source in plan.domains().iter().skip(1) {
@@ -834,6 +1008,21 @@ fn tick(
                     message: frame.message,
                 })?;
             if let Some(inputs) = inputs {
+                if let OperatorExecutor::Producer(producer) =
+                    &mut state.operators[index].as_mut().unwrap().executor
+                {
+                    producer.submit(
+                        ProducerJob {
+                            frame,
+                            inputs,
+                            callback,
+                        },
+                        shared,
+                        plan,
+                    )?;
+                    progress = true;
+                    continue;
+                }
                 invoke_event(
                     state,
                     plan,
@@ -879,7 +1068,6 @@ fn tick(
                     .build()
                 })?;
             state.active_workers += 1;
-            state.domains[domain].running = true;
             progress = true;
         } else {
             state.domains[domain].frame = Some(frame);
@@ -900,17 +1088,28 @@ fn tick(
                     .as_ref()
                     .is_some_and(|operator| !operator.closed)
                 {
-                    invoke_event(
-                        state,
-                        plan,
-                        index,
-                        NodeEvent::UpstreamClosed,
-                        EventContext {
-                            now: clock.now(),
-                            input: None,
-                        },
-                        event_callback(shared, plan, index, None, StreamTrigger::UpstreamClosed),
-                    )?;
+                    if matches!(
+                        state.operators[index].as_ref().unwrap().executor,
+                        OperatorExecutor::Event(_)
+                    ) {
+                        invoke_event(
+                            state,
+                            plan,
+                            index,
+                            NodeEvent::UpstreamClosed,
+                            EventContext {
+                                now: clock.now(),
+                                input: None,
+                            },
+                            event_callback(
+                                shared,
+                                plan,
+                                index,
+                                None,
+                                StreamTrigger::UpstreamClosed,
+                            ),
+                        )?;
+                    }
                     let operator = state.operators[index].as_mut().unwrap();
                     operator.closed = true;
                     operator.deadline = None;
@@ -960,11 +1159,12 @@ fn invoke_event(
     let old_pending = state.operators[index].as_ref().unwrap().pending.len();
     let result = (|| -> Result<(usize, Vec<String>), StreamError> {
         let effects = catch_unwind(AssertUnwindSafe(|| {
-            state.operators[index]
-                .as_mut()
-                .unwrap()
-                .state
-                .on_event(event, &context)
+            let OperatorExecutor::Event(node) =
+                &mut state.operators[index].as_mut().unwrap().executor
+            else {
+                unreachable!("only event nodes receive callbacks");
+            };
+            node.on_event(event, &context)
         }))
         .map_err(panic_error)?
         .with_context(|_| EventSnafu {
@@ -984,7 +1184,9 @@ fn invoke_event(
         Ok((count, ports)) => {
             if let Some(callback) = callback {
                 let operator = state.operators[index].as_ref().unwrap();
-                if let Some(items) = operator.state.buffered_items() {
+                if let OperatorExecutor::Event(node) = &operator.executor
+                    && let Some(items) = node.buffered_items()
+                {
                     callback.buffered(items);
                 }
                 for emitted in operator.pending.iter().skip(old_pending) {
@@ -1011,6 +1213,34 @@ fn invoke_event(
     }
 }
 
+fn enqueue_emission(
+    state: &mut State,
+    plan: &StreamPlan,
+    index: usize,
+    emission: EventEmission,
+) -> Result<(), StreamError> {
+    let domain = plan.output_domain(index);
+    ExecutionContext::for_message(&plan.nodes()[index], emission.result.clone()).context(
+        WorkflowSnafu {
+            message: MessageId {
+                domain,
+                sequence: state.sequences[domain],
+            },
+        },
+    )?;
+    let sequence = take_sequence(&mut state.sequences[domain])?;
+    take_sequence(&mut state.summary.emitted_messages)?;
+    state.operators[index]
+        .as_mut()
+        .unwrap()
+        .pending
+        .push_back(QueuedEmission {
+            message: MessageId { domain, sequence },
+            emission,
+        });
+    Ok(())
+}
+
 fn apply_effects(
     state: &mut State,
     plan: &StreamPlan,
@@ -1018,7 +1248,6 @@ fn apply_effects(
     effects: EventEffects,
     now: Duration,
 ) -> Result<(), StreamError> {
-    let domain = plan.output_domain(index);
     let operator = state.operators[index].as_mut().unwrap();
     ensure!(
         effects
@@ -1034,21 +1263,9 @@ fn apply_effects(
         }
     );
     for emission in effects.emissions {
-        ExecutionContext::for_message(&plan.nodes()[index], emission.result.clone()).context(
-            WorkflowSnafu {
-                message: MessageId {
-                    domain,
-                    sequence: state.sequences[domain],
-                },
-            },
-        )?;
-        let sequence = take_sequence(&mut state.sequences[domain])?;
-        take_sequence(&mut state.summary.emitted_messages)?;
-        operator.pending.push_back(QueuedEmission {
-            message: MessageId { domain, sequence },
-            emission,
-        });
+        enqueue_emission(state, plan, index, emission)?;
     }
+    let operator = state.operators[index].as_mut().unwrap();
     match effects.timer {
         TimerUpdate::Keep => {}
         TimerUpdate::Cancel => operator.deadline = None,
@@ -1127,7 +1344,14 @@ fn release_domain(state: &mut State, domain: usize) {
     }
 }
 
-fn clear_retained(state: &mut State) {
+fn finish_instance(shared: &Shared) {
+    let operators = {
+        let mut state = shared.state.lock().unwrap();
+        std::mem::take(&mut state.operators)
+    };
+    // Joining workers can run plugin destructors that call back into the instance.
+    drop(operators);
+    let mut state = shared.state.lock().unwrap();
     state.inputs.clear();
     state.output = None;
     state.delivered = None;
@@ -1137,10 +1361,11 @@ fn clear_retained(state: &mut State) {
         *domain = Domain::default();
         domain.closed = true;
     }
-    for operator in &mut state.operators {
-        *operator = None;
-    }
     state.root_live = 0;
+    state.active_workers = 0;
+    state.done = true;
+    finish_observation(shared, &state);
+    shared.changed.notify_all();
 }
 
 fn take_sequence(sequence: &mut u64) -> Result<u64, StreamError> {

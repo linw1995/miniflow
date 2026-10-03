@@ -45,6 +45,7 @@ fn plugin(root: &Path) -> PathBuf {
     let source = fs::read_to_string(&lib).unwrap();
     let minimal = source
         .replace("mod typed_fixture;\n", "")
+        .replace("mod line_producer;\n", "")
         .replace("mod stream_fixture;\n", "");
     assert_ne!(minimal, source);
     fs::write(lib, minimal).unwrap();

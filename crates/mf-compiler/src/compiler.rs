@@ -397,9 +397,12 @@ fn prepare_graph(
     let order = structural_order_graph(definition)?;
     let mut nodes = resolve_nodes_in_scope(definition, registry, enclosing, allow_iteration_input)?;
     if definition.execution.is_none()
-        && let Some(node) = nodes
-            .iter()
-            .find(|node| matches!(&node.node, Some(mf_runtime::NodeExecution::Event(_))))
+        && let Some(node) = nodes.iter().find(|node| {
+            matches!(
+                &node.node,
+                Some(mf_runtime::NodeExecution::Event(_) | mf_runtime::NodeExecution::Stream(_))
+            )
+        })
     {
         return InvalidStreamSnafu {
             message: format!(
