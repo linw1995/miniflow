@@ -1,13 +1,13 @@
 use crate::{
     EventContext, EventEffects, EventEmission, EventNode, ExecutionContext, FlowOutputs, NodeEvent,
-    Outputs, PreparedStream, StreamExecution, StreamPlan, TimerUpdate, ValueRef,
+    Outputs, PreparedStream, StreamExecution, StreamPlan, TimerUpdate, ValueRef, WorkerPool,
 };
 use serde::Serialize;
 use snafu::{IntoError, OptionExt, ResultExt, Snafu};
 use std::{
     collections::VecDeque,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Condvar, Mutex, Weak, mpsc},
+    sync::{Arc, Condvar, Mutex, Weak},
     task::{Wake, Waker},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -30,6 +30,11 @@ pub enum StreamError {
         thread: String,
         #[snafu(source(from(std::io::Error, Arc::new)))]
         source: Arc<std::io::Error>,
+    },
+    #[snafu(display("stream worker preparation failed: {source}"))]
+    WorkerStartup {
+        #[snafu(source(from(crate::WorkerPoolError, Arc::new)))]
+        source: Arc<crate::WorkerPoolError>,
     },
     #[snafu(display("invalid stream input: {source}"))]
     Input { source: crate::TypeMismatch },
@@ -369,7 +374,7 @@ impl PreparedStream {
             .clock
             .register_waker(Waker::from(Arc::new(ClockWake(Arc::downgrade(&shared)))));
         let coordinator_shared = Arc::clone(&shared);
-        let workers = Workers::new(&shared, &plan)?;
+        let workers = start_workers(&shared, &plan)?;
         let coordinator = thread::Builder::new()
             .name("workflow-stream".into())
             .spawn(move || {
@@ -483,98 +488,64 @@ impl Drop for StreamInstance {
     }
 }
 
-struct Workers {
-    sender: Option<mpsc::SyncSender<Frame>>,
-    threads: Vec<JoinHandle<()>>,
-    count: usize,
-}
-
-impl Workers {
-    fn new(shared: &Arc<Shared>, plan: &Arc<StreamPlan>) -> Result<Self, StreamError> {
-        let active_domains = plan
-            .domains()
-            .iter()
-            .filter(|domain| {
-                domain
-                    .steps
-                    .iter()
-                    .any(|&index| plan.nodes()[index].node.is_some())
-            })
-            .count();
-        let count = plan.execution().limits.workers.min(active_domains);
-        let (sender, receiver) = mpsc::sync_channel::<Frame>(count);
-        let receiver = Arc::new(Mutex::new(receiver));
-        let mut workers = Self {
-            sender: Some(sender),
-            threads: Vec::new(),
-            count,
-        };
-        for index in 0..count {
-            let receiver = Arc::clone(&receiver);
-            let shared = Arc::clone(shared);
-            let plan = Arc::clone(plan);
-            workers.threads.push(
-                thread::Builder::new()
-                    .name(format!("workflow-worker-{index}"))
-                    .spawn(move || {
-                        loop {
-                            let job = { receiver.lock().unwrap().recv() };
-                            let Ok(mut frame) = job else { break };
-                            let steps = &plan.domains()[frame.message.domain].steps;
-                            let result = (|| -> Result<(), StreamError> {
-                                while let Some(&index) = steps.get(frame.cursor) {
-                                    if plan.nodes()[index].node.is_none() {
-                                        break;
-                                    }
-                                    if let Some(error) =
-                                        shared.state.lock().unwrap().failure.clone()
-                                    {
-                                        return Err(error);
-                                    }
-                                    catch_unwind(AssertUnwindSafe(|| {
-                                        plan.execute_step(index, &mut frame.context)
-                                    }))
-                                    .map_err(panic_error)?
-                                    .context(
-                                        WorkflowSnafu {
-                                            message: frame.message,
-                                        },
-                                    )?;
-                                    frame.cursor += 1;
-                                }
-                                Ok(())
-                            })();
-                            if result.is_err() {
-                                frame.context = ExecutionContext::default();
-                            }
-                            shared
-                                .state
-                                .lock()
-                                .unwrap()
-                                .completions
-                                .push_back(Completion { frame, result });
-                            shared.changed.notify_all();
-                        }
-                    })
-                    .with_context(|_| ThreadSpawnSnafu {
-                        thread: format!("workflow-worker-{index}"),
-                    })?,
-            );
+fn start_workers(
+    shared: &Arc<Shared>,
+    plan: &Arc<StreamPlan>,
+) -> Result<WorkerPool<Frame>, StreamError> {
+    let active_domains = plan
+        .domains()
+        .iter()
+        .filter(|domain| {
+            domain
+                .steps
+                .iter()
+                .any(|&index| plan.nodes()[index].node.is_some())
+        })
+        .count();
+    let count = plan.execution().limits.workers.min(active_domains);
+    let shared = Arc::clone(shared);
+    let plan = Arc::clone(plan);
+    WorkerPool::new(count, move |mut frame: Frame| {
+        let steps = &plan.domains()[frame.message.domain].steps;
+        let result = (|| -> Result<(), StreamError> {
+            while let Some(&index) = steps.get(frame.cursor) {
+                if plan.nodes()[index].node.is_none() {
+                    break;
+                }
+                if let Some(error) = shared.state.lock().unwrap().failure.clone() {
+                    return Err(error);
+                }
+                catch_unwind(AssertUnwindSafe(|| {
+                    plan.execute_step(index, &mut frame.context)
+                }))
+                .map_err(panic_error)?
+                .context(WorkflowSnafu {
+                    message: frame.message,
+                })?;
+                frame.cursor += 1;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            frame.context = ExecutionContext::default();
         }
-        Ok(workers)
-    }
+        shared
+            .state
+            .lock()
+            .unwrap()
+            .completions
+            .push_back(Completion { frame, result });
+        shared.changed.notify_all();
+    })
+    .context(WorkerStartupSnafu)
 }
 
-impl Drop for Workers {
-    fn drop(&mut self) {
-        self.sender.take();
-        for worker in self.threads.drain(..) {
-            let _ = worker.join();
-        }
-    }
-}
-
-fn coordinate(shared: &Arc<Shared>, plan: &StreamPlan, clock: &dyn StreamClock, workers: Workers) {
+fn coordinate(
+    shared: &Arc<Shared>,
+    plan: &StreamPlan,
+    clock: &dyn StreamClock,
+    workers: WorkerPool<Frame>,
+) {
     let mut state = shared.state.lock().unwrap();
     loop {
         while let Some(completion) = state.completions.pop_front() {
@@ -655,7 +626,7 @@ fn coordinate(shared: &Arc<Shared>, plan: &StreamPlan, clock: &dyn StreamClock, 
 fn tick(
     state: &mut State,
     plan: &StreamPlan,
-    workers: &Workers,
+    workers: &WorkerPool<Frame>,
     clock: &dyn StreamClock,
 ) -> Result<bool, StreamError> {
     let mut progress = false;
@@ -795,12 +766,9 @@ fn tick(
             frame.cursor += 1;
             state.domains[domain].frame = Some(frame);
             progress = true;
-        } else if state.active_workers < workers.count {
+        } else if state.active_workers < workers.worker_count() {
             workers
-                .sender
-                .as_ref()
-                .unwrap()
-                .try_send(frame)
+                .try_submit(frame)
                 // A failed send owns the frame; release its values instead of retaining them.
                 .map_err(|_| {
                     ExecutionSnafu {

@@ -13,6 +13,7 @@ mod stream_instance;
 mod stream_plan;
 mod subgraph;
 mod value;
+mod worker;
 
 pub use context::{
     ContextValue, ExecutionContext, ExecutionDependency, ExecutionScope, NodeResult,
@@ -66,6 +67,7 @@ pub use stream_plan::{
 pub use subgraph::PreparedSubgraph;
 
 pub use value::{ValueKind, ValueRef};
+pub use worker::{WorkerPool, WorkerPoolError};
 
 pub use snapshot::{
     NodeSnapshot, SNAPSHOT_VERSION, Snapshot, SnapshotEntry, SnapshotOutcome, SnapshotRecord,
