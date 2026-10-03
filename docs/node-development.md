@@ -199,7 +199,8 @@ Dropping an unfinished instance follows the same failure cleanup before releasin
 Limits default to 64 pending messages and four workers. Positive overrides live in `execution.limits`.
 Preparation reserves one frame slot per downstream domain; the remaining slots bound input admission.
 Each event node's pending emissions are also limited by `max_pending_messages`. A full downstream
-queue propagates pressure to input admission. Payload sizes and plugin buffers have no byte quota.
+queue propagates pressure to input admission. Additional byte quotas are described in
+[streaming byte budgets](#streaming-byte-budgets).
 
 A custom `StreamClock` must advance monotonically and wake registered instances. Deadline expiry
 makes an emission ready; downstream execution remains subject to capacity. Snapshot capture is rejected
@@ -228,3 +229,21 @@ without exposing retained values. Transport and export queues remain bounded, an
 do not change workflow results or request retries. Terminal events follow drain or failure cleanup.
 
 The current terminal launcher and snapshot recorder remain unavailable for stream mode.
+
+## Streaming byte budgets
+
+Streaming byte limits default to a 1 MiB payload limit and 64 MiB of accounted logical values.
+Positive overrides use `execution.limits.max_message_bytes` and `max_buffered_bytes`. Preparation
+reserves bytes for message contexts, event-input handoff, and sealed emissions so admitted work can
+progress when source admission is full. These limits apply in addition to message-count and worker
+limits. `StreamMetrics` reports queued/buffered, reserved, and total accounted bytes.
+
+Event providers report retained logical values with `EventNode::retained_bytes`, excluding returned
+emissions. Batch maintains this total for retained items. Task outputs and retained message contexts
+are checked before publication. Temporary byte pressure blocks admission; oversized payloads and
+impossible graph reservations fail explicitly. These bounds do not measure process RSS or arbitrary
+allocations inside plugins.
+
+The current implementation counts JSON encoding bytes and scans retained contexts on publication.
+Shared values may be counted repeatedly; byte budgeting therefore adds traversal cost even when values
+are not copied. Its accounting policy is reviewed separately from the base streaming scheduler.

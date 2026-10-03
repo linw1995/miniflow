@@ -430,3 +430,42 @@ fn a_nested_workflow_does_not_reuse_another_runs_invocation_identity() {
         .unwrap();
     assert!(inner.identity.as_ref().unwrap().parent.is_none());
 }
+
+#[test]
+fn byte_limit_publication_failures_never_report_success() {
+    let harness = Harness::new(true);
+    let mut value = definition();
+    value["nodes"][0]["config"]["max_items"] = json!(1);
+    value["nodes"][1] =
+        json!({"id":"consume", "kind":"builtin.constant", "config":{"value":"x".repeat(100)}});
+    value["edges"].as_array_mut().unwrap().pop();
+    value["control_edges"] =
+        json!([{"from_node":"collect", "from_output":"items", "to_node":"consume"}]);
+    value["execution"]["limits"] = json!({"max_message_bytes":32, "max_buffered_bytes":8192});
+    let plan = plan(value);
+    let observation = plan
+        .start_stream_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let instance = start_stream(
+        &plan,
+        &NodeRegistry::from_inventory().unwrap(),
+        StreamOptions {
+            observation: Some(observation),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    instance.input().send(json!(1)).unwrap();
+    instance.close_input();
+    assert!(instance.recv().is_err());
+    assert!(instance.join().is_err());
+    let events = records(&harness);
+    assert!(events.iter().any(|event| matches!(&event.payload, StreamPayload::Execution(Event::NodeFinished { node, outcome: Outcome::Failed, .. }) if node.id == "consume")));
+    assert!(!events.iter().any(|event| matches!(&event.payload, StreamPayload::Execution(Event::NodeFinished { node, outcome: Outcome::Succeeded, .. }) if node.id == "consume")));
+    assert!(events.iter().any(|event| matches!(
+        &event.payload,
+        StreamPayload::Control(StreamEvent::Finished {
+            failure: Some(failure), ..
+        }) if failure.phase == "resource"
+    )));
+}

@@ -7,6 +7,7 @@ use snafu::ensure;
 use std::time::Duration;
 
 pub const STREAM_INPUT_ID: &str = "%input";
+pub const MESSAGE_OVERHEAD: usize = 64;
 
 pub fn stream_input_node(value_type: ValueType) -> crate::FlowNode {
     crate::FlowNode {
@@ -39,6 +40,8 @@ pub struct StreamExecution {
 #[serde(default, deny_unknown_fields)]
 pub struct StreamLimits {
     pub max_pending_messages: usize,
+    pub max_buffered_bytes: usize,
+    pub max_message_bytes: usize,
     pub workers: usize,
 }
 
@@ -46,6 +49,8 @@ impl Default for StreamLimits {
     fn default() -> Self {
         Self {
             max_pending_messages: 64,
+            max_buffered_bytes: 64 * 1024 * 1024,
+            max_message_bytes: 1024 * 1024,
             workers: 4,
         }
     }
@@ -54,9 +59,25 @@ impl Default for StreamLimits {
 impl StreamLimits {
     pub fn validate(&self) -> Result<(), StreamBuildError> {
         ensure!(
-            ![self.max_pending_messages, self.workers].contains(&0),
+            ![
+                self.max_pending_messages,
+                self.max_buffered_bytes,
+                self.max_message_bytes,
+                self.workers,
+            ]
+            .contains(&0),
             InvalidPlanSnafu {
                 message: "stream limits must be positive",
+            }
+        );
+        ensure!(
+            self.max_message_bytes
+                .checked_add(MESSAGE_OVERHEAD)
+                .is_some_and(|minimum| self.max_buffered_bytes >= minimum),
+            InvalidPlanSnafu {
+                message: format!(
+                    "max_buffered_bytes must accommodate max_message_bytes and {MESSAGE_OVERHEAD} bytes of envelope overhead"
+                ),
             }
         );
         Ok(())
@@ -72,7 +93,7 @@ pub enum NodeEvent {
 
 pub struct EventContext<'a> {
     pub now: Duration,
-    /// Read current-frame references; publish through returned emissions.
+    /// Read current-frame references without bypassing emission validation and accounting.
     pub input: Option<&'a ExecutionContext>,
 }
 
@@ -127,6 +148,11 @@ pub trait EventNode: Send {
         event: NodeEvent,
         context: &EventContext<'_>,
     ) -> Result<EventEffects, NodeExecutionError>;
+
+    /// Report retained logical value bytes, excluding values returned as emissions.
+    fn retained_bytes(&self) -> usize {
+        0
+    }
 
     fn buffered_items(&self) -> Option<usize> {
         None

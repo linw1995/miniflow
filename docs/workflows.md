@@ -349,3 +349,9 @@ message domains. Failure discards a partial buffer without flushing or retrying.
 Batch runs through the in-memory API and standalone runners, and is rejected inside synchronous
 Loop/Iteration bodies. Its state is independent for every workflow instance.
 The [streaming Batch example](../examples/stream-batch.json) demonstrates the standalone input and output contract.
+
+### Streaming byte limits
+
+Byte budgeting adds `max_message_bytes` and `max_buffered_bytes` under `execution.limits`.
+The aggregate Batch output is subject to the payload limit even when its individual inputs fit.
+Choose count and byte limits together; see [byte accounting](node-development.md#streaming-byte-budgets).
