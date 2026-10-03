@@ -1,9 +1,11 @@
 use crate::ValueRef as Value;
+use crate::runner::{DependencySnafu, InputTypeSnafu, NodeExecutionSnafu};
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use mf_telemetry::{
     event::{FailurePhase, LoopPathEntry, LoopSummary, SkipCause},
     observation::{BodyNodeObservation, BodyObservation, NodeObservation, RunObservation},
 };
+use snafu::ResultExt;
 use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug)]
@@ -106,6 +108,64 @@ impl Default for ExecutionContext {
 }
 
 impl ExecutionContext {
+    pub fn for_message<N>(
+        source: &FlowNode<N>,
+        result: NodeResult,
+    ) -> Result<Self, WorkflowRunError> {
+        let mut context = Self::default();
+        context.publish(source, Some(result))?;
+        Ok(context)
+    }
+
+    pub fn event_inputs<N>(
+        &mut self,
+        node: &FlowNode<N>,
+        dependencies: &[crate::StreamDependency],
+    ) -> Result<Option<Inputs>, WorkflowRunError> {
+        let id = node.definition_id.as_str();
+        self.reserve_step(id)?;
+        let mut inputs = Inputs::new();
+        let mut skipped = false;
+        for dependency in dependencies {
+            let value = self
+                .output(&output_id(
+                    &dependency.source_node,
+                    &dependency.source_output,
+                ))
+                .with_context(|_| DependencySnafu {
+                    definition_id: id,
+                    input: dependency.input.as_deref().unwrap_or("<control>"),
+                })?;
+            match value {
+                ContextValue::Value(value) => {
+                    if let Some(input) = &dependency.input {
+                        inputs.insert(input.clone(), value.clone());
+                    }
+                }
+                ContextValue::Skipped => skipped = true,
+            }
+        }
+        if skipped {
+            return Ok(None);
+        }
+        for (name, value) in &inputs {
+            let port = node
+                .metadata
+                .ports
+                .inputs
+                .iter()
+                .find(|port| port.name == *name)
+                .ok_or_else(|| state_error(id, format!("received undeclared input `{name}`")))?;
+            port.value_type
+                .validate_shared(value)
+                .with_context(|_| InputTypeSnafu {
+                    definition_id: id,
+                    input: name,
+                })?;
+        }
+        Ok(Some(inputs))
+    }
+
     pub fn set_snapshot_recorder(&mut self, recorder: crate::SnapshotRecorder) {
         self.snapshots = Some(recorder);
     }
@@ -129,9 +189,9 @@ impl ExecutionContext {
         path
     }
 
-    fn capture_node(
+    fn capture_node<N>(
         &self,
-        node: &crate::TaskFlowNode,
+        node: &FlowNode<N>,
         inputs: &Inputs,
         result: Option<&NodeResult>,
         outcome: crate::SnapshotOutcome,
@@ -384,9 +444,9 @@ impl ExecutionContext {
         Ok(())
     }
 
-    fn publish(
+    fn publish<N>(
         &mut self,
-        node: &crate::TaskFlowNode,
+        node: &FlowNode<N>,
         result: Option<NodeResult>,
     ) -> Result<(), WorkflowRunError> {
         let id = node.definition_id.as_str();
@@ -566,6 +626,15 @@ pub fn execute_ordered_node_in_context<'a>(
     dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
     ctx: &mut ExecutionContext,
 ) -> Result<(), WorkflowRunError> {
+    execute_ordered_task_in_context(node, node.node.as_ref(), dependencies, ctx)
+}
+
+pub(super) fn execute_ordered_task_in_context<'a, N>(
+    node: &FlowNode<N>,
+    task: &dyn crate::TaskNode,
+    dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
+    ctx: &mut ExecutionContext,
+) -> Result<(), WorkflowRunError> {
     let id = node.definition_id.as_str();
     ctx.reserve_step(id)?;
     ctx.pending_loop_write = None;
@@ -674,13 +743,11 @@ pub fn execute_ordered_node_in_context<'a>(
         if let Some(step) = step.as_mut() {
             step.started(ctx);
         }
-        let result =
-            node.node
-                .execute(inputs, ctx)
-                .map_err(|source| WorkflowRunError::NodeExecution {
-                    definition_id: node.definition_id.clone(),
-                    source,
-                });
+        let result = task
+            .execute(inputs, ctx)
+            .with_context(|_| NodeExecutionSnafu {
+                definition_id: node.definition_id.clone(),
+            });
         match result {
             Ok(result) => Some(result),
             Err(error) => {

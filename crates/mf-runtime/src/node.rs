@@ -23,6 +23,43 @@ pub enum ValueType {
     Map(Box<ValueType>),
 }
 
+impl serde::Serialize for ValueType {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let scalar = match self {
+            Self::Any => "any",
+            Self::Null => "null",
+            Self::Boolean => "bool",
+            Self::Number => "number",
+            Self::Int64 => "int",
+            Self::Float64 => "double",
+            Self::String => "string",
+            Self::Array => "array",
+            Self::Object => "object",
+            Self::List(inner) | Self::Map(inner) => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry(
+                    if matches!(self, Self::List(_)) {
+                        "list"
+                    } else {
+                        "map"
+                    },
+                    inner,
+                )?;
+                return map.end();
+            }
+        };
+        serializer.serialize_str(scalar)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ValueType {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = <Value as serde::Deserialize>::deserialize(deserializer)?;
+        Self::parse_descriptor(&value).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TypeCompatibility {
     Static,
@@ -461,9 +498,9 @@ pub enum NodeBuildError {
 
 #[derive(Debug, Snafu)]
 pub enum NodeExecutionError {
-    #[snafu(display("node execution failed: {message}"))]
+    #[snafu(display("node execution failed: {message}"), visibility(pub))]
     ExecutionFailed { message: String },
-    #[snafu(display("node plugin failed: {source}"))]
+    #[snafu(display("node plugin failed: {source}"), visibility(pub))]
     PluginFailed {
         source: Box<dyn Error + Send + Sync + 'static>,
     },

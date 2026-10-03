@@ -3,12 +3,15 @@ mod definition;
 mod flow;
 mod iteration;
 mod loop_node;
+mod message_domain;
 mod node;
 mod number;
 mod registry;
 mod runner;
 mod snapshot;
 mod stream;
+mod stream_instance;
+mod stream_plan;
 mod subgraph;
 mod value;
 mod worker;
@@ -36,11 +39,13 @@ pub use loop_node::{
     loop_variable_types, prepared_loop_assign, prepared_loop_assign_from_json, prepared_loop_exit,
     prepared_loop_source_from_json, prepared_loop_source_types, prepared_scope_source,
 };
+pub use message_domain::StreamDomain;
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
 pub use node::{
-    ContextReference, Inputs, NodeBuildError, NodeExecution, NodeExecutionError, NodeFactory,
-    NodeMetadata, NodePorts, NodeRegistration, OutputDerivation, OutputDerivationError, Outputs,
+    ContextReference, ExecutionFailedSnafu as NodeExecutionFailedSnafu, Inputs, NodeBuildError,
+    NodeExecution, NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration,
+    OutputDerivation, OutputDerivationError, Outputs, PluginFailedSnafu as NodePluginFailedSnafu,
     PortSpec, PreparedNode, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, ValueType,
     deserialize_config, output_id,
 };
@@ -49,7 +54,17 @@ pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::{
     WorkflowRunError, instantiate_node_with_metadata, instantiate_subgraph_with_metadata,
 };
-pub use stream::{EventContext, EventEffects, EventEmission, EventNode, NodeEvent, TimerUpdate};
+pub use stream::stream_input_node;
+pub use stream::{
+    EventContext, EventEffects, EventEmission, EventNode, NodeEvent, STREAM_INPUT_ID,
+    StreamExecution, StreamLimits, StreamMode, TimerUpdate,
+};
+pub use stream_instance::{
+    CompilationSnafu as StreamCompilationSnafu, MessageId, MonotonicClock, StreamClock,
+    StreamDelivery, StreamError, StreamInstance, StreamMetrics, StreamOptions, StreamOutput,
+    StreamSender, StreamSummary,
+};
+pub use stream_plan::{PreparedStream, StreamBuildError, StreamDependency, StreamPlan};
 pub use subgraph::PreparedSubgraph;
 
 pub use value::{ValueKind, ValueRef};

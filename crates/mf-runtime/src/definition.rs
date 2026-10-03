@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::{ResultExt, Snafu};
+use snafu::{ResultExt, Snafu, ensure};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
@@ -41,6 +41,12 @@ impl fmt::Display for DefinitionId {
 #[serde(deny_unknown_fields)]
 pub struct WorkflowDefinition {
     pub version: WorkflowDefinitionVersion,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_execution",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub execution: Option<crate::StreamExecution>,
     #[serde(deserialize_with = "deserialize_dependencies")]
     pub dependencies: BTreeMap<String, NodeDependency>,
     pub nodes: Vec<NodeDefinition>,
@@ -52,13 +58,41 @@ pub struct WorkflowDefinition {
     pub outputs: Vec<WorkflowOutputDefinition>,
 }
 
+fn deserialize_execution<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<crate::StreamExecution>, D::Error> {
+    crate::StreamExecution::deserialize(deserializer).map(Some)
+}
+
 impl WorkflowDefinition {
+    pub fn validate_execution(&self) -> Result<(), crate::StreamBuildError> {
+        if let Some(execution) = &self.execution {
+            ensure!(
+                self.version == WorkflowDefinitionVersion::V2026_10_02,
+                crate::stream_plan::InvalidPlanSnafu {
+                    message: "stream execution requires workflow schema 2026-10-02",
+                }
+            );
+            execution
+                .input_type
+                .check_depth()
+                .context(crate::stream_plan::InputTypeSnafu)?;
+            execution.limits.validate()?;
+        }
+        Ok(())
+    }
+
     pub fn from_json(input: &str) -> Result<Self, DefinitionParseError> {
         let value: Value = serde_json::from_str(input).context(JsonParseSnafu)?;
         if value.get("version").and_then(Value::as_str) == Some("2026-09-24") {
             return LegacyVersionSnafu.fail();
         }
-        serde_json::from_str(input).context(JsonParseSnafu)
+        let definition: Self = serde_json::from_str(input).context(JsonParseSnafu)?;
+        definition
+            .validate_execution()
+            .map_err(<serde_json::Error as serde::de::Error>::custom)
+            .context(JsonParseSnafu)?;
+        Ok(definition)
     }
 }
 
@@ -68,10 +102,12 @@ pub enum WorkflowDefinitionVersion {
     V2026_09_26,
     #[serde(rename = "2026-09-29")]
     V2026_09_29,
+    #[serde(rename = "2026-10-02")]
+    V2026_10_02,
 }
 
 impl WorkflowDefinitionVersion {
-    pub const CURRENT: Self = Self::V2026_09_29;
+    pub const CURRENT: Self = Self::V2026_10_02;
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

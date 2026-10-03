@@ -1,5 +1,67 @@
-use crate::{ExecutionContext, Inputs, NodeExecutionError, NodeResult};
+use crate::stream_plan::InvalidPlanSnafu;
+use crate::{
+    ExecutionContext, Inputs, NodeExecutionError, NodeResult, StreamBuildError, ValueType,
+};
+use serde::{Deserialize, Serialize};
+use snafu::ensure;
 use std::time::Duration;
+
+pub const STREAM_INPUT_ID: &str = "%input";
+
+pub fn stream_input_node(value_type: ValueType) -> crate::FlowNode {
+    crate::FlowNode {
+        definition_id: STREAM_INPUT_ID.into(),
+        node: None,
+        metadata: crate::NodePorts {
+            inputs: Vec::new(),
+            outputs: vec![crate::PortSpec::new("item", value_type, true)],
+        }
+        .into(),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamMode {
+    Stream,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamExecution {
+    pub mode: StreamMode,
+    pub input_type: ValueType,
+    #[serde(default)]
+    pub limits: StreamLimits,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StreamLimits {
+    pub max_pending_messages: usize,
+    pub workers: usize,
+}
+
+impl Default for StreamLimits {
+    fn default() -> Self {
+        Self {
+            max_pending_messages: 64,
+            workers: 4,
+        }
+    }
+}
+
+impl StreamLimits {
+    pub fn validate(&self) -> Result<(), StreamBuildError> {
+        ensure!(
+            ![self.max_pending_messages, self.workers].contains(&0),
+            InvalidPlanSnafu {
+                message: "stream limits must be positive",
+            }
+        );
+        Ok(())
+    }
+}
 
 #[derive(Debug)]
 pub enum NodeEvent {

@@ -43,6 +43,7 @@ pub fn body_definition(
     nodes.extend(config.body.nodes.iter().cloned());
     Ok(WorkflowDefinition {
         version: parent.version,
+        execution: None,
         dependencies: parent.dependencies.clone(),
         nodes,
         edges: config.body.edges.clone(),

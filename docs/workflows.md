@@ -314,3 +314,19 @@ The first matching branch produces true; all other outputs are explicitly skippe
 No implicit conversion occurs. A present null exists and can be compared with an explicit null literal. Missing fields or explicitly skipped outputs are unavailable to existence checks; comparing them is an execution error. Unexpectedly omitted outputs and pending producers are errors even for existence checks. Objects and arrays cannot be compared in this version. Reached condition errors include the branch, qualified source, path, and operator.
 
 A selected output can fan out to multiple downstream nodes; all eligible consumers execute. Only one branch output is active per router invocation. Execution is sequential in topological order, and a node gated by mutually exclusive outputs is skipped rather than acting as a merge. Compound boolean expressions and field-to-field comparisons are deferred.
+
+## Streaming through the in-memory API
+
+Definitions using schema `2026-10-02` can set `execution.mode` to `stream` and declare `input_type` with
+the existing port-type descriptor grammar. The engine provides `%input.item`. Root nodes require an
+explicit path from this source, including a control edge for nodes with no data inputs.
+
+Task branches can rejoin within one message domain. An event emission creates a new domain, so joining
+an earlier item with a collected output or independently formed collections requires an explicit
+correlation operation, which is currently unsupported. Context references and selected outputs must
+respect the same domain boundary. Event nodes are rejected in single-run graphs and synchronous bodies.
+
+The host submits one value per message, consumes outputs independently, and explicitly closes input.
+An array remains one input value. See [the instance API](node-development.md#in-memory-streaming-instances)
+for admission, backpressure, drain, and failure handling. Standalone runner generation does not yet support
+streaming definitions.

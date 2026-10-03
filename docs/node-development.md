@@ -165,3 +165,45 @@ Event state requires `Send`; mutable access is exclusive and
 `Flow::new` rejects event nodes during synchronous preparation. Direct callers of task execution
 helpers convert a prepared `FlowNode` with `into_task()` first. Generated synchronous bodies perform
 that conversion before capturing their task executors.
+
+## In-memory streaming instances
+
+`WorkflowDefinition::from_json` and `CompiledWorkflow::from_json` validate execution settings after
+parsing. Direct Serde deserialization checks the document shape; compilation validates execution
+settings for definitions constructed or deserialized by the host.
+
+Schema `2026-10-02` accepts `execution: {"mode": "stream", "input_type": "int"}`. An absent
+`execution` field retains single-run behavior. Each root node needs an explicit data or control path
+from the engine's `%input.item` source. Task edges preserve message identity; event emissions start a
+new message domain. Cross-domain joins and context reads are rejected during preparation.
+
+Use `mf_compiler::instantiate_stream` to prepare an instance and inspect its immutable graph through
+`plan()`. Consume the prepared instance with `start` or `start_with_options`. Each preparation creates
+independent plugin state. Task and event executors are reused across messages for the instance lifetime.
+The coordinator serializes events and submits frames to `WorkerPool`, which owns the reusable threads
+and bounded job queue. Each submitted frame runs consecutive ordinary tasks in validated order, returning the frame before the next event node or when
+it is complete. A recorded instance failure prevents the next task call within that dispatch.
+
+`instance.input()` returns a cloneable sender. `send` waits for admission capacity and completes once
+the input is accepted. Consume `instance.recv()` concurrently with production, close input when done,
+and call `join` after draining outputs. `try_send` borrows a value and reports capacity pressure without
+accepting it. `receive` returns a delivery that must be acknowledged or failed by an external sink.
+
+Every message has fresh context bindings and a step budget. Frames execute in FIFO order within each
+domain, while different domains can progress independently. Close propagates after admitted work and
+emissions; success waits for output delivery. Failure stops scheduling and waits for task calls already
+running before releasing pending work, retained values, and nodes. A running task completes its
+synchronous bodies normally.
+Dropping an unfinished instance follows the same failure cleanup before releasing its nodes.
+
+Limits default to 64 pending messages and four workers. Positive overrides live in `execution.limits`.
+Preparation reserves one frame slot per downstream domain; the remaining slots bound input admission.
+Each event node's pending emissions are also limited by `max_pending_messages`. A full downstream
+queue propagates pressure to input admission. Payload sizes and plugin buffers have no byte quota.
+
+A custom `StreamClock` must advance monotonically and wake registered instances. Deadline expiry
+makes an emission ready; downstream execution remains subject to capacity. Snapshot capture is rejected
+before startup. Standalone generation and stream-specific description and observation are currently
+unsupported; the streaming API is available in memory.
+
+Run the producer/consumer example with `cargo run -p mf-compiler --example stream` inside `nix develop`.

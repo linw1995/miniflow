@@ -1,0 +1,55 @@
+# Design
+
+## Ownership and message domains
+
+`WorkflowDefinition` is the single definition model. Its JSON entry point and the compiled-plan JSON
+entry point validate execution settings after parsing. Compilation repeats this validation for
+definitions constructed or deserialized directly by callers.
+
+Schema `2026-10-02` opts into streaming through `execution`. The engine supplies `%input.item` and
+requires an explicit activation path for every root node. Ordinary tasks preserve message identity;
+event emissions start a new domain. Dependencies, context references, and selected outputs must respect
+those boundaries.
+
+`MessageDomains` owns the domain partition, node-output ownership, and selected-output domain. Its
+construction validates dependencies and context references against those boundaries. `StreamPlan`
+combines this validated partition with executors and dependencies; it exposes the existing planning
+queries without maintaining separate domain tables. Each `StreamDomain` identifies its source and
+ordered consumer steps.
+
+An instance owns its prepared executors, deadlines, and retained state until drain or termination.
+`PreparedStream` separates mutable event state from the immutable `StreamPlan`. Workers share task
+executors, while the coordinator invokes events serially. Each frame has isolated outputs, skips, and
+a fresh step budget. Synchronous bodies remain task-only.
+
+## Progress and scheduling bounds
+
+One FIFO frame executes per domain. The shared `WorkerPool` keeps synchronous business calls off the
+coordinator, allowing idle deadlines to progress. The streaming callback owns frame traversal and
+completion delivery; the pool owns threads, bounded submission, and shutdown. Each dispatch advances consecutive ordinary tasks
+in validated order until an event boundary or frame completion. The worker checks the instance's
+terminal failure between calls; an error leaves the cursor at the failing task. Branches keep their
+existing topological order and share the same frame context. Each operator has one replaceable
+deadline, cleared before timer delivery.
+
+Admission and worker concurrency have finite count limits. Preparation reserves a frame slot for each
+downstream domain, and each operator's emission queue has a message-count limit. No flush needs another
+host admission permit. Byte accounting, payload limits, and plugin-buffer budgets are a separate feature.
+
+## Completion and failure
+
+Input close stops admission, then propagates after admitted work and prior emissions reach downstream
+nodes. Successful completion waits for output acknowledgement. Failures discard
+unstarted work and suppress later publications while waiting for started synchronous calls to finish.
+They preserve already delivered results and do not retry or flush a tail automatically. Tasks finish
+their synchronous bodies before cleanup releases task and event executors together. Both kinds of
+executor are retained across messages until the instance ends.
+
+## Independent delivery
+
+The in-memory API is complete in this change. Runner generation, description, and stream observation
+reject unsupported requests until their corresponding implementation is introduced. Snapshot capture
+is rejected before startup because its existing value interner retains whole-run history.
+
+Shared test fixtures exercise event retention, deadlines, capacity, and closure without depending on
+the built-in Batch node or collection type inference.

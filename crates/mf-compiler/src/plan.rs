@@ -32,6 +32,8 @@ pub struct GeneratedWorkflowArtifacts {
 
 #[derive(Debug, Snafu)]
 pub enum PlanError {
+    #[snafu(display("invalid streaming plan: {message}"))]
+    Stream { message: String },
     #[snafu(display("could not serialize compiled workflow: {source}"))]
     Serialize { source: serde_json::Error },
     #[snafu(display("could not parse compiled workflow: {source}"))]
@@ -68,7 +70,12 @@ impl CompiledWorkflow {
         observer: &mf_telemetry::observation::Observer,
         run_id: mf_telemetry::identity::RunId,
     ) -> Result<mf_runtime::RunObservation, mf_telemetry::ContractError> {
-        if self.definition.version == mf_runtime::WorkflowDefinitionVersion::V2026_09_29 {
+        if self.definition.execution.is_some() {
+            return Err(mf_telemetry::ContractError::Invalid {
+                message: "streaming observation is not supported".into(),
+            });
+        }
+        if self.definition.version != mf_runtime::WorkflowDefinitionVersion::V2026_09_26 {
             let description = crate::describe_compiled(self).map_err(|error| {
                 mf_telemetry::ContractError::Invalid {
                     message: error.to_string(),
@@ -122,11 +129,22 @@ impl CompiledWorkflow {
     }
 
     pub fn from_json(input: &str) -> Result<Self, PlanError> {
-        serde_json::from_str(input).context(ParseSnafu)
+        let plan: Self = serde_json::from_str(input).context(ParseSnafu)?;
+        plan.definition
+            .validate_execution()
+            .map_err(<serde_json::Error as serde::de::Error>::custom)
+            .context(ParseSnafu)?;
+        Ok(plan)
     }
 
     #[cfg(feature = "codegen")]
     pub fn generate_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
+        if self.definition.execution.is_some() {
+            return StreamSnafu {
+                message: "standalone streaming runners are not supported",
+            }
+            .fail();
+        }
         if self.execution_order.len() != self.definition.nodes.len() {
             return InvalidExecutionOrderSnafu.fail();
         }

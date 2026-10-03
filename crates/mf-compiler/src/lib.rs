@@ -14,6 +14,7 @@ mod pipeline;
 mod plan;
 #[cfg(feature = "codegen")]
 mod state;
+mod streaming;
 
 #[cfg(feature = "codegen")]
 pub use cache::{BuildDirectory, CacheError, default_build_directory};
@@ -46,6 +47,10 @@ pub use mf_runtime::{
     instantiate_node_with_metadata, output_id, select_context_output,
 };
 pub use mf_runtime::{IterationErrorPolicy, IterationMode};
+pub use mf_runtime::{
+    NodeExecution, PreparedStream, StreamBuildError, StreamDependency, StreamDomain,
+    StreamExecution, StreamLimits, StreamMode,
+};
 #[cfg(feature = "codegen")]
 pub use pipeline::{
     CompileRequest, PipelineError, cargo_command, compile_project, compile_project_with_options,
@@ -54,3 +59,4 @@ pub use pipeline::{
 pub use plan::{CompiledWorkflow, GeneratedWorkflowArtifacts, PlanError};
 #[cfg(feature = "codegen")]
 pub use state::{BuildGuard, StateError, atomic_copy, atomic_write, write_if_changed};
+pub use streaming::{instantiate_stream, start_stream};
