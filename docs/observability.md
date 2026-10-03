@@ -85,9 +85,13 @@ Description version `2026-09-27` contains `workflow_id`, `nodes`, `data_edges`, 
 enclosing Loop IDs and a local graph with the same node and edge metadata. The synthetic `%loop`
 source appears in its body graph. Nodes contain `id` and `kind`; edge endpoints carry connected port
 names. Description mode excludes Loop configuration, variable values, predicates, and ordinary node
-configuration. The full effective port table is unavailable, so unconnected ports, types, and
-required flags remain unknown to the TUI. Compile validation still checks those contracts by
-constructing plugin instances.
+configuration. The graph does not include the full effective port table. Compile validation checks
+those contracts by constructing plugin instances.
+
+Version `2026-10-03` adds `execution` metadata with the execution mode, lifecycle schema, and interface
+inspection support. The separate `--describe-interface` document exposes initial-node input types,
+required flags, and runtime resource declarations. Graph inspection stays factory-free; interface
+inspection performs validated preparation without executing a node or consuming source input.
 
 New runners name the synthetic Loop source `%loop`. Description readers also accept `$loop` from
 previously compiled runners, preserving its original node IDs and workflow identity.
@@ -106,7 +110,7 @@ Use the instrumentation scope `mf.workflow`. Event names, timestamps, and option
 
 | Attribute | Type | Meaning |
 | --- | --- | --- |
-| `mf.schema.version` | Signed integer | Event schema version: 1 for flat runners, 2 for Loop-capable runners |
+| `mf.schema.version` | Signed integer | Event schema version: 1 for flat runs, 2 for finite Loop-capable runs, 4 for source-driven streams |
 | `mf.workflow.id` | String | Identity shared with the description |
 | `mf.run.id` | String | Identity of this invocation |
 | `mf.event.sequence` | Signed integer | Positive per-run sequence starting at 1 |
@@ -243,7 +247,7 @@ success response follows decoding, session checks, and state admission; it does 
 the TUI display are complete. Unrelated runs are ignored. Malformed matching lifecycle records and receiver errors
 remain visible as local drops or observation errors. Trace-only drops do not invalidate lifecycle completeness.
 
-`mf-tui::state::SessionState` keeps one state record per outer node, sparse per-invocation Loop state, and sequence membership bounded by the graph's lifecycle event count. It retains details for up to 64 recent pass frames and aggregate counts when older pass details leave the view. Identical retransmissions are ignored; conflicting sequence content or
+For finite runs, `mf-tui::state::SessionState` keeps one state record per outer node, sparse per-invocation Loop state, and sequence membership bounded by the graph's lifecycle event count. It retains details for up to 64 recent pass frames and aggregate counts when older pass details leave the view. Identical retransmissions are ignored; conflicting sequence content or
 incompatible terminal outcomes are surfaced without moving a terminal node back to Running. A finish event can arrive
 before its start, and later evidence may close an active sequence gap. Unknown node outcomes inside the final visited
 prefix remain Unknown; a valid final boundary can prove that later nodes were NotRun.
@@ -264,7 +268,7 @@ proves lifecycle loss. There is no replay, persistence, reconnect, retry schedul
 ## Input and output history
 
 Generated runners collect value history only when `MF_CAPTURE_SNAPSHOTS=1` and an OTLP logs
-endpoint are configured. TUI execution sets this flag and uses its existing loopback `/v1/logs`
+endpoint are configured. Finite TUI execution sets this flag and uses its existing loopback `/v1/logs`
 endpoint. Ordinary execution does not allocate a snapshot recorder. Runners built with
 `--no-telemetry` report that data history requires a telemetry-enabled build.
 

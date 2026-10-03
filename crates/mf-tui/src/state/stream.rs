@@ -717,6 +717,7 @@ fn validate_graph(
 struct StreamPass {
     identity: Option<StreamIdentity>,
     message: Option<mf_telemetry::stream::StreamMessage>,
+    trigger: mf_telemetry::stream::StreamTrigger,
     path: Vec<LoopPathEntry>,
     started: Option<Count>,
     finished: Option<Count>,
@@ -784,6 +785,7 @@ impl StreamState {
                 StreamPass {
                     identity: Some(identity.clone()),
                     message: identity.message,
+                    trigger: identity.trigger,
                     path: path.clone(),
                     started: None,
                     finished: None,
@@ -803,6 +805,7 @@ impl StreamState {
             .as_ref()
             .is_some_and(|previous| previous != identity)
             || pass.message != identity.message
+            || pass.trigger != identity.trigger
         {
             return Ok(self.conflict("Loop pass changed its stream identity"));
         }
@@ -908,6 +911,7 @@ impl StreamState {
                 StreamPass {
                     identity: None,
                     message: identity.message,
+                    trigger: identity.trigger,
                     path: node.path.clone(),
                     started: None,
                     finished: None,
@@ -925,7 +929,7 @@ impl StreamState {
         let verified = invocation.complete();
         let observed = invocation.node.clone();
         if let Some(pass) = self.passes.get_mut(&key) {
-            if pass.message != identity.message {
+            if pass.message != identity.message || pass.trigger != identity.trigger {
                 self.conflict("body invocation disagrees with its pass message");
                 return;
             }
@@ -1962,6 +1966,21 @@ mod tests {
         }
         let snapshot = state.snapshot();
         assert_eq!(snapshot.loop_passes[0].nodes[0].status, NodeStatus::Unknown);
+    }
+
+    #[test]
+    fn reordered_body_events_cannot_change_their_parent_trigger() {
+        let run = RunId::new();
+        let (graph, records) = loop_records(run, 1, 1);
+        let mut state = SessionState::new(graph, run).unwrap();
+        let mut body = records[4].clone();
+        body.identity.as_mut().unwrap().trigger = StreamTrigger::Input;
+        assert_eq!(state.apply_stream(body).unwrap(), Admission::Applied);
+        assert_eq!(
+            state.apply_stream(records[3].clone()).unwrap(),
+            Admission::Conflict
+        );
+        assert_eq!(state.snapshot().lifecycle.protocol_conflicts, 1);
     }
 
     #[test]

@@ -173,7 +173,7 @@ would place the referenced node first.
 ### Requirement: Validate activation and message boundaries before installation
 
 Streaming validation SHALL recognize initial tasks and stream producers without requiring a path from an
-engine input node. It SHALL bind their declared inputs through the workflow interface and validate ordinary
+engine input node. It SHALL bind their declared inputs through the workflow interface and validate
 startup dependencies. It MUST reject initial event executors, mixed-domain dependencies, cross-domain context
 references, and mixed-domain selected outputs, including inactive branches. Graph, configuration, resource,
 and type checks MUST run without executing nodes or reading input data.

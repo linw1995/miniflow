@@ -100,11 +100,11 @@ deleted together with its callers and transports so no compatibility scheduler o
 
 ## 5. Integration and review
 
-- [ ] 5.1 Run the same autonomous, stdin, and channel-source scenarios through applicable in-memory,
+- [x] 5.1 Run the same autonomous, stdin, and channel-source scenarios through applicable in-memory,
   standalone, and TUI paths; record parity for outputs, failures, type diagnostics, closure, resource
   ownership, and observation identity under `target/`.
-- [ ] 5.2 Validate this change with `openspec validate unify-workflow-inputs-and-stream-sources --strict`, run
+- [x] 5.2 Validate this change with `openspec validate unify-workflow-inputs-and-stream-sources --strict`, run
   `nix develop --command prek -a` and `nix flake check -L`, and record actual results and environment
   limitations before submitting implementation.
-- [ ] 5.3 Review every delta scenario against implementation evidence, confirm examples contain no implicit
+- [x] 5.3 Review every delta scenario against implementation evidence, confirm examples contain no implicit
   `%input` source, and archive only after the implementation tasks are complete.
