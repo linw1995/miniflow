@@ -68,7 +68,7 @@ budgets before admitting input.
 - **WHEN** the memory budget cannot cover the graph's frame, callback, flush, and input reserves
 - **THEN** preparation fails with a byte-budget diagnostic before any input is accepted
 
-### Requirement: Account for retained logical values
+### Requirement: Account for estimated retained memory
 
 The runtime SHALL account for queued inputs, active message contexts, retained event values, pending
 emissions, and selected outputs using cached Rust heap estimates and metadata allowances. Estimates
@@ -97,3 +97,8 @@ Output failure MUST be reported before successful completion.
 
 - **WHEN** an input line grows beyond `max_record_bytes`
 - **THEN** the runner stops that record with a line-numbered size diagnostic
+
+## RENAMED Requirements
+
+- FROM: `### Requirement: Account for retained logical values`
+- TO: `### Requirement: Account for estimated retained memory`
