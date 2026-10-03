@@ -237,12 +237,6 @@ nodes, data edges, and optional `control_edges` use the ordinary workflow graph 
 one body port for each item. Body node IDs belong to the body scope; outer edges cannot address them. All body nodes
 are constructed and validated before the runner is installed, including when the input collection is empty.
 
-The body port rename from `%iteration.items` to `%iteration.item` is a breaking change. When upgrading,
-update body data edges, control edges, result selections, and context references to use `item`.
-Changing the workflow JSON `version` does not restore the old port. Existing compiled runners retain their
-behavior. To rebuild an old definition, keep its original CLI/runtime and node package versions together with
-its Flow lock. Local path dependencies also require the original source checkout; the lock does not freeze their contents.
-
 `mode` defaults to `sequential`. `parallel` uses at most ten workers, keeps results in input order, and is suitable
 when body operations are independent. Nodes in the body may be invoked repeatedly and concurrently, so a plugin with
 mutable internal state must synchronize it or use sequential mode. Each invocation gets fresh context values for
