@@ -113,15 +113,15 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
             .generate_artifacts()
             .unwrap()
             .rust_source
-            .contains("stream_input_node")
+            .contains("builtin.stdin")
     );
 
     fs::write(&trace, "").unwrap();
     let description = Process::spawn(&executable, &["--describe"]).finish();
     assert!(description.status.success());
     let description: Value = serde_json::from_slice(&description.stdout).unwrap();
-    assert_eq!(description["version"], "2026-10-02");
-    assert_eq!(description["nodes"][0]["id"], "%input");
+    assert_eq!(description["version"], "2026-10-03");
+    assert_eq!(description["nodes"][0]["id"], "feed");
     assert_eq!(fs::read_to_string(&trace).unwrap(), "");
     let validation = Process::spawn(&executable, &["--validate"]).finish();
     assert!(
@@ -198,7 +198,12 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
     assert!(String::from_utf8_lossy(&broken.stderr).contains("output failed"));
     drop(open_input);
 
-    definition["execution"]["input_type"] = json!({"list":"int"});
+    definition["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|node| node["id"] == "feed")
+        .unwrap()["config"]["item_type"] = json!({"list":"int"});
     definition["nodes"][0]["config"]["max_wait_ms"] = json!(3_600_000);
     compile(&definition, true).unwrap();
     assert_eq!(
@@ -221,7 +226,12 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
     assert_eq!(fs::read(&executable).unwrap(), unchanged);
 
     let mut stalled_definition = definition.clone();
-    stalled_definition["execution"]["input_type"] = json!("string");
+    stalled_definition["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|node| node["id"] == "feed")
+        .unwrap()["config"]["item_type"] = json!("string");
     stalled_definition["nodes"][0]["config"]["max_items"] = json!(1);
     compile(&stalled_definition, true).unwrap();
     let mut stalled = Process::spawn(&executable, &[]);

@@ -92,6 +92,9 @@ pub struct ExecutionContext {
     snapshot_prefix: Vec<LoopPathEntry>,
     workflow_arguments: crate::WorkflowArguments,
     startup_inputs: BTreeMap<String, Inputs>,
+    resources: std::sync::Arc<crate::ExecutionResources>,
+    cancellation: crate::StreamCancellation,
+    active_node: Option<String>,
 }
 
 impl Default for ExecutionContext {
@@ -107,11 +110,79 @@ impl Default for ExecutionContext {
             snapshot_prefix: Vec::new(),
             workflow_arguments: crate::WorkflowArguments::default(),
             startup_inputs: BTreeMap::new(),
+            resources: std::sync::Arc::new(crate::ExecutionResources::default()),
+            cancellation: crate::StreamCancellation::default(),
+            active_node: None,
         }
     }
 }
 
 impl ExecutionContext {
+    pub fn set_execution_resources(
+        &mut self,
+        resources: crate::ExecutionResources,
+        cancellation: crate::StreamCancellation,
+    ) {
+        resources.bind_cancellation(&cancellation);
+        self.resources = std::sync::Arc::new(resources);
+        self.cancellation = cancellation;
+    }
+
+    pub fn set_cancellation(&mut self, cancellation: crate::StreamCancellation) {
+        self.cancellation = cancellation;
+    }
+    pub fn cancellation(&self) -> crate::StreamCancellation {
+        self.cancellation.clone()
+    }
+
+    pub fn stdin_next(
+        &self,
+        value_type: &crate::ValueType,
+    ) -> Result<Option<Value>, crate::StreamError> {
+        self.resources.stdin_next(value_type, &self.cancellation)
+    }
+
+    pub fn channel_next(&self) -> Result<Option<Value>, crate::StreamError> {
+        let node = self
+            .active_node
+            .as_deref()
+            .ok_or_else(|| crate::StreamError::Preparation {
+                message: "channel read outside a node invocation".into(),
+            })?;
+        self.resources.channel_next(node)
+    }
+
+    pub fn channel_published(&self) -> Result<(), crate::StreamError> {
+        let node = self
+            .active_node
+            .as_deref()
+            .ok_or_else(|| crate::StreamError::Preparation {
+                message: "channel publication outside a node invocation".into(),
+            })?;
+        self.resources.channel_published(node)
+    }
+
+    pub fn with_node<R>(&mut self, node: &str, callback: impl FnOnce(&mut Self) -> R) -> R {
+        let previous = self.active_node.replace(node.into());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(self)));
+        self.active_node = previous;
+        match result {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    pub fn fork_stream(&self, observation: Option<RunObservation>) -> Self {
+        Self {
+            outputs: self.outputs.clone(),
+            remaining_steps: self.remaining_steps,
+            resources: std::sync::Arc::clone(&self.resources),
+            cancellation: self.cancellation.clone(),
+            observation,
+            ..Self::default()
+        }
+    }
+
     pub fn set_workflow_arguments(&mut self, arguments: crate::WorkflowArguments) {
         self.workflow_arguments = arguments;
         self.startup_inputs.clear();
@@ -123,6 +194,9 @@ impl ExecutionContext {
     ) -> Result<(), WorkflowRunError> {
         schema
             .validate(&self.workflow_arguments)
+            .map_err(|source| WorkflowRunError::WorkflowInputs { source })?;
+        schema
+            .validate_resources(|node, resource| self.resources.available(node, resource))
             .map_err(|source| WorkflowRunError::WorkflowInputs { source })?;
         self.startup_inputs = self.workflow_arguments.0.clone();
         Ok(())
@@ -207,6 +281,7 @@ impl ExecutionContext {
 
     pub fn fork_body(&self, observation: Option<BodyObservation>) -> Self {
         let mut child = Self::for_body(observation);
+        child.cancellation = self.cancellation.clone();
         if self.snapshots.is_some() {
             child.snapshots = self.snapshots.clone();
             child.snapshot_prefix = self.snapshot_path();
@@ -774,8 +849,8 @@ pub(super) fn execute_ordered_task_in_context<'a, N>(
         if let Some(step) = step.as_mut() {
             step.started(ctx);
         }
-        let result = task
-            .execute(inputs, ctx)
+        let result = ctx
+            .with_node(id, |ctx| task.execute(inputs, ctx))
             .with_context(|_| NodeExecutionSnafu {
                 definition_id: node.definition_id.clone(),
             });

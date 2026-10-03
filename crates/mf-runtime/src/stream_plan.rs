@@ -1,10 +1,10 @@
 use crate::message_domain::MessageDomains;
 use crate::runner::ContextSnafu;
 use crate::{
-    ExecutionDependency, FlowNode, NodeExecution, STREAM_INPUT_ID, StreamDomain, StreamExecution,
-    TaskNode, WorkflowOutputDefinition,
+    ExecutionDependency, FlowNode, NodeExecution, StreamDomain, StreamExecution, TaskNode,
+    WorkflowOutputDefinition,
 };
-use snafu::{OptionExt, ResultExt, Snafu, ensure};
+use snafu::{OptionExt, Snafu, ensure};
 
 type OperatorStates = Vec<Option<NodeExecution>>;
 
@@ -12,8 +12,6 @@ type OperatorStates = Vec<Option<NodeExecution>>;
 pub enum StreamBuildError {
     #[snafu(display("invalid streaming workflow: {message}"), visibility(pub))]
     InvalidPlan { message: String },
-    #[snafu(display("invalid stream input type: {source}"), visibility(pub))]
-    InputType { source: crate::TypeDepthError },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,11 +37,13 @@ pub struct StreamPlan {
     dependencies: Vec<Vec<StreamDependency>>,
     domains: MessageDomains,
     outputs: Vec<WorkflowOutputDefinition>,
+    input_schema: crate::WorkflowInputSchema,
 }
 
 pub struct PreparedStream {
     plan: StreamPlan,
     operator_states: OperatorStates,
+    resources: crate::ExecutionResources,
 }
 
 impl std::fmt::Debug for PreparedStream {
@@ -65,27 +65,21 @@ impl PreparedStream {
         outputs: Vec<WorkflowOutputDefinition>,
     ) -> Result<Self, StreamBuildError> {
         execution.limits.validate()?;
-        execution.input_type.check_depth().context(InputTypeSnafu)?;
         ensure!(
-            nodes.len() == dependencies.len()
-                && nodes
-                    .first()
-                    .is_some_and(|node| node.definition_id.as_str() == STREAM_INPUT_ID),
+            nodes.len() == dependencies.len(),
             InvalidPlanSnafu {
-                message: "stream plan requires its typed input source first",
+                message: "stream nodes and dependencies must have equal lengths"
             }
         );
-        let source = &nodes[0];
-        ensure!(
-            source.metadata.ports.inputs.is_empty()
-                && source.metadata.ports.outputs.len() == 1
-                && source.metadata.ports.outputs[0].name == "item"
-                && source.metadata.ports.outputs[0].value_type == execution.input_type
-                && source.node.is_none(),
-            InvalidPlanSnafu {
-                message: "stream input source must expose its declared item type",
-            }
-        );
+        let input_schema = crate::WorkflowInputSchema::from_nodes(
+            nodes
+                .iter()
+                .zip(&dependencies)
+                .map(|(node, dependencies)| (node, dependencies.is_empty())),
+        )
+        .map_err(|error| StreamBuildError::InvalidPlan {
+            message: error.to_string(),
+        })?;
         let domains = MessageDomains::new(&nodes, &dependencies, &outputs)?;
         let mut operator_states = Vec::with_capacity(nodes.len());
         let nodes = nodes
@@ -112,6 +106,7 @@ impl PreparedStream {
             dependencies,
             domains,
             outputs,
+            input_schema,
         };
         ensure!(
             plan.execution().limits.max_pending_messages >= plan.domains().len(),
@@ -125,6 +120,7 @@ impl PreparedStream {
         Ok(Self {
             plan,
             operator_states,
+            resources: crate::ExecutionResources::default(),
         })
     }
 
@@ -132,12 +128,46 @@ impl PreparedStream {
         &self.plan
     }
 
-    pub(super) fn into_parts(self) -> (StreamPlan, OperatorStates) {
-        (self.plan, self.operator_states)
+    pub fn channel(&mut self, node: &str) -> Result<crate::ChannelSender, crate::StreamError> {
+        let source = self
+            .plan
+            .nodes
+            .iter()
+            .find(|source| source.definition_id.as_str() == node)
+            .filter(|source| {
+                source
+                    .metadata
+                    .resources
+                    .contains(&crate::InputResource::Channel)
+            })
+            .ok_or_else(|| crate::StreamError::Preparation {
+                message: format!("node `{node}` does not declare a channel source"),
+            })?;
+        let port = source
+            .metadata
+            .ports
+            .outputs
+            .iter()
+            .find(|port| port.name == "item")
+            .ok_or_else(|| crate::StreamError::Preparation {
+                message: format!("channel source `{node}` must declare an item output"),
+            })?;
+        self.resources.channel(
+            node,
+            port.value_type.clone(),
+            self.plan.execution.limits.max_pending_messages,
+        )
+    }
+
+    pub(super) fn into_parts(self) -> (StreamPlan, OperatorStates, crate::ExecutionResources) {
+        (self.plan, self.operator_states, self.resources)
     }
 }
 
 impl StreamPlan {
+    pub fn input_schema(&self) -> &crate::WorkflowInputSchema {
+        &self.input_schema
+    }
     pub fn execution(&self) -> &StreamExecution {
         &self.execution
     }

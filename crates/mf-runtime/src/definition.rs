@@ -68,15 +68,11 @@ impl WorkflowDefinition {
     pub fn validate_execution(&self) -> Result<(), crate::StreamBuildError> {
         if let Some(execution) = &self.execution {
             ensure!(
-                self.version == WorkflowDefinitionVersion::V2026_10_02,
+                self.version == WorkflowDefinitionVersion::V2026_10_03,
                 crate::stream_plan::InvalidPlanSnafu {
-                    message: "stream execution requires workflow schema 2026-10-02",
+                    message: "stream execution requires workflow schema 2026-10-03",
                 }
             );
-            execution
-                .input_type
-                .check_depth()
-                .context(crate::stream_plan::InputTypeSnafu)?;
             execution.limits.validate()?;
         }
         Ok(())

@@ -184,8 +184,9 @@ domain/message identity; every invocation and nested body remains distinguishabl
 synthetic `%input` node.
 
 Replace the old `accepted_inputs` total with `startup_frames` (zero before activation, otherwise one). Retain
-`emitted_messages`, `completed_frames`, and `delivered_outputs`, counting the internal startup frame in
-completion only after its outstanding calls settle. Validate `delivered_outputs <= completed_frames <=
+`emitted_messages`, `completed_frames`, and `delivered_outputs`. The startup frame completes after its
+traversal dispatches the ready producers; producer lifetimes remain tracked by their own output domains. This
+lets startup outputs and timers progress while an independent source remains open. Validate `delivered_outputs <= completed_frames <=
 startup_frames + emitted_messages` using checked counters. Successful drain has completed every admitted
 frame. Source return is a node outcome; workflow success remains a later boundary. Existing finite event
 versions keep their meaning. Old stream records retain their schema-3 interpretation for external decoders and

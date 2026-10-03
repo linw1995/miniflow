@@ -12,21 +12,40 @@ pub enum WorkflowDescriptionVersion {
     V2026_09_29,
     #[serde(rename = "2026-10-02")]
     V2026_10_02,
+    #[serde(rename = "2026-10-03")]
+    V2026_10_03,
 }
 
 impl WorkflowDescriptionVersion {
     /// Default protocol for finite workflow observations.
     pub const CURRENT: Self = Self::V2026_09_29;
 
-    pub fn is_streaming(self) -> bool {
-        self == Self::V2026_10_02
+    pub fn supports_loops(self) -> bool {
+        self != Self::V2026_09_27
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionMode {
+    Single,
+    Stream,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionDescription {
+    pub mode: ExecutionMode,
+    pub event_schema_version: i64,
+    pub interface: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowDescription {
     pub version: WorkflowDescriptionVersion,
     pub workflow_id: WorkflowId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<ExecutionDescription>,
     pub nodes: Vec<NodeDescription>,
     pub data_edges: Vec<DataEdge>,
     pub control_edges: Vec<ControlEdge>,
@@ -66,6 +85,26 @@ pub struct ControlEdge {
 }
 
 impl WorkflowDescription {
+    pub fn is_streaming(&self) -> bool {
+        self.execution.as_ref().map_or(
+            self.version == WorkflowDescriptionVersion::V2026_10_02,
+            |execution| execution.mode == ExecutionMode::Stream,
+        )
+    }
+
+    pub fn event_schema_version(&self) -> i64 {
+        self.execution.as_ref().map_or_else(
+            || match self.version {
+                WorkflowDescriptionVersion::V2026_09_27 => crate::EVENT_SCHEMA_VERSION,
+                WorkflowDescriptionVersion::V2026_10_02 => {
+                    crate::LEGACY_STREAM_EVENT_SCHEMA_VERSION
+                }
+                _ => crate::LOOP_EVENT_SCHEMA_VERSION,
+            },
+            |execution| execution.event_schema_version,
+        )
+    }
+
     pub fn from_json(input: &[u8]) -> Result<Self, ContractError> {
         require(
             input.len() <= MAX_DESCRIPTION_BYTES,
@@ -110,18 +149,32 @@ impl WorkflowDescription {
     }
 
     pub fn validate(&self) -> Result<(), ContractError> {
-        if self.version.is_streaming() {
-            self.node_count()?;
+        if self.version == WorkflowDescriptionVersion::V2026_10_03 {
+            let execution = self
+                .execution
+                .as_ref()
+                .ok_or_else(|| crate::invalid("missing workflow execution description"))?;
             require(
-                self.execution_order
-                    .first()
-                    .is_some_and(|id| id == "%input")
-                    && self
-                        .nodes
-                        .iter()
-                        .any(|node| node.id == "%input" && node.kind == "%input"),
-                "stream description omits its input source",
+                execution.interface,
+                "new descriptions require interface inspection",
             )?;
+            require(
+                execution.event_schema_version
+                    == if execution.mode == ExecutionMode::Stream {
+                        crate::STREAM_EVENT_SCHEMA_VERSION
+                    } else {
+                        crate::LOOP_EVENT_SCHEMA_VERSION
+                    },
+                "execution mode and event protocol disagree",
+            )?;
+        } else {
+            require(
+                self.execution.is_none(),
+                "old descriptions cannot declare an execution interface",
+            )?;
+        }
+        if self.is_streaming() {
+            self.node_count()?;
         } else {
             crate::maximum_event_count(self.node_count()?)?;
         }
@@ -211,6 +264,7 @@ impl WorkflowDescription {
                 data_edges: body.data_edges.clone(),
                 control_edges: body.control_edges.clone(),
                 execution_order: body.execution_order.clone(),
+                execution: None,
                 loop_bodies: Vec::new(),
             };
             scope.validate()?;

@@ -1,8 +1,11 @@
+#[path = "fixtures/channel_run.rs"]
+mod channel;
+use channel::ChannelRun;
 extern crate mfn_core as _;
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_stream};
 use mf_runtime::{
     Inputs, NodeExecutionError, NodeRegistration, Outputs, PortSpec, StreamClock, StreamError,
-    StreamInstance, StreamOptions, ValueType,
+    StreamOptions, ValueType,
 };
 use serde_json::{Value, json};
 use snafu::ResultExt;
@@ -147,27 +150,33 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
 fn edge(source: &str, port: &str, target: &str, input: &str) -> Value {
     json!({"from_node":source, "from_output":port, "to_node":target, "to_input":input})
 }
-fn graph(nodes: Value, edges: Vec<Value>, outputs: Value) -> Value {
-    json!({"version":"2026-10-02", "execution":{"mode":"stream", "input_type":"int"}, "dependencies":{},
+fn graph(mut nodes: Value, edges: Vec<Value>, outputs: Value) -> Value {
+    nodes
+        .as_array_mut()
+        .unwrap()
+        .push(channel::source(json!("int")));
+    json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
         "nodes":nodes, "edges":edges, "outputs":outputs})
 }
-fn start(value: Value, clock: Arc<dyn StreamClock>) -> StreamInstance {
+fn start(value: Value, clock: Arc<dyn StreamClock>) -> ChannelRun {
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
-    instantiate_stream(&plan, &registry)
-        .unwrap()
-        .start_with_options(StreamOptions {
+    ChannelRun::start(
+        instantiate_stream(&plan, &registry).unwrap(),
+        "feed",
+        StreamOptions {
             clock,
-            ..StreamOptions::default()
-        })
-        .unwrap()
+            ..Default::default()
+        },
+    )
+    .unwrap()
 }
 fn accumulating() -> Value {
     graph(
         json!([{"id":"collect", "kind":"test.accumulate"}, {"id":"copy", "kind":"builtin.identity"}]),
         vec![
-            edge("%input", "item", "collect", "item"),
+            edge("feed", "item", "collect", "item"),
             edge("collect", "items", "copy", "input"),
         ],
         json!([{"name":"batch", "node":"copy", "port":"value"}]),
@@ -178,39 +187,42 @@ fn accumulating() -> Value {
 fn admission_finishes_before_emission_and_idle_timers_wake_the_instance() {
     let clock = Arc::new(ManualClock::default());
     let instance = start(accumulating(), clock.clone());
-    let sender = instance.input();
+    let sender = instance.source.clone();
     sender.send(json!(1)).unwrap();
     sender.send(json!(2)).unwrap();
-    wait_until(|| instance.summary().completed_frames == 2);
-    assert_eq!(instance.summary().emitted_messages, 0);
+    wait_until(|| instance.summary().completed_frames == 3);
+    assert_eq!(instance.summary().emitted_messages, 2);
     clock.advance(Duration::from_millis(100));
     let output = instance.recv().unwrap().unwrap();
-    assert_eq!(output.message.domain, 1);
+    assert_eq!(output.message.domain, 2);
     assert_eq!(output.outputs["batch"], json!([1, 2]));
     sender.close();
     sender.close();
     assert!(matches!(sender.send(json!(3)), Err(StreamError::Closed)));
     assert!(instance.recv().unwrap().is_none());
-    assert_eq!(instance.join().unwrap().accepted_inputs, 2);
+    assert_eq!(instance.source.metrics().accepted, 2);
+    assert_eq!(instance.join().unwrap().startup_frames, 1);
 }
 
 #[test]
 fn instances_own_their_nodes_and_frames_do_not_reuse_omitted_outputs() {
     let definition: WorkflowDefinition = serde_json::from_value(graph(
         json!([{"id":"count", "kind":"test.counter"}]),
-        vec![edge("%input", "item", "count", "input")],
+        vec![edge("feed", "item", "count", "input")],
         json!([{"name":"count", "node":"count", "port":"value"}]),
     ))
     .unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     for _ in 0..2 {
-        let instance = instantiate_stream(&plan, &registry)
-            .unwrap()
-            .start()
-            .unwrap();
-        instance.input().send(json!(0)).unwrap();
-        instance.close_input();
+        let instance = ChannelRun::start(
+            instantiate_stream(&plan, &registry).unwrap(),
+            "feed",
+            StreamOptions::default(),
+        )
+        .unwrap();
+        instance.source.clone().send(json!(0)).unwrap();
+        instance.source.close();
         assert_eq!(instance.recv().unwrap().unwrap().outputs["count"], json!(1));
         assert!(instance.recv().unwrap().is_none());
         instance.join().unwrap();
@@ -218,9 +230,9 @@ fn instances_own_their_nodes_and_frames_do_not_reuse_omitted_outputs() {
     let mut value = serde_json::to_value(definition).unwrap();
     value["nodes"][0]["config"] = json!({"omit_after_first":true});
     let instance = start(value, Arc::new(ManualClock::default()));
-    instance.input().send(json!(0)).unwrap();
-    instance.input().send(json!(0)).unwrap();
-    instance.close_input();
+    instance.source.clone().send(json!(0)).unwrap();
+    instance.source.clone().send(json!(0)).unwrap();
+    instance.source.close();
     assert_eq!(instance.recv().unwrap().unwrap().outputs["count"], json!(1));
     assert!(
         instance
@@ -247,7 +259,7 @@ fn blocking_business_work_does_not_stop_input_or_timer_progress() {
         json!({"id":"after", "kind":"builtin.identity"}),
     ]);
     value["edges"] = json!([
-        edge("%input", "item", "collect", "item"),
+        edge("feed", "item", "collect", "item"),
         edge("collect", "items", "before", "input"),
         edge("before", "value", "copy", "input"),
         edge("copy", "value", "after", "input"),
@@ -256,16 +268,16 @@ fn blocking_business_work_does_not_stop_input_or_timer_progress() {
     let clock = Arc::new(ManualClock::default());
     let instance = start(value, clock.clone());
     let _release = ReleaseGate(Arc::clone(&gate));
-    instance.input().send(json!(1)).unwrap();
-    wait_until(|| instance.summary().completed_frames == 1);
+    instance.source.clone().send(json!(1)).unwrap();
+    wait_until(|| instance.summary().completed_frames == 2);
     clock.advance(Duration::from_millis(100));
     wait_until(|| gate.started.load(Ordering::SeqCst) == 1);
-    instance.input().send(json!(2)).unwrap();
-    wait_until(|| instance.summary().completed_frames == 2);
+    instance.source.clone().send(json!(2)).unwrap();
+    wait_until(|| instance.summary().completed_frames == 3);
     clock.advance(Duration::from_millis(200));
-    wait_until(|| instance.summary().emitted_messages == 2);
+    wait_until(|| instance.summary().emitted_messages == 4);
     gate.release();
-    instance.close_input();
+    instance.source.close();
     assert_eq!(
         instance.recv().unwrap().unwrap().outputs["batch"],
         json!([1])
@@ -293,7 +305,7 @@ fn worker_concurrency_is_bounded_across_independent_domains() {
         let slow = format!("slow_{index}");
         nodes.push(json!({"id":collect, "kind":"test.accumulate"}));
         nodes.push(json!({"id":slow, "kind":"test.slow", "config":{"gate":"worker-limit"}}));
-        edges.push(edge("%input", "item", &collect, "item"));
+        edges.push(edge("feed", "item", &collect, "item"));
         edges.push(edge(&collect, "items", &slow, "input"));
     }
     let mut value = graph(json!(nodes), edges, json!([]));
@@ -301,14 +313,14 @@ fn worker_concurrency_is_bounded_across_independent_domains() {
     let clock = Arc::new(ManualClock::default());
     let instance = start(value, clock.clone());
     let _release = ReleaseGate(Arc::clone(&gate));
-    instance.input().send(json!(1)).unwrap();
-    wait_until(|| instance.summary().completed_frames == 1);
+    instance.source.clone().send(json!(1)).unwrap();
+    wait_until(|| instance.summary().completed_frames == 2);
     clock.advance(Duration::from_millis(100));
     wait_until(|| gate.started.load(Ordering::SeqCst) == 2);
-    assert_eq!(instance.summary().emitted_messages, 3);
+    assert_eq!(instance.summary().emitted_messages, 4);
     assert_eq!(gate.started.load(Ordering::SeqCst), 2);
     gate.release();
-    instance.close_input();
+    instance.source.close();
     assert!(instance.recv().unwrap().is_none());
     instance.join().unwrap();
     assert_eq!(gate.started.load(Ordering::SeqCst), 3);
@@ -324,8 +336,8 @@ fn per_message_budgets_allow_a_long_lived_instance_and_preserve_fifo() {
             {"id":"copy", "kind":"builtin.identity"},
         ]),
         vec![
-            edge("%input", "item", "left", "input"),
-            edge("%input", "item", "right", "input"),
+            edge("feed", "item", "left", "input"),
+            edge("feed", "item", "right", "input"),
             edge("left", "value", "copy", "input"),
         ],
         json!([{"name":"value", "node":"copy", "port":"value"}]),
@@ -336,7 +348,7 @@ fn per_message_budgets_allow_a_long_lived_instance_and_preserve_fifo() {
     let instance = start(value, Arc::new(ManualClock::default()));
     let count = mf_runtime::MAX_SCHEDULED_STEPS + 1;
     thread::scope(|scope| {
-        let sender = instance.input();
+        let sender = instance.source.clone();
         let producer = scope.spawn(move || {
             for value in 0..count {
                 sender.send(json!(value)).unwrap();
@@ -351,20 +363,20 @@ fn per_message_budgets_allow_a_long_lived_instance_and_preserve_fifo() {
         assert!(instance.recv().unwrap().is_none());
         producer.join().unwrap();
     });
-    assert_eq!(instance.join().unwrap().completed_frames, count as u64);
+    assert_eq!(instance.join().unwrap().completed_frames, count as u64 + 1);
 }
 
 #[test]
 fn invalid_input_and_empty_close_are_explicit() {
     let instance = start(accumulating(), Arc::new(ManualClock::default()));
     assert!(matches!(
-        instance.input().send(json!("invalid")),
+        instance.source.clone().send(json!("invalid")),
         Err(StreamError::Input { .. })
     ));
-    assert_eq!(instance.summary().accepted_inputs, 0);
+    assert_eq!(instance.source.metrics().accepted, 0);
     assert!(instance.join().is_err());
     let instance = start(accumulating(), Arc::new(ManualClock::default()));
-    instance.close_input();
+    instance.source.close();
     assert!(instance.recv().unwrap().is_none());
     assert_eq!(instance.join().unwrap().emitted_messages, 0);
 }
@@ -419,12 +431,12 @@ inventory::submit! {
 fn one_over_budget_frame_fails() {
     let value = graph(
         json!([{"id":"exhaust", "kind":"test.exhaust"}]),
-        vec![edge("%input", "item", "exhaust", "input")],
+        vec![edge("feed", "item", "exhaust", "input")],
         json!([]),
     );
     let instance = start(value, Arc::new(ManualClock::default()));
-    instance.input().send(json!(1)).unwrap();
-    instance.close_input();
+    instance.source.clone().send(json!(1)).unwrap();
+    instance.source.close();
     let error = instance.recv().unwrap_err().to_string();
     assert!(
         error.contains("budget") && error.contains("message 0"),

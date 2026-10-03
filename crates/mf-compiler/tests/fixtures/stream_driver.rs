@@ -28,14 +28,16 @@ impl Clock {
         }
     }
 }
-fn settle(instance: &StreamInstance) -> Result<(), StreamError> {
+fn settle(instance: &StreamInstance, input: &mf_runtime::ChannelSender) -> Result<(), StreamError> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(error) = instance.failure() {
             return Err(error);
         }
         let summary = instance.summary();
-        if summary.completed_frames == summary.accepted_inputs + summary.emitted_messages {
+        if summary.completed_frames == summary.startup_frames + summary.emitted_messages
+            && input.metrics().published == input.metrics().accepted
+        {
             return Ok(());
         }
         assert!(Instant::now() < deadline, "frame processing stalled");
@@ -48,8 +50,9 @@ fn receive(instance: &StreamInstance, outputs: &mut Vec<Value>) -> Result<(), St
     Ok(())
 }
 
-pub fn drive(prepared: PreparedStream, scenario: &str) -> Value {
+pub fn drive(mut prepared: PreparedStream, scenario: &str) -> Value {
     let clock = Arc::new(Clock::default());
+    let input = prepared.channel("feed").unwrap();
     let instance = prepared
         .start_with_options(StreamOptions {
             clock: clock.clone(),
@@ -61,48 +64,48 @@ pub fn drive(prepared: PreparedStream, scenario: &str) -> Value {
         match scenario {
             "windows" => {
                 for value in [1, 2] {
-                    instance.input().send(json!(value))?;
-                    settle(&instance)?;
+                    input.send(json!(value))?;
+                    settle(&instance, &input)?;
                 }
                 clock.advance(100);
                 receive(&instance, &mut outputs)?;
                 for value in [3, 4, 5] {
-                    instance.input().send(json!(value))?;
-                    settle(&instance)?;
+                    input.send(json!(value))?;
+                    settle(&instance, &input)?;
                 }
                 receive(&instance, &mut outputs)?;
                 clock.advance(150);
                 for value in [-1, 6] {
-                    instance.input().send(json!(value))?;
-                    settle(&instance)?;
+                    input.send(json!(value))?;
+                    settle(&instance, &input)?;
                 }
                 // The count flush cancelled the old deadline at 200; this buffer is due at 250.
                 clock.advance(200);
-                instance.input().send(json!(7))?;
-                settle(&instance)?;
+                input.send(json!(7))?;
+                settle(&instance, &input)?;
             }
             "failure" => {
-                instance.input().send(json!(1))?;
-                settle(&instance)?;
+                input.send(json!(1))?;
+                settle(&instance, &input)?;
                 receive(&instance, &mut outputs)?;
-                instance.input().send(json!(2))?;
+                input.send(json!(2))?;
             }
             "chain" => {
                 for value in 1..=5 {
-                    instance.input().send(json!(value))?;
+                    input.send(json!(value))?;
                 }
             }
             "nested" => {
                 for value in 1..=3 {
-                    instance.input().send(json!(value))?;
+                    input.send(json!(value))?;
                 }
             }
             _ => panic!("unknown scenario"),
         }
-        instance.close_input();
+        input.close();
         if scenario == "chain" {
             let deadline = Instant::now() + Duration::from_secs(10);
-            while instance.summary().emitted_messages != 5 {
+            while instance.summary().emitted_messages != 10 {
                 if let Some(error) = instance.failure() {
                     return Err(error);
                 }

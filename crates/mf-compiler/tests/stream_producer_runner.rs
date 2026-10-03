@@ -52,8 +52,8 @@ fn external_line_producer_matches_memory_and_drains_after_stdin_closes() {
     let empty = root.path().join("empty.txt");
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/multi-nodes");
     let value = json!({
-        "version":"2026-10-02",
-        "execution":{"mode":"stream", "input_type":"string", "limits":{"max_pending_messages":3, "workers":1}},
+        "version":"2026-10-03",
+        "execution":{"mode":"stream", "limits":{"max_pending_messages":4, "workers":1}},
         "dependencies":{
             "fixture":{"package":"fixture-multi-nodes", "path":fixture},
             "core":{"package":"mfn-core", "path":common::crates_dir().join("builtin-nodes/core")}
@@ -61,10 +61,11 @@ fn external_line_producer_matches_memory_and_drains_after_stdin_closes() {
         "nodes":[
             {"id":"read", "kind":"fixture.read_lines"},
             {"id":"batch", "kind":"builtin.batch", "config":{"max_items":3, "max_wait_ms":3_600_000}},
-            {"id":"copy", "kind":"builtin.identity"}
+            {"id":"copy", "kind":"builtin.identity"},
+            {"id":"feed", "kind":"builtin.stdin", "config":{"item_type":"string"}}
         ],
         "edges":[
-            {"from_node":"%input", "from_output":"item", "to_node":"read", "to_input":"path"},
+            {"from_node":"feed", "from_output":"item", "to_node":"read", "to_input":"path"},
             {"from_node":"read", "from_output":"line", "to_node":"batch", "to_input":"item"},
             {"from_node":"batch", "from_output":"items", "to_node":"copy", "to_input":"input"}
         ],
@@ -108,14 +109,18 @@ fn external_line_producer_matches_memory_and_drains_after_stdin_closes() {
     expected_lines.push("last without newline".into());
     fs::write(&document, expected_lines.join("\r\n")).unwrap();
     fs::write(&empty, "").unwrap();
-    let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
+    let mut definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
+    definition
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "feed")
+        .unwrap()
+        .kind = "builtin.channel".into();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
-    let instance = instantiate_stream(&plan, &registry)
-        .unwrap()
-        .start()
-        .unwrap();
-    let input = instance.input();
+    let mut prepared = instantiate_stream(&plan, &registry).unwrap();
+    let input = prepared.channel("feed").unwrap();
+    let instance = prepared.start().unwrap();
     let empty_input = format!("{}\n", json!(empty));
     let paths = [empty.clone(), document.clone(), empty];
     let input_bytes = paths

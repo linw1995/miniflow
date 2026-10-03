@@ -350,8 +350,8 @@ See [compiling workflows](compiling.md) for executable commands, endpoint settin
 
 ## Streaming observations
 
-Streaming runner descriptions use version `2026-10-02`. Their workflow lifecycle records use event
-schema `3`, decoded with `mf_telemetry::stream::StreamRecord`; the existing finite-run decoder keeps
+New streaming runner descriptions use version `2026-10-03`. Their workflow lifecycle records use event
+schema `4`, decoded with `mf_telemetry::stream::StreamRecord`; the existing finite-run decoder keeps
 its original schema `1` and `2` contracts. The terminal launcher and finite-session reducer reject the
 streaming protocol before execution.
 
@@ -363,13 +363,13 @@ final sequence. Counter exhaustion stops trustworthy lifecycle emission without 
 changing business execution; consumers cannot claim a complete terminal stream in that case.
 
 Node and Loop records include a structured `stream` body with an invocation ID, trigger, optional
-message identity, and optional parent invocation ID. Triggers are `message` for ordinary steps and
-`input`, `timer`, or `upstream_closed` for event callbacks. Timer and close invocations have no individual
-input message. Message identity combines a domain with that domain's sequence. Invocation IDs and
+message identity, and optional parent invocation ID. Triggers are `startup` for startup-frame invocations, `message` for emitted-message task steps, and
+`input`, `timer`, or `upstream_closed` for other callbacks. Startup, timer, and close invocations have no
+external input message. Message identity combines a domain with that domain's sequence. Invocation IDs and
 message sequences are canonical unsigned decimal strings so OTel encoding cannot round large values.
 The lifecycle sequence retains the nonnegative signed OTel counter representation.
 
-Incremental producers use the `input` trigger for their complete invocation, including time waiting
+Initial producers use `startup`; message-driven producers use `input` for their invocation, including time waiting
 for output capacity. The runtime carries the node span onto the producer worker. Successful completion
 reports the number of admitted emissions and their produced ports; downstream messages have their own
 identities and can run before production ends. Send validation failures report the `publication` phase,
@@ -388,8 +388,10 @@ Iteration item/body logs retain their existing `mf.iteration` scope and outer-se
 and gain the containing stream identity. Body nodes receive distinct invocation IDs, including when
 item indices or Loop paths repeat in a later message. Native span parentage remains workflow/node/item/body.
 
-The final workflow outcome is `succeeded` or `failed`, with aggregate accepted-input,
-emitted-message, completed-frame, and delivered-output counters. Completion follows drain and output
+The final workflow outcome is `succeeded` or `failed`, with aggregate startup-frame,
+emitted-message, completed-frame, and delivered-output counters. Startup traversal counts as one frame;
+producer lifetimes remain active independently until their output domains close. Older schema-3 records
+retain their accepted-input interpretation and are never relabeled as schema 4. Completion follows drain and output
 acknowledgement, including the final stdout record. Failure preserves its phase and available node
 identity. An earlier missing node outcome remains unknown when a later message succeeds. Consumers
 should bound retained detail and distinguish local history eviction from lifecycle transport loss.

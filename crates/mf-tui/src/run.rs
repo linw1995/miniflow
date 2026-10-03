@@ -990,6 +990,7 @@ mod tests {
             data_edges: vec![],
             control_edges: vec![],
             execution_order: vec!["repeat".into()],
+            execution: None,
             loop_bodies: vec![LoopBodyDescription {
                 path: vec!["repeat".into()],
                 nodes: vec![NodeDescription {

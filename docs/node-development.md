@@ -231,7 +231,7 @@ waits for running producer calls and releases their state and workers. Arbitrary
 cannot be interrupted by the runtime; plugins should propagate send errors and return promptly.
 Previously delivered outputs remain effective if a later read or operation fails.
 
-Stream producers are supported in streaming workflows using schema `2026-10-02`, including generated
+Stream producers are supported in streaming workflows using schema `2026-10-03`, including generated
 runners. They are rejected in synchronous flows, Loop bodies, and Iteration bodies. Existing task and
 event interfaces retain their behavior; downstream exhaustive matches on `NodeExecution` must handle
 the new `Stream` variant.
@@ -242,34 +242,40 @@ the new `Stream` variant.
 parsing. Direct Serde deserialization checks the document shape; compilation validates execution
 settings for definitions constructed or deserialized by the host.
 
-Schema `2026-10-02` accepts `execution: {"mode": "stream", "input_type": "int"}`. An absent
-`execution` field retains single-run behavior. Each root node needs an explicit data or control path
-from the engine's `%input.item` source. Task edges preserve message identity; event and producer emissions start a
-new message domain. Cross-domain joins and context reads are rejected during preparation.
+Schema `2026-10-03` accepts `execution: {"mode": "stream"}`. Initial task and stream nodes receive
+workflow arguments once; ordinary edges retain their message identity, while producer/event outputs create
+a new domain. Nodes and selected outputs cannot join different domains. Initial EventNodes require an
+activation source, and nested synchronous bodies remain task-only.
 
-Use `mf_compiler::instantiate_stream` to prepare an instance and inspect its immutable graph through
-`plan()`. Consume the prepared instance with `start` or `start_with_options`. Each preparation creates
-independent plugin state. Task, event, and stream executors are reused across messages for the instance lifetime.
-The coordinator serializes events and submits frames to `WorkerPool`, which owns the reusable threads
-and bounded job queue. Each submitted frame runs consecutive ordinary tasks in validated order, returning the frame before the next event or stream node or when
-it is complete. A recorded instance failure prevents the next task call within that dispatch.
+Use `mf_compiler::instantiate_stream` to prepare independent node state and inspect its `plan()`. Pass
+`WorkflowArguments` through `StreamOptions.arguments`, or use `start()` when no parameters are required.
+Startup validates every argument and required resource before dispatch. Initial producers, including those
+behind startup tasks, run on independent dedicated workers. Their contexts retain only values available at
+dispatch. Ordinary per-message producer invocations remain serialized.
 
-`instance.input()` returns a cloneable sender. `send` waits for admission capacity and completes once
-the input is accepted. Consume `instance.recv()` concurrently with production, close input when done,
-and call `join` after draining outputs. `try_send` borrows a value and reports capacity pressure without
-accepting it. `receive` returns a delivery that must be acknowledged or failed by an external sink.
+Declare `builtin.channel` with `config.item_type`, or prepare `mf_runtime::channel_source(type)` directly.
+Obtain its named sender with `prepared.channel("feed")` before consuming the prepared instance with `start`.
+The sender is tied to that source and instance. `send` acknowledges bounded admission; `try_send` reports
+capacity without admission. Consume `instance.recv()` concurrently, close the sender when done, and call
+`join` after draining outputs. Dropping the last sender also closes its source. A retained closed sender does
+not delay completion. `ChannelSender::metrics` distinguishes accepted values, published values, queued values,
+and waiting senders. Named `ExecutionResources` can also be supplied through stream options.
 
-Every message has fresh context bindings and a step budget. Frames execute in FIFO order within each
-domain, while different domains can progress independently. Close propagates after admitted work and
-emissions; success waits for output delivery. Failure stops scheduling and waits for task calls already
-running before releasing pending work, retained values, and nodes. A running task completes its
-synchronous bodies normally.
-Dropping an unfinished instance follows the same failure cleanup before releasing its nodes.
+`builtin.stdin` declares exclusive stdin and parses one typed JSON value per line. Runners supply a reserved
+`StreamInput`; embedding hosts can provide one through `ExecutionResources::with_stdin`. Factories and
+interface inspection do not read source data. Only one source may own stdin. Runtime-owned channel waits and
+stdin reads respond to cancellation. Arbitrary plugin I/O still requires cooperation.
 
-Limits default to 64 pending messages and four workers. Positive overrides live in `execution.limits`.
-Preparation reserves one frame slot per downstream domain; the remaining slots bound input admission.
-Each event or stream node's pending emissions are also limited by `max_pending_messages`. A full downstream
-queue propagates pressure to input admission. Payload sizes and plugin buffers have no byte quota.
+Every emitted message has fresh bindings and a step budget. Frames execute in FIFO order in each domain,
+while domains progress independently. `receive` returns a delivery that its sink must acknowledge or fail.
+Success waits for all sources and output acknowledgements. Failure stops admission and dispatch, wakes source
+waits, suppresses later publication, and waits for started calls before releasing nodes. Dropping an unfinished
+instance uses the same cleanup. The ordinary task worker pool remains separate from producer workers.
+
+Limits default to 64 pending messages and four ordinary workers. Preparation reserves one startup frame and
+one frame per output domain. Every operator's pending queue and the standard channel adapter have finite
+message capacity. Pressure propagates back to source senders. Payload size and plugin buffers have no byte
+quota in this layer.
 
 A custom `StreamClock` must advance monotonically and wake registered instances. Deadline expiry
 makes an emission ready; downstream execution remains subject to capacity. Snapshot capture is rejected

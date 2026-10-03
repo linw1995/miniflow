@@ -1,3 +1,6 @@
+#[path = "fixtures/channel_run.rs"]
+mod channel;
+use channel::ChannelRun;
 #[path = "fixtures/event_collector.rs"]
 mod event_collector;
 
@@ -5,7 +8,7 @@ extern crate mfn_core as _;
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_stream};
 use mf_runtime::{
     Inputs, NodeExecutionError, NodeRegistration, Outputs, PortSpec, PreparedStream, StreamClock,
-    StreamError, StreamInstance, StreamMetrics, StreamOptions, ValueRef, ValueType,
+    StreamError, StreamMetrics, StreamOptions, ValueRef, ValueType,
 };
 use serde_json::{Value, json};
 use std::{
@@ -129,25 +132,26 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
 }
 fn definition() -> Value {
     json!({
-      "version": "2026-10-02",
-      "execution": { "mode": "stream", "input_type": "int" },
-      "dependencies": {
-        "core": { "package": "mfn-core", "path": "../crates/builtin-nodes/core" }
-      },
-      "nodes": [
-        {
-          "id": "collect",
-          "kind": "test.accumulate",
-          "config": { "max_items": 3, "max_wait_ms": 250 }
-        },
-        { "id": "consume", "kind": "builtin.identity" }
-      ],
-      "edges": [
-        { "from_node": "%input", "from_output": "item", "to_node": "collect", "to_input": "item" },
-        { "from_node": "collect", "from_output": "items", "to_node": "consume", "to_input": "input" }
-      ],
-      "outputs": [{ "name": "batch", "node": "consume", "port": "value" }]
-    })
+          "version": "2026-10-03",
+          "execution": { "mode": "stream" },
+          "dependencies": {
+            "core": { "package": "mfn-core", "path": "../crates/builtin-nodes/core" }
+          },
+          "nodes": [
+            {
+              "id": "collect",
+              "kind": "test.accumulate",
+              "config": { "max_items": 3, "max_wait_ms": 250 }
+            },
+            { "id": "consume", "kind": "builtin.identity" }
+          , channel::source(json!("int"))
+    ],
+          "edges": [
+            { "from_node": "feed", "from_output": "item", "to_node": "collect", "to_input": "item" },
+            { "from_node": "collect", "from_output": "items", "to_node": "consume", "to_input": "input" }
+          ],
+          "outputs": [{ "name": "batch", "node": "consume", "port": "value" }]
+        })
 }
 fn prepare(value: Value) -> Result<PreparedStream, mf_compiler::WorkflowCompileError> {
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
@@ -155,25 +159,27 @@ fn prepare(value: Value) -> Result<PreparedStream, mf_compiler::WorkflowCompileE
     let plan = compile_definition(&definition, &registry)?;
     instantiate_stream(&plan, &registry)
 }
-fn start(value: Value, clock: Arc<Clock>) -> StreamInstance {
-    prepare(value)
-        .unwrap()
-        .start_with_options(StreamOptions {
+fn start(value: Value, clock: Arc<Clock>) -> ChannelRun {
+    ChannelRun::start(
+        prepare(value).unwrap(),
+        "feed",
+        StreamOptions {
             clock,
-            ..StreamOptions::default()
-        })
-        .unwrap()
+            ..Default::default()
+        },
+    )
+    .unwrap()
 }
 
 #[test]
 fn a_slow_consumer_backpressures_admission_with_bounded_frames() {
     let mut value = definition();
-    value["execution"]["limits"] = json!({"max_pending_messages":2});
+    value["execution"]["limits"] = json!({"max_pending_messages":3});
     value["nodes"][0]["config"]["max_items"] = json!(1);
     let instance = start(value, Arc::new(Clock::default()));
-    let input = instance.input();
+    let input = instance.source.clone();
     input.send(json!(0)).unwrap();
-    wait_until(|| instance.summary().completed_frames == 2);
+    wait_until(|| instance.summary().completed_frames == 3);
     let mut accepted = 1;
     loop {
         assert!(accepted < 100, "output pressure did not reach admission");
@@ -196,26 +202,27 @@ fn a_slow_consumer_backpressures_admission_with_bounded_frames() {
     }
     assert!(instance.recv().unwrap().is_none());
     assert_eq!(instance.metrics(), StreamMetrics::default());
-    assert_eq!(instance.join().unwrap().accepted_inputs, accepted);
+    assert_eq!(instance.source.metrics().accepted, accepted);
+    instance.join().unwrap();
 }
 
 #[test]
 fn timeouts_make_progress_when_the_count_threshold_exceeds_frame_capacity() {
     let mut value = definition();
-    value["execution"]["limits"] = json!({"max_pending_messages":2});
+    value["execution"]["limits"] = json!({"max_pending_messages":3});
     value["nodes"][0]["config"] = json!({"max_items":100, "max_wait_ms":100});
     let clock = Arc::new(Clock::default());
     let instance = start(value, clock.clone());
     for value in 0..5 {
-        instance.input().send(json!(value)).unwrap();
+        instance.source.clone().send(json!(value)).unwrap();
     }
-    wait_until(|| instance.summary().completed_frames == 5);
+    wait_until(|| instance.summary().completed_frames == 6);
     clock.advance(100);
     assert_eq!(
         instance.recv().unwrap().unwrap().outputs["batch"],
         json!([0, 1, 2, 3, 4])
     );
-    instance.close_input();
+    instance.source.close();
     assert!(instance.recv().unwrap().is_none());
     instance.join().unwrap();
 }
@@ -233,23 +240,23 @@ fn upstream_close_waits_for_work_already_running_before_flushing_the_tail() {
     value["edges"][0]["from_node"] = json!("slow");
     value["edges"][0]["from_output"] = json!("value");
     value["edges"].as_array_mut().unwrap().push(
-        json!({"from_node":"%input", "from_output":"item", "to_node":"slow", "to_input":"input"}),
+        json!({"from_node":"feed", "from_output":"item", "to_node":"slow", "to_input":"input"}),
     );
     let instance = start(value, Arc::new(Clock::default()));
     let _release = Release(Arc::clone(&probe));
-    instance.input().send(json!(1)).unwrap();
+    instance.source.clone().send(json!(1)).unwrap();
     wait_until(|| probe.calls.load(Ordering::SeqCst) == 1);
     let mut accepted = 1;
     loop {
         let item = json!(accepted + 1).into();
-        match instance.input().try_send(&item) {
+        match instance.source.clone().try_send(&item) {
             Ok(()) => accepted += 1,
             Err(StreamError::Capacity) => break,
             Err(error) => panic!("unexpected admission failure: {error}"),
         }
     }
-    instance.close_input();
-    assert_eq!(instance.summary().emitted_messages, 0);
+    instance.source.close();
+    assert_eq!(instance.summary().delivered_outputs, 0);
     probe.release();
     assert_eq!(
         instance.recv().unwrap().unwrap().outputs["batch"],
@@ -269,10 +276,10 @@ fn chained_collectors_seal_all_tails_before_output_is_consumed() {
     value["outputs"][0]["port"] = json!("items");
     let instance = start(value, Arc::new(Clock::default()));
     for value in 1..=5 {
-        instance.input().send(json!(value)).unwrap();
+        instance.source.clone().send(json!(value)).unwrap();
     }
-    instance.close_input();
-    wait_until(|| instance.summary().emitted_messages == 5);
+    instance.source.close();
+    wait_until(|| instance.summary().emitted_messages == 10);
     assert_eq!(
         instance.recv().unwrap().unwrap().outputs["batch"],
         json!([[1, 2], [3, 4]])
@@ -289,16 +296,16 @@ fn chained_collectors_seal_all_tails_before_output_is_consumed() {
 fn input_failure_discards_a_partial_buffer_and_wakes_a_blocked_producer() {
     let clock = Arc::new(Clock::default());
     let instance = start(definition(), clock);
-    let input = instance.input();
+    let input = instance.source.clone();
     input.send(json!(1)).unwrap();
-    wait_until(|| instance.summary().completed_frames == 1);
+    wait_until(|| instance.summary().completed_frames == 2);
     assert!(matches!(
-        instance.input().send(json!("invalid")),
+        instance.source.clone().send(json!("invalid")),
         Err(StreamError::Input { .. })
     ));
     assert!(matches!(instance.recv(), Err(StreamError::Input { .. })));
     wait_until(|| instance.metrics() == StreamMetrics::default());
-    assert_eq!(instance.summary().emitted_messages, 0);
+    assert_eq!(instance.summary().emitted_messages, 1);
     assert!(matches!(instance.join(), Err(StreamError::Input { .. })));
     assert!(matches!(
         input.send(json!(2)),
@@ -306,23 +313,29 @@ fn input_failure_discards_a_partial_buffer_and_wakes_a_blocked_producer() {
     ));
 
     let mut value = definition();
-    value["execution"]["limits"] = json!({"max_pending_messages":2});
+    value["execution"]["limits"] = json!({"max_pending_messages":3});
     value["nodes"][0]["config"]["max_items"] = json!(1);
     let instance = start(value, Arc::new(Clock::default()));
-    let input = instance.input();
+    let input = instance.source.clone();
     input.send(json!(0)).unwrap();
-    wait_until(|| instance.summary().completed_frames == 2);
-    input.send(json!(1)).unwrap();
     wait_until(|| instance.summary().completed_frames == 3);
+    input.send(json!(1)).unwrap();
+    wait_until(|| instance.summary().completed_frames == 4);
     input.send(json!(2)).unwrap();
-    assert!(matches!(
-        input.try_send(&json!(3).into()),
-        Err(StreamError::Capacity)
-    ));
+    let mut value = 3;
+    while input.try_send(&json!(value).into()).is_ok() {
+        value += 1;
+        assert!(value < 100, "output pressure did not reach the source");
+    }
     thread::scope(|scope| {
-        let producer = scope.spawn(move || input.send(json!(3)));
+        let producer = scope.spawn(move || -> Result<(), StreamError> {
+            loop {
+                input.send(json!(3))?;
+            }
+        });
+        wait_until(|| instance.source.metrics().waiting_senders > 0);
         assert!(matches!(
-            instance.input().send(json!("invalid")),
+            instance.source.clone().send(json!("invalid")),
             Err(StreamError::Input { .. })
         ));
         assert!(matches!(
@@ -345,9 +358,9 @@ fn a_later_failure_preserves_the_delivered_prefix_and_never_retries() {
     value["nodes"][1] = json!({"id":"consume", "kind":"test.capacity_sink", "config":{"key":"fail-prefix", "fail_at":2}});
     let instance = start(value, Arc::new(Clock::default()));
     for value in 1..=3 {
-        instance.input().send(json!(value)).unwrap();
+        instance.source.clone().send(json!(value)).unwrap();
     }
-    instance.close_input();
+    instance.source.close();
     assert_eq!(
         instance.recv().unwrap().unwrap().outputs["batch"],
         json!([1])
@@ -357,7 +370,7 @@ fn a_later_failure_preserves_the_delivered_prefix_and_never_retries() {
     let cause = error.source().unwrap();
     assert!(cause.is::<Arc<mf_runtime::WorkflowRunError>>());
     assert!(cause.source().unwrap().is::<NodeExecutionError>());
-    let input = instance.input();
+    let input = instance.source.clone();
     let StreamError::Workflow { source, message } = error else {
         panic!("expected a workflow error");
     };
@@ -391,7 +404,7 @@ fn plugin_objects_are_released_even_when_a_sender_handle_outlives_the_instance()
         json!({"id":"consume", "kind":"test.capacity_sink", "config":{"key":"release-nodes"}});
     let instance = start(value.clone(), Arc::new(Clock::default()));
     let before = probe.drops.load(Ordering::SeqCst);
-    let input = instance.input();
+    let input = instance.source.clone();
     input.send(json!(1)).unwrap();
     input.close();
     assert!(instance.recv().unwrap().is_some());
@@ -401,9 +414,9 @@ fn plugin_objects_are_released_even_when_a_sender_handle_outlives_the_instance()
     assert!(matches!(input.send(json!(2)), Err(StreamError::Closed)));
     let instance = start(value, Arc::new(Clock::default()));
     let before = probe.drops.load(Ordering::SeqCst);
-    let input = instance.input();
+    let input = instance.source.clone();
     input.send(json!(1)).unwrap();
-    wait_until(|| instance.summary().completed_frames == 1);
+    wait_until(|| instance.summary().completed_frames == 2);
     drop(instance);
     assert_eq!(probe.drops.load(Ordering::SeqCst), before + 1);
     assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
@@ -455,12 +468,12 @@ fn input_failure_suppresses_followup_work_after_a_running_call_returns() {
     value["outputs"][0]["node"] = json!("following");
     let instance = start(value, Arc::new(Clock::default()));
     let _release = Release(Arc::clone(&running));
-    instance.input().send(json!(1)).unwrap();
+    instance.source.clone().send(json!(1)).unwrap();
     wait_until(|| running.calls.load(Ordering::SeqCst) == 1);
-    instance.input().send(json!(2)).unwrap();
+    instance.source.clone().send(json!(2)).unwrap();
     wait_until(|| instance.summary().emitted_messages == 2);
     assert!(matches!(
-        instance.input().send(json!("invalid")),
+        instance.source.clone().send(json!("invalid")),
         Err(StreamError::Input { .. })
     ));
     assert!(matches!(instance.recv(), Err(StreamError::Input { .. })));
@@ -476,8 +489,8 @@ fn input_failure_suppresses_followup_work_after_a_running_call_returns() {
 #[test]
 fn final_output_failure_is_reported_before_the_instance_can_complete() {
     let instance = start(definition(), Arc::new(Clock::default()));
-    instance.input().send(json!(1)).unwrap();
-    instance.close_input();
+    instance.source.clone().send(json!(1)).unwrap();
+    instance.source.close();
     let delivery = instance.receive().unwrap().unwrap();
     assert_eq!(delivery.output().outputs["batch"], json!([1]));
     assert_eq!(instance.summary().delivered_outputs, 0);
@@ -488,8 +501,8 @@ fn final_output_failure_is_reported_before_the_instance_can_complete() {
     assert!(matches!(instance.join(), Err(StreamError::Output { .. })));
 
     let instance = start(definition(), Arc::new(Clock::default()));
-    instance.input().send(json!(2)).unwrap();
-    instance.close_input();
+    instance.source.clone().send(json!(2)).unwrap();
+    instance.source.close();
     drop(instance.receive().unwrap().unwrap());
     assert!(
         instance

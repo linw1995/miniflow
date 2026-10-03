@@ -8,7 +8,9 @@ mod node;
 mod number;
 mod registry;
 mod runner;
+mod runner_arguments;
 mod snapshot;
+mod sources;
 mod stream;
 mod stream_instance;
 mod stream_io;
@@ -57,17 +59,19 @@ pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::{
     WorkflowRunError, instantiate_node_with_metadata, instantiate_subgraph_with_metadata,
 };
-pub use stream::stream_input_node;
+pub use sources::{
+    ChannelMetrics, ChannelSender, ExecutionResources, StreamCancellation, channel_source,
+};
 pub use stream::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
-    STREAM_INPUT_ID, StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate,
+    StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate,
 };
 pub use stream_instance::{
     CompilationSnafu as StreamCompilationSnafu, Emitter, MessageId, MonotonicClock, StreamClock,
     StreamDelivery, StreamError, StreamInstance, StreamMetrics, StreamOptions, StreamOutput,
-    StreamSender, StreamSummary,
+    StreamSummary,
 };
-pub use stream_io::StreamStdio;
+pub use stream_io::{StreamInput, StreamStdio};
 pub use stream_plan::{PreparedStream, StreamBuildError, StreamDependency, StreamPlan};
 pub use subgraph::PreparedSubgraph;
 
@@ -83,3 +87,7 @@ pub use workflow_inputs::{
     InputResource, MAX_WORKFLOW_INPUT_BYTES, WorkflowArguments, WorkflowInput, WorkflowInputError,
     WorkflowInputSchema,
 };
+
+pub use runner_arguments::{RunnerArgumentError, RunnerCommand};
+
+pub use workflow_inputs::{WorkflowInterface, WorkflowInterfaceVersion};

@@ -387,8 +387,7 @@ impl LifecycleEvent {
             self.workflow_id == graph.workflow_id,
             "workflow identity mismatch",
         )?;
-        let loop_schema =
-            graph.version == crate::description::WorkflowDescriptionVersion::V2026_09_29;
+        let loop_schema = graph.version.supports_loops() && !graph.is_streaming();
         let count = if loop_schema {
             graph.static_node_count()?
         } else {

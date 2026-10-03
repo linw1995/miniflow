@@ -6,6 +6,105 @@ use std::{collections::BTreeMap, fmt};
 
 pub const MAX_WORKFLOW_INPUT_BYTES: usize = 1024 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkflowInterfaceVersion {
+    #[serde(rename = "2026-10-03")]
+    V2026_10_03,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowInterface {
+    pub version: WorkflowInterfaceVersion,
+    pub workflow_id: mf_telemetry::identity::WorkflowId,
+    pub schema: WorkflowInputSchema,
+}
+
+impl WorkflowInterface {
+    pub fn from_json(bytes: &[u8]) -> Result<Self, WorkflowInputError> {
+        if bytes.len() > mf_telemetry::description::MAX_DESCRIPTION_BYTES {
+            return Err(WorkflowInputError::TooLarge {
+                limit: mf_telemetry::description::MAX_DESCRIPTION_BYTES,
+            });
+        }
+        let value: UniqueValue =
+            serde_json::from_slice(bytes).map_err(|source| WorkflowInputError::Json { source })?;
+        serde_json::from_value(value.0).map_err(|source| WorkflowInputError::Json { source })
+    }
+
+    pub fn validate_for_description(
+        &self,
+        description: &mf_telemetry::description::WorkflowDescription,
+    ) -> Result<(), WorkflowInputError> {
+        use std::collections::BTreeSet;
+        if self.workflow_id != description.workflow_id {
+            return Err(invalid(
+                String::new(),
+                "graph and interface workflow identities disagree",
+            ));
+        }
+        let incoming: BTreeSet<_> = description
+            .data_edges
+            .iter()
+            .map(|edge| edge.to_node.as_str())
+            .chain(
+                description
+                    .control_edges
+                    .iter()
+                    .map(|edge| edge.to_node.as_str()),
+            )
+            .collect();
+        let roots: BTreeSet<_> = description
+            .nodes
+            .iter()
+            .filter(|node| !incoming.contains(node.id.as_str()))
+            .map(|node| node.id.as_str())
+            .collect();
+        let declared: BTreeSet<_> = self.schema.inputs.keys().map(String::as_str).collect();
+        if description.execution.is_some() && roots != declared {
+            return Err(invalid(
+                String::new(),
+                "interface must describe every initial node exactly once",
+            ));
+        }
+        if !declared.is_subset(&roots) {
+            return Err(invalid(
+                String::new(),
+                "interface names a noninitial or unknown node",
+            ));
+        }
+        let mut stdin = None;
+        for (node, ports) in &self.schema.inputs {
+            for (name, input) in ports {
+                if name.is_empty() {
+                    return Err(invalid(pointer("", node), "empty input port name"));
+                }
+                input.value_type.check_depth().map_err(|error| {
+                    invalid(pointer(&pointer("", node), name), error.to_string())
+                })?;
+            }
+        }
+        for (node, resources) in &self.schema.resources {
+            if !declared.contains(node.as_str()) {
+                return Err(invalid(
+                    pointer("", node),
+                    "resource owner is not an initial node",
+                ));
+            }
+            let mut unique = BTreeSet::new();
+            for resource in resources {
+                if !unique.insert(resource) {
+                    return Err(invalid(pointer("", node), "duplicate resource requirement"));
+                }
+                if *resource == InputResource::Stdin && stdin.replace(node).is_some() {
+                    return Err(invalid(pointer("", node), "stdin has multiple owners"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputResource {

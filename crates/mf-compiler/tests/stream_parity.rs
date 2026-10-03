@@ -23,8 +23,8 @@ fn definition(scenario: &str) -> WorkflowDefinition {
         json!({"id":"consume", "kind":"builtin.identity"}),
     ];
     let mut edges = vec![
-        edge("%input", "item", "left", "x"),
-        edge("%input", "item", "right", "input"),
+        edge("feed", "item", "left", "x"),
+        edge("feed", "item", "right", "input"),
         edge("left", "value", "join", "a"),
         edge("right", "value", "join", "b"),
         edge("join", "value", "collect", "item"),
@@ -62,7 +62,7 @@ fn definition(scenario: &str) -> WorkflowDefinition {
                 }}}),
             ];
             edges = vec![
-                edge("%input", "item", "repeat", "x"),
+                edge("feed", "item", "repeat", "x"),
                 edge("repeat", "x", "collect", "item"),
                 edge("collect", "items", "consume", "items"),
             ];
@@ -71,7 +71,8 @@ fn definition(scenario: &str) -> WorkflowDefinition {
         }
         _ => unreachable!(),
     }
-    serde_json::from_value(json!({"version":"2026-10-02", "execution":{"mode":"stream", "input_type":"int"},
+    nodes.push(json!({"id":"feed", "kind":"builtin.channel", "config":{"item_type":"int"}}));
+    serde_json::from_value(json!({"version":"2026-10-03", "execution":{"mode":"stream"},
         "dependencies":{"core":{"package":"mfn-core", "path":common::crates_dir().join("builtin-nodes/core")}, "code":{"package":"mfn-code", "path":common::crates_dir().join("builtin-nodes/code")}},
         "nodes":nodes, "edges":edges, "control_edges":controls, "outputs":[{"name":"value", "node":"consume", "port":result_port}]
     })).unwrap()

@@ -541,7 +541,16 @@ impl Flow {
         &self,
         arguments: crate::WorkflowArguments,
     ) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        self.execute_with_resources(arguments, crate::ExecutionResources::default())
+    }
+
+    pub fn execute_with_resources(
+        &self,
+        arguments: crate::WorkflowArguments,
+        resources: crate::ExecutionResources,
+    ) -> Result<FlowOutputs, crate::WorkflowRunError> {
         let mut state = crate::ExecutionContext::default();
+        state.set_execution_resources(resources, crate::StreamCancellation::default());
         state.set_workflow_arguments(arguments);
         self.execute_in_context(&mut state)
     }

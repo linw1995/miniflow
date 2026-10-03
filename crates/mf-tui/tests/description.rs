@@ -32,6 +32,7 @@ fn sample() -> (String, WorkflowDescription) {
         control_edges: vec![],
         execution_order: vec![],
 
+        execution: None,
         loop_bodies: Vec::new(),
     };
     (
