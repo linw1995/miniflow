@@ -1,5 +1,6 @@
 //! Bounded preflight for one locally launched compiled workflow.
 
+use mf_runtime::{WorkflowInputError, WorkflowInterface};
 use mf_telemetry::{
     ContractError,
     description::{MAX_DESCRIPTION_BYTES, WorkflowDescription},
@@ -46,9 +47,11 @@ impl Default for DescriptionLimits {
 #[derive(Debug, Snafu)]
 pub enum DescriptionError {
     #[snafu(display(
-        "streaming workflows require JSON Lines input; run the standalone executable with piped input instead of --tui"
+        "streaming event schema {schema_version} is unsupported by TUI; recompile the workflow for schema 4"
     ))]
-    UnsupportedStream,
+    UnsupportedStream { schema_version: i64 },
+    #[snafu(display("runner returned an invalid interface: {source}; recompile the workflow"))]
+    InvalidInterface { source: WorkflowInputError },
     #[snafu(display("could not start workflow description from {path:?}: {source}"))]
     Spawn { path: PathBuf, source: io::Error },
     #[snafu(display("could not read workflow description: {source}"))]
@@ -82,6 +85,37 @@ pub fn describe_executable_with_limits(
     path: &Path,
     limits: DescriptionLimits,
 ) -> Result<WorkflowDescription, DescriptionError> {
+    let json = inspect_executable(path, "--describe", limits)?;
+    let description = WorkflowDescription::from_json(&json)
+        .map_err(|source| DescriptionError::Invalid { source })?;
+    if description.is_streaming()
+        && description.event_schema_version() != mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
+    {
+        return Err(DescriptionError::UnsupportedStream {
+            schema_version: description.event_schema_version(),
+        });
+    }
+    Ok(description)
+}
+
+pub fn describe_interface(path: &Path) -> Result<WorkflowInterface, DescriptionError> {
+    describe_interface_with_limits(path, DescriptionLimits::default())
+}
+
+pub fn describe_interface_with_limits(
+    path: &Path,
+    limits: DescriptionLimits,
+) -> Result<WorkflowInterface, DescriptionError> {
+    let json = inspect_executable(path, "--describe-interface", limits)?;
+    WorkflowInterface::from_json(&json)
+        .map_err(|source| DescriptionError::InvalidInterface { source })
+}
+
+fn inspect_executable(
+    path: &Path,
+    flag: &str,
+    limits: DescriptionLimits,
+) -> Result<Vec<u8>, DescriptionError> {
     let limits = DescriptionLimits {
         timeout: limits.timeout.min(DESCRIPTION_TIMEOUT),
         drain_timeout: limits.drain_timeout.min(DRAIN_TIMEOUT),
@@ -90,7 +124,7 @@ pub fn describe_executable_with_limits(
     };
     let mut command = Command::new(path);
     command
-        .arg("--describe")
+        .arg(flag)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -184,12 +218,7 @@ pub fn describe_executable_with_limits(
     let json = bytes
         .strip_suffix(b"\n")
         .ok_or(DescriptionError::MissingTerminator)?;
-    let description = WorkflowDescription::from_json(json)
-        .map_err(|source| DescriptionError::Invalid { source })?;
-    if description.is_streaming() {
-        return Err(DescriptionError::UnsupportedStream);
-    }
-    Ok(description)
+    Ok(json.to_vec())
 }
 
 enum ReadResult {

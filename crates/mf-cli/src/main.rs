@@ -27,6 +27,15 @@ enum Command {
         /// Observe workflow execution in the terminal UI.
         #[arg(long, required = true)]
         tui: bool,
+        /// Workflow startup arguments keyed by initial node and input port.
+        #[arg(long, value_name = "JSON", conflicts_with = "inputs_file")]
+        inputs: Option<String>,
+        /// Read workflow startup arguments from a JSON file (up to 1 MiB).
+        #[arg(long, value_name = "PATH")]
+        inputs_file: Option<PathBuf>,
+        /// JSON Lines file for a declared stdin source.
+        #[arg(long, value_name = "PATH")]
+        stream_input: Option<PathBuf>,
     },
 }
 
@@ -76,14 +85,28 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             compile(options)?;
             Ok(0)
         }
-        Command::Run { executable, .. } => {
+        Command::Run {
+            executable,
+            inputs,
+            inputs_file,
+            stream_input,
+            ..
+        } => {
             #[cfg(unix)]
             {
-                mf_tui::run::run_executable(&executable).context(RunSnafu)
+                mf_tui::run::run_executable_with_options(
+                    &executable,
+                    &mf_tui::run::RunOptions {
+                        inputs,
+                        inputs_file,
+                        stream_input,
+                    },
+                )
+                .context(RunSnafu)
             }
             #[cfg(not(unix))]
             {
-                let _ = executable;
+                let _ = (executable, inputs, inputs_file, stream_input);
                 UnsupportedTuiSnafu.fail()
             }
         }
@@ -196,12 +219,55 @@ mod tests {
             ["mf", "run", "./flow", "--tui"],
             ["mf", "run", "--tui", "./flow"],
         ] {
-            let Command::Run { executable, tui } = Cli::try_parse_from(args).unwrap().command
+            let Command::Run {
+                executable, tui, ..
+            } = Cli::try_parse_from(args).unwrap().command
             else {
                 panic!("expected run command");
             };
             assert_eq!(executable, PathBuf::from("./flow"));
             assert!(tui);
+        }
+    }
+
+    #[test]
+    fn run_options_parse_startup_arguments_and_reject_conflicts() {
+        let cli = Cli::try_parse_from([
+            "mf",
+            "run",
+            "./flow",
+            "--tui",
+            "--inputs",
+            "{}",
+            "--stream-input",
+            "data.jsonl",
+        ])
+        .unwrap();
+        let Command::Run {
+            inputs,
+            inputs_file,
+            stream_input,
+            ..
+        } = cli.command
+        else {
+            panic!("expected run command");
+        };
+        assert_eq!(inputs.as_deref(), Some("{}"));
+        assert!(inputs_file.is_none());
+        assert_eq!(stream_input, Some("data.jsonl".into()));
+        for arguments in [
+            vec!["--inputs", "{}", "--inputs-file", "args.json"],
+            vec!["--inputs", "{}", "--inputs", "{}"],
+            vec!["--stream-input", "a", "--stream-input", "b"],
+        ] {
+            assert!(
+                Cli::try_parse_from(
+                    ["mf", "run", "./flow", "--tui"]
+                        .into_iter()
+                        .chain(arguments)
+                )
+                .is_err()
+            );
         }
     }
 

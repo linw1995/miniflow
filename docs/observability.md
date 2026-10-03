@@ -308,23 +308,43 @@ mf run ./if-else --tui
 ```
 
 `mf run` requires terminal stdin and stderr. Stdout can be redirected: the CLI reserves it for the runner's byte-for-byte
-output after the final view closes. The runner receives null stdin, so workflows that prompt for input are unsupported in
-TUI mode. Preflight calls `--describe` before the execution process starts; existing binaries without the current
-description contract must be recompiled. A fresh run ID and loopback OTLP/HTTP receiver are prepared before launch. The
+output after the final view closes. Preflight calls `--describe` and, for new runners, `--describe-interface` with
+bounded output and a 30-second deadline per inspection. It validates matching workflow identities, startup parameters,
+and declared resources before starting the receiver or execution process. Older finite descriptions remain supported;
+older streaming descriptions require recompilation. A fresh run ID and loopback OTLP/HTTP receiver are prepared before launch. The
 execution child receives these session settings; inherited `OTEL_EXPORTER_OTLP_*` settings, including remote
 endpoints and headers, are removed from the child environment. The parent environment is unchanged.
+
+Pass startup arguments with `--inputs '<JSON>'` or `--inputs-file <PATH>`. These options are mutually
+exclusive and accept at most 1 MiB. The CLI reads a parameter file once, validates the nested node/port
+map, and forwards a canonical copy through a private temporary file kept alive for the child.
+
+Autonomous streams receive null stdin. A workflow declaring a stdin resource requires
+`--stream-input <PATH>` with a readable regular JSON Lines file. `-`, missing or unused input paths,
+and host-bound channel resources fail preflight. The child's file descriptor is opened before launch;
+terminal stdin remains available for TUI controls. Resource metadata controls this routing for all
+registered node kinds.
+
+```sh
+mf run ./read-workflow --tui --inputs '{"read":{"path":"/data/events.txt"}}'
+mf run ./stream-batch --tui --stream-input ./events.jsonl
+```
 
 The graph shows data and control edges, node status, elapsed time, and confirmed branch outcomes.
 The header keeps the observed workflow outcome separate from the child process result. Arrow keys
 pan; `f` resets the viewport; Tab, `j`, and `k` select a node for details. On a Loop node, `l` opens
 its body graph; `h` or Esc returns to the parent graph. `[` and `]` inspect older and newer retained
 pass frames. The detail pane shows active and completed pass counts, stop reason, and any hidden
-older detail. `q` has no action while the workflow runs. Ctrl-C requests interruption, and a second
+older detail. Streaming details also show observed invocation/completion/result counts, Batch state,
+message identity, unresolved outcomes, and final workflow totals. Loop pass headers include their owning
+invocation so repeated paths in different messages remain distinct. `q` has no action while the workflow runs. Ctrl-C requests interruption, and a second
 Ctrl-C or the two-second deadline forces termination. After the runner exits, the view stays open
 until `q`, Enter, Esc at the root, or Ctrl-C. The terminal is restored before the captured stdout is
 copied to CLI stdout.
 
-Press `v` to browse recorded inputs and outputs, including Loop passes and Iteration items.
+For finite runs, press `v` to browse recorded inputs and outputs, including Loop passes and Iteration items.
+Streaming runs show an explicit unavailable message instead. The launcher sets `MF_CAPTURE_SNAPSHOTS=0`
+for streams even when the parent environment enables capture; finite runs retain capture support.
 Use `j`/`k` or Up/Down to select a change, Home for the first change, and End/`f` to follow the latest.
 PgUp/PgDn scroll values; `v` or Esc returns to the graph. Previews are limited to 64 KiB per
 input/output object, while the complete values remain in memory. The view copies only the visible

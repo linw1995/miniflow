@@ -84,16 +84,16 @@ deleted together with its callers and transports so no compatibility scheduler o
 
 ## 4. TUI launch and presentation
 
-- [ ] 4.1 Run bounded graph/interface/argument/resource preflight and private parameter forwarding before receiver and child execution; verify
+- [x] 4.1 Run bounded graph/interface/argument/resource preflight and private parameter forwarding before receiver and child execution; verify
   autonomous streams launch with no stdin, invalid parameters cause no business execution, legacy finite
   runners remain supported, and unsupported streaming protocols receive compatibility diagnostics.
-- [ ] 4.2 Add `--stream-input <PATH>` for declared stdin sources while retaining terminal input ownership;
+- [x] 4.2 Add `--stream-input <PATH>` for declared stdin sources while retaining terminal input ownership;
   verify absent/unreadable/unneeded paths and `-` fail before execution, explicit files reach the child,
   host-only resources are rejected, and source kind names do not control routing.
-- [ ] 4.3 Select schema-aware graph/detail rendering and disable stream snapshot capture in the child
+- [x] 4.3 Select schema-aware graph/detail rendering and disable stream snapshot capture in the child
   environment; verify unsupported history messaging, inherited capture settings, completed-view inspection,
   and unchanged finite data history.
-- [ ] 4.4 Add PTY acceptance coverage using an actual generated parameterized source runner and an explicit
+- [x] 4.4 Add PTY acceptance coverage using an actual generated parameterized source runner and an explicit
   stdin source; verify displayed repeated activity, exact captured outputs, Ctrl-C escalation, terminal
   restoration, capture limits, and process outcome independent of telemetry loss; update
   `docs/observability.md` and CLI usage.

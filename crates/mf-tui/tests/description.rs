@@ -6,6 +6,7 @@ use mf_telemetry::{
 };
 use mf_tui::description::{
     DescriptionError, DescriptionLimits, describe_executable, describe_executable_with_limits,
+    describe_interface_with_limits,
 };
 use std::{
     fs,
@@ -60,7 +61,7 @@ fn accepts_one_complete_document_despite_noisy_stderr() {
 }
 
 #[test]
-fn rejects_streaming_descriptions_before_the_execution_launch() {
+fn rejects_legacy_streaming_protocols_before_the_execution_launch() {
     let (_, mut description) = sample();
     description.version = WorkflowDescriptionVersion::V2026_10_02;
     description
@@ -75,8 +76,11 @@ fn rejects_streaming_descriptions_before_the_execution_launch() {
         "test \"$1\" = --describe || exit 99\nprintf '%s\\n' '{json}'"
     ));
     let error = describe_executable(&runner).unwrap_err();
-    assert!(matches!(error, DescriptionError::UnsupportedStream));
-    assert!(error.to_string().contains("JSON Lines"));
+    assert!(matches!(
+        error,
+        DescriptionError::UnsupportedStream { schema_version: 3 }
+    ));
+    assert!(error.to_string().contains("recompile"));
 }
 
 #[test]
@@ -163,5 +167,20 @@ fn reports_nonzero_exits_and_missing_runners_without_execution() {
     assert!(matches!(
         describe_executable(&missing),
         Err(DescriptionError::Spawn { .. })
+    ));
+}
+
+#[test]
+fn interface_inspection_uses_the_same_process_and_output_bounds() {
+    let (_root, runner) =
+        create_runner("[ \"$1\" = --describe-interface ] || exit 99\nexec sleep 60");
+    assert!(matches!(
+        describe_interface_with_limits(&runner, limits()),
+        Err(DescriptionError::Timeout { .. })
+    ));
+    let (_root, runner) = create_runner("yes x | head -c 131072");
+    assert!(matches!(
+        describe_interface_with_limits(&runner, limits()),
+        Err(DescriptionError::TooLarge { .. })
     ));
 }
