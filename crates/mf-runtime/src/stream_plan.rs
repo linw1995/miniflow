@@ -1,9 +1,9 @@
+use crate::message_domain::MessageDomains;
 use crate::{
-    ExecutionDependency, FlowNode, NodeExecution, STREAM_INPUT_ID, StreamExecution, TaskNode,
-    WorkflowOutputDefinition, output_id,
+    ExecutionDependency, FlowNode, NodeExecution, STREAM_INPUT_ID, StreamDomain, StreamExecution,
+    TaskNode, WorkflowOutputDefinition,
 };
 use snafu::{ResultExt, Snafu};
-use std::collections::{BTreeMap, BTreeSet};
 
 type EventStates = Vec<Option<Box<dyn crate::EventNode>>>;
 
@@ -32,20 +32,12 @@ impl StreamDependency {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StreamDomain {
-    pub source: usize,
-    pub steps: Vec<usize>,
-}
-
 pub struct StreamPlan {
     execution: StreamExecution,
     nodes: Vec<FlowNode<Option<Box<dyn TaskNode>>>>,
     dependencies: Vec<Vec<StreamDependency>>,
-    domains: Vec<StreamDomain>,
-    output_domains: Vec<usize>,
+    domains: MessageDomains,
     outputs: Vec<WorkflowOutputDefinition>,
-    selected_domain: Option<usize>,
 }
 
 pub struct PreparedStream {
@@ -57,8 +49,8 @@ impl std::fmt::Debug for PreparedStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PreparedStream")
             .field("execution", &self.plan.execution)
-            .field("domains", &self.plan.domains)
-            .field("selected_domain", &self.plan.selected_domain)
+            .field("domains", &self.plan.domains())
+            .field("selected_domain", &self.plan.selected_domain())
             .finish_non_exhaustive()
     }
 }
@@ -83,7 +75,6 @@ impl PreparedStream {
                 "stream plan requires its typed input source first".into(),
             ));
         }
-        let mut indices = BTreeMap::new();
         let source = &nodes[0];
         if !source.metadata.ports.inputs.is_empty()
             || source.metadata.ports.outputs.len() != 1
@@ -95,121 +86,7 @@ impl PreparedStream {
                 "stream input source must expose its declared item type".into(),
             ));
         }
-        let mut output_index = BTreeMap::new();
-        for (index, node) in nodes.iter().enumerate() {
-            if indices.insert(node.definition_id.as_str(), index).is_some() {
-                return Err(invalid(format!("duplicate node `{}`", node.definition_id)));
-            }
-            for port in &node.metadata.ports.outputs {
-                let name = output_id(node.definition_id.as_str(), &port.name);
-                if output_index.insert(name.clone(), index).is_some() {
-                    return Err(invalid(format!("ambiguous output `{name}`")));
-                }
-            }
-        }
-        let mut domains = vec![StreamDomain {
-            source: 0,
-            steps: Vec::new(),
-        }];
-        let mut output_domains = vec![0; nodes.len()];
-        for (index, node) in nodes.iter().enumerate() {
-            if index == 0 {
-                if !dependencies[index].is_empty() {
-                    return Err(invalid(
-                        "stream input cannot have incoming dependencies".into(),
-                    ));
-                }
-                continue;
-            }
-            let mut incoming_domains = BTreeSet::new();
-            for dependency in &dependencies[index] {
-                let source = indices
-                    .get(dependency.source_node.as_str())
-                    .copied()
-                    .ok_or_else(|| {
-                        invalid(format!(
-                            "node `{}` has unknown dependency `{}`",
-                            node.definition_id, dependency.source_node
-                        ))
-                    })?;
-                if source >= index {
-                    return Err(invalid(format!(
-                        "dependency `{}` must precede `{}`",
-                        dependency.source_node, node.definition_id
-                    )));
-                }
-                incoming_domains.insert(output_domains[source]);
-            }
-            if incoming_domains.len() != 1 {
-                let edges = dependencies[index]
-                    .iter()
-                    .map(|dependency| {
-                        format!(
-                            "{}.{} -> {}.{}",
-                            dependency.source_node,
-                            dependency.source_output,
-                            node.definition_id,
-                            dependency.input.as_deref().unwrap_or("<control>"),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                return Err(invalid(format!(
-                    "node `{}` requires one message domain and an explicit path from {STREAM_INPUT_ID}; incoming domains: {incoming_domains:?}; dependencies: {edges}",
-                    node.definition_id
-                )));
-            }
-            let domain = *incoming_domains.first().unwrap();
-            domains[domain].steps.push(index);
-            output_domains[index] = match &node.node {
-                Some(NodeExecution::Task(_)) => domain,
-                Some(NodeExecution::Event(_)) => {
-                    let new_domain = domains.len();
-                    domains.push(StreamDomain {
-                        source: index,
-                        steps: Vec::new(),
-                    });
-                    new_domain
-                }
-                None => {
-                    return Err(invalid(format!(
-                        "node `{}` has no execution implementation",
-                        node.definition_id
-                    )));
-                }
-            };
-            for reference in &node.metadata.context_references {
-                let producer = output_index
-                    .get(&reference.output)
-                    .copied()
-                    .ok_or_else(|| {
-                        invalid(format!(
-                            "node `{}` references unknown output `{}`",
-                            node.definition_id, reference.output
-                        ))
-                    })?;
-                if output_domains[producer] != domain || producer >= index {
-                    return Err(invalid(format!(
-                        "node `{}` context reference `{}` crosses a message boundary",
-                        node.definition_id, reference.output
-                    )));
-                }
-            }
-        }
-        let mut selected_domain = None;
-        for output in &outputs {
-            let index = indices.get(output.node.as_str()).copied().ok_or_else(|| {
-                invalid(format!("unknown selected output node `{}`", output.node))
-            })?;
-            let domain = output_domains[index];
-            if selected_domain.is_some_and(|selected| selected != domain) {
-                return Err(invalid(format!(
-                    "selected output `{}` belongs to a different message domain",
-                    output.name
-                )));
-            }
-            selected_domain = Some(domain);
-        }
+        let domains = MessageDomains::new(&nodes, &dependencies, &outputs)?;
         let mut event_states = Vec::with_capacity(nodes.len());
         let nodes = nodes
             .into_iter()
@@ -232,9 +109,7 @@ impl PreparedStream {
             nodes,
             dependencies,
             domains,
-            output_domains,
             outputs,
-            selected_domain,
         };
         if plan.execution().limits.max_pending_messages < plan.domains().len() {
             return Err(invalid(format!(
@@ -265,16 +140,16 @@ impl StreamPlan {
         &self.dependencies[node]
     }
     pub fn domains(&self) -> &[StreamDomain] {
-        &self.domains
+        self.domains.domains()
     }
     pub fn output_domain(&self, node: usize) -> usize {
-        self.output_domains[node]
+        self.domains.output_domain(node)
     }
     pub fn outputs(&self) -> &[WorkflowOutputDefinition] {
         &self.outputs
     }
     pub fn selected_domain(&self) -> Option<usize> {
-        self.selected_domain
+        self.domains.selected_domain()
     }
 
     pub fn execute_step(

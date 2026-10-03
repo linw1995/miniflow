@@ -99,8 +99,16 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
         ValueType::Array
     );
     assert_eq!(prepared.plan().domains().len(), 2);
+    assert_eq!(prepared.plan().domains()[0].source, 0);
     assert_eq!(prepared.plan().domains()[0].steps, [1]);
+    assert_eq!(prepared.plan().domains()[1].source, 1);
     assert_eq!(prepared.plan().domains()[1].steps, [2]);
+    assert_eq!(
+        (0..3)
+            .map(|node| prepared.plan().output_domain(node))
+            .collect::<Vec<_>>(),
+        [0, 1, 1]
+    );
     assert_eq!(prepared.plan().selected_domain(), Some(1));
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let plan = plan_definition(&definition).unwrap();
@@ -168,7 +176,11 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
             edge("right", "value", "join", "right"),
         ],
     );
-    assert_eq!(prepare(value).unwrap().plan().domains().len(), 1);
+    let prepared = prepare(value).unwrap();
+    assert_eq!(prepared.plan().domains().len(), 1);
+    assert!(
+        (0..prepared.plan().nodes().len()).all(|node| prepared.plan().output_domain(node) == 0)
+    );
 
     let chained = graph(
         json!([{"id":"first", "kind":"test.collect"}, {"id":"second", "kind":"test.collect"}]),
@@ -177,7 +189,23 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
             edge("first", "items", "second", "item"),
         ],
     );
-    assert_eq!(prepare(chained).unwrap().plan().domains().len(), 3);
+    let prepared = prepare(chained).unwrap();
+    assert_eq!(prepared.plan().domains().len(), 3);
+    assert_eq!(
+        prepared
+            .plan()
+            .domains()
+            .iter()
+            .map(|domain| (domain.source, domain.steps.as_slice()))
+            .collect::<Vec<_>>(),
+        [(0, [1].as_slice()), (1, [2].as_slice()), (2, [].as_slice())]
+    );
+    assert_eq!(
+        (0..3)
+            .map(|node| prepared.plan().output_domain(node))
+            .collect::<Vec<_>>(),
+        [0, 1, 2]
+    );
 
     let mut independent = graph(
         json!([
