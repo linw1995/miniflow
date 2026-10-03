@@ -180,8 +180,8 @@ new message domain. Cross-domain joins and context reads are rejected during pre
 Use `mf_compiler::instantiate_stream` to prepare an instance and inspect its immutable graph through
 `plan()`. Consume the prepared instance with `start` or `start_with_options`. Each preparation creates
 independent plugin state. Task and event executors are reused across messages for the instance lifetime.
-The coordinator serializes events; ordinary tasks run on bounded workers. Each worker dispatch runs
-consecutive ordinary tasks in validated order, returning the frame before the next event node or when
+The coordinator serializes events and submits frames to `WorkerPool`, which owns the reusable threads
+and bounded job queue. Each submitted frame runs consecutive ordinary tasks in validated order, returning the frame before the next event node or when
 it is complete. A recorded instance failure prevents the next task call within that dispatch.
 
 `instance.input()` returns a cloneable sender. `send` waits for admission capacity and completes once
