@@ -18,8 +18,9 @@ a fresh step budget. Synchronous bodies remain task-only.
 
 ## Progress and scheduling bounds
 
-One FIFO frame executes per domain. A bounded worker pool keeps synchronous business calls off the
-coordinator, allowing idle deadlines to progress. Each dispatch advances consecutive ordinary tasks
+One FIFO frame executes per domain. The shared `WorkerPool` keeps synchronous business calls off the
+coordinator, allowing idle deadlines to progress. The streaming callback owns frame traversal and
+completion delivery; the pool owns threads, bounded submission, and shutdown. Each dispatch advances consecutive ordinary tasks
 in validated order until an event boundary or frame completion. The worker checks the instance's
 terminal failure between calls; an error leaves the cursor at the failing task. Branches keep their
 existing topological order and share the same frame context. Each operator has one replaceable
