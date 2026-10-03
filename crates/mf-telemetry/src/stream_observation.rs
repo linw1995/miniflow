@@ -39,10 +39,12 @@ impl Observer {
         run_id: RunId,
     ) -> Result<StreamObservation, ContractError> {
         description.validate()?;
-        crate::require(
+        snafu::ensure!(
             description.version.is_streaming(),
-            "stream observation requires a streaming description",
-        )?;
+            crate::InvalidSnafu {
+                message: "stream observation requires a streaming description",
+            }
+        );
         let parent = Context::current();
         let span = self
             .0
