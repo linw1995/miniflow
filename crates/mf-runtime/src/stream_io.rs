@@ -1,3 +1,5 @@
+#[cfg(not(unix))]
+use crate::stream_instance::PreparationSnafu;
 use crate::{StreamError, StreamInstance, StreamSummary};
 
 #[cfg(unix)]
@@ -8,7 +10,7 @@ mod unix {
         ThreadSpawnSnafu,
     };
     use crate::{StreamSender, ValueRef, ValueType};
-    use snafu::{IntoError, ResultExt};
+    use snafu::{IntoError, OptionExt, ResultExt, ensure};
     use std::{
         fs::File,
         io::{self, Read, Write},
@@ -179,9 +181,9 @@ mod unix {
             for &byte in &chunk[..read] {
                 if byte == b'\n' {
                     accept_record(&mut record, line, input, value_type)?;
-                    line = line
-                        .checked_add(1)
-                        .ok_or_else(|| input_error(line, "line counter exhausted"))?;
+                    line = line.checked_add(1).with_context(|| InputFailureSnafu {
+                        message: format!("line {line}: line counter exhausted"),
+                    })?;
                 } else {
                     record.push(byte);
                 }
@@ -198,9 +200,12 @@ mod unix {
         if record.last() == Some(&b'\r') {
             record.pop();
         }
-        if record.iter().all(u8::is_ascii_whitespace) {
-            return Err(input_error(line, "blank JSON Lines record"));
-        }
+        ensure!(
+            !record.iter().all(u8::is_ascii_whitespace),
+            InputFailureSnafu {
+                message: format!("line {line}: blank JSON Lines record"),
+            }
+        );
         let value: ValueRef = serde_json::from_slice::<serde_json::Value>(record)
             .boxed()
             .context(InputRecordSnafu { line })?
@@ -212,13 +217,6 @@ mod unix {
         input.send(value)?;
         record.clear();
         Ok(())
-    }
-
-    fn input_error(line: u64, message: &str) -> StreamError {
-        InputFailureSnafu {
-            message: format!("line {line}: {message}"),
-        }
-        .build()
     }
 
     fn write_record(
@@ -260,14 +258,16 @@ pub struct StreamStdio {
 #[cfg(not(unix))]
 impl StreamStdio {
     pub fn claim() -> Result<Self, StreamError> {
-        Err(StreamError::Preparation {
-            message: "stream stdio requires Linux or macOS".into(),
-        })
+        PreparationSnafu {
+            message: "stream stdio requires Linux or macOS",
+        }
+        .fail()
     }
     pub fn run(self, instance: StreamInstance) -> Result<StreamSummary, StreamError> {
-        let error = StreamError::Preparation {
-            message: "stream stdio requires Linux or macOS".into(),
-        };
+        let error = PreparationSnafu {
+            message: "stream stdio requires Linux or macOS",
+        }
+        .build();
         instance.input().fail(error.clone());
         let _ = instance.join();
         Err(error)

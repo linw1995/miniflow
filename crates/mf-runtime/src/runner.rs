@@ -23,7 +23,7 @@ pub enum WorkflowRunError {
         input: String,
         source: crate::TypeMismatch,
     },
-    #[snafu(display("node `{definition_id}`: {message}"))]
+    #[snafu(display("node `{definition_id}`: {message}"), visibility(pub))]
     Context {
         definition_id: DefinitionId,
         message: String,

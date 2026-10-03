@@ -512,7 +512,7 @@ pub enum NodeBuildError {
 
 #[derive(Debug, Snafu)]
 pub enum NodeExecutionError {
-    #[snafu(display("node execution failed: {message}"))]
+    #[snafu(display("node execution failed: {message}"), visibility(pub))]
     ExecutionFailed { message: String },
     #[snafu(display("node plugin failed: {source}"), visibility(pub))]
     PluginFailed {
