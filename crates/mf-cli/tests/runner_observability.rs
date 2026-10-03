@@ -299,27 +299,59 @@ fn read_request(mut stream: TcpStream) -> Option<(String, Vec<u8>)> {
 }
 
 type CapturedRequests = Vec<(String, Vec<u8>)>;
-type CollectorHandle = thread::JoinHandle<CapturedRequests>;
 
-fn collector(expected: usize) -> (String, CollectorHandle) {
+struct CollectorHandle {
+    stop: mpsc::Sender<()>,
+    exported: mpsc::Receiver<String>,
+    worker: thread::JoinHandle<CapturedRequests>,
+}
+
+impl CollectorHandle {
+    fn wait_for_exports(&self) {
+        let deadline = Instant::now() + Duration::from_secs(8);
+        let mut logs = false;
+        let mut traces = false;
+        while !logs || !traces {
+            let path = self
+                .exported
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("OTLP logs and traces did not arrive");
+            match path.as_str() {
+                "/v1/logs" => logs = true,
+                "/v1/traces" => traces = true,
+                other => panic!("unexpected OTLP endpoint {other}"),
+            }
+        }
+    }
+
+    fn finish(self) -> CapturedRequests {
+        drop(self.stop);
+        self.worker.join().unwrap()
+    }
+}
+
+fn collector() -> (String, CollectorHandle) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     listener.set_nonblocking(true).unwrap();
+    let (stop, stopped) = mpsc::channel();
+    let (exported, exports) = mpsc::channel();
     let worker = thread::spawn(move || {
-        let mut requests = Vec::new();
-        let (sender, receiver) = mpsc::channel();
+        let mut handlers = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(8);
-        while requests.len() < expected && Instant::now() < deadline {
-            requests.extend(receiver.try_iter());
+        while matches!(stopped.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+            assert!(Instant::now() < deadline, "OTLP collector was not stopped");
             match listener.accept() {
                 Ok((stream, _)) => {
                     // An idle connection must not block a concurrent logs or traces request.
-                    let sender = sender.clone();
-                    thread::spawn(move || {
-                        if let Some(request) = read_request(stream) {
-                            let _ = sender.send(request);
+                    let exported = exported.clone();
+                    handlers.push(thread::spawn(move || {
+                        let request = read_request(stream);
+                        if let Some((path, _)) = &request {
+                            let _ = exported.send(path.clone());
                         }
-                    });
+                        request
+                    }));
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(5))
@@ -327,11 +359,20 @@ fn collector(expected: usize) -> (String, CollectorHandle) {
                 Err(error) => panic!("collector accept failed: {error}"),
             }
         }
-        requests.extend(receiver.try_iter());
-        assert_eq!(requests.len(), expected, "OTLP requests did not arrive");
-        requests
+        // A runner can exit after the HTTP response but before its handler returns.
+        handlers
+            .into_iter()
+            .filter_map(|handler| handler.join().unwrap())
+            .collect()
     });
-    (endpoint, worker)
+    (
+        endpoint,
+        CollectorHandle {
+            stop,
+            exported: exports,
+            worker,
+        },
+    )
 }
 
 fn check_otel(
@@ -522,7 +563,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     );
     assert_eq!(last_json(&plain.stdout), json!({"answer":14}));
 
-    let (endpoint, worker) = collector(2);
+    let (endpoint, worker) = collector();
     let observed = command(&runner)
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
         .env("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
@@ -535,7 +576,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
         String::from_utf8_lossy(&observed.stderr)
     );
     assert_eq!(observed.stdout, plain.stdout);
-    let requests = worker.join().unwrap();
+    let requests = worker.finish();
     check_otel(
         &requests,
         &[
@@ -551,18 +592,16 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
         4,
         description.workflow_id.as_str(),
     );
-    let logs = requests
-        .iter()
-        .find(|(path, _)| path == "/v1/logs")
-        .unwrap();
-    let export = ExportLogsServiceRequest::decode(logs.1.as_slice()).unwrap();
-    assert!(export.resource_logs.iter().flat_map(|resource| &resource.scope_logs)
-        .flat_map(|scope| &scope.log_records).all(|record| {
-            record.attributes.iter().any(|attribute| {
-                attribute.key == "mf.run.id" && matches!(attribute.value.as_ref().and_then(|value| value.value.as_ref()),
-                    Some(any_value::Value::StringValue(id)) if id == "12345678-1234-4234-9234-123456789abc")
-            })
-        }));
+    for (_, body) in requests.iter().filter(|(path, _)| path == "/v1/logs") {
+        let export = ExportLogsServiceRequest::decode(body.as_slice()).unwrap();
+        assert!(export.resource_logs.iter().flat_map(|resource| &resource.scope_logs)
+            .flat_map(|scope| &scope.log_records).all(|record| {
+                record.attributes.iter().any(|attribute| {
+                    attribute.key == "mf.run.id" && matches!(attribute.value.as_ref().and_then(|value| value.value.as_ref()),
+                        Some(any_value::Value::StringValue(id)) if id == "12345678-1234-4234-9234-123456789abc")
+                })
+            }));
+    }
 
     let run_id =
         mf_telemetry::identity::RunId::try_from("12345678-1234-4234-9234-123456789abd".to_owned())
@@ -615,7 +654,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
         json!(14)
     );
 
-    let (endpoint, worker) = collector(1);
+    let (endpoint, worker) = collector();
     let logs_only = command(&runner)
         .env(
             "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
@@ -625,19 +664,23 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
         .unwrap();
     assert!(logs_only.status.success());
     assert_eq!(logs_only.stdout, plain.stdout);
-    let requests = worker.join().unwrap();
-    assert_eq!(requests[0].0, "/v1/logs");
-    let logs = ExportLogsServiceRequest::decode(requests[0].1.as_slice()).unwrap();
+    let requests = worker.finish();
     assert_eq!(
-        logs.resource_logs
+        requests
             .iter()
-            .flat_map(|resource| &resource.scope_logs)
-            .flat_map(|scope| &scope.log_records)
+            .flat_map(|(path, body)| {
+                assert_eq!(path, "/v1/logs");
+                ExportLogsServiceRequest::decode(body.as_slice())
+                    .unwrap()
+                    .resource_logs
+            })
+            .flat_map(|resource| resource.scope_logs)
+            .flat_map(|scope| scope.log_records)
             .count(),
         8
     );
 
-    let (endpoint, worker) = collector(1);
+    let (endpoint, worker) = collector();
     let traces_only = command(&runner)
         .env(
             "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
@@ -647,15 +690,18 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
         .unwrap();
     assert!(traces_only.status.success());
     assert_eq!(traces_only.stdout, plain.stdout);
-    let requests = worker.join().unwrap();
-    assert_eq!(requests[0].0, "/v1/traces");
-    let traces = ExportTraceServiceRequest::decode(requests[0].1.as_slice()).unwrap();
+    let requests = worker.finish();
     assert_eq!(
-        traces
-            .resource_spans
+        requests
             .iter()
-            .flat_map(|resource| &resource.scope_spans)
-            .flat_map(|scope| &scope.spans)
+            .flat_map(|(path, body)| {
+                assert_eq!(path, "/v1/traces");
+                ExportTraceServiceRequest::decode(body.as_slice())
+                    .unwrap()
+                    .resource_spans
+            })
+            .flat_map(|resource| resource.scope_spans)
+            .flat_map(|scope| scope.spans)
             .count(),
         4
     );
@@ -689,14 +735,14 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
             .success()
     );
     let failing_description = describe_executable(&failing_runner).unwrap();
-    let (endpoint, worker) = collector(2);
+    let (endpoint, worker) = collector();
     let failed = command(&failing_runner)
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
         .output()
         .unwrap();
     assert!(!failed.status.success());
     assert!(String::from_utf8_lossy(&failed.stderr).contains("execution sentinel"));
-    let requests = worker.join().unwrap();
+    let requests = worker.finish();
     check_otel(
         &requests,
         &[
@@ -858,7 +904,7 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         &root.path().join("flow.lock"),
         &definition,
     );
-    let execute = |endpoint: Option<&str>| {
+    let execute = |endpoint: Option<&str>, collector: Option<&CollectorHandle>| {
         let mut command = command(&runner);
         if let Some(endpoint) = endpoint {
             command.env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint);
@@ -869,12 +915,14 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(b"1\n2\n3\n4\n5\n")
-            .unwrap();
+        let mut input = child.stdin.take().unwrap();
+        input.write_all(b"1\n2\n3\n").unwrap();
+        if let Some(collector) = collector {
+            // Force later events into new export requests without relying on sleeps.
+            collector.wait_for_exports();
+        }
+        input.write_all(b"4\n5\n").unwrap();
+        drop(input);
         let output = child.wait_with_output().unwrap();
         assert!(
             output.status.success(),
@@ -883,11 +931,18 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         );
         output
     };
-    let plain = execute(None);
-    let (endpoint, collector) = collector(2);
-    let observed = execute(Some(&endpoint));
+    let plain = execute(None, None);
+    let (endpoint, collector) = collector();
+    let observed = execute(Some(&endpoint), Some(&collector));
     assert_eq!(observed.stdout, plain.stdout);
-    let requests = collector.join().unwrap();
+    let requests = collector.finish();
+    assert!(
+        requests
+            .iter()
+            .filter(|(path, _)| path == "/v1/logs")
+            .count()
+            >= 2
+    );
     let mut records = Vec::new();
     let mut spans = Vec::new();
     for (path, body) in requests {
@@ -940,8 +995,11 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         StreamPayload::Control(StreamEvent::Flushed { .. })
     )));
     assert!(
-        matches!(&records.last().unwrap().payload, StreamPayload::Control(StreamEvent::Finished { outcome: StreamOutcome::Succeeded, counts, .. }) if counts.accepted_inputs == 5 && counts.delivered_outputs == 2)
+        matches!(&records.last().unwrap().payload, StreamPayload::Control(StreamEvent::Finished { outcome: StreamOutcome::Succeeded, counts, .. }) if counts.accepted_inputs == 5 && counts.delivered_outputs == 2),
+        "unexpected terminal record: {:?}",
+        records.last()
     );
+    assert_eq!(spans.len(), 9);
     assert!(
         spans
             .iter()
@@ -956,7 +1014,7 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         .local_addr()
         .unwrap();
     assert_eq!(
-        execute(Some(&format!("http://{closed}"))).stdout,
+        execute(Some(&format!("http://{closed}")), None).stdout,
         plain.stdout
     );
 }
