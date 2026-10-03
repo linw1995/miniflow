@@ -321,6 +321,30 @@ No implicit conversion occurs. A present null exists and can be compared with an
 
 A selected output can fan out to multiple downstream nodes; all eligible consumers execute. Only one branch output is active per router invocation. Execution is sequential in topological order, and a node gated by mutually exclusive outputs is skipped rather than acting as a merge. Compound boolean expressions and field-to-field comparisons are deferred.
 
+## Workflow startup parameters
+
+Schema `2026-10-03` promotes the inputs of top-level initial nodes to workflow parameters. An initial node
+has no incoming data or control edges. Its configured input types and required flags define the interface;
+the workflow does not repeat those declarations. A node behind a control edge still needs its required
+data connections. Loop and Iteration body inputs stay local to their enclosing scope.
+
+Supply a JSON object keyed by exact node ID and then input port. Names containing dots remain whole keys:
+
+```json
+{
+  "read": { "path": "/data/events.jsonl" },
+  "copy": { "input": { "count": 42 } }
+}
+```
+
+All startup arguments are checked before any node executes. Unknown nodes/ports, missing required values,
+duplicate JSON keys, and type mismatches fail with input context. Optional omissions stay absent; explicit
+null is checked against the port type. Parameter values do not specialize the compiled graph or persist
+between invocations. `describe_workflow_inputs` inspects configured requirements without executing nodes;
+`execute_compiled_with_inputs` and `Flow::execute_with_inputs` bind values through the same validator.
+
+Older single-run schemas keep their required-edge rules.
+
 ## Streaming through the in-memory API
 
 Definitions using schema `2026-10-02` can set `execution.mode` to `stream` and declare `input_type` with

@@ -13,8 +13,8 @@ parameters through the workflow interface and start without an external trigger 
 - Start initial tasks once and initial stream producers once per workflow instance. Preserve message-driven
   execution downstream of producers.
 - **BREAKING**: Introduce definition schema `2026-10-03`, remove automatic `%input` injection and
-  `execution.input_type`, and replace the instance-wide input sender with explicit source handles. Reject old
-  streaming definitions with migration instructions; retain existing single-run schemas.
+  `execution.input_type`, and replace the instance-wide input sender with explicit source handles. Delete all
+  associated execution and validation special cases; retain existing single-run schemas.
 - Provide an explicit typed stdin JSON Lines source and a programmatic channel source so existing
   external-input use cases remain available.
 - Add shared runner/CLI startup argument handling and bounded interface inspection for configuration-dependent

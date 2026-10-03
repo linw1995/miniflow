@@ -164,6 +164,7 @@ fn producer(config: Value) -> Result<PreparedNode, mf_runtime::NodeBuildError> {
                 inputs: vec![PortSpec::new("input", ValueType::Int64, true)],
                 outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
             },
+            resources: Vec::new(),
             context_references: if mode == "context" {
                 vec![mf_runtime::ContextReference::new(
                     "copy.value",

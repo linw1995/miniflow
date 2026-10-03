@@ -104,10 +104,16 @@ pub enum WorkflowDefinitionVersion {
     V2026_09_29,
     #[serde(rename = "2026-10-02")]
     V2026_10_02,
+    #[serde(rename = "2026-10-03")]
+    V2026_10_03,
 }
 
 impl WorkflowDefinitionVersion {
-    pub const CURRENT: Self = Self::V2026_10_02;
+    pub const CURRENT: Self = Self::V2026_10_03;
+
+    pub fn supports_startup_inputs(self) -> bool {
+        self == Self::V2026_10_03
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

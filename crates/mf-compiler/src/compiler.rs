@@ -45,6 +45,10 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
+    #[snafu(display("{source}"))]
+    WorkflowInputs {
+        source: mf_runtime::WorkflowInputError,
+    },
     #[snafu(display("invalid streaming workflow: {message}"), visibility(pub))]
     InvalidStream { message: String },
     #[snafu(
@@ -412,7 +416,38 @@ fn prepare_graph(
         }.fail();
     }
     let incoming = incoming_dependencies(definition);
-    validate_base_metadata(definition, &nodes, &incoming)?;
+    let startup = definition.version.supports_startup_inputs()
+        && enclosing.is_none()
+        && !allow_iteration_input;
+    validate_base_metadata(definition, &nodes, &incoming, startup)?;
+    if startup {
+        mf_runtime::WorkflowInputSchema::from_nodes(
+            nodes
+                .iter()
+                .map(|node| (node, !incoming.contains_key(node.definition_id.as_str()))),
+        )
+        .context(WorkflowInputsSnafu)?;
+        if let Some(node) = nodes.iter().find(|node| {
+            !incoming.contains_key(node.definition_id.as_str())
+                && matches!(node.node, Some(mf_runtime::NodeExecution::Event(_)))
+        }) {
+            return InvalidStreamSnafu {
+                message: format!(
+                    "initial event node `{}` requires an explicit activation source",
+                    node.definition_id
+                ),
+            }
+            .fail();
+        }
+    } else if let Some(node) = nodes
+        .iter()
+        .find(|node| !node.metadata.resources.is_empty())
+    {
+        return Err(WorkflowCompileError::InvalidNodeMetadata {
+            definition_id: node.definition_id.clone(),
+            message: "input resources require a schema 2026-10-03 top-level initial node".into(),
+        });
+    }
 
     let indices: BTreeMap<_, _> = nodes
         .iter()
@@ -458,6 +493,7 @@ fn validate_base_metadata(
     definition: &WorkflowDefinition,
     nodes: &[FlowNode],
     incoming: &BTreeMap<&str, Vec<ExecutionDependency<'_>>>,
+    startup: bool,
 ) -> Result<(), WorkflowCompileError> {
     let registrations: BTreeMap<_, _> = nodes
         .iter()
@@ -578,6 +614,9 @@ fn validate_base_metadata(
 
     for node in &definition.nodes {
         let registration = registrations[&node.id];
+        if startup && !incoming.contains_key(node.id.as_str()) {
+            continue;
+        }
         for port in registration.inputs.iter().filter(|port| port.required) {
             if !connected_inputs.contains(&(node.id.clone(), port.name.to_string())) {
                 return MissingRequiredInputSnafu {
@@ -950,6 +989,30 @@ pub fn instantiate_compiled(
     )
     .and_then(|flow| flow.with_control_edges(plan.definition.control_edges.clone()))
     .context(FlowConstructionSnafu)
+    .and_then(|flow| {
+        if plan.definition.version.supports_startup_inputs() {
+            flow.with_workflow_inputs().context(WorkflowInputsSnafu)
+        } else {
+            Ok(flow)
+        }
+    })
+}
+
+pub fn describe_workflow_inputs(
+    plan: &CompiledWorkflow,
+    registry: &NodeRegistry,
+) -> Result<mf_runtime::WorkflowInputSchema, WorkflowCompileError> {
+    let (nodes, _) = prepare_definition(&plan.definition, registry)?;
+    if !plan.definition.version.supports_startup_inputs() {
+        return Ok(mf_runtime::WorkflowInputSchema::default());
+    }
+    let incoming = incoming_dependencies(&plan.definition);
+    mf_runtime::WorkflowInputSchema::from_nodes(
+        nodes
+            .iter()
+            .map(|node| (node, !incoming.contains_key(node.definition_id.as_str()))),
+    )
+    .context(WorkflowInputsSnafu)
 }
 
 #[derive(Debug, Snafu)]
@@ -1023,7 +1086,8 @@ pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription,
                     WorkflowDescriptionVersion::V2026_09_27
                 }
                 mf_runtime::WorkflowDefinitionVersion::V2026_09_29
-                | mf_runtime::WorkflowDefinitionVersion::V2026_10_02 => {
+                | mf_runtime::WorkflowDefinitionVersion::V2026_10_02
+                | mf_runtime::WorkflowDefinitionVersion::V2026_10_03 => {
                     WorkflowDescriptionVersion::V2026_09_29
                 }
             }
@@ -1117,7 +1181,22 @@ pub fn execute_compiled(
     registry: &NodeRegistry,
     observation: Option<mf_runtime::RunObservation>,
 ) -> Result<mf_runtime::FlowOutputs, WorkflowExecutionError> {
+    execute_compiled_with_inputs(
+        plan,
+        registry,
+        mf_runtime::WorkflowArguments::default(),
+        observation,
+    )
+}
+
+pub fn execute_compiled_with_inputs(
+    plan: &CompiledWorkflow,
+    registry: &NodeRegistry,
+    arguments: mf_runtime::WorkflowArguments,
+    observation: Option<mf_runtime::RunObservation>,
+) -> Result<mf_runtime::FlowOutputs, WorkflowExecutionError> {
     mf_runtime::ExecutionContext::run(observation, |state| {
+        state.set_workflow_arguments(arguments);
         let flow = instantiate_compiled(plan, registry)
             .inspect_err(|error| {
                 if let WorkflowCompileError::NodeConstruction { definition_id, .. }

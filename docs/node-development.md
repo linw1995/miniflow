@@ -172,6 +172,19 @@ Event state requires `Send`; mutable access is exclusive and
 helpers convert a prepared `FlowNode` with `into_task()` first. Generated synchronous bodies perform
 that conversion before capturing their task executors.
 
+## Startup input and resource declarations
+
+Top-level initial nodes in schema `2026-10-03` expose their prepared input ports as workflow parameters.
+Factories derive ports from configuration and do not need invocation values. Required flags and type
+descriptors retain their ordinary port meaning. `WorkflowArguments::from_json` rejects duplicate keys and
+limits JSON arguments to 1 MiB; `WorkflowInputSchema` validates the complete object before dispatch.
+
+`NodeMetadata.resources` declares `InputResource::Stdin` or `InputResource::Channel` for initial nodes.
+Resource metadata is available without opening files, claiming descriptors, or receiving messages.
+Validation rejects duplicate declarations, multiple exclusive stdin owners, and noninitial resource
+consumers. Hosts can check availability with `WorkflowInputSchema::validate_resources`. Resource discovery
+uses metadata for both built-in and external providers. Runtime handles are not JSON input values.
+
 ## Incremental stream producers
 
 `PreparedNode::stream(producer, metadata)` selects `NodeExecution::Stream`. Implement `StreamNode`

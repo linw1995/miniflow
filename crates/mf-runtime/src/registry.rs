@@ -102,6 +102,7 @@ mod tests {
                 outputs: vec![],
             },
             output_derivations: Vec::new(),
+            resources: Vec::new(),
             context_references: Vec::new(),
         };
         Ok(crate::PreparedNode::new(node, metadata))
@@ -115,6 +116,7 @@ mod tests {
                 outputs: vec![crate::PortSpec::new("value", ValueType::Any, false)],
             },
             output_derivations: Vec::new(),
+            resources: Vec::new(),
             context_references: Vec::new(),
         };
         Ok(crate::PreparedNode::new(node, metadata))

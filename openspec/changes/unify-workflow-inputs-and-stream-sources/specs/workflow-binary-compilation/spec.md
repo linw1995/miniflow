@@ -170,42 +170,6 @@ would place the referenced node first.
 - **THEN** compilation validates and exposes those parameter requirements without executing the node or
   requiring invocation values during the build
 
-### Requirement: Opt in to a typed streaming definition
-
-Schema `2026-10-03` SHALL accept `execution` with `mode: "stream"` and optional resource limits, and MUST
-reject `execution.input_type`. It SHALL derive startup parameters from initial nodes and obtain stream item
-types from explicit source output ports without injecting `%input`. Without `execution`, the new schema SHALL
-use single-run execution with the same startup parameter interface. Older accepted single-run schemas SHALL
-retain their existing behavior; older streaming definitions MUST receive an explicit-source migration
-diagnostic.
-
-#### Scenario: Compile a typed stream
-
-- **WHEN** a new-schema workflow connects an explicit integer source's `item` output to Batch
-- **THEN** validation resolves integer items and list-of-integer batch output without an engine input node
-
-#### Scenario: Preserve an older definition
-
-- **WHEN** a definition uses an existing accepted single-run schema without streaming configuration
-- **THEN** its execution, required connections, dependencies, and single-result output behavior are unchanged
-
-#### Scenario: Require explicit streaming support
-
-- **WHEN** a single-run definition contains an event or stream executor
-- **THEN** validation fails with a mode diagnostic
-
-#### Scenario: Migrate old streaming syntax
-
-- **WHEN** a definition uses the old streaming schema, `execution.input_type`, or a reference to the removed
-  synthetic `%input` source
-- **THEN** compilation explains how to use schema `2026-10-03`, explicit sources, and startup parameters
-  instead of silently changing activation behavior
-
-#### Scenario: Reserve the input source
-
-- **WHEN** a user node or plugin attempts to redefine the removed synthetic `%input` source
-- **THEN** validation rejects the reserved legacy identity and directs the author to a named explicit source
-
 ### Requirement: Validate activation and message boundaries before installation
 
 Streaming validation SHALL recognize initial tasks and stream producers without requiring a path from an
@@ -282,6 +246,33 @@ workflow execution events.
 
 ## ADDED Requirements
 
+### Requirement: Declare source-driven streaming execution
+
+Schema `2026-10-03` SHALL accept `execution` with `mode: "stream"` and optional resource limits. Startup
+parameters SHALL come from initial node ports, and stream item types from explicit source outputs. The engine
+input field, global sender, synthetic source, and their special-case validators SHALL be removed. Older
+single-run schemas SHALL retain their existing behavior.
+
+#### Scenario: Compile a typed source
+
+- **WHEN** an explicit integer source feeds Batch
+- **THEN** validation resolves integer items and list-of-integer batches through ordinary node ports
+
+#### Scenario: Handle a removed field normally
+
+- **WHEN** a definition supplies a field absent from the execution schema
+- **THEN** normal schema validation reports the unknown field without selecting a legacy input mode
+
+#### Scenario: Treat node names uniformly
+
+- **WHEN** a user declares a node named `%input` with a registered kind
+- **THEN** that node has the same ordinary graph and execution rules as any other user node, with no implicit outputs
+
+#### Scenario: Report an absent endpoint normally
+
+- **WHEN** an edge names `%input` and no such node is declared
+- **THEN** normal graph validation reports an unknown endpoint without injecting or specially banning that node
+
 ### Requirement: Inspect configured startup interfaces in the installed runner
 
 New runners SHALL support `--describe-interface`, returning one versioned JSON document with workflow
@@ -344,6 +335,13 @@ source; result delivery remains incremental and backpressured.
 - **THEN** stdin EOF drains only that source and does not declare the entire workflow complete
 
 ## REMOVED Requirements
+
+### Requirement: Opt in to a typed streaming definition
+
+**Reason**: The mandatory engine input model is removed in favor of startup parameters and explicit sources.
+
+**Migration**: Use schema `2026-10-03`, declare source nodes, and move item types to those nodes. The removed
+`input_type` field and undeclared `%input` endpoints are handled by normal schema and graph validation.
 
 ### Requirement: Read JSON Lines input while timers progress
 

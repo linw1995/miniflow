@@ -149,8 +149,8 @@ host-only resources MUST fail before workflow execution.
 
 #### Scenario: Identify an older streaming runner
 
-- **WHEN** a runner requires the older mandatory `%input` execution protocol
-- **THEN** preflight explains the explicit-source migration and recompilation before executing the workflow
+- **WHEN** a runner requires an unsupported streaming observation protocol
+- **THEN** ordinary compatibility preflight requests recompilation before executing the workflow
 
 ### Requirement: Display repeated stream execution with bounded state
 

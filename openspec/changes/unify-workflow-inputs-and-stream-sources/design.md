@@ -66,8 +66,9 @@ never one run's actual values.
 
 Remove `STREAM_INPUT_ID`, synthetic-node expansion, input-position assumptions, and
 `StreamExecution.input_type` from the new runtime/compiler path. Preserve `execution.mode: stream` and
-resource limits. Retain older single-run definitions with their existing required-edge rules; reject
-`2026-10-02` streaming definitions rather than maintaining a second stream scheduler.
+resource limits. Retain older single-run definitions with their existing required-edge rules. Delete the old
+stream execution model completely. `%input` has no special meaning or reserved-name validation in the new
+model; removed fields and absent graph endpoints use ordinary schema and graph diagnostics.
 
 Represent one workflow invocation internally as one startup frame. It carries validated bindings and runs
 ordinary task dependencies in deterministic topological order. It is neither a user-visible node nor an
@@ -222,8 +223,8 @@ and process-status authority remain unchanged; long-running streams can still ex
 spool budget and must fail capture visibly.
 
 Keep existing finite binaries compatible without requiring the new interface operation when no parameters are
-supplied. Old streaming binaries that only implement the mandatory `%input` protocol receive an actionable
-migration diagnostic before execution. They remain directly runnable with their original stdin contract.
+supplied. Runners with an unsupported streaming protocol receive the same compatibility diagnostics as other
+unsupported protocols before execution. Existing binaries remain directly runnable on their own.
 
 ## Risks / Trade-offs
 
@@ -243,8 +244,9 @@ migration diagnostic before execution. They remain directly runnable with their 
 
 1. Add schema `2026-10-03`, interface inspection, and source resources with negative tests before switching
    stream preparation. Keep older single-run schemas working.
-2. Update source-driven runtime and generated execution together. Replace old streaming definitions, examples,
-   and fixtures; do not silently upgrade them during loading.
+2. Replace the stream runtime, explicit source adapters, and generated runner transport atomically. Delete
+   the old input type, sender API, synthetic source, and all associated special cases. Migrate existing
+   definitions, examples, and fixtures with this replacement; do not retain a compatibility execution path.
 3. For an old pipe-driven graph, replace `%input.item` with an explicit `builtin.stdin` node's `item`, move
    `execution.input_type` to that node's `config.item_type`, and update the version. Preserve former `%input`
    control edges from the explicit source when per-message activation is intended.

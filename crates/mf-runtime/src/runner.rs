@@ -5,6 +5,8 @@ use snafu::{ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowRunError {
+    #[snafu(display("{source}"))]
+    WorkflowInputs { source: crate::WorkflowInputError },
     #[snafu(
         display("node `{definition_id}` dependency `{input}`: {source}"),
         visibility(pub)
