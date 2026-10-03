@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::{ResultExt, Snafu};
+use snafu::{ResultExt, Snafu, ensure};
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
@@ -67,20 +67,17 @@ fn deserialize_execution<'de, D: serde::Deserializer<'de>>(
 impl WorkflowDefinition {
     pub fn validate_execution(&self) -> Result<(), crate::StreamBuildError> {
         if let Some(execution) = &self.execution {
-            if self.version != WorkflowDefinitionVersion::V2026_10_02 {
-                return crate::stream_plan::InvalidPlanSnafu {
+            ensure!(
+                self.version == WorkflowDefinitionVersion::V2026_10_02,
+                crate::stream_plan::InvalidPlanSnafu {
                     message: "stream execution requires workflow schema 2026-10-02",
                 }
-                .fail();
-            }
+            );
             execution
                 .input_type
                 .check_depth()
                 .context(crate::stream_plan::InputTypeSnafu)?;
-            execution
-                .limits
-                .validate()
-                .map_err(|message| crate::stream_plan::InvalidPlanSnafu { message }.build())?;
+            execution.limits.validate()?;
         }
         Ok(())
     }

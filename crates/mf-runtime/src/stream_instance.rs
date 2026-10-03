@@ -3,7 +3,7 @@ use crate::{
     Outputs, PreparedStream, StreamExecution, StreamPlan, TimerUpdate, ValueRef, WorkerPool,
 };
 use serde::Serialize;
-use snafu::{IntoError, OptionExt, ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::VecDeque,
     panic::{AssertUnwindSafe, catch_unwind},
@@ -15,7 +15,7 @@ use std::{
 
 #[derive(Clone, Debug, Snafu)]
 pub enum StreamError {
-    #[snafu(display("stream preparation failed: {message}"))]
+    #[snafu(display("stream preparation failed: {message}"), visibility(pub))]
     Preparation { message: String },
     #[snafu(display("stream preparation failed: {source}"), visibility(pub))]
     Compilation {
@@ -57,7 +57,7 @@ pub enum StreamError {
         #[snafu(source(from(crate::NodeExecutionError, Arc::new)))]
         source: Arc<crate::NodeExecutionError>,
     },
-    #[snafu(display("stream resource limit: {message}"))]
+    #[snafu(display("stream resource limit: {message}"), visibility(pub))]
     Resource { message: String },
     #[snafu(display("stream input capacity is full"))]
     Capacity,
@@ -217,9 +217,7 @@ impl StreamSender {
         if let Some(error) = &state.failure {
             return Err(error.clone());
         }
-        if state.input_closed || state.done {
-            return Err(StreamError::Closed);
-        }
+        ensure!(!state.input_closed && !state.done, ClosedSnafu);
         if let Err(error) = self
             .0
             .execution
@@ -235,9 +233,7 @@ impl StreamSender {
             if let Some(error) = &state.failure {
                 return Err(error.clone());
             }
-            if state.input_closed || state.done {
-                return Err(StreamError::Closed);
-            }
+            ensure!(!state.input_closed && !state.done, ClosedSnafu);
             if state.root_live < self.0.input_capacity {
                 let sequence =
                     take_sequence(&mut state.summary.accepted_inputs).inspect_err(|error| {
@@ -255,9 +251,7 @@ impl StreamSender {
                 self.0.changed.notify_all();
                 return Ok(());
             }
-            if !wait {
-                return Err(StreamError::Capacity);
-            }
+            ensure!(wait, CapacitySnafu);
             state = self.0.changed.wait(state).unwrap();
         }
     }
@@ -301,9 +295,12 @@ impl StreamDelivery {
 impl Drop for StreamDelivery {
     fn drop(&mut self) {
         if self.output.is_some() {
-            self.shared.fail(StreamError::Output {
-                message: "delivery was dropped before acknowledgement".into(),
-            });
+            self.shared.fail(
+                OutputSnafu {
+                    message: "delivery was dropped before acknowledgement",
+                }
+                .build(),
+            );
         }
     }
 }
@@ -319,11 +316,12 @@ impl PreparedStream {
     }
 
     pub fn start_with_options(self, options: StreamOptions) -> Result<StreamInstance, StreamError> {
-        if options.snapshots.is_some() {
-            return Err(StreamError::Preparation {
-                message: "snapshot capture is unsupported for streaming instances".into(),
-            });
-        }
+        ensure!(
+            options.snapshots.is_none(),
+            PreparationSnafu {
+                message: "snapshot capture is unsupported for streaming instances",
+            }
+        );
         let (prepared, event_states) = self.into_parts();
         let domain_count = prepared.domains().len();
         let input_capacity = prepared
@@ -480,9 +478,12 @@ impl StreamInstance {
 impl Drop for StreamInstance {
     fn drop(&mut self) {
         if let Some(coordinator) = self.coordinator.take() {
-            self.shared.fail(StreamError::Execution {
-                message: "stream instance dropped before completion".into(),
-            });
+            self.shared.fail(
+                ExecutionSnafu {
+                    message: "stream instance dropped before completion",
+                }
+                .build(),
+            );
             let _ = coordinator.join();
         }
     }
@@ -741,11 +742,14 @@ fn tick(
                 continue;
             }
 
-            match frame
+            if let Some(inputs) = frame
                 .context
                 .event_inputs(&plan.nodes()[index], plan.dependencies(index))
+                .context(WorkflowSnafu {
+                    message: frame.message,
+                })?
             {
-                Ok(Some(inputs)) => invoke_event(
+                invoke_event(
                     state,
                     plan,
                     index,
@@ -754,14 +758,7 @@ fn tick(
                         now: clock.now(),
                         input: Some(&frame.context),
                     },
-                )?,
-                Ok(None) => {}
-                Err(error) => {
-                    return Err(WorkflowSnafu {
-                        message: frame.message,
-                    }
-                    .into_error(error));
-                }
+                )?;
             }
             frame.cursor += 1;
             state.domains[domain].frame = Some(frame);
@@ -858,19 +855,19 @@ fn apply_effects(
 ) -> Result<(), StreamError> {
     let domain = plan.output_domain(index);
     let operator = state.operators[index].as_mut().unwrap();
-    if effects
-        .emissions
-        .len()
-        .saturating_add(operator.pending.len())
-        > plan.execution().limits.max_pending_messages
-    {
-        return Err(StreamError::Resource {
+    ensure!(
+        effects
+            .emissions
+            .len()
+            .saturating_add(operator.pending.len())
+            <= plan.execution().limits.max_pending_messages,
+        ResourceSnafu {
             message: format!(
                 "node `{}` emitted too many pending messages",
                 plan.nodes()[index].definition_id
             ),
-        });
-    }
+        }
+    );
     for emission in effects.emissions {
         ExecutionContext::for_message(&plan.nodes()[index], emission.result.clone()).context(
             WorkflowSnafu {
@@ -891,25 +888,26 @@ fn apply_effects(
         TimerUpdate::Keep => {}
         TimerUpdate::Cancel => operator.deadline = None,
         TimerUpdate::Set(deadline) => {
-            if deadline <= now {
-                return Err(StreamError::Execution {
+            ensure!(
+                deadline > now,
+                ExecutionSnafu {
                     message: format!(
                         "node `{}` must request a future timer deadline",
                         plan.nodes()[index].definition_id
                     ),
-                });
-            }
-            if Instant::now()
-                .checked_add(deadline.saturating_sub(now))
-                .is_none()
-            {
-                return Err(StreamError::Resource {
+                }
+            );
+            ensure!(
+                Instant::now()
+                    .checked_add(deadline.saturating_sub(now))
+                    .is_some(),
+                ResourceSnafu {
                     message: format!(
                         "node `{}` deadline exceeds the monotonic clock",
                         plan.nodes()[index].definition_id
                     ),
-                });
-            }
+                }
+            );
             operator.deadline = Some(deadline);
         }
     }
