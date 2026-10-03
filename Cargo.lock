@@ -1337,6 +1337,7 @@ name = "mf-runtime"
 version = "0.1.0"
 dependencies = [
  "inventory",
+ "libc",
  "mf-telemetry",
  "rpds",
  "serde",

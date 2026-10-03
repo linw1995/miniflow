@@ -11,15 +11,16 @@ fn workspace() -> &'static Path {
         .unwrap()
 }
 
-fn examples() -> [(&'static str, Value); 7] {
+fn examples() -> [(&'static str, Option<&'static str>, Value); 8] {
     [
-        ("cel-list.json", json!({"doubled": [2, 4]})),
-        ("cel-scalar.json", json!({"doubled": 42})),
-        ("else-if.json", json!({"medium": {"amount": 500}})),
-        ("hello-workflow.json", json!({"answer": 42})),
-        ("if-else.json", json!({"accepted": {"amount": 150}})),
-        ("iteration.json", json!({"results": [2, 5, 8]})),
-        ("loop.json", json!({"count": 3})),
+        ("cel-list.json", None, json!({"doubled": [2, 4]})),
+        ("cel-scalar.json", None, json!({"doubled": 42})),
+        ("else-if.json", None, json!({"medium": {"amount": 500}})),
+        ("hello-workflow.json", None, json!({"answer": 42})),
+        ("if-else.json", None, json!({"accepted": {"amount": 150}})),
+        ("iteration.json", None, json!({"results": [2, 5, 8]})),
+        ("loop.json", None, json!({"count": 3})),
+        ("stream-batch.json", Some("1\n"), json!({"batch": [1]})),
     ]
 }
 
@@ -34,7 +35,7 @@ fn every_example_has_an_expected_result() {
         })
         .map(|path| path.file_name().unwrap().to_str().unwrap().to_owned())
         .collect();
-    let mut expected: Vec<_> = examples().into_iter().map(|(name, _)| name).collect();
+    let mut expected: Vec<_> = examples().into_iter().map(|(name, _, _)| name).collect();
     actual.sort();
     expected.sort();
     assert_eq!(
@@ -46,7 +47,11 @@ fn every_example_has_an_expected_result() {
 #[cfg(unix)]
 #[test]
 fn documented_examples_compile_and_produce_expected_outputs() {
-    use std::{os::unix::fs::symlink, process::Command};
+    use std::{
+        io::Write,
+        os::unix::fs::symlink,
+        process::{Command, Stdio},
+    };
 
     let temporary = tempfile::Builder::new()
         .prefix("mf examples ")
@@ -59,7 +64,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
     // Preserve the examples' relative paths while keeping lock files out of the checkout.
     symlink(workspace().join("crates"), temporary.path().join("crates")).unwrap();
 
-    for (name, expected) in examples() {
+    for (name, input, expected) in examples() {
         let definition = definitions.join(name);
         fs::copy(workspace().join("examples").join(name), &definition).unwrap();
         let stem = Path::new(name).file_stem().unwrap();
@@ -85,11 +90,23 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             String::from_utf8_lossy(&compiled.stderr),
         );
 
-        let output = Command::new(&executable)
+        let mut child = Command::new(&executable)
             .current_dir(&runtime)
             .env("PATH", "")
-            .output()
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .unwrap();
+        if let Some(input) = input {
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+        }
+        let output = child.wait_with_output().unwrap();
         assert!(
             output.status.success(),
             "{name}: execution failed with {}:\n{}\n{}",

@@ -130,19 +130,6 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
             .to_string();
         assert!(error.contains(expected), "{error}");
     }
-    assert!(
-        mf_compiler::describe_compiled(&plan)
-            .unwrap_err()
-            .to_string()
-            .contains("streaming descriptions are not supported")
-    );
-    #[cfg(feature = "codegen")]
-    assert!(
-        plan.generate_artifacts()
-            .unwrap_err()
-            .to_string()
-            .contains("standalone streaming runners are not supported")
-    );
 
     assert_eq!(plan.definition.nodes.len(), 2);
     assert_eq!(

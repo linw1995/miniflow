@@ -124,3 +124,31 @@ are materialized independently of symbolic links or Unix hard links before reuse
 inputs; the next build resynchronizes them from the Flow.
 
 Retained directories contain embedded configuration and diagnostics and are created with user-private permissions. To reclaim space, delete an inactive build directory using its reported path; never remove a directory while a build is running. A later invocation recreates it from the definition and lock. Automatic eviction and sharing compiled targets across different Flows are not provided.
+
+## Streaming runners
+
+Compile a definition that opts into schema `2026-10-02` streaming mode, then pipe JSON Lines into
+its executable. Each input line is one value; an array line remains one item. For the repository example:
+
+```sh
+nix develop --command cargo run -p mf-cli --features development-support -- \
+  compile examples/stream-batch.json --output target/stream-batch
+printf '1\n2\n3\n4\n5\n' | target/stream-batch
+```
+
+The result is one object per emitted batch, such as `{"batch":[1,2,3]}` followed by `{"batch":[4,5]}`.
+Results are written as they become available, including a timeout batch while stdin stays open. LF,
+CRLF, and a final record without a newline are accepted. Blank, malformed, and type-invalid
+records fail with a line number. An empty stream produces no result records.
+
+The process reserves stdin for workflow input and stdout for result records before constructing plugins.
+Plugin stdout diagnostics are directed to stderr. Private protocol descriptors are not inherited by plugin
+subprocesses. A stalled stdout backpressures the workflow; a broken output pipe fails execution and stops
+an idle input reader. The final record must be written successfully before the instance reports completion.
+Message-count limits bound admission; individual JSON records have no byte quota in this layer.
+A failed run can end with an incomplete final output line; fully delivered earlier lines remain valid.
+
+`--validate` and `--describe` do not read stdin or execute callbacks. Streaming descriptions use protocol
+`2026-10-02` and include the synthetic input source. The current terminal launcher rejects streaming
+executables during preflight; launch the executable directly with JSON Lines input. Both ordinary and
+`--no-telemetry` compilation retain the single-build validation and installation process.

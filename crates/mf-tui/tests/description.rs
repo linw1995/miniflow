@@ -59,6 +59,26 @@ fn accepts_one_complete_document_despite_noisy_stderr() {
 }
 
 #[test]
+fn rejects_streaming_descriptions_before_the_execution_launch() {
+    let (_, mut description) = sample();
+    description.version = WorkflowDescriptionVersion::V2026_10_02;
+    description
+        .nodes
+        .push(mf_telemetry::description::NodeDescription {
+            id: "%input".into(),
+            kind: "%input".into(),
+        });
+    description.execution_order.push("%input".into());
+    let json = String::from_utf8(description.to_json().unwrap()).unwrap();
+    let (_root, runner) = create_runner(&format!(
+        "test \"$1\" = --describe || exit 99\nprintf '%s\\n' '{json}'"
+    ));
+    let error = describe_executable(&runner).unwrap_err();
+    assert!(matches!(error, DescriptionError::UnsupportedStream));
+    assert!(error.to_string().contains("JSON Lines"));
+}
+
+#[test]
 fn rejects_unsupported_incomplete_and_multiple_documents() {
     let (json, _) = sample();
     for script in [

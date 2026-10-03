@@ -43,7 +43,9 @@ fn plugin(root: &Path) -> PathBuf {
     }
     let lib = plugin.join("src/lib.rs");
     let source = fs::read_to_string(&lib).unwrap();
-    let minimal = source.replace("mod typed_fixture;\n", "");
+    let minimal = source
+        .replace("mod typed_fixture;\n", "")
+        .replace("mod stream_fixture;\n", "");
     assert_ne!(minimal, source);
     fs::write(lib, minimal).unwrap();
     let runtime = serde_json::to_string(&crates_dir().join("mf-runtime")).unwrap();

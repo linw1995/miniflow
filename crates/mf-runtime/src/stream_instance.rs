@@ -17,6 +17,11 @@ use std::{
 pub enum StreamError {
     #[snafu(display("stream preparation failed: {message}"), visibility(pub))]
     Preparation { message: String },
+    #[snafu(display("could not claim stream stdio: {source}"), visibility(pub))]
+    Stdio {
+        #[snafu(source(from(std::io::Error, Arc::new)))]
+        source: Arc<std::io::Error>,
+    },
     #[snafu(display("stream preparation failed: {source}"), visibility(pub))]
     Compilation {
         #[snafu(source(from(Box<dyn std::error::Error + Send + Sync>, Arc::from)))]
@@ -38,8 +43,29 @@ pub enum StreamError {
     },
     #[snafu(display("invalid stream input: {source}"))]
     Input { source: crate::TypeMismatch },
+    #[snafu(display("invalid stream input: {message}"), visibility(pub))]
+    InputFailure { message: String },
+    #[snafu(
+        display("invalid stream input at line {line}: {source}"),
+        visibility(pub)
+    )]
+    InputRecord {
+        line: u64,
+        #[snafu(source(from(Box<dyn std::error::Error + Send + Sync>, Arc::from)))]
+        source: Arc<dyn std::error::Error + Send + Sync>,
+    },
     #[snafu(display("stream output failed: {message}"))]
     Output { message: String },
+    #[snafu(display("stream output failed: {source}"), visibility(pub))]
+    OutputWrite {
+        #[snafu(source(from(std::io::Error, Arc::new)))]
+        source: Arc<std::io::Error>,
+    },
+    #[snafu(display("stream output failed: {source}"), visibility(pub))]
+    OutputEncode {
+        #[snafu(source(from(serde_json::Error, Arc::new)))]
+        source: Arc<serde_json::Error>,
+    },
     #[snafu(display("stream execution failed: {message}"))]
     Execution { message: String },
     #[snafu(display(
@@ -259,6 +285,14 @@ impl StreamSender {
     pub fn close(&self) {
         self.0.state.lock().unwrap().input_closed = true;
         self.0.changed.notify_all();
+    }
+
+    pub(super) fn fail(&self, error: StreamError) {
+        self.0.fail(error);
+    }
+
+    pub(super) fn failure(&self) -> Option<StreamError> {
+        self.0.state.lock().unwrap().failure.clone()
     }
 }
 

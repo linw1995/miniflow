@@ -313,7 +313,6 @@ impl TypeInferenceState {
                             .clone(),
                         exact: None,
                     }),
-
                 Some(OutputDerivation::CollectInput { input, .. }) => TypeFact {
                     value_type: ValueType::List(Box::new(inputs.get(input.as_str()).map_or_else(
                         || {
@@ -971,13 +970,6 @@ pub enum DescriptionError {
 }
 
 pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription, DescriptionError> {
-    if plan.definition.execution.is_some() {
-        return Err(DescriptionError::Contract {
-            source: ContractError::Invalid {
-                message: "streaming descriptions are not supported".into(),
-            },
-        });
-    }
     let definitions: BTreeMap<_, _> = plan
         .definition
         .nodes
@@ -1002,21 +994,35 @@ pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription,
             kind: definition.kind.clone(),
         });
     }
-    let order: Vec<String> = plan
+    let mut order: Vec<String> = plan
         .execution_order
         .iter()
         .map(ToString::to_string)
         .collect();
+    if plan.definition.execution.is_some() {
+        nodes.insert(
+            0,
+            NodeDescription {
+                id: mf_runtime::STREAM_INPUT_ID.into(),
+                kind: mf_runtime::STREAM_INPUT_ID.into(),
+            },
+        );
+        order.insert(0, mf_runtime::STREAM_INPUT_ID.into());
+    }
     let mut loop_bodies = Vec::new();
     describe_loop_bodies(&plan.definition, &mut Vec::new(), &mut loop_bodies)?;
     let description = WorkflowDescription {
-        version: match plan.definition.version {
-            mf_runtime::WorkflowDefinitionVersion::V2026_09_26 => {
-                WorkflowDescriptionVersion::V2026_09_27
-            }
-            mf_runtime::WorkflowDefinitionVersion::V2026_09_29
-            | mf_runtime::WorkflowDefinitionVersion::V2026_10_02 => {
-                WorkflowDescriptionVersion::V2026_09_29
+        version: if plan.definition.execution.is_some() {
+            WorkflowDescriptionVersion::V2026_10_02
+        } else {
+            match plan.definition.version {
+                mf_runtime::WorkflowDefinitionVersion::V2026_09_26 => {
+                    WorkflowDescriptionVersion::V2026_09_27
+                }
+                mf_runtime::WorkflowDefinitionVersion::V2026_09_29
+                | mf_runtime::WorkflowDefinitionVersion::V2026_10_02 => {
+                    WorkflowDescriptionVersion::V2026_09_29
+                }
             }
         },
         workflow_id: WorkflowId::from_definition(&plan.definition, &order)
