@@ -1,0 +1,20 @@
+version: 2
+
+updates:
+  - package-ecosystem: "github-actions"
+    directories:
+      - "/"
+      - "/.github/actions/setup-nix"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "ci(ci)"
+
+  - package-ecosystem: "cargo"
+    directories:
+      - "/"
+      - "/crates/mf-compiler/tests/fixtures/multi-nodes"
+    schedule:
+      interval: "monthly"
+    commit-message:
+      prefix: "build(bundle)"
