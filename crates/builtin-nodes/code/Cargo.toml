@@ -7,8 +7,13 @@ repository.workspace = true
 description = "Typed expression nodes for miniflow"
 
 [dependencies]
-cel-core = "=0.5.1"
-inventory = "0.3.24"
+# Node contracts and registration.
+inventory.workspace = true
 mf-runtime.workspace = true
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
+
+# CEL expression parsing, type checking, and evaluation.
+cel-core.workspace = true
+
+# Node configuration and values.
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true

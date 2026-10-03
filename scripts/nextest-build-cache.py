@@ -5,7 +5,6 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
-import tomllib
 
 
 def main():
@@ -28,13 +27,18 @@ def main():
     project = directory / "warmup"
     target = directory / "target"
     (project / "src").mkdir(parents=True)
-    compiler_manifest = tomllib.loads(
-        (workspace / "crates/mf-compiler/Cargo.toml").read_text()
+    compiler = next(
+        package for package in metadata["packages"] if package["name"] == "mf-compiler"
+    )
+    serde_json_requirement = next(
+        dependency["req"]
+        for dependency in compiler["dependencies"]
+        if dependency["name"] == "serde_json" and dependency["kind"] is None
     )
     manifest = (
         '[package]\nname = "mf-test-warmup"\nversion = "0.0.0"\nedition = "2024"\n'
         '\n[workspace]\n\n[dependencies]\n'
-        f'serde_json = {json.dumps(compiler_manifest["dependencies"]["serde_json"])}\n'
+        f'serde_json = {json.dumps(serde_json_requirement)}\n'
     )
     # Match the feature graph emitted for telemetry-enabled runners.
     for name, path in [
