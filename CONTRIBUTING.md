@@ -35,8 +35,7 @@ its duration is included in the overall run, but not in individual test duration
 and packaged acceptance tests keep isolated targets. Plain `cargo test` also keeps its existing isolated builds.
 
 This uses nextest's experimental setup scripts and requires nextest 0.9.145 or newer and Python 3.11 or newer,
-both provided by `nix develop`. Nextest 0.9.145 fixes false leaked-handle reports when tests spawn concurrently
-on macOS. Warmup preserves Cargo wrappers, compiler flags, and coverage instrumentation.
+both provided by `nix develop`. Warmup preserves Cargo wrappers, compiler flags, and coverage instrumentation.
 Each run gets its own directory under the Cargo target's `nextest-build-cache/`, so concurrent runs cannot overwrite
 each other's runners. These build artifacts remain until removed or cleaned with `cargo clean`.
 
