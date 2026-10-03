@@ -160,7 +160,10 @@ pub enum WorkflowCompileError {
         visibility(pub)
     )]
     FlowConstruction { source: FlowBuildError },
-    #[snafu(display("compiled workflow execution order does not match its definition"))]
+    #[snafu(
+        display("compiled workflow execution order does not match its definition"),
+        visibility(pub)
+    )]
     NonCanonicalPlanOrder,
     #[snafu(display("invalid node metadata for `{definition_id}`: {message}"))]
     InvalidNodeMetadata {
@@ -383,12 +386,12 @@ fn prepare_graph(
             .iter()
             .find(|node| matches!(&node.node, Some(mf_runtime::NodeExecution::Event(_))))
     {
-        return Err(WorkflowCompileError::InvalidStream {
+        return InvalidStreamSnafu {
             message: format!(
                 "node `{}` requires streaming execution and is not supported in a synchronous scope",
                 node.definition_id
             ),
-        });
+        }.fail();
     }
     let incoming = incoming_dependencies(definition);
     validate_base_metadata(definition, &nodes, &incoming)?;
@@ -912,9 +915,10 @@ pub fn instantiate_compiled(
     registry: &NodeRegistry,
 ) -> Result<Flow, WorkflowCompileError> {
     if plan.definition.execution.is_some() {
-        return Err(WorkflowCompileError::InvalidStream {
-            message: "use instantiate_stream for streaming workflows".into(),
-        });
+        return InvalidStreamSnafu {
+            message: "use instantiate_stream for streaming workflows",
+        }
+        .fail();
     }
     let (nodes, canonical_order) = prepare_definition(&plan.definition, registry)?;
     if plan.execution_order != canonical_order {
@@ -1207,9 +1211,10 @@ fn resolve_nodes_in_scope(
                 if let Some(execution) = &definition.execution {
                     return Ok(mf_runtime::stream_input_node(execution.input_type.clone()));
                 }
-                return Err(WorkflowCompileError::InvalidStream {
-                    message: "%input is only available in a streaming root graph".into(),
-                });
+                return InvalidStreamSnafu {
+                    message: "%input is only available in a streaming root graph",
+                }
+                .fail();
             }
             match node.kind.as_str() {
                 crate::LOOP_KIND => {

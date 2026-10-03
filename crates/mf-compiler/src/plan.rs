@@ -140,9 +140,10 @@ impl CompiledWorkflow {
     #[cfg(feature = "codegen")]
     pub fn generate_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
         if self.definition.execution.is_some() {
-            return Err(PlanError::Stream {
-                message: "standalone streaming runners are not supported".into(),
-            });
+            return StreamSnafu {
+                message: "standalone streaming runners are not supported",
+            }
+            .fail();
         }
         if self.execution_order.len() != self.definition.nodes.len() {
             return InvalidExecutionOrderSnafu.fail();

@@ -1,9 +1,10 @@
 use crate::message_domain::MessageDomains;
+use crate::runner::ContextSnafu;
 use crate::{
     ExecutionDependency, FlowNode, NodeExecution, STREAM_INPUT_ID, StreamDomain, StreamExecution,
     TaskNode, WorkflowOutputDefinition,
 };
-use snafu::{ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 
 type EventStates = Vec<Option<Box<dyn crate::EventNode>>>;
 
@@ -63,29 +64,28 @@ impl PreparedStream {
         dependencies: Vec<Vec<StreamDependency>>,
         outputs: Vec<WorkflowOutputDefinition>,
     ) -> Result<Self, StreamBuildError> {
-        let invalid = |message: String| InvalidPlanSnafu { message }.build();
-        execution.limits.validate().map_err(invalid)?;
+        execution.limits.validate()?;
         execution.input_type.check_depth().context(InputTypeSnafu)?;
-        if nodes.len() != dependencies.len()
-            || nodes
-                .first()
-                .is_none_or(|node| node.definition_id.as_str() != STREAM_INPUT_ID)
-        {
-            return Err(invalid(
-                "stream plan requires its typed input source first".into(),
-            ));
-        }
+        ensure!(
+            nodes.len() == dependencies.len()
+                && nodes
+                    .first()
+                    .is_some_and(|node| node.definition_id.as_str() == STREAM_INPUT_ID),
+            InvalidPlanSnafu {
+                message: "stream plan requires its typed input source first",
+            }
+        );
         let source = &nodes[0];
-        if !source.metadata.ports.inputs.is_empty()
-            || source.metadata.ports.outputs.len() != 1
-            || source.metadata.ports.outputs[0].name != "item"
-            || source.metadata.ports.outputs[0].value_type != execution.input_type
-            || source.node.is_some()
-        {
-            return Err(invalid(
-                "stream input source must expose its declared item type".into(),
-            ));
-        }
+        ensure!(
+            source.metadata.ports.inputs.is_empty()
+                && source.metadata.ports.outputs.len() == 1
+                && source.metadata.ports.outputs[0].name == "item"
+                && source.metadata.ports.outputs[0].value_type == execution.input_type
+                && source.node.is_none(),
+            InvalidPlanSnafu {
+                message: "stream input source must expose its declared item type",
+            }
+        );
         let domains = MessageDomains::new(&nodes, &dependencies, &outputs)?;
         let mut event_states = Vec::with_capacity(nodes.len());
         let nodes = nodes
@@ -111,12 +111,15 @@ impl PreparedStream {
             domains,
             outputs,
         };
-        if plan.execution().limits.max_pending_messages < plan.domains().len() {
-            return Err(invalid(format!(
-                "max_pending_messages must reserve at least {} domain slots",
-                plan.domains().len()
-            )));
-        }
+        ensure!(
+            plan.execution().limits.max_pending_messages >= plan.domains().len(),
+            InvalidPlanSnafu {
+                message: format!(
+                    "max_pending_messages must reserve at least {} domain slots",
+                    plan.domains().len()
+                ),
+            }
+        );
         Ok(Self { plan, event_states })
     }
 
@@ -157,21 +160,16 @@ impl StreamPlan {
         index: usize,
         context: &mut crate::ExecutionContext,
     ) -> Result<(), crate::WorkflowRunError> {
-        let node = self
-            .nodes
-            .get(index)
-            .ok_or_else(|| crate::WorkflowRunError::Context {
-                definition_id: "<stream>".into(),
-                message: "invalid stream dispatch index".into(),
-            })?;
+        let node = self.nodes.get(index).context(ContextSnafu {
+            definition_id: "<stream>",
+            message: "invalid stream dispatch index",
+        })?;
         crate::context::execute_ordered_task_in_context(
             node,
-            node.node
-                .as_deref()
-                .ok_or_else(|| crate::WorkflowRunError::Context {
-                    definition_id: node.definition_id.clone(),
-                    message: "stream boundary is not a task".into(),
-                })?,
+            node.node.as_deref().with_context(|| ContextSnafu {
+                definition_id: node.definition_id.clone(),
+                message: "stream boundary is not a task",
+            })?,
             self.dependencies(index)
                 .iter()
                 .map(StreamDependency::borrowed),
