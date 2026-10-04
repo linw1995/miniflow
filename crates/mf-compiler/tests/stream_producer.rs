@@ -159,11 +159,6 @@ fn producer(config: Value) -> Result<PreparedNode, mf_runtime::NodeBuildError> {
             probe: probe(key),
         },
         mf_runtime::NodeMetadata {
-            ports: NodePorts {
-                inputs: vec![PortSpec::new("input", ValueType::Int64, true)],
-                outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
-            },
-            stdin: None,
             context_references: if mode == "context" {
                 vec![mf_runtime::ContextReference::new(
                     "copy.value",
@@ -172,7 +167,10 @@ fn producer(config: Value) -> Result<PreparedNode, mf_runtime::NodeBuildError> {
             } else {
                 Vec::new()
             },
-            ..Default::default()
+            ..mf_runtime::NodeMetadata::new(NodePorts {
+                inputs: vec![PortSpec::new("input", ValueType::Int64, true)],
+                outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
+            })
         },
     ))
 }

@@ -35,18 +35,13 @@ impl TaskNode for MapItem {
 
 fn map_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = MapItem;
-    let metadata = mf_runtime::NodeMetadata {
-        ports: mf_runtime::NodePorts {
-            inputs: vec![
-                PortSpec::new("item", ValueType::Int64, true),
-                PortSpec::new("index", ValueType::Int64, true),
-            ],
-            outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
-        },
-        output_derivations: Vec::new(),
-        stdin: None,
-        context_references: Vec::new(),
-    };
+    let metadata = mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
+        inputs: vec![
+            PortSpec::new("item", ValueType::Int64, true),
+            PortSpec::new("index", ValueType::Int64, true),
+        ],
+        outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
+    });
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
@@ -73,15 +68,10 @@ impl TaskNode for TraceProbe {
 
 fn trace_probe_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = TraceProbe;
-    let metadata = mf_runtime::NodeMetadata {
-        ports: mf_runtime::NodePorts {
-            inputs: vec![],
-            outputs: vec![PortSpec::new("span", ValueType::String, true)],
-        },
-        output_derivations: Vec::new(),
-        stdin: None,
-        context_references: Vec::new(),
-    };
+    let metadata = mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
+        inputs: vec![],
+        outputs: vec![PortSpec::new("span", ValueType::String, true)],
+    });
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 

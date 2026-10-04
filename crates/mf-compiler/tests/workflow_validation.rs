@@ -46,23 +46,13 @@ fn noop_factory(
     declared_ports: mf_runtime::NodePorts,
 ) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = NoopNode;
-    let metadata = mf_runtime::NodeMetadata {
-        ports: declared_ports,
-        output_derivations: Vec::new(),
-        stdin: None,
-        context_references: Vec::new(),
-    };
+    let metadata = mf_runtime::NodeMetadata::new(declared_ports);
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 fn deep_type_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = DeepTypeNode;
-    let metadata = mf_runtime::NodeMetadata {
-        ports: node.ports(),
-        output_derivations: Vec::new(),
-        stdin: None,
-        context_references: Vec::new(),
-    };
+    let metadata = mf_runtime::NodeMetadata::new(node.ports());
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 

@@ -68,12 +68,11 @@ fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     Ok(PreparedNode::stream(
         Readline,
         NodeMetadata {
-            ports: NodePorts {
+            stdin: Some(StdinRequirement::UnlessInput("path".into())),
+            ..NodeMetadata::new(NodePorts {
                 inputs: vec![PortSpec::new("path", ValueType::String, false)],
                 outputs: vec![PortSpec::new("line", ValueType::String, true)],
-            },
-            stdin: Some(StdinRequirement::UnlessInput("path".into())),
-            ..Default::default()
+            })
         },
     ))
 }

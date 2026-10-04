@@ -30,29 +30,19 @@ impl TaskNode for SinkNode {
 
 fn source_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = SourceNode;
-    let metadata = mf_runtime::NodeMetadata {
-        ports: mf_runtime::NodePorts {
-            inputs: vec![],
-            outputs: vec![PortSpec::new("value", ValueType::Number, true)],
-        },
-        output_derivations: Vec::new(),
-        stdin: None,
-        context_references: Vec::new(),
-    };
+    let metadata = mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
+        inputs: vec![],
+        outputs: vec![PortSpec::new("value", ValueType::Number, true)],
+    });
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 fn sink_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = SinkNode;
-    let metadata = mf_runtime::NodeMetadata {
-        ports: mf_runtime::NodePorts {
-            inputs: vec![PortSpec::new("value", ValueType::Number, true)],
-            outputs: vec![PortSpec::new("received", ValueType::Number, true)],
-        },
-        output_derivations: Vec::new(),
-        stdin: None,
-        context_references: Vec::new(),
-    };
+    let metadata = mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
+        inputs: vec![PortSpec::new("value", ValueType::Number, true)],
+        outputs: vec![PortSpec::new("received", ValueType::Number, true)],
+    });
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
