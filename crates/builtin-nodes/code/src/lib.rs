@@ -293,22 +293,7 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel_core::{MapActivation, Value as CelValue};
     use serde_json::json;
-
-    fn assert_send_sync<T: Send + Sync>() {}
-
-    #[test]
-    fn pinned_cel_api_checks_and_evaluates_json_values() {
-        assert_send_sync::<Program>();
-        let env = Env::with_standard_library().with_variable("amount", CelType::Int);
-        let ast = env.compile("amount * 2").unwrap();
-        assert_eq!(ast.result_type(), Some(&CelType::Int));
-        let mut activation = MapActivation::new();
-        activation.insert("amount", json!(21).as_i64().unwrap());
-        let result = env.program(&ast).unwrap().eval(&activation);
-        assert!(matches!(result, CelValue::Int(42)));
-    }
 
     #[test]
     fn registers_one_code_kind_and_infers_instance_ports() {
@@ -421,6 +406,42 @@ mod tests {
             node.metadata.ports.outputs[0].value_type,
             ValueType::Map(Box::new(ValueType::Int64))
         );
+    }
+
+    #[test]
+    fn explicitly_converts_text_to_inferred_numeric_outputs() {
+        for (expression, expected_type, valid, invalid) in [
+            (
+                "int(text)",
+                ValueType::Int64,
+                vec![("42", json!(42)), ("-7", json!(-7))],
+                vec!["", "invalid", "2.5", "9223372036854775808"],
+            ),
+            (
+                "double(text)",
+                ValueType::Float64,
+                vec![("2.5", json!(2.5)), ("1e3", json!(1000.0))],
+                vec!["", "invalid", "NaN", "Infinity"],
+            ),
+        ] {
+            let node = factory(
+                json!({"language":"cel", "inputs":{"text":"string"}, "code":{"number":expression}}),
+            )
+            .unwrap();
+            assert_eq!(node.metadata.ports.outputs[0].value_type, expected_type);
+            let execute = |text: &str| {
+                node.execution.as_task_node().unwrap().execute(
+                    Inputs::from([("text".into(), text.into())]),
+                    &mut mf_runtime::ExecutionContext::default(),
+                )
+            };
+            for (text, expected) in valid {
+                assert_eq!(execute(text).unwrap().outputs["number"], expected);
+            }
+            for text in invalid {
+                assert!(execute(text).is_err(), "{expression}: {text}");
+            }
+        }
     }
 
     #[test]

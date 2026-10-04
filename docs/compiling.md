@@ -166,9 +166,9 @@ acknowledged before successful completion. Complete earlier output lines remain 
 New graph descriptions use version `2026-10-03` and explicitly declare execution mode, lifecycle protocol, and
 interface inspection. Both ordinary and `--no-telemetry` builds retain one-build validation and installation.
 Use `mf run ./workflow --tui --inputs-file ./parameters.json` to observe autonomous streams.
-For workflows declaring a stdin source, use `mf run ./workflow --tui --stream-input ./lines.txt`.
-The TUI owns terminal stdin and gives the declared source an opened file. It validates parameters and
-resource requirements before execution. Startup options also work with new finite runners.
+The TUI owns terminal stdin and launches the child with null stdin. It validates parameters and rejects
+workflows that still require stdin. Supply a readline `path` through startup arguments for TUI execution;
+run the executable directly to read piped text. Startup options also work with new finite runners.
 
 ### Migrate an older streaming definition
 
