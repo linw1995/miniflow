@@ -33,15 +33,14 @@ fn node(
     evidence: Evidence,
 ) -> mf_runtime::TaskFlowNode {
     let metadata = mf_runtime::NodeMetadata {
-        ports: NodePorts {
+        output_derivations: evidence.derivation.iter().cloned().collect(),
+        ..mf_runtime::NodeMetadata::new(NodePorts {
             inputs: input
                 .map(|ty| PortSpec::new("input", ty, true))
                 .into_iter()
                 .collect(),
             outputs: vec![PortSpec::new("value", output, true)],
-        },
-        output_derivations: evidence.derivation.iter().cloned().collect(),
-        ..Default::default()
+        })
     };
     FlowNode::new(id, mf_runtime::PreparedNode::new(evidence, metadata))
         .into_task()

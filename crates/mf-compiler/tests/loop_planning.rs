@@ -47,29 +47,19 @@ impl TaskNode for OmitOnSecond {
 
 fn omit_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = OmitOnSecond;
-    let metadata = mf_runtime::NodeMetadata {
-        ports: mf_runtime::NodePorts {
-            inputs: vec![PortSpec::new("index", ValueType::Int64, true)],
-            outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
-        },
-        output_derivations: Vec::new(),
-        resources: Vec::new(),
-        context_references: Vec::new(),
-    };
+    let metadata = mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
+        inputs: vec![PortSpec::new("index", ValueType::Int64, true)],
+        outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
+    });
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 fn wrong_type_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = WrongType;
-    let metadata = mf_runtime::NodeMetadata {
-        ports: mf_runtime::NodePorts {
-            inputs: vec![],
-            outputs: vec![PortSpec::new("value", ValueType::Any, true)],
-        },
-        output_derivations: Vec::new(),
-        resources: Vec::new(),
-        context_references: Vec::new(),
-    };
+    let metadata = mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
+        inputs: vec![],
+        outputs: vec![PortSpec::new("value", ValueType::Any, true)],
+    });
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
