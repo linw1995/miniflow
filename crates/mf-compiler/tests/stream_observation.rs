@@ -1,8 +1,11 @@
+#[path = "fixtures/controlled_source.rs"]
+mod controlled;
+use controlled::SourceRun;
 #[path = "fixtures/observation_capture.rs"]
 mod capture;
 extern crate mfn_core as _;
 use capture::Harness;
-use mf_compiler::{NodeRegistry, WorkflowDefinition, plan_definition, start_stream};
+use mf_compiler::{NodeRegistry, WorkflowDefinition, plan_definition};
 use mf_runtime::{StreamClock, StreamOptions};
 use mf_telemetry::{
     INSTRUMENTATION_SCOPE,
@@ -51,10 +54,28 @@ fn wait_until(mut check: impl FnMut() -> bool) {
     }
 }
 fn definition() -> Value {
-    serde_json::from_str(include_str!("../../../examples/stream-batch.json")).unwrap()
+    let mut value: Value =
+        serde_json::from_str(include_str!("../../../examples/stream-batch.json")).unwrap();
+    *value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|node| node["id"] == "feed")
+        .unwrap() = controlled::source(json!("int"));
+    value["edges"][0]["from_output"] = json!("item");
+    value
 }
 fn plan(value: Value) -> mf_compiler::CompiledWorkflow {
     plan_definition(&serde_json::from_value::<WorkflowDefinition>(value).unwrap()).unwrap()
+}
+fn start_stream(
+    plan: &mf_compiler::CompiledWorkflow,
+    registry: &NodeRegistry,
+    mut options: StreamOptions,
+) -> Result<SourceRun, mf_runtime::StreamError> {
+    let source = controlled::prepare_control("feed", &mut options);
+    let instance = mf_compiler::start_stream(plan, registry, options)?;
+    Ok(SourceRun { instance, source })
 }
 fn records(harness: &Harness) -> Vec<StreamRecord> {
     harness
@@ -66,11 +87,86 @@ fn records(harness: &Harness) -> Vec<StreamRecord> {
 }
 
 #[test]
+fn startup_loop_observation_needs_no_synthetic_message_or_source() {
+    let plan = plan(
+        json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+        "nodes":[{"id":"repeat", "kind":"workflow.loop", "loop":{"max_iterations":2,
+            "variables":[{"name":"x", "type":"int"}], "body":{
+                "nodes":[{"id":"copy", "kind":"builtin.identity"}],
+                "edges":[{"from_node":"%loop", "from_output":"x", "to_node":"copy", "to_input":"input"}]
+            }}}], "outputs":[{"name":"value", "node":"repeat", "port":"x"}]}),
+    );
+    let harness = Harness::new(true);
+    let observation = plan
+        .start_stream_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let instance = mf_compiler::start_stream(
+        &plan,
+        &NodeRegistry::from_inventory().unwrap(),
+        StreamOptions {
+            observation: Some(observation),
+            arguments: mf_runtime::WorkflowArguments::try_from(json!({"repeat":{"x":7}})).unwrap(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(instance.recv().unwrap().unwrap().outputs["value"], json!(7));
+    assert!(instance.recv().unwrap().is_none());
+    instance.join().unwrap();
+    let events = records(&harness);
+    for (index, event) in events.iter().enumerate() {
+        assert_eq!(event.sequence.get(), index as i64 + 1);
+        assert_eq!(event.schema_version, 4);
+        if let Some(identity) = &event.identity {
+            assert_eq!(identity.trigger, StreamTrigger::Startup);
+            assert!(identity.message.is_none());
+        }
+    }
+    assert!(events.iter().any(|record| matches!(&record.payload, StreamPayload::Execution(Event::NodeStarted { node, .. }) if !node.path.is_empty())));
+    assert!(
+        matches!(&events.last().unwrap().payload, StreamPayload::Control(StreamEvent::Finished { counts, outcome: StreamOutcome::Succeeded, .. }) if counts.startup_frames == 1 && counts.emitted_messages == 0 && counts.completed_frames == 1)
+    );
+}
+
+#[test]
+fn invalid_startup_arguments_fail_before_any_node_started_record() {
+    let plan = plan(
+        json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+        "nodes":[{"id":"copy", "kind":"builtin.identity"}]}),
+    );
+    let harness = Harness::new(true);
+    let observation = plan
+        .start_stream_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    assert!(
+        mf_compiler::start_stream(
+            &plan,
+            &NodeRegistry::from_inventory().unwrap(),
+            StreamOptions {
+                observation: Some(observation),
+                ..Default::default()
+            }
+        )
+        .is_err()
+    );
+    let events = records(&harness);
+    assert_eq!(events.len(), 2);
+    assert!(
+        matches!(&events[1].payload, StreamPayload::Control(StreamEvent::Finished { counts, failure: Some(failure), .. }) if counts.startup_frames == 0 && failure.phase == "input")
+    );
+}
+
+#[test]
 fn buffering_flushes_and_repeated_messages_have_distinct_correlated_lifecycles() {
     for sampled in [false, true] {
         let harness = Harness::new(sampled);
         let mut value = definition();
-        value["execution"]["input_type"] = json!("string");
+        value["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|node| node["id"] == "feed")
+            .unwrap()["config"]["item_type"] = json!("string");
         let plan = plan(value);
         let observation = plan
             .start_stream_observation(&harness.observer(), RunId::new())
@@ -86,9 +182,9 @@ fn buffering_flushes_and_repeated_messages_have_distinct_correlated_lifecycles()
         )
         .unwrap();
         for value in ["secret-a", "secret-b", "secret-c", "secret-d", "secret-e"] {
-            instance.input().send(json!(value)).unwrap();
+            instance.source.clone().send(json!(value)).unwrap();
         }
-        instance.close_input();
+        instance.source.close();
         assert!(instance.recv().unwrap().is_some());
         assert!(instance.recv().unwrap().is_some());
         assert!(instance.recv().unwrap().is_none());
@@ -124,10 +220,10 @@ fn buffering_flushes_and_repeated_messages_have_distinct_correlated_lifecycles()
             }
         }
         assert!(zero_emissions >= 4);
-        assert_eq!(messages, BTreeSet::from([(1, 0), (1, 1)]));
+        assert_eq!(messages, BTreeSet::from([(2, 0), (2, 1)]));
         assert_eq!(reasons, ["size_exceed", "upstream_closed"]);
         assert!(
-            matches!(&events.last().unwrap().payload, StreamPayload::Control(StreamEvent::Finished { outcome: StreamOutcome::Succeeded, counts, .. }) if counts.accepted_inputs == 5 && counts.delivered_outputs == 2)
+            matches!(&events.last().unwrap().payload, StreamPayload::Control(StreamEvent::Finished { outcome: StreamOutcome::Succeeded, counts, .. }) if counts.startup_frames == 1 && counts.emitted_messages == 7 && counts.delivered_outputs == 2)
         );
         assert!(
             !serde_json::to_string(&harness.records())
@@ -170,11 +266,11 @@ fn timers_have_no_input_message_and_terminal_events_wait_for_delivery() {
         },
     )
     .unwrap();
-    instance.input().send(json!(1)).unwrap();
-    wait_until(|| instance.summary().completed_frames == 1);
+    instance.source.clone().send(json!(1)).unwrap();
+    wait_until(|| instance.summary().completed_frames == 2);
     clock.advance(250);
     let delivery = instance.receive().unwrap().unwrap();
-    instance.close_input();
+    instance.source.close();
     assert!(!records(&harness).iter().any(|record| matches!(
         record.payload,
         StreamPayload::Control(StreamEvent::Finished { .. })
@@ -227,8 +323,8 @@ fn task_failures_never_publish_success_and_snapshot_requests_fail_before_input()
         },
     )
     .unwrap();
-    instance.input().send(json!(1)).unwrap();
-    instance.close_input();
+    instance.source.clone().send(json!(1)).unwrap();
+    instance.source.close();
     assert!(instance.recv().is_err());
     assert!(instance.join().is_err());
     let events = records(&harness);
@@ -266,14 +362,14 @@ fn task_failures_never_publish_success_and_snapshot_requests_fail_before_input()
 
 #[test]
 fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
-    let value = json!({"version":"2026-10-02", "execution":{"mode":"stream", "input_type":"int"}, "dependencies":{},
+    let value = json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
         "nodes":[
             {"id":"repeat", "kind":"workflow.loop", "loop":{"max_iterations":2, "variables":[{"name":"x", "type":"int"}], "body":{
                 "nodes":[{"id":"copy", "kind":"builtin.identity"}], "edges":[{"from_node":"%loop", "from_output":"x", "to_node":"copy", "to_input":"input"}]}}},
             {"id":"collect", "kind":"builtin.batch", "config":{"max_items":1, "max_wait_ms":100}},
             {"id":"iterate", "kind":"builtin.iteration", "config":{"body":{"nodes":[{"id":"copy", "kind":"builtin.identity"}],
                 "edges":[{"from_node":"%iteration", "from_output":"item", "to_node":"copy", "to_input":"input"}], "result":{"node":"copy", "port":"value"}}}}
-        ], "edges":[{"from_node":"%input", "from_output":"item", "to_node":"repeat", "to_input":"x"},
+        , controlled::source(json!("int"))], "edges":[{"from_node":"feed", "from_output":"item", "to_node":"repeat", "to_input":"x"},
             {"from_node":"repeat", "from_output":"x", "to_node":"collect", "to_input":"item"},
             {"from_node":"collect", "from_output":"items", "to_node":"iterate", "to_input":"items"}],
         "outputs":[{"name":"value", "node":"iterate", "port":"results"}]
@@ -292,9 +388,9 @@ fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
         },
     )
     .unwrap();
-    instance.input().send(json!(1)).unwrap();
-    instance.input().send(json!(2)).unwrap();
-    instance.close_input();
+    instance.source.clone().send(json!(1)).unwrap();
+    instance.source.clone().send(json!(2)).unwrap();
+    instance.source.close();
     assert_eq!(
         instance.recv().unwrap().unwrap().outputs["value"],
         json!([1])

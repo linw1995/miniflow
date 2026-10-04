@@ -23,12 +23,10 @@ input, and terminal failure.
 
 ### Requirement: Preserve message identity through ordinary dependencies
 
-Ordinary nodes SHALL resolve all data and control dependencies for one message identity within one message
-domain. Fan-out SHALL preserve that identity. Initial tasks and their ordinary startup dependencies SHALL
-share one startup frame; producer emissions establish separate message domains. Startup values MUST NOT be
-implicitly broadcast across those domains. Nodes that collect inputs or produce incremental results SHALL
-establish a new domain. Dependencies from different domains MUST be rejected unless an explicit supported
-correlation operation defines their relationship.
+Ordinary nodes SHALL resolve data and control dependencies within one message domain and identity, preserved
+by fan-out. Initial tasks and ordinary startup dependencies SHALL share one startup frame. Collectors and
+producers SHALL create new domains; startup values MUST NOT be implicitly broadcast across them. Cross-domain
+dependencies MUST be rejected unless an explicit supported correlation operation defines their relationship.
 
 #### Scenario: Rejoin two branches of one input
 

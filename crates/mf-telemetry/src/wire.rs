@@ -232,9 +232,12 @@ impl WireRecord {
     /// Fills a fresh record created by a logger with the `mf.workflow` scope.
     /// It does not install a provider or emit, enqueue, or export the record.
     pub fn write_to(&self, record: &mut impl LogRecord) -> Result<(), ContractError> {
-        let (normalized, name) = if self.attributes.get("mf.schema.version")
-            == Some(&json!(crate::STREAM_EVENT_SCHEMA_VERSION))
-        {
+        let (normalized, name) = if matches!(
+            self.attributes
+                .get("mf.schema.version")
+                .and_then(Value::as_i64),
+            Some(crate::LEGACY_STREAM_EVENT_SCHEMA_VERSION | crate::STREAM_EVENT_SCHEMA_VERSION)
+        ) {
             let event = crate::stream::StreamRecord::decode(self)?;
             (
                 event.to_wire(self.time_unix_nano, self.trace_context.clone())?,

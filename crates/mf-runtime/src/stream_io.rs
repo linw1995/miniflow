@@ -1,275 +1,257 @@
-#[cfg(not(unix))]
-use crate::stream_instance::PreparationSnafu;
-use crate::{StreamError, StreamInstance, StreamSummary};
+use crate::stream_instance::{
+    InputRecordSnafu, OutputEncodeSnafu, OutputWriteSnafu, ResourceSnafu, StdioSnafu,
+};
+use crate::{StreamCancellation, StreamError, StreamInstance, StreamSummary};
+use snafu::ResultExt;
+use std::{
+    collections::VecDeque,
+    fs::File,
+    io::{self, Read, Write},
+};
 
-#[cfg(unix)]
-mod unix {
-    use super::*;
-    use crate::stream_instance::{
-        InputFailureSnafu, InputRecordSnafu, OutputEncodeSnafu, OutputWriteSnafu, StdioSnafu,
-        ThreadSpawnSnafu,
-    };
-    use crate::{StreamSender, ValueRef, ValueType};
-    use snafu::{IntoError, OptionExt, ResultExt, ensure};
-    use std::{
-        fs::File,
-        io::{self, Read, Write},
-        os::fd::{AsRawFd, FromRawFd},
-        panic::{AssertUnwindSafe, catch_unwind},
-        thread,
-    };
+#[derive(Debug)]
+pub struct TextInput {
+    file: File,
+    buffered: VecDeque<u8>,
+    partial: Vec<u8>,
+    line: u64,
+    eof: bool,
+}
 
-    /// Claims process stdio before plugin construction or worker startup.
-    pub struct StreamStdio {
-        input: File,
-        output: File,
-    }
-
-    fn duplicate(fd: libc::c_int) -> io::Result<File> {
-        // Plugin subprocesses must not inherit the private protocol descriptors.
-        let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
-        if duplicate < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(unsafe { File::from_raw_fd(duplicate) })
-    }
-
-    fn redirect(source: libc::c_int, target: libc::c_int) -> io::Result<()> {
-        if unsafe { libc::dup2(source, target) } < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
-    }
-
-    impl StreamStdio {
-        pub fn claim() -> Result<Self, StreamError> {
-            let claim = || -> io::Result<Self> {
-                io::stdout().flush()?;
-                let input = duplicate(libc::STDIN_FILENO)?;
-                let output = duplicate(libc::STDOUT_FILENO)?;
-                let null = File::open("/dev/null")?;
-                redirect(null.as_raw_fd(), libc::STDIN_FILENO)?;
-                redirect(libc::STDERR_FILENO, libc::STDOUT_FILENO)?;
-                Ok(Self { input, output })
-            };
-            claim().context(StdioSnafu)
-        }
-
-        pub fn run(mut self, instance: StreamInstance) -> Result<StreamSummary, StreamError> {
-            let input = instance.input();
-            let reader_input = input.clone();
-            let value_type = instance.execution().input_type.clone();
-            let reader = thread::Builder::new()
-                .name("workflow-input".into())
-                .spawn(move || {
-                    let result = catch_unwind(AssertUnwindSafe(|| {
-                        read_lines(self.input, &reader_input, &value_type)
-                    }));
-                    match result {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => reader_input.fail(error),
-                        Err(_) => reader_input.fail(
-                            InputFailureSnafu {
-                                message: "input reader panicked",
-                            }
-                            .build(),
-                        ),
-                    }
-                })
-                .context(ThreadSpawnSnafu {
-                    thread: "workflow-input",
-                })
-                .inspect_err(|error| {
-                    input.fail(error.clone());
-                })?;
-            loop {
-                let delivery = match instance.receive() {
-                    Ok(Some(delivery)) => delivery,
-                    Ok(None) | Err(_) => break,
-                };
-                let result = write_record(&mut self.output, delivery.output(), &input);
-                match result {
-                    Ok(()) => {
-                        if delivery.acknowledge().is_err() {
-                            break;
-                        }
-                    }
-                    Err(error) => {
-                        delivery.fail(error);
-                        break;
-                    }
-                }
+impl TextInput {
+    #[cfg(unix)]
+    pub fn claim() -> Result<Self, StreamError> {
+        use std::os::fd::{AsRawFd, FromRawFd};
+        let reserve = || -> io::Result<Self> {
+            let fd = unsafe { libc::fcntl(libc::STDIN_FILENO, libc::F_DUPFD_CLOEXEC, 3) };
+            if fd < 0 {
+                return Err(io::Error::last_os_error());
             }
-            let result = instance.join();
-            if let Err(error) = &result {
-                input.fail(error.clone());
+            let input = unsafe { File::from_raw_fd(fd) };
+            let null = File::open("/dev/null")?;
+            if unsafe { libc::dup2(null.as_raw_fd(), libc::STDIN_FILENO) } < 0 {
+                return Err(io::Error::last_os_error());
             }
-            if reader.join().is_err() {
-                return result.and(
-                    InputFailureSnafu {
-                        message: "input reader stopped unexpectedly",
-                    }
-                    .fail(),
-                );
-            }
-            result
+            Ok(Self::new(input))
+        };
+        reserve().context(StdioSnafu)
+    }
+
+    pub fn new(file: File) -> Self {
+        Self {
+            file,
+            buffered: VecDeque::new(),
+            partial: Vec::new(),
+            line: 1,
+            eof: false,
         }
     }
 
-    fn wait_ready(file: &File, events: libc::c_short, input: &StreamSender) -> io::Result<bool> {
+    pub fn next_line(
+        &mut self,
+        cancellation: &StreamCancellation,
+    ) -> Result<Option<String>, StreamError> {
         loop {
-            if input.failure().is_some() {
-                return Ok(false);
-            }
-            let mut descriptor = libc::pollfd {
-                fd: file.as_raw_fd(),
-                events,
-                revents: 0,
-            };
-            // Polling keeps idle input and blocked output interruptible by instance failure.
-            let ready = unsafe { libc::poll(&mut descriptor, 1, 50) };
-            if ready < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() == io::ErrorKind::Interrupted {
-                    continue;
-                }
+            if let Some(error) = cancellation.failure() {
                 return Err(error);
             }
-            if ready == 0 {
-                continue;
-            }
-            if descriptor.revents & libc::POLLNVAL != 0 {
-                return Err(io::Error::other("stream descriptor is invalid"));
-            }
-            if events == libc::POLLOUT && descriptor.revents & (libc::POLLERR | libc::POLLHUP) != 0
-            {
-                return Err(io::Error::from(io::ErrorKind::BrokenPipe));
-            }
-            if descriptor.revents & (events | libc::POLLERR | libc::POLLHUP) != 0 {
-                return Ok(true);
-            }
-        }
-    }
-
-    fn read_lines(
-        mut file: File,
-        input: &StreamSender,
-        value_type: &ValueType,
-    ) -> Result<(), StreamError> {
-        let mut chunk = [0; 8192];
-        let mut record = Vec::new();
-        let mut line = 1u64;
-        loop {
-            if !wait_ready(&file, libc::POLLIN, input)
-                .boxed()
-                .context(InputRecordSnafu { line })?
-            {
-                return Err(input.failure().expect("instance failure stops I/O"));
-            }
-            let read = match file.read(&mut chunk) {
-                Ok(read) => read,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(InputRecordSnafu { line }.into_error(Box::new(error))),
-            };
-            if read == 0 {
-                if !record.is_empty() {
-                    accept_record(&mut record, line, input, value_type)?;
-                }
-                input.close();
-                return Ok(());
-            }
-            for &byte in &chunk[..read] {
+            while let Some(byte) = self.buffered.pop_front() {
                 if byte == b'\n' {
-                    accept_record(&mut record, line, input, value_type)?;
-                    line = line.checked_add(1).with_context(|| InputFailureSnafu {
-                        message: format!("line {line}: line counter exhausted"),
-                    })?;
+                    return self.finish_line(true).map(Some);
+                }
+                self.partial.push(byte);
+            }
+            if self.eof {
+                return if self.partial.is_empty() {
+                    Ok(None)
                 } else {
-                    record.push(byte);
+                    self.finish_line(false).map(Some)
+                };
+            }
+            wait_ready(&self.file, false, cancellation)
+                .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> { Box::new(source) })
+                .context(InputRecordSnafu { line: self.line })?;
+            if let Some(error) = cancellation.failure() {
+                return Err(error);
+            }
+            let mut bytes = [0; 8192];
+            match self.file.read(&mut bytes) {
+                Ok(0) => self.eof = true,
+                Ok(len) => self.buffered.extend(&bytes[..len]),
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                Err(error) => {
+                    return Err(error)
+                        .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> {
+                            Box::new(source)
+                        })
+                        .context(InputRecordSnafu { line: self.line });
                 }
             }
         }
     }
 
-    fn accept_record(
-        record: &mut Vec<u8>,
-        line: u64,
-        input: &StreamSender,
-        value_type: &ValueType,
-    ) -> Result<(), StreamError> {
-        if record.last() == Some(&b'\r') {
+    fn finish_line(&mut self, terminated: bool) -> Result<String, StreamError> {
+        let line = self.line;
+        self.line = line.checked_add(1).ok_or_else(|| {
+            ResourceSnafu {
+                message: String::from("input line counter exhausted"),
+            }
+            .build()
+        })?;
+        let mut record = std::mem::take(&mut self.partial);
+        if terminated && record.last() == Some(&b'\r') {
             record.pop();
         }
-        ensure!(
-            !record.iter().all(u8::is_ascii_whitespace),
-            InputFailureSnafu {
-                message: format!("line {line}: blank JSON Lines record"),
-            }
-        );
-        let value: ValueRef = serde_json::from_slice::<serde_json::Value>(record)
-            .boxed()
-            .context(InputRecordSnafu { line })?
-            .into();
-        value_type
-            .validate_shared(&value)
-            .boxed()
-            .context(InputRecordSnafu { line })?;
-        input.send(value)?;
-        record.clear();
-        Ok(())
-    }
-
-    fn write_record(
-        file: &mut File,
-        output: &crate::StreamOutput,
-        input: &StreamSender,
-    ) -> Result<(), StreamError> {
-        let mut bytes = serde_json::to_vec(&output.outputs).context(OutputEncodeSnafu)?;
-        bytes.push(b'\n');
-        let mut remaining = bytes.as_slice();
-        while !remaining.is_empty() {
-            if !wait_ready(file, libc::POLLOUT, input).context(OutputWriteSnafu)? {
-                return Err(input.failure().expect("instance failure stops I/O"));
-            }
-            // A single writer uses at most the POSIX minimum PIPE_BUF after polling.
-            let written = match file.write(&remaining[..remaining.len().min(512)]) {
-                Ok(0) => {
-                    return Err(
-                        OutputWriteSnafu.into_error(io::Error::from(io::ErrorKind::WriteZero))
-                    );
-                }
-                Ok(written) => written,
-                Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(OutputWriteSnafu.into_error(error)),
-            };
-            remaining = &remaining[written..];
-        }
-        file.flush().context(OutputWriteSnafu)
+        String::from_utf8(record)
+            .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> { Box::new(source) })
+            .context(InputRecordSnafu { line })
     }
 }
 
 #[cfg(unix)]
-pub use unix::StreamStdio;
+fn wait_ready(file: &File, writing: bool, cancellation: &StreamCancellation) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    let events = if writing { libc::POLLOUT } else { libc::POLLIN };
+    loop {
+        if cancellation.failure().is_some() {
+            return Ok(());
+        }
+        let mut descriptor = libc::pollfd {
+            fd: file.as_raw_fd(),
+            events,
+            revents: 0,
+        };
+        // The deadline lets cancellation interrupt idle input and blocked output.
+        let ready = unsafe { libc::poll(&mut descriptor, 1, 50) };
+        if ready < 0 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        if ready == 0 {
+            continue;
+        }
+        if descriptor.revents & libc::POLLNVAL != 0 {
+            return Err(io::Error::other("stream descriptor is invalid"));
+        }
+        if writing && descriptor.revents & (libc::POLLERR | libc::POLLHUP) != 0 {
+            return Err(io::ErrorKind::BrokenPipe.into());
+        }
+        if descriptor.revents & (events | libc::POLLERR | libc::POLLHUP) != 0 {
+            return Ok(());
+        }
+    }
+}
 
 #[cfg(not(unix))]
-pub struct StreamStdio {
-    _private: (),
+fn wait_ready(_: &File, _: bool, _: &StreamCancellation) -> io::Result<()> {
+    Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "stream stdio requires Linux or macOS",
+    ))
 }
-#[cfg(not(unix))]
+
+pub struct StreamStdio {
+    input: Option<TextInput>,
+    output: File,
+}
+
 impl StreamStdio {
+    #[cfg(unix)]
     pub fn claim() -> Result<Self, StreamError> {
-        PreparationSnafu {
-            message: "stream stdio requires Linux or macOS",
+        use std::os::fd::{AsRawFd, FromRawFd};
+        fn duplicate(fd: libc::c_int) -> io::Result<File> {
+            let duplicate = unsafe { libc::fcntl(fd, libc::F_DUPFD_CLOEXEC, 3) };
+            if duplicate < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(unsafe { File::from_raw_fd(duplicate) })
+        }
+        fn redirect(source: libc::c_int, target: libc::c_int) -> io::Result<()> {
+            if unsafe { libc::dup2(source, target) } < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        }
+        let claim = || -> io::Result<Self> {
+            io::stdout().flush()?;
+            let input = TextInput::new(duplicate(libc::STDIN_FILENO)?);
+            let output = duplicate(libc::STDOUT_FILENO)?;
+            let null = File::open("/dev/null")?;
+            redirect(null.as_raw_fd(), libc::STDIN_FILENO)?;
+            redirect(libc::STDERR_FILENO, libc::STDOUT_FILENO)?;
+            Ok(Self {
+                input: Some(input),
+                output,
+            })
+        };
+        claim().context(StdioSnafu)
+    }
+
+    #[cfg(not(unix))]
+    pub fn claim() -> Result<Self, StreamError> {
+        crate::StreamPreparationSnafu {
+            message: String::from("stream stdio requires Linux or macOS"),
         }
         .fail()
     }
-    pub fn run(self, instance: StreamInstance) -> Result<StreamSummary, StreamError> {
-        let error = PreparationSnafu {
-            message: "stream stdio requires Linux or macOS",
-        }
-        .build();
-        instance.input().fail(error.clone());
-        let _ = instance.join();
-        Err(error)
+
+    pub fn take_input(&mut self) -> Option<TextInput> {
+        self.input.take()
     }
+
+    pub fn write_json(&mut self, value: &impl serde::Serialize) -> Result<(), StreamError> {
+        serde_json::to_writer(&mut self.output, value).context(OutputEncodeSnafu)?;
+        self.output
+            .write_all(b"\n")
+            .and_then(|()| self.output.flush())
+            .context(OutputWriteSnafu)
+    }
+
+    pub fn run(mut self, instance: StreamInstance) -> Result<StreamSummary, StreamError> {
+        let cancellation = instance.cancellation();
+        while let Ok(Some(delivery)) = instance.receive() {
+            let result = write_record(&mut self.output, delivery.output(), &cancellation);
+            match result {
+                Ok(()) => {
+                    if delivery.acknowledge().is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    delivery.fail(error);
+                    break;
+                }
+            }
+        }
+        instance.join()
+    }
+}
+
+fn write_record(
+    file: &mut File,
+    output: &crate::StreamOutput,
+    cancellation: &StreamCancellation,
+) -> Result<(), StreamError> {
+    let mut bytes = serde_json::to_vec(&output.outputs).context(OutputEncodeSnafu)?;
+    bytes.push(b'\n');
+    let mut remaining = bytes.as_slice();
+    while !remaining.is_empty() {
+        wait_ready(file, true, cancellation).context(OutputWriteSnafu)?;
+        if let Some(error) = cancellation.failure() {
+            return Err(error);
+        }
+        let written = match file.write(&remaining[..remaining.len().min(512)]) {
+            Ok(0) => {
+                return Err(io::Error::from(io::ErrorKind::WriteZero)).context(OutputWriteSnafu);
+            }
+            Ok(written) => written,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(source) => return Err(source).context(OutputWriteSnafu),
+        };
+        remaining = &remaining[written..];
+    }
+    file.flush().context(OutputWriteSnafu)
 }

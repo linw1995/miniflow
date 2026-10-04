@@ -996,11 +996,11 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         StreamPayload::Control(StreamEvent::Flushed { .. })
     )));
     assert!(
-        matches!(&records.last().unwrap().payload, StreamPayload::Control(StreamEvent::Finished { outcome: StreamOutcome::Succeeded, counts, .. }) if counts.accepted_inputs == 5 && counts.delivered_outputs == 2),
+        matches!(&records.last().unwrap().payload, StreamPayload::Control(StreamEvent::Finished { outcome: StreamOutcome::Succeeded, counts, .. }) if counts.startup_frames == 1 && counts.emitted_messages == 7 && counts.delivered_outputs == 2),
         "unexpected terminal record: {:?}",
         records.last()
     );
-    assert_eq!(spans.len(), 9);
+    assert_eq!(spans.len(), 10);
     assert!(
         spans
             .iter()

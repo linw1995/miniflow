@@ -1,20 +1,51 @@
 {
-  "version": "2026-10-02",
-  "execution": { "mode": "stream", "input_type": "int" },
+  "version": "2026-10-03",
+  "execution": {
+    "mode": "stream"
+  },
   "dependencies": {
-    "core": { "package": "mfn-core", "path": "../crates/builtin-nodes/core" }
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    }
   },
   "nodes": [
     {
       "id": "collect",
       "kind": "builtin.batch",
-      "config": { "max_items": 3, "max_wait_ms": 250 }
+      "config": {
+        "max_items": 3,
+        "max_wait_ms": 250
+      }
     },
-    { "id": "consume", "kind": "builtin.identity" }
+    {
+      "id": "consume",
+      "kind": "builtin.identity"
+    },
+    {
+      "id": "feed",
+      "kind": "builtin.readline"
+    }
   ],
   "edges": [
-    { "from_node": "%input", "from_output": "item", "to_node": "collect", "to_input": "item" },
-    { "from_node": "collect", "from_output": "items", "to_node": "consume", "to_input": "input" }
+    {
+      "from_node": "feed",
+      "from_output": "line",
+      "to_node": "collect",
+      "to_input": "item"
+    },
+    {
+      "from_node": "collect",
+      "from_output": "items",
+      "to_node": "consume",
+      "to_input": "input"
+    }
   ],
-  "outputs": [{ "name": "batch", "node": "consume", "port": "value" }]
+  "outputs": [
+    {
+      "name": "batch",
+      "node": "consume",
+      "port": "value"
+    }
+  ]
 }

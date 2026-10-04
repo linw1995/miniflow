@@ -6,11 +6,118 @@ use std::{collections::BTreeMap, fmt};
 
 pub const MAX_WORKFLOW_INPUT_BYTES: usize = 1024 * 1024;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkflowInterfaceVersion {
+    #[serde(rename = "2026-10-03")]
+    V2026_10_03,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowInterface {
+    pub version: WorkflowInterfaceVersion,
+    pub workflow_id: mf_telemetry::identity::WorkflowId,
+    pub schema: WorkflowInputSchema,
+}
+
+impl WorkflowInterface {
+    pub fn from_json(bytes: &[u8]) -> Result<Self, WorkflowInputError> {
+        if bytes.len() > mf_telemetry::description::MAX_DESCRIPTION_BYTES {
+            return TooLargeSnafu {
+                limit: mf_telemetry::description::MAX_DESCRIPTION_BYTES,
+            }
+            .fail();
+        }
+        let value: UniqueValue = serde_json::from_slice(bytes).context(JsonSnafu)?;
+        serde_json::from_value(value.0).context(JsonSnafu)
+    }
+
+    pub fn validate_for_description(
+        &self,
+        description: &mf_telemetry::description::WorkflowDescription,
+    ) -> Result<(), WorkflowInputError> {
+        use std::collections::BTreeSet;
+        if self.workflow_id != description.workflow_id {
+            return Err(invalid(
+                String::new(),
+                "graph and interface workflow identities disagree",
+            ));
+        }
+        let incoming: BTreeSet<_> = description
+            .data_edges
+            .iter()
+            .map(|edge| edge.to_node.as_str())
+            .chain(
+                description
+                    .control_edges
+                    .iter()
+                    .map(|edge| edge.to_node.as_str()),
+            )
+            .collect();
+        let roots: BTreeSet<_> = description
+            .nodes
+            .iter()
+            .filter(|node| !incoming.contains(node.id.as_str()))
+            .map(|node| node.id.as_str())
+            .collect();
+        let declared: BTreeSet<_> = self.schema.inputs.keys().map(String::as_str).collect();
+        if description.execution.is_some() && roots != declared {
+            return Err(invalid(
+                String::new(),
+                "interface must describe every initial node exactly once",
+            ));
+        }
+        if !declared.is_subset(&roots) {
+            return Err(invalid(
+                String::new(),
+                "interface names a noninitial or unknown node",
+            ));
+        }
+        let mut stdin = None;
+        for (node, ports) in &self.schema.inputs {
+            for (name, input) in ports {
+                if name.is_empty() {
+                    return Err(invalid(pointer("", node), "empty input port name"));
+                }
+                input.value_type.check_depth().context(TypeDepthSnafu {
+                    path: pointer(&pointer("", node), name),
+                })?;
+            }
+        }
+        for (node, resources) in &self.schema.resources {
+            if !declared.contains(node.as_str()) {
+                return Err(invalid(
+                    pointer("", node),
+                    "resource owner is not an initial node",
+                ));
+            }
+            let mut unique = BTreeSet::new();
+            for resource in resources {
+                if !unique.insert(resource) {
+                    return Err(invalid(pointer("", node), "duplicate resource requirement"));
+                }
+                if let InputResource::StdinIfMissing(input) = resource
+                    && !self.schema.inputs[node].contains_key(input)
+                {
+                    return Err(invalid(
+                        pointer("", node),
+                        "stdin condition names an unknown input",
+                    ));
+                }
+                if *resource == InputResource::Stdin && stdin.replace(node).is_some() {
+                    return Err(invalid(pointer("", node), "stdin has multiple owners"));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputResource {
     Stdin,
-    Channel,
+    StdinIfMissing(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -34,9 +141,12 @@ pub struct WorkflowArguments(pub BTreeMap<String, Inputs>);
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowInputError {
-    #[snafu(display("invalid workflow arguments: {source}"))]
+    #[snafu(display("invalid workflow arguments: {source}"), visibility(pub))]
     Json { source: serde_json::Error },
-    #[snafu(display("workflow arguments exceed the {limit}-byte limit"))]
+    #[snafu(
+        display("workflow arguments exceed the {limit}-byte limit"),
+        visibility(pub)
+    )]
     TooLarge { limit: usize },
     #[snafu(display("workflow input `{path}`: {message}"))]
     Invalid { path: String, message: String },
@@ -45,21 +155,21 @@ pub enum WorkflowInputError {
         path: String,
         source: crate::TypeDepthError,
     },
-    #[snafu(display("workflow input `{path}`: expected {expected}, found {actual}"))]
+    #[snafu(display(
+        "workflow input `{}`: expected {}, found {}",
+        format!("{path}{}", source.path),
+        source.expected,
+        source.actual
+    ))]
     TypeMismatch {
         path: String,
-        expected: ValueType,
-        actual: &'static str,
         source: crate::TypeMismatch,
     },
 }
 
 fn invalid(path: String, message: impl Into<String>) -> WorkflowInputError {
-    InvalidSnafu {
-        path,
-        message: message.into(),
-    }
-    .build()
+    let message: String = message.into();
+    InvalidSnafu { path, message }.build()
 }
 
 fn pointer(parent: &str, key: &str) -> String {
@@ -112,6 +222,7 @@ impl TryFrom<Value> for WorkflowArguments {
 impl WorkflowInputSchema {
     pub fn from_nodes<'a, N: 'a>(
         nodes: impl IntoIterator<Item = (&'a FlowNode<N>, bool)>,
+        mut input_bound: impl FnMut(&str, &str) -> bool,
     ) -> Result<Self, WorkflowInputError> {
         let mut schema = Self::default();
         let mut stdin_owner = None;
@@ -144,13 +255,30 @@ impl WorkflowInputSchema {
             }
             let mut resources = std::collections::BTreeSet::new();
             for resource in &node.metadata.resources {
+                if let InputResource::StdinIfMissing(input) = resource {
+                    if !node
+                        .metadata
+                        .ports
+                        .inputs
+                        .iter()
+                        .any(|port| port.name == *input)
+                    {
+                        return Err(invalid(
+                            pointer("", id),
+                            "stdin condition names an unknown input",
+                        ));
+                    }
+                    if !initial && input_bound(id, input) {
+                        continue;
+                    }
+                }
                 if !initial {
                     return Err(invalid(
                         pointer("", id),
                         "input resources require an initial node",
                     ));
                 }
-                if !resources.insert(*resource) {
+                if !resources.insert(resource.clone()) {
                     return Err(invalid(pointer("", id), "duplicate input resource"));
                 }
                 if *resource == InputResource::Stdin
@@ -186,11 +314,7 @@ impl WorkflowInputSchema {
                 input
                     .value_type
                     .validate_shared(value)
-                    .with_context(|source| TypeMismatchSnafu {
-                        path: format!("{path}{}", source.path),
-                        expected: source.expected.clone(),
-                        actual: source.actual,
-                    })?;
+                    .context(TypeMismatchSnafu { path })?;
             }
         }
         for (node, ports) in &self.inputs {
@@ -211,19 +335,43 @@ impl WorkflowInputSchema {
         Ok(())
     }
 
-    pub fn validate_resources(
-        &self,
-        mut available: impl FnMut(&str, InputResource) -> bool,
-    ) -> Result<(), WorkflowInputError> {
-        for (node, requirements) in &self.resources {
-            for &resource in requirements {
-                if !available(node, resource) {
+    pub fn stdin_owner<'a>(
+        &'a self,
+        arguments: &WorkflowArguments,
+    ) -> Result<Option<&'a str>, WorkflowInputError> {
+        let mut owner = None;
+        for (node, resources) in &self.resources {
+            for resource in resources {
+                let required = match resource {
+                    InputResource::Stdin => true,
+                    InputResource::StdinIfMissing(input) => !arguments
+                        .0
+                        .get(node)
+                        .is_some_and(|values| values.contains_key(input)),
+                };
+                if required && let Some(previous) = owner.replace(node.as_str()) {
                     return Err(invalid(
                         pointer("", node),
-                        format!("required input resource {resource:?} is unavailable"),
+                        format!("stdin is already required by node `{previous}`"),
                     ));
                 }
             }
+        }
+        Ok(owner)
+    }
+
+    pub fn validate_resources(
+        &self,
+        arguments: &WorkflowArguments,
+        stdin_available: bool,
+    ) -> Result<(), WorkflowInputError> {
+        if let Some(node) = self.stdin_owner(arguments)?
+            && !stdin_available
+        {
+            return Err(invalid(
+                pointer("", node),
+                "required stdin resource is unavailable",
+            ));
         }
         Ok(())
     }

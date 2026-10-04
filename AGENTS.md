@@ -15,6 +15,15 @@
 - Do not introduce facade modules, split implementation files, or relocate tests solely to restrict visibility or move scoped declarations elsewhere. Existing integration tests may call public planning and execution APIs; such calls alone do not justify making those APIs private.
 - Before changing visibility, inspect the relevant code as it existed before the current change. Do not present an inferred preference as an established project rule. If the intended public surface remains unclear after checking instructions and existing code, confirm it with the user before changing it.
 
+## Rust Error Handling
+
+- Derive error types with `Snafu` and use generated selectors with `ResultExt::context` or `with_context` to add context to fallible operations. Avoid `map_err` closures that manually construct a Snafu variant.
+- Use `#[snafu(transparent)]` for pass-through variants that add no useful context, so `?` can convert the source error directly.
+- Preserve typed error sources and their chains. Do not stringify an error just to wrap it in another error; add a source-bearing variant and attach it with a Snafu selector.
+- Use `ensure!` for checked invariants, `.fail()` for immediate domain errors, and `.build()` when an error value is needed without returning it directly.
+- Expose or re-export context selectors only at module boundaries that need to attach that error context.
+- Keep node-specific error types in their owning node crate. Runtime error types should describe shared runtime contracts and mechanics.
+
 ## Commits and pull requests
 
 - Keep ablation reports local under the Git-ignored `target/` directory; do not include them in commits.

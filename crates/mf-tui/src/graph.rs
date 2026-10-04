@@ -92,6 +92,7 @@ impl GraphLayout {
             data_edges: body.data_edges.clone(),
             control_edges: body.control_edges.clone(),
             execution_order: body.execution_order.clone(),
+            execution: None,
             loop_bodies: Vec::new(),
         };
         Self::new(&scope)

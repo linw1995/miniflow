@@ -122,7 +122,7 @@ impl Observer {
     ) -> Result<RunObservation, ContractError> {
         description.validate()?;
         crate::require(
-            description.version == crate::description::WorkflowDescriptionVersion::V2026_09_29,
+            description.version.supports_loops() && !description.is_streaming(),
             "Loop observation requires the new description version",
         )?;
         let nodes = description
@@ -153,7 +153,7 @@ impl Observer {
             i64::try_from(nodes.len()).map_err(|_| crate::invalid("too many nodes"))?,
         )?;
         let loop_schema = description.as_ref().is_some_and(|description| {
-            description.version == crate::description::WorkflowDescriptionVersion::V2026_09_29
+            description.version.supports_loops() && !description.is_streaming()
         });
         let static_count = if loop_schema {
             description

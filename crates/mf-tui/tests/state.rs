@@ -120,6 +120,7 @@ fn graph() -> WorkflowDescription {
         }],
         control_edges: vec![],
         execution_order: vec!["a".into(), "b".into()],
+        execution: None,
         loop_bodies: Vec::new(),
     }
 }
@@ -213,6 +214,7 @@ fn loop_graph() -> WorkflowDescription {
         data_edges: vec![],
         control_edges: vec![],
         execution_order: vec!["repeat".into()],
+        execution: None,
         loop_bodies: vec![LoopBodyDescription {
             path: vec!["repeat".into()],
             nodes: vec![
