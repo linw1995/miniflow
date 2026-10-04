@@ -193,12 +193,8 @@ impl ExecutionContext {
         schema: &crate::WorkflowInputSchema,
     ) -> Result<(), WorkflowRunError> {
         self.startup_inputs_bound = false;
-        schema
-            .validate(&self.workflow_arguments)
-            .map_err(|source| WorkflowRunError::WorkflowInputs { source })?;
-        schema
-            .validate_resources(|node, resource| self.resources.available(node, resource))
-            .map_err(|source| WorkflowRunError::WorkflowInputs { source })?;
+        schema.validate(&self.workflow_arguments)?;
+        schema.validate_resources(|node, resource| self.resources.available(node, resource))?;
         self.startup_inputs_bound = true;
         Ok(())
     }
