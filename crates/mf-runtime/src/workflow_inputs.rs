@@ -155,7 +155,12 @@ pub enum WorkflowInputError {
         path: String,
         source: crate::TypeDepthError,
     },
-    #[snafu(display("workflow input `{path}` has an incompatible value: {source}"))]
+    #[snafu(display(
+        "workflow input `{}`: expected {}, found {}",
+        format!("{path}{}", source.path),
+        source.expected,
+        source.actual
+    ))]
     TypeMismatch {
         path: String,
         source: crate::TypeMismatch,
