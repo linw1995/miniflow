@@ -14,15 +14,15 @@
     {
       "id": "source",
       "kind": "builtin.constant",
-      "config": { "value": 21 }
+      "config": { "value": "21" }
     },
     {
       "id": "transform",
       "kind": "builtin.code",
       "config": {
         "language": "cel",
-        "inputs": { "amount": "int" },
-        "code": { "doubled": "amount * 2" }
+        "inputs": { "amount": "string" },
+        "code": { "doubled": "int(amount) * 2" }
       }
     }
   ],

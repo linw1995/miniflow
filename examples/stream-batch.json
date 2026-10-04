@@ -7,6 +7,10 @@
     "core": {
       "package": "mfn-core",
       "path": "../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
     }
   },
   "nodes": [
@@ -25,12 +29,27 @@
     {
       "id": "feed",
       "kind": "builtin.readline"
+    },
+    {
+      "id": "convert",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": { "line": "string" },
+        "code": { "item": "int(line)" }
+      }
     }
   ],
   "edges": [
     {
       "from_node": "feed",
       "from_output": "line",
+      "to_node": "convert",
+      "to_input": "line"
+    },
+    {
+      "from_node": "convert",
+      "from_output": "item",
       "to_node": "collect",
       "to_input": "item"
     },
