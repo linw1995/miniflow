@@ -56,6 +56,24 @@ fn wait_until(mut check: impl FnMut() -> bool) {
 fn definition() -> Value {
     let mut value: Value =
         serde_json::from_str(include_str!("../../../examples/stream-batch.json")).unwrap();
+    value["dependencies"]
+        .as_object_mut()
+        .unwrap()
+        .remove("code");
+    value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|node| node["id"] != "convert");
+    {
+        let edges = value["edges"].as_array_mut().unwrap();
+        let input = edges
+            .iter_mut()
+            .find(|edge| edge["to_node"] == "convert")
+            .unwrap();
+        input["to_node"] = json!("collect");
+        input["to_input"] = json!("item");
+        edges.retain(|edge| edge["from_node"] != "convert");
+    }
     *value["nodes"]
         .as_array_mut()
         .unwrap()
