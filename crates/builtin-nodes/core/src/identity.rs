@@ -35,13 +35,11 @@ impl IdentityNode {
 fn identity_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = IdentityNode;
     let metadata = mf_runtime::NodeMetadata {
-        ports: mf_runtime::NodePorts {
+        output_derivations: node.output_derivations(),
+        ..mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
             inputs: vec![PortSpec::new("input", ValueType::Any, true)],
             outputs: vec![PortSpec::new("value", ValueType::Any, true)],
-        },
-        output_derivations: node.output_derivations(),
-        stdin: None,
-        context_references: Vec::new(),
+        })
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
