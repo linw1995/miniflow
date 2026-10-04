@@ -66,6 +66,11 @@ pub use stream::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
     StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate,
 };
+pub(crate) use stream_instance::{
+    CapacitySnafu as StreamCapacitySnafu, ClosedSnafu as StreamClosedSnafu,
+    InputSnafu as StreamInputSnafu, PreparationSnafu as StreamPreparationSnafu,
+    ResourceSnafu as StreamResourceSnafu,
+};
 pub use stream_instance::{
     CompilationSnafu as StreamCompilationSnafu, Emitter, MessageId, MonotonicClock, StreamClock,
     StreamDelivery, StreamError, StreamInstance, StreamMetrics, StreamOptions, StreamOutput,

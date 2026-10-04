@@ -1,4 +1,9 @@
-use crate::{InputResource, StreamError, ValueRef, ValueType};
+use crate::{
+    InputResource, NodePluginFailedSnafu, StreamCapacitySnafu, StreamClosedSnafu,
+    StreamCompilationSnafu, StreamError, StreamInputSnafu, StreamPreparationSnafu,
+    StreamResourceSnafu, ValueRef, ValueType,
+};
+use snafu::ResultExt;
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{Arc, Condvar, Mutex, Weak},
@@ -121,26 +126,31 @@ impl ChannelSender {
                 return Err(error.clone());
             }
             if state.closed {
-                return Err(StreamError::Closed);
+                return Err(self.reject(state, StreamClosedSnafu.build()));
             }
-            if let Err(source) = self.0.value_type.validate_shared(&value) {
-                let error = StreamError::Input { source };
+            if let Err(error) = self
+                .0
+                .value_type
+                .validate_shared(&value)
+                .context(StreamInputSnafu)
+            {
                 return Err(self.reject(state, error));
             }
             if state.queue.len() < self.0.capacity {
                 break;
             }
             if !wait {
-                return Err(StreamError::Capacity);
+                return StreamCapacitySnafu.fail();
             }
             state.waiting_senders += 1;
             state = self.0.changed.wait(state).unwrap();
             state.waiting_senders -= 1;
         }
         let Some(next) = state.accepted.checked_add(1) else {
-            let error = StreamError::Resource {
-                message: "channel admission counter exhausted".into(),
-            };
+            let error = StreamResourceSnafu {
+                message: "channel admission counter exhausted".to_owned(),
+            }
+            .build();
             return Err(self.reject(state, error));
         };
         state.accepted = next;
@@ -231,9 +241,10 @@ impl ExecutionResources {
                 .keys()
                 .any(|key| self.channels.contains_key(key))
         {
-            return Err(StreamError::Preparation {
-                message: "input resource was supplied more than once".into(),
-            });
+            return StreamPreparationSnafu {
+                message: "input resource was supplied more than once".to_owned(),
+            }
+            .fail();
         }
         if let Some(stdin) = other.stdin.take() {
             self.stdin = Some(stdin);
@@ -254,15 +265,15 @@ impl ExecutionResources {
         capacity: usize,
     ) -> Result<ChannelSender, StreamError> {
         if capacity == 0 {
-            return Err(StreamError::Preparation {
-                message: "channel capacity must be positive".into(),
-            });
+            return StreamPreparationSnafu {
+                message: "channel capacity must be positive".to_owned(),
+            }
+            .fail();
         }
         value_type
             .check_depth()
-            .map_err(|error| StreamError::Preparation {
-                message: error.to_string(),
-            })?;
+            .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> { Box::new(source) })
+            .context(StreamCompilationSnafu)?;
         let channel = self.channels.entry(node.into()).or_insert_with(|| {
             Arc::new(Channel {
                 state: Mutex::new(ChannelState::default()),
@@ -272,9 +283,10 @@ impl ExecutionResources {
             })
         });
         if channel.value_type != value_type || channel.capacity != capacity {
-            return Err(StreamError::Preparation {
+            return StreamPreparationSnafu {
                 message: format!("channel `{node}` already has different type or capacity"),
-            });
+            }
+            .fail();
         }
         channel.state.lock().unwrap().senders += 1;
         Ok(ChannelSender(Arc::clone(channel)))
@@ -309,22 +321,22 @@ impl ExecutionResources {
         value_type: &ValueType,
         cancellation: &StreamCancellation,
     ) -> Result<Option<ValueRef>, StreamError> {
-        let input = self
-            .stdin
-            .as_ref()
-            .ok_or_else(|| StreamError::Preparation {
-                message: "stdin resource is unavailable".into(),
-            })?;
+        let input = self.stdin.as_ref().ok_or_else(|| {
+            StreamPreparationSnafu {
+                message: "stdin resource is unavailable".to_owned(),
+            }
+            .build()
+        })?;
         input.lock().unwrap().next_value(value_type, cancellation)
     }
 
     pub fn channel_next(&self, node: &str) -> Result<Option<ValueRef>, StreamError> {
-        let channel = self
-            .channels
-            .get(node)
-            .ok_or_else(|| StreamError::Preparation {
+        let channel = self.channels.get(node).ok_or_else(|| {
+            StreamPreparationSnafu {
                 message: format!("channel resource `{node}` is unavailable"),
-            })?;
+            }
+            .build()
+        })?;
         let mut state = channel.state.lock().unwrap();
         loop {
             if let Some(error) = &state.failure {
@@ -342,19 +354,19 @@ impl ExecutionResources {
     }
 
     pub fn channel_published(&self, node: &str) -> Result<(), StreamError> {
-        let channel = self
-            .channels
-            .get(node)
-            .ok_or_else(|| StreamError::Preparation {
+        let channel = self.channels.get(node).ok_or_else(|| {
+            StreamPreparationSnafu {
                 message: format!("channel resource `{node}` is unavailable"),
-            })?;
+            }
+            .build()
+        })?;
         let mut state = channel.state.lock().unwrap();
-        state.published = state
-            .published
-            .checked_add(1)
-            .ok_or_else(|| StreamError::Resource {
-                message: "channel publication counter exhausted".into(),
-            })?;
+        state.published = state.published.checked_add(1).ok_or_else(|| {
+            StreamResourceSnafu {
+                message: "channel publication counter exhausted".to_owned(),
+            }
+            .build()
+        })?;
         channel.changed.notify_all();
         Ok(())
     }
@@ -380,12 +392,18 @@ pub fn channel_source(value_type: ValueType) -> crate::PreparedNode {
             context: &mut crate::ExecutionContext,
             emitter: &mut crate::Emitter<'_>,
         ) -> Result<(), crate::NodeExecutionError> {
-            let error = |source: StreamError| crate::NodeExecutionError::PluginFailed {
-                source: Box::new(source),
-            };
-            while let Some(value) = context.channel_next().map_err(error)? {
+            while let Some(value) = context
+                .channel_next()
+                .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> { Box::new(source) })
+                .context(NodePluginFailedSnafu)?
+            {
                 emitter.send(crate::Outputs::from([("item".into(), value)]).into())?;
-                context.channel_published().map_err(error)?;
+                context
+                    .channel_published()
+                    .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> {
+                        Box::new(source)
+                    })
+                    .context(NodePluginFailedSnafu)?;
             }
             Ok(())
         }
