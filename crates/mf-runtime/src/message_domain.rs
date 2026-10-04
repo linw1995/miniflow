@@ -1,7 +1,7 @@
 use crate::stream_plan::InvalidPlanSnafu;
 use crate::{
-    FlowNode, NodeExecution, STREAM_INPUT_ID, StreamBuildError, StreamDependency,
-    WorkflowOutputDefinition, output_id,
+    FlowNode, NodeExecution, StreamBuildError, StreamDependency, WorkflowOutputDefinition,
+    output_id,
 };
 use snafu::{OptionExt, ensure};
 use std::collections::{BTreeMap, BTreeSet};
@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 /// A message source and the ordered steps that consume its messages.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamDomain {
-    pub source: usize,
+    pub source: Option<usize>,
     pub steps: Vec<usize>,
 }
 
@@ -48,20 +48,11 @@ impl MessageDomains {
             }
         }
         let mut domains = vec![StreamDomain {
-            source: 0,
+            source: None,
             steps: Vec::new(),
         }];
         let mut output_domains = vec![0; nodes.len()];
         for (index, node) in nodes.iter().enumerate() {
-            if index == 0 {
-                ensure!(
-                    dependencies[index].is_empty(),
-                    InvalidPlanSnafu {
-                        message: "stream input cannot have incoming dependencies",
-                    }
-                );
-                continue;
-            }
             let mut incoming_domains = BTreeSet::new();
             for dependency in &dependencies[index] {
                 let source = indices
@@ -84,7 +75,7 @@ impl MessageDomains {
                 );
                 incoming_domains.insert(output_domains[source]);
             }
-            ensure!(incoming_domains.len() == 1, {
+            ensure!(incoming_domains.len() <= 1, {
                 let edges = dependencies[index]
                     .iter()
                     .map(|dependency| {
@@ -100,12 +91,21 @@ impl MessageDomains {
                     .join(", ");
                 InvalidPlanSnafu {
                     message: format!(
-                        "node `{}` requires one message domain and an explicit path from {STREAM_INPUT_ID}; incoming domains: {incoming_domains:?}; dependencies: {edges}",
+                        "node `{}` requires one message domain; incoming domains: {incoming_domains:?}; dependencies: {edges}",
                         node.definition_id
                     ),
                 }
             });
-            let domain = *incoming_domains.first().unwrap();
+            let domain = incoming_domains.first().copied().unwrap_or(0);
+            ensure!(
+                !incoming_domains.is_empty() || !matches!(node.node, Some(NodeExecution::Event(_))),
+                InvalidPlanSnafu {
+                    message: format!(
+                        "initial event node `{}` requires an explicit activation source",
+                        node.definition_id
+                    ),
+                }
+            );
             domains[domain].steps.push(index);
             output_domains[index] = match node.node.as_ref().with_context(|| InvalidPlanSnafu {
                 message: format!(
@@ -117,7 +117,7 @@ impl MessageDomains {
                 NodeExecution::Event(_) | NodeExecution::Stream(_) => {
                     let new_domain = domains.len();
                     domains.push(StreamDomain {
-                        source: index,
+                        source: Some(index),
                         steps: Vec::new(),
                     });
                     new_domain

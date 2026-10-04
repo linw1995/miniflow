@@ -1,5 +1,6 @@
 //! Bounded preflight for one locally launched compiled workflow.
 
+use mf_runtime::{WorkflowInputError, WorkflowInterface};
 use mf_telemetry::{
     ContractError,
     description::{MAX_DESCRIPTION_BYTES, WorkflowDescription},
@@ -9,7 +10,7 @@ use process_wrap::std::JobObject;
 #[cfg(unix)]
 use process_wrap::std::ProcessGroup;
 use process_wrap::std::{ChildWrapper, CommandWrap};
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 use std::{
     collections::VecDeque,
     io::{self, Read},
@@ -46,9 +47,11 @@ impl Default for DescriptionLimits {
 #[derive(Debug, Snafu)]
 pub enum DescriptionError {
     #[snafu(display(
-        "streaming workflows require JSON Lines input; run the standalone executable with piped input instead of --tui"
+        "streaming event schema {schema_version} is unsupported by TUI; recompile the workflow for schema 4"
     ))]
-    UnsupportedStream,
+    UnsupportedStream { schema_version: i64 },
+    #[snafu(display("runner returned an invalid interface: {source}; recompile the workflow"))]
+    InvalidInterface { source: WorkflowInputError },
     #[snafu(display("could not start workflow description from {path:?}: {source}"))]
     Spawn { path: PathBuf, source: io::Error },
     #[snafu(display("could not read workflow description: {source}"))]
@@ -82,6 +85,36 @@ pub fn describe_executable_with_limits(
     path: &Path,
     limits: DescriptionLimits,
 ) -> Result<WorkflowDescription, DescriptionError> {
+    let json = inspect_executable(path, "--describe", limits)?;
+    let description = WorkflowDescription::from_json(&json).context(InvalidSnafu)?;
+    if description.is_streaming()
+        && description.event_schema_version() != mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
+    {
+        return UnsupportedStreamSnafu {
+            schema_version: description.event_schema_version(),
+        }
+        .fail();
+    }
+    Ok(description)
+}
+
+pub fn describe_interface(path: &Path) -> Result<WorkflowInterface, DescriptionError> {
+    describe_interface_with_limits(path, DescriptionLimits::default())
+}
+
+pub fn describe_interface_with_limits(
+    path: &Path,
+    limits: DescriptionLimits,
+) -> Result<WorkflowInterface, DescriptionError> {
+    let json = inspect_executable(path, "--describe-interface", limits)?;
+    WorkflowInterface::from_json(&json).context(InvalidInterfaceSnafu)
+}
+
+fn inspect_executable(
+    path: &Path,
+    flag: &str,
+    limits: DescriptionLimits,
+) -> Result<Vec<u8>, DescriptionError> {
     let limits = DescriptionLimits {
         timeout: limits.timeout.min(DESCRIPTION_TIMEOUT),
         drain_timeout: limits.drain_timeout.min(DRAIN_TIMEOUT),
@@ -90,7 +123,7 @@ pub fn describe_executable_with_limits(
     };
     let mut command = Command::new(path);
     command
-        .arg("--describe")
+        .arg(flag)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -99,9 +132,8 @@ pub fn describe_executable_with_limits(
     command.wrap(ProcessGroup::leader());
     #[cfg(windows)]
     command.wrap(JobObject);
-    let child = command.spawn().map_err(|source| DescriptionError::Spawn {
+    let child = command.spawn().context(SpawnSnafu {
         path: path.to_owned(),
-        source,
     })?;
     let mut child = ChildGuard::new(child);
     let stdout = child.child.stdout().take().expect("stdout was piped");
@@ -127,21 +159,19 @@ pub fn describe_executable_with_limits(
             match result {
                 ReadResult::Output(Ok(bytes)) => output = Some(bytes),
                 ReadResult::Output(Err(OutputReadError::TooLarge)) => {
-                    return Err(DescriptionError::TooLarge {
+                    return TooLargeSnafu {
                         limit: limits.max_bytes,
-                    });
+                    }
+                    .fail();
                 }
                 ReadResult::Output(Err(OutputReadError::Io(source)))
                 | ReadResult::Diagnostics(Err(source)) => {
-                    return Err(DescriptionError::Read { source });
+                    return Err(source).context(ReadSnafu);
                 }
                 ReadResult::Diagnostics(Ok(tail)) => diagnostics = Some(tail),
             }
         }
-        let status = child
-            .child
-            .try_wait()
-            .map_err(|source| DescriptionError::Read { source })?;
+        let status = child.child.try_wait().context(ReadSnafu)?;
         if status.is_some() {
             exited_at.get_or_insert_with(Instant::now);
         }
@@ -155,11 +185,12 @@ pub fn describe_executable_with_limits(
         let deadline = exited_at.map_or(started + limits.timeout, |at| at + limits.drain_timeout);
         if Instant::now() >= deadline {
             if status.is_some() {
-                return Err(DescriptionError::OpenPipe);
+                return OpenPipeSnafu.fail();
             }
-            return Err(DescriptionError::Timeout {
+            return TimeoutSnafu {
                 timeout: limits.timeout,
-            });
+            }
+            .fail();
         }
         thread::sleep(
             deadline
@@ -167,29 +198,23 @@ pub fn describe_executable_with_limits(
                 .min(Duration::from_millis(10)),
         );
     };
-    output_reader
-        .join()
-        .map_err(|_| DescriptionError::ReaderPanic)?;
+    output_reader.join().map_err(|_| ReaderPanicSnafu.build())?;
     diagnostic_reader
         .join()
-        .map_err(|_| DescriptionError::ReaderPanic)?;
+        .map_err(|_| ReaderPanicSnafu.build())?;
     let details = diagnostics.expect("reader completed").display();
     if !status.success() {
-        return Err(DescriptionError::Exit {
+        return ExitSnafu {
             status,
             diagnostics: details,
-        });
+        }
+        .fail();
     }
     let bytes = output.expect("reader completed");
     let json = bytes
         .strip_suffix(b"\n")
-        .ok_or(DescriptionError::MissingTerminator)?;
-    let description = WorkflowDescription::from_json(json)
-        .map_err(|source| DescriptionError::Invalid { source })?;
-    if description.version.is_streaming() {
-        return Err(DescriptionError::UnsupportedStream);
-    }
-    Ok(description)
+        .ok_or_else(|| MissingTerminatorSnafu.build())?;
+    Ok(json.to_vec())
 }
 
 enum ReadResult {

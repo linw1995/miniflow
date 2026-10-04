@@ -22,7 +22,8 @@ pub use cache::{BuildDirectory, CacheError, default_build_directory};
 pub use compatibility::{RuntimeCompatibilityError, validate_runtime_identity};
 pub use compiler::{
     CyclePath, DescriptionError, TypeInferenceState, WorkflowCompileError, WorkflowExecutionError,
-    compile_definition, describe_compiled, execute_compiled, instantiate_compiled, plan_definition,
+    compile_definition, describe_compiled, describe_interface, describe_workflow_inputs,
+    execute_compiled, execute_compiled_with_inputs, instantiate_compiled, plan_definition,
     resolve_nodes, structural_order, topological_order, validate_definition,
 };
 #[cfg(feature = "codegen")]

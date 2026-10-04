@@ -1,3 +1,6 @@
+#[path = "fixtures/controlled_source.rs"]
+mod controlled;
+use controlled::SourceRun;
 #[path = "fixtures/observation_capture.rs"]
 mod capture;
 
@@ -34,7 +37,6 @@ struct Probe {
     dropped: AtomicUsize,
     threads: Mutex<Vec<ThreadId>>,
     spans: Mutex<Vec<opentelemetry::trace::SpanId>>,
-    drop_sender: Mutex<Option<mf_runtime::StreamSender>>,
     open: Mutex<bool>,
     changed: Condvar,
 }
@@ -142,9 +144,6 @@ impl StreamNode for Producer {
 
 impl Drop for Producer {
     fn drop(&mut self) {
-        if let Some(sender) = self.probe.drop_sender.lock().unwrap().take() {
-            let _ = sender.try_send(&json!(0).into());
-        }
         self.probe.dropped.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -164,6 +163,7 @@ fn producer(config: Value) -> Result<PreparedNode, mf_runtime::NodeBuildError> {
                 inputs: vec![PortSpec::new("input", ValueType::Int64, true)],
                 outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
             },
+            resources: Vec::new(),
             context_references: if mode == "context" {
                 vec![mf_runtime::ContextReference::new(
                     "copy.value",
@@ -217,28 +217,31 @@ fn wait_until(mut predicate: impl FnMut() -> bool) {
 
 fn graph(key: &str, count: usize) -> Value {
     json!({
-        "version":"2026-10-02", "dependencies":{},
-        "execution":{"mode":"stream", "input_type":"int", "limits":{"max_pending_messages":2, "workers":1}},
-        "nodes":[
-            {"id":"produce", "kind":"test.producer", "config":{"key":key, "count":count}},
-            {"id":"consume", "kind":"builtin.identity"}
-        ],
-        "edges":[
-            {"from_node":"%input", "from_output":"item", "to_node":"produce", "to_input":"input"},
-            {"from_node":"produce", "from_output":"value", "to_node":"consume", "to_input":"input"}
-        ],
-        "outputs":[{"name":"value", "node":"consume", "port":"value"}]
-    })
+            "version":"2026-10-03", "dependencies":{},
+            "execution":{"mode":"stream", "limits":{"max_pending_messages":3, "workers":1}},
+            "nodes":[
+                {"id":"produce", "kind":"test.producer", "config":{"key":key, "count":count}},
+                {"id":"consume", "kind":"builtin.identity"}
+            , controlled::source(json!("int"))
+    ],
+            "edges":[
+                {"from_node":"feed", "from_output":"item", "to_node":"produce", "to_input":"input"},
+                {"from_node":"produce", "from_output":"value", "to_node":"consume", "to_input":"input"}
+            ],
+            "outputs":[{"name":"value", "node":"consume", "port":"value"}]
+        })
 }
 
-fn start(value: Value, options: StreamOptions) -> StreamInstance {
+fn start(value: Value, options: StreamOptions) -> SourceRun {
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
-    instantiate_stream(&plan, &registry)
-        .unwrap()
-        .start_with_options(options)
-        .unwrap()
+    SourceRun::start(
+        instantiate_stream(&plan, &registry).unwrap(),
+        "feed",
+        options,
+    )
+    .unwrap()
 }
 
 fn receive(instance: &StreamInstance) -> i64 {
@@ -250,15 +253,15 @@ fn receive(instance: &StreamInstance) -> i64 {
 #[test]
 fn large_output_drains_after_input_closes_with_one_task_worker() {
     let instance = start(graph("large", 1_000), StreamOptions::default());
-    instance.input().send(json!(10)).unwrap();
-    instance.close_input();
+    instance.source.clone().send(json!(10)).unwrap();
+    instance.source.close();
     for expected in 10..1_010 {
         assert_eq!(receive(&instance), expected);
     }
     assert!(instance.recv().unwrap().is_none());
     let summary = instance.join().unwrap();
-    assert_eq!(summary.accepted_inputs, 1);
-    assert_eq!(summary.emitted_messages, 1_000);
+    assert_eq!(summary.startup_frames, 1);
+    assert_eq!(summary.emitted_messages, 1_001);
     assert_eq!(summary.delivered_outputs, 1_000);
 }
 
@@ -267,11 +270,11 @@ fn stalled_delivery_bounds_sends_and_drop_wakes_the_producer() {
     let instance = start(graph("blocked", 1_000), StreamOptions::default());
     let probe = probe("blocked");
     probe.dropped.store(0, Ordering::SeqCst);
-    instance.input().send(json!(0)).unwrap();
+    instance.source.clone().send(json!(0)).unwrap();
     let delivery = instance.receive().unwrap().unwrap();
-    wait_until(|| probe.attempted.load(Ordering::SeqCst) == 4);
-    assert_eq!(probe.sent.load(Ordering::SeqCst), 3);
-    assert_eq!(instance.summary().emitted_messages, 3);
+    wait_until(|| probe.attempted.load(Ordering::SeqCst) == 5);
+    assert_eq!(probe.sent.load(Ordering::SeqCst), 4);
+    assert_eq!(instance.summary().emitted_messages, 5);
     let (sender, receiver) = std::sync::mpsc::channel();
     thread::spawn(move || {
         drop(instance);
@@ -283,41 +286,19 @@ fn stalled_delivery_bounds_sends_and_drop_wakes_the_producer() {
 }
 
 #[test]
-fn producer_cleanup_can_reenter_the_closed_input_handle() {
-    let instance = start(graph("drop-reentry", 1), StreamOptions::default());
-    let probe = probe("drop-reentry");
-    probe.dropped.store(0, Ordering::SeqCst);
-    *probe.drop_sender.lock().unwrap() = Some(instance.input());
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let consumer = thread::spawn(move || {
-        instance.input().send(json!(7)).unwrap();
-        instance.close_input();
-        assert_eq!(receive(&instance), 7);
-        assert!(instance.recv().unwrap().is_none());
-        sender.send(instance.join()).unwrap();
-    });
-    receiver
-        .recv_timeout(Duration::from_secs(5))
-        .unwrap()
-        .unwrap();
-    consumer.join().unwrap();
-    assert_eq!(probe.dropped.load(Ordering::SeqCst), 1);
-}
-
-#[test]
 fn producer_state_and_worker_are_reused_but_instances_are_isolated() {
     let mut value = graph("state", 1);
     value["nodes"][0]["config"]["mode"] = json!("state");
     let first = start(value.clone(), StreamOptions::default());
     let second = start(value, StreamOptions::default());
     for expected in 1..=3 {
-        first.input().send(json!(0)).unwrap();
+        first.source.clone().send(json!(0)).unwrap();
         assert_eq!(receive(&first), expected);
     }
-    second.input().send(json!(0)).unwrap();
+    second.source.clone().send(json!(0)).unwrap();
     assert_eq!(receive(&second), 1);
     for instance in [first, second] {
-        instance.close_input();
+        instance.source.close();
         assert!(instance.recv().unwrap().is_none());
         instance.join().unwrap();
     }
@@ -330,7 +311,7 @@ fn producer_state_and_worker_are_reused_but_instances_are_isolated() {
 #[test]
 fn skips_and_chained_producers_preserve_input_order() {
     let mut value = graph("chain-first", 3);
-    value["execution"]["limits"]["max_pending_messages"] = json!(3);
+    value["execution"]["limits"]["max_pending_messages"] = json!(4);
     value["nodes"].as_array_mut().unwrap().push(json!({
         "id":"expand", "kind":"test.producer", "config":{"key":"chain-second", "count":2}
     }));
@@ -340,15 +321,15 @@ fn skips_and_chained_producers_preserve_input_order() {
     }));
     value["nodes"].as_array_mut().unwrap().push(json!({
         "id":"route", "kind":"builtin.if_else", "config":{"branches":[{
-            "id":"positive", "condition":{"source":{"output":"%input.item", "path":""}, "operator":"gt", "value":0}
+            "id":"positive", "condition":{"source":{"output":"feed.item", "path":""}, "operator":"gt", "value":0}
         }]}
     }));
     value["control_edges"] = json!([
-        {"from_node":"%input", "from_output":"item", "to_node":"route"},
+        {"from_node":"feed", "from_output":"item", "to_node":"route"},
         {"from_node":"route", "from_output":"positive", "to_node":"produce"}
     ]);
     let instance = start(value, StreamOptions::default());
-    let input = instance.input();
+    let input = instance.source.clone();
     let producer = thread::spawn(move || {
         for value in [0, 10, 20] {
             input.send(json!(value)).unwrap();
@@ -368,7 +349,7 @@ fn skips_and_chained_producers_preserve_input_order() {
 fn timers_flush_while_a_producer_is_still_executing() {
     let mut value = graph("timer", 1);
     value["nodes"][0]["config"]["mode"] = json!("gate");
-    value["execution"]["limits"]["max_pending_messages"] = json!(3);
+    value["execution"]["limits"]["max_pending_messages"] = json!(4);
     value["nodes"][1] =
         json!({"id":"consume", "kind":"builtin.batch", "config":{"max_items":5, "max_wait_ms":20}});
     value["edges"][1]["to_input"] = json!("item");
@@ -376,8 +357,8 @@ fn timers_flush_while_a_producer_is_still_executing() {
     let instance = start(value, StreamOptions::default());
     let probe = probe("timer");
     let _release = Release(Arc::clone(&probe));
-    instance.input().send(json!(7)).unwrap();
-    instance.close_input();
+    instance.source.clone().send(json!(7)).unwrap();
+    instance.source.close();
     wait_until(|| instance.summary().emitted_messages == 2);
     assert_eq!(
         instance.recv().unwrap().unwrap().outputs["value"],
@@ -398,9 +379,9 @@ fn downstream_failure_wakes_a_producer_blocked_on_capacity() {
     let _release = Release(Arc::clone(&sink));
     let producer = probe("failed-upstream");
     producer.dropped.store(0, Ordering::SeqCst);
-    instance.input().send(json!(0)).unwrap();
+    instance.source.clone().send(json!(0)).unwrap();
     wait_until(|| {
-        producer.attempted.load(Ordering::SeqCst) == 4 && sink.calls.load(Ordering::SeqCst) == 1
+        producer.attempted.load(Ordering::SeqCst) == 5 && sink.calls.load(Ordering::SeqCst) == 1
     });
     sink.release();
     let error = instance.recv().unwrap_err().to_string();
@@ -417,7 +398,7 @@ fn producer_errors_and_panics_report_node_identity_and_preserve_delivered_output
         let instance = start(value, StreamOptions::default());
         let probe = probe(mode);
         let _release = Release(Arc::clone(&probe));
-        instance.input().send(json!(42)).unwrap();
+        instance.source.clone().send(json!(42)).unwrap();
         if mode == "fail_after" {
             assert_eq!(receive(&instance), 42);
             probe.release();
@@ -451,8 +432,8 @@ fn ignored_invalid_sends_fail_publication_and_producer_observation_counts_output
                 ..Default::default()
             },
         );
-        instance.input().send(json!(0)).unwrap();
-        instance.close_input();
+        instance.source.clone().send(json!(0)).unwrap();
+        instance.source.close();
         if mode == "range" {
             for expected in 0..3 {
                 assert_eq!(receive(&instance), expected);
@@ -536,7 +517,7 @@ fn preparation_rejects_synchronous_and_mixed_domain_placement_without_execution(
     ));
     let mut value = graph("preparation", 1);
     value["control_edges"] = json!([{
-        "from_node":"%input", "from_output":"item", "to_node":"consume"
+        "from_node":"feed", "from_output":"item", "to_node":"consume"
     }]);
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let error = compile_definition(&definition, &registry)
@@ -559,8 +540,8 @@ fn producer_reads_declared_ancestor_context_on_its_worker() {
         "from_node":"copy", "from_output":"value", "to_node":"produce", "to_input":"input"
     }));
     let instance = start(value, StreamOptions::default());
-    instance.input().send(json!(17)).unwrap();
-    instance.close_input();
+    instance.source.clone().send(json!(17)).unwrap();
+    instance.source.close();
     assert_eq!(receive(&instance), 17);
     assert!(instance.recv().unwrap().is_none());
     instance.join().unwrap();

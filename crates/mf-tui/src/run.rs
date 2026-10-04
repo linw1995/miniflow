@@ -1,7 +1,7 @@
 //! Supervision and terminal presentation for one locally launched workflow.
 
 use crate::{
-    description::{DescriptionError, describe_executable},
+    description::{DescriptionError, describe_executable, describe_interface},
     duration::format_duration_ns,
     graph::{GraphError, GraphLayout, GraphView},
     receiver::{LoopbackReceiver, ReceiverError},
@@ -14,7 +14,8 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use mf_telemetry::{event::LoopPathEntry, identity::RunId};
+use mf_runtime::{MAX_WORKFLOW_INPUT_BYTES, WorkflowArguments, WorkflowInputError};
+use mf_telemetry::{description::WorkflowDescription, identity::RunId};
 use nix::{
     fcntl::{FcntlArg, OFlag, fcntl},
     sys::signal::Signal,
@@ -27,13 +28,16 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 use signal_hook::{SigId, consts::SIGINT, flag, low_level::unregister};
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 use std::{
     collections::{BTreeMap, VecDeque},
     env,
     fs::File,
     io::{self, IsTerminal, Read, Seek, SeekFrom, Write},
-    os::{fd::AsFd, unix::process::ExitStatusExt},
+    os::{
+        fd::AsFd,
+        unix::{fs::OpenOptionsExt, process::ExitStatusExt},
+    },
     path::{Path, PathBuf},
     process::{Command, ExitStatus, Stdio},
     sync::{
@@ -54,6 +58,14 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(100);
 pub enum RunError {
     #[snafu(display("TUI requires terminal stdin and stderr"))]
     TerminalRequired,
+    #[snafu(transparent)]
+    Inputs { source: WorkflowInputError },
+    #[snafu(display("{message}"))]
+    Options { message: String },
+    #[snafu(display("could not read workflow input file {path:?}: {source}"))]
+    InputFile { path: PathBuf, source: io::Error },
+    #[snafu(display("could not prepare private workflow arguments: {source}"))]
+    ArgumentFile { source: io::Error },
     #[snafu(display("could not describe workflow: {source}"))]
     Description { source: DescriptionError },
     #[snafu(display("could not layout workflow graph: {source}"))]
@@ -70,29 +82,157 @@ pub enum RunError {
     Supervise { source: io::Error },
 }
 
-pub fn run_executable(path: &Path) -> Result<u8, RunError> {
-    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
-        return Err(RunError::TerminalRequired);
+#[derive(Clone, Debug, Default)]
+pub struct RunOptions {
+    pub inputs: Option<String>,
+    pub inputs_file: Option<PathBuf>,
+    pub stream_input: Option<PathBuf>,
+}
+
+struct PreparedLaunch {
+    description: WorkflowDescription,
+    arguments: Option<tempfile::NamedTempFile>,
+    stdin: Option<File>,
+}
+
+fn option_error(message: &str) -> RunError {
+    OptionsSnafu {
+        message: message.to_owned(),
     }
-    let area = terminal_area().map_err(|source| RunError::Terminal { source })?;
-    let description =
-        describe_executable(path).map_err(|source| RunError::Description { source })?;
-    let layout = GraphLayout::new(&description).map_err(|source| RunError::Graph { source })?;
+    .build()
+}
+
+fn open_input_file(path: &Path) -> Result<File, RunError> {
+    let open = || -> io::Result<File> {
+        let file = File::options()
+            .read(true)
+            .custom_flags(OFlag::O_NONBLOCK.bits())
+            .open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "expected a regular file",
+            ));
+        }
+        Ok(file)
+    };
+    open().context(InputFileSnafu {
+        path: path.to_owned(),
+    })
+}
+
+fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, RunError> {
+    if options.inputs.is_some() && options.inputs_file.is_some() {
+        return Err(option_error(
+            "--inputs and --inputs-file are mutually exclusive",
+        ));
+    }
+    if options.stream_input.as_deref() == Some(Path::new("-")) {
+        return Err(option_error(
+            "--stream-input requires a file path; terminal stdin is reserved for TUI controls",
+        ));
+    }
+    let arguments = if let Some(json) = &options.inputs {
+        WorkflowArguments::from_json(json.as_bytes())?
+    } else if let Some(path) = &options.inputs_file {
+        let mut bytes = Vec::new();
+        open_input_file(path)?
+            .take(MAX_WORKFLOW_INPUT_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)
+            .context(InputFileSnafu { path: path.clone() })?;
+        WorkflowArguments::from_json(&bytes)?
+    } else {
+        WorkflowArguments::default()
+    };
+    let description = describe_executable(path).context(DescriptionSnafu)?;
+    let interface = if description.execution.is_some() {
+        let interface = describe_interface(path).context(DescriptionSnafu)?;
+        interface.validate_for_description(&description)?;
+        interface.schema.validate(&arguments)?;
+        Some(interface)
+    } else {
+        if options.inputs.is_some()
+            || options.inputs_file.is_some()
+            || options.stream_input.is_some()
+        {
+            return Err(option_error(
+                "this runner has no workflow input interface; recompile it to pass startup arguments or input resources",
+            ));
+        }
+        None
+    };
+    let needs_stdin = interface
+        .as_ref()
+        .map(|interface| interface.schema.stdin_owner(&arguments))
+        .transpose()?
+        .flatten()
+        .is_some();
+    let stdin = match (needs_stdin, &options.stream_input) {
+        (true, Some(path)) => Some(open_input_file(path)?),
+        (true, None) => {
+            return Err(option_error(
+                "workflow declares a stdin source; provide --stream-input <PATH>",
+            ));
+        }
+        (false, Some(_)) => {
+            return Err(option_error(
+                "--stream-input was supplied but the workflow declares no stdin resource",
+            ));
+        }
+        (false, None) => None,
+    };
+    let arguments = if !arguments.0.is_empty() {
+        let bytes = serde_json::to_vec(&arguments).context(mf_runtime::WorkflowInputJsonSnafu)?;
+        if bytes.len() > MAX_WORKFLOW_INPUT_BYTES {
+            return Err(mf_runtime::WorkflowInputTooLargeSnafu {
+                limit: MAX_WORKFLOW_INPUT_BYTES,
+            }
+            .build()
+            .into());
+        }
+        let mut file = tempfile::NamedTempFile::new().context(ArgumentFileSnafu)?;
+        file.write_all(&bytes)
+            .and_then(|()| file.flush())
+            .context(ArgumentFileSnafu)?;
+        Some(file)
+    } else {
+        None
+    };
+    Ok(PreparedLaunch {
+        description,
+        arguments,
+        stdin,
+    })
+}
+
+pub fn run_executable(path: &Path) -> Result<u8, RunError> {
+    run_executable_with_options(path, &RunOptions::default())
+}
+
+pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<u8, RunError> {
+    if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
+        return TerminalRequiredSnafu.fail();
+    }
+    let area = terminal_area().context(TerminalSnafu)?;
+    let PreparedLaunch {
+        description,
+        arguments,
+        stdin,
+    } = prepare_launch(path, options)?;
+    let streaming = description.is_streaming();
+    let layout = GraphLayout::new(&description).context(GraphSnafu)?;
     let mut body_layouts = BTreeMap::new();
     for body in &description.loop_bodies {
-        let body_layout = GraphLayout::from_loop_body(&description, &body.path)
-            .map_err(|source| RunError::Graph { source })?;
+        let body_layout =
+            GraphLayout::from_loop_body(&description, &body.path).context(GraphSnafu)?;
         body_layouts.insert(body.path.clone(), body_layout);
     }
-    let capture = Arc::new(Mutex::new(
-        Capture::new().map_err(|source| RunError::Spool { source })?,
-    ));
+    let capture = Arc::new(Mutex::new(Capture::new().context(SpoolSnafu)?));
     let mut capture_worker = None;
     let run_id = RunId::new();
-    let mut receiver = LoopbackReceiver::bind(description, run_id)
-        .map_err(|source| RunError::Receiver { source })?;
-    let signal = SignalGuard::register().map_err(|source| RunError::Terminal { source })?;
-    let guard = TerminalGuard::enter().map_err(|source| RunError::Terminal { source })?;
+    let mut receiver = LoopbackReceiver::bind(description, run_id).context(ReceiverSnafu)?;
+    let signal = SignalGuard::register().context(TerminalSnafu)?;
+    let guard = TerminalGuard::enter().context(TerminalSnafu)?;
     // The backend's global size lookup can consult redirected stdout without a controlling TTY.
     let mut terminal = Terminal::with_options(
         CrosstermBackend::new(io::stderr()),
@@ -100,13 +240,16 @@ pub fn run_executable(path: &Path) -> Result<u8, RunError> {
             viewport: Viewport::Fixed(area),
         },
     )
-    .map_err(|source| RunError::Terminal { source })?;
+    .context(TerminalSnafu)?;
     let result = (|| {
         let mut command = Command::new(path);
         command
-            .stdin(Stdio::null())
+            .stdin(stdin.map_or_else(Stdio::null, Stdio::from))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if let Some(arguments) = &arguments {
+            command.arg("--inputs-file").arg(arguments.path());
+        }
         for (name, _) in env::vars_os() {
             if name.to_string_lossy().starts_with("OTEL_EXPORTER_OTLP_") {
                 command.env_remove(name);
@@ -115,19 +258,21 @@ pub fn run_executable(path: &Path) -> Result<u8, RunError> {
         command
             .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
             .env("MF_RUN_ID", run_id.to_string())
-            .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1");
+            .env(
+                mf_telemetry::SNAPSHOT_CAPTURE_ENV,
+                if streaming { "0" } else { "1" },
+            );
         let mut command = CommandWrap::from(command);
         command.wrap(ProcessGroup::leader());
-        let child = command.spawn().map_err(|source| RunError::Spawn {
+        let child = command.spawn().context(SpawnSnafu {
             path: path.to_owned(),
-            source,
         })?;
         let mut child = ChildGuard::new(child);
         capture
             .lock()
             .expect("capture lock was not poisoned")
             .attach(&mut child.child)
-            .map_err(|source| RunError::Supervise { source })?;
+            .context(SuperviseSnafu)?;
         capture_worker = Some(CaptureWorker::start(Arc::clone(&capture)));
         supervise(
             &mut child,
@@ -572,10 +717,7 @@ fn supervise(
     loop {
         let view = capture.view();
         if exited.is_none()
-            && let Some(status) = child
-                .child
-                .try_wait()
-                .map_err(|source| RunError::Supervise { source })?
+            && let Some(status) = child.child.try_wait().context(SuperviseSnafu)?
         {
             exited = Some((status, Instant::now()));
         }
@@ -633,10 +775,8 @@ fn supervise(
                 if signal.interrupted.swap(false, Ordering::Relaxed) {
                     return Ok((status, interrupted_at.is_some(), capture_forced));
                 }
-                if event::poll(Duration::from_millis(100))
-                    .map_err(|source| RunError::Terminal { source })?
-                {
-                    match event::read().map_err(|source| RunError::Terminal { source })? {
+                if event::poll(Duration::from_millis(100)).context(TerminalSnafu)? {
+                    match event::read().context(TerminalSnafu)? {
                         Event::Key(key)
                             if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                         {
@@ -669,7 +809,7 @@ fn supervise(
                         Event::Resize(width, height) => {
                             terminal
                                 .resize(Rect::new(0, 0, width, height))
-                                .map_err(|source| RunError::Terminal { source })?;
+                                .context(TerminalSnafu)?;
                         }
                         _ => continue,
                     }
@@ -703,8 +843,8 @@ fn supervise(
             )?;
             last_frame = Instant::now();
         }
-        if event::poll(Duration::from_millis(20)).map_err(|source| RunError::Terminal { source })? {
-            match event::read().map_err(|source| RunError::Terminal { source })? {
+        if event::poll(Duration::from_millis(20)).context(TerminalSnafu)? {
+            match event::read().context(TerminalSnafu)? {
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
@@ -732,7 +872,7 @@ fn supervise(
                 Event::Resize(width, height) => {
                     terminal
                         .resize(Rect::new(0, 0, width, height))
-                        .map_err(|source| RunError::Terminal { source })?;
+                        .context(TerminalSnafu)?;
                     last_frame = Instant::now() - FRAME_INTERVAL;
                 }
                 _ => {}
@@ -776,13 +916,17 @@ fn draw(
     if view_state.history.visible {
         terminal
             .draw(|frame| {
+                if snapshot.stream.is_some() {
+                    frame.render_widget(Paragraph::new("Data history is unavailable for streaming workflows.\nUse the graph to inspect observed invocations and workflow totals.\n\nv/Esc: graph | Ctrl-C: interrupt/close").block(Block::default().title("Streaming observation").borders(Borders::ALL)).wrap(Wrap { trim: false }), frame.area());
+                    return;
+                }
                 let snapshot = history.history_snapshot(
                     view_state.history.selection(),
                     usize::from(frame.area().height.saturating_sub(6)),
                 );
                 view_state.history.draw(frame, &snapshot);
             })
-            .map_err(|source| RunError::Terminal { source })?;
+            .context(TerminalSnafu)?;
         return Ok(());
     }
     let layout = view_state.layout(root_layout, body_layouts);
@@ -819,8 +963,13 @@ fn draw(
         } else {
             format!("{:?}", view_state.path)
         };
-        let pass_label = pass.and_then(|pass| pass.path.last())
-            .map_or(String::new(), |entry| format!("  |  Pass: {}", entry.index.get()));
+        let pass_label = pass.map_or(String::new(), |pass| {
+            let index = pass.path.last().map_or(0, |entry| entry.index.get());
+            match pass.stream_invocation {
+                Some(owner) => format!("  |  Invocation: {owner}  |  Pass: {index}"),
+                None => format!("  |  Pass: {index}"),
+            }
+        });
         frame.render_widget(Paragraph::new(format!(
             "Workflow: {workflow}  |  Process: {phase}  |  Scope: {scope}{pass_label}  |  {:.1}s",
             elapsed.as_secs_f64()
@@ -840,8 +989,7 @@ fn draw(
         } else {
             snapshot.nodes.get(view_state.selected)
         };
-        let parent_path = pass.map_or(&[][..], |pass| pass.path.as_slice());
-        frame.render_widget(Paragraph::new(details_text(selected_node, parent_path, snapshot, capture))
+        frame.render_widget(Paragraph::new(details_text(selected_node, pass, snapshot, capture))
             .block(Block::default().title("Details").borders(Borders::ALL))
             .wrap(Wrap { trim: false }), details);
         let lifecycle = &snapshot.lifecycle;
@@ -851,22 +999,72 @@ fn draw(
             lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
             lifecycle.observation_errors + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
         )), footer);
-    }).map_err(|source| RunError::Terminal { source })?;
+    }).context(TerminalSnafu)?;
     Ok(())
 }
 
 fn details_text(
     node: Option<&NodeObservation>,
-    parent_path: &[LoopPathEntry],
+    pass: Option<&LoopPassObservation>,
     snapshot: &StateSnapshot,
     capture: &CaptureView,
 ) -> String {
     let mut details = String::new();
+    let parent_path = pass.map_or(&[][..], |pass| pass.path.as_slice());
     if let Some(node) = node {
         details.push_str(&format!(
             "{} ({})\nStatus: {:?}\n",
             node.id, node.kind, node.status
         ));
+        if let Some(stream) = &snapshot.stream {
+            if parent_path.is_empty()
+                && let Some(metrics) = stream.nodes.iter().find(|metrics| metrics.id == node.id)
+            {
+                details.push_str(&format!(
+                    "Observed calls: {}\nCompleted: {} | Results: {}\n",
+                    metrics.observed_invocations,
+                    metrics.observed_completions,
+                    metrics.observed_results
+                ));
+                if let Some(count) = metrics.buffered_items {
+                    details.push_str(&format!("Buffered items: {}\n", count.get()));
+                }
+                if let Some(reason) = &metrics.last_flush_reason {
+                    details.push_str(&format!("Last flush: {reason}\n"));
+                }
+            }
+            if let Some(invocation) = stream.invocations.iter().rev().find(|invocation| {
+                invocation.node.id == node.id
+                    && invocation.path == parent_path
+                    && invocation.identity.parent == pass.and_then(|pass| pass.stream_invocation)
+            }) {
+                details.push_str(&format!(
+                    "Invocation: {} ({:?})\n",
+                    invocation.identity.invocation, invocation.identity.trigger
+                ));
+                if let Some(message) = invocation.identity.message {
+                    details.push_str(&format!(
+                        "Message: {}:{}\n",
+                        message.domain, message.sequence
+                    ));
+                }
+                if node.kind == "workflow.loop" {
+                    details.push_str(&format!(
+                        "Completed passes: {}\n",
+                        invocation.completed_passes
+                    ));
+                    if let Some(index) = invocation.active_pass {
+                        details.push_str(&format!("Active pass: {}\n", index.get()));
+                    }
+                    if let Some(summary) = &invocation.loop_summary {
+                        details.push_str(&format!("Stop reason: {:?}\n", summary.reason));
+                    }
+                }
+            }
+            if pass.is_some_and(|pass| !pass.nodes.iter().any(|detail| detail.id == node.id)) {
+                details.push_str("Node detail evicted; compact status retained\n");
+            }
+        }
         if let Some(duration) = node.duration_ns {
             details.push_str(&format!(
                 "Duration: {}\n",
@@ -901,6 +1099,12 @@ fn details_text(
             details.push_str("Node observation may be incomplete\n");
         }
         if node.kind == "workflow.loop"
+            && snapshot.stream.as_ref().is_none_or(|stream| {
+                parent_path.is_empty()
+                    && !stream.invocations.iter().any(|invocation| {
+                        invocation.node.id == node.id && invocation.path.is_empty()
+                    })
+            })
             && let Some(loop_state) = snapshot
                 .loop_overviews
                 .iter()
@@ -916,6 +1120,37 @@ fn details_text(
             if let Some(reason) = loop_state.stop_reason {
                 details.push_str(&format!("Stop reason: {reason:?}\n"));
             }
+        }
+    }
+    if let Some(stream) = &snapshot.stream {
+        if let Some(counts) = &stream.counts {
+            details.push_str(&format!("Workflow totals\nStartup: {} | Messages: {}\nCompleted frames: {}\nDelivered outputs: {}\n", counts.startup_frames, counts.emitted_messages, counts.completed_frames, counts.delivered_outputs));
+        }
+        if let Some(failure) = &stream.failure {
+            details.push_str(&format!(
+                "Workflow failure ({}): {}\n",
+                failure.phase, failure.message
+            ));
+        }
+        if stream.hidden_invocations != 0 {
+            details.push_str(&format!(
+                "Older invocation details hidden: {}\n",
+                stream.hidden_invocations
+            ));
+        }
+        if stream.unverified_retransmissions != 0 {
+            details.push_str(&format!(
+                "Retransmissions outside verification coverage: {}\n",
+                stream.unverified_retransmissions
+            ));
+        }
+        let unresolved = stream
+            .invocations
+            .iter()
+            .filter(|invocation| invocation.node.possibly_missing_events)
+            .count();
+        if unresolved != 0 {
+            details.push_str(&format!("Unresolved invocation outcomes: {unresolved}\n"));
         }
     }
     if snapshot.hidden_loop_passes != 0 {
@@ -969,6 +1204,7 @@ fn details_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mf_runtime::InputResource;
     use mf_telemetry::{
         Count,
         description::{
@@ -978,8 +1214,128 @@ mod tests {
         identity::WorkflowId,
     };
 
+    fn source_runner(
+        directory: &Path,
+        resource: Option<InputResource>,
+        on_describe: &str,
+    ) -> PathBuf {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let runner = directory.join("runner");
+        let graph = serde_json::json!({"version":"2026-10-03", "workflow_id":format!("sha256:{}", "a".repeat(64)),
+            "execution":{"mode":"stream", "event_schema_version":4},
+            "nodes":[{"id":"source/id", "kind":"third-party.dynamic_source"}], "execution_order":["source/id"],
+            "data_edges":[], "control_edges":[], "loop_bodies":[]});
+        let mut resources = serde_json::Map::new();
+        if let Some(resource) = resource {
+            resources.insert("source/id".into(), serde_json::json!([resource]));
+        }
+        let interface = serde_json::json!({"version":"2026-10-03", "workflow_id":graph["workflow_id"],
+            "schema":{"inputs":{"source/id":{"path":{"type":"string", "required":true}}}, "resources":resources}});
+        fs::write(&runner, format!("#!/bin/sh\ncase \"$1\" in\n--describe) printf '%s\\n' '{graph}';;\n--describe-interface) {on_describe}\nprintf '%s\\n' '{interface}';;\n*) exit 99;;\nesac\n")).unwrap();
+        fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+        runner
+    }
+
+    fn valid_options() -> RunOptions {
+        RunOptions {
+            inputs: Some(r#"{"source/id":{"path":"data.txt"}}"#.into()),
+            ..Default::default()
+        }
+    }
+
     #[test]
-    fn loop_view_enters_body_and_returns_to_root() {
+    fn preflight_validates_interfaces_and_preserves_owned_parameters() {
+        use std::{fs, os::unix::fs::PermissionsExt};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("arguments.json");
+        fs::write(&path, valid_options().inputs.unwrap()).unwrap();
+        let runner = source_runner(root.path(), None, &format!("rm '{}'", path.display()));
+        let prepared = prepare_launch(
+            &runner,
+            &RunOptions {
+                inputs_file: Some(path.clone()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!path.exists());
+        let private = prepared.arguments.as_ref().unwrap();
+        assert_eq!(
+            private.as_file().metadata().unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        let temporary_path = private.path().to_owned();
+        assert_eq!(
+            WorkflowArguments::from_file(private.path()).unwrap(),
+            WorkflowArguments::from_json(valid_options().inputs.unwrap().as_bytes()).unwrap()
+        );
+        assert!(prepared.stdin.is_none());
+        drop(prepared);
+        assert!(!temporary_path.exists());
+        let runner = source_runner(root.path(), None, "");
+        for input in [
+            "{}",
+            r#"{"source/id":{"path":42}}"#,
+            r#"{"source/id":{"path":"a","path":"b"}}"#,
+            r#"{"source/id":{"path":"a","extra":null}}"#,
+        ] {
+            assert!(
+                prepare_launch(
+                    &runner,
+                    &RunOptions {
+                        inputs: Some(input.into()),
+                        ..Default::default()
+                    }
+                )
+                .is_err()
+            );
+        }
+        let mut options = valid_options();
+        options.inputs_file = Some(path);
+        assert!(prepare_launch(&runner, &options).is_err());
+        options.inputs_file = None;
+        options.inputs = Some(" ".repeat(MAX_WORKFLOW_INPUT_BYTES + 1));
+        assert!(matches!(
+            prepare_launch(&runner, &options),
+            Err(RunError::Inputs {
+                source: WorkflowInputError::TooLarge { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn preflight_routes_only_declared_file_resources() {
+        use std::fs;
+        let root = tempfile::tempdir().unwrap();
+        let data = root.path().join("data.jsonl");
+        fs::write(&data, "1\r\n2").unwrap();
+        let runner = source_runner(root.path(), Some(InputResource::Stdin), "");
+        assert!(prepare_launch(&runner, &valid_options()).is_err());
+        let mut options = valid_options();
+        options.stream_input = Some(data.clone());
+        let mut prepared = prepare_launch(&runner, &options).unwrap();
+        fs::remove_file(&data).unwrap();
+        let mut contents = String::new();
+        prepared
+            .stdin
+            .as_mut()
+            .unwrap()
+            .read_to_string(&mut contents)
+            .unwrap();
+        assert_eq!(contents, "1\r\n2");
+        assert!(prepare_launch(&runner, &options).is_err());
+        options.stream_input = Some(root.path().to_owned());
+        assert!(prepare_launch(&runner, &options).is_err());
+        options.stream_input = Some(PathBuf::from("-"));
+        assert!(prepare_launch(&runner, &options).is_err());
+        options.stream_input = Some(data);
+        let runner = source_runner(root.path(), None, "");
+        assert!(prepare_launch(&runner, &options).is_err());
+        options.stream_input = None;
+    }
+
+    #[test]
+    fn loop_views_preserve_navigation_and_compacted_stream_totals() {
         let description = WorkflowDescription {
             version: WorkflowDescriptionVersion::V2026_09_29,
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "c".repeat(64))).unwrap(),
@@ -990,6 +1346,7 @@ mod tests {
             data_edges: vec![],
             control_edges: vec![],
             execution_order: vec!["repeat".into()],
+            execution: None,
             loop_bodies: vec![LoopBodyDescription {
                 path: vec!["repeat".into()],
                 nodes: vec![NodeDescription {
@@ -1059,6 +1416,22 @@ mod tests {
         assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 1);
         view.handle_key(KeyCode::Char('h'), &snapshot, &root, &bodies, 0);
         assert!(view.path.is_empty());
+        let mut snapshot = snapshot;
+        snapshot.stream = Some(crate::state::StreamSnapshot {
+            hidden_invocations: 1000,
+            ..Default::default()
+        });
+        snapshot.loop_overviews[0].completed_passes = 1000;
+        let capture = CaptureView {
+            stdout_open: false,
+            stderr_open: false,
+            stderr_tail: String::new(),
+            stderr_dropped: 0,
+            error: None,
+        };
+        let text = details_text(snapshot.nodes.first(), None, &snapshot, &capture);
+        assert!(text.contains("Completed passes: 1000"));
+        assert!(text.contains("Older invocation details hidden: 1000"));
     }
 
     #[test]

@@ -90,6 +90,10 @@ pub struct ExecutionContext {
     remaining_steps: usize,
     snapshots: Option<crate::SnapshotRecorder>,
     snapshot_prefix: Vec<LoopPathEntry>,
+    workflow_arguments: crate::WorkflowArguments,
+    startup_inputs_bound: bool,
+    resources: std::sync::Arc<crate::ExecutionResources>,
+    cancellation: crate::StreamCancellation,
 }
 
 impl Default for ExecutionContext {
@@ -103,11 +107,73 @@ impl Default for ExecutionContext {
             remaining_steps: crate::MAX_SCHEDULED_STEPS,
             snapshots: None,
             snapshot_prefix: Vec::new(),
+            workflow_arguments: crate::WorkflowArguments::default(),
+            startup_inputs_bound: false,
+            resources: std::sync::Arc::new(crate::ExecutionResources::default()),
+            cancellation: crate::StreamCancellation::default(),
         }
     }
 }
 
 impl ExecutionContext {
+    pub fn set_execution_resources(
+        &mut self,
+        resources: crate::ExecutionResources,
+        cancellation: crate::StreamCancellation,
+    ) {
+        self.resources = std::sync::Arc::new(resources);
+        self.cancellation = cancellation;
+    }
+
+    pub fn set_cancellation(&mut self, cancellation: crate::StreamCancellation) {
+        self.cancellation = cancellation;
+    }
+    pub fn cancellation(&self) -> crate::StreamCancellation {
+        self.cancellation.clone()
+    }
+
+    pub fn stdin_line(&self) -> Result<Option<String>, crate::StreamError> {
+        self.resources.stdin_line(&self.cancellation)
+    }
+
+    pub fn fork_stream(&self, observation: Option<RunObservation>) -> Self {
+        Self {
+            outputs: self.outputs.clone(),
+            remaining_steps: self.remaining_steps,
+            resources: std::sync::Arc::clone(&self.resources),
+            cancellation: self.cancellation.clone(),
+            observation,
+            ..Self::default()
+        }
+    }
+
+    pub fn set_workflow_arguments(&mut self, arguments: crate::WorkflowArguments) {
+        self.workflow_arguments = arguments;
+        self.startup_inputs_bound = false;
+    }
+
+    pub fn bind_workflow_inputs(
+        &mut self,
+        schema: &crate::WorkflowInputSchema,
+    ) -> Result<(), WorkflowRunError> {
+        self.startup_inputs_bound = false;
+        schema.validate(&self.workflow_arguments)?;
+        schema.validate_resources(&self.workflow_arguments, self.resources.has_stdin())?;
+        self.startup_inputs_bound = true;
+        Ok(())
+    }
+
+    fn initial_inputs(&self, node: &str) -> Inputs {
+        if !self.startup_inputs_bound || !self.scopes.is_empty() {
+            return Inputs::new();
+        }
+        self.workflow_arguments
+            .0
+            .get(node)
+            .cloned()
+            .unwrap_or_default()
+    }
+
     pub(super) fn set_frame_observation(&mut self, observation: RunObservation) {
         self.observation = Some(observation);
     }
@@ -128,7 +194,7 @@ impl ExecutionContext {
     ) -> Result<Option<Inputs>, WorkflowRunError> {
         let id = node.definition_id.as_str();
         self.reserve_step(id)?;
-        let mut inputs = Inputs::new();
+        let mut inputs = self.initial_inputs(id);
         let mut skipped = false;
         for dependency in dependencies {
             let value = self
@@ -180,6 +246,7 @@ impl ExecutionContext {
 
     pub fn fork_body(&self, observation: Option<BodyObservation>) -> Self {
         let mut child = Self::for_body(observation);
+        child.cancellation = self.cancellation.clone();
         if self.snapshots.is_some() {
             child.snapshots = self.snapshots.clone();
             child.snapshot_prefix = self.snapshot_path();
@@ -664,7 +731,7 @@ pub(super) fn execute_ordered_task_in_context<'a, N>(
         Some(StepObservation::Body(step)) => Some(step.enter()),
         _ => None,
     };
-    let mut inputs = Inputs::new();
+    let mut inputs = ctx.initial_inputs(id);
     let mut skipped = false;
     let mut causes = BTreeSet::new();
     for dependency in dependencies {

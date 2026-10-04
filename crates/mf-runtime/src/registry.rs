@@ -40,10 +40,7 @@ impl NodeRegistry {
         for registration in registrations {
             if matches!(
                 registration.kind,
-                crate::LOOP_ASSIGN_KIND
-                    | crate::EXIT_LOOP_KIND
-                    | crate::LOOP_SOURCE_ID
-                    | crate::STREAM_INPUT_ID
+                crate::LOOP_ASSIGN_KIND | crate::EXIT_LOOP_KIND | crate::LOOP_SOURCE_ID
             ) {
                 return Err(NodeRegistryError::ReservedKind {
                     kind: registration.kind.to_owned(),
@@ -102,6 +99,7 @@ mod tests {
                 outputs: vec![],
             },
             output_derivations: Vec::new(),
+            resources: Vec::new(),
             context_references: Vec::new(),
         };
         Ok(crate::PreparedNode::new(node, metadata))
@@ -115,6 +113,7 @@ mod tests {
                 outputs: vec![crate::PortSpec::new("value", ValueType::Any, false)],
             },
             output_derivations: Vec::new(),
+            resources: Vec::new(),
             context_references: Vec::new(),
         };
         Ok(crate::PreparedNode::new(node, metadata))

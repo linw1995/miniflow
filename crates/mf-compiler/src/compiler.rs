@@ -45,6 +45,12 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
+    #[snafu(display("{source}"))]
+    InterfaceDescription { source: DescriptionError },
+    #[snafu(display("{source}"))]
+    WorkflowInputs {
+        source: mf_runtime::WorkflowInputError,
+    },
     #[snafu(display("invalid streaming workflow: {message}"), visibility(pub))]
     InvalidStream { message: String },
     #[snafu(
@@ -381,8 +387,10 @@ pub fn prepare_definition(
     registry: &NodeRegistry,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    let expanded = crate::streaming::expanded_definition(definition)?;
-    prepare_graph(&expanded, registry, None, false)
+    definition
+        .validate_execution()
+        .context(StreamConstructionSnafu)?;
+    prepare_graph(definition, registry, None, false)
 }
 
 fn prepare_graph(
@@ -412,7 +420,44 @@ fn prepare_graph(
         }.fail();
     }
     let incoming = incoming_dependencies(definition);
-    validate_base_metadata(definition, &nodes, &incoming)?;
+    let startup = definition.version.supports_startup_inputs()
+        && enclosing.is_none()
+        && !allow_iteration_input;
+    validate_base_metadata(definition, &nodes, &incoming, startup)?;
+    if startup {
+        mf_runtime::WorkflowInputSchema::from_nodes(
+            nodes
+                .iter()
+                .map(|node| (node, !incoming.contains_key(node.definition_id.as_str()))),
+            |node, input| {
+                definition
+                    .edges
+                    .iter()
+                    .any(|edge| edge.to_node.as_str() == node && edge.to_input == input)
+            },
+        )
+        .context(WorkflowInputsSnafu)?;
+        if let Some(node) = nodes.iter().find(|node| {
+            !incoming.contains_key(node.definition_id.as_str())
+                && matches!(node.node, Some(mf_runtime::NodeExecution::Event(_)))
+        }) {
+            return InvalidStreamSnafu {
+                message: format!(
+                    "initial event node `{}` requires an explicit activation source",
+                    node.definition_id
+                ),
+            }
+            .fail();
+        }
+    } else if let Some(node) = nodes
+        .iter()
+        .find(|node| !node.metadata.resources.is_empty())
+    {
+        return Err(WorkflowCompileError::InvalidNodeMetadata {
+            definition_id: node.definition_id.clone(),
+            message: "input resources require a schema 2026-10-03 top-level initial node".into(),
+        });
+    }
 
     let indices: BTreeMap<_, _> = nodes
         .iter()
@@ -458,6 +503,7 @@ fn validate_base_metadata(
     definition: &WorkflowDefinition,
     nodes: &[FlowNode],
     incoming: &BTreeMap<&str, Vec<ExecutionDependency<'_>>>,
+    startup: bool,
 ) -> Result<(), WorkflowCompileError> {
     let registrations: BTreeMap<_, _> = nodes
         .iter()
@@ -578,6 +624,9 @@ fn validate_base_metadata(
 
     for node in &definition.nodes {
         let registration = registrations[&node.id];
+        if startup && !incoming.contains_key(node.id.as_str()) {
+            continue;
+        }
         for port in registration.inputs.iter().filter(|port| port.required) {
             if !connected_inputs.contains(&(node.id.clone(), port.name.to_string())) {
                 return MissingRequiredInputSnafu {
@@ -714,12 +763,10 @@ pub fn structural_order(
     definition: &WorkflowDefinition,
 ) -> Result<Vec<DefinitionId>, WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    let expanded = crate::streaming::expanded_definition(definition)?;
-    let mut order = structural_order_graph(&expanded)?;
-    if definition.execution.is_some() {
-        order.retain(|id| id.as_str() != mf_runtime::STREAM_INPUT_ID);
-    }
-    Ok(order)
+    definition
+        .validate_execution()
+        .context(StreamConstructionSnafu)?;
+    structural_order_graph(definition)
 }
 
 pub fn structural_order_graph(
@@ -813,7 +860,7 @@ pub fn compile_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
-    let (nodes, mut execution_order) = prepare_definition(definition, registry)?;
+    let (nodes, execution_order) = prepare_definition(definition, registry)?;
     let flow = Flow::prepare(
         nodes,
         definition.edges.clone(),
@@ -826,7 +873,6 @@ pub fn compile_definition(
     if let Some(execution) = &definition.execution {
         flow.into_stream(execution.clone())
             .context(StreamConstructionSnafu)?;
-        execution_order.retain(|id| id.as_str() != mf_runtime::STREAM_INPUT_ID);
     } else {
         flow.into_tasks().context(FlowConstructionSnafu)?;
     }
@@ -950,6 +996,43 @@ pub fn instantiate_compiled(
     )
     .and_then(|flow| flow.with_control_edges(plan.definition.control_edges.clone()))
     .context(FlowConstructionSnafu)
+    .and_then(|flow| {
+        if plan.definition.version.supports_startup_inputs() {
+            flow.with_workflow_inputs().context(WorkflowInputsSnafu)
+        } else {
+            Ok(flow)
+        }
+    })
+}
+
+pub fn describe_workflow_inputs(
+    plan: &CompiledWorkflow,
+    registry: &NodeRegistry,
+) -> Result<mf_runtime::WorkflowInputSchema, WorkflowCompileError> {
+    if plan.definition.execution.is_some() {
+        Ok(crate::instantiate_stream(plan, registry)?
+            .plan()
+            .input_schema()
+            .clone())
+    } else {
+        Ok(instantiate_compiled(plan, registry)?.input_schema().clone())
+    }
+}
+
+pub fn describe_interface(
+    plan: &CompiledWorkflow,
+    registry: &NodeRegistry,
+) -> Result<mf_runtime::WorkflowInterface, WorkflowCompileError> {
+    let graph = describe_compiled(plan).context(InterfaceDescriptionSnafu)?;
+    let interface = mf_runtime::WorkflowInterface {
+        version: mf_runtime::WorkflowInterfaceVersion::V2026_10_03,
+        workflow_id: graph.workflow_id.clone(),
+        schema: describe_workflow_inputs(plan, registry)?,
+    };
+    interface
+        .validate_for_description(&graph)
+        .context(WorkflowInputsSnafu)?;
+    Ok(interface)
 }
 
 #[derive(Debug, Snafu)]
@@ -997,37 +1080,42 @@ pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription,
             kind: definition.kind.clone(),
         });
     }
-    let mut order: Vec<String> = plan
+    let order: Vec<String> = plan
         .execution_order
         .iter()
         .map(ToString::to_string)
         .collect();
-    if plan.definition.execution.is_some() {
-        nodes.insert(
-            0,
-            NodeDescription {
-                id: mf_runtime::STREAM_INPUT_ID.into(),
-                kind: mf_runtime::STREAM_INPUT_ID.into(),
-            },
-        );
-        order.insert(0, mf_runtime::STREAM_INPUT_ID.into());
-    }
     let mut loop_bodies = Vec::new();
     describe_loop_bodies(&plan.definition, &mut Vec::new(), &mut loop_bodies)?;
     let description = WorkflowDescription {
-        version: if plan.definition.execution.is_some() {
-            WorkflowDescriptionVersion::V2026_10_02
+        version: if plan.definition.version.supports_startup_inputs() {
+            WorkflowDescriptionVersion::V2026_10_03
         } else {
             match plan.definition.version {
                 mf_runtime::WorkflowDefinitionVersion::V2026_09_26 => {
                     WorkflowDescriptionVersion::V2026_09_27
                 }
                 mf_runtime::WorkflowDefinitionVersion::V2026_09_29
-                | mf_runtime::WorkflowDefinitionVersion::V2026_10_02 => {
+                | mf_runtime::WorkflowDefinitionVersion::V2026_10_02
+                | mf_runtime::WorkflowDefinitionVersion::V2026_10_03 => {
                     WorkflowDescriptionVersion::V2026_09_29
                 }
             }
         },
+        execution: plan.definition.version.supports_startup_inputs().then(|| {
+            mf_telemetry::description::ExecutionDescription {
+                mode: if plan.definition.execution.is_some() {
+                    mf_telemetry::description::ExecutionMode::Stream
+                } else {
+                    mf_telemetry::description::ExecutionMode::Single
+                },
+                event_schema_version: if plan.definition.execution.is_some() {
+                    mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
+                } else {
+                    mf_telemetry::LOOP_EVENT_SCHEMA_VERSION
+                },
+            }
+        }),
         workflow_id: WorkflowId::from_definition(&plan.definition, &order)
             .context(ContractSnafu)?,
         nodes,
@@ -1117,7 +1205,22 @@ pub fn execute_compiled(
     registry: &NodeRegistry,
     observation: Option<mf_runtime::RunObservation>,
 ) -> Result<mf_runtime::FlowOutputs, WorkflowExecutionError> {
+    execute_compiled_with_inputs(
+        plan,
+        registry,
+        mf_runtime::WorkflowArguments::default(),
+        observation,
+    )
+}
+
+pub fn execute_compiled_with_inputs(
+    plan: &CompiledWorkflow,
+    registry: &NodeRegistry,
+    arguments: mf_runtime::WorkflowArguments,
+    observation: Option<mf_runtime::RunObservation>,
+) -> Result<mf_runtime::FlowOutputs, WorkflowExecutionError> {
     mf_runtime::ExecutionContext::run(observation, |state| {
+        state.set_workflow_arguments(arguments);
         let flow = instantiate_compiled(plan, registry)
             .inspect_err(|error| {
                 if let WorkflowCompileError::NodeConstruction { definition_id, .. }
@@ -1138,8 +1241,10 @@ pub fn resolve_nodes(
     registry: &NodeRegistry,
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    let expanded = crate::streaming::expanded_definition(definition)?;
-    resolve_nodes_in_scope(&expanded, registry, None, false)
+    definition
+        .validate_execution()
+        .context(StreamConstructionSnafu)?;
+    resolve_nodes_in_scope(definition, registry, None, false)
 }
 
 fn registration_for(
@@ -1232,15 +1337,6 @@ fn resolve_nodes_in_scope(
         .nodes
         .iter()
         .map(|node| {
-            if node.kind == mf_runtime::STREAM_INPUT_ID {
-                if let Some(execution) = &definition.execution {
-                    return Ok(mf_runtime::stream_input_node(execution.input_type.clone()));
-                }
-                return InvalidStreamSnafu {
-                    message: "%input is only available in a streaming root graph",
-                }
-                .fail();
-            }
             match node.kind.as_str() {
                 crate::LOOP_KIND => {
                     let loop_definition = node.loop_definition.as_deref().expect("validated Loop");

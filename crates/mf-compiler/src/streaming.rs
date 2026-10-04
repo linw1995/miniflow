@@ -1,10 +1,9 @@
 use crate::compiler::{
     FlowConstructionSnafu, InvalidStreamSnafu, NonCanonicalPlanOrderSnafu, StreamConstructionSnafu,
 };
-use crate::{CompiledWorkflow, Flow, NodeRegistry, WorkflowCompileError, WorkflowDefinition};
-use mf_runtime::{NodeDefinition, PreparedStream, STREAM_INPUT_ID};
+use crate::{CompiledWorkflow, Flow, NodeRegistry, WorkflowCompileError};
+use mf_runtime::PreparedStream;
 use snafu::{OptionExt, ResultExt, ensure};
-use std::borrow::Cow;
 
 pub fn start_stream(
     plan: &CompiledWorkflow,
@@ -22,37 +21,6 @@ pub fn start_stream(
     prepared.start_with_options(options)
 }
 
-pub fn expanded_definition(
-    definition: &WorkflowDefinition,
-) -> Result<Cow<'_, WorkflowDefinition>, WorkflowCompileError> {
-    definition
-        .validate_execution()
-        .context(StreamConstructionSnafu)?;
-    ensure!(
-        !definition.nodes.iter().any(|node| {
-            node.kind == STREAM_INPUT_ID
-                || (definition.execution.is_some() && node.id.as_str() == STREAM_INPUT_ID)
-        }),
-        InvalidStreamSnafu {
-            message: "%input is reserved for the engine input source",
-        }
-    );
-    if definition.execution.is_none() {
-        return Ok(Cow::Borrowed(definition));
-    }
-    let mut expanded = definition.clone();
-    expanded.nodes.insert(
-        0,
-        NodeDefinition {
-            id: STREAM_INPUT_ID.into(),
-            kind: STREAM_INPUT_ID.into(),
-            config: serde_json::json!({}),
-            loop_definition: None,
-        },
-    );
-    Ok(Cow::Owned(expanded))
-}
-
 pub fn instantiate_stream(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
@@ -65,13 +33,7 @@ pub fn instantiate_stream(
             message: "workflow does not declare streaming execution",
         })?;
     let (nodes, order) = crate::compiler::prepare_definition(&plan.definition, registry)?;
-    ensure!(
-        order
-            .iter()
-            .filter(|id| id.as_str() != STREAM_INPUT_ID)
-            .eq(plan.execution_order.iter()),
-        NonCanonicalPlanOrderSnafu
-    );
+    ensure!(order == plan.execution_order, NonCanonicalPlanOrderSnafu);
     Flow::prepare(
         nodes,
         plan.definition.edges.clone(),

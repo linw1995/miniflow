@@ -129,8 +129,8 @@ Retained directories contain embedded configuration and diagnostics and are crea
 
 ## Streaming runners
 
-Compile a definition that opts into schema `2026-10-02` streaming mode, then pipe JSON Lines into
-its executable. Each input line is one value; an array line remains one item. For the repository example:
+Use schema `2026-10-03` with `execution.mode` set to `stream`. Sources are explicit nodes. The repository
+example declares `builtin.readline` with string output `line`:
 
 ```sh
 nix develop --command cargo run -p mf-cli --features development-support -- \
@@ -138,19 +138,43 @@ nix develop --command cargo run -p mf-cli --features development-support -- \
 printf '1\n2\n3\n4\n5\n' | target/stream-batch
 ```
 
-The result is one object per emitted batch, such as `{"batch":[1,2,3]}` followed by `{"batch":[4,5]}`.
-Results are written as they become available, including a timeout batch while stdin stays open. LF,
-CRLF, and a final record without a newline are accepted. Blank, malformed, and type-invalid
-records fail with a line number. An empty stream produces no result records.
+The result is one object per batch, such as `{"batch":["1","2","3"]}` followed by `{"batch":["4","5"]}`.
+Results are written as they become available, including timer flushes while stdin remains open. Readline
+preserves blank lines and whitespace, accepts LF/CRLF and a final unterminated line, and rejects invalid UTF-8
+with a line number. It does not interpret text as JSON. EOF closes only that source.
 
-The process reserves stdin for workflow input and stdout for result records before constructing plugins.
-Plugin stdout diagnostics are directed to stderr. Private protocol descriptors are not inherited by plugin
-subprocesses. A stalled stdout backpressures the workflow; a broken output pipe fails execution and stops
-an idle input reader. The final record must be written successfully before the instance reports completion.
-Message-count limits bound admission; individual JSON records have no byte quota in this layer.
-A failed run can end with an incomplete final output line; fully delivered earlier lines remain valid.
+Autonomous sources run with null stdin. For an initial file-reading node exposing `path`, pass startup values:
 
-`--validate` and `--describe` do not read stdin or execute callbacks. Streaming descriptions use protocol
-`2026-10-02` and include the synthetic input source. The current terminal launcher rejects streaming
-executables during preflight; launch the executable directly with JSON Lines input. Both ordinary and
-`--no-telemetry` compilation retain the single-build validation and installation process.
+```sh
+./read-workflow --inputs '{"read":{"path":"/data/lines.txt"}}'
+./read-workflow --inputs-file ./parameters.json
+./read-workflow --describe-interface
+```
+
+Input options are mutually exclusive. Values are nested by exact node ID and port; all required values and
+types are validated before node execution. JSON argument transport is limited to 1 MiB and rejects duplicate
+keys. Parameter files are ordinary JSON documents. `--describe-interface` returns the configured parameter
+schema and input resource requirements with the workflow identity. It prepares linked providers without
+executing nodes, reading source data, or initializing telemetry, and isolates construction diagnostics on
+stderr. `--describe` remains a factory-free graph operation. Inspection modes do not accept execution options.
+
+Streaming execution reserves protocol descriptors before plugin construction and routes plugin stdout to
+stderr. Private descriptors are not inherited by plugin subprocesses. Slow output backpressures production;
+a broken output pipe fails execution and interrupts runtime-owned input waits. The final result must be
+acknowledged before successful completion. Complete earlier output lines remain effective on failure.
+
+New graph descriptions use version `2026-10-03` and explicitly declare execution mode, lifecycle protocol, and
+interface inspection. Both ordinary and `--no-telemetry` builds retain one-build validation and installation.
+Use `mf run ./workflow --tui --inputs-file ./parameters.json` to observe autonomous streams.
+For workflows declaring a stdin source, use `mf run ./workflow --tui --stream-input ./lines.txt`.
+The TUI owns terminal stdin and gives the declared source an opened file. It validates parameters and
+resource requirements before execution. Startup options also work with new finite runners.
+
+### Migrate an older streaming definition
+
+Update the version, remove `execution.input_type`, and declare a source node. For pipe-driven workflows use
+`builtin.readline` and connect its `line` output wherever the former synthetic source was referenced.
+Parse text explicitly downstream when typed values are needed. Application-specific producers use ordinary
+StreamNode implementations. Initial producers receive their requirements through workflow parameters.
+The old input mechanism and its dedicated validation rules are removed; fields and graph endpoints follow
+the normal schema and graph rules.

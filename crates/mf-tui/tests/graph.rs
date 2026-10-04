@@ -63,6 +63,7 @@ fn description() -> WorkflowDescription {
             },
         ],
         execution_order: nodes.iter().map(|id| (*id).into()).collect(),
+        execution: None,
         loop_bodies: Vec::new(),
     }
 }

@@ -36,6 +36,7 @@ fn source_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildE
             outputs: vec![PortSpec::new("value", ValueType::Number, true)],
         },
         output_derivations: Vec::new(),
+        resources: Vec::new(),
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
@@ -49,6 +50,7 @@ fn sink_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildErr
             outputs: vec![PortSpec::new("received", ValueType::Number, true)],
         },
         output_derivations: Vec::new(),
+        resources: Vec::new(),
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))

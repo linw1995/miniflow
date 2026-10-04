@@ -38,6 +38,7 @@ fn graph() -> WorkflowDescription {
         data_edges: vec![],
         control_edges: vec![],
         execution_order: vec![],
+        execution: None,
         loop_bodies: Vec::new(),
     }
 }

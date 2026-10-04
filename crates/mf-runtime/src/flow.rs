@@ -111,6 +111,8 @@ pub type FlowOutputs = crate::Outputs;
 
 #[derive(Debug, Snafu)]
 pub enum FlowBuildError {
+    #[snafu(transparent)]
+    WorkflowInputs { source: crate::WorkflowInputError },
     #[snafu(display("node `{definition_id}` cannot execute in a synchronous flow"))]
     NonTaskNode { definition_id: DefinitionId },
     #[snafu(display("execution plan entry {position} references unknown node `{definition_id}`"))]
@@ -184,6 +186,7 @@ pub struct Flow<N = Box<dyn TaskNode>> {
     execution_order: Vec<NodeId>,
     outputs: Vec<FlowOutput>,
     controls: Vec<crate::ControlEdgeDefinition>,
+    input_schema: crate::WorkflowInputSchema,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -216,6 +219,7 @@ impl Flow<Option<crate::NodeExecution>> {
             execution_order: self.execution_order,
             outputs: self.outputs,
             controls: self.controls,
+            input_schema: self.input_schema,
         })
     }
 
@@ -273,6 +277,37 @@ impl Flow {
 }
 
 impl<N> Flow<N> {
+    pub fn with_workflow_inputs(mut self) -> Result<Self, crate::WorkflowInputError> {
+        let initial: BTreeSet<_> = self
+            .execution_order
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| self.dependencies[*position].is_empty())
+            .map(|(_, id)| id.index())
+            .collect();
+        self.input_schema = crate::WorkflowInputSchema::from_nodes(
+            self.nodes
+                .iter()
+                .enumerate()
+                .map(|(index, node)| (node, initial.contains(&index))),
+            |node, input| {
+                self.execution_order
+                    .iter()
+                    .position(|id| self.nodes[id.index()].definition_id.as_str() == node)
+                    .is_some_and(|position| {
+                        self.dependencies[position]
+                            .iter()
+                            .any(|dependency| dependency.input.as_deref() == Some(input))
+                    })
+            },
+        )?;
+        Ok(self)
+    }
+
+    pub fn input_schema(&self) -> &crate::WorkflowInputSchema {
+        &self.input_schema
+    }
+
     /// Validates graph structure while retaining ownership of each prepared execution kind.
     pub fn prepare(
         nodes: Vec<FlowNode<N>>,
@@ -411,6 +446,7 @@ impl<N> Flow<N> {
             execution_order: resolved_order,
             outputs: resolved_outputs,
             controls: Vec::new(),
+            input_schema: crate::WorkflowInputSchema::default(),
         };
         flow.prepare_execution();
         Ok(flow)
@@ -449,6 +485,9 @@ impl<N> Flow<N> {
         }
         self.controls = controls;
         self.prepare_execution();
+        if !self.input_schema.inputs.is_empty() {
+            self = self.with_workflow_inputs()?;
+        }
         Ok(self)
     }
 
@@ -506,6 +545,24 @@ impl Flow {
         self.nodes.get(id.index()).map(|node| node.node.as_ref())
     }
 
+    pub fn execute_with_inputs(
+        &self,
+        arguments: crate::WorkflowArguments,
+    ) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        self.execute_with_resources(arguments, crate::ExecutionResources::default())
+    }
+
+    pub fn execute_with_resources(
+        &self,
+        arguments: crate::WorkflowArguments,
+        resources: crate::ExecutionResources,
+    ) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        let mut state = crate::ExecutionContext::default();
+        state.set_execution_resources(resources, crate::StreamCancellation::default());
+        state.set_workflow_arguments(arguments);
+        self.execute_in_context(&mut state)
+    }
+
     pub fn execute(&self) -> Result<FlowOutputs, crate::WorkflowRunError> {
         self.execute_with_observation(None)
     }
@@ -522,6 +579,9 @@ impl Flow {
         &self,
         state: &mut crate::ExecutionContext,
     ) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        if state.scope_path().is_empty() {
+            state.bind_workflow_inputs(&self.input_schema)?;
+        }
         for (position, node_id) in self.execution_order.iter().enumerate() {
             let node = &self.nodes[node_id.index()];
             crate::context::execute_ordered_node_in_context(

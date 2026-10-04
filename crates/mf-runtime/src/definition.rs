@@ -68,15 +68,11 @@ impl WorkflowDefinition {
     pub fn validate_execution(&self) -> Result<(), crate::StreamBuildError> {
         if let Some(execution) = &self.execution {
             ensure!(
-                self.version == WorkflowDefinitionVersion::V2026_10_02,
+                self.version == WorkflowDefinitionVersion::V2026_10_03,
                 crate::stream_plan::InvalidPlanSnafu {
-                    message: "stream execution requires workflow schema 2026-10-02",
+                    message: "stream execution requires workflow schema 2026-10-03",
                 }
             );
-            execution
-                .input_type
-                .check_depth()
-                .context(crate::stream_plan::InputTypeSnafu)?;
             execution.limits.validate()?;
         }
         Ok(())
@@ -104,10 +100,16 @@ pub enum WorkflowDefinitionVersion {
     V2026_09_29,
     #[serde(rename = "2026-10-02")]
     V2026_10_02,
+    #[serde(rename = "2026-10-03")]
+    V2026_10_03,
 }
 
 impl WorkflowDefinitionVersion {
-    pub const CURRENT: Self = Self::V2026_10_02;
+    pub const CURRENT: Self = Self::V2026_10_03;
+
+    pub fn supports_startup_inputs(self) -> bool {
+        self == Self::V2026_10_03
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

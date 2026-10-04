@@ -10,8 +10,6 @@ use proc_macro2::{Span, TokenStream};
 #[cfg(feature = "codegen")]
 use quote::{format_ident, quote};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "codegen")]
-use snafu::OptionExt;
 use snafu::{ResultExt, Snafu};
 use std::collections::BTreeMap;
 #[cfg(feature = "codegen")]
@@ -34,8 +32,6 @@ pub struct GeneratedWorkflowArtifacts {
 
 #[derive(Debug, Snafu)]
 pub enum PlanError {
-    #[snafu(display("stream input source is outside a stream root"))]
-    StreamInputOutsideRoot,
     #[snafu(display("invalid streaming plan: {source}"))]
     Stream {
         #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
@@ -237,7 +233,34 @@ impl CompiledWorkflow {
         }
         let outputs_return = generate_outputs(&self.definition);
 
+        let bindings = if self.definition.version.supports_startup_inputs() {
+            let incoming = crate::compiler::incoming_dependencies(&self.definition);
+            let nodes = self.execution_order.iter().enumerate().map(|(index, id)| {
+                let ident = format_ident!("node_root_{index}");
+                let initial = !incoming.contains_key(id.as_str());
+                quote! { (&#ident, #initial) }
+            });
+            let bound_inputs = self.definition.edges.iter().map(|edge| {
+                let node = edge.to_node.as_str();
+                let input = edge.to_input.as_str();
+                quote! { (#node, #input) }
+            });
+            quote! {
+                let bound_inputs: &[(&str, &str)] = &[#(#bound_inputs),*];
+                let schema_nodes: &[(&mf_runtime::TaskFlowNode, bool)] = &[#(#nodes),*];
+                let schema = mf_runtime::WorkflowInputSchema::from_nodes(schema_nodes.iter().copied(), |node, input| bound_inputs.contains(&(node, input)))?;
+                state.bind_workflow_inputs(&schema)?;
+            }
+        } else {
+            quote! { state.bind_workflow_inputs(&mf_runtime::WorkflowInputSchema::default())?; }
+        };
         let generated = quote! {
+            pub fn run_workflow_with_inputs(registry: &mf_runtime::NodeRegistry, arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
+                let mut state = mf_runtime::ExecutionContext::default();
+                state.set_workflow_arguments(arguments);
+                run_workflow_in_context(registry, &mut state)
+            }
+
             pub fn run_workflow(
                 registry: &mf_runtime::NodeRegistry,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
@@ -258,6 +281,7 @@ impl CompiledWorkflow {
                 state: &mut mf_runtime::ExecutionContext,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
                 #(#preparations)*
+                #bindings
                 #(#node_statements)*
                 #outputs_return
             }
@@ -279,11 +303,9 @@ fn generate_stream_artifacts(
     if crate::structural_order(&plan.definition).context(StreamSnafu)? != plan.execution_order {
         return InvalidExecutionOrderSnafu.fail();
     }
-    let definition =
-        crate::streaming::expanded_definition(&plan.definition).context(StreamSnafu)?;
-    let mut order = vec![mf_runtime::STREAM_INPUT_ID.into()];
-    order.extend(plan.execution_order.iter().cloned());
-    let (preparations, _) = generate_scope(&definition, &order, "stream", &[], None, None)?;
+    let definition = &plan.definition;
+    let order = &plan.execution_order;
+    let (preparations, _) = generate_scope(definition, order, "stream", &[], None, None)?;
     let nodes = (0..order.len()).map(|index| format_ident!("node_stream_{index}"));
     let bindings = (0..order.len()).map(|index| {
         let name = format_ident!("DEPENDENCIES_STREAM_{index}");
@@ -399,18 +421,6 @@ fn generate_scope(
             }
         });
         let constructor = match node.kind.as_str() {
-            mf_runtime::STREAM_INPUT_ID => {
-                let execution = definition
-                    .execution
-                    .as_ref()
-                    .context(StreamInputOutsideRootSnafu)?;
-                let input_type = LitStr::new(
-                    &serde_json::to_string(&execution.input_type).context(SerializeSnafu)?,
-                    Span::call_site(),
-                );
-                quote! { mf_runtime::stream_input_node(serde_json::from_str(#input_type)
-                .map_err(|source| mf_runtime::WorkflowRunError::InvalidEmbeddedConfig { definition_id: #id_lit.into(), source })?) }
-            }
             crate::LOOP_ASSIGN_KIND => {
                 let target = crate::loops::assignment_target(&node.config).map_err(|message| {
                     PlanError::InvalidLoopConfig {

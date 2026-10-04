@@ -1,8 +1,11 @@
 //! Bounded, transport-independent state reduction for one workflow run.
 
+mod stream;
+pub use stream::{StreamInvocationObservation, StreamNodeMetrics, StreamSnapshot};
+
 use mf_telemetry::{
-    ContractError, Count, EVENT_SCHEMA_VERSION, LOOP_EVENT_SCHEMA_VERSION,
-    description::{NodeDescription, WorkflowDescription, WorkflowDescriptionVersion},
+    ContractError, Count,
+    description::{NodeDescription, WorkflowDescription},
     event::{
         Event, Failure, FailurePhase, LifecycleEvent, LoopPassOutcome, LoopPathEntry,
         LoopStopReason, LoopSummary, Outcome, SkipCause,
@@ -11,7 +14,7 @@ use mf_telemetry::{
     maximum_event_count, maximum_loop_event_count,
 };
 use sha2::{Digest, Sha256};
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Mutex},
@@ -122,6 +125,7 @@ pub struct StateSnapshot {
     pub total_loop_passes: usize,
     pub hidden_loop_passes: usize,
     pub loop_overviews: Vec<LoopOverview>,
+    pub stream: Option<StreamSnapshot>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,6 +136,8 @@ pub struct LoopPassObservation {
     pub outcome: Option<LoopPassOutcome>,
     pub visited_node_count: Option<Count>,
     pub interrupted: bool,
+    pub stream_invocation: Option<u64>,
+    pub compact_statuses: Vec<Option<NodeStatus>>,
 }
 
 impl LoopPassObservation {
@@ -152,6 +158,17 @@ impl LoopPassObservation {
                     || NodeObservation::pending(id, kind),
                     |node| (*node).clone(),
                 );
+                if !observed.contains_key(id) {
+                    if let Some(Some(status)) = self.compact_statuses.get(position) {
+                        node.status = *status;
+                    } else if self.stream_invocation.is_some()
+                        && self
+                            .visited_node_count
+                            .is_some_and(|visited| (position as i64) < visited.get())
+                    {
+                        node.status = NodeStatus::Unknown;
+                    }
+                }
                 if self
                     .visited_node_count
                     .is_some_and(|visited| position as i64 >= visited.get())
@@ -232,6 +249,7 @@ pub struct SessionState {
     loop_summaries: BTreeMap<(Vec<LoopPathEntry>, String), LoopSummary>,
     closed: bool,
     snapshot_cache: Mutex<Option<Arc<StateSnapshot>>>,
+    stream: Option<stream::StreamState>,
 }
 
 #[derive(Default)]
@@ -261,15 +279,15 @@ struct SequenceWitness {
 
 impl SessionState {
     pub fn new(description: WorkflowDescription, run_id: RunId) -> Result<Self, StateError> {
-        if description.version.is_streaming() {
+        if description.is_streaming()
+            && description.event_schema_version() != mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
+        {
             return Err(StateError::UnsupportedStream);
         }
-        description
-            .validate()
-            .map_err(|source| StateError::Description { source })?;
+        description.validate().context(DescriptionSnafu)?;
         if description
             .static_node_count()
-            .map_err(|source| StateError::Description { source })?
+            .context(DescriptionSnafu)?
             .get()
             > MAX_SESSION_NODES as i64
         {
@@ -277,15 +295,11 @@ impl SessionState {
                 limit: MAX_SESSION_NODES,
             });
         }
-        let max_sequence = if description.version == WorkflowDescriptionVersion::V2026_09_29 {
+        let max_sequence = if description.version.supports_loops() {
             maximum_loop_event_count()
         } else {
-            maximum_event_count(
-                description
-                    .node_count()
-                    .map_err(|source| StateError::Description { source })?,
-            )
-            .map_err(|source| StateError::Description { source })?
+            maximum_event_count(description.node_count().context(DescriptionSnafu)?)
+                .context(DescriptionSnafu)?
         };
         let described: BTreeMap<_, _> = description
             .nodes
@@ -293,7 +307,7 @@ impl SessionState {
             .map(|node| (node.id.as_str(), node))
             .collect();
         let mut node_positions = BTreeMap::new();
-        let nodes = description
+        let mut nodes: Vec<NodeObservation> = description
             .execution_order
             .iter()
             .enumerate()
@@ -303,7 +317,14 @@ impl SessionState {
                 pending_node(node)
             })
             .collect();
+        let stream = description.is_streaming().then(|| {
+            stream::StreamState::new(
+                std::mem::take(&mut nodes),
+                std::mem::take(&mut node_positions),
+            )
+        });
         Ok(Self {
+            stream,
             description,
             run_id,
             node_positions,
@@ -326,14 +347,37 @@ impl SessionState {
     }
 
     pub fn expected_event_schema_version(&self) -> i64 {
-        if self.description.version == WorkflowDescriptionVersion::V2026_09_29 {
-            LOOP_EVENT_SCHEMA_VERSION
-        } else {
-            EVENT_SCHEMA_VERSION
+        self.description.event_schema_version()
+    }
+
+    pub fn apply_stream(
+        &mut self,
+        record: mf_telemetry::stream::StreamRecord,
+    ) -> Result<Admission, StateError> {
+        if self.closed {
+            return Err(StateError::Closed);
         }
+        if record.run_id != self.run_id || record.workflow_id != self.description.workflow_id {
+            self.note("ignored stream record from another workflow or run");
+            return Ok(Admission::UnrelatedRun);
+        }
+        self.invalidate_snapshot();
+        let stream = self.stream.as_mut().ok_or_else(|| StateError::Event {
+            source: ContractError::Invalid {
+                message: "stream record in a finite session".into(),
+            },
+        })?;
+        stream.apply(&self.description, record)
     }
 
     pub fn apply(&mut self, event: LifecycleEvent) -> Result<Admission, StateError> {
+        if self.stream.is_some() {
+            return Err(StateError::Event {
+                source: ContractError::Invalid {
+                    message: "finite event in a stream session".into(),
+                },
+            });
+        }
         if self.closed {
             return Err(StateError::Closed);
         }
@@ -350,9 +394,8 @@ impl SessionState {
         }
         event
             .validate_for_validated_description(&self.description)
-            .map_err(|source| StateError::Event { source })?;
-        let encoded =
-            serde_json::to_vec(&event.event).map_err(|source| StateError::Serialize { source })?;
+            .context(EventSnafu)?;
+        let encoded = serde_json::to_vec(&event.event).context(SerializeSnafu)?;
         if encoded.len() > MAX_EVENT_BYTES {
             return Err(StateError::TooLarge {
                 limit: MAX_EVENT_BYTES,
@@ -509,6 +552,9 @@ impl SessionState {
     }
 
     fn build_snapshot(&self) -> StateSnapshot {
+        if let Some(stream) = &self.stream {
+            return stream.snapshot(self);
+        }
         let lifecycle = self.integrity();
         let has_gap = lifecycle.known_missing_count != 0;
         let mut nodes = self.nodes.clone();
@@ -519,6 +565,7 @@ impl SessionState {
             }
         }
         StateSnapshot {
+            stream: None,
             nodes,
             workflow_outcome: self
                 .final_boundary
@@ -562,6 +609,8 @@ impl SessionState {
                     outcome: state.outcome,
                     visited_node_count: state.visited_node_count,
                     interrupted: self.closed && self.final_boundary.is_none(),
+                    stream_invocation: None,
+                    compact_statuses: Vec::new(),
                 }
             })
             .collect()
@@ -604,6 +653,9 @@ impl SessionState {
     }
 
     pub fn integrity(&self) -> LifecycleIntegrity {
+        if let Some(stream) = &self.stream {
+            return stream.integrity(self);
+        }
         let upper = self.final_boundary.as_ref().map_or_else(
             || {
                 self.received

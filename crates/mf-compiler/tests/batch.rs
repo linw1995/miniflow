@@ -1,3 +1,6 @@
+#[path = "fixtures/controlled_source.rs"]
+mod controlled;
+use controlled::SourceRun;
 extern crate mfn_core as _;
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_stream};
 use mf_runtime::{StreamClock, StreamOptions, ValueType};
@@ -12,7 +15,22 @@ impl StreamClock for FixedClock {
 }
 
 fn definition() -> WorkflowDefinition {
-    WorkflowDefinition::from_json(include_str!("../../../examples/stream-batch.json")).unwrap()
+    let mut definition =
+        WorkflowDefinition::from_json(include_str!("../../../examples/stream-batch.json")).unwrap();
+    let source = definition
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "feed")
+        .unwrap();
+    source.kind = "test.controlled_source".into();
+    source.config = json!({"item_type":"int"});
+    definition
+        .edges
+        .iter_mut()
+        .find(|edge| edge.from_node.as_str() == "feed")
+        .unwrap()
+        .from_output = "item".into();
+    definition
 }
 
 #[test]
@@ -25,16 +43,19 @@ fn batch_infers_types_and_delivers_full_and_tail_batches() {
         prepared.plan().nodes()[1].metadata.ports.outputs[0].value_type,
         ValueType::List(Box::new(ValueType::Int64))
     );
-    let instance = prepared
-        .start_with_options(StreamOptions {
+    let instance = SourceRun::start(
+        prepared,
+        "feed",
+        StreamOptions {
             clock: Arc::new(FixedClock),
             ..StreamOptions::default()
-        })
-        .unwrap();
+        },
+    )
+    .unwrap();
     for value in 1..=5 {
-        instance.input().send(json!(value)).unwrap();
+        instance.source.clone().send(json!(value)).unwrap();
     }
-    instance.close_input();
+    instance.source.close();
     assert_eq!(
         instance.recv().unwrap().unwrap().outputs["batch"],
         json!([1, 2, 3])
@@ -44,38 +65,41 @@ fn batch_infers_types_and_delivers_full_and_tail_batches() {
         json!([4, 5])
     );
     assert!(instance.recv().unwrap().is_none());
-    assert_eq!(instance.join().unwrap().emitted_messages, 2);
+    assert_eq!(instance.join().unwrap().emitted_messages, 7);
 }
 
 #[test]
 fn conditional_skips_do_not_add_items_or_skip_a_pending_batch() {
     let definition: WorkflowDefinition = serde_json::from_value(json!({
-        "version":"2026-10-02", "execution":{"mode":"stream", "input_type":"int"}, "dependencies":{},
+        "version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
         "nodes":[
             {"id":"route", "kind":"builtin.if_else", "config":{"branches":[{"id":"positive", "condition":{
-                "source":{"output":"%input.item", "path":""}, "operator":"gt", "value":0
+                "source":{"output":"feed.item", "path":""}, "operator":"gt", "value":0
             }}]}},
-            {"id":"collect", "kind":"builtin.batch", "config":{"max_items":3, "max_wait_ms":100}}
+            {"id":"collect", "kind":"builtin.batch", "config":{"max_items":3, "max_wait_ms":100}},
+            controlled::source(json!("int"))
         ],
-        "edges":[{"from_node":"%input", "from_output":"item", "to_node":"collect", "to_input":"item"}],
-        "control_edges":[{"from_node":"%input", "from_output":"item", "to_node":"route"},
+        "edges":[{"from_node":"feed", "from_output":"item", "to_node":"collect", "to_input":"item"}],
+        "control_edges":[{"from_node":"feed", "from_output":"item", "to_node":"route"},
             {"from_node":"route", "from_output":"positive", "to_node":"collect"}],
         "outputs":[{"name":"batch", "node":"collect", "port":"items"}]
     })).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     for (input, expected) in [(vec![1, -1, 2], Some(json!([1, 2]))), (vec![-1, -2], None)] {
-        let instance = instantiate_stream(&plan, &registry)
-            .unwrap()
-            .start_with_options(StreamOptions {
+        let instance = SourceRun::start(
+            instantiate_stream(&plan, &registry).unwrap(),
+            "feed",
+            StreamOptions {
                 clock: Arc::new(FixedClock),
                 ..StreamOptions::default()
-            })
-            .unwrap();
+            },
+        )
+        .unwrap();
         for value in input {
-            instance.input().send(json!(value)).unwrap();
+            instance.source.clone().send(json!(value)).unwrap();
         }
-        instance.close_input();
+        instance.source.close();
         if let Some(expected) = expected {
             assert_eq!(instance.recv().unwrap().unwrap().outputs["batch"], expected);
         }

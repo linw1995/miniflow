@@ -1,8 +1,8 @@
 use crate::message_domain::MessageDomains;
 use crate::runner::ContextSnafu;
 use crate::{
-    ExecutionDependency, FlowNode, NodeExecution, STREAM_INPUT_ID, StreamDomain, StreamExecution,
-    TaskNode, WorkflowOutputDefinition,
+    ExecutionDependency, FlowNode, NodeExecution, StreamDomain, StreamExecution, TaskNode,
+    WorkflowOutputDefinition,
 };
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 
@@ -12,8 +12,8 @@ type OperatorStates = Vec<Option<NodeExecution>>;
 pub enum StreamBuildError {
     #[snafu(display("invalid streaming workflow: {message}"), visibility(pub))]
     InvalidPlan { message: String },
-    #[snafu(display("invalid stream input type: {source}"), visibility(pub))]
-    InputType { source: crate::TypeDepthError },
+    #[snafu(display("invalid streaming workflow: {source}"), visibility(pub))]
+    WorkflowInputs { source: crate::WorkflowInputError },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -39,6 +39,7 @@ pub struct StreamPlan {
     dependencies: Vec<Vec<StreamDependency>>,
     domains: MessageDomains,
     outputs: Vec<WorkflowOutputDefinition>,
+    input_schema: crate::WorkflowInputSchema,
 }
 
 pub struct PreparedStream {
@@ -65,27 +66,29 @@ impl PreparedStream {
         outputs: Vec<WorkflowOutputDefinition>,
     ) -> Result<Self, StreamBuildError> {
         execution.limits.validate()?;
-        execution.input_type.check_depth().context(InputTypeSnafu)?;
         ensure!(
-            nodes.len() == dependencies.len()
-                && nodes
-                    .first()
-                    .is_some_and(|node| node.definition_id.as_str() == STREAM_INPUT_ID),
+            nodes.len() == dependencies.len(),
             InvalidPlanSnafu {
-                message: "stream plan requires its typed input source first",
+                message: "stream nodes and dependencies must have equal lengths"
             }
         );
-        let source = &nodes[0];
-        ensure!(
-            source.metadata.ports.inputs.is_empty()
-                && source.metadata.ports.outputs.len() == 1
-                && source.metadata.ports.outputs[0].name == "item"
-                && source.metadata.ports.outputs[0].value_type == execution.input_type
-                && source.node.is_none(),
-            InvalidPlanSnafu {
-                message: "stream input source must expose its declared item type",
-            }
-        );
+        let input_schema = crate::WorkflowInputSchema::from_nodes(
+            nodes
+                .iter()
+                .zip(&dependencies)
+                .map(|(node, dependencies)| (node, dependencies.is_empty())),
+            |node, input| {
+                nodes
+                    .iter()
+                    .position(|candidate| candidate.definition_id.as_str() == node)
+                    .is_some_and(|index| {
+                        dependencies[index]
+                            .iter()
+                            .any(|dependency| dependency.input.as_deref() == Some(input))
+                    })
+            },
+        )
+        .context(WorkflowInputsSnafu)?;
         let domains = MessageDomains::new(&nodes, &dependencies, &outputs)?;
         let mut operator_states = Vec::with_capacity(nodes.len());
         let nodes = nodes
@@ -112,6 +115,7 @@ impl PreparedStream {
             dependencies,
             domains,
             outputs,
+            input_schema,
         };
         ensure!(
             plan.execution().limits.max_pending_messages >= plan.domains().len(),
@@ -138,6 +142,9 @@ impl PreparedStream {
 }
 
 impl StreamPlan {
+    pub fn input_schema(&self) -> &crate::WorkflowInputSchema {
+        &self.input_schema
+    }
     pub fn execution(&self) -> &StreamExecution {
         &self.execution
     }

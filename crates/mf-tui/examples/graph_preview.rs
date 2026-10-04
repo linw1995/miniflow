@@ -187,6 +187,7 @@ fn description() -> WorkflowDescription {
             .into_iter()
             .map(str::to_owned)
             .collect(),
+        execution: None,
         loop_bodies: Vec::new(),
     }
 }

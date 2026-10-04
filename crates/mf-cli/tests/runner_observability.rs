@@ -996,11 +996,11 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         StreamPayload::Control(StreamEvent::Flushed { .. })
     )));
     assert!(
-        matches!(&records.last().unwrap().payload, StreamPayload::Control(StreamEvent::Finished { outcome: StreamOutcome::Succeeded, counts, .. }) if counts.accepted_inputs == 5 && counts.delivered_outputs == 2),
+        matches!(&records.last().unwrap().payload, StreamPayload::Control(StreamEvent::Finished { outcome: StreamOutcome::Succeeded, counts, .. }) if counts.startup_frames == 1 && counts.emitted_messages == 7 && counts.delivered_outputs == 2),
         "unexpected terminal record: {:?}",
         records.last()
     );
-    assert_eq!(spans.len(), 9);
+    assert_eq!(spans.len(), 10);
     assert!(
         spans
             .iter()
@@ -1009,6 +1009,46 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
                 .attributes
                 .iter()
                 .any(|attribute| attribute.key == "mf.stream.invocation"))
+    );
+    let run_id = mf_telemetry::identity::RunId::new();
+    let described = mf_compiler::describe_compiled(&plan_definition(&definition).unwrap()).unwrap();
+    let mut receiver = LoopbackReceiver::bind(described, run_id).unwrap();
+    let mut child = command(&runner)
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
+        .env("MF_RUN_ID", run_id.to_string())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"1\n2\n3\n4\n5\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, plain.stdout);
+    let snapshot = receiver.finish();
+    assert_eq!(
+        snapshot.lifecycle.completeness,
+        Completeness::Complete,
+        "{snapshot:?}"
+    );
+    assert!(
+        snapshot
+            .nodes
+            .iter()
+            .all(|node| node.status == NodeStatus::Succeeded)
+    );
+    assert_eq!(
+        snapshot.stream.unwrap().counts.unwrap().delivered_outputs,
+        2
     );
     let closed = TcpListener::bind("127.0.0.1:0")
         .unwrap()

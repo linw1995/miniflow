@@ -40,7 +40,7 @@ impl Observer {
     ) -> Result<StreamObservation, ContractError> {
         description.validate()?;
         snafu::ensure!(
-            description.version.is_streaming(),
+            description.is_streaming(),
             crate::InvalidSnafu {
                 message: "stream observation requires a streaming description",
             }
@@ -112,6 +112,10 @@ impl StreamObservation {
     }
     pub fn elapsed(&self) -> Count {
         nanos(self.0.started.elapsed())
+    }
+
+    pub fn startup_frame(&self) -> RunObservation {
+        self.frame_inner(None, StreamTrigger::Startup)
     }
 
     pub fn frame(&self, message: StreamMessage) -> RunObservation {
@@ -234,6 +238,7 @@ impl StreamObservation {
             return;
         };
         let record = StreamRecord {
+            schema_version: self.0.description.event_schema_version(),
             workflow_id: self.0.description.workflow_id.clone(),
             run_id: self.0.run_id,
             sequence,
@@ -382,7 +387,11 @@ impl StreamInvocation {
     pub(super) fn child_context(&self, context: Context) -> Context {
         match self.observation.invocation(
             self.identity.message,
-            StreamTrigger::Message,
+            if self.identity.message.is_some() {
+                StreamTrigger::Message
+            } else {
+                self.identity.trigger
+            },
             Some(self.identity.invocation),
         ) {
             Some(child) => child.attach(context),
@@ -547,6 +556,7 @@ mod tests {
                     data_edges: Vec::new(),
                     control_edges: Vec::new(),
                     execution_order: vec!["%input".into()],
+                    execution: None,
                     loop_bodies: Vec::new(),
                 },
                 RunId::new(),

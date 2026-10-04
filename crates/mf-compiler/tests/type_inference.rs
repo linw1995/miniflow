@@ -140,6 +140,7 @@ fn forwarding_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBu
     let metadata = mf_runtime::NodeMetadata {
         ports: node.ports(),
         output_derivations: node.output_derivations(),
+        resources: Vec::new(),
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
@@ -239,6 +240,7 @@ fn invalid_metadata_factory(_config: Value) -> Result<mf_runtime::PreparedNode, 
             outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
         },
         output_derivations: node.output_derivations(),
+        resources: Vec::new(),
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))

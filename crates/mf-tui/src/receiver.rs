@@ -24,7 +24,7 @@ use opentelemetry_proto::tonic::{
 };
 use prost::Message;
 use serde_json::{Map, Value};
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 use std::{
     convert::Infallible,
     io,
@@ -70,28 +70,18 @@ pub struct LoopbackReceiver {
 impl LoopbackReceiver {
     pub fn bind(description: WorkflowDescription, run_id: RunId) -> Result<Self, ReceiverError> {
         let workflow_id = description.workflow_id.clone();
-        let state = SessionState::new(description, run_id)
-            .map_err(|source| ReceiverError::State { source })?;
-        let listener =
-            TcpListener::bind("127.0.0.1:0").map_err(|source| ReceiverError::Bind { source })?;
-        let endpoint = format!(
-            "http://{}",
-            listener
-                .local_addr()
-                .map_err(|source| ReceiverError::Bind { source })?
-        );
-        listener
-            .set_nonblocking(true)
-            .map_err(|source| ReceiverError::Bind { source })?;
+        let state = SessionState::new(description, run_id).context(StateSnafu)?;
+        let listener = TcpListener::bind("127.0.0.1:0").context(BindSnafu)?;
+        let endpoint = format!("http://{}", listener.local_addr().context(BindSnafu)?);
+        listener.set_nonblocking(true).context(BindSnafu)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
             .build()
-            .map_err(|source| ReceiverError::Runtime { source })?;
+            .context(RuntimeSnafu)?;
         let listener = {
             let _entered = runtime.enter();
-            tokio::net::TcpListener::from_std(listener)
-                .map_err(|source| ReceiverError::Runtime { source })?
+            tokio::net::TcpListener::from_std(listener).context(RuntimeSnafu)?
         };
         let context = Arc::new(Context {
             state: Arc::new(Mutex::new(state)),
@@ -459,30 +449,43 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), String> {
         attributes,
         body,
     };
-    let event = wire.decode().map_err(|error| {
-        context
-            .state
-            .lock()
-            .expect("receiver state was not poisoned")
-            .record_local_lifecycle_drop(1, "invalid lifecycle schema");
-        error.to_string()
-    })?;
-    let schema_version = wire.schema_version().map_err(|error| error.to_string())?;
+    let schema_version = wire
+        .attributes
+        .get("mf.schema.version")
+        .and_then(Value::as_i64);
     {
         let mut state = context
             .state
             .lock()
             .expect("receiver state was not poisoned");
-        if schema_version != state.expected_event_schema_version() {
-            state.record_local_lifecycle_drop(1, "event and description versions disagree");
-            return Err("event and description versions disagree".into());
+        if schema_version != Some(state.expected_event_schema_version()) {
+            state.record_local_lifecycle_drop(1, "event schema and description versions disagree");
+            return Err("event schema and description versions disagree".into());
         }
     }
-    let admission = context
-        .state
-        .lock()
-        .expect("receiver state was not poisoned")
-        .apply(event);
+    let admission = if schema_version == Some(mf_telemetry::STREAM_EVENT_SCHEMA_VERSION) {
+        mf_telemetry::stream::StreamRecord::decode(&wire)
+            .map_err(|error| error.to_string())
+            .and_then(|event| {
+                context
+                    .state
+                    .lock()
+                    .expect("receiver state was not poisoned")
+                    .apply_stream(event)
+                    .map_err(|error| error.to_string())
+            })
+    } else {
+        wire.decode()
+            .map_err(|error| error.to_string())
+            .and_then(|event| {
+                context
+                    .state
+                    .lock()
+                    .expect("receiver state was not poisoned")
+                    .apply(event)
+                    .map_err(|error| error.to_string())
+            })
+    };
     match admission {
         Ok(_) => Ok(()),
         Err(error) => {
@@ -490,7 +493,7 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), String> {
                 .state
                 .lock()
                 .expect("receiver state was not poisoned")
-                .record_local_lifecycle_drop(1, "lifecycle admission rejected a record");
+                .record_local_lifecycle_drop(1, "lifecycle schema or admission rejected a record");
             Err(error.to_string())
         }
     }

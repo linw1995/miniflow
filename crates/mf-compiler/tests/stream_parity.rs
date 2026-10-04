@@ -1,4 +1,6 @@
 mod common;
+#[path = "fixtures/controlled_source.rs"]
+mod controlled;
 #[path = "fixtures/stream_driver.rs"]
 mod driver;
 extern crate mfn_code as _;
@@ -23,8 +25,8 @@ fn definition(scenario: &str) -> WorkflowDefinition {
         json!({"id":"consume", "kind":"builtin.identity"}),
     ];
     let mut edges = vec![
-        edge("%input", "item", "left", "x"),
-        edge("%input", "item", "right", "input"),
+        edge("feed", "item", "left", "x"),
+        edge("feed", "item", "right", "input"),
         edge("left", "value", "join", "a"),
         edge("right", "value", "join", "b"),
         edge("join", "value", "collect", "item"),
@@ -62,7 +64,7 @@ fn definition(scenario: &str) -> WorkflowDefinition {
                 }}}),
             ];
             edges = vec![
-                edge("%input", "item", "repeat", "x"),
+                edge("feed", "item", "repeat", "x"),
                 edge("repeat", "x", "collect", "item"),
                 edge("collect", "items", "consume", "items"),
             ];
@@ -71,7 +73,8 @@ fn definition(scenario: &str) -> WorkflowDefinition {
         }
         _ => unreachable!(),
     }
-    serde_json::from_value(json!({"version":"2026-10-02", "execution":{"mode":"stream", "input_type":"int"},
+    nodes.push(json!({"id":"feed", "kind":"test.controlled_source", "config":{"item_type":"int"}}));
+    serde_json::from_value(json!({"version":"2026-10-03", "execution":{"mode":"stream"},
         "dependencies":{"core":{"package":"mfn-core", "path":common::crates_dir().join("builtin-nodes/core")}, "code":{"package":"mfn-code", "path":common::crates_dir().join("builtin-nodes/code")}},
         "nodes":nodes, "edges":edges, "control_edges":controls, "outputs":[{"name":"value", "node":"consume", "port":result_port}]
     })).unwrap()
@@ -114,6 +117,11 @@ fn generated_preparation_matches_memory_under_the_same_clock_and_inputs() {
         )
         .unwrap();
         fs::write(
+            project.join("src/controlled.rs"),
+            include_str!("fixtures/controlled_source.rs"),
+        )
+        .unwrap();
+        fs::write(
             project.join("src/driver.rs"),
             include_str!("fixtures/stream_driver.rs"),
         )
@@ -123,6 +131,7 @@ fn generated_preparation_matches_memory_under_the_same_clock_and_inputs() {
             r#"extern crate node_0 as _;
 extern crate node_1 as _;
 mod workflow;
+mod controlled;
 mod driver;
 fn main() {
     let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
@@ -132,6 +141,11 @@ fn main() {
 "#,
         )
         .unwrap();
+        let manifest = project.join("Cargo.toml");
+        let mut text = fs::read_to_string(&manifest).unwrap();
+        text.push('\n');
+        text = text.replace("[dependencies]", "[dependencies]\ninventory = \"0.3.24\"");
+        fs::write(&manifest, text).unwrap();
         let build = mf_compiler::cargo_command(&project)
             .args(["build", "--offline", "--release"])
             .output()

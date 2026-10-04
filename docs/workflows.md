@@ -321,21 +321,52 @@ No implicit conversion occurs. A present null exists and can be compared with an
 
 A selected output can fan out to multiple downstream nodes; all eligible consumers execute. Only one branch output is active per router invocation. Execution is sequential in topological order, and a node gated by mutually exclusive outputs is skipped rather than acting as a merge. Compound boolean expressions and field-to-field comparisons are deferred.
 
+## Workflow startup parameters
+
+Schema `2026-10-03` promotes the inputs of top-level initial nodes to workflow parameters. An initial node
+has no incoming data or control edges. Its configured input types and required flags define the interface;
+the workflow does not repeat those declarations. A node behind a control edge still needs its required
+data connections. Loop and Iteration body inputs stay local to their enclosing scope.
+
+Supply a JSON object keyed by exact node ID and then input port. Names containing dots remain whole keys:
+
+```json
+{
+  "read": { "path": "/data/events.jsonl" },
+  "copy": { "input": { "count": 42 } }
+}
+```
+
+All startup arguments are checked before any node executes. Unknown nodes/ports, missing required values,
+duplicate JSON keys, and type mismatches fail with input context. Optional omissions stay absent; explicit
+null is checked against the port type. Parameter values do not specialize the compiled graph or persist
+between invocations. `describe_workflow_inputs` inspects configured requirements without executing nodes;
+`execute_compiled_with_inputs` and `Flow::execute_with_inputs` bind values through the same validator.
+
+Older single-run schemas keep their required-edge rules.
+
 ## Streaming through the in-memory API
 
-Definitions using schema `2026-10-02` can set `execution.mode` to `stream` and declare `input_type` with
-the existing port-type descriptor grammar. The engine provides `%input.item`. Root nodes require an
-explicit path from this source, including a control edge for nodes with no data inputs.
+Schema `2026-10-03` enables streams with `execution: {"mode": "stream"}` and optional limits. Initial
+nodes receive their workflow parameters once. Initial tasks and their ordinary dependencies execute in one
+startup frame; producers execute independently and emit messages into their own domains. An empty graph or a
+task-only graph finishes without external input. A producer reached through startup tasks also starts once.
 
-Task branches can rejoin within one message domain. An event emission creates a new domain, so joining
-an earlier item with a collected output or independently formed collections requires an explicit
-correlation operation, which is currently unsupported. Context references and selected outputs must
-respect the same domain boundary. Event nodes are rejected in single-run graphs and synchronous bodies.
+Use `builtin.readline` to read UTF-8 text lines from a file or stdin. Its optional string input `path`
+selects a text file when supplied; omission selects stdin. Its string output `line` preserves blank lines and
+whitespace and strips LF/CRLF delimiters. JSON parsing belongs in downstream nodes. Other StreamNodes can
+obtain data from files or services using their startup parameters. Every source is an ordinary declared node;
+there is no injected node or global input type. Initial event nodes require an upstream activation source.
 
-The host submits one value per message, consumes outputs independently, and explicitly closes input.
-An array remains one input value. See [the instance API](node-development.md#in-memory-streaming-instances)
-for admission, backpressure, drain, and failure handling. Compile streaming definitions as standalone
-JSON Lines runners using the [runner instructions](compiling.md#streaming-runners).
+Task branches can rejoin within one message domain. Event and producer emissions create new domains. Joining
+an earlier item with a collected output, broadcasting startup values into emitted frames, or joining
+independent sources requires an explicit correlation operation, which is currently unsupported. Context
+references and selected outputs respect the same boundary. Synchronous bodies still contain only tasks.
+
+Producers close by returning. Each source drains
+independently; workflow completion waits for every source, downstream work, and selected output delivery.
+See [the instance API](node-development.md#in-memory-streaming-instances) and
+[runner instructions](compiling.md#streaming-runners).
 
 ### Batch collection
 
