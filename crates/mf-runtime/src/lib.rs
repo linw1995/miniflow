@@ -88,6 +88,7 @@ pub use snapshot::{
     SnapshotRecorder, SnapshotStore, ValueDefinition, ValueId,
 };
 
+pub use workflow_inputs::TooLargeSnafu as WorkflowInputTooLargeSnafu;
 pub use workflow_inputs::{
     InputResource, MAX_WORKFLOW_INPUT_BYTES, WorkflowArguments, WorkflowInput, WorkflowInputError,
     WorkflowInputSchema,

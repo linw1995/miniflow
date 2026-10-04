@@ -28,7 +28,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 use signal_hook::{SigId, consts::SIGINT, flag, low_level::unregister};
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 use std::{
     collections::{BTreeMap, VecDeque},
     env,
@@ -58,7 +58,7 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(100);
 pub enum RunError {
     #[snafu(display("TUI requires terminal stdin and stderr"))]
     TerminalRequired,
-    #[snafu(display("{source}"))]
+    #[snafu(transparent)]
     Inputs { source: WorkflowInputError },
     #[snafu(display("{message}"))]
     Options { message: String },
@@ -66,6 +66,8 @@ pub enum RunError {
     InputFile { path: PathBuf, source: io::Error },
     #[snafu(display("could not prepare private workflow arguments: {source}"))]
     ArgumentFile { source: io::Error },
+    #[snafu(display("could not serialize workflow arguments: {source}"))]
+    ArgumentSerialization { source: serde_json::Error },
     #[snafu(display("could not describe workflow: {source}"))]
     Description { source: DescriptionError },
     #[snafu(display("could not layout workflow graph: {source}"))]
@@ -96,9 +98,10 @@ struct PreparedLaunch {
 }
 
 fn option_error(message: &str) -> RunError {
-    RunError::Options {
-        message: message.into(),
+    OptionsSnafu {
+        message: message.to_owned(),
     }
+    .build()
 }
 
 fn open_input_file(path: &Path) -> Result<File, RunError> {
@@ -115,9 +118,8 @@ fn open_input_file(path: &Path) -> Result<File, RunError> {
         }
         Ok(file)
     };
-    open().map_err(|source| RunError::InputFile {
-        path: path.into(),
-        source,
+    open().context(InputFileSnafu {
+        path: path.to_owned(),
     })
 }
 
@@ -133,33 +135,22 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         ));
     }
     let arguments = if let Some(json) = &options.inputs {
-        WorkflowArguments::from_json(json.as_bytes())
-            .map_err(|source| RunError::Inputs { source })?
+        WorkflowArguments::from_json(json.as_bytes())?
     } else if let Some(path) = &options.inputs_file {
         let mut bytes = Vec::new();
         open_input_file(path)?
             .take(MAX_WORKFLOW_INPUT_BYTES as u64 + 1)
             .read_to_end(&mut bytes)
-            .map_err(|source| RunError::InputFile {
-                path: path.clone(),
-                source,
-            })?;
-        WorkflowArguments::from_json(&bytes).map_err(|source| RunError::Inputs { source })?
+            .context(InputFileSnafu { path: path.clone() })?;
+        WorkflowArguments::from_json(&bytes)?
     } else {
         WorkflowArguments::default()
     };
-    let description =
-        describe_executable(path).map_err(|source| RunError::Description { source })?;
+    let description = describe_executable(path).context(DescriptionSnafu)?;
     let interface = if description.execution.is_some() {
-        let interface =
-            describe_interface(path).map_err(|source| RunError::Description { source })?;
-        interface
-            .validate_for_description(&description)
-            .map_err(|source| RunError::Inputs { source })?;
-        interface
-            .schema
-            .validate(&arguments)
-            .map_err(|source| RunError::Inputs { source })?;
+        let interface = describe_interface(path).context(DescriptionSnafu)?;
+        interface.validate_for_description(&description)?;
+        interface.schema.validate(&arguments)?;
         Some(interface)
     } else {
         if options.inputs.is_some()
@@ -202,21 +193,17 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         (false, None) => None,
     };
     let arguments = if !arguments.0.is_empty() {
-        let bytes = serde_json::to_vec(&arguments).map_err(|source| RunError::Inputs {
-            source: WorkflowInputError::Json { source },
-        })?;
+        let bytes = serde_json::to_vec(&arguments).context(ArgumentSerializationSnafu)?;
         if bytes.len() > MAX_WORKFLOW_INPUT_BYTES {
-            return Err(RunError::Inputs {
-                source: WorkflowInputError::TooLarge {
-                    limit: MAX_WORKFLOW_INPUT_BYTES,
-                },
-            });
+            mf_runtime::WorkflowInputTooLargeSnafu {
+                limit: MAX_WORKFLOW_INPUT_BYTES,
+            }
+            .fail()?;
         }
-        let mut file =
-            tempfile::NamedTempFile::new().map_err(|source| RunError::ArgumentFile { source })?;
+        let mut file = tempfile::NamedTempFile::new().context(ArgumentFileSnafu)?;
         file.write_all(&bytes)
             .and_then(|()| file.flush())
-            .map_err(|source| RunError::ArgumentFile { source })?;
+            .context(ArgumentFileSnafu)?;
         Some(file)
     } else {
         None

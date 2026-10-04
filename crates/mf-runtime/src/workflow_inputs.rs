@@ -137,7 +137,10 @@ pub struct WorkflowArguments(pub BTreeMap<String, Inputs>);
 pub enum WorkflowInputError {
     #[snafu(display("invalid workflow arguments: {source}"))]
     Json { source: serde_json::Error },
-    #[snafu(display("workflow arguments exceed the {limit}-byte limit"))]
+    #[snafu(
+        display("workflow arguments exceed the {limit}-byte limit"),
+        visibility(pub)
+    )]
     TooLarge { limit: usize },
     #[snafu(display("workflow input `{path}`: {message}"))]
     Invalid { path: String, message: String },
