@@ -49,12 +49,11 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     Ok(mf_runtime::PreparedNode::event(
         BatchState::new(config),
         mf_runtime::NodeMetadata {
-            ports: mf_runtime::NodePorts {
+            output_derivations: vec![OutputDerivation::collect_input("items", "item")],
+            ..mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
                 inputs: vec![PortSpec::new("item", ValueType::Any, true)],
                 outputs: vec![PortSpec::new("items", ValueType::Array, true)],
-            },
-            output_derivations: vec![OutputDerivation::collect_input("items", "item")],
-            ..Default::default()
+            })
         },
     ))
 }
