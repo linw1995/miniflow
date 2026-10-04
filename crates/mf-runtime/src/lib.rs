@@ -1,3 +1,4 @@
+mod cancellation;
 mod context;
 mod definition;
 mod flow;
@@ -7,7 +8,6 @@ mod message_domain;
 mod node;
 mod number;
 mod registry;
-mod resources;
 mod runner;
 mod runner_arguments;
 mod snapshot;
@@ -20,6 +20,7 @@ mod value;
 mod worker;
 mod workflow_inputs;
 
+pub use cancellation::StreamCancellation;
 pub use context::{
     ContextValue, ExecutionContext, ExecutionDependency, ExecutionScope, NodeResult,
     execute_node_in_context, select_context_output,
@@ -56,7 +57,6 @@ pub use node::{
 };
 pub use number::compare_json_numbers;
 pub use registry::{NodeRegistry, NodeRegistryError};
-pub use resources::{ExecutionResources, StreamCancellation};
 pub use runner::{
     WorkflowRunError, instantiate_node_with_metadata, instantiate_subgraph_with_metadata,
 };
@@ -64,7 +64,6 @@ pub use stream::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
     StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate,
 };
-#[cfg(not(unix))]
 pub(crate) use stream_instance::PreparationSnafu as StreamPreparationSnafu;
 pub use stream_instance::{
     CompilationSnafu as StreamCompilationSnafu, Emitter, MessageId, MonotonicClock, StreamClock,
@@ -84,8 +83,8 @@ pub use snapshot::{
 };
 
 pub use workflow_inputs::{
-    InputResource, MAX_WORKFLOW_INPUT_BYTES, WorkflowArguments, WorkflowInput, WorkflowInputError,
-    WorkflowInputSchema,
+    MAX_WORKFLOW_INPUT_BYTES, StdinRequirement, WorkflowArguments, WorkflowInput,
+    WorkflowInputError, WorkflowInputSchema,
 };
 
 pub use runner_arguments::{RunnerArgumentError, RunnerCommand};

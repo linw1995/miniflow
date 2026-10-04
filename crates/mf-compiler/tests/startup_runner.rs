@@ -63,7 +63,7 @@ fn standalone_sources_describe_parameters_and_run_without_stdin_or_build_inputs(
             required: true
         }
     );
-    assert!(interface.schema.resources.is_empty());
+    assert!(interface.schema.stdin.is_empty());
     assert!(!data.exists());
     for arguments in [
         vec![],

@@ -42,32 +42,3 @@ impl StreamCancellation {
         }
     }
 }
-
-#[derive(Debug, Default)]
-pub struct ExecutionResources {
-    stdin: Option<Mutex<crate::TextInput>>,
-}
-
-impl ExecutionResources {
-    pub fn with_stdin(mut self, input: crate::TextInput) -> Self {
-        self.stdin = Some(Mutex::new(input));
-        self
-    }
-
-    pub fn has_stdin(&self) -> bool {
-        self.stdin.is_some()
-    }
-
-    pub fn stdin_line(
-        &self,
-        cancellation: &StreamCancellation,
-    ) -> Result<Option<String>, StreamError> {
-        let input = self
-            .stdin
-            .as_ref()
-            .ok_or_else(|| StreamError::Preparation {
-                message: "stdin resource is unavailable".into(),
-            })?;
-        input.lock().unwrap().next_line(cancellation)
-    }
-}

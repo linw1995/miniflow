@@ -92,7 +92,7 @@ pub struct ExecutionContext {
     snapshot_prefix: Vec<LoopPathEntry>,
     workflow_arguments: crate::WorkflowArguments,
     startup_inputs_bound: bool,
-    resources: std::sync::Arc<crate::ExecutionResources>,
+    stdin: Option<std::sync::Arc<std::sync::Mutex<crate::TextInput>>>,
     cancellation: crate::StreamCancellation,
 }
 
@@ -109,20 +109,15 @@ impl Default for ExecutionContext {
             snapshot_prefix: Vec::new(),
             workflow_arguments: crate::WorkflowArguments::default(),
             startup_inputs_bound: false,
-            resources: std::sync::Arc::new(crate::ExecutionResources::default()),
+            stdin: None,
             cancellation: crate::StreamCancellation::default(),
         }
     }
 }
 
 impl ExecutionContext {
-    pub fn set_execution_resources(
-        &mut self,
-        resources: crate::ExecutionResources,
-        cancellation: crate::StreamCancellation,
-    ) {
-        self.resources = std::sync::Arc::new(resources);
-        self.cancellation = cancellation;
+    pub fn set_stdin(&mut self, input: crate::TextInput) {
+        self.stdin = Some(std::sync::Arc::new(std::sync::Mutex::new(input)));
     }
 
     pub fn set_cancellation(&mut self, cancellation: crate::StreamCancellation) {
@@ -133,17 +128,29 @@ impl ExecutionContext {
     }
 
     pub fn stdin_line(&self) -> Result<Option<String>, crate::StreamError> {
-        self.resources.stdin_line(&self.cancellation)
+        let input = self.stdin.as_ref().ok_or_else(|| {
+            crate::StreamPreparationSnafu {
+                message: "stdin is unavailable".to_owned(),
+            }
+            .build()
+        })?;
+        input.lock().unwrap().next_line(&self.cancellation)
     }
 
     pub fn fork_stream(&self, observation: Option<RunObservation>) -> Self {
         Self {
             outputs: self.outputs.clone(),
             remaining_steps: self.remaining_steps,
-            resources: std::sync::Arc::clone(&self.resources),
+            stdin: self.stdin.clone(),
             cancellation: self.cancellation.clone(),
             observation,
-            ..Self::default()
+            body_observation: None,
+            scopes: Vec::new(),
+            pending_loop_write: None,
+            snapshots: None,
+            snapshot_prefix: Vec::new(),
+            workflow_arguments: crate::WorkflowArguments::default(),
+            startup_inputs_bound: false,
         }
     }
 
@@ -158,7 +165,7 @@ impl ExecutionContext {
     ) -> Result<(), WorkflowRunError> {
         self.startup_inputs_bound = false;
         schema.validate(&self.workflow_arguments)?;
-        schema.validate_resources(&self.workflow_arguments, self.resources.has_stdin())?;
+        schema.validate_stdin(&self.workflow_arguments, self.stdin.is_some())?;
         self.startup_inputs_bound = true;
         Ok(())
     }

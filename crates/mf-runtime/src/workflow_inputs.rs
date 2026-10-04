@@ -84,40 +84,34 @@ impl WorkflowInterface {
                 })?;
             }
         }
-        for (node, resources) in &self.schema.resources {
+        for (node, requirement) in &self.schema.stdin {
             if !declared.contains(node.as_str()) {
                 return Err(invalid(
                     pointer("", node),
-                    "resource owner is not an initial node",
+                    "stdin owner is not an initial node",
                 ));
             }
-            let mut unique = BTreeSet::new();
-            for resource in resources {
-                if !unique.insert(resource) {
-                    return Err(invalid(pointer("", node), "duplicate resource requirement"));
-                }
-                if let InputResource::StdinIfMissing(input) = resource
-                    && !self.schema.inputs[node].contains_key(input)
-                {
-                    return Err(invalid(
-                        pointer("", node),
-                        "stdin condition names an unknown input",
-                    ));
-                }
-                if *resource == InputResource::Stdin && stdin.replace(node).is_some() {
-                    return Err(invalid(pointer("", node), "stdin has multiple owners"));
-                }
+            if let StdinRequirement::UnlessInput(input) = requirement
+                && !self.schema.inputs[node].contains_key(input)
+            {
+                return Err(invalid(
+                    pointer("", node),
+                    "stdin condition names an unknown input",
+                ));
+            }
+            if *requirement == StdinRequirement::Always && stdin.replace(node).is_some() {
+                return Err(invalid(pointer("", node), "stdin has multiple owners"));
             }
         }
         Ok(())
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum InputResource {
-    Stdin,
-    StdinIfMissing(String),
+pub enum StdinRequirement {
+    Always,
+    UnlessInput(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,7 +126,7 @@ pub struct WorkflowInput {
 #[serde(deny_unknown_fields)]
 pub struct WorkflowInputSchema {
     pub inputs: BTreeMap<String, BTreeMap<String, WorkflowInput>>,
-    pub resources: BTreeMap<String, Vec<InputResource>>,
+    pub stdin: BTreeMap<String, StdinRequirement>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -253,9 +247,8 @@ impl WorkflowInputSchema {
                     return Err(invalid(pointer("", id), "duplicate initial node"));
                 }
             }
-            let mut resources = std::collections::BTreeSet::new();
-            for resource in &node.metadata.resources {
-                if let InputResource::StdinIfMissing(input) = resource {
+            if let Some(requirement) = &node.metadata.stdin {
+                if let StdinRequirement::UnlessInput(input) = requirement {
                     if !node
                         .metadata
                         .ports
@@ -273,15 +266,9 @@ impl WorkflowInputSchema {
                     }
                 }
                 if !initial {
-                    return Err(invalid(
-                        pointer("", id),
-                        "input resources require an initial node",
-                    ));
+                    return Err(invalid(pointer("", id), "stdin requires an initial node"));
                 }
-                if !resources.insert(resource.clone()) {
-                    return Err(invalid(pointer("", id), "duplicate input resource"));
-                }
-                if *resource == InputResource::Stdin
+                if *requirement == StdinRequirement::Always
                     && let Some(previous) = stdin_owner.replace(id.to_owned())
                 {
                     return Err(invalid(
@@ -289,11 +276,7 @@ impl WorkflowInputSchema {
                         format!("stdin is already required by node `{previous}`"),
                     ));
                 }
-            }
-            if !resources.is_empty() {
-                schema
-                    .resources
-                    .insert(id.into(), resources.into_iter().collect());
+                schema.stdin.insert(id.into(), requirement.clone());
             }
         }
         Ok(schema)
@@ -340,27 +323,25 @@ impl WorkflowInputSchema {
         arguments: &WorkflowArguments,
     ) -> Result<Option<&'a str>, WorkflowInputError> {
         let mut owner = None;
-        for (node, resources) in &self.resources {
-            for resource in resources {
-                let required = match resource {
-                    InputResource::Stdin => true,
-                    InputResource::StdinIfMissing(input) => !arguments
-                        .0
-                        .get(node)
-                        .is_some_and(|values| values.contains_key(input)),
-                };
-                if required && let Some(previous) = owner.replace(node.as_str()) {
-                    return Err(invalid(
-                        pointer("", node),
-                        format!("stdin is already required by node `{previous}`"),
-                    ));
-                }
+        for (node, requirement) in &self.stdin {
+            let required = match requirement {
+                StdinRequirement::Always => true,
+                StdinRequirement::UnlessInput(input) => !arguments
+                    .0
+                    .get(node)
+                    .is_some_and(|values| values.contains_key(input)),
+            };
+            if required && let Some(previous) = owner.replace(node.as_str()) {
+                return Err(invalid(
+                    pointer("", node),
+                    format!("stdin is already required by node `{previous}`"),
+                ));
             }
         }
         Ok(owner)
     }
 
-    pub fn validate_resources(
+    pub fn validate_stdin(
         &self,
         arguments: &WorkflowArguments,
         stdin_available: bool,
