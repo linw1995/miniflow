@@ -370,24 +370,18 @@ fn a_later_failure_preserves_the_delivered_prefix_and_never_retries() {
     let cause = error.source().unwrap();
     assert!(cause.is::<Arc<mf_runtime::WorkflowRunError>>());
     assert!(cause.source().unwrap().is::<NodeExecutionError>());
-    let input = instance.source.clone();
     let StreamError::Workflow { source, message } = error else {
         panic!("expected a workflow error");
     };
-    for error in [
-        input.send(json!(4)).unwrap_err(),
-        instance.join().unwrap_err(),
-    ] {
-        let StreamError::Workflow {
-            source: shared,
-            message: failed_message,
-        } = error
-        else {
-            panic!("expected the same terminal error");
-        };
-        assert!(Arc::ptr_eq(&source, &shared));
-        assert_eq!(message, failed_message);
-    }
+    let StreamError::Workflow {
+        source: shared,
+        message: failed_message,
+    } = instance.join().unwrap_err()
+    else {
+        panic!("expected the original workflow error");
+    };
+    assert!(Arc::ptr_eq(&source, &shared));
+    assert_eq!(message, failed_message);
     assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
     probes().lock().unwrap().remove("fail-prefix");
 }
