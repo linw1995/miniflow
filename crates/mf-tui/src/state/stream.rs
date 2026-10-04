@@ -140,12 +140,11 @@ fn invalid(message: impl Into<String>) -> StateError {
 }
 
 impl StreamState {
-    pub fn new(nodes: &[NodeObservation]) -> Self {
+    pub fn new(nodes: Vec<NodeObservation>, positions: BTreeMap<String, usize>) -> Self {
         Self {
             roots: nodes
-                .iter()
+                .into_iter()
                 .map(|node| RootState {
-                    node: node.clone(),
                     invocation: None,
                     buffer_sequence: Count::ZERO,
                     flush_sequence: Count::ZERO,
@@ -154,13 +153,10 @@ impl StreamState {
                         ..Default::default()
                     },
                     loop_summary: None,
+                    node,
                 })
                 .collect(),
-            positions: nodes
-                .iter()
-                .enumerate()
-                .map(|(index, node)| (node.id.clone(), index))
-                .collect(),
+            positions,
             witnesses: BTreeMap::new(),
             watermark: 0,
             highest: 0,
@@ -203,13 +199,10 @@ impl StreamState {
         description: &WorkflowDescription,
         record: StreamRecord,
     ) -> Result<Admission, StateError> {
-        record
-            .validate()
-            .map_err(|source| StateError::Event { source })?;
-        validate_graph(description, &record)?;
         let wire = record
             .to_wire(0, None)
             .map_err(|source| StateError::Event { source })?;
+        validate_graph(description, &record)?;
         let bytes = serde_json::to_vec(&wire).map_err(|source| StateError::Serialize { source })?;
         if bytes.len() > MAX_EVENT_BYTES {
             return Err(StateError::TooLarge {
@@ -717,6 +710,7 @@ fn validate_graph(
 struct StreamPass {
     identity: Option<StreamIdentity>,
     message: Option<mf_telemetry::stream::StreamMessage>,
+    trigger: mf_telemetry::stream::StreamTrigger,
     path: Vec<LoopPathEntry>,
     started: Option<Count>,
     finished: Option<Count>,
@@ -784,6 +778,7 @@ impl StreamState {
                 StreamPass {
                     identity: Some(identity.clone()),
                     message: identity.message,
+                    trigger: identity.trigger,
                     path: path.clone(),
                     started: None,
                     finished: None,
@@ -803,6 +798,7 @@ impl StreamState {
             .as_ref()
             .is_some_and(|previous| previous != identity)
             || pass.message != identity.message
+            || pass.trigger != identity.trigger
         {
             return Ok(self.conflict("Loop pass changed its stream identity"));
         }
@@ -908,6 +904,7 @@ impl StreamState {
                 StreamPass {
                     identity: None,
                     message: identity.message,
+                    trigger: identity.trigger,
                     path: node.path.clone(),
                     started: None,
                     finished: None,
@@ -925,7 +922,7 @@ impl StreamState {
         let verified = invocation.complete();
         let observed = invocation.node.clone();
         if let Some(pass) = self.passes.get_mut(&key) {
-            if pass.message != identity.message {
+            if pass.message != identity.message || pass.trigger != identity.trigger {
                 self.conflict("body invocation disagrees with its pass message");
                 return;
             }
@@ -1340,7 +1337,6 @@ mod tests {
             execution: Some(ExecutionDescription {
                 mode: ExecutionMode::Stream,
                 event_schema_version: 4,
-                interface: true,
             }),
             nodes: vec![
                 NodeDescription {
@@ -1962,6 +1958,21 @@ mod tests {
         }
         let snapshot = state.snapshot();
         assert_eq!(snapshot.loop_passes[0].nodes[0].status, NodeStatus::Unknown);
+    }
+
+    #[test]
+    fn reordered_body_events_cannot_change_their_parent_trigger() {
+        let run = RunId::new();
+        let (graph, records) = loop_records(run, 1, 1);
+        let mut state = SessionState::new(graph, run).unwrap();
+        let mut body = records[4].clone();
+        body.identity.as_mut().unwrap().trigger = StreamTrigger::Input;
+        assert_eq!(state.apply_stream(body).unwrap(), Admission::Applied);
+        assert_eq!(
+            state.apply_stream(records[3].clone()).unwrap(),
+            Admission::Conflict
+        );
+        assert_eq!(state.snapshot().lifecycle.protocol_conflicts, 1);
     }
 
     #[test]
