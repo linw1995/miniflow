@@ -140,12 +140,11 @@ fn invalid(message: impl Into<String>) -> StateError {
 }
 
 impl StreamState {
-    pub fn new(nodes: &[NodeObservation]) -> Self {
+    pub fn new(nodes: Vec<NodeObservation>, positions: BTreeMap<String, usize>) -> Self {
         Self {
             roots: nodes
-                .iter()
+                .into_iter()
                 .map(|node| RootState {
-                    node: node.clone(),
                     invocation: None,
                     buffer_sequence: Count::ZERO,
                     flush_sequence: Count::ZERO,
@@ -154,13 +153,10 @@ impl StreamState {
                         ..Default::default()
                     },
                     loop_summary: None,
+                    node,
                 })
                 .collect(),
-            positions: nodes
-                .iter()
-                .enumerate()
-                .map(|(index, node)| (node.id.clone(), index))
-                .collect(),
+            positions,
             witnesses: BTreeMap::new(),
             watermark: 0,
             highest: 0,
@@ -203,13 +199,10 @@ impl StreamState {
         description: &WorkflowDescription,
         record: StreamRecord,
     ) -> Result<Admission, StateError> {
-        record
-            .validate()
-            .map_err(|source| StateError::Event { source })?;
-        validate_graph(description, &record)?;
         let wire = record
             .to_wire(0, None)
             .map_err(|source| StateError::Event { source })?;
+        validate_graph(description, &record)?;
         let bytes = serde_json::to_vec(&wire).map_err(|source| StateError::Serialize { source })?;
         if bytes.len() > MAX_EVENT_BYTES {
             return Err(StateError::TooLarge {
@@ -1344,7 +1337,6 @@ mod tests {
             execution: Some(ExecutionDescription {
                 mode: ExecutionMode::Stream,
                 event_schema_version: 4,
-                interface: true,
             }),
             nodes: vec![
                 NodeDescription {

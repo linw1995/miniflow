@@ -12,9 +12,8 @@ struct Config {
     item_type: ValueType,
 }
 
-struct Source {
+struct StdinSource {
     item_type: ValueType,
-    resource: InputResource,
 }
 
 fn execution_error(source: mf_runtime::StreamError) -> NodeExecutionError {
@@ -23,57 +22,44 @@ fn execution_error(source: mf_runtime::StreamError) -> NodeExecutionError {
     }
 }
 
-impl StreamNode for Source {
+impl StreamNode for StdinSource {
     fn execute(
         &mut self,
         _: Inputs,
         context: &mut ExecutionContext,
         emitter: &mut mf_runtime::Emitter<'_>,
     ) -> Result<(), NodeExecutionError> {
-        loop {
-            let value = match self.resource {
-                InputResource::Stdin => context.stdin_next(&self.item_type),
-                InputResource::Channel => context.channel_next(),
-            }
-            .map_err(execution_error)?;
-            let Some(value) = value else {
-                return Ok(());
-            };
+        while let Some(value) = context
+            .stdin_next(&self.item_type)
+            .map_err(execution_error)?
+        {
             emitter.send(Outputs::from([("item".into(), value)]).into())?;
-            if self.resource == InputResource::Channel {
-                context.channel_published().map_err(execution_error)?;
-            }
         }
+        Ok(())
     }
 }
 
-fn factory(config: Value, resource: InputResource) -> Result<PreparedNode, NodeBuildError> {
+fn stdin_source(config: Value) -> Result<PreparedNode, NodeBuildError> {
     let Config { item_type } = deserialize_config(config)?;
-    if resource == InputResource::Channel {
-        return Ok(mf_runtime::channel_source(item_type));
-    }
     let metadata = NodeMetadata {
         ports: NodePorts {
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("item", item_type.clone(), true)],
         },
-        resources: vec![resource],
+        resources: vec![InputResource::Stdin],
         ..Default::default()
     };
-    Ok(PreparedNode::stream(
-        Source {
-            item_type,
-            resource,
-        },
-        metadata,
-    ))
+    Ok(PreparedNode::stream(StdinSource { item_type }, metadata))
 }
 
 inventory::submit! { NodeRegistration {
     kind: "builtin.stdin",
-    factory: NodeFactory::Plain(|config| factory(config, InputResource::Stdin)),
+    factory: NodeFactory::Plain(stdin_source),
 } }
 inventory::submit! { NodeRegistration {
     kind: "builtin.channel",
-    factory: NodeFactory::Plain(|config| factory(config, InputResource::Channel)),
+    factory: NodeFactory::Plain(|config| {
+        let Config { item_type } = deserialize_config(config)?;
+        Ok(mf_runtime::channel_source(item_type))
+    }),
 } }

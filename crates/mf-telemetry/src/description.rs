@@ -33,11 +33,9 @@ pub enum ExecutionMode {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct ExecutionDescription {
     pub mode: ExecutionMode,
     pub event_schema_version: i64,
-    pub interface: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,10 +153,6 @@ impl WorkflowDescription {
                 .as_ref()
                 .ok_or_else(|| crate::invalid("missing workflow execution description"))?;
             require(
-                execution.interface,
-                "new descriptions require interface inspection",
-            )?;
-            require(
                 execution.event_schema_version
                     == if execution.mode == ExecutionMode::Stream {
                         crate::STREAM_EVENT_SCHEMA_VERSION
@@ -170,7 +164,7 @@ impl WorkflowDescription {
         } else {
             require(
                 self.execution.is_none(),
-                "old descriptions cannot declare an execution interface",
+                "old descriptions cannot declare execution metadata",
             )?;
         }
         if self.is_streaming() {

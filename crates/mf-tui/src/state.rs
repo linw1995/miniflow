@@ -313,7 +313,7 @@ impl SessionState {
             .map(|node| (node.id.as_str(), node))
             .collect();
         let mut node_positions = BTreeMap::new();
-        let nodes: Vec<NodeObservation> = description
+        let mut nodes: Vec<NodeObservation> = description
             .execution_order
             .iter()
             .enumerate()
@@ -323,9 +323,12 @@ impl SessionState {
                 pending_node(node)
             })
             .collect();
-        let stream = description
-            .is_streaming()
-            .then(|| stream::StreamState::new(&nodes));
+        let stream = description.is_streaming().then(|| {
+            stream::StreamState::new(
+                std::mem::take(&mut nodes),
+                std::mem::take(&mut node_positions),
+            )
+        });
         Ok(Self {
             stream,
             description,
