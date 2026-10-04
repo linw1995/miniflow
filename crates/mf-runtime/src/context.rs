@@ -143,22 +143,22 @@ impl ExecutionContext {
     }
 
     pub fn channel_next(&self) -> Result<Option<Value>, crate::StreamError> {
-        let node = self
-            .active_node
-            .as_deref()
-            .ok_or_else(|| crate::StreamError::Preparation {
-                message: "channel read outside a node invocation".into(),
-            })?;
+        let node = self.active_node.as_deref().ok_or_else(|| {
+            crate::StreamPreparationSnafu {
+                message: "channel read outside a node invocation".to_owned(),
+            }
+            .build()
+        })?;
         self.resources.channel_next(node)
     }
 
     pub fn channel_published(&self) -> Result<(), crate::StreamError> {
-        let node = self
-            .active_node
-            .as_deref()
-            .ok_or_else(|| crate::StreamError::Preparation {
-                message: "channel publication outside a node invocation".into(),
-            })?;
+        let node = self.active_node.as_deref().ok_or_else(|| {
+            crate::StreamPreparationSnafu {
+                message: "channel publication outside a node invocation".to_owned(),
+            }
+            .build()
+        })?;
         self.resources.channel_published(node)
     }
 
@@ -193,12 +193,8 @@ impl ExecutionContext {
         schema: &crate::WorkflowInputSchema,
     ) -> Result<(), WorkflowRunError> {
         self.startup_inputs_bound = false;
-        schema
-            .validate(&self.workflow_arguments)
-            .map_err(|source| WorkflowRunError::WorkflowInputs { source })?;
-        schema
-            .validate_resources(|node, resource| self.resources.available(node, resource))
-            .map_err(|source| WorkflowRunError::WorkflowInputs { source })?;
+        schema.validate(&self.workflow_arguments)?;
+        schema.validate_resources(|node, resource| self.resources.available(node, resource))?;
         self.startup_inputs_bound = true;
         Ok(())
     }

@@ -111,7 +111,7 @@ pub type FlowOutputs = crate::Outputs;
 
 #[derive(Debug, Snafu)]
 pub enum FlowBuildError {
-    #[snafu(display("{source}"))]
+    #[snafu(transparent)]
     WorkflowInputs { source: crate::WorkflowInputError },
     #[snafu(display("node `{definition_id}` cannot execute in a synchronous flow"))]
     NonTaskNode { definition_id: DefinitionId },
@@ -476,9 +476,7 @@ impl<N> Flow<N> {
         self.controls = controls;
         self.prepare_execution();
         if !self.input_schema.inputs.is_empty() {
-            return self
-                .with_workflow_inputs()
-                .map_err(|source| FlowBuildError::WorkflowInputs { source });
+            self = self.with_workflow_inputs()?;
         }
         Ok(self)
     }

@@ -1,5 +1,5 @@
 use crate::{MAX_WORKFLOW_INPUT_BYTES, WorkflowArguments, WorkflowInputError};
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 use std::{
     ffi::OsString,
     fs::File,
@@ -23,7 +23,7 @@ pub enum RunnerArgumentError {
     Invalid { message: String },
     #[snafu(display("could not read workflow arguments from {path:?}: {source}"))]
     Read { path: PathBuf, source: io::Error },
-    #[snafu(display("{source}"))]
+    #[snafu(transparent)]
     Arguments { source: WorkflowInputError },
 }
 
@@ -36,11 +36,10 @@ impl WorkflowArguments {
                 .read_to_end(&mut bytes)?;
             Ok(bytes)
         };
-        let bytes = read().map_err(|source| RunnerArgumentError::Read {
-            path: path.into(),
-            source,
+        let bytes = read().context(ReadSnafu {
+            path: path.to_path_buf(),
         })?;
-        Self::from_json(&bytes).map_err(|source| RunnerArgumentError::Arguments { source })
+        Ok(Self::from_json(&bytes)?)
     }
 }
 
@@ -48,8 +47,11 @@ impl RunnerCommand {
     pub fn parse(
         arguments: impl IntoIterator<Item = OsString>,
     ) -> Result<Self, RunnerArgumentError> {
-        let invalid = |message: &str| RunnerArgumentError::Invalid {
-            message: message.into(),
+        let invalid = |message: &str| {
+            InvalidSnafu {
+                message: message.to_owned(),
+            }
+            .build()
         };
         let mut arguments = arguments.into_iter();
         let mut mode = None;
@@ -95,8 +97,7 @@ impl RunnerCommand {
                 json.to_str()
                     .ok_or_else(|| invalid("--inputs requires UTF-8 JSON"))?
                     .as_bytes(),
-            )
-            .map_err(|source| RunnerArgumentError::Arguments { source })?,
+            )?,
         };
         Ok(Self::Execute(values))
     }
