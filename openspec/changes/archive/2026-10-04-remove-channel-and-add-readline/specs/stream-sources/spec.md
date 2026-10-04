@@ -1,27 +1,6 @@
-# stream-sources Specification
+# Spec Delta
 
-## Purpose
-
-Read UTF-8 text lines through an explicit file-or-stdin StreamNode, preserving independent progress,
-producer backpressure, and source-local completion without a mandatory engine input node.
-
-## Requirements
-
-### Requirement: Bind resources only for execution
-
-Launchers SHALL supply declared input resources before source execution and reject unsatisfied or conflicting
-requirements. Preparation, validation, and inspection MUST NOT acquire or consume business inputs. Resource
-behavior SHALL follow declared metadata for built-in and external providers alike.
-
-#### Scenario: Launch a source without an input resource
-
-- **WHEN** a source actively requires stdin but its launcher cannot supply it
-- **THEN** preflight reports the unsatisfied requirement before any node executes
-
-#### Scenario: Inspect a source before opening its data
-
-- **WHEN** an external source is prepared or its interface is inspected
-- **THEN** it declares its required resource without reading or claiming that resource
+## ADDED Requirements
 
 ### Requirement: Read text lines from a file or stdin
 
@@ -61,3 +40,47 @@ keyboard ownership; file mode SHALL launch without that option.
 
 - **WHEN** both sources omit path
 - **THEN** launch rejects the exclusive-resource conflict before either source reads
+
+## REMOVED Requirements
+
+### Requirement: Provide a typed stdin source
+
+**Reason**: Text ingestion now uses the file-or-stdin readline node.
+
+**Migration**: Use `builtin.readline` and parse text in downstream nodes when typed JSON values are needed.
+
+### Requirement: Preserve JSON Lines input behavior
+
+**Reason**: Readline preserves text rather than interpreting it as JSON values.
+
+**Migration**: Supply text to readline and perform explicit downstream parsing.
+
+### Requirement: Provide per-source host admission
+
+**Reason**: Host channel admission is removed from the runtime.
+
+**Migration**: Use an ordinary StreamNode implementation for application-specific data production.
+
+### Requirement: Close and cancel each channel independently
+
+**Reason**: The channel queue and sender APIs are removed.
+
+**Migration**: Source execution and emitter cancellation retain their ordinary contracts.
+
+## MODIFIED Requirements
+
+### Requirement: Bind resources only for execution
+
+Launchers SHALL supply declared input resources before source execution and reject unsatisfied or conflicting
+requirements. Preparation, validation, and inspection MUST NOT acquire or consume business inputs. Resource
+behavior SHALL follow declared metadata for built-in and external providers alike.
+
+#### Scenario: Launch a source without an input resource
+
+- **WHEN** a source actively requires stdin but its launcher cannot supply it
+- **THEN** preflight reports the unsatisfied requirement before any node executes
+
+#### Scenario: Inspect a source before opening its data
+
+- **WHEN** an external source is prepared or its interface is inspected
+- **THEN** it declares its required resource without reading or claiming that resource

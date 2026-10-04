@@ -239,9 +239,8 @@ SHALL mark a body suffix NotRun only when an observed pass-finish boundary prove
 ### Requirement: Launch compatible streaming sources
 
 The terminal launcher SHALL support source-driven streaming protocols. It SHALL use null child stdin for
-sources that require none. A declared stdin source SHALL require `--stream-input <PATH>` while the terminal
-remains available for keyboard input. Missing, unreadable, unused, or `-` input selections and unsatisfied
-host-only resources MUST fail before workflow execution.
+sources whose bindings or startup arguments require none. An active stdin requirement SHALL require `--stream-input <PATH>` while the terminal
+remains available for keyboard input. Missing, unreadable, unused, or `-` input selections MUST fail before workflow execution.
 
 #### Scenario: Observe an autonomous source
 
