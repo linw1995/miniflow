@@ -1,7 +1,7 @@
 //! Bounded loopback OTLP/HTTP reception for one local workflow session.
 
 use crate::snapshots::{HistorySnapshot, SnapshotCapture};
-use crate::state::{SessionState, StateError, StateSnapshot};
+use crate::state::{Admission, SessionState, StateError, StateSnapshot};
 use http_body_util::{BodyExt, Full};
 use hyper::{
     Request, Response, StatusCode,
@@ -24,7 +24,7 @@ use opentelemetry_proto::tonic::{
 };
 use prost::Message;
 use serde_json::{Map, Value};
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 use std::{
     convert::Infallible,
     io,
@@ -53,6 +53,18 @@ pub enum ReceiverError {
     State { source: StateError },
 }
 
+#[derive(Debug, Snafu)]
+enum IngestError {
+    #[snafu(transparent)]
+    Protobuf { source: prost::DecodeError },
+    #[snafu(transparent)]
+    Contract { source: mf_telemetry::ContractError },
+    #[snafu(transparent)]
+    State { source: StateError },
+    #[snafu(display("{message}"))]
+    Invalid { message: String },
+}
+
 struct Context {
     state: Arc<Mutex<SessionState>>,
     snapshots: Mutex<SnapshotCapture>,
@@ -70,28 +82,18 @@ pub struct LoopbackReceiver {
 impl LoopbackReceiver {
     pub fn bind(description: WorkflowDescription, run_id: RunId) -> Result<Self, ReceiverError> {
         let workflow_id = description.workflow_id.clone();
-        let state = SessionState::new(description, run_id)
-            .map_err(|source| ReceiverError::State { source })?;
-        let listener =
-            TcpListener::bind("127.0.0.1:0").map_err(|source| ReceiverError::Bind { source })?;
-        let endpoint = format!(
-            "http://{}",
-            listener
-                .local_addr()
-                .map_err(|source| ReceiverError::Bind { source })?
-        );
-        listener
-            .set_nonblocking(true)
-            .map_err(|source| ReceiverError::Bind { source })?;
+        let state = SessionState::new(description, run_id).context(StateSnafu)?;
+        let listener = TcpListener::bind("127.0.0.1:0").context(BindSnafu)?;
+        let endpoint = format!("http://{}", listener.local_addr().context(BindSnafu)?);
+        listener.set_nonblocking(true).context(BindSnafu)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
             .build()
-            .map_err(|source| ReceiverError::Runtime { source })?;
+            .context(RuntimeSnafu)?;
         let listener = {
             let _entered = runtime.enter();
-            tokio::net::TcpListener::from_std(listener)
-                .map_err(|source| ReceiverError::Runtime { source })?
+            tokio::net::TcpListener::from_std(listener).context(RuntimeSnafu)?
         };
         let context = Arc::new(Context {
             state: Arc::new(Mutex::new(state)),
@@ -287,7 +289,7 @@ async fn handle(
     };
     Ok(match result {
         Ok(()) => response(StatusCode::OK, ""),
-        Err(error) => response(StatusCode::BAD_REQUEST, &error),
+        Err(error) => response(StatusCode::BAD_REQUEST, &error.to_string()),
     })
 }
 
@@ -306,10 +308,9 @@ fn response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
         .expect("static HTTP response is valid")
 }
 
-fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), String> {
-    let request = ExportLogsServiceRequest::decode(bytes).map_err(|error| {
+fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), IngestError> {
+    let request = ExportLogsServiceRequest::decode(bytes).inspect_err(|_| {
         note_error(context, "invalid OTLP logs protobuf");
-        error.to_string()
     })?;
     let total = request
         .resource_logs
@@ -342,7 +343,10 @@ fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), String> {
                     "OTLP log record count exceeded the limit",
                 );
         }
-        return Err("too many log records".into());
+        return InvalidSnafu {
+            message: "too many log records".to_owned(),
+        }
+        .fail();
     }
     let mut rejected = false;
     for resource in request.resource_logs {
@@ -366,19 +370,22 @@ fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), String> {
                         .state
                         .lock()
                         .expect("receiver state was not poisoned")
-                        .record_diagnostic(&error);
+                        .record_diagnostic(&error.to_string());
                 }
             }
         }
     }
     if rejected {
-        Err("one or more lifecycle records were rejected".into())
+        InvalidSnafu {
+            message: "one or more lifecycle records were rejected".to_owned(),
+        }
+        .fail()
     } else {
         Ok(())
     }
 }
 
-fn receive_snapshot(record: LogRecord, context: &Context) -> Result<(), String> {
+fn receive_snapshot(record: LogRecord, context: &Context) -> Result<(), IngestError> {
     let run = string_attribute(&record.attributes, "mf.run.id");
     let workflow = string_attribute(&record.attributes, "mf.workflow.id");
     if let (Some(run), Some(workflow)) = (run, workflow) {
@@ -392,16 +399,23 @@ fn receive_snapshot(record: LogRecord, context: &Context) -> Result<(), String> 
             .lock()
             .expect("snapshot capture was not poisoned")
             .fail(message);
-        return Err(message.into());
+        return InvalidSnafu {
+            message: message.to_owned(),
+        }
+        .fail();
     }
-    context
+    match context
         .snapshots
         .lock()
         .expect("snapshot capture was not poisoned")
         .admit(record)
+    {
+        Ok(()) => Ok(()),
+        Err(message) => Err(InvalidSnafu { message }.build()),
+    }
 }
 
-fn receive_log(record: LogRecord, context: &Context) -> Result<(), String> {
+fn receive_log(record: LogRecord, context: &Context) -> Result<(), IngestError> {
     let run = string_attribute(&record.attributes, "mf.run.id");
     let workflow = string_attribute(&record.attributes, "mf.workflow.id");
     if run != Some(context.run_id.as_str()) || workflow != Some(context.workflow_id.as_str()) {
@@ -414,7 +428,10 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), String> {
             return Ok(());
         }
         note_error(context, "lifecycle record omitted session identity");
-        return Err("missing lifecycle session identity".into());
+        return InvalidSnafu {
+            message: "missing lifecycle session identity".to_owned(),
+        }
+        .fail();
     }
     let attributes = lifecycle_attributes(&record.attributes).inspect_err(|_| {
         note_error(context, "lifecycle record has invalid attributes");
@@ -425,7 +442,10 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), String> {
             .lock()
             .expect("receiver state was not poisoned")
             .record_local_lifecycle_drop(1, "missing lifecycle body");
-        "missing lifecycle body".to_owned()
+        InvalidSnafu {
+            message: "missing lifecycle body".to_owned(),
+        }
+        .build()
     })?;
     let body = value(body, 0).inspect_err(|_| {
         context
@@ -443,7 +463,10 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), String> {
                 .lock()
                 .expect("receiver state was not poisoned")
                 .record_local_lifecycle_drop(1, "invalid lifecycle trace context");
-            return Err("invalid lifecycle trace context".into());
+            return InvalidSnafu {
+                message: "invalid lifecycle trace context".to_owned(),
+            }
+            .fail();
         }
         Some(TraceContext {
             trace_id: hex(&record.trace_id),
@@ -459,51 +482,58 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), String> {
         attributes,
         body,
     };
-    let event = wire.decode().map_err(|error| {
-        context
-            .state
-            .lock()
-            .expect("receiver state was not poisoned")
-            .record_local_lifecycle_drop(1, "invalid lifecycle schema");
-        error.to_string()
-    })?;
-    let schema_version = wire.schema_version().map_err(|error| error.to_string())?;
+    let schema_version = wire
+        .attributes
+        .get("mf.schema.version")
+        .and_then(Value::as_i64);
     {
         let mut state = context
             .state
             .lock()
             .expect("receiver state was not poisoned");
-        if schema_version != state.expected_event_schema_version() {
-            state.record_local_lifecycle_drop(1, "event and description versions disagree");
-            return Err("event and description versions disagree".into());
+        if schema_version != Some(state.expected_event_schema_version()) {
+            state.record_local_lifecycle_drop(1, "event schema and description versions disagree");
+            return InvalidSnafu {
+                message: "event schema and description versions disagree".to_owned(),
+            }
+            .fail();
         }
     }
-    let admission = context
-        .state
-        .lock()
-        .expect("receiver state was not poisoned")
-        .apply(event);
-    match admission {
-        Ok(_) => Ok(()),
-        Err(error) => {
-            context
+    let admission = (|| -> Result<Admission, IngestError> {
+        if schema_version == Some(mf_telemetry::STREAM_EVENT_SCHEMA_VERSION) {
+            let event = mf_telemetry::stream::StreamRecord::decode(&wire)?;
+            Ok(context
                 .state
                 .lock()
                 .expect("receiver state was not poisoned")
-                .record_local_lifecycle_drop(1, "lifecycle admission rejected a record");
-            Err(error.to_string())
+                .apply_stream(event)?)
+        } else {
+            let event = wire.decode()?;
+            Ok(context
+                .state
+                .lock()
+                .expect("receiver state was not poisoned")
+                .apply(event)?)
         }
-    }
+    })()
+    .inspect_err(|_| {
+        context
+            .state
+            .lock()
+            .expect("receiver state was not poisoned")
+            .record_local_lifecycle_drop(1, "lifecycle schema or admission rejected a record");
+    })?;
+    let _ = admission;
+    Ok(())
 }
 
-fn receive_traces(bytes: &[u8], context: &Context) -> Result<(), String> {
-    let request = ExportTraceServiceRequest::decode(bytes).map_err(|error| {
+fn receive_traces(bytes: &[u8], context: &Context) -> Result<(), IngestError> {
+    let request = ExportTraceServiceRequest::decode(bytes).inspect_err(|_| {
         context
             .state
             .lock()
             .expect("receiver state was not poisoned")
             .record_local_trace_drop(1, "invalid OTLP traces protobuf");
-        error.to_string()
     })?;
     let total = request
         .resource_spans
@@ -530,7 +560,10 @@ fn receive_traces(bytes: &[u8], context: &Context) -> Result<(), String> {
                 .expect("receiver state was not poisoned")
                 .record_local_trace_drop(related as u64, "OTLP span count exceeded the limit");
         }
-        return Err("too many spans".into());
+        return InvalidSnafu {
+            message: "too many spans".to_owned(),
+        }
+        .fail();
     }
     let mut rejected = false;
     for resource in request.resource_spans {
@@ -566,7 +599,10 @@ fn receive_traces(bytes: &[u8], context: &Context) -> Result<(), String> {
         }
     }
     if rejected {
-        Err("one or more spans were rejected".into())
+        InvalidSnafu {
+            message: "one or more spans were rejected".to_owned(),
+        }
+        .fail()
     } else {
         Ok(())
     }
@@ -604,7 +640,7 @@ fn string_attribute<'a>(attributes: &'a [KeyValue], name: &str) -> Option<&'a st
         })
 }
 
-fn lifecycle_attributes(attributes: &[KeyValue]) -> Result<Map<String, Value>, String> {
+fn lifecycle_attributes(attributes: &[KeyValue]) -> Result<Map<String, Value>, IngestError> {
     let mut result = Map::new();
     for attribute in attributes {
         if !matches!(
@@ -620,31 +656,47 @@ fn lifecycle_attributes(attributes: &[KeyValue]) -> Result<Map<String, Value>, S
         ) {
             continue;
         }
-        let item = attribute
-            .value
-            .as_ref()
-            .ok_or("missing OTLP attribute value")?;
+        let item = attribute.value.as_ref().ok_or_else(|| {
+            InvalidSnafu {
+                message: "missing OTLP attribute value".to_owned(),
+            }
+            .build()
+        })?;
         if result
             .insert(attribute.key.clone(), value(item, 0)?)
             .is_some()
         {
-            return Err("duplicate lifecycle attribute key".into());
+            return InvalidSnafu {
+                message: "duplicate lifecycle attribute key".to_owned(),
+            }
+            .fail();
         }
     }
     Ok(result)
 }
 
-fn value(input: &AnyValue, depth: usize) -> Result<Value, String> {
+fn value(input: &AnyValue, depth: usize) -> Result<Value, IngestError> {
     if depth > MAX_VALUE_DEPTH {
-        return Err("OTLP value exceeded nesting limit".into());
+        return InvalidSnafu {
+            message: "OTLP value exceeded nesting limit".to_owned(),
+        }
+        .fail();
     }
-    match input.value.as_ref().ok_or("missing OTLP value")? {
+    match input.value.as_ref().ok_or_else(|| {
+        InvalidSnafu {
+            message: "missing OTLP value".to_owned(),
+        }
+        .build()
+    })? {
         any_value::Value::StringValue(value) => Ok(Value::String(value.clone())),
         any_value::Value::BoolValue(value) => Ok(Value::Bool(*value)),
         any_value::Value::IntValue(value) => Ok(Value::Number((*value).into())),
         any_value::Value::ArrayValue(values) => {
             if values.values.len() > MAX_COLLECTION_ITEMS {
-                return Err("OTLP array exceeded item limit".into());
+                return InvalidSnafu {
+                    message: "OTLP array exceeded item limit".to_owned(),
+                }
+                .fail();
             }
             values
                 .values
@@ -655,24 +707,41 @@ fn value(input: &AnyValue, depth: usize) -> Result<Value, String> {
         }
         any_value::Value::KvlistValue(values) => {
             if values.values.len() > MAX_COLLECTION_ITEMS {
-                return Err("OTLP map exceeded item limit".into());
+                return InvalidSnafu {
+                    message: "OTLP map exceeded item limit".to_owned(),
+                }
+                .fail();
             }
             let mut map = Map::new();
             for item in &values.values {
                 if item.key.is_empty() {
-                    return Err("empty OTLP map key".into());
+                    return InvalidSnafu {
+                        message: "empty OTLP map key".to_owned(),
+                    }
+                    .fail();
                 }
-                let entry = item.value.as_ref().ok_or("missing OTLP map value")?;
+                let entry = item.value.as_ref().ok_or_else(|| {
+                    InvalidSnafu {
+                        message: "missing OTLP map value".to_owned(),
+                    }
+                    .build()
+                })?;
                 if map
                     .insert(item.key.clone(), value(entry, depth + 1)?)
                     .is_some()
                 {
-                    return Err("duplicate OTLP map key".into());
+                    return InvalidSnafu {
+                        message: "duplicate OTLP map key".to_owned(),
+                    }
+                    .fail();
                 }
             }
             Ok(Value::Object(map))
         }
-        _ => Err("unsupported OTLP value type for lifecycle metadata".into()),
+        _ => InvalidSnafu {
+            message: "unsupported OTLP value type for lifecycle metadata".to_owned(),
+        }
+        .fail(),
     }
 }
 

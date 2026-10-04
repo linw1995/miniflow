@@ -85,9 +85,13 @@ Description version `2026-09-27` contains `workflow_id`, `nodes`, `data_edges`, 
 enclosing Loop IDs and a local graph with the same node and edge metadata. The synthetic `%loop`
 source appears in its body graph. Nodes contain `id` and `kind`; edge endpoints carry connected port
 names. Description mode excludes Loop configuration, variable values, predicates, and ordinary node
-configuration. The full effective port table is unavailable, so unconnected ports, types, and
-required flags remain unknown to the TUI. Compile validation still checks those contracts by
-constructing plugin instances.
+configuration. The graph does not include the full effective port table. Compile validation checks
+those contracts by constructing plugin instances.
+
+Version `2026-10-03` adds `execution` metadata with the execution mode and lifecycle schema, and requires
+interface inspection. The separate `--describe-interface` document exposes initial-node input types,
+required flags, and runtime resource declarations. Graph inspection stays factory-free; interface
+inspection performs validated preparation without executing a node or consuming source input.
 
 New runners name the synthetic Loop source `%loop`. Description readers also accept `$loop` from
 previously compiled runners, preserving its original node IDs and workflow identity.
@@ -106,7 +110,7 @@ Use the instrumentation scope `mf.workflow`. Event names, timestamps, and option
 
 | Attribute | Type | Meaning |
 | --- | --- | --- |
-| `mf.schema.version` | Signed integer | Event schema version: 1 for flat runners, 2 for Loop-capable runners |
+| `mf.schema.version` | Signed integer | Event schema version: 1 for flat runs, 2 for finite Loop-capable runs, 4 for source-driven streams |
 | `mf.workflow.id` | String | Identity shared with the description |
 | `mf.run.id` | String | Identity of this invocation |
 | `mf.event.sequence` | Signed integer | Positive per-run sequence starting at 1 |
@@ -243,7 +247,7 @@ success response follows decoding, session checks, and state admission; it does 
 the TUI display are complete. Unrelated runs are ignored. Malformed matching lifecycle records and receiver errors
 remain visible as local drops or observation errors. Trace-only drops do not invalidate lifecycle completeness.
 
-`mf-tui::state::SessionState` keeps one state record per outer node, sparse per-invocation Loop state, and sequence membership bounded by the graph's lifecycle event count. It retains details for up to 64 recent pass frames and aggregate counts when older pass details leave the view. Identical retransmissions are ignored; conflicting sequence content or
+For finite runs, `mf-tui::state::SessionState` keeps one state record per outer node, sparse per-invocation Loop state, and sequence membership bounded by the graph's lifecycle event count. It retains details for up to 64 recent pass frames and aggregate counts when older pass details leave the view. Identical retransmissions are ignored; conflicting sequence content or
 incompatible terminal outcomes are surfaced without moving a terminal node back to Running. A finish event can arrive
 before its start, and later evidence may close an active sequence gap. Unknown node outcomes inside the final visited
 prefix remain Unknown; a valid final boundary can prove that later nodes were NotRun.
@@ -264,7 +268,7 @@ proves lifecycle loss. There is no replay, persistence, reconnect, retry schedul
 ## Input and output history
 
 Generated runners collect value history only when `MF_CAPTURE_SNAPSHOTS=1` and an OTLP logs
-endpoint are configured. TUI execution sets this flag and uses its existing loopback `/v1/logs`
+endpoint are configured. Finite TUI execution sets this flag and uses its existing loopback `/v1/logs`
 endpoint. Ordinary execution does not allocate a snapshot recorder. Runners built with
 `--no-telemetry` report that data history requires a telemetry-enabled build.
 
@@ -308,23 +312,42 @@ mf run ./if-else --tui
 ```
 
 `mf run` requires terminal stdin and stderr. Stdout can be redirected: the CLI reserves it for the runner's byte-for-byte
-output after the final view closes. The runner receives null stdin, so workflows that prompt for input are unsupported in
-TUI mode. Preflight calls `--describe` before the execution process starts; existing binaries without the current
-description contract must be recompiled. A fresh run ID and loopback OTLP/HTTP receiver are prepared before launch. The
+output after the final view closes. Preflight calls `--describe` and, for new runners, `--describe-interface` with
+bounded output and a 30-second deadline per inspection. It validates matching workflow identities, startup parameters,
+and declared resources before starting the receiver or execution process. Older finite descriptions remain supported;
+older streaming descriptions require recompilation. A fresh run ID and loopback OTLP/HTTP receiver are prepared before launch. The
 execution child receives these session settings; inherited `OTEL_EXPORTER_OTLP_*` settings, including remote
 endpoints and headers, are removed from the child environment. The parent environment is unchanged.
+
+Pass startup arguments with `--inputs '<JSON>'` or `--inputs-file <PATH>`. These options are mutually
+exclusive and accept at most 1 MiB. The CLI reads a parameter file once, validates the nested node/port
+map, and forwards a canonical copy through a private temporary file kept alive for the child.
+
+Autonomous streams receive null stdin. A workflow with an active stdin requirement requires
+`--stream-input <PATH>` with a readable regular text file. `-` and missing or unused input paths fail preflight. The child's file descriptor is opened before launch;
+terminal stdin remains available for TUI controls. Resource metadata controls this routing for all
+registered node kinds.
+
+```sh
+mf run ./read-workflow --tui --inputs '{"read":{"path":"/data/events.txt"}}'
+mf run ./stream-batch --tui --stream-input ./events.jsonl
+```
 
 The graph shows data and control edges, node status, elapsed time, and confirmed branch outcomes.
 The header keeps the observed workflow outcome separate from the child process result. Arrow keys
 pan; `f` resets the viewport; Tab, `j`, and `k` select a node for details. On a Loop node, `l` opens
 its body graph; `h` or Esc returns to the parent graph. `[` and `]` inspect older and newer retained
 pass frames. The detail pane shows active and completed pass counts, stop reason, and any hidden
-older detail. `q` has no action while the workflow runs. Ctrl-C requests interruption, and a second
+older detail. Streaming details also show observed invocation/completion/result counts, Batch state,
+message identity, unresolved outcomes, and final workflow totals. Loop pass headers include their owning
+invocation so repeated paths in different messages remain distinct. `q` has no action while the workflow runs. Ctrl-C requests interruption, and a second
 Ctrl-C or the two-second deadline forces termination. After the runner exits, the view stays open
 until `q`, Enter, Esc at the root, or Ctrl-C. The terminal is restored before the captured stdout is
 copied to CLI stdout.
 
-Press `v` to browse recorded inputs and outputs, including Loop passes and Iteration items.
+For finite runs, press `v` to browse recorded inputs and outputs, including Loop passes and Iteration items.
+Streaming runs show an explicit unavailable message instead. The launcher sets `MF_CAPTURE_SNAPSHOTS=0`
+for streams even when the parent environment enables capture; finite runs retain capture support.
 Use `j`/`k` or Up/Down to select a change, Home for the first change, and End/`f` to follow the latest.
 PgUp/PgDn scroll values; `v` or Esc returns to the graph. Previews are limited to 64 KiB per
 input/output object, while the complete values remain in memory. The view copies only the visible
@@ -352,8 +375,8 @@ See [compiling workflows](compiling.md) for executable commands, endpoint settin
 
 New streaming runner descriptions use version `2026-10-03`. Their workflow lifecycle records use event
 schema `4`, decoded with `mf_telemetry::stream::StreamRecord`; the existing finite-run decoder keeps
-its original schema `1` and `2` contracts. The terminal launcher and finite-session reducer reject the
-streaming protocol before execution.
+its original schema `1` and `2` contracts. Session admission selects a reducer from the description
+protocol and rejects incompatible lifecycle records. Older schema-3 streams require recompilation for TUI use.
 
 A streaming instance has one workflow/run identity and a checked, monotonically increasing lifecycle
 sequence. A run can exceed the finite-run event budget. The producer retains counters and shared graph
@@ -395,6 +418,15 @@ retain their accepted-input interpretation and are never relabeled as schema 4. 
 acknowledgement, including the final stdout record. Failure preserves its phase and available node
 identity. An earlier missing node outcome remains unknown when a later message succeeds. Consumers
 should bound retained detail and distinguish local history eviction from lifecycle transport loss.
+
+The stream reducer retains 4,096 sequence witnesses, up to 4,096 unresolved invocations, 64 recent
+completed invocations, and 64 Loop pass details. Each retained pass has compact per-node status and up
+to 64 detailed node records. Contiguous verified sequences and completed Loop prefixes compact into
+counters. Losing old display detail does not invalidate lifecycle completeness. An ancient retransmission
+outside the witness window is ignored and counted as unverified; its payload cannot be compared with
+retired evidence. Exhausting an unresolved retention window permanently marks observation incomplete.
+Repeated node invocations keep separate identities; node totals describe observed activity, while final
+workflow totals come from the terminal record. Missing outcomes remain visible even after later successes.
 
 For in-memory execution, create an observation with `CompiledWorkflow::start_stream_observation`, then
 pass it in `StreamOptions.observation` to `mf_compiler::start_stream`. This includes preparation in the
