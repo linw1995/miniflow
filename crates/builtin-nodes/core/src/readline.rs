@@ -1,6 +1,6 @@
 use mf_runtime::{
-    Emitter, ExecutionContext, InputResource, Inputs, NodeBuildError, NodeExecutionError,
-    NodeFactory, NodeMetadata, NodePorts, NodeRegistration, Outputs, PortSpec, PreparedNode,
+    Emitter, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeFactory,
+    NodeMetadata, NodePorts, NodeRegistration, Outputs, PortSpec, PreparedNode, StdinRequirement,
     StreamError, StreamNode, TextInput, ValueType, deserialize_config,
 };
 use serde::Deserialize;
@@ -72,7 +72,7 @@ fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
                 inputs: vec![PortSpec::new("path", ValueType::String, false)],
                 outputs: vec![PortSpec::new("line", ValueType::String, true)],
             },
-            resources: vec![InputResource::StdinIfMissing("path".into())],
+            stdin: Some(StdinRequirement::UnlessInput("path".into())),
             ..Default::default()
         },
     ))

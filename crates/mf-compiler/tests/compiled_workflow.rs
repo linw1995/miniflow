@@ -51,7 +51,7 @@ fn constant_factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuild
             outputs: vec![PortSpec::new("value", ValueType::Number, true)],
         },
         output_derivations: Vec::new(),
-        resources: Vec::new(),
+        stdin: None,
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
@@ -65,7 +65,7 @@ fn increment_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBui
             outputs: vec![PortSpec::new("value", ValueType::Number, true)],
         },
         output_derivations: Vec::new(),
-        resources: Vec::new(),
+        stdin: None,
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))

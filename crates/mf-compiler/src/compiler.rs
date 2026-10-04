@@ -449,13 +449,10 @@ fn prepare_graph(
             }
             .fail();
         }
-    } else if let Some(node) = nodes
-        .iter()
-        .find(|node| !node.metadata.resources.is_empty())
-    {
+    } else if let Some(node) = nodes.iter().find(|node| node.metadata.stdin.is_some()) {
         return Err(WorkflowCompileError::InvalidNodeMetadata {
             definition_id: node.definition_id.clone(),
-            message: "input resources require a schema 2026-10-03 top-level initial node".into(),
+            message: "stdin requires a schema 2026-10-03 top-level initial node".into(),
         });
     }
 

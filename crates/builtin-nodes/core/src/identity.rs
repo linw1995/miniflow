@@ -40,7 +40,7 @@ fn identity_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuil
             outputs: vec![PortSpec::new("value", ValueType::Any, true)],
         },
         output_derivations: node.output_derivations(),
-        resources: Vec::new(),
+        stdin: None,
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))

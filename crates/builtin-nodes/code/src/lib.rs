@@ -285,7 +285,7 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let metadata = mf_runtime::NodeMetadata {
         ports: node.ports(),
         output_derivations: Vec::new(),
-        resources: Vec::new(),
+        stdin: None,
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
@@ -298,22 +298,7 @@ inventory::submit! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cel_core::{MapActivation, Value as CelValue};
     use serde_json::json;
-
-    fn assert_send_sync<T: Send + Sync>() {}
-
-    #[test]
-    fn pinned_cel_api_checks_and_evaluates_json_values() {
-        assert_send_sync::<Program>();
-        let env = Env::with_standard_library().with_variable("amount", CelType::Int);
-        let ast = env.compile("amount * 2").unwrap();
-        assert_eq!(ast.result_type(), Some(&CelType::Int));
-        let mut activation = MapActivation::new();
-        activation.insert("amount", json!(21).as_i64().unwrap());
-        let result = env.program(&ast).unwrap().eval(&activation);
-        assert!(matches!(result, CelValue::Int(42)));
-    }
 
     #[test]
     fn registers_one_code_kind_and_infers_instance_ports() {

@@ -49,7 +49,7 @@ fn noop_factory(
     let metadata = mf_runtime::NodeMetadata {
         ports: declared_ports,
         output_derivations: Vec::new(),
-        resources: Vec::new(),
+        stdin: None,
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
@@ -60,7 +60,7 @@ fn deep_type_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBui
     let metadata = mf_runtime::NodeMetadata {
         ports: node.ports(),
         output_derivations: Vec::new(),
-        resources: Vec::new(),
+        stdin: None,
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))

@@ -1,7 +1,7 @@
 extern crate mfn_core as _;
 
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_stream};
-use mf_runtime::{ExecutionResources, PreparedStream, StreamOptions, TextInput, WorkflowArguments};
+use mf_runtime::{PreparedStream, StreamOptions, TextInput, WorkflowArguments};
 use serde_json::{Value, json};
 use std::{fs, fs::File};
 
@@ -45,10 +45,7 @@ fn readline_uses_initial_or_upstream_paths_and_stdin_as_text() {
                     .push(json!({"id":"path", "kind":"builtin.constant", "config":{"value":path}}));
                 edges = json!([{"from_node":"path", "from_output":"value", "to_node":"read", "to_input":"path"}]);
             }
-            _ => {
-                options.resources = ExecutionResources::default()
-                    .with_stdin(TextInput::new(File::open(&path).unwrap()))
-            }
+            _ => options.stdin = Some(TextInput::new(File::open(&path).unwrap())),
         }
         let prepared = prepare(nodes, edges);
         assert_eq!(

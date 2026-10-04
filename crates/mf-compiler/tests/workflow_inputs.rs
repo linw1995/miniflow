@@ -6,8 +6,8 @@ use mf_compiler::{
     instantiate_compiled, plan_definition,
 };
 use mf_runtime::{
-    ExecutionContext, InputResource, Inputs, NodeBuildError, NodeExecutionError, NodeFactory,
-    NodeMetadata, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, PreparedNode,
+    ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeFactory, NodeMetadata,
+    NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, PreparedNode, StdinRequirement,
     TaskNode, ValueType, WorkflowArguments, WorkflowInput,
 };
 use serde_json::{Value, json};
@@ -39,12 +39,8 @@ impl TaskNode for Echo {
 fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     let inputs: BTreeMap<String, WorkflowInput> =
         mf_runtime::deserialize_config(config["inputs"].clone())?;
-    let resources = mf_runtime::deserialize_config(
-        config
-            .get("resources")
-            .cloned()
-            .unwrap_or_else(|| json!([])),
-    )?;
+    let stdin =
+        mf_runtime::deserialize_config(config.get("stdin").cloned().unwrap_or(Value::Null))?;
     Ok(PreparedNode::new(
         Echo,
         NodeMetadata {
@@ -55,7 +51,7 @@ fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
                     .collect(),
                 outputs: vec![PortSpec::new("value", ValueType::Object, true)],
             },
-            resources,
+            stdin,
             ..Default::default()
         },
     ))
@@ -240,7 +236,7 @@ fn describes_dynamic_source_inputs_and_exclusive_resources_without_execution() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut definition = definition_from_json(
         json!({"version":"2026-10-03", "dependencies":{}, "nodes":[
-            {"id":"source", "kind":"test.startup_echo", "config":{"inputs":{"path":{"type":"string", "required":true}}, "resources":["stdin"]}}
+            {"id":"source", "kind":"test.startup_echo", "config":{"inputs":{"path":{"type":"string", "required":true}}, "stdin":"always"}}
         ]}),
     );
     let schema =
@@ -249,14 +245,14 @@ fn describes_dynamic_source_inputs_and_exclusive_resources_without_execution() {
         schema.inputs["source"]["path"].value_type,
         ValueType::String
     );
-    assert_eq!(schema.resources["source"], [InputResource::Stdin]);
+    assert_eq!(schema.stdin["source"], StdinRequirement::Always);
     assert!(
         schema
-            .validate_resources(&WorkflowArguments::default(), false)
+            .validate_stdin(&WorkflowArguments::default(), false)
             .is_err()
     );
     schema
-        .validate_resources(&WorkflowArguments::default(), true)
+        .validate_stdin(&WorkflowArguments::default(), true)
         .unwrap();
     let mut other = definition.nodes[0].clone();
     other.id = "other".into();

@@ -1,6 +1,6 @@
 extern crate mfn_core as _;
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_stream};
-use mf_runtime::{ExecutionResources, StreamOptions, TextInput, WorkflowArguments};
+use mf_runtime::{StreamOptions, TextInput, WorkflowArguments};
 use serde_json::json;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -18,19 +18,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|path| WorkflowArguments::try_from(json!({"read":{"path":path}})))
         .transpose()?
         .unwrap_or_default();
-    let resources = if prepared
+    let stdin = if prepared
         .plan()
         .input_schema()
         .stdin_owner(&arguments)?
         .is_some()
     {
-        ExecutionResources::default().with_stdin(TextInput::claim()?)
+        Some(TextInput::claim()?)
     } else {
-        ExecutionResources::default()
+        None
     };
     let instance = prepared.start_with_options(StreamOptions {
         arguments,
-        resources,
+        stdin,
         ..Default::default()
     })?;
     while let Some(output) = instance.recv()? {

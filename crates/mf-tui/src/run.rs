@@ -1183,7 +1183,7 @@ fn details_text(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mf_runtime::InputResource;
+    use mf_runtime::StdinRequirement;
     use mf_telemetry::{
         Count,
         description::{
@@ -1195,7 +1195,7 @@ mod tests {
 
     fn source_runner(
         directory: &Path,
-        resource: Option<InputResource>,
+        resource: Option<StdinRequirement>,
         on_describe: &str,
     ) -> PathBuf {
         use std::{fs, os::unix::fs::PermissionsExt};
@@ -1204,12 +1204,12 @@ mod tests {
             "execution":{"mode":"stream", "event_schema_version":4},
             "nodes":[{"id":"source/id", "kind":"third-party.dynamic_source"}], "execution_order":["source/id"],
             "data_edges":[], "control_edges":[], "loop_bodies":[]});
-        let mut resources = serde_json::Map::new();
+        let mut stdin = serde_json::Map::new();
         if let Some(resource) = resource {
-            resources.insert("source/id".into(), serde_json::json!([resource]));
+            stdin.insert("source/id".into(), serde_json::json!(resource));
         }
         let interface = serde_json::json!({"version":"2026-10-03", "workflow_id":graph["workflow_id"],
-            "schema":{"inputs":{"source/id":{"path":{"type":"string", "required":true}}}, "resources":resources}});
+            "schema":{"inputs":{"source/id":{"path":{"type":"string", "required":true}}}, "stdin":stdin}});
         fs::write(&runner, format!("#!/bin/sh\ncase \"$1\" in\n--describe) printf '%s\\n' '{graph}';;\n--describe-interface) {on_describe}\nprintf '%s\\n' '{interface}';;\n*) exit 99;;\nesac\n")).unwrap();
         fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
         runner
@@ -1284,7 +1284,7 @@ mod tests {
     #[test]
     fn preflight_rejects_workflow_stdin() {
         let root = tempfile::tempdir().unwrap();
-        let runner = source_runner(root.path(), Some(InputResource::Stdin), "");
+        let runner = source_runner(root.path(), Some(StdinRequirement::Always), "");
         assert!(
             prepare_launch(&runner, &valid_options())
                 .err()

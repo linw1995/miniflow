@@ -159,7 +159,7 @@ pub struct StreamOptions {
     pub observation: Option<StreamObservation>,
     pub snapshots: Option<crate::SnapshotRecorder>,
     pub arguments: crate::WorkflowArguments,
-    pub resources: crate::ExecutionResources,
+    pub stdin: Option<crate::TextInput>,
 }
 impl Default for StreamOptions {
     fn default() -> Self {
@@ -168,7 +168,7 @@ impl Default for StreamOptions {
             observation: None,
             snapshots: None,
             arguments: crate::WorkflowArguments::default(),
-            resources: crate::ExecutionResources::default(),
+            stdin: None,
         }
     }
 }
@@ -555,9 +555,11 @@ impl PreparedStream {
             );
         }
         let (prepared, operator_states) = self.into_parts();
-        let cancellation = crate::StreamCancellation::default();
         let mut context = ExecutionContext::default();
-        context.set_execution_resources(options.resources, cancellation.clone());
+        if let Some(input) = options.stdin {
+            context.set_stdin(input);
+        }
+        let cancellation = context.cancellation();
         context.set_workflow_arguments(options.arguments);
         context
             .bind_workflow_inputs(prepared.input_schema())

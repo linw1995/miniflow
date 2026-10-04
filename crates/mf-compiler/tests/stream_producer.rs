@@ -163,7 +163,7 @@ fn producer(config: Value) -> Result<PreparedNode, mf_runtime::NodeBuildError> {
                 inputs: vec![PortSpec::new("input", ValueType::Int64, true)],
                 outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
             },
-            resources: Vec::new(),
+            stdin: None,
             context_references: if mode == "context" {
                 vec![mf_runtime::ContextReference::new(
                     "copy.value",
@@ -529,20 +529,39 @@ fn preparation_rejects_synchronous_and_mixed_domain_placement_without_execution(
 
 #[test]
 fn producer_reads_declared_ancestor_context_on_its_worker() {
-    let mut value = graph("context", 1);
-    value["nodes"][0]["config"]["mode"] = json!("context");
-    value["nodes"]
-        .as_array_mut()
-        .unwrap()
-        .push(json!({"id":"copy", "kind":"builtin.identity"}));
-    value["edges"][0]["to_node"] = json!("copy");
-    value["edges"].as_array_mut().unwrap().push(json!({
-        "from_node":"copy", "from_output":"value", "to_node":"produce", "to_input":"input"
-    }));
-    let instance = start(value, StreamOptions::default());
-    instance.source.clone().send(json!(17)).unwrap();
-    instance.source.close();
-    assert_eq!(receive(&instance), 17);
-    assert!(instance.recv().unwrap().is_none());
-    instance.join().unwrap();
+    for startup in [false, true] {
+        let mut value = graph("context", 1);
+        value["nodes"][0]["config"]["mode"] = json!("context");
+        value["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"copy", "kind":"builtin.identity"}));
+        value["edges"][0]["to_node"] = json!("copy");
+        value["edges"].as_array_mut().unwrap().push(json!({
+            "from_node":"copy", "from_output":"value", "to_node":"produce", "to_input":"input"
+        }));
+        let (instance, _source) = if startup {
+            value["nodes"][2] =
+                json!({"id":"feed", "kind":"builtin.constant", "config":{"value":17}});
+            value["edges"][0]["from_output"] = json!("value");
+            let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
+            let registry = NodeRegistry::from_inventory().unwrap();
+            let plan = compile_definition(&definition, &registry).unwrap();
+            (
+                instantiate_stream(&plan, &registry)
+                    .unwrap()
+                    .start()
+                    .unwrap(),
+                None,
+            )
+        } else {
+            let run = start(value, StreamOptions::default());
+            run.source.send(json!(17)).unwrap();
+            run.source.close();
+            (run.instance, Some(run.source))
+        };
+        assert_eq!(receive(&instance), 17);
+        assert!(instance.recv().unwrap().is_none());
+        instance.join().unwrap();
+    }
 }

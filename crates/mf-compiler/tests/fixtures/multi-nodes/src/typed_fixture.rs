@@ -26,7 +26,7 @@ fn integer_source(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildEr
             outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
         },
         output_derivations: Vec::new(),
-        resources: Vec::new(),
+        stdin: None,
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
@@ -113,7 +113,7 @@ fn typed_source(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildErro
     let metadata = mf_runtime::NodeMetadata {
         ports: node.ports(),
         output_derivations: Vec::new(),
-        resources: Vec::new(),
+        stdin: None,
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
@@ -168,7 +168,7 @@ fn typed_echo(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError>
     let metadata = mf_runtime::NodeMetadata {
         ports: node.ports(),
         output_derivations: Vec::new(),
-        resources: Vec::new(),
+        stdin: None,
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
@@ -204,7 +204,7 @@ fn dishonest_forward(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuil
             outputs: vec![PortSpec::new("value", ValueType::Any, true)],
         },
         output_derivations: node.output_derivations(),
-        resources: Vec::new(),
+        stdin: None,
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))

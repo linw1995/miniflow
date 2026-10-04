@@ -49,7 +49,7 @@ fn source(
     let metadata = mf_runtime::NodeMetadata {
         ports: declared_ports,
         output_derivations: Vec::new(),
-        resources: Vec::new(),
+        stdin: None,
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
@@ -64,7 +64,7 @@ fn echo(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
             outputs: vec![PortSpec::new("value", ValueType::Number, true)],
         },
         output_derivations: Vec::new(),
-        resources: Vec::new(),
+        stdin: None,
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))

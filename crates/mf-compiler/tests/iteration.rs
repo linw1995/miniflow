@@ -44,7 +44,7 @@ fn map_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
             outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
         },
         output_derivations: Vec::new(),
-        resources: Vec::new(),
+        stdin: None,
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
@@ -79,7 +79,7 @@ fn trace_probe_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildEr
             outputs: vec![PortSpec::new("span", ValueType::String, true)],
         },
         output_derivations: Vec::new(),
-        resources: Vec::new(),
+        stdin: None,
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))

@@ -179,12 +179,12 @@ Factories derive ports from configuration and do not need invocation values. Req
 descriptors retain their ordinary port meaning. `WorkflowArguments::from_json` rejects duplicate keys and
 limits JSON arguments to 1 MiB; `WorkflowInputSchema` validates the complete object before dispatch.
 
-`NodeMetadata.resources` declares exclusive `InputResource::Stdin`, or
-`InputResource::StdinIfMissing("path".into())` for a source whose optional input selects a file.
+`NodeMetadata.stdin` optionally declares exclusive `StdinRequirement::Always`, or
+`StdinRequirement::UnlessInput("path".into())` for a source whose optional input selects a file.
 A data-bound conditional input removes its stdin requirement. Otherwise validated startup arguments determine
 whether stdin is needed. Resource discovery uses metadata for built-in and external providers alike;
 preparation does not acquire business inputs. Launchers use `WorkflowInputSchema::stdin_owner` and
-`validate_resources` to reject missing resources or competing active consumers before execution.
+`validate_stdin` to reject missing resources or competing active consumers before execution.
 
 ## Incremental stream producers
 
@@ -257,7 +257,8 @@ dispatch. Ordinary per-message producer invocations remain serialized.
 `builtin.readline` accepts optional string input `path` and emits string output `line`. Supplying a path
 reads that UTF-8 text file; omission selects stdin. It preserves blank lines and whitespace, strips LF or
 CRLF delimiters, and accepts a final unterminated line. It does not parse JSON. Runners supply a reserved
-`TextInput` when stdin is required; embedding hosts can supply one through `ExecutionResources::with_stdin`.
+`TextInput` when stdin is required; embedding hosts supply `StreamOptions.stdin` or use
+`ExecutionContext::set_stdin` for context-based execution.
 Factories and interface inspection do not open source files or read stdin. Runtime-owned reads respond to
 cancellation. Application-specific sources use ordinary `StreamNode` implementations and propagate emitter
 errors; arbitrary plugin I/O requires cooperation.

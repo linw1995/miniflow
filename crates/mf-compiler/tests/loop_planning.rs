@@ -53,7 +53,7 @@ fn omit_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
             outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
         },
         output_derivations: Vec::new(),
-        resources: Vec::new(),
+        stdin: None,
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
@@ -67,7 +67,7 @@ fn wrong_type_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildErr
             outputs: vec![PortSpec::new("value", ValueType::Any, true)],
         },
         output_derivations: Vec::new(),
-        resources: Vec::new(),
+        stdin: None,
         context_references: Vec::new(),
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
