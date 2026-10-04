@@ -103,6 +103,19 @@ and outputs cannot refer to one another. CEL evaluation errors and values that c
 JSON type fail the node. Errors identify the Code input or output and a JSON Pointer path for nested values. The
 workflow publishes no Code outputs if any expression fails. A skipped Code node does not evaluate expressions.
 
+To convert text explicitly, declare a string input and call `int(text)` or `double(text)` in the expression.
+The checker infers `Int64` or `Float64` outputs. Integers must fit signed 64-bit range; doubles can use decimal
+or scientific notation and must produce a finite JSON number. Invalid numeric text fails the node.
+For example, a readline output connected to input `text` can use:
+
+```json
+{
+  "language": "cel",
+  "inputs": { "text": "string" },
+  "code": { "number": "int(text)" }
+}
+```
+
 Each expression is limited to 8 KiB. The serialized input map and output map are each limited to 1 MiB, with at most
 10,000 collection entries across input conversion and output conversion per execution. Type descriptors and values
 are limited to 16 nesting levels. These bounds limit accidental work; CEL evaluation runs in-process without a hard
