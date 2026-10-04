@@ -86,13 +86,11 @@ pub enum RunError {
 pub struct RunOptions {
     pub inputs: Option<String>,
     pub inputs_file: Option<PathBuf>,
-    pub stream_input: Option<PathBuf>,
 }
 
 struct PreparedLaunch {
     description: WorkflowDescription,
     arguments: Option<tempfile::NamedTempFile>,
-    stdin: Option<File>,
 }
 
 fn option_error(message: &str) -> RunError {
@@ -127,11 +125,6 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
             "--inputs and --inputs-file are mutually exclusive",
         ));
     }
-    if options.stream_input.as_deref() == Some(Path::new("-")) {
-        return Err(option_error(
-            "--stream-input requires a file path; terminal stdin is reserved for TUI controls",
-        ));
-    }
     let arguments = if let Some(json) = &options.inputs {
         WorkflowArguments::from_json(json.as_bytes())?
     } else if let Some(path) = &options.inputs_file {
@@ -151,10 +144,7 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         interface.schema.validate(&arguments)?;
         Some(interface)
     } else {
-        if options.inputs.is_some()
-            || options.inputs_file.is_some()
-            || options.stream_input.is_some()
-        {
+        if options.inputs.is_some() || options.inputs_file.is_some() {
             return Err(option_error(
                 "this runner has no workflow input interface; recompile it to pass startup arguments or input resources",
             ));
@@ -167,20 +157,11 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         .transpose()?
         .flatten()
         .is_some();
-    let stdin = match (needs_stdin, &options.stream_input) {
-        (true, Some(path)) => Some(open_input_file(path)?),
-        (true, None) => {
-            return Err(option_error(
-                "workflow declares a stdin source; provide --stream-input <PATH>",
-            ));
-        }
-        (false, Some(_)) => {
-            return Err(option_error(
-                "--stream-input was supplied but the workflow declares no stdin resource",
-            ));
-        }
-        (false, None) => None,
-    };
+    if needs_stdin {
+        return Err(option_error(
+            "TUI execution cannot supply workflow stdin; provide source parameters or run the executable directly",
+        ));
+    }
     let arguments = if !arguments.0.is_empty() {
         let bytes = serde_json::to_vec(&arguments).context(mf_runtime::WorkflowInputJsonSnafu)?;
         if bytes.len() > MAX_WORKFLOW_INPUT_BYTES {
@@ -201,7 +182,6 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
     Ok(PreparedLaunch {
         description,
         arguments,
-        stdin,
     })
 }
 
@@ -217,7 +197,6 @@ pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<
     let PreparedLaunch {
         description,
         arguments,
-        stdin,
     } = prepare_launch(path, options)?;
     let streaming = description.is_streaming();
     let layout = GraphLayout::new(&description).context(GraphSnafu)?;
@@ -244,7 +223,7 @@ pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<
     let result = (|| {
         let mut command = Command::new(path);
         command
-            .stdin(stdin.map_or_else(Stdio::null, Stdio::from))
+            .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if let Some(arguments) = &arguments {
@@ -1269,7 +1248,6 @@ mod tests {
             WorkflowArguments::from_file(private.path()).unwrap(),
             WorkflowArguments::from_json(valid_options().inputs.unwrap().as_bytes()).unwrap()
         );
-        assert!(prepared.stdin.is_none());
         drop(prepared);
         assert!(!temporary_path.exists());
         let runner = source_runner(root.path(), None, "");
@@ -1304,34 +1282,16 @@ mod tests {
     }
 
     #[test]
-    fn preflight_routes_only_declared_file_resources() {
-        use std::fs;
+    fn preflight_rejects_workflow_stdin() {
         let root = tempfile::tempdir().unwrap();
-        let data = root.path().join("data.jsonl");
-        fs::write(&data, "1\r\n2").unwrap();
         let runner = source_runner(root.path(), Some(InputResource::Stdin), "");
-        assert!(prepare_launch(&runner, &valid_options()).is_err());
-        let mut options = valid_options();
-        options.stream_input = Some(data.clone());
-        let mut prepared = prepare_launch(&runner, &options).unwrap();
-        fs::remove_file(&data).unwrap();
-        let mut contents = String::new();
-        prepared
-            .stdin
-            .as_mut()
-            .unwrap()
-            .read_to_string(&mut contents)
-            .unwrap();
-        assert_eq!(contents, "1\r\n2");
-        assert!(prepare_launch(&runner, &options).is_err());
-        options.stream_input = Some(root.path().to_owned());
-        assert!(prepare_launch(&runner, &options).is_err());
-        options.stream_input = Some(PathBuf::from("-"));
-        assert!(prepare_launch(&runner, &options).is_err());
-        options.stream_input = Some(data);
-        let runner = source_runner(root.path(), None, "");
-        assert!(prepare_launch(&runner, &options).is_err());
-        options.stream_input = None;
+        assert!(
+            prepare_launch(&runner, &valid_options())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("cannot supply workflow stdin")
+        );
     }
 
     #[test]

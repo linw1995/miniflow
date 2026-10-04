@@ -282,32 +282,10 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
         expected
     );
 
-    let jsonl = root.join("data.jsonl");
-    fs::write(&jsonl, "one\r\ntwo\nthree\nfour\nfive\nsix").unwrap();
-    let (status, captured, screen) = run_tui(
-        &source,
-        &["--stream-input".into(), jsonl.clone().into_os_string()],
-        false,
-        true,
-    );
-    assert_eq!(status.code(), Some(0), "{screen}");
-    assert_eq!(captured, output);
-    for arguments in [
-        vec![],
-        vec!["--stream-input".into(), "-".into()],
-        vec![
-            "--stream-input".into(),
-            root.join("absent").into_os_string(),
-        ],
-    ] {
-        let (status, output, screen) = run_tui(&source, &arguments, false, false);
-        assert_eq!(status.code(), Some(1), "{screen}");
-        assert!(output.is_empty());
-    }
-    fs::write(&jsonl, b"one\n\xff\n").unwrap();
+    fs::write(&data, b"one\n\xff\n").unwrap();
     let (status, _, screen) = run_tui(
         &source,
-        &["--stream-input".into(), jsonl.into_os_string()],
+        &["--inputs".into(), parameters.clone().into()],
         false,
         false,
     );

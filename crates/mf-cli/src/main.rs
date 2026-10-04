@@ -33,9 +33,6 @@ enum Command {
         /// Read workflow startup arguments from a JSON file (up to 1 MiB).
         #[arg(long, value_name = "PATH")]
         inputs_file: Option<PathBuf>,
-        /// JSON Lines file for a declared stdin source.
-        #[arg(long, value_name = "PATH")]
-        stream_input: Option<PathBuf>,
     },
 }
 
@@ -89,7 +86,6 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             executable,
             inputs,
             inputs_file,
-            stream_input,
             ..
         } => {
             #[cfg(unix)]
@@ -99,14 +95,13 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     &mf_tui::run::RunOptions {
                         inputs,
                         inputs_file,
-                        stream_input,
                     },
                 )
                 .context(RunSnafu)
             }
             #[cfg(not(unix))]
             {
-                let _ = (executable, inputs, inputs_file, stream_input);
+                let _ = (executable, inputs, inputs_file);
                 UnsupportedTuiSnafu.fail()
             }
         }
@@ -232,21 +227,10 @@ mod tests {
 
     #[test]
     fn run_options_parse_startup_arguments_and_reject_conflicts() {
-        let cli = Cli::try_parse_from([
-            "mf",
-            "run",
-            "./flow",
-            "--tui",
-            "--inputs",
-            "{}",
-            "--stream-input",
-            "data.jsonl",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["mf", "run", "./flow", "--tui", "--inputs", "{}"]).unwrap();
         let Command::Run {
             inputs,
             inputs_file,
-            stream_input,
             ..
         } = cli.command
         else {
@@ -254,11 +238,9 @@ mod tests {
         };
         assert_eq!(inputs.as_deref(), Some("{}"));
         assert!(inputs_file.is_none());
-        assert_eq!(stream_input, Some("data.jsonl".into()));
         for arguments in [
             vec!["--inputs", "{}", "--inputs-file", "args.json"],
             vec!["--inputs", "{}", "--inputs", "{}"],
-            vec!["--stream-input", "a", "--stream-input", "b"],
         ] {
             assert!(
                 Cli::try_parse_from(
