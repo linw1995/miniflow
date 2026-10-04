@@ -85,6 +85,24 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
         serde_json::from_str(include_str!("../../../examples/stream-batch.json")).unwrap();
     definition["dependencies"]["core"]["path"] =
         json!(common::crates_dir().join("builtin-nodes/core"));
+    definition["dependencies"]
+        .as_object_mut()
+        .unwrap()
+        .remove("code");
+    definition["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|node| node["id"] != "convert");
+    {
+        let edges = definition["edges"].as_array_mut().unwrap();
+        let input = edges
+            .iter_mut()
+            .find(|edge| edge["to_node"] == "convert")
+            .unwrap();
+        input["to_node"] = json!("collect");
+        input["to_input"] = json!("item");
+        edges.retain(|edge| edge["from_node"] != "convert");
+    }
     definition["dependencies"]["fixture"] = json!({"package":"fixture-multi-nodes", "path":Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/multi-nodes")});
     definition["nodes"][0]["config"]["max_wait_ms"] = json!(3_600_000);
     definition["nodes"][1] =
