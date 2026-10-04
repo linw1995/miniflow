@@ -45,7 +45,7 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
-    #[snafu(display("{source}"))]
+    #[snafu(transparent)]
     WorkflowInputs {
         source: mf_runtime::WorkflowInputError,
     },
@@ -425,8 +425,7 @@ fn prepare_graph(
             nodes
                 .iter()
                 .map(|node| (node, !incoming.contains_key(node.definition_id.as_str()))),
-        )
-        .context(WorkflowInputsSnafu)?;
+        )?;
         if let Some(node) = nodes.iter().find(|node| {
             !incoming.contains_key(node.definition_id.as_str())
                 && matches!(node.node, Some(mf_runtime::NodeExecution::Event(_)))
@@ -443,10 +442,13 @@ fn prepare_graph(
         .iter()
         .find(|node| !node.metadata.resources.is_empty())
     {
-        return Err(WorkflowCompileError::InvalidNodeMetadata {
+        return InvalidNodeMetadataSnafu {
             definition_id: node.definition_id.clone(),
-            message: "input resources require a schema 2026-10-03 top-level initial node".into(),
-        });
+            message: String::from(
+                "input resources require a schema 2026-10-03 top-level initial node",
+            ),
+        }
+        .fail();
     }
 
     let indices: BTreeMap<_, _> = nodes
@@ -991,7 +993,7 @@ pub fn instantiate_compiled(
     .context(FlowConstructionSnafu)
     .and_then(|flow| {
         if plan.definition.version.supports_startup_inputs() {
-            flow.with_workflow_inputs().context(WorkflowInputsSnafu)
+            Ok(flow.with_workflow_inputs()?)
         } else {
             Ok(flow)
         }
@@ -1007,12 +1009,11 @@ pub fn describe_workflow_inputs(
         return Ok(mf_runtime::WorkflowInputSchema::default());
     }
     let incoming = incoming_dependencies(&plan.definition);
-    mf_runtime::WorkflowInputSchema::from_nodes(
+    Ok(mf_runtime::WorkflowInputSchema::from_nodes(
         nodes
             .iter()
             .map(|node| (node, !incoming.contains_key(node.definition_id.as_str()))),
-    )
-    .context(WorkflowInputsSnafu)
+    )?)
 }
 
 #[derive(Debug, Snafu)]

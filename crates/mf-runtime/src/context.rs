@@ -121,9 +121,7 @@ impl ExecutionContext {
         &mut self,
         schema: &crate::WorkflowInputSchema,
     ) -> Result<(), WorkflowRunError> {
-        schema
-            .validate(&self.workflow_arguments)
-            .map_err(|source| WorkflowRunError::WorkflowInputs { source })?;
+        schema.validate(&self.workflow_arguments)?;
         self.startup_inputs = self.workflow_arguments.0.clone();
         Ok(())
     }
