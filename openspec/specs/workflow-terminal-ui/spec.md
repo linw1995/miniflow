@@ -17,7 +17,7 @@ The system SHALL provide terminal presentation through a separate `mf-tui` crate
 
 ### Requirement: Launch and observe an existing local executable
 
-`mf run <executable> --tui` SHALL obtain a supported runner description and, for runners advertising it, the
+`mf run <executable> --tui` SHALL obtain a supported runner description and, for description versions requiring it, the
 matching startup interface. It SHALL validate supplied startup arguments and resource availability, establish
 a loopback OTLP/HTTP receiver, and then launch the actual executable with the same arguments and
 session-specific observation configuration. It MUST NOT reimplement workflow
@@ -65,7 +65,7 @@ run; missing observations MUST NOT trigger workflow restart.
 
 #### Scenario: Preserve legacy finite runners
 
-- **WHEN** a supported older single-run binary does not advertise interface inspection and no startup
+- **WHEN** a supported older single-run binary does not require interface inspection and no startup
   parameters are supplied
 - **THEN** existing preflight, terminal launch, observation, and cleanup continue to work
 

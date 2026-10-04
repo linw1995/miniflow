@@ -150,11 +150,7 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
     };
     let description =
         describe_executable(path).map_err(|source| RunError::Description { source })?;
-    let interface = if description
-        .execution
-        .as_ref()
-        .is_some_and(|execution| execution.interface)
-    {
+    let interface = if description.execution.is_some() {
         let interface =
             describe_interface(path).map_err(|source| RunError::Description { source })?;
         interface
@@ -205,7 +201,7 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         }
         (false, None) => None,
     };
-    let arguments = if interface.is_some() {
+    let arguments = if !arguments.0.is_empty() {
         let bytes = serde_json::to_vec(&arguments).map_err(|source| RunError::Inputs {
             source: WorkflowInputError::Json { source },
         })?;
@@ -1257,7 +1253,7 @@ mod tests {
         use std::{fs, os::unix::fs::PermissionsExt};
         let runner = directory.join("runner");
         let graph = serde_json::json!({"version":"2026-10-03", "workflow_id":format!("sha256:{}", "a".repeat(64)),
-            "execution":{"mode":"stream", "event_schema_version":4, "interface":true},
+            "execution":{"mode":"stream", "event_schema_version":4},
             "nodes":[{"id":"source/id", "kind":"third-party.dynamic_source"}], "execution_order":["source/id"],
             "data_edges":[], "control_edges":[], "loop_bodies":[]});
         let mut resources = serde_json::Map::new();

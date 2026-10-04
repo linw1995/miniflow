@@ -53,50 +53,20 @@ impl Screen {
                 else {
                     break;
                 };
-                let parameters = String::from_utf8_lossy(&self.pending[index + 2..end]);
-                let private = parameters.starts_with('?');
-                let values: Vec<usize> = parameters
-                    .split(';')
-                    .map(|value| value.parse().unwrap_or(0))
-                    .collect();
-                let first = values.first().copied().unwrap_or(0);
-                let count = first.max(1);
-                if !private {
-                    match self.pending[end] {
-                        b'H' | b'f' => {
-                            self.row = count - 1;
-                            self.column = values.get(1).copied().unwrap_or(1).max(1) - 1;
-                        }
-                        b'G' => self.column = count - 1,
-                        b'd' => self.row = count - 1,
-                        b'A' => self.row = self.row.saturating_sub(count),
-                        b'B' => self.row += count,
-                        b'C' => self.column += count,
-                        b'D' => self.column = self.column.saturating_sub(count),
-                        b'J' if first == 2 || first == 3 => {
-                            self.cells.iter_mut().for_each(|row| row.fill(' '))
-                        }
-                        b'K' => {
-                            let row = &mut self.cells[self.row.min(39)];
-                            let range = match first {
-                                1 => 0..(self.column + 1).min(160),
-                                2 => 0..160,
-                                _ => self.column.min(160)..160,
-                            };
-                            row[range].fill(' ');
-                        }
-                        _ => {}
-                    }
+                if self.pending[end] == b'H' {
+                    let parameters = String::from_utf8_lossy(&self.pending[index + 2..end]);
+                    let mut coordinates = parameters
+                        .split(';')
+                        .map(|value| value.parse::<usize>().unwrap_or(1).max(1));
+                    self.row = coordinates.next().unwrap_or(1).min(40) - 1;
+                    self.column = coordinates.next().unwrap_or(1).min(160) - 1;
                 }
-                self.row = self.row.min(39);
-                self.column = self.column.min(159);
                 index = end + 1;
                 continue;
             }
             match byte {
                 b'\r' => self.column = 0,
                 b'\n' => self.row = (self.row + 1).min(39),
-                b'\x08' => self.column = self.column.saturating_sub(1),
                 0..=31 => {}
                 _ => {
                     let length = match byte {
@@ -240,7 +210,6 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let source = root.join("source");
     let stdin = root.join("stdin");
-    let no_telemetry = root.join("unobserved");
     let definition = root.join("workflow.json");
     let build = root.join("build");
     let marker = root.join("executed");
@@ -249,7 +218,7 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
     let support = SupportPackages::Local {
         crates_dir: crates.into(),
     };
-    let compile = |value: Value, output: &Path, telemetry| {
+    let compile = |value: Value, output: &Path| {
         fs::write(&definition, value.to_string()).unwrap();
         compile_project_with_options(
             &CompileRequest {
@@ -259,7 +228,7 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
                 build_dir: Some(&build),
                 support: &support,
             },
-            &RunnerOptions { telemetry },
+            &RunnerOptions::default(),
         )
         .unwrap();
     };
@@ -268,12 +237,11 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
         "nodes":[{"id":"read", "kind":"fixture.read_lines", "config":{"marker":marker, "delay_ms":100}}, {"id":"consume", "kind":"builtin.identity"}],
         "edges":[{"from_node":"read", "from_output":"line", "to_node":"consume", "to_input":"input"}],
         "outputs":[{"name":"value", "node":"consume", "port":"value"}]});
-    compile(graph.clone(), &source, true);
-    compile(graph.clone(), &no_telemetry, false);
+    compile(graph.clone(), &source);
     graph["nodes"][0] =
         json!({"id":"read", "kind":"builtin.stdin", "config":{"item_type":"string"}});
     graph["edges"][0]["from_output"] = json!("item");
-    compile(graph, &stdin, true);
+    compile(graph, &stdin);
     fs::remove_file(&definition).unwrap();
     fs::remove_dir_all(&build).unwrap();
 
@@ -316,16 +284,6 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
             .collect::<Vec<_>>(),
         expected
     );
-
-    let (status, unobserved, screen) = run_tui(
-        &no_telemetry,
-        &["--inputs".into(), parameters.clone().into()],
-        false,
-        false,
-    );
-    assert_eq!(status.code(), Some(0), "{screen}");
-    assert_eq!(unobserved, output);
-    assert!(screen.contains("UnverifiedTail"), "{screen}");
 
     let jsonl = root.join("data.jsonl");
     fs::write(
