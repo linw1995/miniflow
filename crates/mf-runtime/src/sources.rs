@@ -126,7 +126,7 @@ impl ChannelSender {
                 return Err(error.clone());
             }
             if state.closed {
-                return Err(self.reject(state, StreamClosedSnafu.build()));
+                return StreamClosedSnafu.fail();
             }
             if let Err(error) = self
                 .0
