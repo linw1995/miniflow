@@ -2,10 +2,9 @@ use crate::stream_instance::{
     InputRecordSnafu, OutputEncodeSnafu, OutputWriteSnafu, ResourceSnafu, StdioSnafu,
 };
 use crate::{StreamCancellation, StreamError, StreamInstance, StreamSummary};
-use snafu::{IntoError, ResultExt};
+use snafu::ResultExt;
 use std::{
     collections::VecDeque,
-    error::Error,
     fs::File,
     io::{self, Read, Write},
 };
@@ -70,7 +69,8 @@ impl TextInput {
                 };
             }
             wait_ready(&self.file, false, cancellation)
-                .map_err(|error| input_error(self.line, error))?;
+                .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> { Box::new(source) })
+                .context(InputRecordSnafu { line: self.line })?;
             if let Some(error) = cancellation.failure() {
                 return Err(error);
             }
@@ -79,7 +79,13 @@ impl TextInput {
                 Ok(0) => self.eof = true,
                 Ok(len) => self.buffered.extend(&bytes[..len]),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-                Err(error) => return Err(input_error(self.line, error)),
+                Err(error) => {
+                    return Err(error)
+                        .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> {
+                            Box::new(source)
+                        })
+                        .context(InputRecordSnafu { line: self.line });
+                }
             }
         }
     }
@@ -96,13 +102,10 @@ impl TextInput {
         if terminated && record.last() == Some(&b'\r') {
             record.pop();
         }
-        String::from_utf8(record).map_err(|error| input_error(line, error))
+        String::from_utf8(record)
+            .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> { Box::new(source) })
+            .context(InputRecordSnafu { line })
     }
-}
-
-fn input_error(line: u64, error: impl std::error::Error + Send + Sync + 'static) -> StreamError {
-    let source: Box<dyn Error + Send + Sync> = Box::new(error);
-    InputRecordSnafu { line }.into_error(source)
 }
 
 #[cfg(unix)]
@@ -189,7 +192,7 @@ impl StreamStdio {
 
     #[cfg(not(unix))]
     pub fn claim() -> Result<Self, StreamError> {
-        crate::stream_instance::PreparationSnafu {
+        crate::StreamPreparationSnafu {
             message: String::from("stream stdio requires Linux or macOS"),
         }
         .fail()

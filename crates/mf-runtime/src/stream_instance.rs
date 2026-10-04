@@ -357,12 +357,12 @@ impl Producer {
                 .context(WorkerStartupSnafu)?,
             );
         }
-        self.worker.as_ref().unwrap().try_submit(job).map_err(|_| {
-            ExecutionSnafu {
+        if self.worker.as_ref().unwrap().try_submit(job).is_err() {
+            return ExecutionSnafu {
                 message: "producer worker unavailable",
             }
-            .build()
-        })?;
+            .fail();
+        }
         self.active = true;
         Ok(())
     }
@@ -1111,15 +1111,13 @@ fn tick(
             state.domains[domain].frame = Some(frame);
             progress = true;
         } else if state.active_workers < workers.worker_count() {
-            workers
-                .try_submit(frame)
-                // A failed send owns the frame; release its values instead of retaining them.
-                .map_err(|_| {
-                    ExecutionSnafu {
-                        message: "worker queue unavailable",
-                    }
-                    .build()
-                })?;
+            // A failed send owns the frame; release its values instead of retaining them.
+            if workers.try_submit(frame).is_err() {
+                return ExecutionSnafu {
+                    message: "worker queue unavailable",
+                }
+                .fail();
+            }
             state.active_workers += 1;
             progress = true;
         } else {

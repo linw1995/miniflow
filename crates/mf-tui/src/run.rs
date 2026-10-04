@@ -184,11 +184,10 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
     let arguments = if !arguments.0.is_empty() {
         let bytes = serde_json::to_vec(&arguments).context(mf_runtime::WorkflowInputJsonSnafu)?;
         if bytes.len() > MAX_WORKFLOW_INPUT_BYTES {
-            return Err(mf_runtime::WorkflowInputTooLargeSnafu {
+            mf_runtime::WorkflowInputTooLargeSnafu {
                 limit: MAX_WORKFLOW_INPUT_BYTES,
             }
-            .build()
-            .into());
+            .fail()?;
         }
         let mut file = tempfile::NamedTempFile::new().context(ArgumentFileSnafu)?;
         file.write_all(&bytes)
