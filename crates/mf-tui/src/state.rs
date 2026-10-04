@@ -216,6 +216,8 @@ pub enum Admission {
 pub enum StateError {
     #[snafu(display("streaming observation requires a compatible streaming consumer"))]
     UnsupportedStream,
+    #[snafu(display("invalid lifecycle event: {message}"))]
+    InvalidEvent { message: String },
     #[snafu(display("invalid workflow description: {source}"))]
     Description { source: ContractError },
     #[snafu(display("invalid lifecycle event: {source}"))]
@@ -228,6 +230,13 @@ pub enum StateError {
     TooManyNodes { limit: usize },
     #[snafu(display("workflow observation has finished collecting"))]
     Closed,
+}
+
+pub(super) fn invalid(message: impl Into<String>) -> StateError {
+    InvalidEventSnafu {
+        message: message.into(),
+    }
+    .build()
 }
 
 pub struct SessionState {
@@ -282,7 +291,7 @@ impl SessionState {
         if description.is_streaming()
             && description.event_schema_version() != mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
         {
-            return Err(StateError::UnsupportedStream);
+            return UnsupportedStreamSnafu.fail();
         }
         description
             .validate()
@@ -361,28 +370,26 @@ impl SessionState {
         record: mf_telemetry::stream::StreamRecord,
     ) -> Result<Admission, StateError> {
         if self.closed {
-            return Err(StateError::Closed);
+            return ClosedSnafu.fail();
         }
         if record.run_id != self.run_id || record.workflow_id != self.description.workflow_id {
             self.note("ignored stream record from another workflow or run");
             return Ok(Admission::UnrelatedRun);
         }
         self.invalidate_snapshot();
-        let stream = self.stream.as_mut().ok_or_else(|| StateError::Event {
-            source: ContractError::Invalid {
-                message: "stream record in a finite session".into(),
-            },
-        })?;
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| invalid("stream record in a finite session"))?;
         stream.apply(&self.description, record)
     }
 
     pub fn apply(&mut self, event: LifecycleEvent) -> Result<Admission, StateError> {
         if self.stream.is_some() {
-            return Err(StateError::Event {
-                source: ContractError::Invalid {
-                    message: "finite event in a stream session".into(),
-                },
-            });
+            return InvalidEventSnafu {
+                message: "finite event in a stream session".to_owned(),
+            }
+            .fail();
         }
         if self.closed {
             return Err(StateError::Closed);

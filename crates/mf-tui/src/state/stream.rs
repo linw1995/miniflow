@@ -2,6 +2,7 @@ use super::*;
 use mf_telemetry::stream::{
     StreamCounts, StreamEvent, StreamFailure, StreamIdentity, StreamPayload, StreamRecord,
 };
+use snafu::ResultExt;
 
 const MAX_WITNESSES: usize = 4096;
 const MAX_INVOCATIONS: usize = 4096;
@@ -131,14 +132,6 @@ pub struct StreamState {
     hidden_passes: usize,
 }
 
-fn invalid(message: impl Into<String>) -> StateError {
-    StateError::Event {
-        source: ContractError::Invalid {
-            message: message.into(),
-        },
-    }
-}
-
 impl StreamState {
     pub fn new(nodes: Vec<NodeObservation>, positions: BTreeMap<String, usize>) -> Self {
         Self {
@@ -199,15 +192,14 @@ impl StreamState {
         description: &WorkflowDescription,
         record: StreamRecord,
     ) -> Result<Admission, StateError> {
-        let wire = record
-            .to_wire(0, None)
-            .map_err(|source| StateError::Event { source })?;
+        let wire = record.to_wire(0, None).context(EventSnafu)?;
         validate_graph(description, &record)?;
-        let bytes = serde_json::to_vec(&wire).map_err(|source| StateError::Serialize { source })?;
+        let bytes = serde_json::to_vec(&wire).context(SerializeSnafu)?;
         if bytes.len() > MAX_EVENT_BYTES {
-            return Err(StateError::TooLarge {
+            return TooLargeSnafu {
                 limit: MAX_EVENT_BYTES,
-            });
+            }
+            .fail();
         }
         let signature: [u8; 32] = Sha256::digest(bytes).into();
         let sequence = record.sequence.get();
@@ -589,11 +581,7 @@ fn validate_graph(
     }
     match &record.payload {
         StreamPayload::Control(StreamEvent::Started { node_count, .. }) => {
-            if *node_count
-                != description
-                    .static_node_count()
-                    .map_err(|source| StateError::Event { source })?
-            {
+            if *node_count != description.static_node_count().context(EventSnafu)? {
                 return Err(invalid(
                     "stream start node count disagrees with description",
                 ));
