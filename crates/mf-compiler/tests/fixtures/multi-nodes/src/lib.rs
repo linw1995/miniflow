@@ -46,27 +46,17 @@ fn source(
     }
     let _: serde_json::Map<String, Value> = mf_runtime::deserialize_config(config)?;
     let node = Source;
-    let metadata = mf_runtime::NodeMetadata {
-        ports: declared_ports,
-        output_derivations: Vec::new(),
-        resources: Vec::new(),
-        context_references: Vec::new(),
-    };
+    let metadata = mf_runtime::NodeMetadata::new(declared_ports);
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
 fn echo(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let _: serde_json::Map<String, Value> = mf_runtime::deserialize_config(config)?;
     let node = Echo;
-    let metadata = mf_runtime::NodeMetadata {
-        ports: mf_runtime::NodePorts {
-            inputs: vec![PortSpec::new("input", ValueType::Number, true)],
-            outputs: vec![PortSpec::new("value", ValueType::Number, true)],
-        },
-        output_derivations: Vec::new(),
-        resources: Vec::new(),
-        context_references: Vec::new(),
-    };
+    let metadata = mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
+        inputs: vec![PortSpec::new("input", ValueType::Number, true)],
+        outputs: vec![PortSpec::new("value", ValueType::Number, true)],
+    });
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
