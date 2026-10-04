@@ -49,8 +49,8 @@ number. Preparation MUST NOT open the file or read stdin. Runtime-owned reads MU
 
 Launchers SHALL derive stdin requirements from prepared metadata, data bindings, and validated startup
 arguments. A file-bound source SHALL not require stdin. Multiple active stdin consumers or a missing required
-stdin resource MUST fail before execution. TUI stdin mode SHALL require `--stream-input` and retain terminal
-keyboard ownership; file mode SHALL launch without that option.
+stdin resource MUST fail before execution. TUI launch SHALL reject active stdin requirements and retain terminal keyboard ownership. File mode SHALL
+launch through workflow parameters; standalone runners SHALL support stdin ingestion.
 
 #### Scenario: Run two file sources
 

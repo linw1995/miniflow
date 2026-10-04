@@ -180,8 +180,7 @@ failure
 MUST NOT silently claim complete workflow output; it SHALL produce a CLI capture/output error and bounded
 cleanup.
 Diagnostic tail eviction SHALL remain nonfatal and visibly counted. The TUI SHALL own terminal input. The
-child SHALL receive null stdin when no stdin resource is required, or the explicitly selected stream-input
-file when its interface declares that resource.
+child SHALL always receive null stdin; workflows requiring stdin MUST fail preflight.
 
 #### Scenario: Exceed stdout storage budget
 
@@ -238,9 +237,9 @@ SHALL mark a body suffix NotRun only when an observed pass-finish boundary prove
 
 ### Requirement: Launch compatible streaming sources
 
-The terminal launcher SHALL support source-driven streaming protocols. It SHALL use null child stdin for
-sources whose bindings or startup arguments require none. An active stdin requirement SHALL require `--stream-input <PATH>` while the terminal
-remains available for keyboard input. Missing, unreadable, unused, or `-` input selections MUST fail before workflow execution.
+The terminal launcher SHALL support source-driven streaming protocols and always launch children with null
+stdin while retaining terminal keyboard input. File producers SHALL receive paths through workflow startup
+parameters. Workflows with active stdin requirements MUST fail preflight before workflow execution.
 
 #### Scenario: Observe an autonomous source
 
@@ -249,13 +248,13 @@ remains available for keyboard input. Missing, unreadable, unused, or `-` input 
 
 #### Scenario: Observe an explicit stdin source
 
-- **WHEN** the workflow declares stdin and the user selects a readable stream-input file
-- **THEN** that file supplies the child source while terminal keyboard input remains owned by the TUI
+- **WHEN** the workflow requires stdin after applying its startup arguments
+- **THEN** TUI preflight reports unsupported stdin ingestion before executing the workflow
 
 #### Scenario: Reject missing source input
 
-- **WHEN** a workflow requires stdin but no stream-input file was supplied
-- **THEN** preflight reports the required option and does not launch an empty stream
+- **WHEN** a readline node omits its file path and therefore requires stdin
+- **THEN** TUI preflight rejects execution and reports that the source needs workflow parameters or direct execution
 
 #### Scenario: Identify an older streaming runner
 

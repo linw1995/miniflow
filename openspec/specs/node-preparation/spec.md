@@ -87,11 +87,10 @@ Synchronous flows and generated task bodies SHALL contain only task executors. E
 
 ### Requirement: Declare execution resources during preparation
 
-Prepared node metadata SHALL identify runtime input resources required for execution, including exclusive
-stdin and stdin conditional on the absence of a named input. Data bindings and validated startup arguments
-SHALL resolve conditional requirements before execution. Validation SHALL reject conflicting active owners
-without acquiring those inputs. Resource discovery MUST use the selected provider's metadata without built-in kind-name inference or a
-second metadata-only factory contract.
+Prepared metadata SHALL declare at most one stdin requirement per node: unconditional ownership or ownership
+unless a named input is supplied. Data bindings and validated startup arguments SHALL resolve conditional
+ownership before execution. Validation SHALL reject competing active owners without acquiring input.
+Discovery MUST use provider metadata without built-in kind-name inference or a separate factory contract.
 
 #### Scenario: Prepare an external stdin provider
 
