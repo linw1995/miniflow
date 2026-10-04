@@ -16,6 +16,7 @@ mod stream_plan;
 mod subgraph;
 mod value;
 mod worker;
+mod workflow_inputs;
 
 pub use context::{
     ContextValue, ExecutionContext, ExecutionDependency, ExecutionScope, NodeResult,
@@ -76,4 +77,9 @@ pub use worker::{WorkerPool, WorkerPoolError};
 pub use snapshot::{
     NodeSnapshot, SNAPSHOT_VERSION, Snapshot, SnapshotEntry, SnapshotOutcome, SnapshotRecord,
     SnapshotRecorder, SnapshotStore, ValueDefinition, ValueId,
+};
+
+pub use workflow_inputs::{
+    InputResource, MAX_WORKFLOW_INPUT_BYTES, WorkflowArguments, WorkflowInput, WorkflowInputError,
+    WorkflowInputSchema,
 };

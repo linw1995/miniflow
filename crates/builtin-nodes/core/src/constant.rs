@@ -51,9 +51,8 @@ fn constant_factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuild
         value: config.value.into(),
     };
     let metadata = mf_runtime::NodeMetadata {
-        ports: node.ports(),
         output_derivations: node.output_derivations(),
-        context_references: Vec::new(),
+        ..mf_runtime::NodeMetadata::new(node.ports())
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }

@@ -31,14 +31,10 @@ fn constant_factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuild
     let node = ConstantNode {
         value: config.value,
     };
-    let metadata = mf_runtime::NodeMetadata {
-        ports: mf_runtime::NodePorts {
-            inputs: vec![],
-            outputs: vec![PortSpec::new("value", ValueType::Number, true)],
-        },
-        output_derivations: Vec::new(),
-        context_references: Vec::new(),
-    };
+    let metadata = mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
+        inputs: vec![],
+        outputs: vec![PortSpec::new("value", ValueType::Number, true)],
+    });
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 

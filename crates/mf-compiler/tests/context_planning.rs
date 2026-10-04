@@ -43,9 +43,8 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     }
     let node = Dynamic(config);
     let metadata = mf_runtime::NodeMetadata {
-        ports: node.ports(),
-        output_derivations: Vec::new(),
         context_references: node.context_references(),
+        ..mf_runtime::NodeMetadata::new(node.ports())
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }

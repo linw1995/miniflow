@@ -540,14 +540,21 @@ pub struct NodeMetadata {
     pub ports: NodePorts,
     pub output_derivations: Vec<OutputDerivation>,
     pub context_references: Vec<ContextReference>,
+    pub resources: Vec<crate::InputResource>,
 }
 
-impl From<NodePorts> for NodeMetadata {
-    fn from(ports: NodePorts) -> Self {
+impl NodeMetadata {
+    pub fn new(ports: NodePorts) -> Self {
         Self {
             ports,
             ..Self::default()
         }
+    }
+}
+
+impl From<NodePorts> for NodeMetadata {
+    fn from(ports: NodePorts) -> Self {
+        Self::new(ports)
     }
 }
 

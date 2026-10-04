@@ -20,14 +20,10 @@ impl TaskNode for IntegerSource {
 fn integer_source(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let _: serde_json::Map<String, Value> = deserialize_config(config)?;
     let node = IntegerSource;
-    let metadata = mf_runtime::NodeMetadata {
-        ports: mf_runtime::NodePorts {
-            inputs: vec![],
-            outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
-        },
-        output_derivations: Vec::new(),
-        context_references: Vec::new(),
-    };
+    let metadata = mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
+        inputs: vec![],
+        outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
+    });
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
@@ -109,11 +105,7 @@ impl TypedSource {
 
 fn typed_source(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = TypedSource(deserialize_config(config)?);
-    let metadata = mf_runtime::NodeMetadata {
-        ports: node.ports(),
-        output_derivations: Vec::new(),
-        context_references: Vec::new(),
-    };
+    let metadata = mf_runtime::NodeMetadata::new(node.ports());
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
@@ -163,11 +155,7 @@ impl TypedEcho {
 
 fn typed_echo(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = TypedEcho(deserialize_config(config)?);
-    let metadata = mf_runtime::NodeMetadata {
-        ports: node.ports(),
-        output_derivations: Vec::new(),
-        context_references: Vec::new(),
-    };
+    let metadata = mf_runtime::NodeMetadata::new(node.ports());
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
 
@@ -196,12 +184,11 @@ fn dishonest_forward(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuil
     let _: serde_json::Map<String, Value> = deserialize_config(config)?;
     let node = DishonestForward;
     let metadata = mf_runtime::NodeMetadata {
-        ports: mf_runtime::NodePorts {
+        output_derivations: node.output_derivations(),
+        ..mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
             inputs: vec![PortSpec::new("input", ValueType::Any, true)],
             outputs: vec![PortSpec::new("value", ValueType::Any, true)],
-        },
-        output_derivations: node.output_derivations(),
-        context_references: Vec::new(),
+        })
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }

@@ -237,7 +237,29 @@ impl CompiledWorkflow {
         }
         let outputs_return = generate_outputs(&self.definition);
 
+        let bindings = if self.definition.version.supports_startup_inputs() {
+            let incoming = crate::compiler::incoming_dependencies(&self.definition);
+            let nodes = self.execution_order.iter().enumerate().map(|(index, id)| {
+                let ident = format_ident!("node_root_{index}");
+                let initial = !incoming.contains_key(id.as_str());
+                quote! { (&#ident, #initial) }
+            });
+            quote! {
+                let schema_nodes: &[(&mf_runtime::TaskFlowNode, bool)] = &[#(#nodes),*];
+                let schema = mf_runtime::WorkflowInputSchema::from_nodes(schema_nodes.iter().copied())
+                    .map_err(|source| mf_runtime::WorkflowRunError::WorkflowInputs { source })?;
+                state.bind_workflow_inputs(&schema)?;
+            }
+        } else {
+            quote! { state.bind_workflow_inputs(&mf_runtime::WorkflowInputSchema::default())?; }
+        };
         let generated = quote! {
+            pub fn run_workflow_with_inputs(registry: &mf_runtime::NodeRegistry, arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
+                let mut state = mf_runtime::ExecutionContext::default();
+                state.set_workflow_arguments(arguments);
+                run_workflow_in_context(registry, &mut state)
+            }
+
             pub fn run_workflow(
                 registry: &mf_runtime::NodeRegistry,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
@@ -258,6 +280,7 @@ impl CompiledWorkflow {
                 state: &mut mf_runtime::ExecutionContext,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
                 #(#preparations)*
+                #bindings
                 #(#node_statements)*
                 #outputs_return
             }
