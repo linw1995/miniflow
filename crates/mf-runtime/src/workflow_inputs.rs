@@ -23,13 +23,13 @@ pub struct WorkflowInterface {
 impl WorkflowInterface {
     pub fn from_json(bytes: &[u8]) -> Result<Self, WorkflowInputError> {
         if bytes.len() > mf_telemetry::description::MAX_DESCRIPTION_BYTES {
-            return Err(WorkflowInputError::TooLarge {
+            return TooLargeSnafu {
                 limit: mf_telemetry::description::MAX_DESCRIPTION_BYTES,
-            });
+            }
+            .fail();
         }
-        let value: UniqueValue =
-            serde_json::from_slice(bytes).map_err(|source| WorkflowInputError::Json { source })?;
-        serde_json::from_value(value.0).map_err(|source| WorkflowInputError::Json { source })
+        let value: UniqueValue = serde_json::from_slice(bytes).context(JsonSnafu)?;
+        serde_json::from_value(value.0).context(JsonSnafu)
     }
 
     pub fn validate_for_description(
@@ -79,9 +79,11 @@ impl WorkflowInterface {
                 if name.is_empty() {
                     return Err(invalid(pointer("", node), "empty input port name"));
                 }
-                input.value_type.check_depth().map_err(|error| {
-                    invalid(pointer(&pointer("", node), name), error.to_string())
-                })?;
+                let path = pointer(&pointer("", node), name);
+                input
+                    .value_type
+                    .check_depth()
+                    .context(TypeDepthSnafu { path })?;
             }
         }
         for (node, resources) in &self.schema.resources {

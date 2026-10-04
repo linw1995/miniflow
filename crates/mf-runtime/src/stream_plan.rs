@@ -4,7 +4,7 @@ use crate::{
     ExecutionDependency, FlowNode, NodeExecution, StreamDomain, StreamExecution, TaskNode,
     WorkflowOutputDefinition,
 };
-use snafu::{OptionExt, Snafu, ensure};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 
 type OperatorStates = Vec<Option<NodeExecution>>;
 
@@ -12,6 +12,8 @@ type OperatorStates = Vec<Option<NodeExecution>>;
 pub enum StreamBuildError {
     #[snafu(display("invalid streaming workflow: {message}"), visibility(pub))]
     InvalidPlan { message: String },
+    #[snafu(display("invalid streaming workflow: {source}"), visibility(pub))]
+    WorkflowInputs { source: crate::WorkflowInputError },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -77,9 +79,7 @@ impl PreparedStream {
                 .zip(&dependencies)
                 .map(|(node, dependencies)| (node, dependencies.is_empty())),
         )
-        .map_err(|error| StreamBuildError::InvalidPlan {
-            message: error.to_string(),
-        })?;
+        .context(WorkflowInputsSnafu)?;
         let domains = MessageDomains::new(&nodes, &dependencies, &outputs)?;
         let mut operator_states = Vec::with_capacity(nodes.len());
         let nodes = nodes
@@ -140,8 +140,11 @@ impl PreparedStream {
                     .resources
                     .contains(&crate::InputResource::Channel)
             })
-            .ok_or_else(|| crate::StreamError::Preparation {
-                message: format!("node `{node}` does not declare a channel source"),
+            .ok_or_else(|| {
+                crate::StreamPreparationSnafu {
+                    message: format!("node `{node}` does not declare a channel source"),
+                }
+                .build()
             })?;
         let port = source
             .metadata
@@ -149,8 +152,11 @@ impl PreparedStream {
             .outputs
             .iter()
             .find(|port| port.name == "item")
-            .ok_or_else(|| crate::StreamError::Preparation {
-                message: format!("channel source `{node}` must declare an item output"),
+            .ok_or_else(|| {
+                crate::StreamPreparationSnafu {
+                    message: format!("channel source `{node}` must declare an item output"),
+                }
+                .build()
             })?;
         self.resources.channel(
             node,

@@ -47,7 +47,7 @@ pub enum StreamError {
         #[snafu(source(from(crate::WorkerPoolError, Arc::new)))]
         source: Arc<crate::WorkerPoolError>,
     },
-    #[snafu(display("invalid stream input: {source}"))]
+    #[snafu(display("invalid stream input: {source}"), visibility(pub(crate)))]
     Input { source: crate::TypeMismatch },
     #[snafu(display("invalid stream input: {message}"), visibility(pub))]
     InputFailure { message: String },
@@ -59,6 +59,11 @@ pub enum StreamError {
         line: u64,
         #[snafu(source(from(Box<dyn std::error::Error + Send + Sync>, Arc::from)))]
         source: Arc<dyn std::error::Error + Send + Sync>,
+    },
+    #[snafu(display("invalid stream input: {source}"), visibility(pub))]
+    InputValidation {
+        #[snafu(source(from(crate::WorkflowRunError, Arc::new)))]
+        source: Arc<crate::WorkflowRunError>,
     },
     #[snafu(display("stream output failed: {message}"))]
     Output { message: String },
@@ -97,9 +102,9 @@ pub enum StreamError {
     },
     #[snafu(display("stream resource limit: {message}"), visibility(pub))]
     Resource { message: String },
-    #[snafu(display("stream input capacity is full"))]
+    #[snafu(display("stream input capacity is full"), visibility(pub(crate)))]
     Capacity,
-    #[snafu(display("stream input is closed"))]
+    #[snafu(display("stream input is closed"), visibility(pub(crate)))]
     Closed,
 }
 
@@ -111,7 +116,10 @@ impl StreamError {
             | Self::ThreadSpawn { .. }
             | Self::WorkerStartup { .. }
             | Self::Stdio { .. } => "preparation",
-            Self::Input { .. } | Self::InputFailure { .. } | Self::InputRecord { .. } => "input",
+            Self::Input { .. }
+            | Self::InputFailure { .. }
+            | Self::InputRecord { .. }
+            | Self::InputValidation { .. } => "input",
             Self::Output { .. } | Self::OutputWrite { .. } | Self::OutputEncode { .. } => "output",
             Self::Resource { .. } | Self::Capacity => "resource",
             Self::Producer { source, .. } | Self::Event { source, .. } => {
@@ -293,9 +301,8 @@ impl Emitter<'_> {
     /// Failure wakes waiting senders. Success does not imply downstream completion.
     pub fn send(&mut self, result: NodeResult) -> Result<(), NodeExecutionError> {
         self.admit(result)
-            .map_err(|source| NodeExecutionError::PluginFailed {
-                source: Box::new(source),
-            })
+            .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> { Box::new(source) })
+            .context(crate::NodePluginFailedSnafu)
     }
 
     fn admit(&mut self, result: NodeResult) -> Result<(), StreamError> {
@@ -349,12 +356,12 @@ impl Producer {
                 .context(WorkerStartupSnafu)?,
             );
         }
-        self.worker.as_ref().unwrap().try_submit(job).map_err(|_| {
-            ExecutionSnafu {
+        if self.worker.as_ref().unwrap().try_submit(job).is_err() {
+            return ExecutionSnafu {
                 message: "producer worker unavailable",
             }
-            .build()
-        })?;
+            .fail();
+        }
         self.active = true;
         Ok(())
     }
@@ -552,12 +559,6 @@ impl PreparedStream {
         }
         let (prepared, operator_states, mut resources) = self.into_parts();
         resources.extend(options.resources)?;
-        prepared
-            .input_schema()
-            .validate(&options.arguments)
-            .map_err(|error| StreamError::InputFailure {
-                message: error.to_string(),
-            })?;
         let cancellation = crate::StreamCancellation::default();
         let mut context = ExecutionContext::default();
         context.set_execution_resources(resources, cancellation.clone());
@@ -567,9 +568,7 @@ impl PreparedStream {
         context.set_workflow_arguments(options.arguments);
         context
             .bind_workflow_inputs(prepared.input_schema())
-            .map_err(|error| StreamError::Preparation {
-                message: error.to_string(),
-            })?;
+            .context(InputValidationSnafu)?;
         if let Some(observation) = &options.observation {
             context.set_frame_observation(observation.startup_frame());
         }
@@ -1119,15 +1118,13 @@ fn tick(
             state.domains[domain].frame = Some(frame);
             progress = true;
         } else if state.active_workers < workers.worker_count() {
-            workers
-                .try_submit(frame)
-                // A failed send owns the frame; release its values instead of retaining them.
-                .map_err(|_| {
-                    ExecutionSnafu {
-                        message: "worker queue unavailable",
-                    }
-                    .build()
-                })?;
+            // A failed send owns the frame; release its values instead of retaining them.
+            if workers.try_submit(frame).is_err() {
+                return ExecutionSnafu {
+                    message: "worker queue unavailable",
+                }
+                .fail();
+            }
             state.active_workers += 1;
             progress = true;
         } else {

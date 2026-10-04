@@ -143,22 +143,22 @@ impl ExecutionContext {
     }
 
     pub fn channel_next(&self) -> Result<Option<Value>, crate::StreamError> {
-        let node = self
-            .active_node
-            .as_deref()
-            .ok_or_else(|| crate::StreamError::Preparation {
-                message: "channel read outside a node invocation".into(),
-            })?;
+        let node = self.active_node.as_deref().ok_or_else(|| {
+            crate::StreamPreparationSnafu {
+                message: "channel read outside a node invocation".to_owned(),
+            }
+            .build()
+        })?;
         self.resources.channel_next(node)
     }
 
     pub fn channel_published(&self) -> Result<(), crate::StreamError> {
-        let node = self
-            .active_node
-            .as_deref()
-            .ok_or_else(|| crate::StreamError::Preparation {
-                message: "channel publication outside a node invocation".into(),
-            })?;
+        let node = self.active_node.as_deref().ok_or_else(|| {
+            crate::StreamPreparationSnafu {
+                message: "channel publication outside a node invocation".to_owned(),
+            }
+            .build()
+        })?;
         self.resources.channel_published(node)
     }
 
