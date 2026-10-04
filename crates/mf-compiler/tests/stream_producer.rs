@@ -1,6 +1,6 @@
-#[path = "fixtures/channel_run.rs"]
-mod channel;
-use channel::ChannelRun;
+#[path = "fixtures/controlled_source.rs"]
+mod controlled;
+use controlled::SourceRun;
 #[path = "fixtures/observation_capture.rs"]
 mod capture;
 
@@ -37,7 +37,6 @@ struct Probe {
     dropped: AtomicUsize,
     threads: Mutex<Vec<ThreadId>>,
     spans: Mutex<Vec<opentelemetry::trace::SpanId>>,
-    drop_sender: Mutex<Option<mf_runtime::ChannelSender>>,
     open: Mutex<bool>,
     changed: Condvar,
 }
@@ -145,9 +144,6 @@ impl StreamNode for Producer {
 
 impl Drop for Producer {
     fn drop(&mut self) {
-        if let Some(sender) = self.probe.drop_sender.lock().unwrap().take() {
-            let _ = sender.try_send(&json!(0).into());
-        }
         self.probe.dropped.fetch_add(1, Ordering::SeqCst);
     }
 }
@@ -226,7 +222,7 @@ fn graph(key: &str, count: usize) -> Value {
             "nodes":[
                 {"id":"produce", "kind":"test.producer", "config":{"key":key, "count":count}},
                 {"id":"consume", "kind":"builtin.identity"}
-            , channel::source(json!("int"))
+            , controlled::source(json!("int"))
     ],
             "edges":[
                 {"from_node":"feed", "from_output":"item", "to_node":"produce", "to_input":"input"},
@@ -236,11 +232,11 @@ fn graph(key: &str, count: usize) -> Value {
         })
 }
 
-fn start(value: Value, options: StreamOptions) -> ChannelRun {
+fn start(value: Value, options: StreamOptions) -> SourceRun {
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
-    ChannelRun::start(
+    SourceRun::start(
         instantiate_stream(&plan, &registry).unwrap(),
         "feed",
         options,
@@ -287,28 +283,6 @@ fn stalled_delivery_bounds_sends_and_drop_wakes_the_producer() {
     receiver.recv_timeout(Duration::from_secs(5)).unwrap();
     assert_eq!(probe.dropped.load(Ordering::SeqCst), 1);
     drop(delivery);
-}
-
-#[test]
-fn producer_cleanup_can_reenter_the_closed_input_handle() {
-    let instance = start(graph("drop-reentry", 1), StreamOptions::default());
-    let probe = probe("drop-reentry");
-    probe.dropped.store(0, Ordering::SeqCst);
-    *probe.drop_sender.lock().unwrap() = Some(instance.source.clone());
-    let (sender, receiver) = std::sync::mpsc::channel();
-    let consumer = thread::spawn(move || {
-        instance.source.clone().send(json!(7)).unwrap();
-        instance.source.close();
-        assert_eq!(receive(&instance), 7);
-        assert!(instance.recv().unwrap().is_none());
-        sender.send(instance.join()).unwrap();
-    });
-    receiver
-        .recv_timeout(Duration::from_secs(5))
-        .unwrap()
-        .unwrap();
-    consumer.join().unwrap();
-    assert_eq!(probe.dropped.load(Ordering::SeqCst), 1);
 }
 
 #[test]

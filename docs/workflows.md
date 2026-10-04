@@ -352,17 +352,18 @@ nodes receive their workflow parameters once. Initial tasks and their ordinary d
 startup frame; producers execute independently and emit messages into their own domains. An empty graph or a
 task-only graph finishes without external input. A producer reached through startup tasks also starts once.
 
-Use `builtin.stdin` for JSON Lines from a runner's stdin, or `builtin.channel` for an embedding host. Both
-expose a typed `item` output configured with `item_type`. Other StreamNodes can obtain data from files or
-services using their startup parameters. Every source is an ordinary declared node; there is no injected
-node or global input type. Initial event nodes require an upstream activation source.
+Use `builtin.readline` to read UTF-8 text lines from a file or stdin. Its optional string input `path`
+selects a text file when supplied; omission selects stdin. Its string output `line` preserves blank lines and
+whitespace and strips LF/CRLF delimiters. JSON parsing belongs in downstream nodes. Other StreamNodes can
+obtain data from files or services using their startup parameters. Every source is an ordinary declared node;
+there is no injected node or global input type. Initial event nodes require an upstream activation source.
 
 Task branches can rejoin within one message domain. Event and producer emissions create new domains. Joining
 an earlier item with a collected output, broadcasting startup values into emitted frames, or joining
 independent sources requires an explicit correlation operation, which is currently unsupported. Context
 references and selected outputs respect the same boundary. Synchronous bodies still contain only tasks.
 
-Close each host channel when production ends. Autonomous producers close by returning. Each source drains
+Producers close by returning. Each source drains
 independently; workflow completion waits for every source, downstream work, and selected output delivery.
 See [the instance API](node-development.md#in-memory-streaming-instances) and
 [runner instructions](compiling.md#streaming-runners).

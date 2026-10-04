@@ -179,11 +179,12 @@ Factories derive ports from configuration and do not need invocation values. Req
 descriptors retain their ordinary port meaning. `WorkflowArguments::from_json` rejects duplicate keys and
 limits JSON arguments to 1 MiB; `WorkflowInputSchema` validates the complete object before dispatch.
 
-`NodeMetadata.resources` declares `InputResource::Stdin` or `InputResource::Channel` for initial nodes.
-Resource metadata is available without opening files, claiming descriptors, or receiving messages.
-Validation rejects duplicate declarations, multiple exclusive stdin owners, and noninitial resource
-consumers. Hosts can check availability with `WorkflowInputSchema::validate_resources`. Resource discovery
-uses metadata for both built-in and external providers. Runtime handles are not JSON input values.
+`NodeMetadata.resources` declares exclusive `InputResource::Stdin`, or
+`InputResource::StdinIfMissing("path".into())` for a source whose optional input selects a file.
+A data-bound conditional input removes its stdin requirement. Otherwise validated startup arguments determine
+whether stdin is needed. Resource discovery uses metadata for built-in and external providers alike;
+preparation does not acquire business inputs. Launchers use `WorkflowInputSchema::stdin_owner` and
+`validate_resources` to reject missing resources or competing active consumers before execution.
 
 ## Incremental stream producers
 
@@ -253,18 +254,13 @@ Startup validates every argument and required resource before dispatch. Initial 
 behind startup tasks, run on independent dedicated workers. Their contexts retain only values available at
 dispatch. Ordinary per-message producer invocations remain serialized.
 
-Declare `builtin.channel` with `config.item_type`, or prepare `mf_runtime::channel_source(type)` directly.
-Obtain its named sender with `prepared.channel("feed")` before consuming the prepared instance with `start`.
-The sender is tied to that source and instance. `send` acknowledges bounded admission; `try_send` reports
-capacity without admission. Consume `instance.recv()` concurrently, close the sender when done, and call
-`join` after draining outputs. Dropping the last sender also closes its source. A retained closed sender does
-not delay completion. `ChannelSender::metrics` distinguishes accepted values, published values, queued values,
-and waiting senders. Named `ExecutionResources` can also be supplied through stream options.
-
-`builtin.stdin` declares exclusive stdin and parses one typed JSON value per line. Runners supply a reserved
-`StreamInput`; embedding hosts can provide one through `ExecutionResources::with_stdin`. Factories and
-interface inspection do not read source data. Only one source may own stdin. Runtime-owned channel waits and
-stdin reads respond to cancellation. Arbitrary plugin I/O still requires cooperation.
+`builtin.readline` accepts optional string input `path` and emits string output `line`. Supplying a path
+reads that UTF-8 text file; omission selects stdin. It preserves blank lines and whitespace, strips LF or
+CRLF delimiters, and accepts a final unterminated line. It does not parse JSON. Runners supply a reserved
+`TextInput` when stdin is required; embedding hosts can supply one through `ExecutionResources::with_stdin`.
+Factories and interface inspection do not open source files or read stdin. Runtime-owned reads respond to
+cancellation. Application-specific sources use ordinary `StreamNode` implementations and propagate emitter
+errors; arbitrary plugin I/O requires cooperation.
 
 Every emitted message has fresh bindings and a step budget. Frames execute in FIFO order in each domain,
 while domains progress independently. `receive` returns a delivery that its sink must acknowledge or fail.
@@ -273,8 +269,7 @@ waits, suppresses later publication, and waits for started calls before releasin
 instance uses the same cleanup. The ordinary task worker pool remains separate from producer workers.
 
 Limits default to 64 pending messages and four ordinary workers. Preparation reserves one startup frame and
-one frame per output domain. Every operator's pending queue and the standard channel adapter have finite
-message capacity. Pressure propagates back to source senders. Payload size and plugin buffers have no byte
+one frame per output domain. Every operator's pending queue has finite message capacity. Pressure propagates back to producer emitters. Payload size and plugin buffers have no byte
 quota in this layer.
 
 A custom `StreamClock` must advance monotonically and wake registered instances. Deadline expiry

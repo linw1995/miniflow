@@ -113,7 +113,8 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments) -> Result<(), Box<dy
         let prepared = workflow::prepare_stream(&registry).inspect_err(|error| {
             if let Some(observation) = &observation { observation.preparation_failed(error.to_string()); }
         })?;
-        let needs_stdin = prepared.plan().input_schema().resources.values().any(|resources| resources.contains(&mf_runtime::InputResource::Stdin));
+        prepared.plan().input_schema().validate(&arguments)?;
+        let needs_stdin = prepared.plan().input_schema().stdin_owner(&arguments)?.is_some();
         let resources = if needs_stdin { mf_runtime::ExecutionResources::default().with_stdin(stdio.take_input().expect("stdio was reserved")) } else { mf_runtime::ExecutionResources::default() };
         let instance = prepared.start_with_options(mf_runtime::StreamOptions { observation: observation.clone(), arguments, resources, ..Default::default() })?;
         stdio.run(instance)?;
@@ -207,7 +208,7 @@ fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: 
         {
             let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
             if plan.definition.version.supports_startup_inputs() {
-                state.set_execution_resources(mf_runtime::ExecutionResources::default().with_stdin(mf_runtime::StreamInput::claim()?), mf_runtime::StreamCancellation::default());
+                state.set_execution_resources(mf_runtime::ExecutionResources::default().with_stdin(mf_runtime::TextInput::claim()?), mf_runtime::StreamCancellation::default());
             }
         }
         if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.clone()); }

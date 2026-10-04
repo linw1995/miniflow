@@ -1,6 +1,6 @@
-#[path = "fixtures/channel_run.rs"]
-mod channel;
-use channel::ChannelRun;
+#[path = "fixtures/controlled_source.rs"]
+mod controlled;
+use controlled::SourceRun;
 #[path = "fixtures/observation_capture.rs"]
 mod capture;
 extern crate mfn_core as _;
@@ -56,12 +56,13 @@ fn wait_until(mut check: impl FnMut() -> bool) {
 fn definition() -> Value {
     let mut value: Value =
         serde_json::from_str(include_str!("../../../examples/stream-batch.json")).unwrap();
-    value["nodes"]
+    *value["nodes"]
         .as_array_mut()
         .unwrap()
         .iter_mut()
         .find(|node| node["id"] == "feed")
-        .unwrap()["kind"] = json!("builtin.channel");
+        .unwrap() = controlled::source(json!("int"));
+    value["edges"][0]["from_output"] = json!("item");
     value
 }
 fn plan(value: Value) -> mf_compiler::CompiledWorkflow {
@@ -71,26 +72,10 @@ fn start_stream(
     plan: &mf_compiler::CompiledWorkflow,
     registry: &NodeRegistry,
     mut options: StreamOptions,
-) -> Result<ChannelRun, mf_runtime::StreamError> {
-    let node = plan
-        .definition
-        .nodes
-        .iter()
-        .find(|node| node.id.as_str() == "feed")
-        .unwrap();
-    let item_type = serde_json::from_value(node.config["item_type"].clone()).unwrap();
-    let source = options.resources.channel(
-        "feed",
-        item_type,
-        plan.definition
-            .execution
-            .as_ref()
-            .unwrap()
-            .limits
-            .max_pending_messages,
-    )?;
+) -> Result<SourceRun, mf_runtime::StreamError> {
+    let source = controlled::prepare_control("feed", &mut options);
     let instance = mf_compiler::start_stream(plan, registry, options)?;
-    Ok(ChannelRun { instance, source })
+    Ok(SourceRun { instance, source })
 }
 fn records(harness: &Harness) -> Vec<StreamRecord> {
     harness
@@ -384,7 +369,7 @@ fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
             {"id":"collect", "kind":"builtin.batch", "config":{"max_items":1, "max_wait_ms":100}},
             {"id":"iterate", "kind":"builtin.iteration", "config":{"body":{"nodes":[{"id":"copy", "kind":"builtin.identity"}],
                 "edges":[{"from_node":"%iteration", "from_output":"item", "to_node":"copy", "to_input":"input"}], "result":{"node":"copy", "port":"value"}}}}
-        , channel::source(json!("int"))], "edges":[{"from_node":"feed", "from_output":"item", "to_node":"repeat", "to_input":"x"},
+        , controlled::source(json!("int"))], "edges":[{"from_node":"feed", "from_output":"item", "to_node":"repeat", "to_input":"x"},
             {"from_node":"repeat", "from_output":"x", "to_node":"collect", "to_input":"item"},
             {"from_node":"collect", "from_output":"items", "to_node":"iterate", "to_input":"items"}],
         "outputs":[{"name":"value", "node":"iterate", "port":"results"}]

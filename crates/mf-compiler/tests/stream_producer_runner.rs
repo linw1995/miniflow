@@ -1,5 +1,7 @@
 #![cfg(unix)]
 mod common;
+#[path = "fixtures/controlled_source.rs"]
+mod controlled_source;
 #[path = "fixtures/multi-nodes/src/line_producer.rs"]
 mod line_producer;
 
@@ -62,10 +64,10 @@ fn external_line_producer_matches_memory_and_drains_after_stdin_closes() {
             {"id":"read", "kind":"fixture.read_lines"},
             {"id":"batch", "kind":"builtin.batch", "config":{"max_items":3, "max_wait_ms":3_600_000}},
             {"id":"copy", "kind":"builtin.identity"},
-            {"id":"feed", "kind":"builtin.stdin", "config":{"item_type":"string"}}
+            {"id":"feed", "kind":"builtin.readline"}
         ],
         "edges":[
-            {"from_node":"feed", "from_output":"item", "to_node":"read", "to_input":"path"},
+            {"from_node":"feed", "from_output":"line", "to_node":"read", "to_input":"path"},
             {"from_node":"read", "from_output":"line", "to_node":"batch", "to_input":"item"},
             {"from_node":"batch", "from_output":"items", "to_node":"copy", "to_input":"input"}
         ],
@@ -110,22 +112,31 @@ fn external_line_producer_matches_memory_and_drains_after_stdin_closes() {
     fs::write(&document, expected_lines.join("\r\n")).unwrap();
     fs::write(&empty, "").unwrap();
     let mut definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
-    definition
+    let feed = definition
         .nodes
         .iter_mut()
         .find(|node| node.id.as_str() == "feed")
+        .unwrap();
+    feed.kind = "test.controlled_source".into();
+    feed.config = json!({"item_type":"string"});
+    definition
+        .edges
+        .iter_mut()
+        .find(|edge| edge.from_node.as_str() == "feed")
         .unwrap()
-        .kind = "builtin.channel".into();
+        .from_output = "item".into();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
-    let mut prepared = instantiate_stream(&plan, &registry).unwrap();
-    let input = prepared.channel("feed").unwrap();
-    let instance = prepared.start().unwrap();
-    let empty_input = format!("{}\n", json!(empty));
+    let prepared = instantiate_stream(&plan, &registry).unwrap();
+    let running =
+        controlled_source::SourceRun::start(prepared, "feed", Default::default()).unwrap();
+    let input = running.source.clone();
+    let instance = running.instance;
+    let empty_input = format!("{}\n", empty.display());
     let paths = [empty.clone(), document.clone(), empty];
     let input_bytes = paths
         .iter()
-        .map(|path| format!("{}\n", json!(path)))
+        .map(|path| format!("{}\n", path.display()))
         .collect::<String>();
     let sender = thread::spawn(move || {
         for path in paths {
@@ -147,14 +158,14 @@ fn external_line_producer_matches_memory_and_drains_after_stdin_closes() {
     assert_eq!(records(&run(&executable, input_bytes.as_bytes())), memory);
     assert!(records(&run(&executable, b"")).is_empty());
     assert!(records(&run(&executable, empty_input.as_bytes())).is_empty());
-    let missing = format!("{}\n", json!(root.path().join("missing.txt")));
+    let missing = format!("{}\n", root.path().join("missing.txt").display());
     let failed = run(&executable, missing.as_bytes());
     assert!(!failed.status.success());
     assert!(String::from_utf8_lossy(&failed.stderr).contains("`read`"));
     let invalid = root.path().join("invalid.txt");
     fs::write(&invalid, b"\xff\n").unwrap();
     assert!(
-        !run(&executable, format!("{}\n", json!(invalid)).as_bytes())
+        !run(&executable, format!("{}\n", invalid.display()).as_bytes())
             .status
             .success()
     );

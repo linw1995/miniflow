@@ -94,7 +94,6 @@ pub struct ExecutionContext {
     startup_inputs_bound: bool,
     resources: std::sync::Arc<crate::ExecutionResources>,
     cancellation: crate::StreamCancellation,
-    active_node: Option<String>,
 }
 
 impl Default for ExecutionContext {
@@ -112,7 +111,6 @@ impl Default for ExecutionContext {
             startup_inputs_bound: false,
             resources: std::sync::Arc::new(crate::ExecutionResources::default()),
             cancellation: crate::StreamCancellation::default(),
-            active_node: None,
         }
     }
 }
@@ -123,7 +121,6 @@ impl ExecutionContext {
         resources: crate::ExecutionResources,
         cancellation: crate::StreamCancellation,
     ) {
-        resources.bind_cancellation(&cancellation);
         self.resources = std::sync::Arc::new(resources);
         self.cancellation = cancellation;
     }
@@ -135,41 +132,8 @@ impl ExecutionContext {
         self.cancellation.clone()
     }
 
-    pub fn stdin_next(
-        &self,
-        value_type: &crate::ValueType,
-    ) -> Result<Option<Value>, crate::StreamError> {
-        self.resources.stdin_next(value_type, &self.cancellation)
-    }
-
-    pub fn channel_next(&self) -> Result<Option<Value>, crate::StreamError> {
-        let node = self
-            .active_node
-            .as_deref()
-            .ok_or_else(|| crate::StreamError::Preparation {
-                message: "channel read outside a node invocation".into(),
-            })?;
-        self.resources.channel_next(node)
-    }
-
-    pub fn channel_published(&self) -> Result<(), crate::StreamError> {
-        let node = self
-            .active_node
-            .as_deref()
-            .ok_or_else(|| crate::StreamError::Preparation {
-                message: "channel publication outside a node invocation".into(),
-            })?;
-        self.resources.channel_published(node)
-    }
-
-    pub fn with_node<R>(&mut self, node: &str, callback: impl FnOnce(&mut Self) -> R) -> R {
-        let previous = self.active_node.replace(node.into());
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(self)));
-        self.active_node = previous;
-        match result {
-            Ok(value) => value,
-            Err(payload) => std::panic::resume_unwind(payload),
-        }
+    pub fn stdin_line(&self) -> Result<Option<String>, crate::StreamError> {
+        self.resources.stdin_line(&self.cancellation)
     }
 
     pub fn fork_stream(&self, observation: Option<RunObservation>) -> Self {
@@ -197,7 +161,7 @@ impl ExecutionContext {
             .validate(&self.workflow_arguments)
             .map_err(|source| WorkflowRunError::WorkflowInputs { source })?;
         schema
-            .validate_resources(|node, resource| self.resources.available(node, resource))
+            .validate_resources(&self.workflow_arguments, self.resources.has_stdin())
             .map_err(|source| WorkflowRunError::WorkflowInputs { source })?;
         self.startup_inputs_bound = true;
         Ok(())
@@ -854,8 +818,8 @@ pub(super) fn execute_ordered_task_in_context<'a, N>(
         if let Some(step) = step.as_mut() {
             step.started(ctx);
         }
-        let result = ctx
-            .with_node(id, |ctx| task.execute(inputs, ctx))
+        let result = task
+            .execute(inputs, ctx)
             .with_context(|_| NodeExecutionSnafu {
                 definition_id: node.definition_id.clone(),
             });

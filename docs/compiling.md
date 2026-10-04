@@ -130,7 +130,7 @@ Retained directories contain embedded configuration and diagnostics and are crea
 ## Streaming runners
 
 Use schema `2026-10-03` with `execution.mode` set to `stream`. Sources are explicit nodes. The repository
-example declares `builtin.stdin` with `config.item_type: "int"`:
+example declares `builtin.readline` with string output `line`:
 
 ```sh
 nix develop --command cargo run -p mf-cli --features development-support -- \
@@ -138,15 +138,15 @@ nix develop --command cargo run -p mf-cli --features development-support -- \
 printf '1\n2\n3\n4\n5\n' | target/stream-batch
 ```
 
-The result is one object per batch, such as `{"batch":[1,2,3]}` followed by `{"batch":[4,5]}`. Results are
-written as they become available, including timer flushes while stdin remains open. The explicit stdin source
-accepts LF, CRLF, and a final nonempty record without a newline. Arrays remain single values. Blank, malformed,
-or type-invalid records fail with their line number. EOF closes only that source.
+The result is one object per batch, such as `{"batch":["1","2","3"]}` followed by `{"batch":["4","5"]}`.
+Results are written as they become available, including timer flushes while stdin remains open. Readline
+preserves blank lines and whitespace, accepts LF/CRLF and a final unterminated line, and rejects invalid UTF-8
+with a line number. It does not interpret text as JSON. EOF closes only that source.
 
 Autonomous sources run with null stdin. For an initial file-reading node exposing `path`, pass startup values:
 
 ```sh
-./read-workflow --inputs '{"read":{"path":"/data/events.jsonl"}}'
+./read-workflow --inputs '{"read":{"path":"/data/lines.txt"}}'
 ./read-workflow --inputs-file ./parameters.json
 ./read-workflow --describe-interface
 ```
@@ -166,14 +166,15 @@ acknowledged before successful completion. Complete earlier output lines remain 
 New graph descriptions use version `2026-10-03` and explicitly declare execution mode, lifecycle protocol, and
 interface inspection. Both ordinary and `--no-telemetry` builds retain one-build validation and installation.
 Use `mf run ./workflow --tui --inputs-file ./parameters.json` to observe autonomous streams.
-For workflows declaring a stdin source, use `mf run ./workflow --tui --stream-input ./events.jsonl`.
+For workflows declaring a stdin source, use `mf run ./workflow --tui --stream-input ./lines.txt`.
 The TUI owns terminal stdin and gives the declared source an opened file. It validates parameters and
 resource requirements before execution. Startup options also work with new finite runners.
 
 ### Migrate an older streaming definition
 
 Update the version, remove `execution.input_type`, and declare a source node. For pipe-driven workflows use
-`builtin.stdin` with its `item_type` configuration; connect its `item` output wherever the former synthetic
-source was referenced. For host-driven workflows use a named channel source and its sender. Autonomous
-producers receive their requirements through workflow parameters. The old input mechanism and its dedicated
-validation rules are removed; fields and graph endpoints follow the normal schema and graph rules.
+`builtin.readline` and connect its `line` output wherever the former synthetic source was referenced.
+Parse text explicitly downstream when typed values are needed. Application-specific producers use ordinary
+StreamNode implementations. Initial producers receive their requirements through workflow parameters.
+The old input mechanism and its dedicated validation rules are removed; fields and graph endpoints follow
+the normal schema and graph rules.

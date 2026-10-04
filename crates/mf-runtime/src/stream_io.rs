@@ -1,4 +1,4 @@
-use crate::{StreamCancellation, StreamError, StreamInstance, StreamSummary, ValueRef, ValueType};
+use crate::{StreamCancellation, StreamError, StreamInstance, StreamSummary};
 use std::{
     collections::VecDeque,
     fs::File,
@@ -6,7 +6,7 @@ use std::{
 };
 
 #[derive(Debug)]
-pub struct StreamInput {
+pub struct TextInput {
     file: File,
     buffered: VecDeque<u8>,
     partial: Vec<u8>,
@@ -14,7 +14,7 @@ pub struct StreamInput {
     eof: bool,
 }
 
-impl StreamInput {
+impl TextInput {
     #[cfg(unix)]
     pub fn claim() -> Result<Self, StreamError> {
         use std::os::fd::{AsRawFd, FromRawFd};
@@ -45,18 +45,17 @@ impl StreamInput {
         }
     }
 
-    pub fn next_value(
+    pub fn next_line(
         &mut self,
-        value_type: &ValueType,
         cancellation: &StreamCancellation,
-    ) -> Result<Option<ValueRef>, StreamError> {
+    ) -> Result<Option<String>, StreamError> {
         loop {
             if let Some(error) = cancellation.failure() {
                 return Err(error);
             }
             while let Some(byte) = self.buffered.pop_front() {
                 if byte == b'\n' {
-                    return self.finish_record(value_type).map(Some);
+                    return self.finish_line(true).map(Some);
                 }
                 self.partial.push(byte);
             }
@@ -64,7 +63,7 @@ impl StreamInput {
                 return if self.partial.is_empty() {
                     Ok(None)
                 } else {
-                    self.finish_record(value_type).map(Some)
+                    self.finish_line(false).map(Some)
                 };
             }
             wait_ready(&self.file, false, cancellation)
@@ -82,27 +81,16 @@ impl StreamInput {
         }
     }
 
-    fn finish_record(&mut self, value_type: &ValueType) -> Result<ValueRef, StreamError> {
+    fn finish_line(&mut self, terminated: bool) -> Result<String, StreamError> {
         let line = self.line;
         self.line = line.checked_add(1).ok_or_else(|| StreamError::Resource {
             message: "input line counter exhausted".into(),
         })?;
         let mut record = std::mem::take(&mut self.partial);
-        if record.last() == Some(&b'\r') {
+        if terminated && record.last() == Some(&b'\r') {
             record.pop();
         }
-        if record.iter().all(u8::is_ascii_whitespace) {
-            return Err(StreamError::InputFailure {
-                message: format!("line {line}: blank JSON Lines record"),
-            });
-        }
-        let value: ValueRef = serde_json::from_slice::<serde_json::Value>(&record)
-            .map_err(|error| input_error(line, error))?
-            .into();
-        value_type
-            .validate_shared(&value)
-            .map_err(|error| input_error(line, error))?;
-        Ok(value)
+        String::from_utf8(record).map_err(|error| input_error(line, error))
     }
 }
 
@@ -159,7 +147,7 @@ fn wait_ready(_: &File, _: bool, _: &StreamCancellation) -> io::Result<()> {
 }
 
 pub struct StreamStdio {
-    input: Option<StreamInput>,
+    input: Option<TextInput>,
     output: File,
 }
 
@@ -182,7 +170,7 @@ impl StreamStdio {
         }
         let claim = || -> io::Result<Self> {
             io::stdout().flush()?;
-            let input = StreamInput::new(duplicate(libc::STDIN_FILENO)?);
+            let input = TextInput::new(duplicate(libc::STDIN_FILENO)?);
             let output = duplicate(libc::STDOUT_FILENO)?;
             let null = File::open("/dev/null")?;
             redirect(null.as_raw_fd(), libc::STDIN_FILENO)?;
@@ -204,7 +192,7 @@ impl StreamStdio {
         })
     }
 
-    pub fn take_input(&mut self) -> Option<StreamInput> {
+    pub fn take_input(&mut self) -> Option<TextInput> {
         self.input.take()
     }
 

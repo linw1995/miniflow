@@ -47,8 +47,6 @@ pub enum StreamError {
         #[snafu(source(from(crate::WorkerPoolError, Arc::new)))]
         source: Arc<crate::WorkerPoolError>,
     },
-    #[snafu(display("invalid stream input: {source}"))]
-    Input { source: crate::TypeMismatch },
     #[snafu(display("invalid stream input: {message}"), visibility(pub))]
     InputFailure { message: String },
     #[snafu(
@@ -59,6 +57,12 @@ pub enum StreamError {
         line: u64,
         #[snafu(source(from(Box<dyn std::error::Error + Send + Sync>, Arc::from)))]
         source: Arc<dyn std::error::Error + Send + Sync>,
+    },
+    #[snafu(display("could not open text file {path:?}: {source}"))]
+    InputFile {
+        path: std::path::PathBuf,
+        #[snafu(source(from(std::io::Error, Arc::new)))]
+        source: Arc<std::io::Error>,
     },
     #[snafu(display("stream output failed: {message}"))]
     Output { message: String },
@@ -97,10 +101,6 @@ pub enum StreamError {
     },
     #[snafu(display("stream resource limit: {message}"), visibility(pub))]
     Resource { message: String },
-    #[snafu(display("stream input capacity is full"))]
-    Capacity,
-    #[snafu(display("stream input is closed"))]
-    Closed,
 }
 
 impl StreamError {
@@ -111,9 +111,11 @@ impl StreamError {
             | Self::ThreadSpawn { .. }
             | Self::WorkerStartup { .. }
             | Self::Stdio { .. } => "preparation",
-            Self::Input { .. } | Self::InputFailure { .. } | Self::InputRecord { .. } => "input",
+            Self::InputFailure { .. } | Self::InputRecord { .. } | Self::InputFile { .. } => {
+                "input"
+            }
             Self::Output { .. } | Self::OutputWrite { .. } | Self::OutputEncode { .. } => "output",
-            Self::Resource { .. } | Self::Capacity => "resource",
+            Self::Resource { .. } => "resource",
             Self::Producer { source, .. } | Self::Event { source, .. } => {
                 if let NodeExecutionError::PluginFailed { source } = source.as_ref()
                     && let Some(error) = source.downcast_ref::<Self>()
@@ -384,11 +386,7 @@ fn run_producer(
             callback.started();
         }
         catch_unwind(AssertUnwindSafe(|| {
-            job.frame
-                .context
-                .with_node(plan.nodes()[index].definition_id.as_str(), |context| {
-                    node.execute(job.inputs, context, &mut emitter)
-                })
+            node.execute(job.inputs, &mut job.frame.context, &mut emitter)
         }))
         .unwrap_or_else(|payload| {
             Err(NodeExecutionError::ExecutionFailed {
@@ -550,8 +548,7 @@ impl PreparedStream {
                 }
             );
         }
-        let (prepared, operator_states, mut resources) = self.into_parts();
-        resources.extend(options.resources)?;
+        let (prepared, operator_states) = self.into_parts();
         prepared
             .input_schema()
             .validate(&options.arguments)
@@ -560,10 +557,7 @@ impl PreparedStream {
             })?;
         let cancellation = crate::StreamCancellation::default();
         let mut context = ExecutionContext::default();
-        context.set_execution_resources(resources, cancellation.clone());
-        if let Some(failure) = cancellation.failure() {
-            return Err(failure);
-        }
+        context.set_execution_resources(options.resources, cancellation.clone());
         context.set_workflow_arguments(options.arguments);
         context
             .bind_workflow_inputs(prepared.input_schema())
@@ -629,7 +623,7 @@ impl PreparedStream {
         });
         shared
             .cancellation
-            .register_failure(Waker::from(Arc::new(FailureWake(Arc::downgrade(&shared)))));
+            .register(Waker::from(Arc::new(FailureWake(Arc::downgrade(&shared)))));
         options
             .clock
             .register_waker(Waker::from(Arc::new(ClockWake(Arc::downgrade(&shared)))));

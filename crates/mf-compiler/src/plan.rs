@@ -240,9 +240,15 @@ impl CompiledWorkflow {
                 let initial = !incoming.contains_key(id.as_str());
                 quote! { (&#ident, #initial) }
             });
+            let bound_inputs = self.definition.edges.iter().map(|edge| {
+                let node = edge.to_node.as_str();
+                let input = edge.to_input.as_str();
+                quote! { (#node, #input) }
+            });
             quote! {
+                let bound_inputs: &[(&str, &str)] = &[#(#bound_inputs),*];
                 let schema_nodes: &[(&mf_runtime::TaskFlowNode, bool)] = &[#(#nodes),*];
-                let schema = mf_runtime::WorkflowInputSchema::from_nodes(schema_nodes.iter().copied())
+                let schema = mf_runtime::WorkflowInputSchema::from_nodes(schema_nodes.iter().copied(), |node, input| bound_inputs.contains(&(node, input)))
                     .map_err(|source| mf_runtime::WorkflowRunError::WorkflowInputs { source })?;
                 state.bind_workflow_inputs(&schema)?;
             }

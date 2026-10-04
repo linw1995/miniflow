@@ -429,6 +429,12 @@ fn prepare_graph(
             nodes
                 .iter()
                 .map(|node| (node, !incoming.contains_key(node.definition_id.as_str()))),
+            |node, input| {
+                definition
+                    .edges
+                    .iter()
+                    .any(|edge| edge.to_node.as_str() == node && edge.to_input == input)
+            },
         )
         .context(WorkflowInputsSnafu)?;
         if let Some(node) = nodes.iter().find(|node| {

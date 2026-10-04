@@ -96,6 +96,14 @@ impl WorkflowInterface {
                 if !unique.insert(resource) {
                     return Err(invalid(pointer("", node), "duplicate resource requirement"));
                 }
+                if let InputResource::StdinIfMissing(input) = resource
+                    && !self.schema.inputs[node].contains_key(input)
+                {
+                    return Err(invalid(
+                        pointer("", node),
+                        "stdin condition names an unknown input",
+                    ));
+                }
                 if *resource == InputResource::Stdin && stdin.replace(node).is_some() {
                     return Err(invalid(pointer("", node), "stdin has multiple owners"));
                 }
@@ -105,11 +113,11 @@ impl WorkflowInterface {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InputResource {
     Stdin,
-    Channel,
+    StdinIfMissing(String),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +206,7 @@ impl TryFrom<Value> for WorkflowArguments {
 impl WorkflowInputSchema {
     pub fn from_nodes<'a, N: 'a>(
         nodes: impl IntoIterator<Item = (&'a FlowNode<N>, bool)>,
+        mut input_bound: impl FnMut(&str, &str) -> bool,
     ) -> Result<Self, WorkflowInputError> {
         let mut schema = Self::default();
         let mut stdin_owner = None;
@@ -230,13 +239,30 @@ impl WorkflowInputSchema {
             }
             let mut resources = std::collections::BTreeSet::new();
             for resource in &node.metadata.resources {
+                if let InputResource::StdinIfMissing(input) = resource {
+                    if !node
+                        .metadata
+                        .ports
+                        .inputs
+                        .iter()
+                        .any(|port| port.name == *input)
+                    {
+                        return Err(invalid(
+                            pointer("", id),
+                            "stdin condition names an unknown input",
+                        ));
+                    }
+                    if !initial && input_bound(id, input) {
+                        continue;
+                    }
+                }
                 if !initial {
                     return Err(invalid(
                         pointer("", id),
                         "input resources require an initial node",
                     ));
                 }
-                if !resources.insert(*resource) {
+                if !resources.insert(resource.clone()) {
                     return Err(invalid(pointer("", id), "duplicate input resource"));
                 }
                 if *resource == InputResource::Stdin
@@ -295,19 +321,43 @@ impl WorkflowInputSchema {
         Ok(())
     }
 
-    pub fn validate_resources(
-        &self,
-        mut available: impl FnMut(&str, InputResource) -> bool,
-    ) -> Result<(), WorkflowInputError> {
-        for (node, requirements) in &self.resources {
-            for &resource in requirements {
-                if !available(node, resource) {
+    pub fn stdin_owner<'a>(
+        &'a self,
+        arguments: &WorkflowArguments,
+    ) -> Result<Option<&'a str>, WorkflowInputError> {
+        let mut owner = None;
+        for (node, resources) in &self.resources {
+            for resource in resources {
+                let required = match resource {
+                    InputResource::Stdin => true,
+                    InputResource::StdinIfMissing(input) => !arguments
+                        .0
+                        .get(node)
+                        .is_some_and(|values| values.contains_key(input)),
+                };
+                if required && let Some(previous) = owner.replace(node.as_str()) {
                     return Err(invalid(
                         pointer("", node),
-                        format!("required input resource {resource:?} is unavailable"),
+                        format!("stdin is already required by node `{previous}`"),
                     ));
                 }
             }
+        }
+        Ok(owner)
+    }
+
+    pub fn validate_resources(
+        &self,
+        arguments: &WorkflowArguments,
+        stdin_available: bool,
+    ) -> Result<(), WorkflowInputError> {
+        if let Some(node) = self.stdin_owner(arguments)?
+            && !stdin_available
+        {
+            return Err(invalid(
+                pointer("", node),
+                "required stdin resource is unavailable",
+            ));
         }
         Ok(())
     }

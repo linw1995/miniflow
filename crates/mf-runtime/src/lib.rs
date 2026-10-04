@@ -7,10 +7,10 @@ mod message_domain;
 mod node;
 mod number;
 mod registry;
+mod resources;
 mod runner;
 mod runner_arguments;
 mod snapshot;
-mod sources;
 mod stream;
 mod stream_instance;
 mod stream_io;
@@ -56,11 +56,9 @@ pub use node::{
 };
 pub use number::compare_json_numbers;
 pub use registry::{NodeRegistry, NodeRegistryError};
+pub use resources::{ExecutionResources, StreamCancellation};
 pub use runner::{
     WorkflowRunError, instantiate_node_with_metadata, instantiate_subgraph_with_metadata,
-};
-pub use sources::{
-    ChannelMetrics, ChannelSender, ExecutionResources, StreamCancellation, channel_source,
 };
 pub use stream::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
@@ -71,7 +69,7 @@ pub use stream_instance::{
     StreamDelivery, StreamError, StreamInstance, StreamMetrics, StreamOptions, StreamOutput,
     StreamSummary,
 };
-pub use stream_io::{StreamInput, StreamStdio};
+pub use stream_io::{StreamStdio, TextInput};
 pub use stream_plan::{PreparedStream, StreamBuildError, StreamDependency, StreamPlan};
 pub use subgraph::PreparedSubgraph;
 

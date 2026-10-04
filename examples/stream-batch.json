@@ -24,16 +24,13 @@
     },
     {
       "id": "feed",
-      "kind": "builtin.stdin",
-      "config": {
-        "item_type": "int"
-      }
+      "kind": "builtin.readline"
     }
   ],
   "edges": [
     {
       "from_node": "feed",
-      "from_output": "item",
+      "from_output": "line",
       "to_node": "collect",
       "to_input": "item"
     },

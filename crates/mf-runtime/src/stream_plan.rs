@@ -43,7 +43,6 @@ pub struct StreamPlan {
 pub struct PreparedStream {
     plan: StreamPlan,
     operator_states: OperatorStates,
-    resources: crate::ExecutionResources,
 }
 
 impl std::fmt::Debug for PreparedStream {
@@ -76,6 +75,16 @@ impl PreparedStream {
                 .iter()
                 .zip(&dependencies)
                 .map(|(node, dependencies)| (node, dependencies.is_empty())),
+            |node, input| {
+                nodes
+                    .iter()
+                    .position(|candidate| candidate.definition_id.as_str() == node)
+                    .is_some_and(|index| {
+                        dependencies[index]
+                            .iter()
+                            .any(|dependency| dependency.input.as_deref() == Some(input))
+                    })
+            },
         )
         .map_err(|error| StreamBuildError::InvalidPlan {
             message: error.to_string(),
@@ -120,7 +129,6 @@ impl PreparedStream {
         Ok(Self {
             plan,
             operator_states,
-            resources: crate::ExecutionResources::default(),
         })
     }
 
@@ -128,39 +136,8 @@ impl PreparedStream {
         &self.plan
     }
 
-    pub fn channel(&mut self, node: &str) -> Result<crate::ChannelSender, crate::StreamError> {
-        let source = self
-            .plan
-            .nodes
-            .iter()
-            .find(|source| source.definition_id.as_str() == node)
-            .filter(|source| {
-                source
-                    .metadata
-                    .resources
-                    .contains(&crate::InputResource::Channel)
-            })
-            .ok_or_else(|| crate::StreamError::Preparation {
-                message: format!("node `{node}` does not declare a channel source"),
-            })?;
-        let port = source
-            .metadata
-            .ports
-            .outputs
-            .iter()
-            .find(|port| port.name == "item")
-            .ok_or_else(|| crate::StreamError::Preparation {
-                message: format!("channel source `{node}` must declare an item output"),
-            })?;
-        self.resources.channel(
-            node,
-            port.value_type.clone(),
-            self.plan.execution.limits.max_pending_messages,
-        )
-    }
-
-    pub(super) fn into_parts(self) -> (StreamPlan, OperatorStates, crate::ExecutionResources) {
-        (self.plan, self.operator_states, self.resources)
+    pub(super) fn into_parts(self) -> (StreamPlan, OperatorStates) {
+        (self.plan, self.operator_states)
     }
 }
 

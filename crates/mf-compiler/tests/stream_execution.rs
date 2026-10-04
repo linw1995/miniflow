@@ -1,11 +1,11 @@
-#[path = "fixtures/channel_run.rs"]
-mod channel;
-use channel::ChannelRun;
+#[path = "fixtures/controlled_source.rs"]
+mod controlled;
+use controlled::SourceRun;
 extern crate mfn_core as _;
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_stream};
 use mf_runtime::{
-    Inputs, NodeExecutionError, NodeRegistration, Outputs, PortSpec, StreamClock, StreamError,
-    StreamOptions, ValueType,
+    Inputs, NodeExecutionError, NodeRegistration, Outputs, PortSpec, StreamClock, StreamOptions,
+    ValueType,
 };
 use serde_json::{Value, json};
 use snafu::ResultExt;
@@ -154,15 +154,15 @@ fn graph(mut nodes: Value, edges: Vec<Value>, outputs: Value) -> Value {
     nodes
         .as_array_mut()
         .unwrap()
-        .push(channel::source(json!("int")));
+        .push(controlled::source(json!("int")));
     json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
         "nodes":nodes, "edges":edges, "outputs":outputs})
 }
-fn start(value: Value, clock: Arc<dyn StreamClock>) -> ChannelRun {
+fn start(value: Value, clock: Arc<dyn StreamClock>) -> SourceRun {
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
-    ChannelRun::start(
+    SourceRun::start(
         instantiate_stream(&plan, &registry).unwrap(),
         "feed",
         StreamOptions {
@@ -184,7 +184,7 @@ fn accumulating() -> Value {
 }
 
 #[test]
-fn admission_finishes_before_emission_and_idle_timers_wake_the_instance() {
+fn idle_timers_flush_while_a_source_remains_open() {
     let clock = Arc::new(ManualClock::default());
     let instance = start(accumulating(), clock.clone());
     let sender = instance.source.clone();
@@ -197,10 +197,7 @@ fn admission_finishes_before_emission_and_idle_timers_wake_the_instance() {
     assert_eq!(output.message.domain, 2);
     assert_eq!(output.outputs["batch"], json!([1, 2]));
     sender.close();
-    sender.close();
-    assert!(matches!(sender.send(json!(3)), Err(StreamError::Closed)));
     assert!(instance.recv().unwrap().is_none());
-    assert_eq!(instance.source.metrics().accepted, 2);
     assert_eq!(instance.join().unwrap().startup_frames, 1);
 }
 
@@ -215,7 +212,7 @@ fn instances_own_their_nodes_and_frames_do_not_reuse_omitted_outputs() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     for _ in 0..2 {
-        let instance = ChannelRun::start(
+        let instance = SourceRun::start(
             instantiate_stream(&plan, &registry).unwrap(),
             "feed",
             StreamOptions::default(),
@@ -367,14 +364,7 @@ fn per_message_budgets_allow_a_long_lived_instance_and_preserve_fifo() {
 }
 
 #[test]
-fn invalid_input_and_empty_close_are_explicit() {
-    let instance = start(accumulating(), Arc::new(ManualClock::default()));
-    assert!(matches!(
-        instance.source.clone().send(json!("invalid")),
-        Err(StreamError::Input { .. })
-    ));
-    assert_eq!(instance.source.metrics().accepted, 0);
-    assert!(instance.join().is_err());
+fn empty_source_closure_does_not_emit() {
     let instance = start(accumulating(), Arc::new(ManualClock::default()));
     instance.source.close();
     assert!(instance.recv().unwrap().is_none());

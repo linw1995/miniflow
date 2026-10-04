@@ -209,10 +209,8 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
     let root = directory.path();
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let source = root.join("source");
-    let stdin = root.join("stdin");
     let definition = root.join("workflow.json");
     let build = root.join("build");
-    let marker = root.join("executed");
     let data = root.join("lines.txt");
     fs::write(&data, "one\ntwo\nthree\nfour\nfive\nsix").unwrap();
     let support = SupportPackages::Local {
@@ -232,16 +230,12 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
         )
         .unwrap();
     };
-    let mut graph = json!({"version":"2026-10-03", "execution":{"mode":"stream"},
-        "dependencies":{"fixture":{"package":"fixture-multi-nodes", "path":crates.join("mf-compiler/tests/fixtures/multi-nodes")}, "core":{"package":"mfn-core", "path":crates.join("builtin-nodes/core")}},
-        "nodes":[{"id":"read", "kind":"fixture.read_lines", "config":{"marker":marker, "delay_ms":100}}, {"id":"consume", "kind":"builtin.identity"}],
+    let graph = json!({"version":"2026-10-03", "execution":{"mode":"stream"},
+        "dependencies":{"core":{"package":"mfn-core", "path":crates.join("builtin-nodes/core")}},
+        "nodes":[{"id":"read", "kind":"builtin.readline"}, {"id":"consume", "kind":"builtin.identity"}],
         "edges":[{"from_node":"read", "from_output":"line", "to_node":"consume", "to_input":"input"}],
         "outputs":[{"name":"value", "node":"consume", "port":"value"}]});
     compile(graph.clone(), &source);
-    graph["nodes"][0] =
-        json!({"id":"read", "kind":"builtin.stdin", "config":{"item_type":"string"}});
-    graph["edges"][0]["from_output"] = json!("item");
-    compile(graph, &stdin);
     fs::remove_file(&definition).unwrap();
     fs::remove_dir_all(&build).unwrap();
 
@@ -253,7 +247,7 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
         let (status, output, screen) =
             run_tui(&source, &["--inputs".into(), invalid.into()], false, false);
         assert_eq!(status.code(), Some(1), "{screen}");
-        assert!(output.is_empty() && !marker.exists());
+        assert!(output.is_empty());
         assert!(!screen.contains("Workflow: "));
     }
     let parameters = json!({"read":{"path":data}}).to_string();
@@ -266,7 +260,6 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
         true,
     );
     assert_eq!(status.code(), Some(0), "{screen}");
-    assert!(marker.exists());
     assert!(
         screen.contains("Complete") && screen.contains("Observed calls: 6"),
         "{screen}"
@@ -286,13 +279,9 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
     );
 
     let jsonl = root.join("data.jsonl");
-    fs::write(
-        &jsonl,
-        "\"one\"\r\n\"two\"\n\"three\"\n\"four\"\n\"five\"\n\"six\"",
-    )
-    .unwrap();
+    fs::write(&jsonl, "one\r\ntwo\nthree\nfour\nfive\nsix").unwrap();
     let (status, captured, screen) = run_tui(
-        &stdin,
+        &source,
         &["--stream-input".into(), jsonl.clone().into_os_string()],
         false,
         true,
@@ -307,13 +296,13 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
             root.join("absent").into_os_string(),
         ],
     ] {
-        let (status, output, screen) = run_tui(&stdin, &arguments, false, false);
+        let (status, output, screen) = run_tui(&source, &arguments, false, false);
         assert_eq!(status.code(), Some(1), "{screen}");
         assert!(output.is_empty());
     }
-    fs::write(&jsonl, "\"one\"\n42\n").unwrap();
+    fs::write(&jsonl, b"one\n\xff\n").unwrap();
     let (status, _, screen) = run_tui(
-        &stdin,
+        &source,
         &["--stream-input".into(), jsonl.into_os_string()],
         false,
         false,
@@ -321,7 +310,7 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
     assert_eq!(status.code(), Some(1), "{screen}");
     assert!(screen.contains("Workflow failure (input)"), "{screen}");
 
-    fs::write(&data, "line\n".repeat(1000)).unwrap();
+    fs::write(&data, "line\n".repeat(100_000)).unwrap();
     let (status, _, screen) = run_tui(
         &source,
         &["--inputs".into(), parameters.into()],

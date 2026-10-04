@@ -28,7 +28,10 @@ impl Clock {
         }
     }
 }
-fn settle(instance: &StreamInstance, input: &mf_runtime::ChannelSender) -> Result<(), StreamError> {
+fn settle(
+    instance: &StreamInstance,
+    input: &super::controlled::Controller,
+) -> Result<(), StreamError> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(error) = instance.failure() {
@@ -36,7 +39,7 @@ fn settle(instance: &StreamInstance, input: &mf_runtime::ChannelSender) -> Resul
         }
         let summary = instance.summary();
         if summary.completed_frames == summary.startup_frames + summary.emitted_messages
-            && input.metrics().published == input.metrics().accepted
+            && input.settled()
         {
             return Ok(());
         }
@@ -50,15 +53,19 @@ fn receive(instance: &StreamInstance, outputs: &mut Vec<Value>) -> Result<(), St
     Ok(())
 }
 
-pub fn drive(mut prepared: PreparedStream, scenario: &str) -> Value {
+pub fn drive(prepared: PreparedStream, scenario: &str) -> Value {
     let clock = Arc::new(Clock::default());
-    let input = prepared.channel("feed").unwrap();
-    let instance = prepared
-        .start_with_options(StreamOptions {
+    let run = super::controlled::SourceRun::start(
+        prepared,
+        "feed",
+        StreamOptions {
             clock: clock.clone(),
             ..Default::default()
-        })
-        .unwrap();
+        },
+    )
+    .unwrap();
+    let input = run.source.clone();
+    let instance = run.instance;
     let mut outputs = Vec::new();
     let result = (|| -> Result<(), StreamError> {
         match scenario {

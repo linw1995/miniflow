@@ -180,36 +180,6 @@ fn task_only_and_empty_streams_complete_without_a_sender() {
 }
 
 #[test]
-fn explicit_channel_drains_on_close_and_cancellation_wakes_idle_sources() {
-    let graph = json!({"nodes":[{"id":"feed", "kind":"builtin.channel", "config":{"item_type":"int"}}],
-        "outputs":[{"name":"value", "node":"feed", "port":"item"}]});
-    let mut prepared = prepare(graph.clone());
-    let sender = prepared.channel("feed").unwrap();
-    sender.send(json!(1)).unwrap();
-    sender.send(json!(2)).unwrap();
-    sender.close();
-    let instance = prepared.start().unwrap();
-    for value in [1, 2] {
-        assert_eq!(
-            instance.recv().unwrap().unwrap().outputs["value"],
-            json!(value)
-        );
-    }
-    assert!(instance.recv().unwrap().is_none());
-    assert_eq!(instance.join().unwrap().delivered_outputs, 2);
-    assert!(matches!(
-        sender.send(json!(3)),
-        Err(mf_runtime::StreamError::Closed)
-    ));
-
-    let mut prepared = prepare(graph);
-    let sender = prepared.channel("feed").unwrap();
-    let instance = prepared.start().unwrap();
-    drop(instance);
-    assert!(sender.send(json!(4)).is_err());
-}
-
-#[test]
 fn source_return_waits_for_final_output_acknowledgement() {
     let prepared = prepare(
         json!({"nodes":[{"id":"read", "kind":"test.autonomous_source"}],
@@ -226,22 +196,4 @@ fn source_return_waits_for_final_output_acknowledgement() {
     delivery.acknowledge().unwrap();
     assert!(instance.recv().unwrap().is_none());
     assert_eq!(instance.join().unwrap().delivered_outputs, 1);
-}
-
-#[test]
-fn closing_one_source_does_not_close_another_source() {
-    let mut prepared = prepare(json!({"nodes":[
-        {"id":"a", "kind":"builtin.channel", "config":{"item_type":"int"}},
-        {"id":"b", "kind":"builtin.channel", "config":{"item_type":"int"}}
-    ], "outputs":[{"name":"value", "node":"a", "port":"item"}]}));
-    let first = prepared.channel("a").unwrap();
-    let second = prepared.channel("b").unwrap();
-    let instance = prepared.start().unwrap();
-    first.send(json!(1)).unwrap();
-    first.close();
-    assert_eq!(instance.recv().unwrap().unwrap().outputs["value"], json!(1));
-    second.send(json!(2)).unwrap();
-    second.close();
-    assert!(instance.recv().unwrap().is_none());
-    assert_eq!(instance.join().unwrap().emitted_messages, 2);
 }

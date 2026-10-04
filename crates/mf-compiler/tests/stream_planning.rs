@@ -1,5 +1,5 @@
-#[path = "fixtures/channel_run.rs"]
-mod channel;
+#[path = "fixtures/controlled_source.rs"]
+mod controlled;
 extern crate mfn_core as _;
 use mf_compiler::{
     CompiledWorkflow, Inputs, NodeExecutionError, NodeRegistration, NodeRegistry, PortSpec,
@@ -69,7 +69,7 @@ fn graph(mut nodes: Value, edges: Vec<Value>) -> Value {
     nodes
         .as_array_mut()
         .unwrap()
-        .push(channel::source(json!("int")));
+        .push(controlled::source(json!("int")));
     json!({"version":"2026-10-03", "execution":{"mode":"stream"},
         "dependencies":{}, "nodes":nodes, "edges":edges})
 }

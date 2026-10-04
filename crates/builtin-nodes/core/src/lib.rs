@@ -4,7 +4,7 @@ mod identity;
 mod if_else;
 mod iteration;
 mod loop_declaration;
-mod sources;
+mod readline;
 
 pub use batch::KIND as BATCH_KIND;
 pub use constant::{KIND as CONSTANT_KIND, kind as constant_kind};

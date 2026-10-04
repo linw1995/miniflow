@@ -1,6 +1,6 @@
-#[path = "fixtures/channel_run.rs"]
-mod channel;
-use channel::ChannelRun;
+#[path = "fixtures/controlled_source.rs"]
+mod controlled;
+use controlled::SourceRun;
 extern crate mfn_core as _;
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_stream};
 use mf_runtime::{StreamClock, StreamOptions, ValueType};
@@ -17,12 +17,19 @@ impl StreamClock for FixedClock {
 fn definition() -> WorkflowDefinition {
     let mut definition =
         WorkflowDefinition::from_json(include_str!("../../../examples/stream-batch.json")).unwrap();
-    definition
+    let source = definition
         .nodes
         .iter_mut()
         .find(|node| node.id.as_str() == "feed")
+        .unwrap();
+    source.kind = "test.controlled_source".into();
+    source.config = json!({"item_type":"int"});
+    definition
+        .edges
+        .iter_mut()
+        .find(|edge| edge.from_node.as_str() == "feed")
         .unwrap()
-        .kind = "builtin.channel".into();
+        .from_output = "item".into();
     definition
 }
 
@@ -36,7 +43,7 @@ fn batch_infers_types_and_delivers_full_and_tail_batches() {
         prepared.plan().nodes()[1].metadata.ports.outputs[0].value_type,
         ValueType::List(Box::new(ValueType::Int64))
     );
-    let instance = ChannelRun::start(
+    let instance = SourceRun::start(
         prepared,
         "feed",
         StreamOptions {
@@ -70,7 +77,7 @@ fn conditional_skips_do_not_add_items_or_skip_a_pending_batch() {
                 "source":{"output":"feed.item", "path":""}, "operator":"gt", "value":0
             }}]}},
             {"id":"collect", "kind":"builtin.batch", "config":{"max_items":3, "max_wait_ms":100}},
-            channel::source(json!("int"))
+            controlled::source(json!("int"))
         ],
         "edges":[{"from_node":"feed", "from_output":"item", "to_node":"collect", "to_input":"item"}],
         "control_edges":[{"from_node":"feed", "from_output":"item", "to_node":"route"},
@@ -80,7 +87,7 @@ fn conditional_skips_do_not_add_items_or_skip_a_pending_batch() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     for (input, expected) in [(vec![1, -1, 2], Some(json!([1, 2]))), (vec![-1, -2], None)] {
-        let instance = ChannelRun::start(
+        let instance = SourceRun::start(
             instantiate_stream(&plan, &registry).unwrap(),
             "feed",
             StreamOptions {

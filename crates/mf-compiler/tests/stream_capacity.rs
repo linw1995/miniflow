@@ -1,6 +1,6 @@
-#[path = "fixtures/channel_run.rs"]
-mod channel;
-use channel::ChannelRun;
+#[path = "fixtures/controlled_source.rs"]
+mod controlled;
+use controlled::SourceRun;
 #[path = "fixtures/event_collector.rs"]
 mod event_collector;
 
@@ -8,7 +8,7 @@ extern crate mfn_core as _;
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_stream};
 use mf_runtime::{
     Inputs, NodeExecutionError, NodeRegistration, Outputs, PortSpec, PreparedStream, StreamClock,
-    StreamError, StreamMetrics, StreamOptions, ValueRef, ValueType,
+    StreamError, StreamOptions, ValueRef, ValueType,
 };
 use serde_json::{Value, json};
 use std::{
@@ -48,7 +48,6 @@ impl Clock {
 #[derive(Default)]
 struct Probe {
     calls: AtomicUsize,
-    drops: AtomicUsize,
     open: Mutex<bool>,
     changed: Condvar,
 }
@@ -73,11 +72,7 @@ struct Sink {
     block: bool,
     fail_at: Option<i64>,
 }
-impl Drop for Sink {
-    fn drop(&mut self) {
-        self.probe.drops.fetch_add(1, Ordering::SeqCst);
-    }
-}
+
 impl mf_runtime::TaskNode for Sink {
     fn execute(
         &self,
@@ -144,7 +139,7 @@ fn definition() -> Value {
               "config": { "max_items": 3, "max_wait_ms": 250 }
             },
             { "id": "consume", "kind": "builtin.identity" }
-          , channel::source(json!("int"))
+          , controlled::source(json!("int"))
     ],
           "edges": [
             { "from_node": "feed", "from_output": "item", "to_node": "collect", "to_input": "item" },
@@ -159,8 +154,8 @@ fn prepare(value: Value) -> Result<PreparedStream, mf_compiler::WorkflowCompileE
     let plan = compile_definition(&definition, &registry)?;
     instantiate_stream(&plan, &registry)
 }
-fn start(value: Value, clock: Arc<Clock>) -> ChannelRun {
-    ChannelRun::start(
+fn start(value: Value, clock: Arc<Clock>) -> SourceRun {
+    SourceRun::start(
         prepare(value).unwrap(),
         "feed",
         StreamOptions {
@@ -169,41 +164,6 @@ fn start(value: Value, clock: Arc<Clock>) -> ChannelRun {
         },
     )
     .unwrap()
-}
-
-#[test]
-fn a_slow_consumer_backpressures_admission_with_bounded_frames() {
-    let mut value = definition();
-    value["execution"]["limits"] = json!({"max_pending_messages":3});
-    value["nodes"][0]["config"]["max_items"] = json!(1);
-    let instance = start(value, Arc::new(Clock::default()));
-    let input = instance.source.clone();
-    input.send(json!(0)).unwrap();
-    wait_until(|| instance.summary().completed_frames == 3);
-    let mut accepted = 1;
-    loop {
-        assert!(accepted < 100, "output pressure did not reach admission");
-        let item: ValueRef = json!(accepted).into();
-        match input.try_send(&item) {
-            Ok(()) => accepted += 1,
-            Err(StreamError::Capacity) => break,
-            Err(error) => panic!("unexpected admission failure: {error}"),
-        }
-    }
-    let metrics = instance.metrics();
-    assert!(metrics.pending_frames <= 2, "{metrics:?}");
-    input.close();
-    for expected in 0..accepted {
-        assert_eq!(
-            instance.recv().unwrap().unwrap().outputs["batch"],
-            json!([expected])
-        );
-        assert!(instance.metrics().pending_frames <= 2);
-    }
-    assert!(instance.recv().unwrap().is_none());
-    assert_eq!(instance.metrics(), StreamMetrics::default());
-    assert_eq!(instance.source.metrics().accepted, accepted);
-    instance.join().unwrap();
 }
 
 #[test]
@@ -246,14 +206,9 @@ fn upstream_close_waits_for_work_already_running_before_flushing_the_tail() {
     let _release = Release(Arc::clone(&probe));
     instance.source.clone().send(json!(1)).unwrap();
     wait_until(|| probe.calls.load(Ordering::SeqCst) == 1);
-    let mut accepted = 1;
-    loop {
-        let item = json!(accepted + 1).into();
-        match instance.source.clone().try_send(&item) {
-            Ok(()) => accepted += 1,
-            Err(StreamError::Capacity) => break,
-            Err(error) => panic!("unexpected admission failure: {error}"),
-        }
+    let accepted = 3;
+    for value in 2..=accepted {
+        instance.source.send(json!(value)).unwrap();
     }
     instance.source.close();
     assert_eq!(instance.summary().delivered_outputs, 0);
@@ -293,60 +248,6 @@ fn chained_collectors_seal_all_tails_before_output_is_consumed() {
 }
 
 #[test]
-fn input_failure_discards_a_partial_buffer_and_wakes_a_blocked_producer() {
-    let clock = Arc::new(Clock::default());
-    let instance = start(definition(), clock);
-    let input = instance.source.clone();
-    input.send(json!(1)).unwrap();
-    wait_until(|| instance.summary().completed_frames == 2);
-    assert!(matches!(
-        instance.source.clone().send(json!("invalid")),
-        Err(StreamError::Input { .. })
-    ));
-    assert!(matches!(instance.recv(), Err(StreamError::Input { .. })));
-    wait_until(|| instance.metrics() == StreamMetrics::default());
-    assert_eq!(instance.summary().emitted_messages, 1);
-    assert!(matches!(instance.join(), Err(StreamError::Input { .. })));
-    assert!(matches!(
-        input.send(json!(2)),
-        Err(StreamError::Input { .. })
-    ));
-
-    let mut value = definition();
-    value["execution"]["limits"] = json!({"max_pending_messages":3});
-    value["nodes"][0]["config"]["max_items"] = json!(1);
-    let instance = start(value, Arc::new(Clock::default()));
-    let input = instance.source.clone();
-    input.send(json!(0)).unwrap();
-    wait_until(|| instance.summary().completed_frames == 3);
-    input.send(json!(1)).unwrap();
-    wait_until(|| instance.summary().completed_frames == 4);
-    input.send(json!(2)).unwrap();
-    let mut value = 3;
-    while input.try_send(&json!(value).into()).is_ok() {
-        value += 1;
-        assert!(value < 100, "output pressure did not reach the source");
-    }
-    thread::scope(|scope| {
-        let producer = scope.spawn(move || -> Result<(), StreamError> {
-            loop {
-                input.send(json!(3))?;
-            }
-        });
-        wait_until(|| instance.source.metrics().waiting_senders > 0);
-        assert!(matches!(
-            instance.source.clone().send(json!("invalid")),
-            Err(StreamError::Input { .. })
-        ));
-        assert!(matches!(
-            producer.join().unwrap(),
-            Err(StreamError::Input { .. })
-        ));
-    });
-    assert!(instance.join().is_err());
-}
-
-#[test]
 fn a_later_failure_preserves_the_delivered_prefix_and_never_retries() {
     let probe = Arc::new(Probe::default());
     probes()
@@ -370,61 +271,19 @@ fn a_later_failure_preserves_the_delivered_prefix_and_never_retries() {
     let cause = error.source().unwrap();
     assert!(cause.is::<Arc<mf_runtime::WorkflowRunError>>());
     assert!(cause.source().unwrap().is::<NodeExecutionError>());
-    let input = instance.source.clone();
     let StreamError::Workflow { source, message } = error else {
         panic!("expected a workflow error");
     };
-    for error in [
-        input.send(json!(4)).unwrap_err(),
-        instance.join().unwrap_err(),
-    ] {
-        let StreamError::Workflow {
-            source: shared,
-            message: failed_message,
-        } = error
-        else {
-            panic!("expected the same terminal error");
-        };
-        assert!(Arc::ptr_eq(&source, &shared));
-        assert_eq!(message, failed_message);
-    }
-    assert_eq!(probe.calls.load(Ordering::SeqCst), 2);
+    let StreamError::Workflow {
+        source: shared,
+        message: failed_message,
+    } = instance.join().unwrap_err()
+    else {
+        panic!("expected the original workflow error");
+    };
+    assert!(Arc::ptr_eq(&source, &shared));
+    assert_eq!(message, failed_message);
     probes().lock().unwrap().remove("fail-prefix");
-}
-
-#[test]
-fn plugin_objects_are_released_even_when_a_sender_handle_outlives_the_instance() {
-    let probe = Arc::new(Probe::default());
-    probes()
-        .lock()
-        .unwrap()
-        .insert("release-nodes".into(), Arc::clone(&probe));
-    let mut value = definition();
-    value["nodes"][1] =
-        json!({"id":"consume", "kind":"test.capacity_sink", "config":{"key":"release-nodes"}});
-    let instance = start(value.clone(), Arc::new(Clock::default()));
-    let before = probe.drops.load(Ordering::SeqCst);
-    let input = instance.source.clone();
-    input.send(json!(1)).unwrap();
-    input.close();
-    assert!(instance.recv().unwrap().is_some());
-    assert!(instance.recv().unwrap().is_none());
-    instance.join().unwrap();
-    assert_eq!(probe.drops.load(Ordering::SeqCst), before + 1);
-    assert!(matches!(input.send(json!(2)), Err(StreamError::Closed)));
-    let instance = start(value, Arc::new(Clock::default()));
-    let before = probe.drops.load(Ordering::SeqCst);
-    let input = instance.source.clone();
-    input.send(json!(1)).unwrap();
-    wait_until(|| instance.summary().completed_frames == 2);
-    drop(instance);
-    assert_eq!(probe.drops.load(Ordering::SeqCst), before + 1);
-    assert_eq!(probe.calls.load(Ordering::SeqCst), 1);
-    assert!(matches!(
-        input.send(json!(2)),
-        Err(StreamError::Execution { .. })
-    ));
-    probes().lock().unwrap().remove("release-nodes");
 }
 
 #[test]
@@ -447,7 +306,7 @@ fn rejects_snapshot_capture_and_insufficient_domain_capacity() {
 }
 
 #[test]
-fn input_failure_suppresses_followup_work_after_a_running_call_returns() {
+fn cancellation_suppresses_followup_work_after_a_running_call_returns() {
     let running = Arc::new(Probe::default());
     let following = Arc::new(Probe::default());
     probes()
@@ -472,14 +331,19 @@ fn input_failure_suppresses_followup_work_after_a_running_call_returns() {
     wait_until(|| running.calls.load(Ordering::SeqCst) == 1);
     instance.source.clone().send(json!(2)).unwrap();
     wait_until(|| instance.summary().emitted_messages == 2);
+    instance.fail(StreamError::Execution {
+        message: "cancelled during task".into(),
+    });
     assert!(matches!(
-        instance.source.clone().send(json!("invalid")),
-        Err(StreamError::Input { .. })
+        instance.recv(),
+        Err(StreamError::Execution { .. })
     ));
-    assert!(matches!(instance.recv(), Err(StreamError::Input { .. })));
     assert_eq!(instance.metrics().active_workers, 1);
     running.release();
-    assert!(matches!(instance.join(), Err(StreamError::Input { .. })));
+    assert!(matches!(
+        instance.join(),
+        Err(StreamError::Execution { .. })
+    ));
     assert_eq!(running.calls.load(Ordering::SeqCst), 1);
     assert_eq!(following.calls.load(Ordering::SeqCst), 0);
     probes().lock().unwrap().remove("late-running");

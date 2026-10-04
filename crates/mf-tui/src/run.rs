@@ -14,7 +14,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use mf_runtime::{InputResource, MAX_WORKFLOW_INPUT_BYTES, WorkflowArguments, WorkflowInputError};
+use mf_runtime::{MAX_WORKFLOW_INPUT_BYTES, WorkflowArguments, WorkflowInputError};
 use mf_telemetry::{description::WorkflowDescription, identity::RunId};
 use nix::{
     fcntl::{FcntlArg, OFlag, fcntl},
@@ -172,21 +172,13 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         }
         None
     };
-    let mut needs_stdin = false;
-    if let Some(interface) = &interface {
-        for (node, resources) in &interface.schema.resources {
-            for resource in resources {
-                match resource {
-                    InputResource::Stdin => needs_stdin = true,
-                    InputResource::Channel => {
-                        return Err(option_error(&format!(
-                            "node `{node}` requires a host-bound channel resource; TUI launch cannot supply it"
-                        )));
-                    }
-                }
-            }
-        }
-    }
+    let needs_stdin = interface
+        .as_ref()
+        .map(|interface| interface.schema.stdin_owner(&arguments))
+        .transpose()
+        .map_err(|source| RunError::Inputs { source })?
+        .flatten()
+        .is_some();
     let stdin = match (needs_stdin, &options.stream_input) {
         (true, Some(path)) => Some(open_input_file(path)?),
         (true, None) => {
@@ -1236,6 +1228,7 @@ fn details_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mf_runtime::InputResource;
     use mf_telemetry::{
         Count,
         description::{
@@ -1363,14 +1356,6 @@ mod tests {
         let runner = source_runner(root.path(), None, "");
         assert!(prepare_launch(&runner, &options).is_err());
         options.stream_input = None;
-        let runner = source_runner(root.path(), Some(InputResource::Channel), "");
-        assert!(
-            prepare_launch(&runner, &options)
-                .err()
-                .unwrap()
-                .to_string()
-                .contains("host-bound channel")
-        );
     }
 
     #[test]

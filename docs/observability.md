@@ -323,9 +323,8 @@ Pass startup arguments with `--inputs '<JSON>'` or `--inputs-file <PATH>`. These
 exclusive and accept at most 1 MiB. The CLI reads a parameter file once, validates the nested node/port
 map, and forwards a canonical copy through a private temporary file kept alive for the child.
 
-Autonomous streams receive null stdin. A workflow declaring a stdin resource requires
-`--stream-input <PATH>` with a readable regular JSON Lines file. `-`, missing or unused input paths,
-and host-bound channel resources fail preflight. The child's file descriptor is opened before launch;
+Autonomous streams receive null stdin. A workflow with an active stdin requirement requires
+`--stream-input <PATH>` with a readable regular text file. `-` and missing or unused input paths fail preflight. The child's file descriptor is opened before launch;
 terminal stdin remains available for TUI controls. Resource metadata controls this routing for all
 registered node kinds.
 
