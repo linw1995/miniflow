@@ -198,10 +198,9 @@ fn inspect_executable(
                 .min(Duration::from_millis(10)),
         );
     };
-    output_reader.join().map_err(|_| ReaderPanicSnafu.build())?;
-    diagnostic_reader
-        .join()
-        .map_err(|_| ReaderPanicSnafu.build())?;
+    if output_reader.join().is_err() || diagnostic_reader.join().is_err() {
+        return ReaderPanicSnafu.fail();
+    }
     let details = diagnostics.expect("reader completed").display();
     if !status.success() {
         return ExitSnafu {

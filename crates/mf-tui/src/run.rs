@@ -93,11 +93,11 @@ struct PreparedLaunch {
     arguments: Option<tempfile::NamedTempFile>,
 }
 
-fn option_error(message: &str) -> RunError {
+fn option_error<T>(message: &str) -> Result<T, RunError> {
     OptionsSnafu {
         message: message.to_owned(),
     }
-    .build()
+    .fail()
 }
 
 fn open_input_file(path: &Path) -> Result<File, RunError> {
@@ -121,9 +121,7 @@ fn open_input_file(path: &Path) -> Result<File, RunError> {
 
 fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, RunError> {
     if options.inputs.is_some() && options.inputs_file.is_some() {
-        return Err(option_error(
-            "--inputs and --inputs-file are mutually exclusive",
-        ));
+        return option_error("--inputs and --inputs-file are mutually exclusive");
     }
     let arguments = if let Some(json) = &options.inputs {
         WorkflowArguments::from_json(json.as_bytes())?
@@ -145,9 +143,9 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         Some(interface)
     } else {
         if options.inputs.is_some() || options.inputs_file.is_some() {
-            return Err(option_error(
+            return option_error(
                 "this runner has no workflow input interface; recompile it to pass startup arguments or input resources",
-            ));
+            );
         }
         None
     };
@@ -158,18 +156,17 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         .flatten()
         .is_some();
     if needs_stdin {
-        return Err(option_error(
+        return option_error(
             "TUI execution cannot supply workflow stdin; provide source parameters or run the executable directly",
-        ));
+        );
     }
     let arguments = if !arguments.0.is_empty() {
         let bytes = serde_json::to_vec(&arguments).context(mf_runtime::WorkflowInputJsonSnafu)?;
         if bytes.len() > MAX_WORKFLOW_INPUT_BYTES {
-            return Err(mf_runtime::WorkflowInputTooLargeSnafu {
+            mf_runtime::WorkflowInputTooLargeSnafu {
                 limit: MAX_WORKFLOW_INPUT_BYTES,
             }
-            .build()
-            .into());
+            .fail()?;
         }
         let mut file = tempfile::NamedTempFile::new().context(ArgumentFileSnafu)?;
         file.write_all(&bytes)

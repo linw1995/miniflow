@@ -128,12 +128,12 @@ impl ExecutionContext {
     }
 
     pub fn stdin_line(&self) -> Result<Option<String>, crate::StreamError> {
-        let input = self
-            .stdin
-            .as_ref()
-            .ok_or_else(|| crate::StreamError::Preparation {
-                message: "stdin is unavailable".into(),
-            })?;
+        let input = self.stdin.as_ref().ok_or_else(|| {
+            crate::StreamPreparationSnafu {
+                message: "stdin is unavailable".to_owned(),
+            }
+            .build()
+        })?;
         input.lock().unwrap().next_line(&self.cancellation)
     }
 
