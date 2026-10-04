@@ -414,6 +414,42 @@ mod tests {
     }
 
     #[test]
+    fn explicitly_converts_text_to_inferred_numeric_outputs() {
+        for (expression, expected_type, valid, invalid) in [
+            (
+                "int(text)",
+                ValueType::Int64,
+                vec![("42", json!(42)), ("-7", json!(-7))],
+                vec!["", "invalid", "2.5", "9223372036854775808"],
+            ),
+            (
+                "double(text)",
+                ValueType::Float64,
+                vec![("2.5", json!(2.5)), ("1e3", json!(1000.0))],
+                vec!["", "invalid", "NaN", "Infinity"],
+            ),
+        ] {
+            let node = factory(
+                json!({"language":"cel", "inputs":{"text":"string"}, "code":{"number":expression}}),
+            )
+            .unwrap();
+            assert_eq!(node.metadata.ports.outputs[0].value_type, expected_type);
+            let execute = |text: &str| {
+                node.execution.as_task_node().unwrap().execute(
+                    Inputs::from([("text".into(), text.into())]),
+                    &mut mf_runtime::ExecutionContext::default(),
+                )
+            };
+            for (text, expected) in valid {
+                assert_eq!(execute(text).unwrap().outputs["number"], expected);
+            }
+            for text in invalid {
+                assert!(execute(text).is_err(), "{expression}: {text}");
+            }
+        }
+    }
+
+    #[test]
     fn reports_non_json_result_types() {
         for expression in ["b'bytes'", "{1: 2}", "dyn(1)"] {
             let error = factory(json!({
