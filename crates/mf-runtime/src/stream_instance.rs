@@ -63,15 +63,6 @@ pub enum StreamError {
         #[snafu(source(from(crate::WorkflowRunError, Arc::new)))]
         source: Arc<crate::WorkflowRunError>,
     },
-    #[snafu(
-        display("could not open text file {path:?}: {source}"),
-        visibility(pub)
-    )]
-    InputFile {
-        path: std::path::PathBuf,
-        #[snafu(source(from(std::io::Error, Arc::new)))]
-        source: Arc<std::io::Error>,
-    },
     #[snafu(display("stream output failed: {message}"))]
     Output { message: String },
     #[snafu(display("stream output failed: {source}"), visibility(pub))]
@@ -119,10 +110,9 @@ impl StreamError {
             | Self::ThreadSpawn { .. }
             | Self::WorkerStartup { .. }
             | Self::Stdio { .. } => "preparation",
-            Self::InputFailure { .. }
-            | Self::InputRecord { .. }
-            | Self::InputFile { .. }
-            | Self::InputValidation { .. } => "input",
+            Self::InputFailure { .. } | Self::InputRecord { .. } | Self::InputValidation { .. } => {
+                "input"
+            }
             Self::Output { .. } | Self::OutputWrite { .. } | Self::OutputEncode { .. } => "output",
             Self::Resource { .. } => "resource",
             Self::Producer { source, .. } | Self::Event { source, .. } => {

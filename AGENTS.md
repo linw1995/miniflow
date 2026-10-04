@@ -22,6 +22,7 @@
 - Preserve typed error sources and their chains. Do not stringify an error just to wrap it in another error; add a source-bearing variant and attach it with a Snafu selector.
 - Use `ensure!` for checked invariants, `.fail()` for immediate domain errors, and `.build()` when an error value is needed without returning it directly.
 - Expose or re-export context selectors only at module boundaries that need to attach that error context.
+- Keep node-specific error types in their owning node crate. Runtime error types should describe shared runtime contracts and mechanics.
 
 ## Commits and pull requests
 
