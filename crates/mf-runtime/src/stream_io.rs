@@ -2,10 +2,7 @@ use crate::stream_instance::{
     InputFailureSnafu, InputRecordSnafu, OutputEncodeSnafu, OutputWriteSnafu, ResourceSnafu,
     StdioSnafu,
 };
-use crate::{
-    StreamCancellation, StreamError, StreamInputSnafu, StreamInstance, StreamSummary, ValueRef,
-    ValueType,
-};
+use crate::{StreamCancellation, StreamError, StreamInstance, StreamSummary, ValueRef, ValueType};
 use snafu::ResultExt;
 use std::{
     collections::VecDeque,
@@ -119,7 +116,8 @@ impl StreamInput {
             .into();
         value_type
             .validate_shared(&value)
-            .context(StreamInputSnafu)?;
+            .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> { Box::new(source) })
+            .context(InputRecordSnafu { line })?;
         Ok(value)
     }
 }
