@@ -48,15 +48,14 @@ fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     Ok(PreparedNode::new(
         Echo,
         NodeMetadata {
-            ports: NodePorts {
+            resources,
+            ..NodeMetadata::new(NodePorts {
                 inputs: inputs
                     .into_iter()
                     .map(|(name, port)| PortSpec::owned(name, port.value_type, port.required))
                     .collect(),
                 outputs: vec![PortSpec::new("value", ValueType::Object, true)],
-            },
-            resources,
-            ..Default::default()
+            })
         },
     ))
 }

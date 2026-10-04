@@ -138,10 +138,8 @@ impl ForwardingNode {
 fn forwarding_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = ForwardingNode;
     let metadata = mf_runtime::NodeMetadata {
-        ports: node.ports(),
         output_derivations: node.output_derivations(),
-        resources: Vec::new(),
-        context_references: Vec::new(),
+        ..mf_runtime::NodeMetadata::new(node.ports())
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
@@ -235,13 +233,11 @@ impl InvalidMetadataNode {
 fn invalid_metadata_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = InvalidMetadataNode;
     let metadata = mf_runtime::NodeMetadata {
-        ports: mf_runtime::NodePorts {
+        output_derivations: node.output_derivations(),
+        ..mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
             inputs: vec![],
             outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
-        },
-        output_derivations: node.output_derivations(),
-        resources: Vec::new(),
-        context_references: Vec::new(),
+        })
     };
     Ok(mf_runtime::PreparedNode::new(node, metadata))
 }
