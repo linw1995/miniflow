@@ -96,29 +96,19 @@ mod tests {
 
     fn first_factory(_config: Value) -> Result<crate::PreparedNode, NodeBuildError> {
         let node = FirstTestNode;
-        let metadata = crate::NodeMetadata {
-            ports: crate::NodePorts {
-                inputs: vec![],
-                outputs: vec![],
-            },
-            output_derivations: Vec::new(),
-            resources: Vec::new(),
-            context_references: Vec::new(),
-        };
+        let metadata = crate::NodeMetadata::new(crate::NodePorts {
+            inputs: vec![],
+            outputs: vec![],
+        });
         Ok(crate::PreparedNode::new(node, metadata))
     }
 
     fn second_factory(_config: Value) -> Result<crate::PreparedNode, NodeBuildError> {
         let node = SecondTestNode;
-        let metadata = crate::NodeMetadata {
-            ports: crate::NodePorts {
-                inputs: vec![],
-                outputs: vec![crate::PortSpec::new("value", ValueType::Any, false)],
-            },
-            output_derivations: Vec::new(),
-            resources: Vec::new(),
-            context_references: Vec::new(),
-        };
+        let metadata = crate::NodeMetadata::new(crate::NodePorts {
+            inputs: vec![],
+            outputs: vec![crate::PortSpec::new("value", ValueType::Any, false)],
+        });
         Ok(crate::PreparedNode::new(node, metadata))
     }
 
