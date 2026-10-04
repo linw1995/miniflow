@@ -18,7 +18,7 @@ struct Readline;
 enum ReadlineError {
     #[snafu(display("could not open text file {path:?}: {source}"))]
     InputFile { path: PathBuf, source: io::Error },
-    #[snafu(transparent)]
+    #[snafu(display("{source}"))]
     Stream { source: StreamError },
 }
 
@@ -45,7 +45,7 @@ impl StreamNode for Readline {
             let cancellation = context.cancellation();
             while let Some(line) = input
                 .next_line(&cancellation)
-                .map_err(ReadlineError::from)
+                .context(StreamSnafu)
                 .map_err(execution_error)?
             {
                 emitter.send(Outputs::from([("line".into(), line.into())]).into())?;
@@ -53,7 +53,7 @@ impl StreamNode for Readline {
         } else {
             while let Some(line) = context
                 .stdin_line()
-                .map_err(ReadlineError::from)
+                .context(StreamSnafu)
                 .map_err(execution_error)?
             {
                 emitter.send(Outputs::from([("line".into(), line.into())]).into())?;

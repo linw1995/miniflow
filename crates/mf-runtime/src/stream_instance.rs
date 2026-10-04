@@ -12,6 +12,7 @@ use serde::Serialize;
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeSet, VecDeque},
+    error::Error,
     panic::{AssertUnwindSafe, catch_unwind},
     sync::{Arc, Condvar, Mutex, Weak},
     task::{Wake, Waker},
@@ -116,10 +117,17 @@ impl StreamError {
             Self::Output { .. } | Self::OutputWrite { .. } | Self::OutputEncode { .. } => "output",
             Self::Resource { .. } => "resource",
             Self::Producer { source, .. } | Self::Event { source, .. } => {
-                if let NodeExecutionError::PluginFailed { source } = source.as_ref()
-                    && let Some(error) = source.downcast_ref::<Self>()
-                {
-                    return error.phase();
+                if let NodeExecutionError::PluginFailed { source } = source.as_ref() {
+                    let mut cause: &dyn Error = source.as_ref();
+                    loop {
+                        if let Some(error) = cause.downcast_ref::<Self>() {
+                            return error.phase();
+                        }
+                        let Some(source) = cause.source() else {
+                            break;
+                        };
+                        cause = source;
+                    }
                 }
                 "execution"
             }
