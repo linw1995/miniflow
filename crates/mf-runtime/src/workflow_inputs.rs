@@ -1,7 +1,7 @@
 use crate::{FlowNode, Inputs, ValueType};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value;
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 use std::{collections::BTreeMap, fmt};
 
 pub const MAX_WORKFLOW_INPUT_BYTES: usize = 1024 * 1024;
@@ -23,13 +23,13 @@ pub struct WorkflowInterface {
 impl WorkflowInterface {
     pub fn from_json(bytes: &[u8]) -> Result<Self, WorkflowInputError> {
         if bytes.len() > mf_telemetry::description::MAX_DESCRIPTION_BYTES {
-            return Err(WorkflowInputError::TooLarge {
+            return TooLargeSnafu {
                 limit: mf_telemetry::description::MAX_DESCRIPTION_BYTES,
-            });
+            }
+            .fail();
         }
-        let value: UniqueValue =
-            serde_json::from_slice(bytes).map_err(|source| WorkflowInputError::Json { source })?;
-        serde_json::from_value(value.0).map_err(|source| WorkflowInputError::Json { source })
+        let value: UniqueValue = serde_json::from_slice(bytes).context(JsonSnafu)?;
+        serde_json::from_value(value.0).context(JsonSnafu)
     }
 
     pub fn validate_for_description(
@@ -79,8 +79,8 @@ impl WorkflowInterface {
                 if name.is_empty() {
                     return Err(invalid(pointer("", node), "empty input port name"));
                 }
-                input.value_type.check_depth().map_err(|error| {
-                    invalid(pointer(&pointer("", node), name), error.to_string())
+                input.value_type.check_depth().context(TypeDepthSnafu {
+                    path: pointer(&pointer("", node), name),
                 })?;
             }
         }
@@ -141,19 +141,30 @@ pub struct WorkflowArguments(pub BTreeMap<String, Inputs>);
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowInputError {
-    #[snafu(display("invalid workflow arguments: {source}"))]
+    #[snafu(display("invalid workflow arguments: {source}"), visibility(pub))]
     Json { source: serde_json::Error },
-    #[snafu(display("workflow arguments exceed the {limit}-byte limit"))]
+    #[snafu(
+        display("workflow arguments exceed the {limit}-byte limit"),
+        visibility(pub)
+    )]
     TooLarge { limit: usize },
     #[snafu(display("workflow input `{path}`: {message}"))]
     Invalid { path: String, message: String },
+    #[snafu(display("workflow input `{path}`: {source}"))]
+    TypeDepth {
+        path: String,
+        source: crate::TypeDepthError,
+    },
+    #[snafu(display("workflow input `{path}` has an incompatible value: {source}"))]
+    TypeMismatch {
+        path: String,
+        source: crate::TypeMismatch,
+    },
 }
 
 fn invalid(path: String, message: impl Into<String>) -> WorkflowInputError {
-    WorkflowInputError::Invalid {
-        path,
-        message: message.into(),
-    }
+    let message: String = message.into();
+    InvalidSnafu { path, message }.build()
 }
 
 fn pointer(parent: &str, key: &str) -> String {
@@ -163,12 +174,12 @@ fn pointer(parent: &str, key: &str) -> String {
 impl WorkflowArguments {
     pub fn from_json(bytes: &[u8]) -> Result<Self, WorkflowInputError> {
         if bytes.len() > MAX_WORKFLOW_INPUT_BYTES {
-            return Err(WorkflowInputError::TooLarge {
+            return TooLargeSnafu {
                 limit: MAX_WORKFLOW_INPUT_BYTES,
-            });
+            }
+            .fail();
         }
-        let value: UniqueValue =
-            serde_json::from_slice(bytes).map_err(|source| WorkflowInputError::Json { source })?;
+        let value: UniqueValue = serde_json::from_slice(bytes).context(JsonSnafu)?;
         Self::try_from(value.0)
     }
 }
@@ -218,7 +229,7 @@ impl WorkflowInputSchema {
                     let path = pointer(&pointer("", id), &port.name);
                     port.value_type
                         .check_depth()
-                        .map_err(|error| invalid(path.clone(), error.to_string()))?;
+                        .context(TypeDepthSnafu { path: path.clone() })?;
                     if port.name.is_empty()
                         || ports
                             .insert(
@@ -295,12 +306,10 @@ impl WorkflowInputSchema {
                 let input = ports
                     .get(port)
                     .ok_or_else(|| invalid(path.clone(), "unknown input port"))?;
-                input.value_type.validate_shared(value).map_err(|error| {
-                    invalid(
-                        format!("{path}{}", error.path),
-                        format!("expected {}, found {}", error.expected, error.actual),
-                    )
-                })?;
+                input
+                    .value_type
+                    .validate_shared(value)
+                    .context(TypeMismatchSnafu { path })?;
             }
         }
         for (node, ports) in &self.inputs {

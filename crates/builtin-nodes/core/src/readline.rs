@@ -1,10 +1,11 @@
 use mf_runtime::{
     Emitter, ExecutionContext, InputResource, Inputs, NodeBuildError, NodeExecutionError,
     NodeFactory, NodeMetadata, NodePorts, NodeRegistration, Outputs, PortSpec, PreparedNode,
-    StreamError, StreamNode, TextInput, ValueType, deserialize_config,
+    StreamNode, TextInput, ValueType, deserialize_config,
 };
 use serde::Deserialize;
 use serde_json::Value;
+use snafu::ResultExt;
 use std::fs::File;
 
 #[derive(Deserialize)]
@@ -12,12 +13,6 @@ use std::fs::File;
 struct Config {}
 
 struct Readline;
-
-fn execution_error(source: StreamError) -> NodeExecutionError {
-    NodeExecutionError::PluginFailed {
-        source: Box::new(source),
-    }
-}
 
 impl StreamNode for Readline {
     fn execute(
@@ -28,19 +23,27 @@ impl StreamNode for Readline {
     ) -> Result<(), NodeExecutionError> {
         if let Some(path) = inputs.get("path") {
             let path = path.as_str().expect("validated string input");
-            let file = File::open(path).map_err(|source| {
-                execution_error(StreamError::InputFile {
-                    path: path.into(),
-                    source: source.into(),
+            let file = File::open(path)
+                .context(mf_runtime::StreamInputFileSnafu {
+                    path: std::path::PathBuf::from(path),
                 })
-            })?;
+                .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> { Box::new(source) })
+                .context(mf_runtime::NodePluginFailedSnafu)?;
             let mut input = TextInput::new(file);
             let cancellation = context.cancellation();
-            while let Some(line) = input.next_line(&cancellation).map_err(execution_error)? {
+            while let Some(line) = input
+                .next_line(&cancellation)
+                .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> { Box::new(source) })
+                .context(mf_runtime::NodePluginFailedSnafu)?
+            {
                 emitter.send(Outputs::from([("line".into(), line.into())]).into())?;
             }
         } else {
-            while let Some(line) = context.stdin_line().map_err(execution_error)? {
+            while let Some(line) = context
+                .stdin_line()
+                .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> { Box::new(source) })
+                .context(mf_runtime::NodePluginFailedSnafu)?
+            {
                 emitter.send(Outputs::from([("line".into(), line.into())]).into())?;
             }
         }

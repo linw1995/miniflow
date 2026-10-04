@@ -10,7 +10,7 @@ use process_wrap::std::JobObject;
 #[cfg(unix)]
 use process_wrap::std::ProcessGroup;
 use process_wrap::std::{ChildWrapper, CommandWrap};
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 use std::{
     collections::VecDeque,
     io::{self, Read},
@@ -86,14 +86,14 @@ pub fn describe_executable_with_limits(
     limits: DescriptionLimits,
 ) -> Result<WorkflowDescription, DescriptionError> {
     let json = inspect_executable(path, "--describe", limits)?;
-    let description = WorkflowDescription::from_json(&json)
-        .map_err(|source| DescriptionError::Invalid { source })?;
+    let description = WorkflowDescription::from_json(&json).context(InvalidSnafu)?;
     if description.is_streaming()
         && description.event_schema_version() != mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
     {
-        return Err(DescriptionError::UnsupportedStream {
+        return UnsupportedStreamSnafu {
             schema_version: description.event_schema_version(),
-        });
+        }
+        .fail();
     }
     Ok(description)
 }
@@ -107,8 +107,7 @@ pub fn describe_interface_with_limits(
     limits: DescriptionLimits,
 ) -> Result<WorkflowInterface, DescriptionError> {
     let json = inspect_executable(path, "--describe-interface", limits)?;
-    WorkflowInterface::from_json(&json)
-        .map_err(|source| DescriptionError::InvalidInterface { source })
+    WorkflowInterface::from_json(&json).context(InvalidInterfaceSnafu)
 }
 
 fn inspect_executable(
@@ -133,9 +132,8 @@ fn inspect_executable(
     command.wrap(ProcessGroup::leader());
     #[cfg(windows)]
     command.wrap(JobObject);
-    let child = command.spawn().map_err(|source| DescriptionError::Spawn {
+    let child = command.spawn().context(SpawnSnafu {
         path: path.to_owned(),
-        source,
     })?;
     let mut child = ChildGuard::new(child);
     let stdout = child.child.stdout().take().expect("stdout was piped");
@@ -161,21 +159,19 @@ fn inspect_executable(
             match result {
                 ReadResult::Output(Ok(bytes)) => output = Some(bytes),
                 ReadResult::Output(Err(OutputReadError::TooLarge)) => {
-                    return Err(DescriptionError::TooLarge {
+                    return TooLargeSnafu {
                         limit: limits.max_bytes,
-                    });
+                    }
+                    .fail();
                 }
                 ReadResult::Output(Err(OutputReadError::Io(source)))
                 | ReadResult::Diagnostics(Err(source)) => {
-                    return Err(DescriptionError::Read { source });
+                    return Err(source).context(ReadSnafu);
                 }
                 ReadResult::Diagnostics(Ok(tail)) => diagnostics = Some(tail),
             }
         }
-        let status = child
-            .child
-            .try_wait()
-            .map_err(|source| DescriptionError::Read { source })?;
+        let status = child.child.try_wait().context(ReadSnafu)?;
         if status.is_some() {
             exited_at.get_or_insert_with(Instant::now);
         }
@@ -189,11 +185,12 @@ fn inspect_executable(
         let deadline = exited_at.map_or(started + limits.timeout, |at| at + limits.drain_timeout);
         if Instant::now() >= deadline {
             if status.is_some() {
-                return Err(DescriptionError::OpenPipe);
+                return OpenPipeSnafu.fail();
             }
-            return Err(DescriptionError::Timeout {
+            return TimeoutSnafu {
                 timeout: limits.timeout,
-            });
+            }
+            .fail();
         }
         thread::sleep(
             deadline
@@ -201,23 +198,22 @@ fn inspect_executable(
                 .min(Duration::from_millis(10)),
         );
     };
-    output_reader
-        .join()
-        .map_err(|_| DescriptionError::ReaderPanic)?;
+    output_reader.join().map_err(|_| ReaderPanicSnafu.build())?;
     diagnostic_reader
         .join()
-        .map_err(|_| DescriptionError::ReaderPanic)?;
+        .map_err(|_| ReaderPanicSnafu.build())?;
     let details = diagnostics.expect("reader completed").display();
     if !status.success() {
-        return Err(DescriptionError::Exit {
+        return ExitSnafu {
             status,
             diagnostics: details,
-        });
+        }
+        .fail();
     }
     let bytes = output.expect("reader completed");
     let json = bytes
         .strip_suffix(b"\n")
-        .ok_or(DescriptionError::MissingTerminator)?;
+        .ok_or_else(|| MissingTerminatorSnafu.build())?;
     Ok(json.to_vec())
 }
 

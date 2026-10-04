@@ -24,7 +24,7 @@ use opentelemetry_proto::tonic::{
 };
 use prost::Message;
 use serde_json::{Map, Value};
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 use std::{
     convert::Infallible,
     io,
@@ -70,28 +70,18 @@ pub struct LoopbackReceiver {
 impl LoopbackReceiver {
     pub fn bind(description: WorkflowDescription, run_id: RunId) -> Result<Self, ReceiverError> {
         let workflow_id = description.workflow_id.clone();
-        let state = SessionState::new(description, run_id)
-            .map_err(|source| ReceiverError::State { source })?;
-        let listener =
-            TcpListener::bind("127.0.0.1:0").map_err(|source| ReceiverError::Bind { source })?;
-        let endpoint = format!(
-            "http://{}",
-            listener
-                .local_addr()
-                .map_err(|source| ReceiverError::Bind { source })?
-        );
-        listener
-            .set_nonblocking(true)
-            .map_err(|source| ReceiverError::Bind { source })?;
+        let state = SessionState::new(description, run_id).context(StateSnafu)?;
+        let listener = TcpListener::bind("127.0.0.1:0").context(BindSnafu)?;
+        let endpoint = format!("http://{}", listener.local_addr().context(BindSnafu)?);
+        listener.set_nonblocking(true).context(BindSnafu)?;
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_io()
             .enable_time()
             .build()
-            .map_err(|source| ReceiverError::Runtime { source })?;
+            .context(RuntimeSnafu)?;
         let listener = {
             let _entered = runtime.enter();
-            tokio::net::TcpListener::from_std(listener)
-                .map_err(|source| ReceiverError::Runtime { source })?
+            tokio::net::TcpListener::from_std(listener).context(RuntimeSnafu)?
         };
         let context = Arc::new(Context {
             state: Arc::new(Mutex::new(state)),

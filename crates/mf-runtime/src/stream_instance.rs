@@ -58,7 +58,15 @@ pub enum StreamError {
         #[snafu(source(from(Box<dyn std::error::Error + Send + Sync>, Arc::from)))]
         source: Arc<dyn std::error::Error + Send + Sync>,
     },
-    #[snafu(display("could not open text file {path:?}: {source}"))]
+    #[snafu(display("invalid stream input: {source}"), visibility(pub))]
+    InputValidation {
+        #[snafu(source(from(crate::WorkflowRunError, Arc::new)))]
+        source: Arc<crate::WorkflowRunError>,
+    },
+    #[snafu(
+        display("could not open text file {path:?}: {source}"),
+        visibility(pub)
+    )]
     InputFile {
         path: std::path::PathBuf,
         #[snafu(source(from(std::io::Error, Arc::new)))]
@@ -111,9 +119,10 @@ impl StreamError {
             | Self::ThreadSpawn { .. }
             | Self::WorkerStartup { .. }
             | Self::Stdio { .. } => "preparation",
-            Self::InputFailure { .. } | Self::InputRecord { .. } | Self::InputFile { .. } => {
-                "input"
-            }
+            Self::InputFailure { .. }
+            | Self::InputRecord { .. }
+            | Self::InputFile { .. }
+            | Self::InputValidation { .. } => "input",
             Self::Output { .. } | Self::OutputWrite { .. } | Self::OutputEncode { .. } => "output",
             Self::Resource { .. } => "resource",
             Self::Producer { source, .. } | Self::Event { source, .. } => {
@@ -295,9 +304,8 @@ impl Emitter<'_> {
     /// Failure wakes waiting senders. Success does not imply downstream completion.
     pub fn send(&mut self, result: NodeResult) -> Result<(), NodeExecutionError> {
         self.admit(result)
-            .map_err(|source| NodeExecutionError::PluginFailed {
-                source: Box::new(source),
-            })
+            .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> { Box::new(source) })
+            .context(crate::NodePluginFailedSnafu)
     }
 
     fn admit(&mut self, result: NodeResult) -> Result<(), StreamError> {
@@ -549,21 +557,13 @@ impl PreparedStream {
             );
         }
         let (prepared, operator_states) = self.into_parts();
-        prepared
-            .input_schema()
-            .validate(&options.arguments)
-            .map_err(|error| StreamError::InputFailure {
-                message: error.to_string(),
-            })?;
         let cancellation = crate::StreamCancellation::default();
         let mut context = ExecutionContext::default();
         context.set_execution_resources(options.resources, cancellation.clone());
         context.set_workflow_arguments(options.arguments);
         context
             .bind_workflow_inputs(prepared.input_schema())
-            .map_err(|error| StreamError::Preparation {
-                message: error.to_string(),
-            })?;
+            .context(InputValidationSnafu)?;
         if let Some(observation) = &options.observation {
             context.set_frame_observation(observation.startup_frame());
         }

@@ -157,12 +157,8 @@ impl ExecutionContext {
         schema: &crate::WorkflowInputSchema,
     ) -> Result<(), WorkflowRunError> {
         self.startup_inputs_bound = false;
-        schema
-            .validate(&self.workflow_arguments)
-            .map_err(|source| WorkflowRunError::WorkflowInputs { source })?;
-        schema
-            .validate_resources(&self.workflow_arguments, self.resources.has_stdin())
-            .map_err(|source| WorkflowRunError::WorkflowInputs { source })?;
+        schema.validate(&self.workflow_arguments)?;
+        schema.validate_resources(&self.workflow_arguments, self.resources.has_stdin())?;
         self.startup_inputs_bound = true;
         Ok(())
     }

@@ -14,7 +14,7 @@ use mf_telemetry::{
     maximum_event_count, maximum_loop_event_count,
 };
 use sha2::{Digest, Sha256};
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     sync::{Arc, Mutex},
@@ -284,12 +284,10 @@ impl SessionState {
         {
             return Err(StateError::UnsupportedStream);
         }
-        description
-            .validate()
-            .map_err(|source| StateError::Description { source })?;
+        description.validate().context(DescriptionSnafu)?;
         if description
             .static_node_count()
-            .map_err(|source| StateError::Description { source })?
+            .context(DescriptionSnafu)?
             .get()
             > MAX_SESSION_NODES as i64
         {
@@ -300,12 +298,8 @@ impl SessionState {
         let max_sequence = if description.version.supports_loops() {
             maximum_loop_event_count()
         } else {
-            maximum_event_count(
-                description
-                    .node_count()
-                    .map_err(|source| StateError::Description { source })?,
-            )
-            .map_err(|source| StateError::Description { source })?
+            maximum_event_count(description.node_count().context(DescriptionSnafu)?)
+                .context(DescriptionSnafu)?
         };
         let described: BTreeMap<_, _> = description
             .nodes
@@ -400,9 +394,8 @@ impl SessionState {
         }
         event
             .validate_for_validated_description(&self.description)
-            .map_err(|source| StateError::Event { source })?;
-        let encoded =
-            serde_json::to_vec(&event.event).map_err(|source| StateError::Serialize { source })?;
+            .context(EventSnafu)?;
+        let encoded = serde_json::to_vec(&event.event).context(SerializeSnafu)?;
         if encoded.len() > MAX_EVENT_BYTES {
             return Err(StateError::TooLarge {
                 limit: MAX_EVENT_BYTES,

@@ -2,6 +2,7 @@ use super::*;
 use mf_telemetry::stream::{
     StreamCounts, StreamEvent, StreamFailure, StreamIdentity, StreamPayload, StreamRecord,
 };
+use snafu::ResultExt;
 
 const MAX_WITNESSES: usize = 4096;
 const MAX_INVOCATIONS: usize = 4096;
@@ -199,11 +200,9 @@ impl StreamState {
         description: &WorkflowDescription,
         record: StreamRecord,
     ) -> Result<Admission, StateError> {
-        let wire = record
-            .to_wire(0, None)
-            .map_err(|source| StateError::Event { source })?;
+        let wire = record.to_wire(0, None).context(EventSnafu)?;
         validate_graph(description, &record)?;
-        let bytes = serde_json::to_vec(&wire).map_err(|source| StateError::Serialize { source })?;
+        let bytes = serde_json::to_vec(&wire).context(SerializeSnafu)?;
         if bytes.len() > MAX_EVENT_BYTES {
             return Err(StateError::TooLarge {
                 limit: MAX_EVENT_BYTES,
@@ -589,11 +588,7 @@ fn validate_graph(
     }
     match &record.payload {
         StreamPayload::Control(StreamEvent::Started { node_count, .. }) => {
-            if *node_count
-                != description
-                    .static_node_count()
-                    .map_err(|source| StateError::Event { source })?
-            {
+            if *node_count != description.static_node_count().context(EventSnafu)? {
                 return Err(invalid(
                     "stream start node count disagrees with description",
                 ));

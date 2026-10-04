@@ -28,7 +28,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 use signal_hook::{SigId, consts::SIGINT, flag, low_level::unregister};
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 use std::{
     collections::{BTreeMap, VecDeque},
     env,
@@ -58,7 +58,7 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(100);
 pub enum RunError {
     #[snafu(display("TUI requires terminal stdin and stderr"))]
     TerminalRequired,
-    #[snafu(display("{source}"))]
+    #[snafu(transparent)]
     Inputs { source: WorkflowInputError },
     #[snafu(display("{message}"))]
     Options { message: String },
@@ -96,9 +96,10 @@ struct PreparedLaunch {
 }
 
 fn option_error(message: &str) -> RunError {
-    RunError::Options {
-        message: message.into(),
+    OptionsSnafu {
+        message: message.to_owned(),
     }
+    .build()
 }
 
 fn open_input_file(path: &Path) -> Result<File, RunError> {
@@ -115,9 +116,8 @@ fn open_input_file(path: &Path) -> Result<File, RunError> {
         }
         Ok(file)
     };
-    open().map_err(|source| RunError::InputFile {
-        path: path.into(),
-        source,
+    open().context(InputFileSnafu {
+        path: path.to_owned(),
     })
 }
 
@@ -133,33 +133,22 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         ));
     }
     let arguments = if let Some(json) = &options.inputs {
-        WorkflowArguments::from_json(json.as_bytes())
-            .map_err(|source| RunError::Inputs { source })?
+        WorkflowArguments::from_json(json.as_bytes())?
     } else if let Some(path) = &options.inputs_file {
         let mut bytes = Vec::new();
         open_input_file(path)?
             .take(MAX_WORKFLOW_INPUT_BYTES as u64 + 1)
             .read_to_end(&mut bytes)
-            .map_err(|source| RunError::InputFile {
-                path: path.clone(),
-                source,
-            })?;
-        WorkflowArguments::from_json(&bytes).map_err(|source| RunError::Inputs { source })?
+            .context(InputFileSnafu { path: path.clone() })?;
+        WorkflowArguments::from_json(&bytes)?
     } else {
         WorkflowArguments::default()
     };
-    let description =
-        describe_executable(path).map_err(|source| RunError::Description { source })?;
+    let description = describe_executable(path).context(DescriptionSnafu)?;
     let interface = if description.execution.is_some() {
-        let interface =
-            describe_interface(path).map_err(|source| RunError::Description { source })?;
-        interface
-            .validate_for_description(&description)
-            .map_err(|source| RunError::Inputs { source })?;
-        interface
-            .schema
-            .validate(&arguments)
-            .map_err(|source| RunError::Inputs { source })?;
+        let interface = describe_interface(path).context(DescriptionSnafu)?;
+        interface.validate_for_description(&description)?;
+        interface.schema.validate(&arguments)?;
         Some(interface)
     } else {
         if options.inputs.is_some()
@@ -175,8 +164,7 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
     let needs_stdin = interface
         .as_ref()
         .map(|interface| interface.schema.stdin_owner(&arguments))
-        .transpose()
-        .map_err(|source| RunError::Inputs { source })?
+        .transpose()?
         .flatten()
         .is_some();
     let stdin = match (needs_stdin, &options.stream_input) {
@@ -194,21 +182,18 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         (false, None) => None,
     };
     let arguments = if !arguments.0.is_empty() {
-        let bytes = serde_json::to_vec(&arguments).map_err(|source| RunError::Inputs {
-            source: WorkflowInputError::Json { source },
-        })?;
+        let bytes = serde_json::to_vec(&arguments).context(mf_runtime::WorkflowInputJsonSnafu)?;
         if bytes.len() > MAX_WORKFLOW_INPUT_BYTES {
-            return Err(RunError::Inputs {
-                source: WorkflowInputError::TooLarge {
-                    limit: MAX_WORKFLOW_INPUT_BYTES,
-                },
-            });
+            return Err(mf_runtime::WorkflowInputTooLargeSnafu {
+                limit: MAX_WORKFLOW_INPUT_BYTES,
+            }
+            .build()
+            .into());
         }
-        let mut file =
-            tempfile::NamedTempFile::new().map_err(|source| RunError::ArgumentFile { source })?;
+        let mut file = tempfile::NamedTempFile::new().context(ArgumentFileSnafu)?;
         file.write_all(&bytes)
             .and_then(|()| file.flush())
-            .map_err(|source| RunError::ArgumentFile { source })?;
+            .context(ArgumentFileSnafu)?;
         Some(file)
     } else {
         None
@@ -226,31 +211,28 @@ pub fn run_executable(path: &Path) -> Result<u8, RunError> {
 
 pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<u8, RunError> {
     if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
-        return Err(RunError::TerminalRequired);
+        return TerminalRequiredSnafu.fail();
     }
-    let area = terminal_area().map_err(|source| RunError::Terminal { source })?;
+    let area = terminal_area().context(TerminalSnafu)?;
     let PreparedLaunch {
         description,
         arguments,
         stdin,
     } = prepare_launch(path, options)?;
     let streaming = description.is_streaming();
-    let layout = GraphLayout::new(&description).map_err(|source| RunError::Graph { source })?;
+    let layout = GraphLayout::new(&description).context(GraphSnafu)?;
     let mut body_layouts = BTreeMap::new();
     for body in &description.loop_bodies {
-        let body_layout = GraphLayout::from_loop_body(&description, &body.path)
-            .map_err(|source| RunError::Graph { source })?;
+        let body_layout =
+            GraphLayout::from_loop_body(&description, &body.path).context(GraphSnafu)?;
         body_layouts.insert(body.path.clone(), body_layout);
     }
-    let capture = Arc::new(Mutex::new(
-        Capture::new().map_err(|source| RunError::Spool { source })?,
-    ));
+    let capture = Arc::new(Mutex::new(Capture::new().context(SpoolSnafu)?));
     let mut capture_worker = None;
     let run_id = RunId::new();
-    let mut receiver = LoopbackReceiver::bind(description, run_id)
-        .map_err(|source| RunError::Receiver { source })?;
-    let signal = SignalGuard::register().map_err(|source| RunError::Terminal { source })?;
-    let guard = TerminalGuard::enter().map_err(|source| RunError::Terminal { source })?;
+    let mut receiver = LoopbackReceiver::bind(description, run_id).context(ReceiverSnafu)?;
+    let signal = SignalGuard::register().context(TerminalSnafu)?;
+    let guard = TerminalGuard::enter().context(TerminalSnafu)?;
     // The backend's global size lookup can consult redirected stdout without a controlling TTY.
     let mut terminal = Terminal::with_options(
         CrosstermBackend::new(io::stderr()),
@@ -258,7 +240,7 @@ pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<
             viewport: Viewport::Fixed(area),
         },
     )
-    .map_err(|source| RunError::Terminal { source })?;
+    .context(TerminalSnafu)?;
     let result = (|| {
         let mut command = Command::new(path);
         command
@@ -282,16 +264,15 @@ pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<
             );
         let mut command = CommandWrap::from(command);
         command.wrap(ProcessGroup::leader());
-        let child = command.spawn().map_err(|source| RunError::Spawn {
+        let child = command.spawn().context(SpawnSnafu {
             path: path.to_owned(),
-            source,
         })?;
         let mut child = ChildGuard::new(child);
         capture
             .lock()
             .expect("capture lock was not poisoned")
             .attach(&mut child.child)
-            .map_err(|source| RunError::Supervise { source })?;
+            .context(SuperviseSnafu)?;
         capture_worker = Some(CaptureWorker::start(Arc::clone(&capture)));
         supervise(
             &mut child,
@@ -736,10 +717,7 @@ fn supervise(
     loop {
         let view = capture.view();
         if exited.is_none()
-            && let Some(status) = child
-                .child
-                .try_wait()
-                .map_err(|source| RunError::Supervise { source })?
+            && let Some(status) = child.child.try_wait().context(SuperviseSnafu)?
         {
             exited = Some((status, Instant::now()));
         }
@@ -797,10 +775,8 @@ fn supervise(
                 if signal.interrupted.swap(false, Ordering::Relaxed) {
                     return Ok((status, interrupted_at.is_some(), capture_forced));
                 }
-                if event::poll(Duration::from_millis(100))
-                    .map_err(|source| RunError::Terminal { source })?
-                {
-                    match event::read().map_err(|source| RunError::Terminal { source })? {
+                if event::poll(Duration::from_millis(100)).context(TerminalSnafu)? {
+                    match event::read().context(TerminalSnafu)? {
                         Event::Key(key)
                             if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                         {
@@ -833,7 +809,7 @@ fn supervise(
                         Event::Resize(width, height) => {
                             terminal
                                 .resize(Rect::new(0, 0, width, height))
-                                .map_err(|source| RunError::Terminal { source })?;
+                                .context(TerminalSnafu)?;
                         }
                         _ => continue,
                     }
@@ -867,8 +843,8 @@ fn supervise(
             )?;
             last_frame = Instant::now();
         }
-        if event::poll(Duration::from_millis(20)).map_err(|source| RunError::Terminal { source })? {
-            match event::read().map_err(|source| RunError::Terminal { source })? {
+        if event::poll(Duration::from_millis(20)).context(TerminalSnafu)? {
+            match event::read().context(TerminalSnafu)? {
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
@@ -896,7 +872,7 @@ fn supervise(
                 Event::Resize(width, height) => {
                     terminal
                         .resize(Rect::new(0, 0, width, height))
-                        .map_err(|source| RunError::Terminal { source })?;
+                        .context(TerminalSnafu)?;
                     last_frame = Instant::now() - FRAME_INTERVAL;
                 }
                 _ => {}
@@ -950,7 +926,7 @@ fn draw(
                 );
                 view_state.history.draw(frame, &snapshot);
             })
-            .map_err(|source| RunError::Terminal { source })?;
+            .context(TerminalSnafu)?;
         return Ok(());
     }
     let layout = view_state.layout(root_layout, body_layouts);
@@ -1023,7 +999,7 @@ fn draw(
             lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
             lifecycle.observation_errors + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
         )), footer);
-    }).map_err(|source| RunError::Terminal { source })?;
+    }).context(TerminalSnafu)?;
     Ok(())
 }
 

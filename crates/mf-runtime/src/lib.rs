@@ -65,9 +65,9 @@ pub use stream::{
     StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate,
 };
 pub use stream_instance::{
-    CompilationSnafu as StreamCompilationSnafu, Emitter, MessageId, MonotonicClock, StreamClock,
-    StreamDelivery, StreamError, StreamInstance, StreamMetrics, StreamOptions, StreamOutput,
-    StreamSummary,
+    CompilationSnafu as StreamCompilationSnafu, Emitter, InputFileSnafu as StreamInputFileSnafu,
+    MessageId, MonotonicClock, StreamClock, StreamDelivery, StreamError, StreamInstance,
+    StreamMetrics, StreamOptions, StreamOutput, StreamSummary,
 };
 pub use stream_io::{StreamStdio, TextInput};
 pub use stream_plan::{PreparedStream, StreamBuildError, StreamDependency, StreamPlan};
@@ -88,4 +88,7 @@ pub use workflow_inputs::{
 
 pub use runner_arguments::{RunnerArgumentError, RunnerCommand};
 
-pub use workflow_inputs::{WorkflowInterface, WorkflowInterfaceVersion};
+pub use workflow_inputs::{
+    JsonSnafu as WorkflowInputJsonSnafu, TooLargeSnafu as WorkflowInputTooLargeSnafu,
+    WorkflowInterface, WorkflowInterfaceVersion,
+};

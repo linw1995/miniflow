@@ -248,8 +248,7 @@ impl CompiledWorkflow {
             quote! {
                 let bound_inputs: &[(&str, &str)] = &[#(#bound_inputs),*];
                 let schema_nodes: &[(&mf_runtime::TaskFlowNode, bool)] = &[#(#nodes),*];
-                let schema = mf_runtime::WorkflowInputSchema::from_nodes(schema_nodes.iter().copied(), |node, input| bound_inputs.contains(&(node, input)))
-                    .map_err(|source| mf_runtime::WorkflowRunError::WorkflowInputs { source })?;
+                let schema = mf_runtime::WorkflowInputSchema::from_nodes(schema_nodes.iter().copied(), |node, input| bound_inputs.contains(&(node, input)))?;
                 state.bind_workflow_inputs(&schema)?;
             }
         } else {

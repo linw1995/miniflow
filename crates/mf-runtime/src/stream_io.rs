@@ -1,6 +1,11 @@
+use crate::stream_instance::{
+    InputRecordSnafu, OutputEncodeSnafu, OutputWriteSnafu, ResourceSnafu, StdioSnafu,
+};
 use crate::{StreamCancellation, StreamError, StreamInstance, StreamSummary};
+use snafu::{IntoError, ResultExt};
 use std::{
     collections::VecDeque,
+    error::Error,
     fs::File,
     io::{self, Read, Write},
 };
@@ -30,9 +35,7 @@ impl TextInput {
             }
             Ok(Self::new(input))
         };
-        reserve().map_err(|source| StreamError::Stdio {
-            source: source.into(),
-        })
+        reserve().context(StdioSnafu)
     }
 
     pub fn new(file: File) -> Self {
@@ -83,8 +86,11 @@ impl TextInput {
 
     fn finish_line(&mut self, terminated: bool) -> Result<String, StreamError> {
         let line = self.line;
-        self.line = line.checked_add(1).ok_or_else(|| StreamError::Resource {
-            message: "input line counter exhausted".into(),
+        self.line = line.checked_add(1).ok_or_else(|| {
+            ResourceSnafu {
+                message: String::from("input line counter exhausted"),
+            }
+            .build()
         })?;
         let mut record = std::mem::take(&mut self.partial);
         if terminated && record.last() == Some(&b'\r') {
@@ -95,10 +101,8 @@ impl TextInput {
 }
 
 fn input_error(line: u64, error: impl std::error::Error + Send + Sync + 'static) -> StreamError {
-    StreamError::InputRecord {
-        line,
-        source: std::sync::Arc::new(error),
-    }
+    let source: Box<dyn Error + Send + Sync> = Box::new(error);
+    InputRecordSnafu { line }.into_error(source)
 }
 
 #[cfg(unix)]
@@ -180,16 +184,15 @@ impl StreamStdio {
                 output,
             })
         };
-        claim().map_err(|source| StreamError::Stdio {
-            source: source.into(),
-        })
+        claim().context(StdioSnafu)
     }
 
     #[cfg(not(unix))]
     pub fn claim() -> Result<Self, StreamError> {
-        Err(StreamError::Preparation {
-            message: "stream stdio requires Linux or macOS".into(),
-        })
+        crate::stream_instance::PreparationSnafu {
+            message: String::from("stream stdio requires Linux or macOS"),
+        }
+        .fail()
     }
 
     pub fn take_input(&mut self) -> Option<TextInput> {
@@ -197,17 +200,11 @@ impl StreamStdio {
     }
 
     pub fn write_json(&mut self, value: &impl serde::Serialize) -> Result<(), StreamError> {
-        serde_json::to_writer(&mut self.output, value).map_err(|source| {
-            StreamError::OutputEncode {
-                source: source.into(),
-            }
-        })?;
+        serde_json::to_writer(&mut self.output, value).context(OutputEncodeSnafu)?;
         self.output
             .write_all(b"\n")
             .and_then(|()| self.output.flush())
-            .map_err(|source| StreamError::OutputWrite {
-                source: source.into(),
-            })
+            .context(OutputWriteSnafu)
     }
 
     pub fn run(mut self, instance: StreamInstance) -> Result<StreamSummary, StreamError> {
@@ -235,36 +232,23 @@ fn write_record(
     output: &crate::StreamOutput,
     cancellation: &StreamCancellation,
 ) -> Result<(), StreamError> {
-    let mut bytes =
-        serde_json::to_vec(&output.outputs).map_err(|source| StreamError::OutputEncode {
-            source: source.into(),
-        })?;
+    let mut bytes = serde_json::to_vec(&output.outputs).context(OutputEncodeSnafu)?;
     bytes.push(b'\n');
     let mut remaining = bytes.as_slice();
     while !remaining.is_empty() {
-        wait_ready(file, true, cancellation).map_err(|source| StreamError::OutputWrite {
-            source: source.into(),
-        })?;
+        wait_ready(file, true, cancellation).context(OutputWriteSnafu)?;
         if let Some(error) = cancellation.failure() {
             return Err(error);
         }
         let written = match file.write(&remaining[..remaining.len().min(512)]) {
             Ok(0) => {
-                return Err(StreamError::OutputWrite {
-                    source: io::Error::from(io::ErrorKind::WriteZero).into(),
-                });
+                return Err(io::Error::from(io::ErrorKind::WriteZero)).context(OutputWriteSnafu);
             }
             Ok(written) => written,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(source) => {
-                return Err(StreamError::OutputWrite {
-                    source: source.into(),
-                });
-            }
+            Err(source) => return Err(source).context(OutputWriteSnafu),
         };
         remaining = &remaining[written..];
     }
-    file.flush().map_err(|source| StreamError::OutputWrite {
-        source: source.into(),
-    })
+    file.flush().context(OutputWriteSnafu)
 }
