@@ -20,7 +20,7 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 8] {
         ("if-else.json", None, json!({"accepted": {"amount": 150}})),
         ("iteration.json", None, json!({"results": [2, 5, 8]})),
         ("loop.json", None, json!({"count": 3})),
-        ("stream-batch.json", Some("1\n"), json!({"batch": ["1"]})),
+        ("stream-batch.json", Some("1\n"), json!({"batch": [1]})),
     ]
 }
 
