@@ -106,11 +106,11 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
     );
     assert_eq!(prepared.plan().domains().len(), 3);
     assert_eq!(prepared.plan().domains()[0].source, None);
-    assert_eq!(prepared.plan().domains()[0].steps, [0]);
+    assert_eq!(prepared.plan().domains()[0].steps.as_ref(), [0]);
     assert_eq!(prepared.plan().domains()[1].source, Some(0));
-    assert_eq!(prepared.plan().domains()[1].steps, [1]);
+    assert_eq!(prepared.plan().domains()[1].steps.as_ref(), [1]);
     assert_eq!(prepared.plan().domains()[2].source, Some(1));
-    assert_eq!(prepared.plan().domains()[2].steps, [2]);
+    assert_eq!(prepared.plan().domains()[2].steps.as_ref(), [2]);
     assert_eq!(
         (0..3)
             .map(|node| prepared.plan().output_domain(node))
@@ -191,7 +191,7 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
             .plan()
             .domains()
             .iter()
-            .map(|domain| (domain.source, domain.steps.as_slice()))
+            .map(|domain| (domain.source, domain.steps.as_ref()))
             .collect::<Vec<_>>(),
         [
             (None, [0].as_slice()),

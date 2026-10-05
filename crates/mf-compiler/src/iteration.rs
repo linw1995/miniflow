@@ -51,7 +51,7 @@ pub fn body_definition(
         outputs: vec![WorkflowOutputDefinition {
             name: "result".into(),
             node: config.body.result.node.clone(),
-            port: config.body.result.port.clone(),
+            port: config.body.result.port.clone().into(),
             optional: false,
         }],
     })

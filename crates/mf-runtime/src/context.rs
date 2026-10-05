@@ -384,7 +384,7 @@ impl ExecutionContext {
             match value {
                 ContextValue::Value(value) => {
                     if let Some(input) = &dependency.input {
-                        inputs.insert(input.clone(), value.clone());
+                        inputs.insert(input.clone().into_owned(), value.clone());
                     }
                 }
                 ContextValue::Skipped => skipped = true,

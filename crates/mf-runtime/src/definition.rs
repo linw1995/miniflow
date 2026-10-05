@@ -1,17 +1,22 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu, ensure};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
-pub struct DefinitionId(String);
+pub struct DefinitionId(Cow<'static, str>);
 
 impl DefinitionId {
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        Self(id.into().into())
+    }
+
+    pub const fn from_static(id: &'static str) -> Self {
+        Self(Cow::Borrowed(id))
     }
 
     pub fn as_str(&self) -> &str {
@@ -195,16 +200,16 @@ pub struct EdgeDefinition {
 #[serde(deny_unknown_fields)]
 pub struct ControlEdgeDefinition {
     pub from_node: DefinitionId,
-    pub from_output: String,
+    pub from_output: Cow<'static, str>,
     pub to_node: DefinitionId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowOutputDefinition {
-    pub name: String,
+    pub name: Cow<'static, str>,
     pub node: DefinitionId,
-    pub port: String,
+    pub port: Cow<'static, str>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub optional: bool,
 }

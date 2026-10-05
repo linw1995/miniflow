@@ -1079,7 +1079,7 @@ fn tick(
                             message: frame.message,
                         })?
                     {
-                        outputs.insert(output.name.clone(), value);
+                        outputs.insert(output.name.clone().into_owned(), value);
                     }
                 }
                 state.output = Some(StreamOutput {
@@ -1195,8 +1195,8 @@ fn tick(
                             )
                         })
                         .map(|dependency| SkipCause {
-                            source_node: dependency.source_node.clone(),
-                            source_output: dependency.source_output.clone(),
+                            source_node: dependency.source_node.clone().into_owned(),
+                            source_output: dependency.source_output.clone().into_owned(),
                         })
                         .collect();
                     callback.skipped(causes.into_iter().collect());
@@ -1264,7 +1264,7 @@ fn tick(
                             message: frame.message,
                         })?
                     {
-                        outputs.insert(output.name.clone(), value);
+                        outputs.insert(output.name.clone().into_owned(), value);
                     }
                 }
                 state.output = Some(StreamOutput {
@@ -1284,7 +1284,7 @@ fn tick(
     }
     for domain in 0..state.domains.len() {
         if state.domains[domain].closed {
-            for &index in &plan.domains()[domain].steps {
+            for &index in plan.domains()[domain].steps.iter() {
                 if state.operators[index]
                     .as_ref()
                     .is_some_and(|operator| !operator.closed && !matches!(&operator.executor, OperatorExecutor::Producer(producer) if producer.active))

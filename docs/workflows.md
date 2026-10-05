@@ -337,7 +337,9 @@ A selected output can fan out to multiple downstream nodes; all eligible consume
 
 Construction validates nodes, dependencies, message ownership, and execution-domain plans before returning an
 executable Flow. `FlowRuntime` consumes prepared plans; it does not construct nodes or return graph construction
-errors. Generated task workflows expose `prepare_workflow` separately from their execution functions. Runtime
+errors. Generated projects resolve linked providers in their Cargo build script and emit constant dependency,
+execution-domain, and message-ownership tables. `prepare_workflow` binds fresh executors to those tables; launch
+does not rebuild or repartition the graph. Loop and Iteration bodies use the same compiled layouts. Runtime
 input validation, worker startup, and node execution can still fail after construction succeeds.
 
 The runtime groups task nodes into synchronous execution domains. A linear chain stays in one domain and runs in

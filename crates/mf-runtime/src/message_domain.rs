@@ -5,27 +5,49 @@ use crate::{
     output_id,
 };
 use snafu::{OptionExt, ensure};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, BTreeSet},
+};
 
 /// A message source and the nodes that consume its messages, retained in topological order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamDomain {
     pub source: Option<usize>,
-    pub steps: Vec<usize>,
+    pub steps: Cow<'static, [usize]>,
 }
 
 /// Validated message boundaries and output ownership for one streaming graph.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct MessageDomains {
-    domains: Vec<StreamDomain>,
-    output_domains: Vec<usize>,
+    domains: Cow<'static, [StreamDomain]>,
+    output_domains: Cow<'static, [usize]>,
     selected_domain: Option<usize>,
     execution_domains: ExecutionDomains,
-    execution_domains_by_message: Vec<Vec<usize>>,
-    message_domain_by_execution: Vec<usize>,
+    execution_domains_by_message: Cow<'static, [Cow<'static, [usize]>]>,
+    message_domain_by_execution: Cow<'static, [usize]>,
 }
 
 impl MessageDomains {
+    /// Accepts compiler-validated message and execution ownership without planning a graph.
+    pub const fn from_parts(
+        domains: Cow<'static, [StreamDomain]>,
+        output_domains: Cow<'static, [usize]>,
+        selected_domain: Option<usize>,
+        execution_domains: ExecutionDomains,
+        execution_domains_by_message: Cow<'static, [Cow<'static, [usize]>]>,
+        message_domain_by_execution: Cow<'static, [usize]>,
+    ) -> Self {
+        Self {
+            domains,
+            output_domains,
+            selected_domain,
+            execution_domains,
+            execution_domains_by_message,
+            message_domain_by_execution,
+        }
+    }
+
     /// Partitions topologically ordered nodes after input-source validation.
     pub fn new(
         nodes: &[FlowNode],
@@ -53,7 +75,7 @@ impl MessageDomains {
         }
         let mut domains = vec![StreamDomain {
             source: None,
-            steps: Vec::new(),
+            steps: Vec::new().into(),
         }];
         let mut output_domains = vec![0; nodes.len()];
         let mut node_message_domains = vec![0; nodes.len()];
@@ -61,7 +83,7 @@ impl MessageDomains {
             let mut incoming_domains = BTreeSet::new();
             for dependency in &dependencies[index] {
                 let source = indices
-                    .get(dependency.source_node.as_str())
+                    .get(dependency.source_node.as_ref())
                     .copied()
                     .with_context(|| InvalidPlanSnafu {
                         message: format!(
@@ -140,7 +162,7 @@ impl MessageDomains {
                     ),
                 }
             );
-            domains[domain].steps.push(index);
+            domains[domain].steps.to_mut().push(index);
             node_message_domains[index] = domain;
             output_domains[index] = match node.node.as_ref().with_context(|| InvalidPlanSnafu {
                 message: format!(
@@ -153,7 +175,7 @@ impl MessageDomains {
                     let new_domain = domains.len();
                     domains.push(StreamDomain {
                         source: Some(index),
-                        steps: Vec::new(),
+                        steps: Vec::new().into(),
                     });
                     new_domain
                 }
@@ -217,7 +239,7 @@ impl MessageDomains {
         let mut execution_edges = Vec::new();
         for (target, node_dependencies) in dependencies.iter().enumerate() {
             for dependency in node_dependencies {
-                let source = indices[dependency.source_node.as_str()];
+                let source = indices[dependency.source_node.as_ref()];
                 if node_message_domains[source] == node_message_domains[target] {
                     execution_edges.push((source, target));
                 }
@@ -243,12 +265,16 @@ impl MessageDomains {
             message_domain_by_execution[execution_domain.id] = message_domain;
         }
         Ok(Self {
-            domains,
-            output_domains,
+            domains: domains.into(),
+            output_domains: output_domains.into(),
             selected_domain,
             execution_domains,
-            execution_domains_by_message,
-            message_domain_by_execution,
+            execution_domains_by_message: execution_domains_by_message
+                .into_iter()
+                .map(Cow::Owned)
+                .collect::<Vec<_>>()
+                .into(),
+            message_domain_by_execution: message_domain_by_execution.into(),
         })
     }
 

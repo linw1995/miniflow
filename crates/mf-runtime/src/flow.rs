@@ -6,6 +6,7 @@ use crate::{NodeMetadata, PreparedNode, TaskNode};
 use serde::{Deserialize, Serialize};
 use snafu::{Snafu, ensure};
 use std::any::Any;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -68,9 +69,9 @@ impl FlowNode {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlowConnection {
     pub from_node: NodeId,
-    pub from_output: String,
+    pub from_output: Cow<'static, str>,
     pub to_node: NodeId,
-    pub to_input: String,
+    pub to_input: Cow<'static, str>,
 }
 
 impl FlowConnection {
@@ -82,18 +83,18 @@ impl FlowConnection {
     ) -> Self {
         Self {
             from_node: from_node.into(),
-            from_output: from_output.into(),
+            from_output: from_output.into().into(),
             to_node: to_node.into(),
-            to_input: to_input.into(),
+            to_input: to_input.into().into(),
         }
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlowOutput {
-    pub name: String,
+    pub name: Cow<'static, str>,
     pub node_id: NodeId,
-    pub port: String,
+    pub port: Cow<'static, str>,
     pub optional: bool,
 }
 
@@ -105,9 +106,9 @@ impl FlowOutput {
         optional: bool,
     ) -> Self {
         Self {
-            name: name.into(),
+            name: name.into().into(),
             node_id: node_id.into(),
-            port: port.into(),
+            port: port.into().into(),
             optional,
         }
     }
@@ -267,11 +268,11 @@ pub struct Flow<N = Box<dyn TaskNode>> {
 
 struct FlowData<N> {
     nodes: Vec<FlowNode<N>>,
-    connections: Vec<FlowConnection>,
-    dependencies: Vec<Vec<PreparedDependency>>,
-    execution_order: Vec<NodeId>,
-    outputs: Vec<FlowOutput>,
-    controls: Vec<crate::ControlEdgeDefinition>,
+    connections: Cow<'static, [FlowConnection]>,
+    dependencies: Cow<'static, [Cow<'static, [crate::FlowDependency]>]>,
+    execution_order: Cow<'static, [NodeId]>,
+    outputs: Cow<'static, [FlowOutput]>,
+    controls: Cow<'static, [crate::ControlEdgeDefinition]>,
     input_schema: crate::WorkflowInputSchema,
     execution_domains: Option<ExecutionDomains>,
 }
@@ -292,21 +293,14 @@ impl<N> Flow<N> {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
-struct PreparedDependency {
-    input: Option<String>,
-    source_node: String,
-    source_output: String,
-}
-
-impl PreparedDependency {
-    fn borrowed(&self) -> crate::ExecutionDependency<'_> {
-        crate::ExecutionDependency {
-            input: self.input.as_deref(),
-            source_node: &self.source_node,
-            source_output: &self.source_output,
-        }
-    }
+/// An immutable compiler-validated task graph without executor state.
+pub struct FlowPlan {
+    pub connections: &'static [FlowConnection],
+    pub dependencies: &'static [Cow<'static, [crate::FlowDependency]>],
+    pub execution_order: &'static [NodeId],
+    pub outputs: &'static [FlowOutput],
+    pub controls: &'static [crate::ControlEdgeDefinition],
+    pub execution_domains: ExecutionDomains,
 }
 
 impl Flow<Option<crate::NodeExecution>> {
@@ -350,7 +344,8 @@ impl Flow<Option<crate::NodeExecution>> {
         let mut nodes: Vec<_> = data.nodes.into_iter().map(Some).collect();
         let ordered = data
             .execution_order
-            .into_iter()
+            .iter()
+            .copied()
             .map(|id| {
                 nodes[id.index()]
                     .take()
@@ -359,17 +354,9 @@ impl Flow<Option<crate::NodeExecution>> {
             .collect();
         let dependencies = data
             .dependencies
+            .into_owned()
             .into_iter()
-            .map(|dependencies| {
-                dependencies
-                    .into_iter()
-                    .map(|dependency| crate::StreamDependency {
-                        input: dependency.input,
-                        source_node: dependency.source_node,
-                        source_output: dependency.source_output,
-                    })
-                    .collect()
-            })
+            .map(Cow::into_owned)
             .collect();
         crate::PreparedStream::new(execution, ordered, dependencies, outputs)
     }
@@ -596,11 +583,11 @@ impl<N> Flow<N> {
         let mut flow = Self {
             inner: Arc::new(FlowData {
                 nodes,
-                connections: resolved_connections,
-                dependencies: Vec::new(),
-                execution_order: resolved_order,
-                outputs: resolved_outputs,
-                controls: Vec::new(),
+                connections: resolved_connections.into(),
+                dependencies: Vec::new().into(),
+                execution_order: resolved_order.into(),
+                outputs: resolved_outputs.into(),
+                controls: Vec::new().into(),
                 input_schema: crate::WorkflowInputSchema::default(),
                 execution_domains: None,
             }),
@@ -613,7 +600,7 @@ impl<N> Flow<N> {
         mut self,
         controls: Vec<crate::ControlEdgeDefinition>,
     ) -> Result<Self, FlowBuildError> {
-        if self.inner.controls == controls {
+        if self.inner.controls.as_ref() == controls.as_slice() {
             return Ok(self);
         }
         let positions: BTreeMap<_, _> = self
@@ -656,7 +643,7 @@ impl<N> Flow<N> {
             );
         }
         let has_prepared_domains = self.inner.execution_domains.is_some();
-        self.data_mut().controls = controls;
+        self.data_mut().controls = controls.into();
         self.prepare_execution();
         if has_prepared_domains {
             let execution_domains = self.build_execution_domains();
@@ -682,26 +669,30 @@ impl<N> Flow<N> {
             })
             .collect();
         let mut incoming = vec![Vec::new(); self.inner.nodes.len()];
-        for edge in &self.inner.connections {
+        for edge in self.inner.connections.iter() {
             let source = &self.inner.nodes[edge.from_node.index()];
             let target = &self.inner.nodes[edge.to_node.index()];
-            incoming[positions[target.definition_id.as_str()]].push(PreparedDependency {
+            incoming[positions[target.definition_id.as_str()]].push(crate::FlowDependency {
                 input: Some(edge.to_input.clone()),
-                source_node: source.definition_id.to_string(),
+                source_node: source.definition_id.to_string().into(),
                 source_output: edge.from_output.clone(),
             });
         }
-        for edge in &self.inner.controls {
-            incoming[positions[edge.to_node.as_str()]].push(PreparedDependency {
+        for edge in self.inner.controls.iter() {
+            incoming[positions[edge.to_node.as_str()]].push(crate::FlowDependency {
                 input: None,
-                source_node: edge.from_node.to_string(),
+                source_node: edge.from_node.to_string().into(),
                 source_output: edge.from_output.clone(),
             });
         }
         for dependencies in &mut incoming {
             dependencies.sort();
         }
-        self.data_mut().dependencies = incoming;
+        self.data_mut().dependencies = incoming
+            .into_iter()
+            .map(Cow::Owned)
+            .collect::<Vec<_>>()
+            .into();
     }
 
     fn build_execution_domains(&self) -> ExecutionDomains {
@@ -719,8 +710,8 @@ impl<N> Flow<N> {
             .collect();
         let mut edges = Vec::new();
         for (target, dependencies) in self.inner.dependencies.iter().enumerate() {
-            for dependency in dependencies {
-                if let Some(&source) = positions.get(dependency.source_node.as_str()) {
+            for dependency in dependencies.iter() {
+                if let Some(&source) = positions.get(dependency.source_node.as_ref()) {
                     edges.push((source, target));
                 }
             }
@@ -757,6 +748,22 @@ impl<N> Flow<N> {
 }
 
 impl Flow {
+    /// Binds task instances to a compiler-validated plan without constructing a graph.
+    pub fn from_plan(nodes: Vec<TaskFlowNode>, plan: &'static FlowPlan) -> Self {
+        Self {
+            inner: Arc::new(FlowData {
+                nodes,
+                connections: Cow::Borrowed(plan.connections),
+                dependencies: Cow::Borrowed(plan.dependencies),
+                execution_order: Cow::Borrowed(plan.execution_order),
+                outputs: Cow::Borrowed(plan.outputs),
+                controls: Cow::Borrowed(plan.controls),
+                input_schema: crate::WorkflowInputSchema::default(),
+                execution_domains: Some(plan.execution_domains.clone()),
+            }),
+        }
+    }
+
     pub fn node(&self, id: &NodeId) -> Option<&dyn TaskNode> {
         self.inner
             .nodes
@@ -833,14 +840,14 @@ impl Flow {
         };
         self.execute_domains(domains, state, worker_limit)?;
         let mut workflow_outputs = FlowOutputs::new();
-        for output in &self.inner.outputs {
+        for output in self.inner.outputs.iter() {
             let id = self.inner.nodes[output.node_id.index()]
                 .definition_id
                 .as_str();
             if let Some(value) =
                 state.select_output(&output.name, id, &output.port, output.optional)?
             {
-                workflow_outputs.insert(output.name.clone(), value);
+                workflow_outputs.insert(output.name.clone().into_owned(), value);
             }
         }
         Ok(workflow_outputs)
@@ -910,7 +917,7 @@ impl Flow {
                 if domain.first_position > state.scope_exit_cutoff() {
                     scheduled[domain_id] = true;
                     completed_domains[domain_id] = true;
-                    for successor in &domain.successors {
+                    for successor in domain.successors.iter() {
                         let successor = &plan.domains()[*successor];
                         if !scheduled[successor.id]
                             && successor
@@ -985,7 +992,7 @@ impl Flow {
                             .map(|node_id| &self.inner.nodes[node_id.index()]),
                     );
                     completed_domains[domain_id] = true;
-                    for successor in &domain.successors {
+                    for successor in domain.successors.iter() {
                         let successor = &plan.domains()[*successor];
                         if !scheduled[successor.id]
                             && successor
@@ -1062,7 +1069,7 @@ impl Flow {
         domain: &ExecutionDomain,
         state: &mut crate::ExecutionContext,
     ) -> Result<(), crate::WorkflowRunError> {
-        for &position in &domain.positions {
+        for &position in domain.positions.iter() {
             if position > state.scope_exit_cutoff() {
                 break;
             }
@@ -1073,7 +1080,7 @@ impl Flow {
                 node,
                 self.inner.dependencies[position]
                     .iter()
-                    .map(PreparedDependency::borrowed),
+                    .map(crate::FlowDependency::borrowed),
                 state,
             );
             state.replace_execution_position(previous_position);
@@ -1088,7 +1095,7 @@ impl Flow {
     fn visible_outputs(&self, plan: &ExecutionDomains, domain_id: usize) -> BTreeSet<String> {
         let mut visible = BTreeSet::new();
         for &ancestor in plan.ancestor_domains(domain_id) {
-            for node_id in &plan.domains()[ancestor].nodes {
+            for node_id in plan.domains()[ancestor].nodes.iter() {
                 let node = &self.inner.nodes[node_id.index()];
                 visible.extend(
                     node.metadata
@@ -1415,9 +1422,9 @@ mod tests {
 
     fn selected_output(name: &str, node: &str, port: &str) -> WorkflowOutputDefinition {
         WorkflowOutputDefinition {
-            name: name.to_owned(),
+            name: name.to_owned().into(),
             node: node.into(),
-            port: port.to_owned(),
+            port: port.to_owned().into(),
             optional: false,
         }
     }

@@ -360,7 +360,7 @@ fn failed_validation_preserves_prior_lock_and_executable() {
     fs::write(&definition, invalid.to_string()).unwrap();
     let failed = compile(&definition, &target, None);
     assert!(!failed.status.success());
-    assert!(String::from_utf8_lossy(&failed.stderr).contains("runner validation"));
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("Cargo build"));
     assert_eq!(fs::read(definition.with_extension("lock")).unwrap(), lock);
     assert_eq!(fs::read(&target).unwrap(), executable);
 }

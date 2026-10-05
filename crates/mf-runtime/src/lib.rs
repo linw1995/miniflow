@@ -35,8 +35,8 @@ pub use definition::{
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
 pub use flow::{
-    Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowRuntime, NodeId,
-    RuntimeOptions, TaskFlowNode,
+    Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowPlan, FlowRuntime,
+    NodeId, RuntimeOptions, TaskFlowNode,
 };
 pub use iteration::{
     ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
@@ -47,7 +47,7 @@ pub use loop_node::{
     loop_variable_types, prepared_loop_assign, prepared_loop_assign_from_json, prepared_loop_exit,
     prepared_loop_source_from_json, prepared_loop_source_types, prepared_scope_source,
 };
-pub use message_domain::StreamDomain;
+pub use message_domain::{MessageDomains, StreamDomain};
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
@@ -75,7 +75,9 @@ pub use stream_instance::{
     StreamMetrics, StreamOptions, StreamOutput, StreamSummary,
 };
 pub use stream_io::{StreamStdio, TextInput};
-pub use stream_plan::{PreparedStream, StreamBuildError, StreamDependency, StreamPlan};
+pub use stream_plan::{
+    FlowDependency, PreparedStream, StreamBuildError, StreamDependency, StreamPlan,
+};
 pub use subgraph::PreparedSubgraph;
 
 pub use value::{ValueKind, ValueRef};

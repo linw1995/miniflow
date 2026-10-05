@@ -6,6 +6,7 @@ use crate::{
     WorkflowOutputDefinition,
 };
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
+use std::borrow::Cow;
 
 type OperatorStates = Vec<Option<NodeExecution>>;
 
@@ -17,29 +18,31 @@ pub enum StreamBuildError {
     WorkflowInputs { source: crate::WorkflowInputError },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StreamDependency {
-    pub input: Option<String>,
-    pub source_node: String,
-    pub source_output: String,
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FlowDependency {
+    pub input: Option<Cow<'static, str>>,
+    pub source_node: Cow<'static, str>,
+    pub source_output: Cow<'static, str>,
 }
 
-impl StreamDependency {
+impl FlowDependency {
     pub fn borrowed(&self) -> ExecutionDependency<'_> {
         ExecutionDependency {
             input: self.input.as_deref(),
-            source_node: &self.source_node,
-            source_output: &self.source_output,
+            source_node: self.source_node.as_ref(),
+            source_output: self.source_output.as_ref(),
         }
     }
 }
 
+pub type StreamDependency = FlowDependency;
+
 pub struct StreamPlan {
     execution: StreamExecution,
     nodes: Vec<FlowNode<Option<Box<dyn TaskNode>>>>,
-    dependencies: Vec<Vec<StreamDependency>>,
+    dependencies: Cow<'static, [Cow<'static, [StreamDependency]>]>,
     domains: MessageDomains,
-    outputs: Vec<WorkflowOutputDefinition>,
+    outputs: Cow<'static, [WorkflowOutputDefinition]>,
     input_schema: crate::WorkflowInputSchema,
 }
 
@@ -73,10 +76,48 @@ impl PreparedStream {
                 message: "stream nodes and dependencies must have equal lengths"
             }
         );
+        let domains = MessageDomains::new(&nodes, &dependencies, &outputs)?;
+        Self::assemble(
+            execution,
+            nodes,
+            dependencies
+                .into_iter()
+                .map(Cow::Owned)
+                .collect::<Vec<_>>()
+                .into(),
+            domains,
+            outputs.into(),
+        )
+    }
+
+    /// Binds stream executors to compiler-validated dependencies and message ownership.
+    pub fn from_plan(
+        execution: StreamExecution,
+        nodes: Vec<FlowNode>,
+        dependencies: &'static [Cow<'static, [StreamDependency]>],
+        domains: MessageDomains,
+        outputs: &'static [WorkflowOutputDefinition],
+    ) -> Result<Self, StreamBuildError> {
+        Self::assemble(
+            execution,
+            nodes,
+            Cow::Borrowed(dependencies),
+            domains,
+            Cow::Borrowed(outputs),
+        )
+    }
+
+    fn assemble(
+        execution: StreamExecution,
+        nodes: Vec<FlowNode>,
+        dependencies: Cow<'static, [Cow<'static, [StreamDependency]>]>,
+        domains: MessageDomains,
+        outputs: Cow<'static, [WorkflowOutputDefinition]>,
+    ) -> Result<Self, StreamBuildError> {
         let input_schema = crate::WorkflowInputSchema::from_nodes(
             nodes
                 .iter()
-                .zip(&dependencies)
+                .zip(dependencies.iter())
                 .map(|(node, dependencies)| (node, dependencies.is_empty())),
             |node, input| {
                 nodes
@@ -90,7 +131,6 @@ impl PreparedStream {
             },
         )
         .context(WorkflowInputsSnafu)?;
-        let domains = MessageDomains::new(&nodes, &dependencies, &outputs)?;
         let mut operator_states = Vec::with_capacity(nodes.len());
         let nodes = nodes
             .into_iter()
@@ -154,6 +194,9 @@ impl StreamPlan {
     }
     pub fn dependencies(&self, node: usize) -> &[StreamDependency] {
         &self.dependencies[node]
+    }
+    pub fn message_domains(&self) -> &MessageDomains {
+        &self.domains
     }
     pub fn domains(&self) -> &[StreamDomain] {
         self.domains.domains()
@@ -230,7 +273,7 @@ impl StreamPlan {
         context: &mut crate::ExecutionContext,
     ) -> Result<(), crate::WorkflowRunError> {
         let domain = self.execution_domain(id);
-        for &position in &domain.positions {
+        for &position in domain.positions.iter() {
             if context.cancellation().failure().is_some() {
                 break;
             }

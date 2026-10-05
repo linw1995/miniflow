@@ -692,6 +692,16 @@ fn main() {
             .args(["build", "--offline", "--locked"])
             .output()
             .unwrap();
+        if matches!(
+            &memory,
+            Err(mf_compiler::WorkflowExecutionError::Preparation { .. })
+        ) {
+            assert!(
+                !build.status.success(),
+                "invalid construction reached a runnable artifact"
+            );
+            continue;
+        }
         assert!(
             build.status.success(),
             "{}",

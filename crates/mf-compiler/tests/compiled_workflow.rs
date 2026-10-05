@@ -209,12 +209,12 @@ fn code_generation_escapes_definition_strings() {
     }))
     .unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
-    let artifacts = compile_definition(&definition, &registry)
-        .unwrap()
-        .generate_artifacts()
-        .unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let artifacts = plan.generate_artifacts().unwrap();
+    let layouts = plan.generate_execution_plans(&registry).unwrap();
 
     syn::parse_file(&artifacts.rust_source).unwrap();
+    syn::parse_file(&layouts).unwrap();
     assert!(artifacts.rust_source.contains("source\\\"quoted\\n"));
-    assert!(artifacts.rust_source.contains("answer\\\"quoted"));
+    assert!(layouts.contains("answer\\\"quoted"));
 }

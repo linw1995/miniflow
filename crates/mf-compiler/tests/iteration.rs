@@ -784,9 +784,9 @@ fn generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node(
     value["edges"][0]["from_output"] = json!("values");
     fs::write(&path, value.to_string()).unwrap();
     let error = compile_project(&request).unwrap_err();
-    assert_eq!(error.stage, "runner validation");
-    let validation = Command::new(common::runner_executable(&build, "release"))
-        .arg("--validate")
+    assert_eq!(error.stage, "Cargo build");
+    let validation = mf_compiler::cargo_command(&build)
+        .args(["build", "--offline", "--locked", "--release"])
         .output()
         .unwrap();
     assert!(!validation.status.success());

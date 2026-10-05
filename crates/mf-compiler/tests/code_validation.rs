@@ -71,7 +71,7 @@ fn checks_inactive_code_and_known_input_conflicts() {
 }
 
 #[test]
-fn runner_validation_rejects_inactive_code_without_replacing_output() {
+fn build_rejects_inactive_code_without_replacing_output() {
     let root = tempfile::tempdir().unwrap();
     let definition = root.path().join("flow.json");
     let output = root.path().join("runner");
@@ -99,13 +99,12 @@ fn runner_validation_rejects_inactive_code_without_replacing_output() {
     let lock = fs::read(definition.with_extension("lock")).unwrap();
     fs::write(&definition, graph("missing + 1").to_string()).unwrap();
     let error = compile_project(&request).unwrap_err();
-    assert_eq!(error.stage, "runner validation");
+    assert_eq!(error.stage, "Cargo build");
     assert_eq!(fs::read(&output).unwrap(), installed);
     assert_eq!(fs::read(definition.with_extension("lock")).unwrap(), lock);
 
-    let executable = common::runner_executable(&build, "release");
-    let validation = Command::new(&executable)
-        .arg("--validate")
+    let validation = mf_compiler::cargo_command(&build)
+        .args(["build", "--offline", "--locked", "--release"])
         .output()
         .unwrap();
     assert!(!validation.status.success());

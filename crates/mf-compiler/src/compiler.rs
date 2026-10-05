@@ -736,7 +736,7 @@ fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCom
 fn control_error(edge: &crate::ControlEdgeDefinition, message: &str) -> WorkflowCompileError {
     WorkflowCompileError::InvalidControlEdge {
         from_node: edge.from_node.clone(),
-        from_output: edge.from_output.clone(),
+        from_output: edge.from_output.to_string(),
         to_node: edge.to_node.clone(),
         message: message.into(),
     }
@@ -1133,7 +1133,7 @@ pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription,
             .iter()
             .map(|edge| ControlEdge {
                 from_node: edge.from_node.to_string(),
-                from_output: edge.from_output.clone(),
+                from_output: edge.from_output.to_string(),
                 to_node: edge.to_node.to_string(),
             })
             .collect(),
@@ -1184,7 +1184,7 @@ fn describe_loop_bodies(
                 .iter()
                 .map(|edge| ControlEdge {
                     from_node: edge.from_node.to_string(),
-                    from_output: edge.from_output.clone(),
+                    from_output: edge.from_output.to_string(),
                     to_node: edge.to_node.to_string(),
                 })
                 .collect(),
@@ -1296,7 +1296,11 @@ fn bind_subgraph_node(
                         .find(|port| port.name == output.port)
                 })
                 .expect("validated body output");
-            crate::PortSpec::owned(&output.name, port.value_type.clone(), !output.optional)
+            crate::PortSpec::owned(
+                output.name.as_ref(),
+                port.value_type.clone(),
+                !output.optional,
+            )
         })
         .collect();
     let identities = body

@@ -32,6 +32,15 @@ pub struct GeneratedWorkflowArtifacts {
 
 #[derive(Debug, Snafu)]
 pub enum PlanError {
+    #[snafu(transparent)]
+    Compilation {
+        #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
+        source: Box<crate::WorkflowCompileError>,
+    },
+    #[snafu(transparent)]
+    Construction {
+        source: mf_runtime::WorkflowBuildError,
+    },
     #[snafu(display("invalid streaming plan: {source}"))]
     Stream {
         #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
@@ -219,7 +228,7 @@ impl CompiledWorkflow {
 
         let mut output_names = BTreeSet::new();
         for output in &self.definition.outputs {
-            if !output_names.insert(output.name.as_str()) {
+            if !output_names.insert(output.name.as_ref()) {
                 return DuplicateOutputNameSnafu {
                     name: output.name.clone(),
                 }
@@ -233,6 +242,8 @@ impl CompiledWorkflow {
             }
         }
         let generated = quote! {
+            include!(concat!(env!("OUT_DIR"), "/flow-plans.rs"));
+
             pub fn prepare_workflow(
                 registry: &mf_runtime::NodeRegistry,
                 mut observation: Option<&mut mf_runtime::RunObservation>,
@@ -315,51 +326,24 @@ fn generate_stream_artifacts(
     let order = &plan.execution_order;
     let (preparations, _, _) = generate_scope(definition, order, "stream", &[], None, None, false)?;
     let nodes = (0..order.len()).map(|index| format_ident!("node_stream_{index}"));
-    let edges = definition.edges.iter().map(|edge| {
-        let from_node = LitStr::new(edge.from_node.as_str(), Span::call_site());
-        let from_output = LitStr::new(&edge.from_output, Span::call_site());
-        let to_node = LitStr::new(edge.to_node.as_str(), Span::call_site());
-        let to_input = LitStr::new(&edge.to_input, Span::call_site());
-        quote! { mf_runtime::EdgeDefinition {
-            from_node: #from_node.into(), from_output: #from_output.to_owned(),
-            to_node: #to_node.into(), to_input: #to_input.to_owned(),
-        } }
-    });
-    let order_ids = order.iter().map(|id| {
-        let id = LitStr::new(id.as_str(), Span::call_site());
-        quote! { #id.into() }
-    });
-    let outputs = definition.outputs.iter().map(|output| {
-        let name = LitStr::new(&output.name, Span::call_site());
-        let node = LitStr::new(output.node.as_str(), Span::call_site());
-        let port = LitStr::new(&output.port, Span::call_site());
-        let optional = output.optional;
-        quote! { mf_runtime::WorkflowOutputDefinition { name: #name.into(), node: #node.into(), port: #port.into(), optional: #optional } }
-    });
-    let controls = definition.control_edges.iter().map(|edge| {
-        let from_node = LitStr::new(edge.from_node.as_str(), Span::call_site());
-        let from_output = LitStr::new(&edge.from_output, Span::call_site());
-        let to_node = LitStr::new(edge.to_node.as_str(), Span::call_site());
-        quote! { mf_runtime::ControlEdgeDefinition {
-            from_node: #from_node.into(), from_output: #from_output.to_owned(), to_node: #to_node.into(),
-        } }
-    });
     let execution = LitStr::new(
         &serde_json::to_string(definition.execution.as_ref().unwrap()).context(SerializeSnafu)?,
         Span::call_site(),
     );
     let generated = quote! {
+        include!(concat!(env!("OUT_DIR"), "/flow-plans.rs"));
+
         pub fn prepare_stream(registry: &mf_runtime::NodeRegistry) -> Result<mf_runtime::PreparedStream, mf_runtime::WorkflowBuildError> {
             use snafu::ResultExt as _;
             let mut observation: Option<&mut mf_runtime::RunObservation> = None;
             #(#preparations)*
-            let flow = mf_runtime::Flow::prepare(
-                vec![#(#nodes),*], vec![#(#edges),*], vec![#(#order_ids),*], vec![#(#outputs),*],
-            )?.with_control_edges(vec![#(#controls),*])?;
             let execution = serde_json::from_str::<mf_runtime::StreamExecution>(#execution)
                 .boxed()
                 .context(mf_runtime::WorkflowMetadataSnafu { definition_id: "<workflow>" })?;
-            Ok(flow.into_stream(execution)?)
+            Ok(mf_runtime::PreparedStream::from_plan(
+                execution, vec![#(#nodes),*], STREAM_DEPENDENCIES,
+                STREAM_MESSAGE_DOMAINS.clone(), STREAM_OUTPUTS,
+            )?)
         }
     };
     let syntax: syn::File = syn::parse2(generated).context(GeneratedSyntaxSnafu)?;
@@ -495,57 +479,22 @@ fn generate_scope(
     let flow_ident = format_ident!("flow_{scope}");
     if build_flow {
         let nodes = node_idents.iter();
-        let edges = definition.edges.iter().map(|edge| {
-            let from_node = LitStr::new(edge.from_node.as_str(), Span::call_site());
-            let from_output = LitStr::new(&edge.from_output, Span::call_site());
-            let to_node = LitStr::new(edge.to_node.as_str(), Span::call_site());
-            let to_input = LitStr::new(&edge.to_input, Span::call_site());
-            quote! { mf_runtime::EdgeDefinition {
-                from_node: #from_node.into(), from_output: #from_output.to_owned(),
-                to_node: #to_node.into(), to_input: #to_input.to_owned(),
-            } }
-        });
-        let order_ids = order.iter().map(|id| {
-            let id = LitStr::new(id.as_str(), Span::call_site());
-            quote! { #id.into() }
-        });
-        let outputs = definition.outputs.iter().map(|output| {
-            let name = LitStr::new(&output.name, Span::call_site());
-            let node = LitStr::new(output.node.as_str(), Span::call_site());
-            let port = LitStr::new(&output.port, Span::call_site());
-            let optional = output.optional;
-            quote! { mf_runtime::WorkflowOutputDefinition {
-                name: #name.to_owned(), node: #node.into(), port: #port.to_owned(), optional: #optional,
-            } }
-        });
-        let controls = definition.control_edges.iter().map(|edge| {
-            let from_node = LitStr::new(edge.from_node.as_str(), Span::call_site());
-            let from_output = LitStr::new(&edge.from_output, Span::call_site());
-            let to_node = LitStr::new(edge.to_node.as_str(), Span::call_site());
-            quote! { mf_runtime::ControlEdgeDefinition {
-                from_node: #from_node.into(), from_output: #from_output.to_owned(), to_node: #to_node.into(),
-            } }
-        });
+        let plan_ident = format_ident!("FLOW_PLAN_{}", scope.to_uppercase());
         let bind_inputs = scope == "root" && definition.version.supports_startup_inputs();
-        let builder_ident = format_ident!("{}_builder", flow_ident);
         let flow_binding = if bind_inputs {
-            quote! { let mut #flow_ident = #builder_ident.into_tasks()?; }
+            quote! { let mut #flow_ident = mf_runtime::Flow::from_plan(
+                vec![#(#nodes.into_task()?),*], &#plan_ident,
+            ); }
         } else {
-            quote! { let #flow_ident = #builder_ident.into_tasks()?; }
+            quote! { let #flow_ident = mf_runtime::Flow::from_plan(
+                vec![#(#nodes.into_task()?),*], &#plan_ident,
+            ); }
         };
-        preparations.push(quote! {
-            let mut #builder_ident = mf_runtime::Flow::prepare(
-                vec![#(#nodes),*], vec![#(#edges),*], vec![#(#order_ids),*], vec![#(#outputs),*],
-            )?;
-            #builder_ident = #builder_ident.with_control_edges(vec![#(#controls),*])?;
-            #flow_binding
-        });
+        preparations.push(flow_binding);
         if bind_inputs {
             preparations.push(quote! { #flow_ident = #flow_ident.with_workflow_inputs()?; });
         }
-        statements.push(quote! {
-            runtime.execute_in_context(&#flow_ident, state)
-        });
+        statements.push(quote! { runtime.execute_in_context(&#flow_ident, state) });
     }
     Ok((preparations, statements, flow_ident))
 }
@@ -717,4 +666,268 @@ fn subgraph_preparation(
             .boxed()
             .context(mf_runtime::WorkflowMetadataSnafu { definition_id: #outer_id })?;
     })
+}
+
+#[cfg(feature = "codegen")]
+impl CompiledWorkflow {
+    /// Emits immutable layouts while linked providers are available to the generated Cargo build.
+    pub fn generate_execution_plans(
+        &self,
+        registry: &mf_runtime::NodeRegistry,
+    ) -> Result<String, PlanError> {
+        let (nodes, order) = crate::compiler::prepare_definition(&self.definition, registry)?;
+        if order != self.execution_order {
+            return InvalidExecutionOrderSnafu.fail();
+        }
+        let flow = mf_runtime::Flow::prepare(
+            nodes,
+            self.definition.edges.clone(),
+            order.clone(),
+            self.definition.outputs.clone(),
+        )
+        .and_then(|flow| flow.with_control_edges(self.definition.control_edges.clone()))
+        .map_err(mf_runtime::WorkflowBuildError::from)?;
+        let mut layouts = Vec::new();
+        if let Some(execution) = &self.definition.execution {
+            let prepared = flow
+                .into_stream(execution.clone())
+                .map_err(mf_runtime::WorkflowBuildError::from)?;
+            let message = prepared.plan().message_domains();
+            let domains = message.domains().iter().map(|domain| {
+                let source = match domain.source {
+                    Some(source) => quote! { Some(#source) },
+                    None => quote! { None },
+                };
+                let steps = domain.steps.iter();
+                quote! { mf_runtime::StreamDomain {
+                    source: #source, steps: std::borrow::Cow::Borrowed(&[#(#steps),*]),
+                } }
+            });
+            let outputs = self.definition.outputs.iter().map(output_definition_tokens);
+            let output_domains = (0..order.len()).map(|index| message.output_domain(index));
+            let selected = match message.selected_domain() {
+                Some(selected) => quote! { Some(#selected) },
+                None => quote! { None },
+            };
+            let executions = domain_tokens(message.execution_domains());
+            let by_message = (0..message.domains().len()).map(|id| {
+                let values = message.execution_domains_for_message(id);
+                quote! { std::borrow::Cow::Borrowed(&[#(#values),*]) }
+            });
+            let by_execution = (0..message.execution_domains().len())
+                .map(|id| message.message_domain_for_execution(id));
+            let dependencies = owned_dependency_tokens(&self.definition, &order);
+            layouts.push(quote! {
+                pub static STREAM_DEPENDENCIES: &[std::borrow::Cow<'static, [mf_runtime::FlowDependency]>] = &[#(#dependencies),*];
+                pub static STREAM_OUTPUTS: &[mf_runtime::WorkflowOutputDefinition] = &[#(#outputs),*];
+                pub static STREAM_MESSAGE_DOMAINS: mf_runtime::MessageDomains = mf_runtime::MessageDomains::from_parts(
+                    std::borrow::Cow::Borrowed(&[#(#domains),*]),
+                    std::borrow::Cow::Borrowed(&[#(#output_domains),*]),
+                    #selected, #executions,
+                    std::borrow::Cow::Borrowed(&[#(#by_message),*]),
+                    std::borrow::Cow::Borrowed(&[#(#by_execution),*]),
+                );
+            });
+            collect_body_layouts(&self.definition, &order, "stream", &mut layouts)?;
+        } else {
+            let flow = flow
+                .into_tasks()
+                .map_err(mf_runtime::WorkflowBuildError::from)?;
+            layouts.push(task_layout_tokens(
+                &self.definition,
+                &order,
+                "root",
+                flow.execution_domains(),
+            ));
+            collect_body_layouts(&self.definition, &order, "root", &mut layouts)?;
+        }
+        let syntax: syn::File =
+            syn::parse2(quote! { #(#layouts)* }).context(GeneratedSyntaxSnafu)?;
+        Ok(prettyplease::unparse(&syntax))
+    }
+}
+
+#[cfg(feature = "codegen")]
+fn owned_dependency_tokens(
+    definition: &WorkflowDefinition,
+    order: &[DefinitionId],
+) -> Vec<TokenStream> {
+    let incoming = crate::compiler::incoming_dependencies(definition);
+    order
+        .iter()
+        .map(|id| {
+            let mut dependencies = incoming.get(id.as_str()).cloned().unwrap_or_default();
+            dependencies.sort();
+            let values = dependencies.iter().map(|dependency| {
+                let source = LitStr::new(dependency.source_node, Span::call_site());
+                let output = LitStr::new(dependency.source_output, Span::call_site());
+                let input = match dependency.input {
+                    Some(input) => {
+                        let input = LitStr::new(input, Span::call_site());
+                        quote! { Some(std::borrow::Cow::Borrowed(#input)) }
+                    }
+                    None => quote! { None },
+                };
+                quote! { mf_runtime::FlowDependency {
+                    input: #input,
+                    source_node: std::borrow::Cow::Borrowed(#source),
+                    source_output: std::borrow::Cow::Borrowed(#output),
+                } }
+            });
+            quote! { std::borrow::Cow::Borrowed(&[#(#values),*]) }
+        })
+        .collect()
+}
+
+#[cfg(feature = "codegen")]
+fn domain_tokens(plan: &mf_runtime::ExecutionDomains) -> TokenStream {
+    let domains = plan.domains().iter().map(|domain| {
+        let id = domain.id;
+        let first = domain.first_position;
+        let nodes = domain.positions.iter().map(|index| {
+            quote! { mf_runtime::NodeId::new(#index) }
+        });
+        let positions = domain.positions.iter();
+        let predecessors = domain.predecessors.iter();
+        let successors = domain.successors.iter();
+        quote! { mf_runtime::ExecutionDomain {
+            id: #id, first_position: #first,
+            nodes: std::borrow::Cow::Borrowed(&[#(#nodes),*]),
+            positions: std::borrow::Cow::Borrowed(&[#(#positions),*]),
+            predecessors: std::borrow::Cow::Borrowed(&[#(#predecessors),*]),
+            successors: std::borrow::Cow::Borrowed(&[#(#successors),*]),
+        } }
+    });
+    let ancestors = (0..plan.len()).map(|id| {
+        let values = plan.ancestor_domains(id);
+        quote! { std::borrow::Cow::Borrowed(&[#(#values),*]) }
+    });
+    quote! { mf_runtime::ExecutionDomains::from_parts(
+        std::borrow::Cow::Borrowed(&[#(#domains),*]),
+        std::borrow::Cow::Borrowed(&[#(#ancestors),*]),
+    ) }
+}
+
+#[cfg(feature = "codegen")]
+fn output_definition_tokens(output: &mf_runtime::WorkflowOutputDefinition) -> TokenStream {
+    let name = LitStr::new(&output.name, Span::call_site());
+    let node = LitStr::new(output.node.as_str(), Span::call_site());
+    let port = LitStr::new(&output.port, Span::call_site());
+    let optional = output.optional;
+    quote! { mf_runtime::WorkflowOutputDefinition {
+        name: std::borrow::Cow::Borrowed(#name),
+        node: mf_runtime::DefinitionId::from_static(#node),
+        port: std::borrow::Cow::Borrowed(#port), optional: #optional,
+    } }
+}
+
+#[cfg(feature = "codegen")]
+fn task_layout_tokens(
+    definition: &WorkflowDefinition,
+    order: &[DefinitionId],
+    scope: &str,
+    domains: &mf_runtime::ExecutionDomains,
+) -> TokenStream {
+    let ident = format_ident!("FLOW_PLAN_{}", scope.to_uppercase());
+    let indices: BTreeMap<_, _> = order
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect();
+    let dependencies = owned_dependency_tokens(definition, order);
+    let connections = definition.edges.iter().map(|edge| {
+        let from = indices[&edge.from_node];
+        let to = indices[&edge.to_node];
+        let output = LitStr::new(&edge.from_output, Span::call_site());
+        let input = LitStr::new(&edge.to_input, Span::call_site());
+        quote! { mf_runtime::FlowConnection {
+            from_node: mf_runtime::NodeId::new(#from), to_node: mf_runtime::NodeId::new(#to),
+            from_output: std::borrow::Cow::Borrowed(#output), to_input: std::borrow::Cow::Borrowed(#input),
+        } }
+    });
+    let node_order = (0..order.len()).map(|index| quote! { mf_runtime::NodeId::new(#index) });
+    let outputs = definition.outputs.iter().map(|output| {
+        let index = indices[&output.node];
+        let name = LitStr::new(&output.name, Span::call_site());
+        let port = LitStr::new(&output.port, Span::call_site());
+        let optional = output.optional;
+        quote! { mf_runtime::FlowOutput {
+            name: std::borrow::Cow::Borrowed(#name), node_id: mf_runtime::NodeId::new(#index),
+            port: std::borrow::Cow::Borrowed(#port), optional: #optional,
+        } }
+    });
+    let controls = definition.control_edges.iter().map(|edge| {
+        let from = LitStr::new(edge.from_node.as_str(), Span::call_site());
+        let to = LitStr::new(edge.to_node.as_str(), Span::call_site());
+        let output = LitStr::new(&edge.from_output, Span::call_site());
+        quote! { mf_runtime::ControlEdgeDefinition {
+            from_node: mf_runtime::DefinitionId::from_static(#from),
+            from_output: std::borrow::Cow::Borrowed(#output), to_node: mf_runtime::DefinitionId::from_static(#to),
+        } }
+    });
+    let domains = domain_tokens(domains);
+    quote! { pub static #ident: mf_runtime::FlowPlan = mf_runtime::FlowPlan {
+        connections: &[#(#connections),*], dependencies: &[#(#dependencies),*],
+        execution_order: &[#(#node_order),*], outputs: &[#(#outputs),*],
+        controls: &[#(#controls),*], execution_domains: #domains,
+    }; }
+}
+
+#[cfg(feature = "codegen")]
+fn collect_body_layouts(
+    definition: &WorkflowDefinition,
+    order: &[DefinitionId],
+    scope: &str,
+    layouts: &mut Vec<TokenStream>,
+) -> Result<(), PlanError> {
+    for (index, id) in order.iter().enumerate() {
+        let node = definition
+            .nodes
+            .iter()
+            .find(|node| &node.id == id)
+            .expect("validated node ID");
+        let body = if let Some(loop_definition) = &node.loop_definition {
+            crate::loops::body_definition(&loop_definition.body, &definition.dependencies)
+        } else if node.kind == ITERATION_KIND {
+            let invalid = |message| {
+                IterationSnafu {
+                    definition_id: id.clone(),
+                    message,
+                }
+                .build()
+            };
+            let config = parse_config(node).map_err(invalid)?;
+            body_definition(definition, &config).map_err(invalid)?
+        } else {
+            continue;
+        };
+        let body_order = crate::compiler::structural_order_graph(&body)?;
+        let indices: BTreeMap<_, _> = body_order
+            .iter()
+            .enumerate()
+            .map(|(index, id)| (id.as_str(), index))
+            .collect();
+        let incoming = crate::compiler::incoming_dependencies(&body);
+        let mut edges = Vec::new();
+        for (target, id) in body_order.iter().enumerate() {
+            for dependency in incoming.get(id.as_str()).into_iter().flatten() {
+                edges.push((indices[dependency.source_node], target));
+            }
+        }
+        let node_order: Vec<_> = (0..body_order.len()).map(mf_runtime::NodeId::new).collect();
+        let domains = mf_runtime::ExecutionDomains::partition(
+            &node_order,
+            &edges,
+            &vec![false; body_order.len()],
+        );
+        let body_scope = format!("{scope}_{index}");
+        layouts.push(task_layout_tokens(
+            &body,
+            &body_order,
+            &body_scope,
+            &domains,
+        ));
+        collect_body_layouts(&body, &body_order, &body_scope, layouts)?;
+    }
+    Ok(())
 }

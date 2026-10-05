@@ -257,7 +257,9 @@ a new domain. Nodes and selected outputs cannot join different domains. Initial 
 activation source, and nested synchronous bodies remain task-only.
 
 Embedded node construction returns `WorkflowBuildError`, preserving configuration and factory error sources.
-Generated task workflows prepare a Flow before invoking execution functions; those functions accept the Flow
+Generated Cargo builds link the same provider packages and features to determine static executor boundaries.
+Provider validation happens before the executable is installed. Launch initializes node state and attaches the
+compiled graph tables without constructing a graph. Generated execution functions accept the prepared Flow
 and return `WorkflowRunError`. `FlowRuntime` only executes prepared plans. Compiler orchestration helpers expose
 preparation and execution failures through separate variants of `WorkflowExecutionError`.
 
