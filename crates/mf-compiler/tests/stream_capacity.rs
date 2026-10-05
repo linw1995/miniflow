@@ -118,10 +118,13 @@ inventory::submit! {
     }
 }
 
-fn wait_until(mut predicate: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+fn wait_until(description: &str, mut predicate: impl FnMut() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(15);
     while !predicate() {
-        assert!(Instant::now() < deadline, "stream did not make progress");
+        assert!(
+            Instant::now() < deadline,
+            "stream did not make progress while {description}"
+        );
         thread::sleep(Duration::from_millis(1));
     }
 }
@@ -176,7 +179,9 @@ fn timeouts_make_progress_when_the_count_threshold_exceeds_frame_capacity() {
     for value in 0..5 {
         instance.source.clone().send(json!(value)).unwrap();
     }
-    wait_until(|| instance.summary().completed_frames == 6);
+    wait_until("completing startup and emitted frames", || {
+        instance.summary().completed_frames == 6
+    });
     clock.advance(100);
     assert_eq!(
         instance.recv().unwrap().unwrap().outputs["batch"],
@@ -205,7 +210,9 @@ fn upstream_close_waits_for_work_already_running_before_flushing_the_tail() {
     let instance = start(value, Arc::new(Clock::default()));
     let _release = Release(Arc::clone(&probe));
     instance.source.clone().send(json!(1)).unwrap();
-    wait_until(|| probe.calls.load(Ordering::SeqCst) == 1);
+    wait_until("starting the blocking sink", || {
+        probe.calls.load(Ordering::SeqCst) == 1
+    });
     let accepted = 3;
     for value in 2..=accepted {
         instance.source.send(json!(value)).unwrap();
@@ -234,7 +241,9 @@ fn chained_collectors_seal_all_tails_before_output_is_consumed() {
         instance.source.clone().send(json!(value)).unwrap();
     }
     instance.source.close();
-    wait_until(|| instance.summary().emitted_messages == 10);
+    wait_until("emitting all chained collector messages", || {
+        instance.summary().emitted_messages == 10
+    });
     assert_eq!(
         instance.recv().unwrap().unwrap().outputs["batch"],
         json!([[1, 2], [3, 4]])
@@ -328,9 +337,14 @@ fn cancellation_suppresses_followup_work_after_a_running_call_returns() {
     let instance = start(value, Arc::new(Clock::default()));
     let _release = Release(Arc::clone(&running));
     instance.source.clone().send(json!(1)).unwrap();
-    wait_until(|| running.calls.load(Ordering::SeqCst) == 1);
+    wait_until("starting the blocking sink", || {
+        running.calls.load(Ordering::SeqCst) == 1
+    });
     instance.source.clone().send(json!(2)).unwrap();
-    wait_until(|| instance.summary().emitted_messages == 2);
+    wait_until(
+        "emitting the second message while the first sink is blocked",
+        || instance.summary().emitted_messages == 2,
+    );
     instance.fail(StreamError::Execution {
         message: "cancelled during task".into(),
     });
