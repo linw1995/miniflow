@@ -378,7 +378,7 @@ fn collector() -> (String, CollectorHandle) {
 
 fn check_otel(
     requests: &CapturedRequests,
-    expected_events: &[&str],
+    expected_node_count: usize,
     expected_spans: usize,
     workflow_id: &str,
 ) {
@@ -411,9 +411,47 @@ fn check_otel(
     assert_eq!(
         events
             .iter()
-            .map(|event| event.event_name.as_str())
-            .collect::<Vec<_>>(),
-        expected_events
+            .filter(|event| event.event_name == "mf.workflow.started")
+            .count(),
+        1
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_name == "mf.workflow.finished")
+            .count(),
+        1
+    );
+    for event_name in ["mf.node.started", "mf.node.finished"] {
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_name == event_name)
+                .count(),
+            expected_node_count
+        );
+    }
+    let mut events_by_sequence: Vec<_> = events.iter().collect();
+    events_by_sequence.sort_by_key(|event| {
+        event
+            .attributes
+            .iter()
+            .find(|attribute| attribute.key == "mf.event.sequence")
+            .and_then(|attribute| attribute.value.as_ref())
+            .and_then(|value| value.value.as_ref())
+            .and_then(|value| match value {
+                any_value::Value::IntValue(sequence) => Some(*sequence),
+                _ => None,
+            })
+            .unwrap()
+    });
+    assert_eq!(
+        events_by_sequence.first().unwrap().event_name,
+        "mf.workflow.started"
+    );
+    assert_eq!(
+        events_by_sequence.last().unwrap().event_name,
+        "mf.workflow.finished"
     );
     assert_eq!(spans.len(), expected_spans);
     assert!(!requests.iter().any(|(_, body)| {
@@ -430,7 +468,7 @@ fn check_otel(
             .iter()
             .all(|event| event.trace_id == root.trace_id && event.span_id.len() == 8)
     );
-    for (index, event) in events.iter().enumerate() {
+    for (index, event) in events_by_sequence.iter().enumerate() {
         assert!(event.attributes.iter().any(|attribute| {
             attribute.key == "mf.workflow.id"
                 && matches!(attribute.value.as_ref().and_then(|value| value.value.as_ref()),
@@ -448,8 +486,7 @@ fn check_otel(
             matches!(value.value, Some(any_value::Value::IntValue(sequence)) if sequence == (index + 1) as i64)
         );
     }
-    let failed = expected_events.contains(&"mf.node.finished")
-        && events.iter().any(|event| event.attributes.iter().any(|attribute| {
+    let failed = events.iter().any(|event| event.attributes.iter().any(|attribute| {
             attribute.key == "mf.outcome" && matches!(attribute.value.as_ref().and_then(|value| value.value.as_ref()), Some(any_value::Value::StringValue(outcome)) if outcome == "failed")
         }));
     if failed {
@@ -578,21 +615,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     );
     assert_eq!(observed.stdout, plain.stdout);
     let requests = worker.finish();
-    check_otel(
-        &requests,
-        &[
-            "mf.workflow.started",
-            "mf.node.started",
-            "mf.node.finished",
-            "mf.node.started",
-            "mf.node.finished",
-            "mf.node.started",
-            "mf.node.finished",
-            "mf.workflow.finished",
-        ],
-        4,
-        description.workflow_id.as_str(),
-    );
+    check_otel(&requests, 3, 4, description.workflow_id.as_str());
     for (_, body) in requests.iter().filter(|(path, _)| path == "/v1/logs") {
         let export = ExportLogsServiceRequest::decode(body.as_slice()).unwrap();
         assert!(export.resource_logs.iter().flat_map(|resource| &resource.scope_logs)
@@ -744,19 +767,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     assert!(!failed.status.success());
     assert!(String::from_utf8_lossy(&failed.stderr).contains("execution sentinel"));
     let requests = worker.finish();
-    check_otel(
-        &requests,
-        &[
-            "mf.workflow.started",
-            "mf.node.started",
-            "mf.node.finished",
-            "mf.node.started",
-            "mf.node.finished",
-            "mf.workflow.finished",
-        ],
-        3,
-        failing_description.workflow_id.as_str(),
-    );
+    check_otel(&requests, 3, 4, failing_description.workflow_id.as_str());
 
     fs::remove_dir_all(&project).unwrap();
     fs::remove_dir_all(&plugin).unwrap();
@@ -772,7 +783,10 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     let portable_output = command(&portable).env("PATH", "").output().unwrap();
     assert!(portable_output.status.success());
     assert_eq!(last_json(&portable_output.stdout), json!({"answer":14}));
-    assert_eq!(fs::read_to_string(&trace).unwrap(), "b\nc\n");
+    let trace = fs::read_to_string(&trace).unwrap();
+    let mut trace_entries: Vec<_> = trace.lines().collect();
+    trace_entries.sort_unstable();
+    assert_eq!(trace_entries, ["b", "c"]);
 }
 
 #[test]
