@@ -8,7 +8,8 @@ pub struct ExecutionDomain {
     pub id: usize,
     /// Flow node IDs in validated topological order.
     pub nodes: Vec<NodeId>,
-    pub(crate) positions: Vec<usize>,
+    /// Positions corresponding to the domain's nodes in the Flow execution order.
+    pub positions: Vec<usize>,
     /// Domain IDs whose outputs must commit before this domain can start.
     pub predecessors: Vec<usize>,
     /// Domain IDs that become eligible after this domain completes.
@@ -25,11 +26,9 @@ pub struct ExecutionDomains {
 }
 
 impl ExecutionDomains {
-    pub(crate) fn partition(
-        order: &[NodeId],
-        edges: &[(usize, usize)],
-        boundaries: &[bool],
-    ) -> Self {
+    /// Partitions a validated topological order, with edges indexed by position.
+    /// Nodes marked as boundaries form their own domains.
+    pub fn partition(order: &[NodeId], edges: &[(usize, usize)], boundaries: &[bool]) -> Self {
         assert_eq!(order.len(), boundaries.len());
         let mut predecessors = vec![BTreeSet::new(); order.len()];
         let mut successors = vec![BTreeSet::new(); order.len()];

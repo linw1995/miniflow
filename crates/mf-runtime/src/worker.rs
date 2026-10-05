@@ -45,7 +45,8 @@ struct WorkerState<Job> {
     capacity: usize,
 }
 
-pub(crate) struct WorkerHandle<Job> {
+/// A cloneable submission handle that does not keep its worker pool alive.
+pub struct WorkerHandle<Job> {
     state: Weak<WorkerState<Job>>,
     handler: Weak<WorkerHandler<Job>>,
     worker_count: usize,
@@ -70,14 +71,15 @@ impl<Job: Send + 'static> std::fmt::Debug for WorkerHandle<Job> {
     }
 }
 
-pub(crate) struct WorkerJob(Option<Box<dyn FnOnce() + Send + 'static>>);
+/// An owned synchronous task for a runtime worker.
+pub struct WorkerJob(Option<Box<dyn FnOnce() + Send + 'static>>);
 
 impl WorkerJob {
-    pub(crate) fn new(run: impl FnOnce() + Send + 'static) -> Self {
+    pub fn new(run: impl FnOnce() + Send + 'static) -> Self {
         Self(Some(Box::new(run)))
     }
 
-    pub(crate) fn run(mut self) {
+    pub fn run(mut self) {
         if let Some(run) = self.0.take() {
             run();
         }
@@ -144,7 +146,7 @@ impl<Job: Send + 'static> WorkerPool<Job> {
         self.handle().try_submit(job)
     }
 
-    pub(crate) fn handle(&self) -> WorkerHandle<Job> {
+    pub fn handle(&self) -> WorkerHandle<Job> {
         WorkerHandle {
             state: Arc::downgrade(&self.state),
             handler: Arc::downgrade(&self.handler),
@@ -167,11 +169,11 @@ impl<Job> Drop for WorkerPool<Job> {
 }
 
 impl<Job: Send + 'static> WorkerHandle<Job> {
-    pub(crate) fn worker_count(&self) -> usize {
+    pub fn worker_count(&self) -> usize {
         self.worker_count
     }
 
-    pub(crate) fn try_submit(&self, job: Job) -> Result<(), mpsc::TrySendError<Job>> {
+    pub fn try_submit(&self, job: Job) -> Result<(), mpsc::TrySendError<Job>> {
         if self.worker_count == 0 {
             return Err(mpsc::TrySendError::Disconnected(job));
         }
@@ -190,7 +192,8 @@ impl<Job: Send + 'static> WorkerHandle<Job> {
         Ok(())
     }
 
-    pub(crate) fn submit(&self, job: Job) -> Result<(), mpsc::TrySendError<Job>> {
+    /// Waits for queue space, helping queued jobs when called by a worker in this pool.
+    pub fn submit(&self, job: Job) -> Result<(), mpsc::TrySendError<Job>> {
         if self.worker_count == 0 {
             return Err(mpsc::TrySendError::Disconnected(job));
         }
@@ -229,7 +232,7 @@ impl<Job: Send + 'static> WorkerHandle<Job> {
         }
     }
 
-    pub(crate) fn is_current_worker(&self) -> bool {
+    fn is_current_worker(&self) -> bool {
         let Some(state) = self.state.upgrade() else {
             return false;
         };
@@ -237,7 +240,8 @@ impl<Job: Send + 'static> WorkerHandle<Job> {
         CURRENT_WORKER.with(|current| current.get() == worker_id)
     }
 
-    pub(crate) fn help_one(&self) -> bool {
+    /// Executes one queued job on the current worker; callers outside this pool do no work.
+    pub fn help_one(&self) -> bool {
         if !self.is_current_worker() {
             return false;
         }
@@ -266,7 +270,7 @@ impl<Job: Send + 'static> WorkerHandle<Job> {
         }
     }
 
-    pub(crate) fn is_active(&self) -> bool {
+    pub fn is_active(&self) -> bool {
         let Some(state) = self.state.upgrade() else {
             return false;
         };
@@ -275,7 +279,10 @@ impl<Job: Send + 'static> WorkerHandle<Job> {
 }
 
 impl WorkerHandle<WorkerJob> {
-    pub(crate) fn run_parallel<T, F>(&self, tasks: Vec<F>) -> Vec<T>
+    /// Runs tasks in the pool and returns results in submission order.
+    ///
+    /// All tasks finish before a panic is resumed. An inactive pool runs tasks on the caller.
+    pub fn run_parallel<T, F>(&self, tasks: Vec<F>) -> Vec<T>
     where
         T: Send + 'static,
         F: FnOnce() -> T + Send + 'static,
@@ -325,7 +332,7 @@ impl WorkerHandle<WorkerJob> {
     }
 }
 
-pub(crate) type RuntimeWorkerHandle = WorkerHandle<WorkerJob>;
+pub type RuntimeWorkerHandle = WorkerHandle<WorkerJob>;
 
 #[cfg(test)]
 mod tests {

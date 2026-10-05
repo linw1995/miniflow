@@ -78,7 +78,7 @@ pub use stream_plan::{PreparedStream, StreamBuildError, StreamDependency, Stream
 pub use subgraph::PreparedSubgraph;
 
 pub use value::{ValueKind, ValueRef};
-pub use worker::{WorkerPool, WorkerPoolError};
+pub use worker::{RuntimeWorkerHandle, WorkerHandle, WorkerJob, WorkerPool, WorkerPoolError};
 
 pub use snapshot::{
     NodeSnapshot, SNAPSHOT_VERSION, Snapshot, SnapshotEntry, SnapshotOutcome, SnapshotRecord,

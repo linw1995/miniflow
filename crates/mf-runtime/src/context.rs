@@ -232,15 +232,15 @@ impl ExecutionContext {
         self.observation = Some(observation);
     }
 
-    pub(crate) fn configure_worker_limit(&mut self, limit: NonZeroUsize) {
+    pub fn configure_worker_limit(&mut self, limit: NonZeroUsize) {
         self.worker_limit = limit;
     }
 
-    pub(crate) fn set_worker_handle(&mut self, handle: RuntimeWorkerHandle) {
+    pub fn set_worker_handle(&mut self, handle: RuntimeWorkerHandle) {
         self.worker_handle = Some(handle);
     }
 
-    pub(crate) fn worker_handle(&self) -> Option<RuntimeWorkerHandle> {
+    pub fn worker_handle(&self) -> Option<RuntimeWorkerHandle> {
         self.worker_handle
             .as_ref()
             .filter(|handle| handle.is_active())
@@ -278,11 +278,11 @@ impl ExecutionContext {
         Ok(result)
     }
 
-    pub(crate) fn replace_execution_position(&mut self, position: Option<usize>) -> Option<usize> {
+    pub fn replace_execution_position(&mut self, position: Option<usize>) -> Option<usize> {
         std::mem::replace(&mut self.current_position, position)
     }
 
-    pub(crate) fn scope_exit_cutoff(&self) -> usize {
+    pub fn scope_exit_cutoff(&self) -> usize {
         self.scope_exit_cutoff.load(Ordering::Acquire)
     }
 
@@ -295,17 +295,14 @@ impl ExecutionContext {
         Ok(context)
     }
 
-    pub(crate) fn fork_domain_with_visible_outputs(
-        &self,
-        visible_outputs: &BTreeSet<String>,
-    ) -> Self {
+    pub fn fork_domain_with_visible_outputs(&self, visible_outputs: &BTreeSet<String>) -> Self {
         self.fork_domain_with_observation_and_visible_outputs(
             self.observation.clone(),
             visible_outputs,
         )
     }
 
-    pub(crate) fn fork_domain_with_observation_and_visible_outputs(
+    pub fn fork_domain_with_observation_and_visible_outputs(
         &self,
         observation: Option<RunObservation>,
         visible_outputs: &BTreeSet<String>,
@@ -317,7 +314,7 @@ impl ExecutionContext {
         context
     }
 
-    pub(crate) fn fork_domain_with_observation(&self, observation: Option<RunObservation>) -> Self {
+    pub fn fork_domain_with_observation(&self, observation: Option<RunObservation>) -> Self {
         Self {
             outputs: self.outputs.clone(),
             observation,
@@ -338,7 +335,7 @@ impl ExecutionContext {
         }
     }
 
-    pub(crate) fn merge_domain_outputs<'a, N: 'a>(
+    pub fn merge_domain_outputs<'a, N: 'a>(
         &mut self,
         source: &Self,
         nodes: impl IntoIterator<Item = &'a FlowNode<N>>,
@@ -577,7 +574,7 @@ impl ExecutionContext {
         }
     }
 
-    pub(crate) fn select_observation_failure(&mut self, error: &WorkflowRunError) {
+    pub fn select_observation_failure(&mut self, error: &WorkflowRunError) {
         let Some(observation) = self.observation.as_mut() else {
             return;
         };

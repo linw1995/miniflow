@@ -170,10 +170,7 @@ impl StreamPlan {
     pub fn message_domain_for_execution(&self, id: usize) -> usize {
         self.domains.message_domain_for_execution(id)
     }
-    pub(crate) fn visible_outputs_for_execution(
-        &self,
-        id: usize,
-    ) -> std::collections::BTreeSet<String> {
+    pub fn visible_outputs_for_execution(&self, id: usize) -> std::collections::BTreeSet<String> {
         let message_domain = self.message_domain_for_execution(id);
         let mut visible_nodes = std::collections::BTreeSet::new();
         for &ancestor in self.execution_domains().ancestor_domains(id) {
