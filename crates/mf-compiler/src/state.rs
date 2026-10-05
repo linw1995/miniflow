@@ -1,6 +1,6 @@
 use snafu::{ResultExt, Snafu};
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::{self, File, OpenOptions, TryLockError},
     io::{self, Write},
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
@@ -11,9 +11,11 @@ pub enum StateError {
     #[snafu(display("could not update build state {path:?}: {source}"))]
     Io { path: PathBuf, source: io::Error },
     #[snafu(display(
-        "build state is busy or cannot be locked at {path:?}; retry after the active build exits: {message}"
+        "build state is busy or cannot be locked at {path:?}; retry after the active build exits: {source}"
     ))]
-    Lock { path: PathBuf, message: String },
+    Lock { path: PathBuf, source: TryLockError },
+    #[snafu(display("invalid lock guard at {path:?}: lock guard must not be a symbolic link"))]
+    InvalidGuard { path: PathBuf },
 }
 
 pub struct BuildGuard {
@@ -23,10 +25,10 @@ impl BuildGuard {
     pub fn acquire(path: &Path) -> Result<Self, StateError> {
         match fs::symlink_metadata(path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
-                return Err(StateError::Lock {
+                return InvalidGuardSnafu {
                     path: path.to_owned(),
-                    message: "lock guard must not be a symbolic link".into(),
-                });
+                }
+                .fail();
             }
             Ok(_) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -47,9 +49,8 @@ impl BuildGuard {
         let file = options.open(path).context(IoSnafu {
             path: path.to_owned(),
         })?;
-        file.try_lock().map_err(|error| StateError::Lock {
+        file.try_lock().context(LockSnafu {
             path: path.to_owned(),
-            message: error.to_string(),
         })?;
         Ok(Self { _file: file })
     }

@@ -8,7 +8,8 @@ use mf_runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{collections::BTreeMap, error::Error, fmt};
+use snafu::{IntoError, ResultExt, Snafu};
+use std::{collections::BTreeMap, error::Error};
 use value::{Budget, MAX_JSON_BYTES, cel_to_json, json_to_cel};
 
 pub const KIND: &str = "builtin.code";
@@ -22,27 +23,52 @@ struct Config {
     code: Value,
 }
 
-#[derive(Debug)]
-struct InvalidConfig(String);
-
-impl fmt::Display for InvalidConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
+#[derive(Debug, Snafu)]
+#[snafu(display("{message}"))]
+struct InvalidConfig {
+    message: String,
 }
 
-impl Error for InvalidConfig {}
+#[derive(Debug, Snafu)]
+enum CodeError {
+    #[snafu(display("output `{output}`: {source}"))]
+    Compile {
+        output: String,
+        source: cel_core::CompileError,
+    },
+    #[snafu(display("output `{output}`: {source}"))]
+    Depth {
+        output: String,
+        source: mf_runtime::TypeDepthError,
+    },
+    #[snafu(display("could not measure inputs: {source}"))]
+    MeasureInputs { source: serde_json::Error },
+    #[snafu(display("output `{output}`: {source}"))]
+    MeasureOutput {
+        output: String,
+        source: serde_json::Error,
+    },
+    #[snafu(display("output `{output}`: {source}"))]
+    Evaluate {
+        output: String,
+        source: cel_core::EvalError,
+    },
+}
 
 fn invalid(message: impl Into<String>) -> NodeBuildError {
-    NodeBuildError::FactoryFailed {
-        source: Box::new(InvalidConfig(message.into())),
-    }
+    mf_runtime::NodeFactoryFailedSnafu.into_error(Box::new(
+        InvalidConfigSnafu {
+            message: message.into(),
+        }
+        .build(),
+    ) as Box<dyn Error + Send + Sync>)
 }
 
 fn execution_error(message: impl Into<String>) -> NodeExecutionError {
-    NodeExecutionError::ExecutionFailed {
+    mf_runtime::NodeExecutionFailedSnafu {
         message: message.into(),
     }
+    .build()
 }
 
 fn parse_type(value: &Value) -> Result<ValueType, String> {
@@ -163,7 +189,9 @@ impl TaskNode for CodeNode {
         _ctx: &mut mf_runtime::ExecutionContext,
     ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
         let input_size = json_size(&inputs)
-            .map_err(|error| execution_error(format!("could not measure inputs: {error}")))?;
+            .context(MeasureInputsSnafu)
+            .map_err(Box::<dyn Error + Send + Sync>::from)
+            .context(mf_runtime::NodePluginFailedSnafu)?;
         if input_size > MAX_JSON_BYTES {
             return Err(execution_error(format!(
                 "inputs exceed the {MAX_JSON_BYTES}-byte JSON limit"
@@ -191,14 +219,21 @@ impl TaskNode for CodeNode {
             let name = port.name.as_ref();
             let result = self.programs[name].eval(&activation);
             if let CelValue::Error(error) = &result {
-                return Err(execution_error(format!("output `{name}`: {error}")));
+                return Err(error.as_ref().clone())
+                    .context(EvaluateSnafu { output: name })
+                    .map_err(Box::<dyn Error + Send + Sync>::from)
+                    .context(mf_runtime::NodePluginFailedSnafu);
             }
             let converted = cel_to_json(&result, &port.value_type, &mut budget, "", 1)
                 .map_err(|error| execution_error(format!("output `{name}`: {error}")))?;
             let encoded_name = json_size(name)
-                .map_err(|error| execution_error(format!("output `{name}`: {error}")))?;
+                .context(MeasureOutputSnafu { output: name })
+                .map_err(Box::<dyn Error + Send + Sync>::from)
+                .context(mf_runtime::NodePluginFailedSnafu)?;
             let encoded_value = json_size(&converted)
-                .map_err(|error| execution_error(format!("output `{name}`: {error}")))?;
+                .context(MeasureOutputSnafu { output: name })
+                .map_err(Box::<dyn Error + Send + Sync>::from)
+                .context(mf_runtime::NodePluginFailedSnafu)?;
             output_size += encoded_name + encoded_value + 1 + usize::from(!outputs.is_empty());
             if output_size > MAX_JSON_BYTES {
                 return Err(execution_error(format!(
@@ -257,7 +292,9 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
         }
         let ast = env
             .compile(expression)
-            .map_err(|error| invalid(format!("output `{name}`: {error}")))?;
+            .context(CompileSnafu { output: name })
+            .map_err(Box::<dyn Error + Send + Sync>::from)
+            .context(mf_runtime::NodeFactoryFailedSnafu)?;
         // CEL macros can contain internal dynamic types even when the user expression is concrete.
         if uses_explicit_dyn(ast.expr()) {
             return Err(invalid(format!(
@@ -271,10 +308,14 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
             result_type(inferred).map_err(|error| invalid(format!("output `{name}`: {error}")))?;
         value_type
             .check_depth()
-            .map_err(|error| invalid(format!("output `{name}`: {error}")))?;
+            .context(DepthSnafu { output: name })
+            .map_err(Box::<dyn Error + Send + Sync>::from)
+            .context(mf_runtime::NodeFactoryFailedSnafu)?;
         let program = env
             .program(&ast)
-            .map_err(|error| invalid(format!("output `{name}`: {error}")))?;
+            .context(CompileSnafu { output: name })
+            .map_err(Box::<dyn Error + Send + Sync>::from)
+            .context(mf_runtime::NodeFactoryFailedSnafu)?;
         outputs.push(PortSpec::owned(name, value_type, true));
         programs.insert(name.clone(), program);
     }
@@ -295,6 +336,39 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn find_source<'a, T: Error + 'static>(error: &'a (dyn Error + 'static)) -> Option<&'a T> {
+        let mut current = Some(error);
+        while let Some(error) = current {
+            if let Some(source) = error.downcast_ref::<T>() {
+                return Some(source);
+            }
+            current = error.source();
+        }
+        None
+    }
+
+    #[test]
+    fn preserves_typed_cel_compile_and_evaluation_errors() {
+        let config = |expression| {
+            serde_json::json!({
+                "language": "cel", "inputs": {"x": "int"}, "code": {"result": expression}
+            })
+        };
+        let error = factory(config("unknown + 1")).err().unwrap();
+        assert!(find_source::<cel_core::CompileError>(&error).is_some());
+        let prepared = factory(config("x / 0")).unwrap();
+        let error = prepared
+            .execution
+            .as_task_node()
+            .unwrap()
+            .execute(
+                Inputs::from([("x".into(), 1.into())]),
+                &mut mf_runtime::ExecutionContext::default(),
+            )
+            .unwrap_err();
+        assert!(find_source::<cel_core::EvalError>(&error).is_some());
+        assert!(error.to_string().contains("output `result`"));
+    }
     #[test]
     fn registers_one_code_kind_and_infers_instance_ports() {
         let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();

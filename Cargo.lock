@@ -1398,6 +1398,7 @@ dependencies = [
  "mf-runtime",
  "serde",
  "serde_json",
+ "snafu",
 ]
 
 [[package]]

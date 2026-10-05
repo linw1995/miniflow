@@ -2,7 +2,7 @@ use clap::{Args, Parser, Subcommand};
 use mf_compiler::{
     CompileRequest, PipelineError, RunnerOptions, SupportPackages, compile_project_with_options,
 };
-use snafu::{ResultExt, Snafu};
+use snafu::Snafu;
 #[cfg(feature = "development-support")]
 use std::env;
 use std::io::{self, Write};
@@ -38,10 +38,10 @@ enum Command {
 
 #[derive(Debug, Snafu)]
 enum CliError {
-    #[snafu(display("{source}"))]
+    #[snafu(transparent)]
     Build { source: PipelineError },
     #[cfg(unix)]
-    #[snafu(display("{source}"))]
+    #[snafu(transparent)]
     Run { source: mf_tui::run::RunError },
     #[cfg(not(unix))]
     #[snafu(display("TUI execution is supported on Linux and macOS"))]
@@ -90,14 +90,13 @@ fn run(cli: Cli) -> Result<u8, CliError> {
         } => {
             #[cfg(unix)]
             {
-                mf_tui::run::run_executable_with_options(
+                Ok(mf_tui::run::run_executable_with_options(
                     &executable,
                     &mf_tui::run::RunOptions {
                         inputs,
                         inputs_file,
                     },
-                )
-                .context(RunSnafu)
+                )?)
             }
             #[cfg(not(unix))]
             {
@@ -121,8 +120,7 @@ fn compile(options: CompileOptions) -> Result<(), CliError> {
         &RunnerOptions {
             telemetry: options.telemetry,
         },
-    )
-    .context(BuildSnafu)?;
+    )?;
     Ok(())
 }
 

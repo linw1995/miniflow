@@ -1,6 +1,5 @@
 use crate::compiler::{
-    FlowConstructionSnafu, InvalidStreamSnafu, NonCanonicalPlanOrderSnafu, PreparationSnafu,
-    StreamConstructionSnafu, StreamExecutionSnafu,
+    FlowConstructionSnafu, InvalidStreamSnafu, NonCanonicalPlanOrderSnafu, StreamConstructionSnafu,
 };
 use crate::{CompiledWorkflow, NodeRegistry, WorkflowCompileError, WorkflowExecutionError};
 use mf_runtime::PreparedStream;
@@ -11,16 +10,12 @@ pub fn start_stream(
     registry: &NodeRegistry,
     options: mf_runtime::StreamOptions,
 ) -> Result<mf_runtime::StreamInstance, WorkflowExecutionError> {
-    let prepared = instantiate_stream(plan, registry)
-        .inspect_err(|error| {
-            if let Some(observation) = &options.observation {
-                observation.preparation_failed(error.to_string());
-            }
-        })
-        .context(PreparationSnafu)?;
-    mf_runtime::FlowRuntime::default()
-        .start_stream(prepared, options)
-        .context(StreamExecutionSnafu)
+    let prepared = instantiate_stream(plan, registry).inspect_err(|error| {
+        if let Some(observation) = &options.observation {
+            observation.preparation_failed(error.to_string());
+        }
+    })?;
+    Ok(mf_runtime::FlowRuntime::default().start_stream(prepared, options)?)
 }
 
 pub fn instantiate_stream(

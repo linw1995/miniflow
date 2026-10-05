@@ -52,10 +52,11 @@ pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
 pub use node::{
-    ContextReference, ExecutionFailedSnafu as NodeExecutionFailedSnafu, Inputs, NodeBuildError,
-    NodeExecution, NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration,
-    OutputDerivation, OutputDerivationError, Outputs, PluginFailedSnafu as NodePluginFailedSnafu,
-    PortSpec, PreparedNode, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, ValueType,
+    ContextReference, ExecutionFailedSnafu as NodeExecutionFailedSnafu,
+    FactoryFailedSnafu as NodeFactoryFailedSnafu, Inputs, NodeBuildError, NodeExecution,
+    NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration, OutputDerivation,
+    OutputDerivationError, Outputs, PluginFailedSnafu as NodePluginFailedSnafu, PortSpec,
+    PreparedNode, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, ValueType,
     deserialize_config, output_id,
 };
 pub use number::compare_json_numbers;

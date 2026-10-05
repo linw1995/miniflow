@@ -504,7 +504,7 @@ pub enum NodeBuildError {
     InvalidSubgraph { message: String },
     #[snafu(display("invalid node configuration: {source}"))]
     InvalidConfiguration { source: serde_json::Error },
-    #[snafu(display("node factory failed: {source}"))]
+    #[snafu(display("node factory failed: {source}"), visibility(pub))]
     FactoryFailed {
         source: Box<dyn Error + Send + Sync + 'static>,
     },

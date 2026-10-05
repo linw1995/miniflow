@@ -2,7 +2,7 @@ use crate::{
     BuildGuard, BuildInputs, RunnerOptions, SupportPackages, WorkflowDefinition, atomic_copy,
     plan_definition, validate_runtime_identity, write_dependency_project_with_options,
 };
-use snafu::Snafu;
+use snafu::{IntoError, ResultExt, Snafu};
 use std::{
     env,
     error::Error,
@@ -26,18 +26,19 @@ fn at<T, E: Error + Send + Sync + 'static>(
     project: &Path,
     result: Result<T, E>,
 ) -> Result<T, PipelineError> {
-    result.map_err(|source| PipelineError {
-        stage,
-        project: project.to_owned(),
-        source: Box::new(source),
-    })
+    result
+        .map_err(Box::<dyn Error + Send + Sync>::from)
+        .context(PipelineSnafu {
+            stage,
+            project: project.to_owned(),
+        })
 }
 fn failure(stage: &'static str, project: &Path, message: impl Into<String>) -> PipelineError {
-    PipelineError {
+    PipelineSnafu {
         stage,
         project: project.to_owned(),
-        source: Box::new(io::Error::other(message.into())),
     }
+    .into_error(Box::new(io::Error::other(message.into())) as Box<dyn Error + Send + Sync>)
 }
 
 pub struct CompileRequest<'a> {
@@ -191,7 +192,7 @@ fn build_runner(project: &Path) -> Result<PathBuf, PipelineError> {
     }
     let status = at("Cargo build", project, child.wait())?;
     if let Some(error) = stream_error {
-        return Err(failure("Cargo diagnostics", project, error.to_string()));
+        return at("Cargo diagnostics", project, Err(error));
     }
     if !status.success() {
         return Err(failure(
