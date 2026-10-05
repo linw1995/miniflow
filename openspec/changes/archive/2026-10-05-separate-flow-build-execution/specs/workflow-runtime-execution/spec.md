@@ -18,3 +18,8 @@ FlowRuntime SHALL only accept prepared executable Flows or prepared stream plans
 
 - **WHEN** a workflow contains Loop or Iteration bodies
 - **THEN** their executable plans are constructed before the outer preparation succeeds
+
+#### Scenario: Reject unresolved port references
+
+- **WHEN** a constructor receives a data connection, control dependency, or output selection referencing an undeclared port
+- **THEN** construction fails before execution, including direct Flow and prepared-stream construction APIs

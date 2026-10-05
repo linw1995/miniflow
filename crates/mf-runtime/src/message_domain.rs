@@ -78,6 +78,35 @@ impl MessageDomains {
                         ),
                     }
                 );
+                ensure!(
+                    nodes[source]
+                        .metadata
+                        .ports
+                        .outputs
+                        .iter()
+                        .any(|port| port.name == dependency.source_output),
+                    InvalidPlanSnafu {
+                        message: format!(
+                            "node `{}` has no output `{}`",
+                            dependency.source_node, dependency.source_output
+                        ),
+                    }
+                );
+                if let Some(input) = &dependency.input {
+                    ensure!(
+                        node.metadata
+                            .ports
+                            .inputs
+                            .iter()
+                            .any(|port| port.name == *input),
+                        InvalidPlanSnafu {
+                            message: format!(
+                                "node `{}` has no input `{input}`",
+                                node.definition_id
+                            ),
+                        }
+                    );
+                }
                 incoming_domains.insert(output_domains[source]);
             }
             ensure!(incoming_domains.len() <= 1, {
@@ -158,6 +187,20 @@ impl MessageDomains {
                 .with_context(|| InvalidPlanSnafu {
                     message: format!("unknown selected output node `{}`", output.node),
                 })?;
+            ensure!(
+                nodes[index]
+                    .metadata
+                    .ports
+                    .outputs
+                    .iter()
+                    .any(|port| port.name == output.port),
+                InvalidPlanSnafu {
+                    message: format!(
+                        "selected output `{}` references unknown port `{}.{}`",
+                        output.name, output.node, output.port
+                    ),
+                }
+            );
             let domain = output_domains[index];
             ensure!(
                 selected_domain.is_none_or(|selected| selected == domain),

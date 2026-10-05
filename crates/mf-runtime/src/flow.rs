@@ -4,7 +4,7 @@ use crate::execution_domains::{ExecutionDomain, ExecutionDomains};
 use crate::{Inputs, Outputs};
 use crate::{NodeMetadata, PreparedNode, TaskNode};
 use serde::{Deserialize, Serialize};
-use snafu::Snafu;
+use snafu::{Snafu, ensure};
 use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -246,6 +246,12 @@ pub enum FlowBuildError {
     },
     #[snafu(display("invalid control connection: {message}"))]
     InvalidControlConnection { message: String },
+    #[snafu(display("node `{definition_id}` has no declared {direction} port `{port}`"))]
+    UnknownPort {
+        definition_id: DefinitionId,
+        direction: &'static str,
+        port: String,
+    },
     #[snafu(display("workflow output name `{name}` is selected more than once"))]
     DuplicateOutputName { name: String },
     #[snafu(display("workflow output `{name}` references unknown node `{definition_id}`"))]
@@ -518,6 +524,33 @@ impl<N> Flow<N> {
                 .fail();
             }
 
+            ensure!(
+                nodes[from_node.index()]
+                    .metadata
+                    .ports
+                    .outputs
+                    .iter()
+                    .any(|port| port.name == connection.from_output),
+                UnknownPortSnafu {
+                    definition_id: connection.from_node.clone(),
+                    direction: "output",
+                    port: connection.from_output.clone(),
+                }
+            );
+            ensure!(
+                nodes[to_node.index()]
+                    .metadata
+                    .ports
+                    .inputs
+                    .iter()
+                    .any(|port| port.name == connection.to_input),
+                UnknownPortSnafu {
+                    definition_id: connection.to_node.clone(),
+                    direction: "input",
+                    port: connection.to_input.clone(),
+                }
+            );
+
             resolved_connections.push(FlowConnection::new(
                 from_node,
                 connection.from_output,
@@ -539,6 +572,19 @@ impl<N> Flow<N> {
             if !output_names.insert(output.name.clone()) {
                 return DuplicateOutputNameSnafu { name: output.name }.fail();
             }
+            ensure!(
+                nodes[node_id.index()]
+                    .metadata
+                    .ports
+                    .outputs
+                    .iter()
+                    .any(|port| port.name == output.port),
+                UnknownPortSnafu {
+                    definition_id: output.node.clone(),
+                    direction: "output",
+                    port: output.port.clone(),
+                }
+            );
             resolved_outputs.push(FlowOutput::new(
                 output.name,
                 node_id,
@@ -594,6 +640,20 @@ impl<N> Flow<N> {
             if from >= to || !unique.insert(edge) {
                 return Err(invalid());
             }
+            let source = &self.inner.nodes[self.inner.execution_order[*from].index()];
+            ensure!(
+                source
+                    .metadata
+                    .ports
+                    .outputs
+                    .iter()
+                    .any(|port| port.name == edge.from_output),
+                UnknownPortSnafu {
+                    definition_id: edge.from_node.clone(),
+                    direction: "output",
+                    port: edge.from_output.clone(),
+                }
+            );
         }
         let has_prepared_domains = self.inner.execution_domains.is_some();
         self.data_mut().controls = controls;
