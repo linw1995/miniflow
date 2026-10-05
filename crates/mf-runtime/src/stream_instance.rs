@@ -342,9 +342,7 @@ impl Emitter<'_> {
     /// Wait for queue capacity and transfer one validated result to the runtime.
     /// Failure wakes waiting senders. Success does not imply downstream completion.
     pub fn send(&mut self, result: NodeResult) -> Result<(), NodeExecutionError> {
-        self.admit(result)
-            .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> { Box::new(source) })
-            .context(crate::NodePluginFailedSnafu)
+        Ok(self.admit(result)?)
     }
 
     fn admit(&mut self, result: NodeResult) -> Result<(), StreamError> {

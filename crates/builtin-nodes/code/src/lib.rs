@@ -8,7 +8,7 @@ use mf_runtime::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::{IntoError, ResultExt, Snafu};
+use snafu::{ResultExt, Snafu};
 use std::{collections::BTreeMap, error::Error};
 use value::{Budget, MAX_JSON_BYTES, cel_to_json, json_to_cel};
 
@@ -24,13 +24,9 @@ struct Config {
 }
 
 #[derive(Debug, Snafu)]
-#[snafu(display("{message}"))]
-struct InvalidConfig {
-    message: String,
-}
-
-#[derive(Debug, Snafu)]
-enum CodeError {
+enum CodeBuildError {
+    #[snafu(display("{message}"))]
+    InvalidConfig { message: String },
     #[snafu(display("output `{output}`: {source}"))]
     Compile {
         output: String,
@@ -41,6 +37,16 @@ enum CodeError {
         output: String,
         source: mf_runtime::TypeDepthError,
     },
+}
+
+impl From<CodeBuildError> for NodeBuildError {
+    fn from(source: CodeBuildError) -> Self {
+        Box::<dyn Error + Send + Sync>::from(source).into()
+    }
+}
+
+#[derive(Debug, Snafu)]
+enum CodeExecutionError {
     #[snafu(display("could not measure inputs: {source}"))]
     MeasureInputs { source: serde_json::Error },
     #[snafu(display("output `{output}`: {source}"))]
@@ -55,13 +61,18 @@ enum CodeError {
     },
 }
 
+impl From<CodeExecutionError> for NodeExecutionError {
+    fn from(source: CodeExecutionError) -> Self {
+        Box::<dyn Error + Send + Sync>::from(source).into()
+    }
+}
+
 fn invalid(message: impl Into<String>) -> NodeBuildError {
-    mf_runtime::NodeFactoryFailedSnafu.into_error(Box::new(
-        InvalidConfigSnafu {
-            message: message.into(),
-        }
-        .build(),
-    ) as Box<dyn Error + Send + Sync>)
+    InvalidConfigSnafu {
+        message: message.into(),
+    }
+    .build()
+    .into()
 }
 
 fn execution_error(message: impl Into<String>) -> NodeExecutionError {
@@ -188,10 +199,7 @@ impl TaskNode for CodeNode {
         inputs: Inputs,
         _ctx: &mut mf_runtime::ExecutionContext,
     ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
-        let input_size = json_size(&inputs)
-            .context(MeasureInputsSnafu)
-            .map_err(Box::<dyn Error + Send + Sync>::from)
-            .context(mf_runtime::NodePluginFailedSnafu)?;
+        let input_size = json_size(&inputs).context(MeasureInputsSnafu)?;
         if input_size > MAX_JSON_BYTES {
             return Err(execution_error(format!(
                 "inputs exceed the {MAX_JSON_BYTES}-byte JSON limit"
@@ -219,21 +227,13 @@ impl TaskNode for CodeNode {
             let name = port.name.as_ref();
             let result = self.programs[name].eval(&activation);
             if let CelValue::Error(error) = &result {
-                return Err(error.as_ref().clone())
-                    .context(EvaluateSnafu { output: name })
-                    .map_err(Box::<dyn Error + Send + Sync>::from)
-                    .context(mf_runtime::NodePluginFailedSnafu);
+                Err(error.as_ref().clone()).context(EvaluateSnafu { output: name })?;
             }
             let converted = cel_to_json(&result, &port.value_type, &mut budget, "", 1)
                 .map_err(|error| execution_error(format!("output `{name}`: {error}")))?;
-            let encoded_name = json_size(name)
-                .context(MeasureOutputSnafu { output: name })
-                .map_err(Box::<dyn Error + Send + Sync>::from)
-                .context(mf_runtime::NodePluginFailedSnafu)?;
-            let encoded_value = json_size(&converted)
-                .context(MeasureOutputSnafu { output: name })
-                .map_err(Box::<dyn Error + Send + Sync>::from)
-                .context(mf_runtime::NodePluginFailedSnafu)?;
+            let encoded_name = json_size(name).context(MeasureOutputSnafu { output: name })?;
+            let encoded_value =
+                json_size(&converted).context(MeasureOutputSnafu { output: name })?;
             output_size += encoded_name + encoded_value + 1 + usize::from(!outputs.is_empty());
             if output_size > MAX_JSON_BYTES {
                 return Err(execution_error(format!(
@@ -292,9 +292,7 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
         }
         let ast = env
             .compile(expression)
-            .context(CompileSnafu { output: name })
-            .map_err(Box::<dyn Error + Send + Sync>::from)
-            .context(mf_runtime::NodeFactoryFailedSnafu)?;
+            .context(CompileSnafu { output: name })?;
         // CEL macros can contain internal dynamic types even when the user expression is concrete.
         if uses_explicit_dyn(ast.expr()) {
             return Err(invalid(format!(
@@ -308,14 +306,8 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
             result_type(inferred).map_err(|error| invalid(format!("output `{name}`: {error}")))?;
         value_type
             .check_depth()
-            .context(DepthSnafu { output: name })
-            .map_err(Box::<dyn Error + Send + Sync>::from)
-            .context(mf_runtime::NodeFactoryFailedSnafu)?;
-        let program = env
-            .program(&ast)
-            .context(CompileSnafu { output: name })
-            .map_err(Box::<dyn Error + Send + Sync>::from)
-            .context(mf_runtime::NodeFactoryFailedSnafu)?;
+            .context(DepthSnafu { output: name })?;
+        let program = env.program(&ast).context(CompileSnafu { output: name })?;
         outputs.push(PortSpec::owned(name, value_type, true));
         programs.insert(name.clone(), program);
     }

@@ -69,7 +69,7 @@ impl TextInput {
                 };
             }
             wait_ready(&self.file, false, cancellation)
-                .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> { Box::new(source) })
+                .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
                 .context(InputRecordSnafu { line: self.line })?;
             if let Some(error) = cancellation.failure() {
                 return Err(error);
@@ -80,10 +80,7 @@ impl TextInput {
                 Ok(len) => self.buffered.extend(&bytes[..len]),
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => {
-                    return Err(error)
-                        .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> {
-                            Box::new(source)
-                        })
+                    return Err(Box::<dyn std::error::Error + Send + Sync>::from(error))
                         .context(InputRecordSnafu { line: self.line });
                 }
             }
@@ -103,7 +100,7 @@ impl TextInput {
             record.pop();
         }
         String::from_utf8(record)
-            .map_err(|source| -> Box<dyn std::error::Error + Send + Sync> { Box::new(source) })
+            .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             .context(InputRecordSnafu { line })
     }
 }

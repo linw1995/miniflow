@@ -28,14 +28,8 @@ pub const MAX_LOOP_SCHEDULED_STEPS: i64 = 10_000;
 pub enum ContractError {
     #[snafu(display("invalid observation contract: {message}"))]
     Invalid { message: String },
-    #[snafu(display("invalid observation JSON: {source}"))]
+    #[snafu(display("invalid observation JSON: {source}"), context(false))]
     Json { source: serde_json::Error },
-}
-
-impl From<serde_json::Error> for ContractError {
-    fn from(source: serde_json::Error) -> Self {
-        Self::Json { source }
-    }
 }
 
 fn invalid(message: impl Into<String>) -> ContractError {

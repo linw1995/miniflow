@@ -48,6 +48,12 @@ struct IterationItemFailure {
     source: NodeExecutionError,
 }
 
+impl From<IterationItemFailure> for NodeExecutionError {
+    fn from(source: IterationItemFailure) -> Self {
+        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
+    }
+}
+
 impl IterationNode {
     pub fn new(
         id: impl Into<String>,
@@ -113,10 +119,8 @@ impl IterationNode {
             ]),
         )
         .and_then(|scope| {
-            let (mut outputs, _, _) = state
-                .run_scope(scope, |state| body.execute_in_context(state))
-                .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
-                .context(mf_runtime::NodePluginFailedSnafu)?;
+            let (mut outputs, _, _) =
+                state.run_scope(scope, |state| body.execute_in_context(state))?;
             outputs
                 .remove("result")
                 .ok_or_else(|| NodeExecutionError::ExecutionFailed {
@@ -128,9 +132,7 @@ impl IterationNode {
             let failure = result.as_ref().err().map(ToString::to_string);
             step.finish(failure.as_deref());
         }
-        result
-            .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
-            .context(mf_runtime::NodePluginFailedSnafu)
+        Ok(result?)
     }
 
     fn execute_items(
@@ -180,51 +182,48 @@ impl IterationNode {
                 let completed = Arc::new(Mutex::new(Vec::new()));
                 let stopped = Arc::new(AtomicBool::new(false));
                 let observation = observation.map(Arc::new);
-                parent
-                    .run_parallel(worker_count, |parent| {
-                        (0..worker_count)
-                            .map(|_| {
-                                let queue = Arc::clone(&queue);
-                                let completed = Arc::clone(&completed);
-                                let stopped = Arc::clone(&stopped);
-                                let observation = observation.clone();
-                                let id = self.id.clone();
-                                let on_error = self.on_error;
-                                let body = Arc::clone(&self.body);
-                                let parent = parent.fork_body(None);
-                                move || loop {
-                                    let next = {
-                                        let mut queue = queue.lock().unwrap();
-                                        if stopped.load(Ordering::Acquire) {
-                                            None
-                                        } else {
-                                            queue.pop_front()
-                                        }
-                                    };
-                                    let Some((index, (key, item))) = next else {
-                                        break;
-                                    };
-                                    let result = Self::run_item(
-                                        &id,
-                                        &body,
-                                        item,
-                                        key,
-                                        index,
-                                        observation.as_deref(),
-                                        &parent,
-                                    );
-                                    if result.is_err()
-                                        && matches!(on_error, IterationErrorPolicy::Terminate)
-                                    {
-                                        stopped.store(true, Ordering::Release);
+                parent.run_parallel(worker_count, |parent| {
+                    (0..worker_count)
+                        .map(|_| {
+                            let queue = Arc::clone(&queue);
+                            let completed = Arc::clone(&completed);
+                            let stopped = Arc::clone(&stopped);
+                            let observation = observation.clone();
+                            let id = self.id.clone();
+                            let on_error = self.on_error;
+                            let body = Arc::clone(&self.body);
+                            let parent = parent.fork_body(None);
+                            move || loop {
+                                let next = {
+                                    let mut queue = queue.lock().unwrap();
+                                    if stopped.load(Ordering::Acquire) {
+                                        None
+                                    } else {
+                                        queue.pop_front()
                                     }
-                                    completed.lock().unwrap().push((index, result));
+                                };
+                                let Some((index, (key, item))) = next else {
+                                    break;
+                                };
+                                let result = Self::run_item(
+                                    &id,
+                                    &body,
+                                    item,
+                                    key,
+                                    index,
+                                    observation.as_deref(),
+                                    &parent,
+                                );
+                                if result.is_err()
+                                    && matches!(on_error, IterationErrorPolicy::Terminate)
+                                {
+                                    stopped.store(true, Ordering::Release);
                                 }
-                            })
-                            .collect()
-                    })
-                    .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
-                    .context(mf_runtime::NodePluginFailedSnafu)?;
+                                completed.lock().unwrap().push((index, result));
+                            }
+                        })
+                        .collect()
+                })?;
                 let mut completed = completed.lock().unwrap().drain(..).collect::<Vec<_>>();
                 completed.sort_by_key(|(index, _)| *index);
                 results.extend(completed.into_iter().map(|(_, result)| result));

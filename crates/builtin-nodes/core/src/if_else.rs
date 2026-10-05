@@ -5,7 +5,7 @@ use mf_runtime::{
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use snafu::{IntoError, ResultExt, Snafu};
+use snafu::{ResultExt, Snafu};
 use std::{cmp::Ordering, collections::BTreeSet, error::Error};
 
 pub const KIND: &str = "builtin.if_else";
@@ -52,36 +52,46 @@ fn present_value<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Va
 }
 
 #[derive(Debug, Snafu)]
-#[snafu(display("{message}"))]
-struct InvalidConfig {
-    message: String,
-}
-
-#[derive(Debug, Snafu)]
-enum BranchError {
+enum BranchBuildError {
+    #[snafu(display("{message}"))]
+    InvalidConfig { message: String },
     #[snafu(display("branch `{branch}`: {source}"))]
     Configuration {
         branch: String,
         source: NodeBuildError,
     },
-    #[snafu(display(
-        "branch `{branch}` source `{output}` path `{path}` operator {operator:?}: {source}"
-    ))]
-    Execution {
-        branch: String,
-        output: String,
-        path: String,
-        operator: Operator,
-        source: NodeExecutionError,
-    },
 }
+
+impl From<BranchBuildError> for NodeBuildError {
+    fn from(source: BranchBuildError) -> Self {
+        Box::<dyn Error + Send + Sync>::from(source).into()
+    }
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(display(
+    "branch `{branch}` source `{output}` path `{path}` operator {operator:?}: {source}"
+))]
+struct BranchExecutionError {
+    branch: String,
+    output: String,
+    path: String,
+    operator: Operator,
+    source: NodeExecutionError,
+}
+
+impl From<BranchExecutionError> for NodeExecutionError {
+    fn from(source: BranchExecutionError) -> Self {
+        Box::<dyn Error + Send + Sync>::from(source).into()
+    }
+}
+
 fn invalid(message: impl Into<String>) -> NodeBuildError {
-    mf_runtime::NodeFactoryFailedSnafu.into_error(Box::new(
-        InvalidConfigSnafu {
-            message: message.into(),
-        }
-        .build(),
-    ) as Box<dyn Error + Send + Sync>)
+    InvalidConfigSnafu {
+        message: message.into(),
+    }
+    .build()
+    .into()
 }
 fn execution_error(message: impl Into<String>) -> NodeExecutionError {
     mf_runtime::NodeExecutionFailedSnafu {
@@ -178,15 +188,12 @@ impl TaskNode for IfElse {
                 };
                 condition.evaluate(source).map_err(execution_error)
             })();
-            let matched = result
-                .context(ExecutionSnafu {
-                    branch: &branch.id,
-                    output: &condition.source.output,
-                    path: &condition.source.path,
-                    operator: condition.operator,
-                })
-                .map_err(Box::<dyn Error + Send + Sync>::from)
-                .context(mf_runtime::NodePluginFailedSnafu)?;
+            let matched = result.context(BranchExecutionSnafu {
+                branch: &branch.id,
+                output: &condition.source.output,
+                path: &condition.source.path,
+                operator: condition.operator,
+            })?;
             if matched {
                 selected = &branch.id;
                 break;
@@ -239,10 +246,8 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .unwrap_or_else(|| format!("index {index}"));
-        let branch: Branch = deserialize_config(value)
-            .context(ConfigurationSnafu { branch: label })
-            .map_err(Box::<dyn Error + Send + Sync>::from)
-            .context(mf_runtime::NodeFactoryFailedSnafu)?;
+        let branch: Branch =
+            deserialize_config(value).context(ConfigurationSnafu { branch: label })?;
         let mut bytes = branch.id.bytes();
         let valid = bytes
             .next()

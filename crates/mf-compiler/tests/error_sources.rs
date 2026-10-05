@@ -3,9 +3,9 @@ extern crate mfn_core as _;
 
 use mf_compiler::{
     BuildGuard, CompileRequest, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError,
-    NodeFactory, NodePorts, NodeRegistration, NodeRegistry, NodeResult, PreparedNode,
-    SupportPackages, TaskNode, WorkflowCompileError, WorkflowDefinition, compile_definition,
-    compile_project, instantiate_compiled, plan_definition,
+    NodeFactory, NodePorts, NodeRegistration, NodeRegistry, NodeResult, PortSpec, PreparedNode,
+    SupportPackages, TaskNode, ValueType, WorkflowCompileError, WorkflowDefinition,
+    compile_definition, compile_project, instantiate_compiled, instantiate_stream, plan_definition,
 };
 use serde_json::{Value, json};
 use std::{error::Error, fs, fs::TryLockError, io};
@@ -29,17 +29,22 @@ impl TaskNode for FailWithIo {
         _: Inputs,
         _: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
-        use snafu::ResultExt;
-        Err(Box::new(io::Error::new(
+        Err(Box::<dyn Error + Send + Sync>::from(io::Error::new(
             io::ErrorKind::PermissionDenied,
             "denied by fixture",
-        )) as Box<dyn Error + Send + Sync>)
-        .context(mf_runtime::NodePluginFailedSnafu)
+        ))
+        .into())
     }
 }
 
 fn fail_factory(_: Value) -> Result<PreparedNode, NodeBuildError> {
-    Ok(PreparedNode::new(FailWithIo, NodePorts::default()))
+    Ok(PreparedNode::new(
+        FailWithIo,
+        NodePorts {
+            inputs: Vec::new(),
+            outputs: vec![PortSpec::new("result", ValueType::Any, true)],
+        },
+    ))
 }
 
 inventory::submit! {
@@ -74,6 +79,62 @@ fn loop_failures_preserve_scope_context_and_typed_plugin_sources() {
         find_source::<io::Error>(&error).unwrap().kind(),
         io::ErrorKind::PermissionDenied
     );
+}
+
+#[test]
+fn iteration_failures_preserve_item_context_and_typed_workflow_sources() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for mode in ["sequential", "parallel"] {
+        let definition: WorkflowDefinition = serde_json::from_value(json!({
+            "version": "2026-09-26", "dependencies": {},
+            "nodes": [
+                {"id": "items", "kind": "builtin.constant", "config": {"value": [1]}},
+                {"id": "each", "kind": "builtin.iteration", "config": {
+                    "mode": mode, "body": {
+                        "nodes": [{"id": "fail", "kind": "test.error_source"}],
+                        "result": {"node": "fail", "port": "result"}
+                    }
+                }}
+            ],
+            "edges": [{"from_node": "items", "from_output": "value", "to_node": "each", "to_input": "items"}],
+            "outputs": [{"name": "results", "node": "each", "port": "results"}]
+        })).unwrap();
+        let plan = compile_definition(&definition, &registry).unwrap();
+        let flow = instantiate_compiled(&plan, &registry).unwrap();
+        let error = flow.execute().unwrap_err();
+        assert!(error.to_string().contains("iteration item 0"));
+        assert_eq!(
+            find_source::<io::Error>(&error).unwrap().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+}
+
+#[test]
+fn readline_conversion_preserves_the_stream_input_failure_phase() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("invalid.txt");
+    fs::write(&path, b"\xff\n").unwrap();
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version": "2026-10-03", "execution": {"mode": "stream"}, "dependencies": {},
+        "nodes": [{"id": "read", "kind": "builtin.readline"}],
+        "outputs": [{"name": "text", "node": "read", "port": "line"}]
+    }))
+    .unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let prepared = instantiate_stream(&plan, &registry).unwrap();
+    let instance = prepared
+        .start_with_options(mf_runtime::StreamOptions {
+            arguments: mf_runtime::WorkflowArguments::try_from(json!({"read": {"path": path}}))
+                .unwrap(),
+            ..Default::default()
+        })
+        .unwrap();
+    let error = instance.recv().unwrap_err();
+    assert_eq!(error.phase(), "input");
+    assert!(error.to_string().contains("line 1"));
+    assert_eq!(instance.join().unwrap_err().phase(), "input");
 }
 
 #[test]

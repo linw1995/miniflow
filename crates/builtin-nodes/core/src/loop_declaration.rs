@@ -116,6 +116,12 @@ struct LoopPassFailure {
     source: mf_runtime::WorkflowRunError,
 }
 
+impl From<LoopPassFailure> for NodeExecutionError {
+    fn from(source: LoopPassFailure) -> Self {
+        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
+    }
+}
+
 impl TaskNode for LoopNode {
     fn execute(
         &self,
@@ -157,9 +163,7 @@ impl TaskNode for LoopNode {
                 .context(LoopPassFailureSnafu {
                     node: self.id.clone(),
                     index,
-                })
-                .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
-                .context(mf_runtime::NodePluginFailedSnafu)?;
+                })?;
             variables = updated;
             pass_count = index + 1;
             if exited {
