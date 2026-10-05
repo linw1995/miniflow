@@ -1,52 +1,5 @@
 use crate::NodeId;
 use std::collections::BTreeSet;
-use std::sync::{Condvar, Mutex};
-
-#[derive(Debug)]
-pub struct DomainBudget {
-    limit: usize,
-    active: Mutex<usize>,
-    changed: Condvar,
-}
-
-impl DomainBudget {
-    pub fn new(limit: usize) -> Self {
-        assert!(limit > 0);
-        Self {
-            limit,
-            active: Mutex::new(0),
-            changed: Condvar::new(),
-        }
-    }
-
-    pub fn limit(&self) -> usize {
-        self.limit
-    }
-
-    pub fn try_acquire(&self) -> bool {
-        let mut active = self.active.lock().unwrap();
-        if *active >= self.limit {
-            return false;
-        }
-        *active += 1;
-        true
-    }
-
-    pub fn acquire(&self) {
-        let mut active = self.active.lock().unwrap();
-        while *active >= self.limit {
-            active = self.changed.wait(active).unwrap();
-        }
-        *active += 1;
-    }
-
-    pub fn release(&self) {
-        let mut active = self.active.lock().unwrap();
-        assert!(*active > 0, "domain budget released without a permit");
-        *active -= 1;
-        self.changed.notify_one();
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// A maximal linear region of a workflow graph executed synchronously.

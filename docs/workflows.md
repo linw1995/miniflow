@@ -250,8 +250,9 @@ nodes, data edges, and optional `control_edges` use the ordinary workflow graph 
 one body port for each item. Body node IDs belong to the body scope; outer edges cannot address them. All body nodes
 are constructed and validated before the runner is installed, including when the input collection is empty.
 
-`mode` defaults to `sequential`. `parallel` uses at most ten workers, keeps results in input order, and is suitable
-when body operations are independent. Nodes in the body may be invoked repeatedly and concurrently, so a plugin with
+`mode` defaults to `sequential`. `parallel` schedules up to ten item jobs through the runtime worker pool and keeps
+results in input order. Actual concurrency is also capped by `RuntimeOptions.max_parallel_domains` and, for stream
+instances, `execution.limits.workers`. Parallel mode is suitable when body operations are independent. Nodes in the body may be invoked repeatedly and concurrently, so a plugin with
 mutable internal state must synchronize it or use sequential mode. Each invocation gets fresh context values for
 `%iteration.item`, `%iteration.key`, and `%iteration.index`; body outputs from another item are never visible.
 
@@ -340,7 +341,8 @@ for every predecessor domain. Concurrency is bounded by `RuntimeOptions.max_para
 four. Independent domains may complete side effects in either order, while dependencies and selected output order
 remain stable. In stream workflows, execution domains are distinct from message domains, which continue to define
 message identity and FIFO ordering. Domains inside Loop and Iteration scopes run serially in topological order to
-preserve scope writes and exit behavior; Iteration can still process separate items in parallel.
+preserve scope writes and exit behavior; Iteration can still process separate items in parallel through the same
+bounded worker pool.
 
 ## Workflow startup parameters
 

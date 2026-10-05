@@ -4,10 +4,11 @@ use mf_runtime::{
     PreparedSubgraph, TaskNode, ValueKind, ValueRef, ValueType, deserialize_config,
 };
 use mf_telemetry::observation::{ItemObservation, IterationObservation};
+use snafu::{ResultExt, Snafu};
 use std::{
     collections::{BTreeMap, VecDeque},
     sync::{
-        Mutex,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -37,7 +38,14 @@ pub struct IterationNode {
     mode: IterationMode,
     on_error: IterationErrorPolicy,
     result_type: ValueType,
-    body: PreparedSubgraph,
+    body: Arc<PreparedSubgraph>,
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(display("iteration item {index} failed: {source}"))]
+struct IterationItemFailure {
+    index: usize,
+    source: NodeExecutionError,
 }
 
 impl IterationNode {
@@ -61,7 +69,7 @@ impl IterationNode {
             mode,
             on_error,
             result_type,
-            body,
+            body: Arc::new(body),
         })
     }
 
@@ -82,7 +90,8 @@ impl IterationNode {
     }
 
     fn run_item(
-        &self,
+        id: &str,
+        body: &PreparedSubgraph,
         item: ValueRef,
         key: ValueRef,
         index: usize,
@@ -94,7 +103,7 @@ impl IterationNode {
         let body_observation = step.as_ref().map(ItemObservation::body_observation);
         let mut state = parent.fork_body(body_observation);
         let result = ExecutionScope::new(
-            &self.id,
+            id,
             mf_runtime::ITERATION_INPUT_ID,
             index,
             Outputs::from([("item".into(), item), ("key".into(), key)]),
@@ -105,30 +114,30 @@ impl IterationNode {
         )
         .and_then(|scope| {
             let (mut outputs, _, _) = state
-                .run_scope(scope, |state| self.body.execute_in_context(state))
-                .map_err(|source| NodeExecutionError::PluginFailed {
-                    source: Box::new(source),
-                })?;
+                .run_scope(scope, |state| body.execute_in_context(state))
+                .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
+                .context(mf_runtime::NodePluginFailedSnafu)?;
             outputs
                 .remove("result")
                 .ok_or_else(|| NodeExecutionError::ExecutionFailed {
                     message: "iteration body did not produce `result`".into(),
                 })
         });
+        let result = result.context(IterationItemFailureSnafu { index });
         if let Some(step) = step.as_mut() {
             let failure = result.as_ref().err().map(ToString::to_string);
             step.finish(failure.as_deref());
         }
-        result.map_err(|error| NodeExecutionError::ExecutionFailed {
-            message: format!("iteration item {index} failed: {error}"),
-        })
+        result
+            .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
+            .context(mf_runtime::NodePluginFailedSnafu)
     }
 
     fn execute_items(
         &self,
         mut inputs: Inputs,
         observation: Option<IterationObservation>,
-        parent: &ExecutionContext,
+        parent: &mut ExecutionContext,
     ) -> Result<Outputs, NodeExecutionError> {
         let items = inputs.remove("items");
         let items: Box<dyn ExactSizeIterator<Item = (ValueRef, ValueRef)>> =
@@ -149,7 +158,15 @@ impl IterationNode {
         match self.mode {
             IterationMode::Sequential => {
                 for (index, (key, item)) in items.enumerate() {
-                    results.push(self.run_item(item, key, index, observation.as_ref(), parent));
+                    results.push(Self::run_item(
+                        &self.id,
+                        &self.body,
+                        item,
+                        key,
+                        index,
+                        observation.as_ref(),
+                        parent,
+                    ));
                     if matches!(self.on_error, IterationErrorPolicy::Terminate)
                         && results.last().is_some_and(Result::is_err)
                     {
@@ -159,18 +176,23 @@ impl IterationNode {
             }
             IterationMode::Parallel => {
                 let worker_count = items.len().min(MAX_PARALLEL_ITEMS);
-                let queue = Mutex::new(items.enumerate().collect::<VecDeque<_>>());
-                let completed = Mutex::new(Vec::new());
-                let stopped = AtomicBool::new(false);
-                std::thread::scope(|scope| {
-                    let handles: Vec<_> = (0..worker_count)
-                        .map(|_| {
-                            let queue = &queue;
-                            let completed = &completed;
-                            let stopped = &stopped;
-                            let observation = observation.as_ref();
-                            scope.spawn(move || {
-                                loop {
+                let queue = Arc::new(Mutex::new(items.enumerate().collect::<VecDeque<_>>()));
+                let completed = Arc::new(Mutex::new(Vec::new()));
+                let stopped = Arc::new(AtomicBool::new(false));
+                let observation = observation.map(Arc::new);
+                parent
+                    .run_parallel(worker_count, |parent| {
+                        (0..worker_count)
+                            .map(|_| {
+                                let queue = Arc::clone(&queue);
+                                let completed = Arc::clone(&completed);
+                                let stopped = Arc::clone(&stopped);
+                                let observation = observation.clone();
+                                let id = self.id.clone();
+                                let on_error = self.on_error;
+                                let body = Arc::clone(&self.body);
+                                let parent = parent.fork_body(None);
+                                move || loop {
                                     let next = {
                                         let mut queue = queue.lock().unwrap();
                                         if stopped.load(Ordering::Acquire) {
@@ -182,25 +204,28 @@ impl IterationNode {
                                     let Some((index, (key, item))) = next else {
                                         break;
                                     };
-                                    let result =
-                                        self.run_item(item, key, index, observation, parent);
+                                    let result = Self::run_item(
+                                        &id,
+                                        &body,
+                                        item,
+                                        key,
+                                        index,
+                                        observation.as_deref(),
+                                        &parent,
+                                    );
                                     if result.is_err()
-                                        && matches!(self.on_error, IterationErrorPolicy::Terminate)
+                                        && matches!(on_error, IterationErrorPolicy::Terminate)
                                     {
                                         stopped.store(true, Ordering::Release);
                                     }
                                     completed.lock().unwrap().push((index, result));
                                 }
                             })
-                        })
-                        .collect();
-                    for handle in handles {
-                        if let Err(payload) = handle.join() {
-                            std::panic::resume_unwind(payload);
-                        }
-                    }
-                });
-                let mut completed = completed.into_inner().unwrap();
+                            .collect()
+                    })
+                    .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
+                    .context(mf_runtime::NodePluginFailedSnafu)?;
+                let mut completed = completed.lock().unwrap().drain(..).collect::<Vec<_>>();
                 completed.sort_by_key(|(index, _)| *index);
                 results.extend(completed.into_iter().map(|(_, result)| result));
             }
@@ -232,8 +257,7 @@ impl TaskNode for IterationNode {
         let observation = ctx.observation().and_then(|run| {
             run.iteration_observation(&self.id, &ctx.scope_path(), self.body.nodes.clone())
         });
-        ctx.with_domain_worker_suspended(|ctx| self.execute_items(inputs, observation, ctx))
-            .map(Into::into)
+        self.execute_items(inputs, observation, ctx).map(Into::into)
     }
 }
 

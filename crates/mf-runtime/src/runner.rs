@@ -9,6 +9,8 @@ pub enum WorkflowRunError {
     WorkflowInputs { source: crate::WorkflowInputError },
     #[snafu(transparent)]
     FlowBuild { source: crate::FlowBuildError },
+    #[snafu(transparent)]
+    WorkerPool { source: crate::WorkerPoolError },
     #[snafu(
         display("node `{definition_id}` dependency `{input}`: {source}"),
         visibility(pub)

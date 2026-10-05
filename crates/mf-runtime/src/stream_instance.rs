@@ -1,4 +1,3 @@
-use crate::execution_domains::DomainBudget;
 use crate::{
     EventContext, EventEffects, EventEmission, EventNode, ExecutionContext, FlowOutputs, Inputs,
     NodeEvent, NodeExecution, NodeExecutionError, NodeResult, PreparedStream, StreamExecution,
@@ -15,7 +14,7 @@ use std::{
     collections::{BTreeSet, VecDeque},
     error::Error,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Condvar, Mutex, Weak},
+    sync::{Arc, Condvar, Mutex, Weak, mpsc},
     task::{Wake, Waker},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -315,7 +314,6 @@ struct Shared {
     execution: StreamExecution,
     observation: Option<StreamObservation>,
     cancellation: crate::StreamCancellation,
-    domain_budget: Arc<DomainBudget>,
 }
 
 impl Shared {
@@ -504,7 +502,8 @@ fn workflow_error_node(error: &crate::WorkflowRunError) -> String {
         | crate::WorkflowRunError::NodeConstruction { definition_id, .. }
         | crate::WorkflowRunError::NodeExecution { definition_id, .. } => definition_id.to_string(),
         crate::WorkflowRunError::WorkflowInputs { .. }
-        | crate::WorkflowRunError::FlowBuild { .. } => "<workflow>".to_owned(),
+        | crate::WorkflowRunError::FlowBuild { .. }
+        | crate::WorkflowRunError::WorkerPool { .. } => "<workflow>".to_owned(),
     }
 }
 
@@ -638,14 +637,16 @@ impl PreparedStream {
             .limits
             .workers
             .min(runtime_options.max_parallel_domains.get());
-        let domain_budget = Arc::new(DomainBudget::new(domain_limit));
         let mut context = ExecutionContext::default();
         if let Some(input) = options.stdin {
             context.set_stdin(input);
         }
         let cancellation = context.cancellation();
         context.set_workflow_arguments(options.arguments);
-        context.set_domain_budget(domain_budget.clone());
+        context.configure_worker_limit(
+            std::num::NonZeroUsize::new(domain_limit)
+                .expect("validated stream worker limit is positive"),
+        );
         context
             .bind_workflow_inputs(prepared.input_schema())
             .context(InputValidationSnafu)?;
@@ -706,7 +707,6 @@ impl PreparedStream {
             execution: plan.execution().clone(),
             observation: options.observation,
             cancellation,
-            domain_budget,
         });
         shared
             .cancellation
@@ -715,7 +715,10 @@ impl PreparedStream {
             .clock
             .register_waker(Waker::from(Arc::new(ClockWake(Arc::downgrade(&shared)))));
         let coordinator_shared = Arc::clone(&shared);
-        let workers = start_workers(&shared, &plan, runtime_options)?;
+        let workers = start_workers(&plan, runtime_options)?;
+        if let Some(frame) = shared.state.lock().unwrap().domains[0].frame.as_mut() {
+            frame.context.set_worker_handle(workers.handle());
+        }
         let coordinator = thread::Builder::new()
             .name("workflow-stream".into())
             .spawn(move || {
@@ -835,10 +838,9 @@ impl Drop for StreamInstance {
 }
 
 fn start_workers(
-    shared: &Arc<Shared>,
     plan: &Arc<StreamPlan>,
     runtime_options: crate::RuntimeOptions,
-) -> Result<WorkerPool<DomainJob>, StreamError> {
+) -> Result<WorkerPool<crate::worker::WorkerJob>, StreamError> {
     let active_domains = plan
         .execution_domains()
         .domains()
@@ -856,62 +858,59 @@ fn start_workers(
         .workers
         .min(runtime_options.max_parallel_domains.get())
         .min(active_domains);
-    let shared = Arc::clone(shared);
-    let plan = Arc::clone(plan);
-    WorkerPool::new(count, move |mut job: DomainJob| {
-        let _context = job.context.observation().map(crate::RunObservation::enter);
-        let domain = plan.execution_domain(job.execution_domain);
-        let first_node = domain
-            .nodes
-            .first()
-            .map(|node_id| plan.nodes()[node_id.index()].definition_id.to_string());
-        let execution_result: (Result<(), StreamError>, Option<String>) =
-            if let Some(error) = shared.state.lock().unwrap().failure.clone() {
-                (Err(error), first_node.clone())
-            } else {
-                match catch_unwind(AssertUnwindSafe(|| {
-                    plan.execute_domain(job.execution_domain, &mut job.context)
-                })) {
-                    Ok(result) => {
-                        let failure_node = result.as_ref().err().map(workflow_error_node);
-                        let result = result.context(WorkflowSnafu {
-                            message: job.message,
-                        });
-                        (result, failure_node)
-                    }
-                    Err(payload) => (Err(panic_error(payload)), first_node.clone()),
+    WorkerPool::new(count, crate::worker::WorkerJob::run).context(WorkerStartupSnafu)
+}
+
+fn run_domain_job(mut job: DomainJob, shared: Arc<Shared>, plan: Arc<StreamPlan>) {
+    let _context = job.context.observation().map(crate::RunObservation::enter);
+    let domain = plan.execution_domain(job.execution_domain);
+    let first_node = domain
+        .nodes
+        .first()
+        .map(|node_id| plan.nodes()[node_id.index()].definition_id.to_string());
+    let execution_result: (Result<(), StreamError>, Option<String>) =
+        if let Some(error) = shared.state.lock().unwrap().failure.clone() {
+            (Err(error), first_node.clone())
+        } else {
+            match catch_unwind(AssertUnwindSafe(|| {
+                plan.execute_domain(job.execution_domain, &mut job.context)
+            })) {
+                Ok(result) => {
+                    let failure_node = result.as_ref().err().map(workflow_error_node);
+                    let result = result.context(WorkflowSnafu {
+                        message: job.message,
+                    });
+                    (result, failure_node)
                 }
-            };
-        job.context.release_domain();
-        job.context.set_domain_worker(false);
-        let (result, failure_node) = execution_result;
-        if result.is_err() {
-            job.context = ExecutionContext::default();
-        }
-        shared
-            .state
-            .lock()
-            .unwrap()
-            .completions
-            .push_back(Completion {
-                message: job.message,
-                execution_domain: job.execution_domain,
-                context: job.context,
-                result,
-                failure_node,
-                producer: false,
-                detached: false,
-            });
-        shared.changed.notify_all();
-    })
-    .context(WorkerStartupSnafu)
+                Err(payload) => (Err(panic_error(payload)), first_node.clone()),
+            }
+        };
+    let (result, failure_node) = execution_result;
+    if result.is_err() {
+        job.context = ExecutionContext::default();
+    }
+    shared
+        .state
+        .lock()
+        .unwrap()
+        .completions
+        .push_back(Completion {
+            message: job.message,
+            execution_domain: job.execution_domain,
+            context: job.context,
+            result,
+            failure_node,
+            producer: false,
+            detached: false,
+        });
+    shared.changed.notify_all();
 }
 
 fn coordinate(
     shared: &Arc<Shared>,
     plan: &Arc<StreamPlan>,
     clock: &dyn StreamClock,
-    workers: &WorkerPool<DomainJob>,
+    workers: &WorkerPool<crate::worker::WorkerJob>,
 ) {
     let mut state = shared.state.lock().unwrap();
     loop {
@@ -1005,7 +1004,7 @@ fn coordinate(
 fn tick(
     state: &mut State,
     plan: &Arc<StreamPlan>,
-    workers: &WorkerPool<DomainJob>,
+    workers: &WorkerPool<crate::worker::WorkerJob>,
     clock: &dyn StreamClock,
     shared: &Arc<Shared>,
 ) -> Result<bool, StreamError> {
@@ -1059,7 +1058,6 @@ fn tick(
                 },
             )?;
         context.set_cancellation(shared.cancellation.clone());
-        context.set_domain_budget(shared.domain_budget.clone());
         if let Some(observation) = &shared.observation {
             context.set_frame_observation(observation.frame(stream_message(queued.message)));
         }
@@ -1215,9 +1213,7 @@ fn tick(
                 }
                 frame.execution_domains[execution_domain] = ExecutionDomainState::Complete;
                 progress = true;
-            } else if state.active_workers < workers.worker_count()
-                && shared.domain_budget.try_acquire()
-            {
+            } else if state.active_workers < workers.worker_count() {
                 let observation = shared.observation.as_ref().map(|observation| {
                     if frame.message.domain == 0 {
                         observation.startup_frame()
@@ -1232,25 +1228,29 @@ fn tick(
                         observation,
                         &visible_outputs,
                     );
-                let mut context = context;
-                context.set_domain_worker(true);
-                if workers
-                    .try_submit(DomainJob {
-                        message: frame.message,
-                        execution_domain,
-                        context,
-                    })
-                    .is_err()
-                {
-                    shared.domain_budget.release();
-                    return ExecutionSnafu {
-                        message: "domain worker queue unavailable",
+                let job_shared = Arc::clone(shared);
+                let job_plan = Arc::clone(plan);
+                let job = DomainJob {
+                    message: frame.message,
+                    execution_domain,
+                    context,
+                };
+                match workers.try_submit(crate::worker::WorkerJob::new(move || {
+                    run_domain_job(job, job_shared, job_plan)
+                })) {
+                    Ok(()) => {
+                        frame.execution_domains[execution_domain] = ExecutionDomainState::Running;
+                        state.active_workers += 1;
+                        progress = true;
                     }
-                    .fail();
+                    Err(mpsc::TrySendError::Full(_)) => {}
+                    Err(mpsc::TrySendError::Disconnected(_)) => {
+                        return ExecutionSnafu {
+                            message: "domain worker queue unavailable",
+                        }
+                        .fail();
+                    }
                 }
-                frame.execution_domains[execution_domain] = ExecutionDomainState::Running;
-                state.active_workers += 1;
-                progress = true;
             }
         }
 

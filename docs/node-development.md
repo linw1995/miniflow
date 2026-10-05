@@ -139,7 +139,8 @@ domain run serially, while independent ready domains can run concurrently up to
 `RuntimeOptions.max_parallel_domains` (four by default). Fan-in waits for all predecessor domains. Results and
 context effects become visible to dependent domains only after validation and commit. Within Loop and Iteration
 scopes, domain dispatch stays serial in topological order so scope writes and exits retain their defined order;
-Iteration still parallelizes separate items.
+Iteration still parallelizes separate items through that same bounded worker pool. Workers waiting for nested item work
+help execute queued pool jobs on their existing thread, so nested Iteration work shares the configured worker bound.
 
 ## Migrate an existing plugin
 
@@ -223,8 +224,9 @@ in `execute`. The [external line-producer fixture](../crates/mf-compiler/tests/f
 shows file reading with this contract.
 
 The runtime lazily starts one dedicated worker for each producer that executes, then reuses that worker
-and producer state across inputs. These workers are separate from the ordinary task pool controlled by
-`execution.limits.workers`, so a blocked send cannot consume the worker needed to drain its output.
+and producer state across inputs. These workers are separate from the shared domain and Iteration worker pool
+controlled by the lower of `execution.limits.workers` and `RuntimeOptions.max_parallel_domains`, so a blocked send
+cannot consume the worker needed to drain its output.
 Producer thread count is bounded by the graph's stream-node count. Timers remain coordinator-owned.
 
 An invocation retains its input frame and may read declared ancestor outputs through its context.

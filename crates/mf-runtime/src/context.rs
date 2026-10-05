@@ -1,6 +1,6 @@
 use crate::ValueRef as Value;
-use crate::execution_domains::DomainBudget;
 use crate::runner::{ContextSnafu, DependencySnafu, InputTypeSnafu, NodeExecutionSnafu};
+use crate::worker::{RuntimeWorkerHandle, WorkerJob, WorkerPool};
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use mf_telemetry::{
     event::{FailurePhase, LoopPathEntry, LoopSummary, SkipCause},
@@ -8,7 +8,7 @@ use mf_telemetry::{
 };
 use snafu::ResultExt;
 use std::collections::{BTreeMap, BTreeSet};
-use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
+use std::num::NonZeroUsize;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -124,9 +124,6 @@ pub struct ExecutionContext {
     pending_loop_write: Option<(String, Value)>,
     current_position: Option<usize>,
     scope_exit_cutoff: Arc<AtomicUsize>,
-    domain_budget: Arc<DomainBudget>,
-    domain_budget_configured: bool,
-    domain_worker: bool,
     remaining_steps: StepBudget,
     snapshots: Option<crate::SnapshotRecorder>,
     snapshot_prefix: Vec<LoopPathEntry>,
@@ -134,6 +131,8 @@ pub struct ExecutionContext {
     startup_inputs_bound: bool,
     stdin: Option<std::sync::Arc<std::sync::Mutex<crate::TextInput>>>,
     cancellation: crate::StreamCancellation,
+    worker_handle: Option<RuntimeWorkerHandle>,
+    worker_limit: NonZeroUsize,
 }
 
 impl Default for ExecutionContext {
@@ -146,9 +145,6 @@ impl Default for ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
-            domain_budget: Arc::new(DomainBudget::new(4)),
-            domain_budget_configured: false,
-            domain_worker: false,
             remaining_steps: StepBudget::new(crate::MAX_SCHEDULED_STEPS),
             snapshots: None,
             snapshot_prefix: Vec::new(),
@@ -156,6 +152,8 @@ impl Default for ExecutionContext {
             startup_inputs_bound: false,
             stdin: None,
             cancellation: crate::StreamCancellation::default(),
+            worker_handle: None,
+            worker_limit: crate::RuntimeOptions::default().max_parallel_domains,
         }
     }
 }
@@ -194,13 +192,12 @@ impl ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
-            domain_budget: self.domain_budget.clone(),
-            domain_budget_configured: self.domain_budget_configured,
-            domain_worker: false,
             snapshots: None,
             snapshot_prefix: Vec::new(),
             workflow_arguments: crate::WorkflowArguments::default(),
             startup_inputs_bound: false,
+            worker_handle: self.worker_handle.clone(),
+            worker_limit: self.worker_limit,
         }
     }
 
@@ -235,69 +232,58 @@ impl ExecutionContext {
         self.observation = Some(observation);
     }
 
+    pub(crate) fn configure_worker_limit(&mut self, limit: NonZeroUsize) {
+        self.worker_limit = limit;
+    }
+
+    pub(crate) fn set_worker_handle(&mut self, handle: RuntimeWorkerHandle) {
+        self.worker_handle = Some(handle);
+    }
+
+    pub(crate) fn worker_handle(&self) -> Option<RuntimeWorkerHandle> {
+        self.worker_handle
+            .as_ref()
+            .filter(|handle| handle.is_active())
+            .cloned()
+    }
+
+    /// Runs independent synchronous jobs through the active runtime worker pool.
+    ///
+    /// The builder receives the context after a temporary pool has been attached
+    /// for direct node invocations. `max_jobs` bounds the number of jobs prepared
+    /// by the builder and limits any temporary pool to the same runtime setting.
+    pub fn run_parallel<T, F>(
+        &mut self,
+        max_jobs: usize,
+        build_jobs: impl FnOnce(&Self) -> Vec<F>,
+    ) -> Result<Vec<T>, crate::WorkerPoolError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        if max_jobs == 0 {
+            return Ok(Vec::new());
+        }
+        if let Some(handle) = self.worker_handle() {
+            return Ok(handle.run_parallel(build_jobs(self)));
+        }
+
+        let worker_count = max_jobs.min(self.worker_limit.get());
+        let workers = WorkerPool::new(worker_count, WorkerJob::run)?;
+        let handle = workers.handle();
+        self.worker_handle = Some(handle.clone());
+        let jobs = build_jobs(self);
+        let result = handle.run_parallel(jobs);
+        self.worker_handle = None;
+        Ok(result)
+    }
+
     pub(crate) fn replace_execution_position(&mut self, position: Option<usize>) -> Option<usize> {
         std::mem::replace(&mut self.current_position, position)
     }
 
     pub(crate) fn scope_exit_cutoff(&self) -> usize {
         self.scope_exit_cutoff.load(Ordering::Acquire)
-    }
-
-    pub(crate) fn configure_domain_budget(&mut self, limit: usize) {
-        if !self.domain_budget_configured {
-            self.domain_budget = Arc::new(DomainBudget::new(limit));
-            self.domain_budget_configured = true;
-        }
-    }
-
-    pub(crate) fn set_domain_budget(&mut self, budget: Arc<DomainBudget>) {
-        self.domain_budget = budget;
-        self.domain_budget_configured = true;
-    }
-
-    pub(crate) fn domain_budget(&self) -> Arc<DomainBudget> {
-        self.domain_budget.clone()
-    }
-
-    pub(crate) fn try_acquire_domain(&self) -> bool {
-        self.domain_budget.try_acquire()
-    }
-
-    pub(crate) fn acquire_domain(&self) {
-        self.domain_budget.acquire();
-    }
-
-    pub(crate) fn release_domain(&self) {
-        self.domain_budget.release();
-    }
-
-    pub(crate) fn domain_worker(&self) -> bool {
-        self.domain_worker
-    }
-
-    pub(crate) fn set_domain_worker(&mut self, active: bool) {
-        self.domain_worker = active;
-    }
-
-    /// Runs child work without holding this execution domain's worker permit.
-    ///
-    /// The permit is reacquired before returning or resuming a panic, so bounded
-    /// child work can make progress without deadlocking against its parent.
-    pub fn with_domain_worker_suspended<T>(&mut self, run: impl FnOnce(&mut Self) -> T) -> T {
-        let suspended = std::mem::replace(&mut self.domain_worker, false);
-        if !suspended {
-            return run(self);
-        }
-        self.domain_budget.release();
-
-        let result = catch_unwind(AssertUnwindSafe(|| run(self)));
-        self.domain_budget.acquire();
-        self.domain_worker = true;
-
-        match result {
-            Ok(result) => result,
-            Err(payload) => resume_unwind(payload),
-        }
     }
 
     pub fn for_message<N>(
@@ -307,10 +293,6 @@ impl ExecutionContext {
         let mut context = Self::default();
         context.publish(source, Some(result))?;
         Ok(context)
-    }
-
-    pub(crate) fn fork_domain(&self) -> Self {
-        self.fork_domain_with_observation(self.observation.clone())
     }
 
     pub(crate) fn fork_domain_with_visible_outputs(
@@ -344,9 +326,6 @@ impl ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
-            domain_budget: self.domain_budget.clone(),
-            domain_budget_configured: self.domain_budget_configured,
-            domain_worker: self.domain_worker,
             remaining_steps: self.remaining_steps.clone(),
             snapshots: self.snapshots.clone(),
             snapshot_prefix: self.snapshot_prefix.clone(),
@@ -354,6 +333,8 @@ impl ExecutionContext {
             startup_inputs_bound: self.startup_inputs_bound,
             stdin: self.stdin.clone(),
             cancellation: self.cancellation.clone(),
+            worker_handle: self.worker_handle.clone(),
+            worker_limit: self.worker_limit,
         }
     }
 
@@ -444,9 +425,8 @@ impl ExecutionContext {
     pub fn fork_body(&self, observation: Option<BodyObservation>) -> Self {
         let mut child = Self::for_body(observation);
         child.cancellation = self.cancellation.clone();
-        child.domain_budget = self.domain_budget.clone();
-        child.domain_budget_configured = self.domain_budget_configured;
-        child.domain_worker = self.domain_worker;
+        child.worker_handle = self.worker_handle.clone();
+        child.worker_limit = self.worker_limit;
         if self.snapshots.is_some() {
             child.snapshots = self.snapshots.clone();
             child.snapshot_prefix = self.snapshot_path();
@@ -619,6 +599,7 @@ impl ExecutionContext {
             | WorkflowRunError::UnknownKind { .. }
             | WorkflowRunError::InvalidEmbeddedConfig { .. }
             | WorkflowRunError::NodeConstruction { .. } => (None, FailurePhase::Preparation),
+            WorkflowRunError::WorkerPool { .. } => (None, FailurePhase::Execution),
         };
         observation.select_failure(node, phase, error.to_string());
     }
