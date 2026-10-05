@@ -343,7 +343,8 @@ fn per_message_budgets_allow_a_long_lived_instance_and_preserve_fifo() {
         {"from_node":"right", "from_output":"value", "to_node":"copy"}
     ]);
     let instance = start(value, Arc::new(ManualClock::default()));
-    let count = mf_runtime::MAX_SCHEDULED_STEPS + 1;
+    // Each message schedules left, right, and copy; exceed the legacy run-wide budget.
+    let count = mf_runtime::MAX_SCHEDULED_STEPS / 3 + 1;
     thread::scope(|scope| {
         let sender = instance.source.clone();
         let producer = scope.spawn(move || {

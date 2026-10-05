@@ -80,6 +80,8 @@ def main():
     with open(os.environ["NEXTEST_ENV"], "a") as output:
         for name, value in {
             "CARGO": workspace / "scripts/nextest-cargo.sh",
+            # Selected fixtures use local packages and already-fetched registry dependencies.
+            "CARGO_NET_OFFLINE": "true",
             "MF_TEST_REAL_CARGO": cargo,
             "MF_TEST_TARGET_DIR": target,
         }.items():
