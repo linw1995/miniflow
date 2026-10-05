@@ -848,7 +848,7 @@ fn blocked_otel_export_does_not_block_flow_execution() {
         .cloned()
         .map(mf_compiler::DefinitionId::from)
         .collect();
-    let flow = mf_compiler::Flow::new(nodes, vec![], order, vec![]).unwrap();
+    let flow = mf_compiler::build_flow(nodes, vec![], order, vec![]).unwrap();
     let identity =
         mf_telemetry::identity::WorkflowId::from_definition(&json!({"node_count":count}), &names)
             .unwrap();

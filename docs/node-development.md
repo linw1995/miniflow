@@ -121,7 +121,7 @@ and still require an explicit ancestor dependency.
 
 Keep output names local in node results. Runtime publication qualifies them with the instance ID. Explicit skipped names must be declared non-required outputs and cannot also be produced. A scheduler-skipped node propagates skipping through every output, including required ones. Context references alone never activate or skip a node.
 
-Qualified output IDs must be unique. Both compiler validation and direct `Flow::new` construction reject collisions such as node `a.b` / output `c` and node `a` / output `b.c`, including optional outputs.
+Qualified output IDs must be unique. Both compiler validation and direct `mf_compiler::build_flow` construction reject collisions such as node `a.b` / output `c` and node `a` / output `b.c`, including optional outputs.
 
 The shared executor checks every produced JSON value against its declared output type before publishing the node's result,
 even when no downstream edge reads that port. It checks each bound input against its declared type before invoking an
@@ -134,7 +134,7 @@ carries multiple JSON types; a specific declaration must match every produced va
 `PreparedNode::new(task, metadata)` accepts `NodeMetadata` or plain `NodePorts` when no derivations or
 references are needed. `FlowNode::new(id, prepared)` binds the definition identity. Compiler preparation
 resolves the metadata before execution. Both in-memory execution and generated runners build a prepared `Flow`
-and run it through `FlowRuntime`. Runtime execution partitions a DAG into synchronous domains: tasks in one
+and run it through `FlowRuntime`. The compiler partitions a DAG into synchronous domains before execution: tasks in one
 domain run serially, while independent ready domains can run concurrently up to
 `RuntimeOptions.max_parallel_domains` (four by default). Fan-in waits for all predecessor domains. Results and
 context effects become visible to dependent domains only after validation and commit. Within Loop and Iteration
@@ -175,7 +175,7 @@ Event state requires `Send`; mutable access is exclusive and
 `Sync` is not required.
 
 Oneshot preparation accepts task nodes and rejects event or stream nodes with their definition IDs. Direct callers
-of the low-level task helper convert a prepared `FlowNode` with `into_task()` first. Normal `Flow::new` callers and
+of the low-level task helper convert a prepared `FlowNode` with `into_task()` first. Normal `mf_compiler::build_flow` callers and
 generated oneshot runners pass a task Flow to `FlowRuntime`; streaming preparation keeps the same Flow graph and
 uses the runtime's stream lifecycle and message-domain scheduler.
 
@@ -256,7 +256,7 @@ workflow arguments once; ordinary edges retain their message identity, while pro
 a new domain. Nodes and selected outputs cannot join different domains. Initial EventNodes require an
 activation source, and nested synchronous bodies remain task-only.
 
-Embedded node construction returns `WorkflowBuildError`, preserving configuration and factory error sources.
+Embedded node construction in `mf-compiler` returns `WorkflowBuildError`, preserving configuration and factory error sources.
 Generated Cargo builds link the same provider packages and features to determine static executor boundaries.
 Provider validation happens before the executable is installed. Launch initializes node state and attaches the
 compiled graph tables without constructing a graph. Generated execution functions accept the prepared Flow
@@ -315,3 +315,5 @@ without exposing retained values. Transport and export queues remain bounded, an
 do not change workflow results or request retries. Terminal events follow drain or failure cleanup.
 
 The current terminal launcher and snapshot recorder remain unavailable for stream mode.
+
+Workflow graph construction is owned by `mf-compiler`: `FlowBuilder::prepare` validates configured nodes and graph connections, then `into_tasks` or `into_stream` produces an executable runtime plan. `FlowBuildError`, `StreamBuildError`, and `WorkflowBuildError` are compiler errors. The runtime binds validated owned or borrowed plans and schedules executors without depending on the compiler. Node factories and their `NodeBuildError` contract remain shared provider contracts in `mf-runtime`.

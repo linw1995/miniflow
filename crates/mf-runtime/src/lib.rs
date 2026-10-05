@@ -35,8 +35,8 @@ pub use definition::{
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
 pub use flow::{
-    Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowPlan, FlowRuntime,
-    NodeId, RuntimeOptions, TaskFlowNode,
+    Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowPlan, FlowRuntime, NodeId,
+    RuntimeOptions, TaskFlowNode,
 };
 pub use iteration::{
     ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
@@ -44,10 +44,10 @@ pub use iteration::{
     iteration_input_flow_node,
 };
 pub use loop_node::{
-    loop_variable_types, prepared_loop_assign, prepared_loop_assign_from_json, prepared_loop_exit,
-    prepared_loop_source_from_json, prepared_loop_source_types, prepared_scope_source,
+    loop_variable_types, prepared_loop_assign, prepared_loop_exit, prepared_loop_source_types,
+    prepared_scope_source,
 };
-pub use message_domain::{MessageDomains, StreamDomain};
+pub use message_domain::MessageDomains;
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
@@ -60,12 +60,7 @@ pub use node::{
 };
 pub use number::compare_json_numbers;
 pub use registry::{NodeRegistry, NodeRegistryError};
-pub use runner::{
-    InvalidDefinitionSnafu as WorkflowInvalidDefinitionSnafu,
-    MetadataSnafu as WorkflowMetadataSnafu, SubgraphSnafu as WorkflowSubgraphSnafu,
-    WorkflowBuildError, WorkflowRunError, instantiate_node_with_metadata,
-    instantiate_subgraph_with_metadata,
-};
+pub use runner::WorkflowRunError;
 pub use stream::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
     StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate,
@@ -75,9 +70,7 @@ pub use stream_instance::{
     StreamMetrics, StreamOptions, StreamOutput, StreamSummary,
 };
 pub use stream_io::{StreamStdio, TextInput};
-pub use stream_plan::{
-    FlowDependency, PreparedStream, StreamBuildError, StreamDependency, StreamPlan,
-};
+pub use stream_plan::{FlowDependency, PreparedStream, StreamPlan};
 pub use subgraph::PreparedSubgraph;
 
 pub use value::{ValueKind, ValueRef};
@@ -98,4 +91,8 @@ pub use runner_arguments::{RunnerArgumentError, RunnerCommand};
 pub use workflow_inputs::{
     JsonSnafu as WorkflowInputJsonSnafu, TooLargeSnafu as WorkflowInputTooLargeSnafu,
     WorkflowInterface, WorkflowInterfaceVersion,
+};
+
+pub use workflow_inputs::{
+    InvalidSnafu as WorkflowInputInvalidSnafu, TypeDepthSnafu as WorkflowInputTypeDepthSnafu,
 };

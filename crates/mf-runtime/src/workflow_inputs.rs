@@ -1,4 +1,4 @@
-use crate::{FlowNode, Inputs, ValueType};
+use crate::{Inputs, ValueType};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
@@ -142,9 +142,9 @@ pub enum WorkflowInputError {
         visibility(pub)
     )]
     TooLarge { limit: usize },
-    #[snafu(display("workflow input `{path}`: {message}"))]
+    #[snafu(display("workflow input `{path}`: {message}"), visibility(pub))]
     Invalid { path: String, message: String },
-    #[snafu(display("workflow input `{path}`: {source}"))]
+    #[snafu(display("workflow input `{path}`: {source}"), visibility(pub))]
     TypeDepth {
         path: String,
         source: crate::TypeDepthError,
@@ -214,74 +214,6 @@ impl TryFrom<Value> for WorkflowArguments {
 }
 
 impl WorkflowInputSchema {
-    pub fn from_nodes<'a, N: 'a>(
-        nodes: impl IntoIterator<Item = (&'a FlowNode<N>, bool)>,
-        mut input_bound: impl FnMut(&str, &str) -> bool,
-    ) -> Result<Self, WorkflowInputError> {
-        let mut schema = Self::default();
-        let mut stdin_owner = None;
-        for (node, initial) in nodes {
-            let id = node.definition_id.as_str();
-            if initial {
-                let mut ports = BTreeMap::new();
-                for port in &node.metadata.ports.inputs {
-                    let path = pointer(&pointer("", id), &port.name);
-                    port.value_type
-                        .check_depth()
-                        .context(TypeDepthSnafu { path: path.clone() })?;
-                    if port.name.is_empty()
-                        || ports
-                            .insert(
-                                port.name.to_string(),
-                                WorkflowInput {
-                                    value_type: port.value_type.clone(),
-                                    required: port.required,
-                                },
-                            )
-                            .is_some()
-                    {
-                        return Err(invalid(path, "empty or duplicate input port"));
-                    }
-                }
-                if schema.inputs.insert(id.into(), ports).is_some() {
-                    return Err(invalid(pointer("", id), "duplicate initial node"));
-                }
-            }
-            if let Some(requirement) = &node.metadata.stdin {
-                if let StdinRequirement::UnlessInput(input) = requirement {
-                    if !node
-                        .metadata
-                        .ports
-                        .inputs
-                        .iter()
-                        .any(|port| port.name == *input)
-                    {
-                        return Err(invalid(
-                            pointer("", id),
-                            "stdin condition names an unknown input",
-                        ));
-                    }
-                    if !initial && input_bound(id, input) {
-                        continue;
-                    }
-                }
-                if !initial {
-                    return Err(invalid(pointer("", id), "stdin requires an initial node"));
-                }
-                if *requirement == StdinRequirement::Always
-                    && let Some(previous) = stdin_owner.replace(id.to_owned())
-                {
-                    return Err(invalid(
-                        pointer("", id),
-                        format!("stdin is already required by node `{previous}`"),
-                    ));
-                }
-                schema.stdin.insert(id.into(), requirement.clone());
-            }
-        }
-        Ok(schema)
-    }
-
     pub fn validate(&self, arguments: &WorkflowArguments) -> Result<(), WorkflowInputError> {
         for (node, values) in &arguments.0 {
             let node_path = pointer("", node);

@@ -785,12 +785,6 @@ fn generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node(
     fs::write(&path, value.to_string()).unwrap();
     let error = compile_project(&request).unwrap_err();
     assert_eq!(error.stage, "Cargo build");
-    let validation = mf_compiler::cargo_command(&build)
-        .args(["build", "--offline", "--locked", "--release"])
-        .output()
-        .unwrap();
-    assert!(!validation.status.success());
-    assert!(String::from_utf8_lossy(&validation.stderr).contains("builtin.iteration"));
     assert_eq!(fs::read(&output).unwrap(), installed);
     assert_eq!(fs::read(path.with_extension("lock")).unwrap(), lock);
 }

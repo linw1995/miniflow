@@ -646,7 +646,7 @@ impl PreparedStream {
         if let Some(observation) = &options.observation {
             context.set_frame_observation(observation.startup_frame());
         }
-        let domain_count = prepared.domains().len();
+        let domain_count = prepared.message_sources().len();
         let mut domains: Vec<_> = (0..domain_count).map(|_| Domain::default()).collect();
         domains[0].frame = Some(Frame::new(
             MessageId {
@@ -974,10 +974,10 @@ fn coordinate(
             }
         }
         let wait = plan
-            .domains()
+            .message_sources()
             .iter()
             .skip(1)
-            .filter_map(|domain| state.operators[domain.source.expect("emission domain")].as_ref())
+            .filter_map(|domain| state.operators[domain.expect("emission domain")].as_ref())
             .filter(|operator| {
                 operator.pending.len() < plan.execution().limits.max_pending_messages
             })
@@ -1002,8 +1002,8 @@ fn tick(
     shared: &Arc<Shared>,
 ) -> Result<bool, StreamError> {
     let mut progress = false;
-    for source in plan.domains().iter().skip(1) {
-        let index = source.source.expect("emission domain");
+    for source in plan.message_sources().iter().skip(1) {
+        let index = source.expect("emission domain");
         let due = state.operators[index]
             .as_ref()
             .filter(|operator| {
@@ -1035,7 +1035,7 @@ fn tick(
         if state.domains[domain].occupied {
             continue;
         }
-        let source = plan.domains()[domain].source.expect("emission domain");
+        let source = plan.message_sources()[domain].expect("emission domain");
         let Some(queued) = state.operators[source]
             .as_mut()
             .unwrap()
@@ -1284,7 +1284,11 @@ fn tick(
     }
     for domain in 0..state.domains.len() {
         if state.domains[domain].closed {
-            for &index in plan.domains()[domain].steps.iter() {
+            for &index in plan
+                .execution_domains_for_message(domain)
+                .iter()
+                .flat_map(|&id| plan.execution_domain(id).positions.iter())
+            {
                 if state.operators[index]
                     .as_ref()
                     .is_some_and(|operator| !operator.closed && !matches!(&operator.executor, OperatorExecutor::Producer(producer) if producer.active))
@@ -1318,9 +1322,10 @@ fn tick(
                 }
             }
         } else if domain > 0 && !state.domains[domain].occupied {
-            let operator = state.operators[plan.domains()[domain].source.expect("emission domain")]
-                .as_ref()
-                .unwrap();
+            let operator = state.operators
+                [plan.message_sources()[domain].expect("emission domain")]
+            .as_ref()
+            .unwrap();
             if operator.closed && operator.pending.is_empty() {
                 state.domains[domain].closed = true;
                 progress = true;
@@ -1620,7 +1625,7 @@ mod tests {
                 })
             }
         }
-        let plan = PreparedStream::new(
+        let plan = PreparedStream::from_plan(
             StreamExecution {
                 mode: crate::StreamMode::Stream,
                 limits: Default::default(),
@@ -1647,15 +1652,56 @@ mod tests {
             ],
             vec![
                 Vec::new(),
-                vec![crate::StreamDependency {
+                vec![crate::FlowDependency {
                     input: None,
                     source_node: "start".into(),
                     source_output: "item".into(),
                 }],
-            ],
-            Vec::new(),
-        )
-        .unwrap();
+            ]
+            .into_iter()
+            .map(std::borrow::Cow::Owned)
+            .collect::<Vec<_>>()
+            .into(),
+            crate::MessageDomains::from_parts(
+                vec![None, Some(1)].into(),
+                vec![0, 1].into(),
+                None,
+                crate::ExecutionDomains::from_parts(
+                    vec![
+                        crate::ExecutionDomain {
+                            id: 0,
+                            nodes: vec![crate::NodeId::new(0)].into(),
+                            positions: vec![0].into(),
+                            predecessors: vec![].into(),
+                            successors: vec![1].into(),
+                            first_position: 0,
+                        },
+                        crate::ExecutionDomain {
+                            id: 1,
+                            nodes: vec![crate::NodeId::new(1)].into(),
+                            positions: vec![1].into(),
+                            predecessors: vec![0].into(),
+                            successors: vec![].into(),
+                            first_position: 1,
+                        },
+                    ]
+                    .into(),
+                    vec![
+                        std::borrow::Cow::Owned(vec![]),
+                        std::borrow::Cow::Owned(vec![0]),
+                    ]
+                    .into(),
+                ),
+                vec![
+                    std::borrow::Cow::Owned(vec![0, 1]),
+                    std::borrow::Cow::Owned(vec![]),
+                ]
+                .into(),
+                vec![0, 0].into(),
+            ),
+            Vec::new().into(),
+            Default::default(),
+        );
         let instance = plan.start().unwrap();
 
         assert!(

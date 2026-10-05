@@ -1,13 +1,10 @@
-use crate::definition::{DefinitionId, EdgeDefinition, WorkflowOutputDefinition};
+use crate::definition::DefinitionId;
 use crate::execution_domains::{ExecutionDomain, ExecutionDomains};
-#[cfg(test)]
-use crate::{Inputs, Outputs};
 use crate::{NodeMetadata, PreparedNode, TaskNode};
 use serde::{Deserialize, Serialize};
-use snafu::{Snafu, ensure};
 use std::any::Any;
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -52,13 +49,9 @@ impl FlowNode {
         }
     }
 
-    pub fn into_task(self) -> Result<TaskFlowNode, FlowBuildError> {
-        let Some(task) = self.node.and_then(crate::NodeExecution::into_task_node) else {
-            return Err(FlowBuildError::NonTaskNode {
-                definition_id: self.definition_id,
-            });
-        };
-        Ok(FlowNode {
+    pub fn into_task(self) -> Option<TaskFlowNode> {
+        let task = self.node.and_then(crate::NodeExecution::into_task_node)?;
+        Some(FlowNode {
             definition_id: self.definition_id,
             metadata: self.metadata,
             node: task,
@@ -74,44 +67,12 @@ pub struct FlowConnection {
     pub to_input: Cow<'static, str>,
 }
 
-impl FlowConnection {
-    fn new(
-        from_node: impl Into<NodeId>,
-        from_output: impl Into<String>,
-        to_node: impl Into<NodeId>,
-        to_input: impl Into<String>,
-    ) -> Self {
-        Self {
-            from_node: from_node.into(),
-            from_output: from_output.into().into(),
-            to_node: to_node.into(),
-            to_input: to_input.into().into(),
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlowOutput {
     pub name: Cow<'static, str>,
     pub node_id: NodeId,
     pub port: Cow<'static, str>,
     pub optional: bool,
-}
-
-impl FlowOutput {
-    fn new(
-        name: impl Into<String>,
-        node_id: impl Into<NodeId>,
-        port: impl Into<String>,
-        optional: bool,
-    ) -> Self {
-        Self {
-            name: name.into().into(),
-            node_id: node_id.into(),
-            port: port.into().into(),
-            optional,
-        }
-    }
 }
 
 pub type FlowOutputs = crate::Outputs;
@@ -186,100 +147,20 @@ impl FlowRuntime {
     }
 }
 
-#[derive(Debug, Snafu)]
-pub enum FlowBuildError {
-    #[snafu(transparent)]
-    WorkflowInputs { source: crate::WorkflowInputError },
-    #[snafu(display("node `{definition_id}` cannot execute in a synchronous flow"))]
-    NonTaskNode { definition_id: DefinitionId },
-    #[snafu(display("execution plan entry {position} references unknown node `{definition_id}`"))]
-    UnknownNodeInExecutionOrder {
-        definition_id: DefinitionId,
-        position: usize,
-    },
-    #[snafu(display("execution plan executes node `{definition_id}` more than once"))]
-    DuplicateExecutionNode { definition_id: DefinitionId },
-    #[snafu(display("execution plan omits node `{definition_id}`"))]
-    MissingExecutionNode { definition_id: DefinitionId },
-    #[snafu(display(
-        "connection from `{definition_id}`.`{from_output}` to input `{to_input}` references an unknown source node"
-    ))]
-    UnknownConnectionSource {
-        definition_id: DefinitionId,
-        from_output: String,
-        to_input: String,
-    },
-    #[snafu(display(
-        "connection from output `{from_output}` to `{definition_id}`.`{to_input}` references an unknown target node"
-    ))]
-    UnknownConnectionTarget {
-        definition_id: DefinitionId,
-        from_output: String,
-        to_input: String,
-    },
-    #[snafu(display(
-        "node `{target_definition_id}` input `{target_input}` receives multiple connections"
-    ))]
-    DuplicateInputConnection {
-        target_definition_id: DefinitionId,
-        target_input: String,
-    },
-    #[snafu(display(
-        "connection from `{source_definition_id}`.`{source_output}` to `{target_definition_id}`.`{target_input}` conflicts with the execution order"
-    ))]
-    InvalidExecutionOrder {
-        source_definition_id: DefinitionId,
-        source_output: String,
-        target_definition_id: DefinitionId,
-        target_input: String,
-    },
-    #[snafu(display("node definition ID `{definition_id}` is used more than once"))]
-    DuplicateDefinitionId { definition_id: DefinitionId },
-    #[snafu(display(
-        "output ID `{output_id}` collides between `{first_node}`.`{first_port}` and `{second_node}`.`{second_port}`"
-    ))]
-    OutputIdCollision {
-        output_id: String,
-        first_node: DefinitionId,
-        first_port: Box<str>,
-        second_node: DefinitionId,
-        second_port: Box<str>,
-    },
-    #[snafu(display("invalid control connection: {message}"))]
-    InvalidControlConnection { message: String },
-    #[snafu(display("node `{definition_id}` has no declared {direction} port `{port}`"))]
-    UnknownPort {
-        definition_id: DefinitionId,
-        direction: &'static str,
-        port: String,
-    },
-    #[snafu(display("workflow output name `{name}` is selected more than once"))]
-    DuplicateOutputName { name: String },
-    #[snafu(display("workflow output `{name}` references unknown node `{definition_id}`"))]
-    UnknownOutputNode {
-        name: String,
-        definition_id: DefinitionId,
-    },
+pub struct Flow {
+    inner: Arc<FlowData>,
 }
 
-pub struct Flow<N = Box<dyn TaskNode>> {
-    inner: Arc<FlowData<N>>,
-}
-
-struct FlowData<N> {
-    nodes: Vec<FlowNode<N>>,
-    connections: Cow<'static, [FlowConnection]>,
-    dependencies: Cow<'static, [Cow<'static, [crate::FlowDependency]>]>,
-    execution_order: Cow<'static, [NodeId]>,
-    outputs: Cow<'static, [FlowOutput]>,
-    controls: Cow<'static, [crate::ControlEdgeDefinition]>,
+struct FlowData {
+    nodes: Vec<TaskFlowNode>,
+    plan: FlowPlan,
     input_schema: crate::WorkflowInputSchema,
-    execution_domains: Option<ExecutionDomains>,
 }
 
-impl<N> Flow<N> {
-    fn data_mut(&mut self) -> &mut FlowData<N> {
-        Arc::get_mut(&mut self.inner).expect("Flow plan is uniquely owned while being prepared")
+impl Flow {
+    fn data_mut(&mut self) -> &mut FlowData {
+        Arc::get_mut(&mut self.inner)
+            .expect("Flow executors are uniquely owned while binding inputs")
     }
 
     fn shared_clone(&self) -> Self {
@@ -287,442 +168,19 @@ impl<N> Flow<N> {
             inner: Arc::clone(&self.inner),
         }
     }
-
-    fn into_data(self) -> FlowData<N> {
-        Arc::try_unwrap(self.inner).unwrap_or_else(|_| unreachable!("Flow plan is still shared"))
-    }
 }
 
 /// An immutable compiler-validated task graph without executor state.
+#[derive(Clone)]
 pub struct FlowPlan {
-    pub connections: &'static [FlowConnection],
-    pub dependencies: &'static [Cow<'static, [crate::FlowDependency]>],
-    pub execution_order: &'static [NodeId],
-    pub outputs: &'static [FlowOutput],
-    pub controls: &'static [crate::ControlEdgeDefinition],
+    pub connections: Cow<'static, [FlowConnection]>,
+    pub dependencies: Cow<'static, [Cow<'static, [crate::FlowDependency]>]>,
+    pub execution_order: Cow<'static, [NodeId]>,
+    pub outputs: Cow<'static, [FlowOutput]>,
     pub execution_domains: ExecutionDomains,
 }
 
-impl Flow<Option<crate::NodeExecution>> {
-    pub fn into_tasks(self) -> Result<Flow, FlowBuildError> {
-        let execution_domains = self.build_execution_domains();
-        let data = self.into_data();
-        let flow = Flow {
-            inner: Arc::new(FlowData {
-                nodes: data
-                    .nodes
-                    .into_iter()
-                    .map(FlowNode::into_task)
-                    .collect::<Result<_, _>>()?,
-                connections: data.connections,
-                dependencies: data.dependencies,
-                execution_order: data.execution_order,
-                outputs: data.outputs,
-                controls: data.controls,
-                input_schema: data.input_schema,
-                execution_domains: Some(execution_domains),
-            }),
-        };
-        Ok(flow)
-    }
-
-    pub fn into_stream(
-        self,
-        execution: crate::StreamExecution,
-    ) -> Result<crate::PreparedStream, crate::StreamBuildError> {
-        let data = self.into_data();
-        let outputs = data
-            .outputs
-            .iter()
-            .map(|output| WorkflowOutputDefinition {
-                name: output.name.clone(),
-                node: data.nodes[output.node_id.index()].definition_id.clone(),
-                port: output.port.clone(),
-                optional: output.optional,
-            })
-            .collect();
-        let mut nodes: Vec<_> = data.nodes.into_iter().map(Some).collect();
-        let ordered = data
-            .execution_order
-            .iter()
-            .copied()
-            .map(|id| {
-                nodes[id.index()]
-                    .take()
-                    .expect("validated unique execution order")
-            })
-            .collect();
-        let dependencies = data
-            .dependencies
-            .into_owned()
-            .into_iter()
-            .map(Cow::into_owned)
-            .collect();
-        crate::PreparedStream::new(execution, ordered, dependencies, outputs)
-    }
-}
-
 impl Flow {
-    pub fn new(
-        nodes: Vec<FlowNode>,
-        connections: Vec<EdgeDefinition>,
-        execution_order: Vec<DefinitionId>,
-        outputs: Vec<WorkflowOutputDefinition>,
-    ) -> Result<Self, FlowBuildError> {
-        Flow::prepare(nodes, connections, execution_order, outputs)?.into_tasks()
-    }
-}
-
-impl<N> Flow<N> {
-    pub fn with_workflow_inputs(mut self) -> Result<Self, crate::WorkflowInputError> {
-        let initial: BTreeSet<_> = self
-            .inner
-            .execution_order
-            .iter()
-            .enumerate()
-            .filter(|(position, _)| self.inner.dependencies[*position].is_empty())
-            .map(|(_, id)| id.index())
-            .collect();
-        let input_schema = crate::WorkflowInputSchema::from_nodes(
-            self.inner
-                .nodes
-                .iter()
-                .enumerate()
-                .map(|(index, node)| (node, initial.contains(&index))),
-            |node, input| {
-                self.inner
-                    .execution_order
-                    .iter()
-                    .position(|id| self.inner.nodes[id.index()].definition_id.as_str() == node)
-                    .is_some_and(|position| {
-                        self.inner.dependencies[position]
-                            .iter()
-                            .any(|dependency| dependency.input.as_deref() == Some(input))
-                    })
-            },
-        )?;
-        self.data_mut().input_schema = input_schema;
-        Ok(self)
-    }
-
-    pub fn input_schema(&self) -> &crate::WorkflowInputSchema {
-        &self.inner.input_schema
-    }
-
-    /// Validates graph structure while retaining ownership of each prepared execution kind.
-    pub fn prepare(
-        nodes: Vec<FlowNode<N>>,
-        connections: Vec<EdgeDefinition>,
-        execution_order: Vec<DefinitionId>,
-        outputs: Vec<WorkflowOutputDefinition>,
-    ) -> Result<Self, FlowBuildError> {
-        let mut definition_indices = BTreeMap::new();
-        for (index, node) in nodes.iter().enumerate() {
-            if definition_indices
-                .insert(node.definition_id.clone(), NodeId::new(index))
-                .is_some()
-            {
-                return DuplicateDefinitionIdSnafu {
-                    definition_id: node.definition_id.clone(),
-                }
-                .fail();
-            }
-        }
-
-        let mut output_ids = BTreeMap::new();
-        for node in &nodes {
-            for port in &node.metadata.ports.outputs {
-                let output_id = crate::output_id(node.definition_id.as_str(), &port.name);
-                if let Some((first_node, first_port)) =
-                    output_ids.insert(output_id.clone(), (&node.definition_id, &port.name))
-                {
-                    return OutputIdCollisionSnafu {
-                        output_id,
-                        first_node: first_node.clone(),
-                        first_port: first_port.to_string().into_boxed_str(),
-                        second_node: node.definition_id.clone(),
-                        second_port: port.name.to_string().into_boxed_str(),
-                    }
-                    .fail();
-                }
-            }
-        }
-
-        let mut positions = vec![None; nodes.len()];
-        let mut resolved_order = Vec::with_capacity(execution_order.len());
-        for (position, definition_id) in execution_order.into_iter().enumerate() {
-            let Some(&node_id) = definition_indices.get(&definition_id) else {
-                return UnknownNodeInExecutionOrderSnafu {
-                    definition_id,
-                    position: position + 1,
-                }
-                .fail();
-            };
-            if positions[node_id.index()].replace(position).is_some() {
-                return DuplicateExecutionNodeSnafu { definition_id }.fail();
-            }
-            resolved_order.push(node_id);
-        }
-
-        for (index, node) in nodes.iter().enumerate() {
-            if positions[index].is_none() {
-                return MissingExecutionNodeSnafu {
-                    definition_id: node.definition_id.clone(),
-                }
-                .fail();
-            }
-        }
-
-        let mut resolved_connections = Vec::with_capacity(connections.len());
-        let mut connected_inputs = BTreeSet::new();
-        for connection in connections {
-            let Some(&from_node) = definition_indices.get(&connection.from_node) else {
-                return UnknownConnectionSourceSnafu {
-                    definition_id: connection.from_node,
-                    from_output: connection.from_output,
-                    to_input: connection.to_input,
-                }
-                .fail();
-            };
-            let Some(&to_node) = definition_indices.get(&connection.to_node) else {
-                return UnknownConnectionTargetSnafu {
-                    definition_id: connection.to_node,
-                    from_output: connection.from_output,
-                    to_input: connection.to_input,
-                }
-                .fail();
-            };
-
-            if positions[from_node.index()] >= positions[to_node.index()] {
-                return InvalidExecutionOrderSnafu {
-                    source_definition_id: connection.from_node,
-                    source_output: connection.from_output,
-                    target_definition_id: connection.to_node,
-                    target_input: connection.to_input,
-                }
-                .fail();
-            }
-
-            if !connected_inputs.insert((to_node, connection.to_input.clone())) {
-                return DuplicateInputConnectionSnafu {
-                    target_definition_id: connection.to_node,
-                    target_input: connection.to_input,
-                }
-                .fail();
-            }
-
-            ensure!(
-                nodes[from_node.index()]
-                    .metadata
-                    .ports
-                    .outputs
-                    .iter()
-                    .any(|port| port.name == connection.from_output),
-                UnknownPortSnafu {
-                    definition_id: connection.from_node.clone(),
-                    direction: "output",
-                    port: connection.from_output.clone(),
-                }
-            );
-            ensure!(
-                nodes[to_node.index()]
-                    .metadata
-                    .ports
-                    .inputs
-                    .iter()
-                    .any(|port| port.name == connection.to_input),
-                UnknownPortSnafu {
-                    definition_id: connection.to_node.clone(),
-                    direction: "input",
-                    port: connection.to_input.clone(),
-                }
-            );
-
-            resolved_connections.push(FlowConnection::new(
-                from_node,
-                connection.from_output,
-                to_node,
-                connection.to_input,
-            ));
-        }
-
-        let mut resolved_outputs = Vec::with_capacity(outputs.len());
-        let mut output_names = BTreeSet::new();
-        for output in outputs {
-            let Some(&node_id) = definition_indices.get(&output.node) else {
-                return UnknownOutputNodeSnafu {
-                    name: output.name,
-                    definition_id: output.node,
-                }
-                .fail();
-            };
-            if !output_names.insert(output.name.clone()) {
-                return DuplicateOutputNameSnafu { name: output.name }.fail();
-            }
-            ensure!(
-                nodes[node_id.index()]
-                    .metadata
-                    .ports
-                    .outputs
-                    .iter()
-                    .any(|port| port.name == output.port),
-                UnknownPortSnafu {
-                    definition_id: output.node.clone(),
-                    direction: "output",
-                    port: output.port.clone(),
-                }
-            );
-            resolved_outputs.push(FlowOutput::new(
-                output.name,
-                node_id,
-                output.port,
-                output.optional,
-            ));
-        }
-
-        let mut flow = Self {
-            inner: Arc::new(FlowData {
-                nodes,
-                connections: resolved_connections.into(),
-                dependencies: Vec::new().into(),
-                execution_order: resolved_order.into(),
-                outputs: resolved_outputs.into(),
-                controls: Vec::new().into(),
-                input_schema: crate::WorkflowInputSchema::default(),
-                execution_domains: None,
-            }),
-        };
-        flow.prepare_execution();
-        Ok(flow)
-    }
-
-    pub fn with_control_edges(
-        mut self,
-        controls: Vec<crate::ControlEdgeDefinition>,
-    ) -> Result<Self, FlowBuildError> {
-        if self.inner.controls.as_ref() == controls.as_slice() {
-            return Ok(self);
-        }
-        let positions: BTreeMap<_, _> = self
-            .inner
-            .execution_order
-            .iter()
-            .enumerate()
-            .map(|(position, id)| (self.inner.nodes[id.index()].definition_id.clone(), position))
-            .collect();
-        let mut unique = BTreeSet::new();
-        for edge in &controls {
-            let invalid = || FlowBuildError::InvalidControlConnection {
-                message: format!(
-                    "`{}`.`{}` -> `{}` must have valid endpoints, precede its target, and be unique",
-                    edge.from_node, edge.from_output, edge.to_node
-                ),
-            };
-            let Some(from) = positions.get(&edge.from_node) else {
-                return Err(invalid());
-            };
-            let Some(to) = positions.get(&edge.to_node) else {
-                return Err(invalid());
-            };
-            if from >= to || !unique.insert(edge) {
-                return Err(invalid());
-            }
-            let source = &self.inner.nodes[self.inner.execution_order[*from].index()];
-            ensure!(
-                source
-                    .metadata
-                    .ports
-                    .outputs
-                    .iter()
-                    .any(|port| port.name == edge.from_output),
-                UnknownPortSnafu {
-                    definition_id: edge.from_node.clone(),
-                    direction: "output",
-                    port: edge.from_output.clone(),
-                }
-            );
-        }
-        let has_prepared_domains = self.inner.execution_domains.is_some();
-        self.data_mut().controls = controls.into();
-        self.prepare_execution();
-        if has_prepared_domains {
-            let execution_domains = self.build_execution_domains();
-            self.data_mut().execution_domains = Some(execution_domains);
-        }
-        if !self.inner.input_schema.inputs.is_empty() {
-            self = self.with_workflow_inputs()?;
-        }
-        Ok(self)
-    }
-
-    fn prepare_execution(&mut self) {
-        let positions: BTreeMap<_, _> = self
-            .inner
-            .execution_order
-            .iter()
-            .enumerate()
-            .map(|(position, id)| {
-                (
-                    self.inner.nodes[id.index()].definition_id.as_str(),
-                    position,
-                )
-            })
-            .collect();
-        let mut incoming = vec![Vec::new(); self.inner.nodes.len()];
-        for edge in self.inner.connections.iter() {
-            let source = &self.inner.nodes[edge.from_node.index()];
-            let target = &self.inner.nodes[edge.to_node.index()];
-            incoming[positions[target.definition_id.as_str()]].push(crate::FlowDependency {
-                input: Some(edge.to_input.clone()),
-                source_node: source.definition_id.to_string().into(),
-                source_output: edge.from_output.clone(),
-            });
-        }
-        for edge in self.inner.controls.iter() {
-            incoming[positions[edge.to_node.as_str()]].push(crate::FlowDependency {
-                input: None,
-                source_node: edge.from_node.to_string().into(),
-                source_output: edge.from_output.clone(),
-            });
-        }
-        for dependencies in &mut incoming {
-            dependencies.sort();
-        }
-        self.data_mut().dependencies = incoming
-            .into_iter()
-            .map(Cow::Owned)
-            .collect::<Vec<_>>()
-            .into();
-    }
-
-    fn build_execution_domains(&self) -> ExecutionDomains {
-        let positions: BTreeMap<_, _> = self
-            .inner
-            .execution_order
-            .iter()
-            .enumerate()
-            .map(|(position, node_id)| {
-                (
-                    self.inner.nodes[node_id.index()].definition_id.as_str(),
-                    position,
-                )
-            })
-            .collect();
-        let mut edges = Vec::new();
-        for (target, dependencies) in self.inner.dependencies.iter().enumerate() {
-            for dependency in dependencies.iter() {
-                if let Some(&source) = positions.get(dependency.source_node.as_ref()) {
-                    edges.push((source, target));
-                }
-            }
-        }
-        ExecutionDomains::partition(
-            &self.inner.execution_order,
-            &edges,
-            &vec![false; self.inner.execution_order.len()],
-        )
-    }
-
     pub fn definition_node_id(&self, id: &NodeId) -> Option<&str> {
         self.inner
             .nodes
@@ -739,29 +197,41 @@ impl<N> Flow<N> {
     }
 
     pub fn connections(&self) -> &[FlowConnection] {
-        &self.inner.connections
+        &self.inner.plan.connections
     }
 
     pub fn execution_order(&self) -> &[NodeId] {
-        &self.inner.execution_order
+        &self.inner.plan.execution_order
     }
 }
 
 impl Flow {
     /// Binds task instances to a compiler-validated plan without constructing a graph.
-    pub fn from_plan(nodes: Vec<TaskFlowNode>, plan: &'static FlowPlan) -> Self {
+    pub fn from_plan(
+        nodes: Vec<TaskFlowNode>,
+        plan: FlowPlan,
+        input_schema: crate::WorkflowInputSchema,
+    ) -> Self {
         Self {
             inner: Arc::new(FlowData {
                 nodes,
-                connections: Cow::Borrowed(plan.connections),
-                dependencies: Cow::Borrowed(plan.dependencies),
-                execution_order: Cow::Borrowed(plan.execution_order),
-                outputs: Cow::Borrowed(plan.outputs),
-                controls: Cow::Borrowed(plan.controls),
-                input_schema: crate::WorkflowInputSchema::default(),
-                execution_domains: Some(plan.execution_domains.clone()),
+                plan,
+                input_schema,
             }),
         }
+    }
+    pub fn plan(&self) -> &FlowPlan {
+        &self.inner.plan
+    }
+    pub fn nodes(&self) -> &[TaskFlowNode] {
+        &self.inner.nodes
+    }
+    pub fn input_schema(&self) -> &crate::WorkflowInputSchema {
+        &self.inner.input_schema
+    }
+    pub fn with_input_schema(mut self, schema: crate::WorkflowInputSchema) -> Self {
+        self.data_mut().input_schema = schema;
+        self
     }
 
     pub fn node(&self, id: &NodeId) -> Option<&dyn TaskNode> {
@@ -772,10 +242,7 @@ impl Flow {
     }
 
     pub fn execution_domains(&self) -> &ExecutionDomains {
-        self.inner
-            .execution_domains
-            .as_ref()
-            .expect("task flows have a prepared execution-domain plan")
+        &self.inner.plan.execution_domains
     }
 
     pub fn execute_with_inputs(
@@ -828,11 +295,7 @@ impl Flow {
         if state.scope_path().is_empty() {
             state.bind_workflow_inputs(&self.inner.input_schema)?;
         }
-        let domains = self
-            .inner
-            .execution_domains
-            .as_ref()
-            .expect("prepared task Flows have an execution-domain plan");
+        let domains = &self.inner.plan.execution_domains;
         let worker_limit = if state.scope_path().is_empty() {
             options.max_parallel_domains.get()
         } else {
@@ -840,7 +303,7 @@ impl Flow {
         };
         self.execute_domains(domains, state, worker_limit)?;
         let mut workflow_outputs = FlowOutputs::new();
-        for output in self.inner.outputs.iter() {
+        for output in self.inner.plan.outputs.iter() {
             let id = self.inner.nodes[output.node_id.index()]
                 .definition_id
                 .as_str();
@@ -1073,12 +536,12 @@ impl Flow {
             if position > state.scope_exit_cutoff() {
                 break;
             }
-            let node_id = self.inner.execution_order[position];
+            let node_id = self.inner.plan.execution_order[position];
             let node = &self.inner.nodes[node_id.index()];
             let previous_position = state.replace_execution_position(Some(position));
             let result = crate::context::execute_ordered_node_in_context(
                 node,
-                self.inner.dependencies[position]
+                self.inner.plan.dependencies[position]
                     .iter()
                     .map(crate::FlowDependency::borrowed),
                 state,
@@ -1107,682 +570,5 @@ impl Flow {
             }
         }
         visible
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::NodeExecutionError;
-    use serde_json::json;
-    use std::{
-        sync::{
-            Arc, Condvar, Mutex,
-            atomic::{AtomicUsize, Ordering},
-        },
-        time::{Duration, Instant},
-    };
-
-    struct EmptyNode;
-
-    impl TaskNode for EmptyNode {
-        fn execute(
-            &self,
-            _inputs: Inputs,
-            _ctx: &mut crate::ExecutionContext,
-        ) -> Result<crate::NodeResult, NodeExecutionError> {
-            Ok(Outputs::new().into())
-        }
-    }
-
-    enum Action {
-        Emit {
-            output: &'static str,
-            value: i64,
-        },
-        Increment {
-            input: &'static str,
-            output: &'static str,
-        },
-        Sum {
-            left: &'static str,
-            right: &'static str,
-            output: &'static str,
-        },
-        Fail,
-    }
-
-    struct TestNode {
-        name: &'static str,
-        action: Action,
-        trace: Arc<Mutex<Vec<&'static str>>>,
-    }
-
-    struct RendezvousNode {
-        value: i64,
-        gate: Arc<(Mutex<usize>, Condvar)>,
-    }
-
-    struct NestedWorkNode {
-        active: Arc<AtomicUsize>,
-        peak: Arc<AtomicUsize>,
-    }
-
-    impl TaskNode for NestedWorkNode {
-        fn execute(
-            &self,
-            _inputs: Inputs,
-            context: &mut crate::ExecutionContext,
-        ) -> Result<crate::NodeResult, NodeExecutionError> {
-            let jobs = (0..2)
-                .map(|_| {
-                    let active = Arc::clone(&self.active);
-                    let peak = Arc::clone(&self.peak);
-                    move || {
-                        let running = active.fetch_add(1, Ordering::SeqCst) + 1;
-                        peak.fetch_max(running, Ordering::SeqCst);
-                        std::thread::sleep(Duration::from_millis(50));
-                        active.fetch_sub(1, Ordering::SeqCst);
-                    }
-                })
-                .collect();
-            context.run_parallel(2, |_| jobs).map_err(|source| {
-                NodeExecutionError::PluginFailed {
-                    source: Box::new(source),
-                }
-            })?;
-            Ok(Outputs::new().into())
-        }
-    }
-
-    impl TaskNode for RendezvousNode {
-        fn execute(
-            &self,
-            _inputs: Inputs,
-            _ctx: &mut crate::ExecutionContext,
-        ) -> Result<crate::NodeResult, NodeExecutionError> {
-            let (arrived, changed) = &*self.gate;
-            let mut arrived = arrived.lock().unwrap();
-            *arrived += 1;
-            changed.notify_all();
-            let deadline = Instant::now() + Duration::from_secs(2);
-            while *arrived < 2 {
-                let remaining = deadline.saturating_duration_since(Instant::now());
-                if remaining.is_zero() {
-                    return Err(NodeExecutionError::ExecutionFailed {
-                        message: "independent domains did not overlap".to_owned(),
-                    });
-                }
-                let (next, timeout) = changed.wait_timeout(arrived, remaining).unwrap();
-                arrived = next;
-                if timeout.timed_out() && *arrived < 2 {
-                    return Err(NodeExecutionError::ExecutionFailed {
-                        message: "independent domains did not overlap".to_owned(),
-                    });
-                }
-            }
-            Ok((Outputs::from([("value".into(), json!(self.value).into())])).into())
-        }
-    }
-
-    impl TaskNode for TestNode {
-        fn execute(
-            &self,
-            inputs: Inputs,
-            _ctx: &mut crate::ExecutionContext,
-        ) -> Result<crate::NodeResult, NodeExecutionError> {
-            self.trace.lock().unwrap().push(self.name);
-
-            match self.action {
-                Action::Emit { output, value } => {
-                    Ok((Outputs::from([(output.to_owned(), json!(value).into())])).into())
-                }
-                Action::Increment { input, output } => {
-                    let value = inputs[input].as_i64().unwrap() + 1;
-                    Ok((Outputs::from([(output.to_owned(), json!(value).into())])).into())
-                }
-                Action::Sum {
-                    left,
-                    right,
-                    output,
-                } => {
-                    let value = inputs[left].as_i64().unwrap() + inputs[right].as_i64().unwrap();
-                    Ok((Outputs::from([(output.to_owned(), json!(value).into())])).into())
-                }
-                Action::Fail => Err(NodeExecutionError::ExecutionFailed {
-                    message: "deliberate failure".to_owned(),
-                }),
-            }
-        }
-    }
-
-    fn test_node(
-        name: &'static str,
-        action: Action,
-        trace: &Arc<Mutex<Vec<&'static str>>>,
-    ) -> FlowNode {
-        let mut ports = crate::NodePorts::default();
-        match &action {
-            Action::Emit { output, .. }
-            | Action::Increment { output, .. }
-            | Action::Sum { output, .. } => {
-                ports
-                    .outputs
-                    .push(crate::PortSpec::new(output, crate::ValueType::Number, true));
-            }
-            Action::Fail => {}
-        }
-        match &action {
-            Action::Increment { input, .. } => {
-                ports
-                    .inputs
-                    .push(crate::PortSpec::new(input, crate::ValueType::Number, true));
-            }
-            Action::Sum { left, right, .. } => {
-                ports
-                    .inputs
-                    .push(crate::PortSpec::new(left, crate::ValueType::Number, true));
-                ports
-                    .inputs
-                    .push(crate::PortSpec::new(right, crate::ValueType::Number, true));
-            }
-            Action::Fail => {
-                ports.inputs.push(crate::PortSpec::new(
-                    "value",
-                    crate::ValueType::Number,
-                    true,
-                ));
-            }
-            Action::Emit { .. } => {}
-        }
-        FlowNode::new(
-            name,
-            crate::PreparedNode::new(
-                TestNode {
-                    name,
-                    action,
-                    trace: Arc::clone(trace),
-                },
-                ports,
-            ),
-        )
-    }
-
-    fn edge(from_node: &str, from_output: &str, to_node: &str, to_input: &str) -> EdgeDefinition {
-        EdgeDefinition {
-            from_node: from_node.into(),
-            from_output: from_output.to_owned(),
-            to_node: to_node.into(),
-            to_input: to_input.to_owned(),
-        }
-    }
-
-    #[test]
-    fn rejects_ambiguous_output_ids_before_direct_execution() {
-        for required in [false, true] {
-            for reverse in [false, true] {
-                let source = |id, port| {
-                    FlowNode::new(
-                        id,
-                        crate::PreparedNode::new(
-                            EmptyNode,
-                            crate::NodePorts {
-                                inputs: Vec::new(),
-                                outputs: vec![crate::PortSpec::new(
-                                    port,
-                                    crate::ValueType::Any,
-                                    required,
-                                )],
-                            },
-                        ),
-                    )
-                };
-                let mut nodes = vec![source("a.b", "c"), source("a", "b.c")];
-                if reverse {
-                    nodes.reverse();
-                }
-                let error = Flow::new(
-                    nodes,
-                    Vec::new(),
-                    vec!["a".into(), "a.b".into()],
-                    Vec::new(),
-                )
-                .err()
-                .unwrap();
-                assert!(matches!(
-                    &error,
-                    FlowBuildError::OutputIdCollision { output_id, .. } if output_id == "a.b.c"
-                ));
-                let message = error.to_string();
-                assert!(message.contains("`a.b`.`c`") && message.contains("`a`.`b.c`"));
-            }
-        }
-    }
-
-    #[test]
-    fn prepared_controls_keep_error_order_and_refresh_when_replaced() {
-        for reverse in [false, true] {
-            let source = |id| {
-                FlowNode::new(
-                    id,
-                    crate::PreparedNode::new(
-                        EmptyNode,
-                        crate::NodePorts {
-                            inputs: Vec::new(),
-                            outputs: vec![crate::PortSpec::new(
-                                "value",
-                                crate::ValueType::Any,
-                                false,
-                            )],
-                        },
-                    ),
-                )
-            };
-            let trace = Arc::new(Mutex::new(Vec::new()));
-            let mut controls = vec![
-                crate::ControlEdgeDefinition {
-                    from_node: "b".into(),
-                    from_output: "value".into(),
-                    to_node: "target".into(),
-                },
-                crate::ControlEdgeDefinition {
-                    from_node: "a".into(),
-                    from_output: "value".into(),
-                    to_node: "target".into(),
-                },
-            ];
-            if reverse {
-                controls.reverse();
-            }
-            let flow = Flow::new(
-                vec![
-                    test_node("target", Action::Fail, &trace),
-                    source("a"),
-                    source("b"),
-                ],
-                Vec::new(),
-                ["b", "a", "target"].into_iter().map(Into::into).collect(),
-                Vec::new(),
-            )
-            .unwrap()
-            .with_control_edges(controls)
-            .unwrap();
-            for _ in 0..2 {
-                assert!(flow.execute().unwrap_err().to_string().contains("a.value"));
-            }
-            let flow = flow.with_control_edges(Vec::new()).unwrap();
-            assert!(
-                flow.execute()
-                    .unwrap_err()
-                    .to_string()
-                    .contains("deliberate failure")
-            );
-        }
-    }
-
-    fn selected_output(name: &str, node: &str, port: &str) -> WorkflowOutputDefinition {
-        WorkflowOutputDefinition {
-            name: name.to_owned().into(),
-            node: node.into(),
-            port: port.to_owned().into(),
-            optional: false,
-        }
-    }
-
-    fn order(ids: &[&str]) -> Vec<DefinitionId> {
-        ids.iter().copied().map(DefinitionId::from).collect()
-    }
-
-    #[test]
-    fn routes_named_outputs_to_named_inputs() {
-        let trace = Arc::new(Mutex::new(Vec::new()));
-        let source_a = NodeId::new(0);
-        let source_b = NodeId::new(1);
-        let join = NodeId::new(2);
-        let flow = Flow::new(
-            vec![
-                test_node(
-                    "source-a",
-                    Action::Emit {
-                        output: "value",
-                        value: 3,
-                    },
-                    &trace,
-                ),
-                test_node(
-                    "source-b",
-                    Action::Emit {
-                        output: "value",
-                        value: 5,
-                    },
-                    &trace,
-                ),
-                test_node(
-                    "join",
-                    Action::Sum {
-                        left: "left",
-                        right: "right",
-                        output: "result",
-                    },
-                    &trace,
-                ),
-            ],
-            vec![
-                edge("source-a", "value", "join", "left"),
-                edge("source-b", "value", "join", "right"),
-            ],
-            order(&["source-a", "source-b", "join"]),
-            vec![selected_output("sum", "join", "result")],
-        )
-        .unwrap();
-
-        assert_eq!(flow.execution_order(), [source_a, source_b, join]);
-        assert_eq!(flow.connections().len(), 2);
-        assert_eq!(flow.connections()[0].from_node, source_a);
-        assert_eq!(flow.connections()[0].to_node, join);
-        assert!(flow.node(&join).is_some());
-        assert_eq!(flow.definition_node_id(&join), Some("join"));
-        assert_eq!(flow.execute().unwrap()["sum"], json!(8));
-        let trace = trace.lock().unwrap();
-        assert!(
-            trace.as_slice() == ["source-a", "source-b", "join"]
-                || trace.as_slice() == ["source-b", "source-a", "join"]
-        );
-    }
-
-    #[test]
-    fn executes_a_linear_flow_in_topological_order_and_collects_outputs() {
-        let trace = Arc::new(Mutex::new(Vec::new()));
-        let flow = Flow::new(
-            vec![
-                test_node(
-                    "source",
-                    Action::Emit {
-                        output: "value",
-                        value: 3,
-                    },
-                    &trace,
-                ),
-                test_node(
-                    "increment",
-                    Action::Increment {
-                        input: "value",
-                        output: "value",
-                    },
-                    &trace,
-                ),
-            ],
-            vec![edge("source", "value", "increment", "value")],
-            order(&["source", "increment"]),
-            vec![selected_output("result", "increment", "value")],
-        )
-        .unwrap();
-
-        assert_eq!(
-            flow.execute_with_options(RuntimeOptions {
-                max_parallel_domains: NonZeroUsize::new(1).unwrap(),
-            })
-            .unwrap(),
-            FlowOutputs::from([("result".to_owned(), json!(4).into())])
-        );
-        assert_eq!(*trace.lock().unwrap(), ["source", "increment"]);
-    }
-
-    #[test]
-    fn executes_branching_flows_and_joins_values_by_input_port() {
-        let trace = Arc::new(Mutex::new(Vec::new()));
-        let flow = Flow::new(
-            vec![
-                test_node(
-                    "source",
-                    Action::Emit {
-                        output: "value",
-                        value: 10,
-                    },
-                    &trace,
-                ),
-                test_node(
-                    "left",
-                    Action::Increment {
-                        input: "value",
-                        output: "value",
-                    },
-                    &trace,
-                ),
-                test_node(
-                    "right",
-                    Action::Increment {
-                        input: "value",
-                        output: "value",
-                    },
-                    &trace,
-                ),
-                test_node(
-                    "sum",
-                    Action::Sum {
-                        left: "left",
-                        right: "right",
-                        output: "total",
-                    },
-                    &trace,
-                ),
-            ],
-            vec![
-                edge("source", "value", "left", "value"),
-                edge("source", "value", "right", "value"),
-                edge("left", "value", "sum", "left"),
-                edge("right", "value", "sum", "right"),
-            ],
-            order(&["source", "left", "right", "sum"]),
-            vec![selected_output("total", "sum", "total")],
-        )
-        .unwrap();
-
-        assert_eq!(
-            flow.execute_with_options(RuntimeOptions {
-                max_parallel_domains: NonZeroUsize::new(1).unwrap(),
-            })
-            .unwrap(),
-            FlowOutputs::from([("total".to_owned(), json!(22).into())])
-        );
-        let trace = trace.lock().unwrap();
-        assert_eq!(trace.as_slice(), ["source", "left", "right", "sum"]);
-    }
-
-    #[test]
-    fn runs_independent_domains_concurrently() {
-        let gate = Arc::new((Mutex::new(0), Condvar::new()));
-        let node = |id, value| {
-            FlowNode::new(
-                id,
-                crate::PreparedNode::new(
-                    RendezvousNode {
-                        value,
-                        gate: Arc::clone(&gate),
-                    },
-                    crate::NodePorts {
-                        inputs: Vec::new(),
-                        outputs: vec![crate::PortSpec::new(
-                            "value",
-                            crate::ValueType::Number,
-                            true,
-                        )],
-                    },
-                ),
-            )
-        };
-        let flow = Flow::new(
-            vec![node("left", 3), node("right", 5)],
-            Vec::new(),
-            order(&["left", "right"]),
-            vec![
-                selected_output("left", "left", "value"),
-                selected_output("right", "right", "value"),
-            ],
-        )
-        .unwrap();
-
-        assert_eq!(
-            flow.execute().unwrap(),
-            FlowOutputs::from([
-                ("left".to_owned(), json!(3).into()),
-                ("right".to_owned(), json!(5).into()),
-            ])
-        );
-    }
-
-    #[test]
-    fn nested_parallel_work_shares_the_flow_worker_limit() {
-        for worker_limit in [1, 2] {
-            let active = Arc::new(AtomicUsize::new(0));
-            let peak = Arc::new(AtomicUsize::new(0));
-            let node = |id: &str| {
-                FlowNode::new(
-                    id,
-                    crate::PreparedNode::new(
-                        NestedWorkNode {
-                            active: Arc::clone(&active),
-                            peak: Arc::clone(&peak),
-                        },
-                        crate::NodePorts::default(),
-                    ),
-                )
-            };
-            let flow = Flow::new(
-                vec![node("left"), node("right")],
-                Vec::new(),
-                order(&["left", "right"]),
-                Vec::new(),
-            )
-            .unwrap();
-            flow.execute_with_options(RuntimeOptions {
-                max_parallel_domains: NonZeroUsize::new(worker_limit).unwrap(),
-            })
-            .unwrap();
-
-            assert_eq!(peak.load(Ordering::SeqCst), worker_limit);
-            assert_eq!(active.load(Ordering::SeqCst), 0);
-        }
-    }
-
-    #[test]
-    fn reports_node_failures_with_the_definition_id() {
-        let trace = Arc::new(Mutex::new(Vec::new()));
-        let flow = Flow::new(
-            vec![
-                test_node(
-                    "source",
-                    Action::Emit {
-                        output: "value",
-                        value: 1,
-                    },
-                    &trace,
-                ),
-                test_node("broken-step", Action::Fail, &trace),
-            ],
-            vec![edge("source", "value", "broken-step", "value")],
-            order(&["source", "broken-step"]),
-            Vec::new(),
-        )
-        .unwrap();
-
-        let error = flow.execute().unwrap_err();
-        assert!(matches!(
-            &error,
-            crate::WorkflowRunError::NodeExecution { definition_id, .. }
-                if definition_id.as_str() == "broken-step"
-        ));
-        assert_eq!(
-            error.to_string(),
-            "node `broken-step` failed: node execution failed: deliberate failure"
-        );
-    }
-
-    #[test]
-    fn rejects_unknown_definition_ids_during_construction() {
-        let error = Flow::new(
-            vec![FlowNode::new(
-                "known",
-                crate::PreparedNode::new(EmptyNode, crate::NodePorts::default()),
-            )],
-            Vec::new(),
-            order(&["missing"]),
-            Vec::new(),
-        )
-        .err()
-        .unwrap();
-
-        assert!(matches!(
-            &error,
-            FlowBuildError::UnknownNodeInExecutionOrder { definition_id, position }
-                if definition_id.as_str() == "missing" && *position == 1
-        ));
-        assert_eq!(
-            error.to_string(),
-            "execution plan entry 1 references unknown node `missing`"
-        );
-    }
-
-    #[test]
-    fn rejects_non_topological_execution_order_during_construction() {
-        let error = Flow::new(
-            vec![
-                FlowNode::new(
-                    "source",
-                    crate::PreparedNode::new(EmptyNode, crate::NodePorts::default()),
-                ),
-                FlowNode::new(
-                    "sink",
-                    crate::PreparedNode::new(EmptyNode, crate::NodePorts::default()),
-                ),
-            ],
-            vec![edge("source", "value", "sink", "input")],
-            order(&["sink", "source"]),
-            Vec::new(),
-        )
-        .err()
-        .unwrap();
-
-        assert!(matches!(
-            error,
-            FlowBuildError::InvalidExecutionOrder { .. }
-        ));
-    }
-
-    #[test]
-    fn rejects_missing_connection_and_output_nodes_during_construction() {
-        let connection_error = Flow::new(
-            vec![FlowNode::new(
-                "known",
-                crate::PreparedNode::new(EmptyNode, crate::NodePorts::default()),
-            )],
-            vec![edge("missing", "value", "known", "input")],
-            order(&["known"]),
-            Vec::new(),
-        )
-        .err()
-        .unwrap();
-        assert!(matches!(
-            &connection_error,
-            FlowBuildError::UnknownConnectionSource { .. }
-        ));
-        assert!(connection_error.to_string().contains("`missing`"));
-
-        let output_error = Flow::new(
-            vec![FlowNode::new(
-                "known",
-                crate::PreparedNode::new(EmptyNode, crate::NodePorts::default()),
-            )],
-            Vec::new(),
-            order(&["known"]),
-            vec![selected_output("result", "missing", "value")],
-        )
-        .err()
-        .unwrap();
-        assert!(matches!(
-            &output_error,
-            FlowBuildError::UnknownOutputNode { .. }
-        ));
-        assert!(output_error.to_string().contains("`missing`"));
     }
 }

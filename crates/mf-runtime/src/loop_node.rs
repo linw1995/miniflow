@@ -1,9 +1,8 @@
 use crate::{
     ExecutionContext, FlowNode, Inputs, LoopVariableDefinition, NodeExecutionError, NodePorts,
-    NodeResult, Outputs, PortSpec, TaskNode, ValueType, WorkflowBuildError,
+    NodeResult, Outputs, PortSpec, TaskNode, ValueType,
 };
 use serde_json::Value;
-use snafu::ResultExt;
 use std::collections::BTreeMap;
 
 fn structural_error(message: impl Into<String>) -> NodeExecutionError {
@@ -45,24 +44,6 @@ impl TaskNode for ScopeSourceNode {
     ) -> Result<NodeResult, NodeExecutionError> {
         ctx.scope_values().map(Into::into)
     }
-}
-
-pub fn prepared_loop_source_from_json(
-    variables_json: &str,
-) -> Result<FlowNode, WorkflowBuildError> {
-    let variables: Vec<LoopVariableDefinition> = serde_json::from_str(variables_json).context(
-        crate::runner::InvalidEmbeddedConfigSnafu {
-            definition_id: crate::LOOP_SOURCE_ID,
-        },
-    )?;
-    let types = loop_variable_types(&variables).or_else(|message| {
-        crate::runner::InvalidDefinitionSnafu {
-            definition_id: crate::LOOP_SOURCE_ID,
-            message,
-        }
-        .fail()
-    })?;
-    Ok(prepared_loop_source_types(&types))
 }
 
 pub fn prepared_loop_source_types(types: &BTreeMap<String, ValueType>) -> FlowNode {
@@ -114,23 +95,6 @@ pub fn prepared_loop_assign(id: &str, variable: &str, value_type: ValueType) -> 
             ports,
         ),
     )
-}
-
-pub fn prepared_loop_assign_from_json(
-    id: &str,
-    variable: &str,
-    type_json: &str,
-) -> Result<FlowNode, WorkflowBuildError> {
-    let descriptor: Value = serde_json::from_str(type_json)
-        .context(crate::runner::InvalidEmbeddedConfigSnafu { definition_id: id })?;
-    let value_type = ValueType::parse_descriptor(&descriptor).or_else(|message| {
-        crate::runner::InvalidDefinitionSnafu {
-            definition_id: id,
-            message,
-        }
-        .fail()
-    })?;
-    Ok(prepared_loop_assign(id, variable, value_type))
 }
 
 struct ExitLoopNode;

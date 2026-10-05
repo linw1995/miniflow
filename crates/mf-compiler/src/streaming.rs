@@ -2,7 +2,7 @@ use crate::compiler::{
     FlowConstructionSnafu, InvalidStreamSnafu, NonCanonicalPlanOrderSnafu, PreparationSnafu,
     StreamConstructionSnafu, StreamExecutionSnafu,
 };
-use crate::{CompiledWorkflow, Flow, NodeRegistry, WorkflowCompileError, WorkflowExecutionError};
+use crate::{CompiledWorkflow, NodeRegistry, WorkflowCompileError, WorkflowExecutionError};
 use mf_runtime::PreparedStream;
 use snafu::{OptionExt, ResultExt, ensure};
 
@@ -36,7 +36,7 @@ pub fn instantiate_stream(
         })?;
     let (nodes, order) = crate::compiler::prepare_definition(&plan.definition, registry)?;
     ensure!(order == plan.execution_order, NonCanonicalPlanOrderSnafu);
-    let flow = Flow::prepare(
+    let flow = crate::FlowBuilder::prepare(
         nodes,
         plan.definition.edges.clone(),
         order,

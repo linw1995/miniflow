@@ -365,7 +365,7 @@ impl ExecutionContext {
     pub fn event_inputs<N>(
         &mut self,
         node: &FlowNode<N>,
-        dependencies: &[crate::StreamDependency],
+        dependencies: &[crate::FlowDependency],
     ) -> Result<Option<Inputs>, WorkflowRunError> {
         let id = node.definition_id.as_str();
         self.reserve_step(id)?;
@@ -1088,7 +1088,7 @@ pub fn select_context_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Flow, NodePorts, PortSpec, TaskNode, ValueType, WorkflowOutputDefinition};
+    use crate::{Flow, NodePorts, PortSpec, TaskNode, ValueType};
     use serde_json::json;
     use std::sync::{
         Arc,
@@ -1340,7 +1340,7 @@ mod tests {
 
     #[test]
     fn a_failed_run_does_not_poison_the_next_run() {
-        let flow = Flow::new(
+        let flow = Flow::from_plan(
             vec![FlowNode::new(
                 "source",
                 crate::PreparedNode::new(
@@ -1350,17 +1350,36 @@ mod tests {
                         outputs: vec![port("value", ValueType::Int64, true)],
                     },
                 ),
-            )],
-            vec![],
-            vec!["source".into()],
-            vec![WorkflowOutputDefinition {
-                name: "result".into(),
-                node: "source".into(),
-                port: "value".into(),
-                optional: false,
-            }],
-        )
-        .unwrap();
+            )]
+            .into_iter()
+            .map(|node| node.into_task().unwrap())
+            .collect(),
+            crate::FlowPlan {
+                connections: vec![].into(),
+                dependencies: vec![std::borrow::Cow::Owned(vec![])].into(),
+                execution_order: vec![crate::NodeId::new(0)].into(),
+                outputs: vec![crate::FlowOutput {
+                    name: "result".into(),
+                    node_id: crate::NodeId::new(0),
+                    port: "value".into(),
+                    optional: false,
+                }]
+                .into(),
+                execution_domains: crate::ExecutionDomains::from_parts(
+                    vec![crate::ExecutionDomain {
+                        id: 0,
+                        nodes: vec![crate::NodeId::new(0)].into(),
+                        positions: vec![0].into(),
+                        predecessors: vec![].into(),
+                        successors: vec![].into(),
+                        first_position: 0,
+                    }]
+                    .into(),
+                    vec![std::borrow::Cow::Owned(vec![])].into(),
+                ),
+            },
+            Default::default(),
+        );
         assert!(
             flow.execute()
                 .unwrap_err()
@@ -1374,7 +1393,7 @@ mod tests {
     fn checks_any_source_before_a_refined_consumer_runs() {
         for (value, succeeds) in [(json!(21), true), (json!("21"), false)] {
             let calls = Arc::new(AtomicUsize::new(0));
-            let flow = Flow::new(
+            let flow = Flow::from_plan(
                 vec![
                     FlowNode::new(
                         "source",
@@ -1396,22 +1415,50 @@ mod tests {
                             },
                         ),
                     ),
-                ],
-                vec![crate::EdgeDefinition {
-                    from_node: "source".into(),
-                    from_output: "value".into(),
-                    to_node: "consumer".into(),
-                    to_input: "payload".into(),
-                }],
-                vec!["source".into(), "consumer".into()],
-                vec![WorkflowOutputDefinition {
-                    name: "result".into(),
-                    node: "consumer".into(),
-                    port: "value".into(),
-                    optional: false,
-                }],
-            )
-            .unwrap();
+                ]
+                .into_iter()
+                .map(|node| node.into_task().unwrap())
+                .collect(),
+                crate::FlowPlan {
+                    connections: vec![crate::FlowConnection {
+                        from_node: crate::NodeId::new(0),
+                        from_output: "value".into(),
+                        to_node: crate::NodeId::new(1),
+                        to_input: "payload".into(),
+                    }]
+                    .into(),
+                    dependencies: vec![
+                        std::borrow::Cow::Owned(vec![]),
+                        std::borrow::Cow::Owned(vec![crate::FlowDependency {
+                            input: Some("payload".into()),
+                            source_node: "source".into(),
+                            source_output: "value".into(),
+                        }]),
+                    ]
+                    .into(),
+                    execution_order: vec![crate::NodeId::new(0), crate::NodeId::new(1)].into(),
+                    outputs: vec![crate::FlowOutput {
+                        name: "result".into(),
+                        node_id: crate::NodeId::new(1),
+                        port: "value".into(),
+                        optional: false,
+                    }]
+                    .into(),
+                    execution_domains: crate::ExecutionDomains::from_parts(
+                        vec![crate::ExecutionDomain {
+                            id: 0,
+                            nodes: vec![crate::NodeId::new(0), crate::NodeId::new(1)].into(),
+                            positions: vec![0, 1].into(),
+                            predecessors: vec![].into(),
+                            successors: vec![].into(),
+                            first_position: 0,
+                        }]
+                        .into(),
+                        vec![std::borrow::Cow::Owned(vec![])].into(),
+                    ),
+                },
+                Default::default(),
+            );
             if succeeds {
                 assert_eq!(flow.execute().unwrap()["result"], json!(true));
                 assert_eq!(calls.load(Ordering::SeqCst), 1);

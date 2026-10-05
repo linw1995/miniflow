@@ -72,17 +72,15 @@ impl<Job: Send + 'static> std::fmt::Debug for WorkerHandle<Job> {
 }
 
 /// An owned synchronous task for a runtime worker.
-pub struct WorkerJob(Option<Box<dyn FnOnce() + Send + 'static>>);
+pub struct WorkerJob(Box<dyn FnOnce() + Send + 'static>);
 
 impl WorkerJob {
     pub fn new(run: impl FnOnce() + Send + 'static) -> Self {
-        Self(Some(Box::new(run)))
+        Self(Box::new(run))
     }
 
-    pub fn run(mut self) {
-        if let Some(run) = self.0.take() {
-            run();
-        }
+    pub fn run(self) {
+        (self.0)();
     }
 }
 

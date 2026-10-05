@@ -301,7 +301,7 @@ fn missing_dependency_takes_precedence_over_a_skip_without_invocation() {
 
 #[test]
 fn a_running_plugin_exposes_start_before_end_and_inherits_the_node_context() {
-    use mf_runtime::{Flow, FlowNode, Inputs, NodeExecutionError, NodePorts, Outputs, TaskNode};
+    use mf_runtime::{FlowNode, Inputs, NodeExecutionError, NodePorts, Outputs, TaskNode};
     use opentelemetry::{
         Context,
         trace::{Span, TraceContextExt, Tracer, TracerProvider},
@@ -336,7 +336,7 @@ fn a_running_plugin_exposes_start_before_end_and_inherits_the_node_context() {
     let _parent = parent.clone().attach();
     let (entered_tx, entered_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(1);
-    let flow = Flow::new(
+    let flow = mf_compiler::build_flow(
         vec![FlowNode::new(
             "blocking",
             mf_runtime::PreparedNode::new(
@@ -476,7 +476,7 @@ fn dropped_logs_leave_sequence_gaps_without_changing_execution_or_provider_owner
 
 #[test]
 fn unwinding_restores_context_without_fabricating_completion() {
-    use mf_runtime::{Flow, FlowNode, Inputs, NodeExecutionError, NodePorts, TaskNode};
+    use mf_runtime::{FlowNode, Inputs, NodeExecutionError, NodePorts, TaskNode};
     use opentelemetry::{Context, trace::TraceContextExt};
     struct PanicPlugin;
     impl TaskNode for PanicPlugin {
@@ -502,7 +502,7 @@ fn unwinding_restores_context_without_fabricating_completion() {
             }],
         )
         .unwrap();
-    let flow = Flow::new(
+    let flow = mf_compiler::build_flow(
         vec![FlowNode::new(
             "a",
             mf_runtime::PreparedNode::new(PanicPlugin, NodePorts::default()),
@@ -590,13 +590,13 @@ fn an_embedded_run_closes_preparation_errors_and_restores_its_caller() {
         .unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let result = mf_runtime::ExecutionContext::run(Some(run), |state| {
-        mf_runtime::instantiate_node_with_metadata(&registry, "a", "fixture.context", "{")
+        mf_compiler::instantiate_node_with_metadata(&registry, "a", "fixture.context", "{")
             .inspect_err(|error| state.preparation_failed("a", error))
             .map(|_| ())
     });
     assert!(matches!(
         result,
-        Err(mf_runtime::WorkflowBuildError::InvalidEmbeddedConfig { .. })
+        Err(mf_compiler::WorkflowBuildError::InvalidEmbeddedConfig { .. })
     ));
     let records = harness.records();
     assert_eq!(records.len(), 3);

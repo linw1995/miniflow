@@ -104,13 +104,7 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
         prepared.plan().nodes()[1].metadata.ports.outputs[0].value_type,
         ValueType::Array
     );
-    assert_eq!(prepared.plan().domains().len(), 3);
-    assert_eq!(prepared.plan().domains()[0].source, None);
-    assert_eq!(prepared.plan().domains()[0].steps.as_ref(), [0]);
-    assert_eq!(prepared.plan().domains()[1].source, Some(0));
-    assert_eq!(prepared.plan().domains()[1].steps.as_ref(), [1]);
-    assert_eq!(prepared.plan().domains()[2].source, Some(1));
-    assert_eq!(prepared.plan().domains()[2].steps.as_ref(), [2]);
+    assert_eq!(prepared.plan().message_sources(), [None, Some(0), Some(1)]);
     assert_eq!(
         (0..3)
             .map(|node| prepared.plan().output_domain(node))
@@ -151,7 +145,7 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
         prepare(graph(json!([]), vec![]))
             .unwrap()
             .plan()
-            .domains()
+            .message_sources()
             .len(),
         2
     );
@@ -172,7 +166,7 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
         ],
     );
     let prepared = prepare(value).unwrap();
-    assert_eq!(prepared.plan().domains().len(), 2);
+    assert_eq!(prepared.plan().message_sources().len(), 2);
     assert!(
         (0..prepared.plan().nodes().len()).all(|node| prepared.plan().output_domain(node) == 1)
     );
@@ -185,20 +179,9 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
         ],
     );
     let prepared = prepare(chained).unwrap();
-    assert_eq!(prepared.plan().domains().len(), 4);
     assert_eq!(
-        prepared
-            .plan()
-            .domains()
-            .iter()
-            .map(|domain| (domain.source, domain.steps.as_ref()))
-            .collect::<Vec<_>>(),
-        [
-            (None, [0].as_slice()),
-            (Some(0), [1].as_slice()),
-            (Some(1), [2].as_slice()),
-            (Some(2), [].as_slice())
-        ]
+        prepared.plan().message_sources(),
+        [None, Some(0), Some(1), Some(2)]
     );
     assert_eq!(
         (0..3)

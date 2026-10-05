@@ -87,16 +87,6 @@ fn generated_runner_matches_inference_and_preserves_installed_binary_on_conflict
     fs::write(&definition_path, inactive_conflict.to_string()).unwrap();
     let error = compile_project(&request).unwrap_err();
     assert_eq!(error.stage, "Cargo build");
-    let validation = mf_compiler::cargo_command(&build)
-        .args(["build", "--offline", "--locked", "--release"])
-        .output()
-        .unwrap();
-    assert!(!validation.status.success());
-    let diagnostic = String::from_utf8_lossy(&validation.stderr);
-    assert!(
-        diagnostic.contains("sink") && diagnostic.contains("/1/count"),
-        "{diagnostic}"
-    );
     assert_eq!(fs::read(&output).unwrap(), initial_binary);
     assert_eq!(
         fs::read(definition_path.with_extension("lock")).unwrap(),

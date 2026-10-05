@@ -57,9 +57,7 @@ pub enum WorkflowCompileError {
         display("could not prepare streaming workflow: {source}"),
         visibility(pub)
     )]
-    StreamConstruction {
-        source: mf_runtime::StreamBuildError,
-    },
+    StreamConstruction { source: crate::StreamBuildError },
     #[snafu(display("node at position {position} has a blank definition ID"))]
     InvalidNodeId { position: usize },
     #[snafu(display("node definition ID `{definition_id}` is used more than once"))]
@@ -387,9 +385,7 @@ pub fn prepare_definition(
     registry: &NodeRegistry,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    definition
-        .validate_execution()
-        .context(StreamConstructionSnafu)?;
+    crate::validate_execution(definition).context(StreamConstructionSnafu)?;
     prepare_graph(definition, registry, None, false)
 }
 
@@ -425,7 +421,7 @@ fn prepare_graph(
         && !allow_iteration_input;
     validate_base_metadata(definition, &nodes, &incoming, startup)?;
     if startup {
-        mf_runtime::WorkflowInputSchema::from_nodes(
+        crate::workflow_input_schema(
             nodes
                 .iter()
                 .map(|node| (node, !incoming.contains_key(node.definition_id.as_str()))),
@@ -760,9 +756,7 @@ pub fn structural_order(
     definition: &WorkflowDefinition,
 ) -> Result<Vec<DefinitionId>, WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    definition
-        .validate_execution()
-        .context(StreamConstructionSnafu)?;
+    crate::validate_execution(definition).context(StreamConstructionSnafu)?;
     structural_order_graph(definition)
 }
 
@@ -858,7 +852,7 @@ pub fn compile_definition(
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
     let (nodes, execution_order) = prepare_definition(definition, registry)?;
-    let flow = Flow::prepare(
+    let flow = crate::FlowBuilder::prepare(
         nodes,
         definition.edges.clone(),
         execution_order.clone(),
@@ -985,21 +979,20 @@ pub fn instantiate_compiled(
     if plan.execution_order != canonical_order {
         return NonCanonicalPlanOrderSnafu.fail();
     }
-    Flow::new(
+    let builder = crate::FlowBuilder::prepare(
         nodes,
         plan.definition.edges.clone(),
         plan.execution_order.clone(),
         plan.definition.outputs.clone(),
     )
     .and_then(|flow| flow.with_control_edges(plan.definition.control_edges.clone()))
-    .context(FlowConstructionSnafu)
-    .and_then(|flow| {
-        if plan.definition.version.supports_startup_inputs() {
-            Ok(flow.with_workflow_inputs()?)
-        } else {
-            Ok(flow)
-        }
-    })
+    .context(FlowConstructionSnafu)?;
+    let builder = if plan.definition.version.supports_startup_inputs() {
+        builder.with_workflow_inputs()?
+    } else {
+        builder
+    };
+    builder.into_tasks().context(FlowConstructionSnafu)
 }
 
 pub fn describe_workflow_inputs(
@@ -1238,9 +1231,7 @@ pub fn resolve_nodes(
     registry: &NodeRegistry,
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    definition
-        .validate_execution()
-        .context(StreamConstructionSnafu)?;
+    crate::validate_execution(definition).context(StreamConstructionSnafu)?;
     resolve_nodes_in_scope(definition, registry, None, false)
 }
 
@@ -1313,8 +1304,9 @@ fn bind_subgraph_node(
             path: Vec::new(),
         })
         .collect();
-    let flow = Flow::new(nodes, body.edges.clone(), order, body.outputs.clone())
+    let flow = crate::FlowBuilder::prepare(nodes, body.edges.clone(), order, body.outputs.clone())
         .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
+        .and_then(|flow| flow.into_tasks())
         .context(FlowConstructionSnafu)?;
     let body = PreparedSubgraph::new(identities, outputs, move |state| {
         flow.execute_in_context(state)

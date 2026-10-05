@@ -2,21 +2,13 @@ use crate::execution_domains::{ExecutionDomain, ExecutionDomains};
 use crate::message_domain::MessageDomains;
 use crate::runner::ContextSnafu;
 use crate::{
-    ExecutionDependency, FlowNode, NodeExecution, StreamDomain, StreamExecution, TaskNode,
+    ExecutionDependency, FlowNode, NodeExecution, StreamExecution, TaskNode,
     WorkflowOutputDefinition,
 };
-use snafu::{OptionExt, ResultExt, Snafu, ensure};
+use snafu::OptionExt;
 use std::borrow::Cow;
 
 type OperatorStates = Vec<Option<NodeExecution>>;
-
-#[derive(Debug, Snafu)]
-pub enum StreamBuildError {
-    #[snafu(display("invalid streaming workflow: {message}"), visibility(pub))]
-    InvalidPlan { message: String },
-    #[snafu(display("invalid streaming workflow: {source}"), visibility(pub))]
-    WorkflowInputs { source: crate::WorkflowInputError },
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FlowDependency {
@@ -35,12 +27,10 @@ impl FlowDependency {
     }
 }
 
-pub type StreamDependency = FlowDependency;
-
 pub struct StreamPlan {
     execution: StreamExecution,
     nodes: Vec<FlowNode<Option<Box<dyn TaskNode>>>>,
-    dependencies: Cow<'static, [Cow<'static, [StreamDependency]>]>,
+    dependencies: Cow<'static, [Cow<'static, [FlowDependency]>]>,
     domains: MessageDomains,
     outputs: Cow<'static, [WorkflowOutputDefinition]>,
     input_schema: crate::WorkflowInputSchema,
@@ -55,82 +45,22 @@ impl std::fmt::Debug for PreparedStream {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("PreparedStream")
             .field("execution", &self.plan.execution)
-            .field("domains", &self.plan.domains())
+            .field("message_sources", &self.plan.message_sources())
             .field("selected_domain", &self.plan.selected_domain())
             .finish_non_exhaustive()
     }
 }
 
 impl PreparedStream {
-    /// Consumes nodes with resolved ports in their validated topological order.
-    pub fn new(
-        execution: StreamExecution,
-        nodes: Vec<FlowNode>,
-        dependencies: Vec<Vec<StreamDependency>>,
-        outputs: Vec<WorkflowOutputDefinition>,
-    ) -> Result<Self, StreamBuildError> {
-        execution.limits.validate()?;
-        ensure!(
-            nodes.len() == dependencies.len(),
-            InvalidPlanSnafu {
-                message: "stream nodes and dependencies must have equal lengths"
-            }
-        );
-        let domains = MessageDomains::new(&nodes, &dependencies, &outputs)?;
-        Self::assemble(
-            execution,
-            nodes,
-            dependencies
-                .into_iter()
-                .map(Cow::Owned)
-                .collect::<Vec<_>>()
-                .into(),
-            domains,
-            outputs.into(),
-        )
-    }
-
-    /// Binds stream executors to compiler-validated dependencies and message ownership.
+    /// Binds executor state to an already validated executable layout.
     pub fn from_plan(
         execution: StreamExecution,
         nodes: Vec<FlowNode>,
-        dependencies: &'static [Cow<'static, [StreamDependency]>],
-        domains: MessageDomains,
-        outputs: &'static [WorkflowOutputDefinition],
-    ) -> Result<Self, StreamBuildError> {
-        Self::assemble(
-            execution,
-            nodes,
-            Cow::Borrowed(dependencies),
-            domains,
-            Cow::Borrowed(outputs),
-        )
-    }
-
-    fn assemble(
-        execution: StreamExecution,
-        nodes: Vec<FlowNode>,
-        dependencies: Cow<'static, [Cow<'static, [StreamDependency]>]>,
+        dependencies: Cow<'static, [Cow<'static, [FlowDependency]>]>,
         domains: MessageDomains,
         outputs: Cow<'static, [WorkflowOutputDefinition]>,
-    ) -> Result<Self, StreamBuildError> {
-        let input_schema = crate::WorkflowInputSchema::from_nodes(
-            nodes
-                .iter()
-                .zip(dependencies.iter())
-                .map(|(node, dependencies)| (node, dependencies.is_empty())),
-            |node, input| {
-                nodes
-                    .iter()
-                    .position(|candidate| candidate.definition_id.as_str() == node)
-                    .is_some_and(|index| {
-                        dependencies[index]
-                            .iter()
-                            .any(|dependency| dependency.input.as_deref() == Some(input))
-                    })
-            },
-        )
-        .context(WorkflowInputsSnafu)?;
+        input_schema: crate::WorkflowInputSchema,
+    ) -> Self {
         let mut operator_states = Vec::with_capacity(nodes.len());
         let nodes = nodes
             .into_iter()
@@ -158,19 +88,10 @@ impl PreparedStream {
             outputs,
             input_schema,
         };
-        ensure!(
-            plan.execution().limits.max_pending_messages >= plan.domains().len(),
-            InvalidPlanSnafu {
-                message: format!(
-                    "max_pending_messages must reserve at least {} domain slots",
-                    plan.domains().len()
-                ),
-            }
-        );
-        Ok(Self {
+        Self {
             plan,
             operator_states,
-        })
+        }
     }
 
     pub fn plan(&self) -> &StreamPlan {
@@ -192,14 +113,14 @@ impl StreamPlan {
     pub fn nodes(&self) -> &[FlowNode<Option<Box<dyn TaskNode>>>] {
         &self.nodes
     }
-    pub fn dependencies(&self, node: usize) -> &[StreamDependency] {
+    pub fn dependencies(&self, node: usize) -> &[FlowDependency] {
         &self.dependencies[node]
     }
     pub fn message_domains(&self) -> &MessageDomains {
         &self.domains
     }
-    pub fn domains(&self) -> &[StreamDomain] {
-        self.domains.domains()
+    pub fn message_sources(&self) -> &[Option<usize>] {
+        self.domains.sources()
     }
     pub fn execution_domains(&self) -> &ExecutionDomains {
         self.domains.execution_domains()
@@ -219,7 +140,7 @@ impl StreamPlan {
         for &ancestor in self.execution_domains().ancestor_domains(id) {
             visible_nodes.extend(self.execution_domain(ancestor).nodes.iter().copied());
         }
-        if let Some(source) = self.domains()[message_domain].source {
+        if let Some(source) = self.message_sources()[message_domain] {
             visible_nodes.insert(crate::NodeId::new(source));
         }
         let mut visible_outputs = std::collections::BTreeSet::new();
@@ -245,28 +166,6 @@ impl StreamPlan {
         self.domains.selected_domain()
     }
 
-    pub fn execute_step(
-        &self,
-        index: usize,
-        context: &mut crate::ExecutionContext,
-    ) -> Result<(), crate::WorkflowRunError> {
-        let node = self.nodes.get(index).context(ContextSnafu {
-            definition_id: "<stream>",
-            message: "invalid stream dispatch index",
-        })?;
-        crate::context::execute_ordered_task_in_context(
-            node,
-            node.node.as_deref().with_context(|| ContextSnafu {
-                definition_id: node.definition_id.clone(),
-                message: "stream boundary is not a task",
-            })?,
-            self.dependencies(index)
-                .iter()
-                .map(StreamDependency::borrowed),
-            context,
-        )
-    }
-
     pub fn execute_domain(
         &self,
         id: usize,
@@ -289,7 +188,7 @@ impl StreamPlan {
                 })?,
                 self.dependencies(position)
                     .iter()
-                    .map(StreamDependency::borrowed),
+                    .map(FlowDependency::borrowed),
                 context,
             )?;
             if context.scope_exit_requested() {

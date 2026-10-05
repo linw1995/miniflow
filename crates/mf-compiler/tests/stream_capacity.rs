@@ -311,7 +311,12 @@ fn rejects_snapshot_capture_and_insufficient_domain_capacity() {
     value["execution"]["limits"] = json!({"max_pending_messages":1});
     let error = prepare(value).unwrap_err();
     assert!(error.to_string().contains("reserve"), "{error}");
-    assert!(error.source().unwrap().is::<mf_runtime::StreamBuildError>());
+    assert!(
+        error
+            .source()
+            .unwrap()
+            .is::<mf_compiler::StreamBuildError>()
+    );
 }
 
 #[test]

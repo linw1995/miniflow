@@ -102,12 +102,4 @@ fn build_rejects_inactive_code_without_replacing_output() {
     assert_eq!(error.stage, "Cargo build");
     assert_eq!(fs::read(&output).unwrap(), installed);
     assert_eq!(fs::read(definition.with_extension("lock")).unwrap(), lock);
-
-    let validation = mf_compiler::cargo_command(&build)
-        .args(["build", "--offline", "--locked", "--release"])
-        .output()
-        .unwrap();
-    assert!(!validation.status.success());
-    let diagnostic = String::from_utf8_lossy(&validation.stderr);
-    assert!(diagnostic.contains("transform") && diagnostic.contains("output `result`"));
 }

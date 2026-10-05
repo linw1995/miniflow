@@ -1,6 +1,6 @@
 use mf_runtime::{
-    EventContext, EventEffects, EventNode, Flow, FlowBuildError, FlowNode, NodeBuildError,
-    NodeEvent, NodeExecutionError, NodeFactory, NodePorts, NodeRegistration, PreparedNode,
+    EventContext, EventEffects, EventNode, FlowNode, NodeBuildError, NodeEvent, NodeExecutionError,
+    NodeFactory, NodePorts, NodeRegistration, PreparedNode,
 };
 use serde_json::Value;
 use std::cell::Cell;
@@ -36,7 +36,7 @@ fn prepares_send_only_event_state_and_rejects_synchronous_execution() {
     };
     let prepared = registration.instantiate(Value::Null).unwrap();
     assert!(prepared.execution.as_task_node().is_none());
-    let error = Flow::new(
+    let error = mf_compiler::build_flow(
         vec![FlowNode::new("collector", prepared)],
         Vec::new(),
         vec!["collector".into()],
@@ -45,7 +45,7 @@ fn prepares_send_only_event_state_and_rejects_synchronous_execution() {
     .err()
     .expect("an event cannot enter a synchronous flow");
     assert!(
-        matches!(error, FlowBuildError::NonTaskNode { definition_id }
+        matches!(error, mf_compiler::FlowBuildError::NonTaskNode { definition_id }
         if definition_id.as_str() == "collector")
     );
 }
