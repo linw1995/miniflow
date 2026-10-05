@@ -1,6 +1,6 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use snafu::{ResultExt, Snafu};
+use snafu::{IntoError, Snafu};
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
@@ -502,9 +502,9 @@ pub fn output_id(node: &str, port: &str) -> String {
 pub enum NodeBuildError {
     #[snafu(display("invalid prepared subgraph: {message}"))]
     InvalidSubgraph { message: String },
-    #[snafu(display("invalid node configuration: {source}"))]
+    #[snafu(display("invalid node configuration: {source}"), context(false))]
     InvalidConfiguration { source: serde_json::Error },
-    #[snafu(display("node factory failed: {source}"))]
+    #[snafu(display("node factory failed: {source}"), visibility(pub))]
     FactoryFailed {
         source: Box<dyn Error + Send + Sync + 'static>,
     },
@@ -520,11 +520,41 @@ pub enum NodeExecutionError {
     },
 }
 
+impl From<Box<dyn Error + Send + Sync>> for NodeBuildError {
+    fn from(source: Box<dyn Error + Send + Sync>) -> Self {
+        FactoryFailedSnafu.into_error(source)
+    }
+}
+
+impl From<Box<dyn Error + Send + Sync>> for NodeExecutionError {
+    fn from(source: Box<dyn Error + Send + Sync>) -> Self {
+        PluginFailedSnafu.into_error(source)
+    }
+}
+
+impl From<crate::StreamError> for NodeExecutionError {
+    fn from(source: crate::StreamError) -> Self {
+        Box::<dyn Error + Send + Sync>::from(source).into()
+    }
+}
+
+impl From<crate::WorkflowRunError> for NodeExecutionError {
+    fn from(source: crate::WorkflowRunError) -> Self {
+        Box::<dyn Error + Send + Sync>::from(source).into()
+    }
+}
+
+impl From<crate::WorkerPoolError> for NodeExecutionError {
+    fn from(source: crate::WorkerPoolError) -> Self {
+        Box::<dyn Error + Send + Sync>::from(source).into()
+    }
+}
+
 pub fn deserialize_config<T>(value: Value) -> Result<T, NodeBuildError>
 where
     T: DeserializeOwned,
 {
-    serde_json::from_value(value).context(InvalidConfigurationSnafu)
+    Ok(serde_json::from_value(value)?)
 }
 
 pub trait TaskNode: Send + Sync {

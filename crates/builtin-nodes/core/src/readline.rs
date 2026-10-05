@@ -1,7 +1,7 @@
 use mf_runtime::{
     Emitter, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeFactory,
     NodeMetadata, NodePorts, NodeRegistration, Outputs, PortSpec, PreparedNode, StdinRequirement,
-    StreamError, StreamNode, TextInput, ValueType, deserialize_config,
+    StreamNode, TextInput, ValueType, deserialize_config,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -20,8 +20,12 @@ enum ReadlineError {
     InvalidPath,
     #[snafu(display("could not open text file {path:?}: {source}"))]
     InputFile { path: PathBuf, source: io::Error },
-    #[snafu(transparent)]
-    Stream { source: StreamError },
+}
+
+impl From<ReadlineError> for NodeExecutionError {
+    fn from(source: ReadlineError) -> Self {
+        Box::<dyn Error + Send + Sync>::from(source).into()
+    }
 }
 
 impl StreamNode for Readline {
@@ -31,25 +35,22 @@ impl StreamNode for Readline {
         context: &mut ExecutionContext,
         emitter: &mut Emitter<'_>,
     ) -> Result<(), NodeExecutionError> {
-        let mut execute = || -> Result<(), Box<dyn Error + Send + Sync>> {
-            if let Some(path) = inputs.get("path") {
-                let path = path.as_str().context(InvalidPathSnafu)?;
-                let file = File::open(path).context(InputFileSnafu {
-                    path: PathBuf::from(path),
-                })?;
-                let mut input = TextInput::new(file);
-                let cancellation = context.cancellation();
-                while let Some(line) = input.next_line(&cancellation)? {
-                    emitter.send(Outputs::from([("line".into(), line.into())]).into())?;
-                }
-            } else {
-                while let Some(line) = context.stdin_line()? {
-                    emitter.send(Outputs::from([("line".into(), line.into())]).into())?;
-                }
+        if let Some(path) = inputs.get("path") {
+            let path = path.as_str().context(InvalidPathSnafu)?;
+            let file = File::open(path).context(InputFileSnafu {
+                path: PathBuf::from(path),
+            })?;
+            let mut input = TextInput::new(file);
+            let cancellation = context.cancellation();
+            while let Some(line) = input.next_line(&cancellation)? {
+                emitter.send(Outputs::from([("line".into(), line.into())]).into())?;
             }
-            Ok(())
-        };
-        execute().context(mf_runtime::NodePluginFailedSnafu)
+        } else {
+            while let Some(line) = context.stdin_line()? {
+                emitter.send(Outputs::from([("line".into(), line.into())]).into())?;
+            }
+        }
+        Ok(())
     }
 }
 

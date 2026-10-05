@@ -1217,11 +1217,7 @@ mod tests {
                     }
                 })
                 .collect();
-            context.run_parallel(2, |_| jobs).map_err(|source| {
-                NodeExecutionError::PluginFailed {
-                    source: Box::new(source),
-                }
-            })?;
+            context.run_parallel(2, |_| jobs)?;
             Ok(Outputs::new().into())
         }
     }

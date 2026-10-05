@@ -191,10 +191,36 @@ pub enum WorkflowCompileError {
     },
     #[snafu(display("invalid Loop at {path}: {message}"))]
     InvalidLoop { path: String, message: String },
-    #[snafu(display("invalid iteration node `{definition_id}`: {message}"))]
+    #[snafu(
+        display("invalid iteration node `{definition_id}`: {message}"),
+        visibility(pub)
+    )]
     InvalidIteration {
         definition_id: DefinitionId,
         message: String,
+    },
+    #[snafu(display("invalid Loop at {path}: {source}"), visibility(pub))]
+    LoopBody {
+        path: String,
+        #[snafu(source(from(WorkflowCompileError, Box::new)))]
+        source: Box<WorkflowCompileError>,
+    },
+    #[snafu(
+        display("invalid iteration node `{definition_id}`: {source}"),
+        visibility(pub)
+    )]
+    IterationBody {
+        definition_id: DefinitionId,
+        #[snafu(source(from(WorkflowCompileError, Box::new)))]
+        source: Box<WorkflowCompileError>,
+    },
+    #[snafu(
+        display("invalid iteration node `{definition_id}`: {source}"),
+        visibility(pub)
+    )]
+    IterationConfiguration {
+        definition_id: DefinitionId,
+        source: serde_json::Error,
     },
 }
 
@@ -903,12 +929,7 @@ pub fn normalize_plan(
     for node in &mut nodes {
         normalize_loop_node(node, &definition.dependencies)?;
         if node.kind == ITERATION_KIND {
-            node.config = normalize_config(definition, node).map_err(|message| {
-                WorkflowCompileError::InvalidIteration {
-                    definition_id: node.id.clone(),
-                    message,
-                }
-            })?;
+            node.config = normalize_config(definition, node)?;
         }
     }
     let mut edges = definition.edges.clone();
@@ -1025,13 +1046,13 @@ pub fn describe_interface(
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowExecutionError {
-    #[snafu(display("{source}"), visibility(pub))]
+    #[snafu(transparent)]
     Preparation { source: WorkflowCompileError },
-    #[snafu(display("{source}"))]
+    #[snafu(transparent)]
     Execution {
         source: mf_runtime::WorkflowRunError,
     },
-    #[snafu(display("{source}"), visibility(pub))]
+    #[snafu(transparent)]
     StreamExecution { source: mf_runtime::StreamError },
 }
 
@@ -1211,18 +1232,18 @@ pub fn execute_compiled_with_inputs(
 ) -> Result<mf_runtime::FlowOutputs, WorkflowExecutionError> {
     mf_runtime::ExecutionContext::run(observation, |state| {
         state.set_workflow_arguments(arguments);
-        let flow = instantiate_compiled(plan, registry)
-            .inspect_err(|error| {
-                if let WorkflowCompileError::NodeConstruction { definition_id, .. }
-                | WorkflowCompileError::UnknownNodeKind { definition_id, .. }
-                | WorkflowCompileError::InvalidNodeMetadata { definition_id, .. }
-                | WorkflowCompileError::InvalidIteration { definition_id, .. } = error
-                {
-                    state.preparation_failed(definition_id.as_str(), error);
-                }
-            })
-            .context(PreparationSnafu)?;
-        flow.execute_in_context(state).context(ExecutionSnafu)
+        let flow = instantiate_compiled(plan, registry).inspect_err(|error| {
+            if let WorkflowCompileError::NodeConstruction { definition_id, .. }
+            | WorkflowCompileError::UnknownNodeKind { definition_id, .. }
+            | WorkflowCompileError::InvalidNodeMetadata { definition_id, .. }
+            | WorkflowCompileError::InvalidIteration { definition_id, .. }
+            | WorkflowCompileError::IterationBody { definition_id, .. }
+            | WorkflowCompileError::IterationConfiguration { definition_id, .. } = error
+            {
+                state.preparation_failed(definition_id.as_str(), error);
+            }
+        })?;
+        Ok(flow.execute_in_context(state)?)
     })
 }
 
@@ -1258,20 +1279,16 @@ fn bind_subgraph_node(
     options: Value,
 ) -> Result<FlowNode, WorkflowCompileError> {
     let registration = registration_for(node, registry)?;
-    let (nodes, order) =
-        prepare_graph(body, registry, enclosing, allow_iteration_input).map_err(|error| {
-            if node.kind == crate::LOOP_KIND {
-                WorkflowCompileError::InvalidLoop {
-                    path: format!("{:?}", node.id),
-                    message: error.to_string(),
-                }
-            } else {
-                WorkflowCompileError::InvalidIteration {
-                    definition_id: node.id.clone(),
-                    message: error.to_string(),
-                }
-            }
-        })?;
+    let prepared = prepare_graph(body, registry, enclosing, allow_iteration_input);
+    let (nodes, order) = if node.kind == crate::LOOP_KIND {
+        prepared.context(LoopBodySnafu {
+            path: format!("{:?}", node.id),
+        })?
+    } else {
+        prepared.context(IterationBodySnafu {
+            definition_id: node.id.clone(),
+        })?
+    };
     let outputs = body
         .outputs
         .iter()
@@ -1384,17 +1401,13 @@ fn resolve_nodes_in_scope(
                     }
                     .fail();
                 }
-                let config = parse_config(node).map_err(|message| {
-                    WorkflowCompileError::InvalidIteration {
-                        definition_id: node.id.clone(),
-                        message,
-                    }
-                })?;
+                let config = parse_config(node)?;
                 let body = body_definition(definition, &config).map_err(|message| {
-                    WorkflowCompileError::InvalidIteration {
+                    InvalidIterationSnafu {
                         definition_id: node.id.clone(),
                         message,
                     }
+                    .build()
                 })?;
                 return bind_subgraph_node(node, registry, &body, None, true, Value::Null);
             }

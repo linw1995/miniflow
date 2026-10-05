@@ -1,11 +1,15 @@
-use crate::{NodeDefinition, WorkflowDefinition, WorkflowOutputDefinition};
+use crate::compiler::{InvalidIterationSnafu, IterationBodySnafu, IterationConfigurationSnafu};
+use crate::{NodeDefinition, WorkflowCompileError, WorkflowDefinition, WorkflowOutputDefinition};
 use mf_runtime::{
     EXIT_LOOP_KIND, ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationConfig,
     LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID,
 };
+use snafu::ResultExt;
 
-pub fn parse_config(node: &NodeDefinition) -> Result<IterationConfig, String> {
-    serde_json::from_value(node.config.clone()).map_err(|error| error.to_string())
+pub fn parse_config(node: &NodeDefinition) -> Result<IterationConfig, WorkflowCompileError> {
+    serde_json::from_value(node.config.clone()).context(IterationConfigurationSnafu {
+        definition_id: node.id.clone(),
+    })
 }
 
 pub fn body_definition(
@@ -60,12 +64,22 @@ pub fn body_definition(
 pub fn normalize_config(
     parent: &WorkflowDefinition,
     node: &NodeDefinition,
-) -> Result<serde_json::Value, String> {
+) -> Result<serde_json::Value, WorkflowCompileError> {
     let mut config = parse_config(node)?;
-    let body = body_definition(parent, &config)?;
-    let order = crate::structural_order(&body).map_err(|error| error.to_string())?;
+    let body = body_definition(parent, &config).map_err(|message| {
+        InvalidIterationSnafu {
+            definition_id: node.id.clone(),
+            message,
+        }
+        .build()
+    })?;
+    let order = crate::structural_order(&body).context(IterationBodySnafu {
+        definition_id: node.id.clone(),
+    })?;
     let mut normalized = crate::compiler::normalize_plan(&body, order)
-        .map_err(|error| error.to_string())?
+        .context(IterationBodySnafu {
+            definition_id: node.id.clone(),
+        })?
         .definition;
     normalized
         .nodes
@@ -73,5 +87,7 @@ pub fn normalize_config(
     config.body.nodes = normalized.nodes;
     config.body.edges = normalized.edges;
     config.body.control_edges = normalized.control_edges;
-    serde_json::to_value(config).map_err(|error| error.to_string())
+    serde_json::to_value(config).context(IterationConfigurationSnafu {
+        definition_id: node.id.clone(),
+    })
 }

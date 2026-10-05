@@ -10,6 +10,7 @@ use mf_telemetry::{
 };
 use serde::Deserialize;
 use serde_json::Value;
+use snafu::{ResultExt, Snafu};
 use std::{cmp::Ordering, collections::BTreeMap};
 
 pub const KIND: &str = mf_runtime::LOOP_KIND;
@@ -84,9 +85,10 @@ mod tests {
 }
 
 fn structural_error(message: impl Into<String>) -> NodeExecutionError {
-    NodeExecutionError::ExecutionFailed {
+    mf_runtime::NodeExecutionFailedSnafu {
         message: message.into(),
     }
+    .build()
 }
 
 // Older generated sources include a body field; it is not needed to configure execution.
@@ -104,6 +106,20 @@ struct LoopNode {
     until: Option<LoopConditionDefinition>,
     types: BTreeMap<String, ValueType>,
     body: PreparedSubgraph,
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(display("Loop `{node}` pass {index}: {source}"))]
+struct LoopPassFailure {
+    node: String,
+    index: usize,
+    source: mf_runtime::WorkflowRunError,
+}
+
+impl From<LoopPassFailure> for NodeExecutionError {
+    fn from(source: LoopPassFailure) -> Self {
+        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
+    }
 }
 
 impl TaskNode for LoopNode {
@@ -144,8 +160,9 @@ impl TaskNode for LoopNode {
                     }
                     result
                 })
-                .map_err(|error| {
-                    structural_error(format!("Loop `{}` pass {index}: {error}", self.id))
+                .context(LoopPassFailureSnafu {
+                    node: self.id.clone(),
+                    index,
                 })?;
             variables = updated;
             pass_count = index + 1;

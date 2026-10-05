@@ -556,7 +556,7 @@ fn subgraph_preparation(
             definition_id: node.id.clone(),
             message,
         };
-        let config = parse_config(node).map_err(invalid)?;
+        let config = parse_config(node)?;
         let body = body_definition(parent, &config).map_err(invalid)?;
         body_static_scope.clear();
         let error = quote! {
@@ -566,19 +566,16 @@ fn subgraph_preparation(
         };
         (body, serde_json::Value::Null, None, Some(error))
     };
-    let order = crate::compiler::structural_order_graph(&body).map_err(|error| {
-        if node.kind == crate::LOOP_KIND {
-            PlanError::InvalidLoopConfig {
-                definition_id: node.id.clone(),
-                message: error.to_string(),
-            }
-        } else {
-            PlanError::Iteration {
-                definition_id: node.id.clone(),
-                message: error.to_string(),
-            }
-        }
-    })?;
+    let order = crate::compiler::structural_order_graph(&body);
+    let order = if node.kind == crate::LOOP_KIND {
+        order.context(crate::compiler::LoopBodySnafu {
+            path: format!("{:?}", node.id),
+        })?
+    } else {
+        order.context(crate::compiler::IterationBodySnafu {
+            definition_id: node.id.clone(),
+        })?
+    };
     let body_scope = format!("{scope}_{index}");
     let (preparations, execution, body_flow) = generate_scope(
         &body,
@@ -877,7 +874,7 @@ fn collect_body_layouts(
                 }
                 .build()
             };
-            let config = parse_config(node).map_err(invalid)?;
+            let config = parse_config(node)?;
             body_definition(definition, &config).map_err(invalid)?
         } else {
             continue;

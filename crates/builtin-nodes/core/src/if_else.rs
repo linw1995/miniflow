@@ -5,7 +5,8 @@ use mf_runtime::{
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use std::{cmp::Ordering, collections::BTreeSet, fmt};
+use snafu::{ResultExt, Snafu};
+use std::{cmp::Ordering, collections::BTreeSet, error::Error};
 
 pub const KIND: &str = "builtin.if_else";
 
@@ -50,23 +51,53 @@ fn present_value<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Va
     Value::deserialize(deserializer).map(Some)
 }
 
-#[derive(Debug)]
-struct InvalidConfig(String);
-impl fmt::Display for InvalidConfig {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
+#[derive(Debug, Snafu)]
+enum BranchBuildError {
+    #[snafu(display("{message}"))]
+    InvalidConfig { message: String },
+    #[snafu(display("branch `{branch}`: {source}"))]
+    Configuration {
+        branch: String,
+        source: NodeBuildError,
+    },
+}
+
+impl From<BranchBuildError> for NodeBuildError {
+    fn from(source: BranchBuildError) -> Self {
+        Box::<dyn Error + Send + Sync>::from(source).into()
     }
 }
-impl std::error::Error for InvalidConfig {}
+
+#[derive(Debug, Snafu)]
+#[snafu(display(
+    "branch `{branch}` source `{output}` path `{path}` operator {operator:?}: {source}"
+))]
+struct BranchExecutionError {
+    branch: String,
+    output: String,
+    path: String,
+    operator: Operator,
+    source: NodeExecutionError,
+}
+
+impl From<BranchExecutionError> for NodeExecutionError {
+    fn from(source: BranchExecutionError) -> Self {
+        Box::<dyn Error + Send + Sync>::from(source).into()
+    }
+}
+
 fn invalid(message: impl Into<String>) -> NodeBuildError {
-    NodeBuildError::FactoryFailed {
-        source: Box::new(InvalidConfig(message.into())),
-    }
-}
-fn execution_error(message: impl Into<String>) -> NodeExecutionError {
-    NodeExecutionError::ExecutionFailed {
+    InvalidConfigSnafu {
         message: message.into(),
     }
+    .build()
+    .into()
+}
+fn execution_error(message: impl Into<String>) -> NodeExecutionError {
+    mf_runtime::NodeExecutionFailedSnafu {
+        message: message.into(),
+    }
+    .build()
 }
 fn valid_pointer(path: &str) -> bool {
     if !path.is_empty() && !path.starts_with('/') {
@@ -151,20 +182,17 @@ impl TaskNode for IfElse {
         for branch in &self.branches {
             let condition = &branch.condition;
             let result = (|| {
-                let source = match ctx
-                    .output(&condition.source.output)
-                    .map_err(|error| error.to_string())?
-                {
+                let source = match ctx.output(&condition.source.output)? {
                     ContextValue::Value(value) => Some(value),
                     ContextValue::Skipped => None,
                 };
-                condition.evaluate(source)
+                condition.evaluate(source).map_err(execution_error)
             })();
-            let matched = result.map_err(|message| {
-                execution_error(format!(
-                    "branch `{}` source `{}` path `{}` operator {:?}: {message}",
-                    branch.id, condition.source.output, condition.source.path, condition.operator,
-                ))
+            let matched = result.context(BranchExecutionSnafu {
+                branch: &branch.id,
+                output: &condition.source.output,
+                path: &condition.source.path,
+                operator: condition.operator,
             })?;
             if matched {
                 selected = &branch.id;
@@ -218,8 +246,8 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
             .and_then(Value::as_str)
             .map(str::to_owned)
             .unwrap_or_else(|| format!("index {index}"));
-        let branch: Branch = deserialize_config(value)
-            .map_err(|error| invalid(format!("branch `{label}`: {error}")))?;
+        let branch: Branch =
+            deserialize_config(value).context(ConfigurationSnafu { branch: label })?;
         let mut bytes = branch.id.bytes();
         let valid = bytes
             .next()
@@ -250,6 +278,24 @@ inventory::submit! { NodeRegistration { kind: KIND, factory: mf_runtime::NodeFac
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn malformed_branches_preserve_the_configuration_error_chain() {
+        let error = factory(serde_json::json!({"branches": [{"id": "first"}]}))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("branch `first`"));
+        let mut current: &(dyn Error + 'static) = &error;
+        loop {
+            if let Some(source) = current.downcast_ref::<serde_json::Error>() {
+                assert!(source.is_data());
+                break;
+            }
+            current = current
+                .source()
+                .expect("typed JSON source must remain in the chain");
+        }
+    }
     fn condition(operator: &str, value: Value) -> Value {
         json!({"source":{"output":"source.value","path":""},"operator":operator,"value":value})
     }
