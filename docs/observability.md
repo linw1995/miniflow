@@ -323,14 +323,14 @@ Pass startup arguments with `--inputs '<JSON>'` or `--inputs-file <PATH>`. These
 exclusive and accept at most 1 MiB. The CLI reads a parameter file once, validates the nested node/port
 map, and forwards a canonical copy through a private temporary file kept alive for the child.
 
-Autonomous streams receive null stdin. A workflow with an active stdin requirement requires
-`--stream-input <PATH>` with a readable regular text file. `-` and missing or unused input paths fail preflight. The child's file descriptor is opened before launch;
-terminal stdin remains available for TUI controls. Resource metadata controls this routing for all
+TUI children receive null stdin so terminal input remains available for controls. Preflight rejects workflows
+with an active stdin requirement. Supply a source file path through workflow parameters for TUI observation;
+use the standalone executable for stdin ingestion. Resource metadata determines compatibility for all
 registered node kinds.
 
 ```sh
 mf run ./read-workflow --tui --inputs '{"read":{"path":"/data/events.txt"}}'
-mf run ./stream-batch --tui --stream-input ./events.jsonl
+printf '1\n2\n' | ./stream-batch
 ```
 
 The graph shows data and control edges, node status, elapsed time, and confirmed branch outcomes.

@@ -15,7 +15,7 @@ use ratatui::{
     widgets::Widget,
 };
 use rust_sugiyama::{configure::Config, from_vertices_and_edges};
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 use std::{
     collections::{BTreeMap, BTreeSet},
     ops::RangeInclusive,
@@ -99,9 +99,7 @@ impl GraphLayout {
     }
 
     pub fn new(description: &WorkflowDescription) -> Result<Self, GraphError> {
-        description
-            .validate()
-            .map_err(|source| GraphError::Description { source })?;
+        description.validate().context(DescriptionSnafu)?;
         if description.nodes.len() > MAX_SESSION_NODES {
             return Err(GraphError::TooManyNodes {
                 limit: MAX_SESSION_NODES,
