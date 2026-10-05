@@ -3,14 +3,14 @@ use std::collections::BTreeSet;
 use std::sync::{Condvar, Mutex};
 
 #[derive(Debug)]
-pub(crate) struct DomainBudget {
+pub struct DomainBudget {
     limit: usize,
     active: Mutex<usize>,
     changed: Condvar,
 }
 
 impl DomainBudget {
-    pub(crate) fn new(limit: usize) -> Self {
+    pub fn new(limit: usize) -> Self {
         assert!(limit > 0);
         Self {
             limit,
@@ -19,11 +19,11 @@ impl DomainBudget {
         }
     }
 
-    pub(crate) fn limit(&self) -> usize {
+    pub fn limit(&self) -> usize {
         self.limit
     }
 
-    pub(crate) fn try_acquire(&self) -> bool {
+    pub fn try_acquire(&self) -> bool {
         let mut active = self.active.lock().unwrap();
         if *active >= self.limit {
             return false;
@@ -32,7 +32,7 @@ impl DomainBudget {
         true
     }
 
-    pub(crate) fn acquire(&self) {
+    pub fn acquire(&self) {
         let mut active = self.active.lock().unwrap();
         while *active >= self.limit {
             active = self.changed.wait(active).unwrap();
@@ -40,7 +40,7 @@ impl DomainBudget {
         *active += 1;
     }
 
-    pub(crate) fn release(&self) {
+    pub fn release(&self) {
         let mut active = self.active.lock().unwrap();
         assert!(*active > 0, "domain budget released without a permit");
         *active -= 1;
