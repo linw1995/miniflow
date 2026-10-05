@@ -1,6 +1,6 @@
 use crate::ValueRef as Value;
 use crate::execution_domains::DomainBudget;
-use crate::runner::{DependencySnafu, InputTypeSnafu, NodeExecutionSnafu};
+use crate::runner::{ContextSnafu, DependencySnafu, InputTypeSnafu, NodeExecutionSnafu};
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use mf_telemetry::{
     event::{FailurePhase, LoopPathEntry, LoopSummary, SkipCause},
@@ -8,6 +8,7 @@ use mf_telemetry::{
 };
 use snafu::ResultExt;
 use std::collections::{BTreeMap, BTreeSet};
+use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -56,32 +57,21 @@ impl StepBudget {
     }
 
     fn reserve(&self, id: &str) -> Result<(), WorkflowRunError> {
-        self.0
+        match self
+            .0
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
                 remaining.checked_sub(1)
-            })
-            .map(|_| ())
-            .map_err(|_| {
-                state_error(
-                    id,
-                    format!(
-                        "scheduled-step budget of {} exhausted",
-                        crate::MAX_SCHEDULED_STEPS
-                    ),
-                )
-            })
-    }
-}
-
-impl PartialEq<usize> for StepBudget {
-    fn eq(&self, other: &usize) -> bool {
-        self.0.load(Ordering::Acquire) == *other
-    }
-}
-
-impl PartialEq for StepBudget {
-    fn eq(&self, other: &Self) -> bool {
-        self.0.load(Ordering::Acquire) == other.0.load(Ordering::Acquire)
+            }) {
+            Ok(_) => Ok(()),
+            Err(_) => ContextSnafu {
+                definition_id: crate::DefinitionId::from(id),
+                message: format!(
+                    "scheduled-step budget of {} exhausted",
+                    crate::MAX_SCHEDULED_STEPS
+                ),
+            }
+            .fail(),
+        }
     }
 }
 
@@ -289,23 +279,24 @@ impl ExecutionContext {
         self.domain_worker = active;
     }
 
-    /// Temporarily yields this execution domain's permit for structured child work.
-    #[doc(hidden)]
-    pub fn suspend_domain_worker(&mut self) -> bool {
-        if std::mem::replace(&mut self.domain_worker, false) {
-            self.domain_budget.release();
-            true
-        } else {
-            false
+    /// Runs child work without holding this execution domain's worker permit.
+    ///
+    /// The permit is reacquired before returning or resuming a panic, so bounded
+    /// child work can make progress without deadlocking against its parent.
+    pub fn with_domain_worker_suspended<T>(&mut self, run: impl FnOnce(&mut Self) -> T) -> T {
+        let suspended = std::mem::replace(&mut self.domain_worker, false);
+        if !suspended {
+            return run(self);
         }
-    }
+        self.domain_budget.release();
 
-    /// Reacquires a permit yielded by `suspend_domain_worker`.
-    #[doc(hidden)]
-    pub fn resume_domain_worker(&mut self, suspended: bool) {
-        if suspended {
-            self.domain_budget.acquire();
-            self.domain_worker = true;
+        let result = catch_unwind(AssertUnwindSafe(|| run(self)));
+        self.domain_budget.acquire();
+        self.domain_worker = true;
+
+        match result {
+            Ok(result) => result,
+            Err(payload) => resume_unwind(payload),
         }
     }
 
@@ -1236,7 +1227,10 @@ mod tests {
             }
             assert_eq!(state.outputs, parent_outputs);
             assert!(state.scopes.is_empty());
-            assert_eq!(state.remaining_steps, crate::MAX_SCHEDULED_STEPS - 1);
+            assert_eq!(
+                state.remaining_steps.0.load(Ordering::Acquire),
+                crate::MAX_SCHEDULED_STEPS - 1
+            );
         }
     }
 
