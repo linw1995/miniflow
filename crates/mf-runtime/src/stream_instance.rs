@@ -22,17 +22,15 @@ use std::{
 
 #[derive(Clone, Debug, Snafu)]
 pub enum StreamError {
-    #[snafu(display("stream preparation failed: {message}"), visibility(pub))]
-    Preparation { message: String },
+    #[snafu(
+        display("invalid stream runtime configuration: {message}"),
+        visibility(pub)
+    )]
+    Configuration { message: String },
     #[snafu(display("could not claim stream stdio: {source}"), visibility(pub))]
     Stdio {
         #[snafu(source(from(std::io::Error, Arc::new)))]
         source: Arc<std::io::Error>,
-    },
-    #[snafu(display("stream preparation failed: {source}"), visibility(pub))]
-    Compilation {
-        #[snafu(source(from(Box<dyn std::error::Error + Send + Sync>, Arc::from)))]
-        source: Arc<dyn std::error::Error + Send + Sync>,
     },
     #[snafu(
         display("could not start stream thread `{thread}`: {source}"),
@@ -76,7 +74,7 @@ pub enum StreamError {
         #[snafu(source(from(serde_json::Error, Arc::new)))]
         source: Arc<serde_json::Error>,
     },
-    #[snafu(display("stream execution failed: {message}"))]
+    #[snafu(display("stream execution failed: {message}"), visibility(pub))]
     Execution { message: String },
     #[snafu(display(
         "stream execution failed in domain {} message {}: {source}",
@@ -106,8 +104,7 @@ pub enum StreamError {
 impl StreamError {
     pub fn phase(&self) -> &'static str {
         match self {
-            Self::Preparation { .. }
-            | Self::Compilation { .. }
+            Self::Configuration { .. }
             | Self::ThreadSpawn { .. }
             | Self::WorkerStartup { .. }
             | Self::Stdio { .. } => "preparation",
@@ -497,12 +494,8 @@ fn workflow_error_node(error: &crate::WorkflowRunError) -> String {
         crate::WorkflowRunError::Dependency { definition_id, .. }
         | crate::WorkflowRunError::InputType { definition_id, .. }
         | crate::WorkflowRunError::Context { definition_id, .. }
-        | crate::WorkflowRunError::UnknownKind { definition_id, .. }
-        | crate::WorkflowRunError::InvalidEmbeddedConfig { definition_id, .. }
-        | crate::WorkflowRunError::NodeConstruction { definition_id, .. }
         | crate::WorkflowRunError::NodeExecution { definition_id, .. } => definition_id.to_string(),
         crate::WorkflowRunError::WorkflowInputs { .. }
-        | crate::WorkflowRunError::FlowBuild { .. }
         | crate::WorkflowRunError::WorkerPool { .. } => "<workflow>".to_owned(),
     }
 }
@@ -618,7 +611,7 @@ impl PreparedStream {
     ) -> Result<StreamInstance, StreamError> {
         ensure!(
             options.snapshots.is_none(),
-            PreparationSnafu {
+            ConfigurationSnafu {
                 message: "snapshot capture is unsupported for streaming instances",
             }
         );
@@ -626,7 +619,7 @@ impl PreparedStream {
             ensure!(
                 observation.description().event_schema_version()
                     == mf_telemetry::STREAM_EVENT_SCHEMA_VERSION,
-                PreparationSnafu {
+                ConfigurationSnafu {
                     message: "stream execution requires observation schema 4"
                 }
             );

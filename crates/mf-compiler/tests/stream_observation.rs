@@ -90,7 +90,7 @@ fn start_stream(
     plan: &mf_compiler::CompiledWorkflow,
     registry: &NodeRegistry,
     mut options: StreamOptions,
-) -> Result<SourceRun, mf_runtime::StreamError> {
+) -> Result<SourceRun, mf_compiler::WorkflowExecutionError> {
     let source = controlled::prepare_control("feed", &mut options);
     let instance = mf_compiler::start_stream(plan, registry, options)?;
     Ok(SourceRun { instance, source })

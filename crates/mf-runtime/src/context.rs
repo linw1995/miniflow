@@ -172,7 +172,7 @@ impl ExecutionContext {
 
     pub fn stdin_line(&self) -> Result<Option<String>, crate::StreamError> {
         let input = self.stdin.as_ref().ok_or_else(|| {
-            crate::StreamPreparationSnafu {
+            crate::stream_instance::ExecutionSnafu {
                 message: "stdin is unavailable".to_owned(),
             }
             .build()
@@ -525,35 +525,6 @@ impl ExecutionContext {
         result
     }
 
-    pub fn prepare_node(
-        &mut self,
-        registry: &crate::NodeRegistry,
-        id: &str,
-        kind: &str,
-        config: &str,
-    ) -> Result<FlowNode, WorkflowRunError> {
-        let result = crate::instantiate_node_with_metadata(registry, id, kind, config);
-        if let Err(error) = &result {
-            self.preparation_failed(id, error);
-        }
-        result
-    }
-
-    pub fn prepare_node_in_loop(
-        &mut self,
-        registry: &crate::NodeRegistry,
-        id: &str,
-        kind: &str,
-        config: &str,
-        scope: &[&str],
-    ) -> Result<FlowNode, WorkflowRunError> {
-        let result = crate::instantiate_node_with_metadata(registry, id, kind, config);
-        if let Err(error) = &result {
-            self.preparation_failed_in_loop(scope, id, error);
-        }
-        result
-    }
-
     pub fn preparation_failed_in_loop(
         &mut self,
         scope: &[&str],
@@ -591,11 +562,7 @@ impl ExecutionContext {
             WorkflowRunError::Context { definition_id, .. } => {
                 (Some(definition_id.to_string()), FailurePhase::Execution)
             }
-            WorkflowRunError::WorkflowInputs { .. }
-            | WorkflowRunError::FlowBuild { .. }
-            | WorkflowRunError::UnknownKind { .. }
-            | WorkflowRunError::InvalidEmbeddedConfig { .. }
-            | WorkflowRunError::NodeConstruction { .. } => (None, FailurePhase::Preparation),
+            WorkflowRunError::WorkflowInputs { .. } => (None, FailurePhase::Dependency),
             WorkflowRunError::WorkerPool { .. } => (None, FailurePhase::Execution),
         };
         observation.select_failure(node, phase, error.to_string());

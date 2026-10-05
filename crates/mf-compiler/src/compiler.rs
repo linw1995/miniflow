@@ -867,15 +867,11 @@ pub fn compile_definition(
     .and_then(|flow| flow.with_control_edges(definition.control_edges.clone()))
     .context(FlowConstructionSnafu)?;
 
-    let runtime = mf_runtime::FlowRuntime::default();
     if let Some(execution) = &definition.execution {
-        runtime
-            .prepare_stream(flow, execution.clone())
+        flow.into_stream(execution.clone())
             .context(StreamConstructionSnafu)?;
     } else {
-        runtime
-            .prepare_oneshot(flow)
-            .context(FlowConstructionSnafu)?;
+        flow.into_tasks().context(FlowConstructionSnafu)?;
     }
 
     normalize_plan(definition, execution_order)
@@ -1036,12 +1032,14 @@ pub fn describe_interface(
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowExecutionError {
-    #[snafu(display("{source}"))]
+    #[snafu(display("{source}"), visibility(pub))]
     Preparation { source: WorkflowCompileError },
     #[snafu(display("{source}"))]
     Execution {
         source: mf_runtime::WorkflowRunError,
     },
+    #[snafu(display("{source}"), visibility(pub))]
+    StreamExecution { source: mf_runtime::StreamError },
 }
 
 #[derive(Debug, Snafu)]

@@ -192,10 +192,11 @@ impl StreamStdio {
 
     #[cfg(not(unix))]
     pub fn claim() -> Result<Self, StreamError> {
-        crate::StreamPreparationSnafu {
-            message: String::from("stream stdio requires Linux or macOS"),
-        }
-        .fail()
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "stream stdio requires Linux or macOS",
+        ))
+        .context(StdioSnafu)
     }
 
     pub fn take_input(&mut self) -> Option<TextInput> {

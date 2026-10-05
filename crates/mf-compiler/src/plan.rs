@@ -207,7 +207,7 @@ impl CompiledWorkflow {
             }
         }
 
-        let (preparations, execution, _) = generate_scope(
+        let (preparations, _, root_flow) = generate_scope(
             &self.definition,
             &self.execution_order,
             "root",
@@ -233,58 +233,65 @@ impl CompiledWorkflow {
             }
         }
         let generated = quote! {
-            pub fn run_workflow_with_inputs(registry: &mf_runtime::NodeRegistry, arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                run_workflow_with_inputs_and_options(registry, arguments, mf_runtime::RuntimeOptions::default())
+            pub fn prepare_workflow(
+                registry: &mf_runtime::NodeRegistry,
+                mut observation: Option<&mut mf_runtime::RunObservation>,
+            ) -> Result<mf_runtime::Flow, mf_runtime::WorkflowBuildError> {
+                use snafu::ResultExt as _;
+                #(#preparations)*
+                Ok(#root_flow)
+            }
+
+            pub fn run_workflow_with_inputs(flow: &mf_runtime::Flow, arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
+                run_workflow_with_inputs_and_options(flow, arguments, mf_runtime::RuntimeOptions::default())
             }
 
             pub fn run_workflow_with_inputs_and_options(
-                registry: &mf_runtime::NodeRegistry,
+                flow: &mf_runtime::Flow,
                 arguments: mf_runtime::WorkflowArguments,
                 options: mf_runtime::RuntimeOptions,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
                 let mut state = mf_runtime::ExecutionContext::default();
                 state.set_workflow_arguments(arguments);
-                run_workflow_in_context_with_options(registry, &mut state, options)
+                run_workflow_in_context_with_options(flow, &mut state, options)
             }
 
             pub fn run_workflow(
-                registry: &mf_runtime::NodeRegistry,
+                flow: &mf_runtime::Flow,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                run_workflow_with_observation(registry, None)
+                run_workflow_with_observation(flow, None)
             }
 
             pub fn run_workflow_with_observation(
-                registry: &mf_runtime::NodeRegistry,
+                flow: &mf_runtime::Flow,
                 observation: Option<mf_runtime::RunObservation>,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                run_workflow_with_observation_and_options(registry, observation, mf_runtime::RuntimeOptions::default())
+                run_workflow_with_observation_and_options(flow, observation, mf_runtime::RuntimeOptions::default())
             }
 
             pub fn run_workflow_with_observation_and_options(
-                registry: &mf_runtime::NodeRegistry,
+                flow: &mf_runtime::Flow,
                 observation: Option<mf_runtime::RunObservation>,
                 options: mf_runtime::RuntimeOptions,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
                 mf_runtime::ExecutionContext::run(observation, |state| {
-                    run_workflow_in_context_with_options(registry, state, options)
+                    run_workflow_in_context_with_options(flow, state, options)
                 })
             }
 
             pub fn run_workflow_in_context(
-                registry: &mf_runtime::NodeRegistry,
+                flow: &mf_runtime::Flow,
                 state: &mut mf_runtime::ExecutionContext,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                run_workflow_in_context_with_options(registry, state, mf_runtime::RuntimeOptions::default())
+                run_workflow_in_context_with_options(flow, state, mf_runtime::RuntimeOptions::default())
             }
 
             pub fn run_workflow_in_context_with_options(
-                registry: &mf_runtime::NodeRegistry,
+                flow: &mf_runtime::Flow,
                 state: &mut mf_runtime::ExecutionContext,
                 options: mf_runtime::RuntimeOptions,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                #(#preparations)*
-                let runtime = mf_runtime::FlowRuntime::new(options);
-                #(#execution)*
+                mf_runtime::FlowRuntime::new(options).execute_in_context(flow, state)
             }
         };
         let syntax_tree: syn::File = syn::parse2(generated).context(GeneratedSyntaxSnafu)?;
@@ -342,16 +349,17 @@ fn generate_stream_artifacts(
         Span::call_site(),
     );
     let generated = quote! {
-        pub fn prepare_stream(registry: &mf_runtime::NodeRegistry) -> Result<mf_runtime::PreparedStream, Box<dyn std::error::Error>> {
-            let mut preparation = mf_runtime::ExecutionContext::default();
-            let state = &mut preparation;
+        pub fn prepare_stream(registry: &mf_runtime::NodeRegistry) -> Result<mf_runtime::PreparedStream, mf_runtime::WorkflowBuildError> {
+            use snafu::ResultExt as _;
+            let mut observation: Option<&mut mf_runtime::RunObservation> = None;
             #(#preparations)*
             let flow = mf_runtime::Flow::prepare(
                 vec![#(#nodes),*], vec![#(#edges),*], vec![#(#order_ids),*], vec![#(#outputs),*],
             )?.with_control_edges(vec![#(#controls),*])?;
-            Ok(mf_runtime::FlowRuntime::default().prepare_stream(
-                flow, serde_json::from_str(#execution)?,
-            )?)
+            let execution = serde_json::from_str::<mf_runtime::StreamExecution>(#execution)
+                .boxed()
+                .context(mf_runtime::WorkflowMetadataSnafu { definition_id: "<workflow>" })?;
+            Ok(flow.into_stream(execution)?)
         }
     };
     let syntax: syn::File = syn::parse2(generated).context(GeneratedSyntaxSnafu)?;
@@ -409,17 +417,22 @@ fn generate_scope(
             continue;
         }
 
-        let preparation_error = preparation_error_override.cloned().unwrap_or_else(|| {
-            let report = if static_scope.is_empty() {
-                quote! { state.preparation_failed(#id_lit, &error); }
+        let preparation_report = preparation_error_override.cloned().unwrap_or_else(|| {
+            if static_scope.is_empty() {
+                quote! {
+                    if let Some(observation) = observation.as_deref_mut() {
+                        observation.preparation_failed(#id_lit, error.to_string());
+                    }
+                }
             } else {
-                quote! { state.preparation_failed_in_loop(&[#(#scope_literals),*], #id_lit, &error); }
-            };
-            quote! {
-                #report
-                mf_runtime::WorkflowRunError::Context {
-                    definition_id: #id_lit.into(),
-                    message: error.to_string(),
+                quote! {
+                    if let Some(observation) = observation.as_deref_mut() {
+                        observation.preparation_failed_unattributed(format!(
+                            "Loop scope {} node `{}`: {}",
+                            serde_json::to_string(&[#(#scope_literals),*]).expect("scope IDs serialize"),
+                            #id_lit, error,
+                        ));
+                    }
                 }
             }
         });
@@ -463,25 +476,18 @@ fn generate_scope(
             _ => {
                 let config_json = serde_json::to_string(&node.config).context(SerializeSnafu)?;
                 let config_lit = LitStr::new(&config_json, Span::call_site());
-                if preparation_error_override.is_some() {
-                    quote! {
-                        mf_runtime::instantiate_node_with_metadata(registry, #id_lit, #kind_lit, #config_lit)
-                            .map_err(|error| { #preparation_error })?
-                    }
-                } else if static_scope.is_empty() {
-                    quote! { state.prepare_node(registry, #id_lit, #kind_lit, #config_lit)? }
-                } else {
-                    quote! { state.prepare_node_in_loop(
-                        registry, #id_lit, #kind_lit, #config_lit, &[#(#scope_literals),*]
-                    )? }
+                quote! {
+                    mf_runtime::instantiate_node_with_metadata(registry, #id_lit, #kind_lit, #config_lit)
+                        .inspect_err(|error| { #preparation_report })?
                 }
             }
         };
         preparations.push(quote! {
             let mut #node_ident = #constructor;
-            #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*]).map_err(|error| {
-                #preparation_error
-            })?;
+            #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*])
+                .inspect_err(|error| { #preparation_report })
+                .boxed()
+                .context(mf_runtime::WorkflowMetadataSnafu { definition_id: #id_lit })?;
         });
         node_idents.push(node_ident);
     }
@@ -523,9 +529,9 @@ fn generate_scope(
         let bind_inputs = scope == "root" && definition.version.supports_startup_inputs();
         let builder_ident = format_ident!("{}_builder", flow_ident);
         let flow_binding = if bind_inputs {
-            quote! { let mut #flow_ident = mf_runtime::FlowRuntime::default().prepare_oneshot(#builder_ident)?; }
+            quote! { let mut #flow_ident = #builder_ident.into_tasks()?; }
         } else {
-            quote! { let #flow_ident = mf_runtime::FlowRuntime::default().prepare_oneshot(#builder_ident)?; }
+            quote! { let #flow_ident = #builder_ident.into_tasks()?; }
         };
         preparations.push(quote! {
             let mut #builder_ident = mf_runtime::Flow::prepare(
@@ -607,10 +613,8 @@ fn subgraph_preparation(
         let body = body_definition(parent, &config).map_err(invalid)?;
         body_static_scope.clear();
         let error = quote! {
-            state.preparation_failed(#outer_id, &error);
-            mf_runtime::WorkflowRunError::Context {
-                definition_id: #outer_id.into(),
-                message: format!("iteration body: {error}"),
+            if let Some(observation) = observation.as_deref_mut() {
+                observation.preparation_failed(#outer_id, error.to_string());
             }
         };
         (body, serde_json::Value::Null, None, Some(error))
@@ -660,12 +664,10 @@ fn subgraph_preparation(
                 .into_iter().flat_map(|metadata| metadata.ports.outputs.iter())
                 .find(|port| port.name == #port)
                 .ok_or_else(|| {
-                    let error = mf_runtime::WorkflowRunError::Context {
-                        definition_id: #outer_id.into(),
+                    mf_runtime::WorkflowInvalidDefinitionSnafu {
+                        definition_id: #outer_id,
                         message: format!("body output `{}`.`{}` is unavailable", #source, #port),
-                    };
-                    state.preparation_failed(#outer_id, &error);
-                    error
+                    }.build()
                 })?.value_type.clone(), #required)
         }
     });
@@ -678,12 +680,27 @@ fn subgraph_preparation(
         .map(|id| LitStr::new(id, Span::call_site()))
         .collect();
     let report = if static_scope.is_empty() {
-        quote! { state.preparation_failed(#outer_id, &error); }
+        quote! {
+            if let Some(observation) = observation.as_deref_mut() {
+                observation.preparation_failed(#outer_id, error.to_string());
+            }
+        }
     } else {
-        quote! { state.preparation_failed_in_loop(&[#(#scopes),*], #outer_id, &error); }
+        quote! {
+            if let Some(observation) = observation.as_deref_mut() {
+                observation.preparation_failed_unattributed(format!(
+                    "Loop scope {} node `{}`: {}",
+                    serde_json::to_string(&[#(#scopes),*]).expect("scope IDs serialize"),
+                    #outer_id, error,
+                ));
+            }
+        }
     };
     Ok(quote! {
-        #(#preparations)*
+        let #body_flow = (|| -> Result<mf_runtime::Flow, mf_runtime::WorkflowBuildError> {
+            #(#preparations)*
+            Ok(#body_flow)
+        })().context(mf_runtime::WorkflowSubgraphSnafu { definition_id: #outer_id })?;
         let #body_ident = mf_runtime::PreparedSubgraph::new(
             vec![#(#nodes),*], vec![#(#outputs),*],
             move |state| {
@@ -694,13 +711,10 @@ fn subgraph_preparation(
         let mut #node_ident = mf_runtime::instantiate_subgraph_with_metadata(
             registry, #outer_id, #kind, #config, #options, #body_ident,
         )
-            .map_err(|error| { #report error })?;
+            .inspect_err(|error| { #report })?;
         #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*])
-            .map_err(|error| {
-                #report
-                mf_runtime::WorkflowRunError::Context {
-                    definition_id: #outer_id.into(), message: error.to_string(),
-                }
-            })?;
+            .inspect_err(|error| { #report })
+            .boxed()
+            .context(mf_runtime::WorkflowMetadataSnafu { definition_id: #outer_id })?;
     })
 }

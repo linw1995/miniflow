@@ -640,7 +640,8 @@ fn main() {
     let harness = observation_capture::Harness::new(true);
     let observation = plan.start_observation(&harness.observer(), mf_telemetry::identity::RunId::new()).unwrap();
     let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
-    let result = workflow::run_workflow_with_observation(&registry, Some(observation)).unwrap();
+    let flow = workflow::prepare_workflow(&registry, None).unwrap();
+    let result = workflow::run_workflow_with_observation(&flow, Some(observation)).unwrap();
     let records = harness.records();
     let nested: Vec<_> = records.iter().filter(|record| record.scope == "mf.iteration").collect();
     let spans = harness.spans.get_finished_spans().unwrap();

@@ -1,7 +1,8 @@
 use crate::compiler::{
-    FlowConstructionSnafu, InvalidStreamSnafu, NonCanonicalPlanOrderSnafu, StreamConstructionSnafu,
+    FlowConstructionSnafu, InvalidStreamSnafu, NonCanonicalPlanOrderSnafu, PreparationSnafu,
+    StreamConstructionSnafu, StreamExecutionSnafu,
 };
-use crate::{CompiledWorkflow, Flow, NodeRegistry, WorkflowCompileError};
+use crate::{CompiledWorkflow, Flow, NodeRegistry, WorkflowCompileError, WorkflowExecutionError};
 use mf_runtime::PreparedStream;
 use snafu::{OptionExt, ResultExt, ensure};
 
@@ -9,16 +10,17 @@ pub fn start_stream(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
     options: mf_runtime::StreamOptions,
-) -> Result<mf_runtime::StreamInstance, mf_runtime::StreamError> {
+) -> Result<mf_runtime::StreamInstance, WorkflowExecutionError> {
     let prepared = instantiate_stream(plan, registry)
         .inspect_err(|error| {
             if let Some(observation) = &options.observation {
                 observation.preparation_failed(error.to_string());
             }
         })
-        .boxed()
-        .context(mf_runtime::StreamCompilationSnafu)?;
-    mf_runtime::FlowRuntime::default().start_stream(prepared, options)
+        .context(PreparationSnafu)?;
+    mf_runtime::FlowRuntime::default()
+        .start_stream(prepared, options)
+        .context(StreamExecutionSnafu)
 }
 
 pub fn instantiate_stream(
@@ -42,7 +44,5 @@ pub fn instantiate_stream(
     )
     .and_then(|flow| flow.with_control_edges(plan.definition.control_edges.clone()))
     .context(FlowConstructionSnafu)?;
-    mf_runtime::FlowRuntime::default()
-        .prepare_stream(flow, execution)
-        .context(StreamConstructionSnafu)
+    flow.into_stream(execution).context(StreamConstructionSnafu)
 }

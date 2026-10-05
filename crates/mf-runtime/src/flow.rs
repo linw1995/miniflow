@@ -146,21 +146,6 @@ impl FlowRuntime {
         self.options
     }
 
-    pub fn prepare_oneshot(
-        &self,
-        flow: Flow<Option<crate::NodeExecution>>,
-    ) -> Result<Flow, FlowBuildError> {
-        flow.into_tasks()
-    }
-
-    pub fn prepare_stream(
-        &self,
-        flow: Flow<Option<crate::NodeExecution>>,
-        execution: crate::StreamExecution,
-    ) -> Result<crate::PreparedStream, crate::StreamBuildError> {
-        flow.into_stream(execution)
-    }
-
     pub fn execute(&self, flow: &Flow) -> Result<FlowOutputs, crate::WorkflowRunError> {
         self.execute_with_observation(flow, None)
     }
@@ -391,12 +376,7 @@ impl Flow {
         execution_order: Vec<DefinitionId>,
         outputs: Vec<WorkflowOutputDefinition>,
     ) -> Result<Self, FlowBuildError> {
-        FlowRuntime::default().prepare_oneshot(Flow::prepare(
-            nodes,
-            connections,
-            execution_order,
-            outputs,
-        )?)
+        Flow::prepare(nodes, connections, execution_order, outputs)?.into_tasks()
     }
 }
 

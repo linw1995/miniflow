@@ -43,9 +43,9 @@ pub use mf_runtime::{
     NodeFactory, NodeId, NodeMetadata, NodePorts, NodeRegistration, NodeRegistry,
     NodeRegistryError, NodeResult, OutputDerivation, OutputDerivationError, Outputs, PortSpec,
     PreparedNode, RunObservation, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch,
-    ValueKind, ValueRef, ValueType, WorkflowDefinition, WorkflowDefinitionVersion,
-    WorkflowOutputDefinition, WorkflowRunError, deserialize_config, execute_node_in_context,
-    instantiate_node_with_metadata, output_id, select_context_output,
+    ValueKind, ValueRef, ValueType, WorkflowBuildError, WorkflowDefinition,
+    WorkflowDefinitionVersion, WorkflowOutputDefinition, WorkflowRunError, deserialize_config,
+    execute_node_in_context, instantiate_node_with_metadata, output_id, select_context_output,
 };
 pub use mf_runtime::{IterationErrorPolicy, IterationMode};
 pub use mf_runtime::{

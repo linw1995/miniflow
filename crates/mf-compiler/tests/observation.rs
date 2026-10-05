@@ -590,13 +590,13 @@ fn an_embedded_run_closes_preparation_errors_and_restores_its_caller() {
         .unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let result = mf_runtime::ExecutionContext::run(Some(run), |state| {
-        state
-            .prepare_node(&registry, "a", "fixture.context", "{")
+        mf_runtime::instantiate_node_with_metadata(&registry, "a", "fixture.context", "{")
+            .inspect_err(|error| state.preparation_failed("a", error))
             .map(|_| ())
     });
     assert!(matches!(
         result,
-        Err(mf_runtime::WorkflowRunError::InvalidEmbeddedConfig { .. })
+        Err(mf_runtime::WorkflowBuildError::InvalidEmbeddedConfig { .. })
     ));
     let records = harness.records();
     assert_eq!(records.len(), 3);
@@ -680,7 +680,10 @@ fn main() {
     let harness = observation_capture::Harness::new(true);
     let observation = plan.start_observation(&harness.observer(), mf_telemetry::identity::RunId::new()).unwrap();
     let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
-    let result = workflow::run_workflow_with_observation(&registry, Some(observation));
+    let result = mf_runtime::ExecutionContext::run(Some(observation), |state| -> Result<_, Box<dyn std::error::Error>> {
+        let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
+        Ok(workflow::run_workflow_in_context(&flow, state)?)
+    });
     println!("{}", serde_json::json!({"ok":result.is_ok(), "outputs":result.ok(), "records":harness.records(), "spans":harness.spans.get_finished_spans().unwrap().len()}));
 }
 "#).unwrap();

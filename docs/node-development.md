@@ -256,6 +256,11 @@ workflow arguments once; ordinary edges retain their message identity, while pro
 a new domain. Nodes and selected outputs cannot join different domains. Initial EventNodes require an
 activation source, and nested synchronous bodies remain task-only.
 
+Embedded node construction returns `WorkflowBuildError`, preserving configuration and factory error sources.
+Generated task workflows prepare a Flow before invoking execution functions; those functions accept the Flow
+and return `WorkflowRunError`. `FlowRuntime` only executes prepared plans. Compiler orchestration helpers expose
+preparation and execution failures through separate variants of `WorkflowExecutionError`.
+
 Use `mf_compiler::instantiate_stream` to prepare independent node state and inspect its `plan()`. Pass
 `WorkflowArguments` through `StreamOptions.arguments`, or use `start()` when no parameters are required.
 Startup validates every argument and required resource before dispatch. Initial producers, including those

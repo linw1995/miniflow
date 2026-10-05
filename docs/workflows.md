@@ -335,6 +335,11 @@ No implicit conversion occurs. A present null exists and can be compared with an
 
 A selected output can fan out to multiple downstream nodes; all eligible consumers execute. Only one branch output is active per router invocation. A node gated by mutually exclusive outputs is skipped rather than acting as a merge. Compound boolean expressions and field-to-field comparisons are deferred.
 
+Construction validates nodes, dependencies, message ownership, and execution-domain plans before returning an
+executable Flow. `FlowRuntime` consumes prepared plans; it does not construct nodes or return graph construction
+errors. Generated task workflows expose `prepare_workflow` separately from their execution functions. Runtime
+input validation, worker startup, and node execution can still fail after construction succeeds.
+
 The runtime groups task nodes into synchronous execution domains. A linear chain stays in one domain and runs in
 topological order. Forks split into separate branch domains, which can run concurrently when ready; a join waits
 for every predecessor domain. Concurrency is bounded by `RuntimeOptions.max_parallel_domains`, which defaults to

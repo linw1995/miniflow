@@ -61,17 +61,18 @@ pub use node::{
 pub use number::compare_json_numbers;
 pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::{
-    WorkflowRunError, instantiate_node_with_metadata, instantiate_subgraph_with_metadata,
+    InvalidDefinitionSnafu as WorkflowInvalidDefinitionSnafu,
+    MetadataSnafu as WorkflowMetadataSnafu, SubgraphSnafu as WorkflowSubgraphSnafu,
+    WorkflowBuildError, WorkflowRunError, instantiate_node_with_metadata,
+    instantiate_subgraph_with_metadata,
 };
 pub use stream::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
     StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate,
 };
-pub(crate) use stream_instance::PreparationSnafu as StreamPreparationSnafu;
 pub use stream_instance::{
-    CompilationSnafu as StreamCompilationSnafu, Emitter, MessageId, MonotonicClock, StreamClock,
-    StreamDelivery, StreamError, StreamInstance, StreamMetrics, StreamOptions, StreamOutput,
-    StreamSummary,
+    Emitter, MessageId, MonotonicClock, StreamClock, StreamDelivery, StreamError, StreamInstance,
+    StreamMetrics, StreamOptions, StreamOutput, StreamSummary,
 };
 pub use stream_io::{StreamStdio, TextInput};
 pub use stream_plan::{PreparedStream, StreamBuildError, StreamDependency, StreamPlan};

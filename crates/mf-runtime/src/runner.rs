@@ -4,11 +4,62 @@ use serde_json::Value;
 use snafu::{ResultExt, Snafu};
 
 #[derive(Debug, Snafu)]
-pub enum WorkflowRunError {
+pub enum WorkflowBuildError {
     #[snafu(transparent)]
     WorkflowInputs { source: crate::WorkflowInputError },
     #[snafu(transparent)]
     FlowBuild { source: crate::FlowBuildError },
+    #[snafu(transparent)]
+    StreamBuild { source: crate::StreamBuildError },
+    #[snafu(display("node `{definition_id}` references unavailable kind `{kind}`"))]
+    UnknownKind {
+        definition_id: DefinitionId,
+        kind: String,
+    },
+    #[snafu(
+        display("could not read embedded config for node `{definition_id}`: {source}"),
+        visibility(pub)
+    )]
+    InvalidEmbeddedConfig {
+        source: serde_json::Error,
+        definition_id: DefinitionId,
+    },
+    #[snafu(display("could not construct node `{definition_id}`: {source}"))]
+    NodeConstruction {
+        source: NodeBuildError,
+        definition_id: DefinitionId,
+    },
+    #[snafu(
+        display("invalid definition for node `{definition_id}`: {message}"),
+        visibility(pub)
+    )]
+    InvalidDefinition {
+        definition_id: DefinitionId,
+        message: String,
+    },
+    #[snafu(
+        display("could not resolve metadata for node `{definition_id}`: {source}"),
+        visibility(pub)
+    )]
+    Metadata {
+        definition_id: DefinitionId,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+    #[snafu(
+        display("could not prepare body of node `{definition_id}`: {source}"),
+        visibility(pub)
+    )]
+    Subgraph {
+        definition_id: DefinitionId,
+        #[snafu(source(from(WorkflowBuildError, Box::new)))]
+        source: Box<WorkflowBuildError>,
+    },
+}
+
+#[derive(Debug, Snafu)]
+pub enum WorkflowRunError {
+    #[snafu(transparent)]
+    WorkflowInputs { source: crate::WorkflowInputError },
     #[snafu(transparent)]
     WorkerPool { source: crate::WorkerPoolError },
     #[snafu(
@@ -34,21 +85,6 @@ pub enum WorkflowRunError {
         definition_id: DefinitionId,
         message: String,
     },
-    #[snafu(display("node `{definition_id}` references unavailable kind `{kind}`"))]
-    UnknownKind {
-        definition_id: DefinitionId,
-        kind: String,
-    },
-    #[snafu(display("could not read embedded config for node `{definition_id}`: {source}"))]
-    InvalidEmbeddedConfig {
-        source: serde_json::Error,
-        definition_id: DefinitionId,
-    },
-    #[snafu(display("could not construct node `{definition_id}`: {source}"))]
-    NodeConstruction {
-        source: NodeBuildError,
-        definition_id: DefinitionId,
-    },
     #[snafu(display("node `{definition_id}` failed: {source}"), visibility(pub))]
     NodeExecution {
         source: NodeExecutionError,
@@ -61,7 +97,7 @@ pub fn instantiate_node_with_metadata(
     definition_id: &str,
     kind: &str,
     config_json: &str,
-) -> Result<crate::FlowNode, WorkflowRunError> {
+) -> Result<crate::FlowNode, WorkflowBuildError> {
     let Some(registration) = registry.get(kind) else {
         return UnknownKindSnafu {
             definition_id: DefinitionId::from(definition_id),
@@ -87,7 +123,7 @@ pub fn instantiate_subgraph_with_metadata(
     config_json: &str,
     options_json: &str,
     body: crate::PreparedSubgraph,
-) -> Result<crate::FlowNode, WorkflowRunError> {
+) -> Result<crate::FlowNode, WorkflowBuildError> {
     let Some(registration) = registry.get(kind) else {
         return UnknownKindSnafu {
             definition_id: DefinitionId::from(definition_id),

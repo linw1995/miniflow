@@ -213,7 +213,8 @@ fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: 
         }
         if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.clone()); }
         let registry = mf_runtime::NodeRegistry::from_inventory()?;
-        Ok(workflow::run_workflow_in_context(&registry, state)?)
+        let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
+        Ok(workflow::run_workflow_in_context(&flow, state)?)
     });
     if let Some(snapshots) = snapshots {
         snapshots.finish();
@@ -264,7 +265,7 @@ pub fn write_dependency_project_with_options(
     }
     let default_features = features.join(", ");
     let mut manifest = format!(
-        "[package]\nname = \"mf-generated-workflow\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[features]\ndefault = [{default_features}]\ntelemetry = [\"mf-telemetry/otlp\"]\nstreaming = []\n\n[dependencies]\nserde_json = \"1.0.151\"\n"
+        "[package]\nname = \"mf-generated-workflow\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[features]\ndefault = [{default_features}]\ntelemetry = [\"mf-telemetry/otlp\"]\nstreaming = []\n\n[dependencies]\nserde_json = \"1.0.151\"\nsnafu = \"0.9.2\"\n"
     );
     for package in ["mf-runtime", "mf-compiler", "mf-telemetry"] {
         let source = match support {
