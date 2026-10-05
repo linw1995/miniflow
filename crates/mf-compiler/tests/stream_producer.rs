@@ -7,7 +7,7 @@ mod capture;
 extern crate mfn_core as _;
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_stream};
 use mf_runtime::{
-    Emitter, ExecutionContext, Flow, FlowNode, Inputs, NodeExecutionError, NodeFactory, NodePorts,
+    Emitter, ExecutionContext, FlowNode, Inputs, NodeExecutionError, NodeFactory, NodePorts,
     NodeRegistration, NodeResult, Outputs, PortSpec, PreparedNode, StreamInstance, StreamNode,
     StreamOptions, TaskNode, ValueType,
 };
@@ -505,13 +505,13 @@ fn preparation_rejects_synchronous_and_mixed_domain_placement_without_execution(
     );
     let node = producer(json!({"key":"preparation"})).unwrap();
     assert!(matches!(
-        Flow::new(
+        mf_compiler::build_flow(
             vec![FlowNode::new("produce", node)],
             vec![],
             vec!["produce".into()],
             vec![]
         ),
-        Err(mf_runtime::FlowBuildError::NonTaskNode { .. })
+        Err(mf_compiler::FlowBuildError::NonTaskNode { .. })
     ));
     let mut value = graph("preparation", 1);
     value["control_edges"] = json!([{

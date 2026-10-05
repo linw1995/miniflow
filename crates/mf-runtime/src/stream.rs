@@ -1,7 +1,5 @@
-use crate::stream_plan::InvalidPlanSnafu;
-use crate::{ExecutionContext, Inputs, NodeExecutionError, NodeResult, StreamBuildError};
+use crate::{ExecutionContext, Inputs, NodeExecutionError, NodeResult};
 use serde::{Deserialize, Serialize};
-use snafu::ensure;
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -31,18 +29,6 @@ impl Default for StreamLimits {
             max_pending_messages: 64,
             workers: 4,
         }
-    }
-}
-
-impl StreamLimits {
-    pub fn validate(&self) -> Result<(), StreamBuildError> {
-        ensure!(
-            ![self.max_pending_messages, self.workers].contains(&0),
-            InvalidPlanSnafu {
-                message: "stream limits must be positive",
-            }
-        );
-        Ok(())
     }
 }
 

@@ -181,15 +181,19 @@ fn preserves_noninitial_and_body_required_inputs_and_legacy_validation() {
     let plan = compile_definition(&definition, &registry).unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     assert!(flow.input_schema().inputs.contains_key("b"));
-    let flow = flow
-        .with_control_edges(
-            serde_json::from_value(json!([
-                {"from_node":"a", "from_output":"value", "to_node":"b"}
-            ]))
-            .unwrap(),
-        )
-        .unwrap();
+    definition.control_edges = serde_json::from_value(json!([
+        {"from_node":"a", "from_output":"value", "to_node":"b"}
+    ]))
+    .unwrap();
+    definition.edges = serde_json::from_value(json!([
+        {"from_node":"a", "from_output":"value", "to_node":"b", "to_input":"input"}
+    ]))
+    .unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let flow = instantiate_compiled(&plan, &registry).unwrap();
     assert!(!flow.input_schema().inputs.contains_key("b"));
+    definition.edges.clear();
+    definition.control_edges.clear();
     definition.version = mf_runtime::WorkflowDefinitionVersion::V2026_10_02;
     assert!(compile_definition(&definition, &registry).is_err());
 
@@ -266,8 +270,7 @@ fn source_contracts_use_ports_and_node_ids_without_special_input_names() {
     let prepared = factory(json!({"inputs":{"path":{"type":"string", "required":true}}})).unwrap();
     let source =
         mf_runtime::FlowNode::new("%input", PreparedNode::stream(Source, prepared.metadata));
-    let schema =
-        mf_runtime::WorkflowInputSchema::from_nodes([(&source, true)], |_, _| false).unwrap();
+    let schema = mf_compiler::workflow_input_schema([(&source, true)], |_, _| false).unwrap();
     schema
         .validate(&WorkflowArguments::try_from(json!({"%input":{"path":"/missing/file"}})).unwrap())
         .unwrap();
@@ -303,7 +306,8 @@ mod workflow;
 fn main() {
     let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
     let arguments = mf_runtime::WorkflowArguments::from_json(std::env::args().nth(1).unwrap().as_bytes()).unwrap();
-    match workflow::run_workflow_with_inputs(&registry, arguments) {
+    let flow = workflow::prepare_workflow(&registry, None).unwrap();
+    match workflow::run_workflow_with_inputs(&flow, arguments) {
         Ok(outputs) => println!("{}", serde_json::to_string(&outputs).unwrap()),
         Err(error) => { eprintln!("{error}"); std::process::exit(1); }
     }

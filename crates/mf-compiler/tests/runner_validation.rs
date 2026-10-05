@@ -25,18 +25,18 @@ fn one_runner_validates_without_execution_and_reports_plugin_errors() {
         )
         .unwrap();
         resolve_project(&project, &root.path().join("flow.lock"), false).unwrap();
-        let result = mf_compiler::cargo_command(&project)
+        mf_compiler::cargo_command(&project)
             .args(["build", "--offline", "--release", "--locked"])
             .output()
-            .unwrap();
-        assert!(
-            result.status.success(),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-        common::runner_executable(&project, "release")
+            .unwrap()
     };
-    let runner = build(&definition);
+    let first = build(&definition);
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    let runner = common::runner_executable(&project, "release");
     let validation = Command::new(&runner).arg("--validate").output().unwrap();
     assert!(
         validation.status.success(),
@@ -60,10 +60,7 @@ fn one_runner_validates_without_execution_and_reports_plugin_errors() {
                 .features
                 .push("duplicate-kind".into()),
         }
-        let result = Command::new(build(&invalid_definition))
-            .arg("--validate")
-            .output()
-            .unwrap();
+        let result = build(&invalid_definition);
         assert!(!result.status.success(), "{invalid} was accepted");
         assert!(!String::from_utf8_lossy(&result.stderr).contains("execution sentinel"));
     }

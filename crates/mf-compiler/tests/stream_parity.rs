@@ -141,10 +141,21 @@ fn main() {
 "#,
         )
         .unwrap();
+        let build_script = project.join("build.rs");
+        let build_source = fs::read_to_string(&build_script).unwrap();
+        fs::write(
+            &build_script,
+            format!("#[path = \"src/controlled.rs\"] mod controlled;\n{build_source}"),
+        )
+        .unwrap();
         let manifest = project.join("Cargo.toml");
         let mut text = fs::read_to_string(&manifest).unwrap();
         text.push('\n');
         text = text.replace("[dependencies]", "[dependencies]\ninventory = \"0.3.24\"");
+        text = text.replace(
+            "[build-dependencies]",
+            "[build-dependencies]\ninventory = \"0.3.24\"\nserde_json = \"1.0.151\"",
+        );
         fs::write(&manifest, text).unwrap();
         let build = mf_compiler::cargo_command(&project)
             .args(["build", "--offline", "--release"])

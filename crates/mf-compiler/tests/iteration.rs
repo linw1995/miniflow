@@ -640,7 +640,8 @@ fn main() {
     let harness = observation_capture::Harness::new(true);
     let observation = plan.start_observation(&harness.observer(), mf_telemetry::identity::RunId::new()).unwrap();
     let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
-    let result = workflow::run_workflow_with_observation(&registry, Some(observation)).unwrap();
+    let flow = workflow::prepare_workflow(&registry, None).unwrap();
+    let result = workflow::run_workflow_with_observation(&flow, Some(observation)).unwrap();
     let records = harness.records();
     let nested: Vec<_> = records.iter().filter(|record| record.scope == "mf.iteration").collect();
     let spans = harness.spans.get_finished_spans().unwrap();
@@ -783,13 +784,7 @@ fn generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node(
     value["edges"][0]["from_output"] = json!("values");
     fs::write(&path, value.to_string()).unwrap();
     let error = compile_project(&request).unwrap_err();
-    assert_eq!(error.stage, "runner validation");
-    let validation = Command::new(common::runner_executable(&build, "release"))
-        .arg("--validate")
-        .output()
-        .unwrap();
-    assert!(!validation.status.success());
-    assert!(String::from_utf8_lossy(&validation.stderr).contains("builtin.iteration"));
+    assert_eq!(error.stage, "Cargo build");
     assert_eq!(fs::read(&output).unwrap(), installed);
     assert_eq!(fs::read(path.with_extension("lock")).unwrap(), lock);
 }

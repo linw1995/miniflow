@@ -219,7 +219,7 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
             "max_iterations": 5,
             "variables": variables,
         });
-        let error = mf_runtime::instantiate_subgraph_with_metadata(
+        let error = mf_compiler::instantiate_subgraph_with_metadata(
             &NodeRegistry::from_inventory().unwrap(),
             "repeat",
             mf_runtime::LOOP_KIND,
@@ -234,7 +234,7 @@ fn loop_variable_validation_matches_planner_and_runtime_construction() {
     }
 
     let complete_definition = definition()["nodes"][1]["loop"].to_string();
-    let prepared = mf_runtime::instantiate_subgraph_with_metadata(
+    let prepared = mf_compiler::instantiate_subgraph_with_metadata(
         &NodeRegistry::from_inventory().unwrap(),
         "repeat",
         mf_runtime::LOOP_KIND,
@@ -418,13 +418,7 @@ fn invalid_loop_edit_preserves_installed_binary_and_lock() {
         .remove("core");
     fs::write(&definition_path, value.to_string()).unwrap();
     let error = compile_project(&request).unwrap_err();
-    assert_eq!(error.stage, "runner validation");
-    let runner = common::runner_executable(&build, "release");
-    for args in [vec!["--validate"], Vec::new()] {
-        let result = Command::new(&runner).args(args).output().unwrap();
-        assert!(!result.status.success());
-        assert!(String::from_utf8_lossy(&result.stderr).contains("workflow.loop"));
-    }
+    assert_eq!(error.stage, "Cargo build");
     assert_eq!(fs::read(&executable).unwrap(), installed);
     assert_eq!(fs::read(&lock_path).unwrap(), lock);
 }

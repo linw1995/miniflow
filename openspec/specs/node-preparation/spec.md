@@ -20,14 +20,26 @@ require metadata hooks or methods that complete a partially constructed node.
 
 ### Requirement: Use one task execution entry point
 
-Ordinary tasks SHALL implement one execution method receiving inputs and the current mutable execution
-context and returning `NodeResult`. Context access, explicit skips, scoped control, and ordinary outputs
-SHALL use that method. The runtime SHALL retain dependency checks and validated publication around it.
+Ordinary tasks SHALL implement one execution method receiving resolved inputs and a mutable `ExecutionContext`
+and returning `NodeResult`. Tasks within one execution domain SHALL share that context serially, including
+previously committed outputs in the domain. Concurrent domains SHALL receive isolated contexts seeded from
+committed predecessor results and visible scope state. The runtime SHALL validate and publish each task result
+before dependent work proceeds, and commit domain effects once before scheduling dependent domains.
 
 #### Scenario: Execute a context-aware task
 
 - **WHEN** a conditional task reads an explicit predecessor output
-- **THEN** the runtime invokes its task method with the current context and publishes the validated result
+- **THEN** the runtime provides that committed value through its domain context and publishes the validated result
+
+#### Scenario: Keep concurrent domain contexts isolated
+
+- **WHEN** independent domains execute at the same time
+- **THEN** neither domain can observe or mutate the other's uncommitted outputs or context state
+
+#### Scenario: Commit a staged scope mutation
+
+- **WHEN** a task stages a Loop scope mutation and its domain completes successfully
+- **THEN** the runtime commits the mutation once before scheduling dependent domains
 
 ### Requirement: Declare factory construction requirements
 
@@ -101,3 +113,31 @@ Discovery MUST use provider metadata without built-in kind-name inference or a s
 
 - **WHEN** two prepared nodes actively require exclusive use of the same input resource
 - **THEN** validation reports both consumers and the resource before execution
+
+### Requirement: Separate construction and execution failures
+
+Construction APIs SHALL return construction error types retaining typed sources. Runtime execution error types MUST NOT contain node construction, graph construction, or compiler failures. Compiler orchestration APIs MAY expose separate preparation and execution variants. Generated preparation SHALL report construction failures with node or scope attribution without converting them into execution errors.
+
+#### Scenario: Preserve an embedded configuration error
+
+- **WHEN** embedded node configuration cannot be decoded
+- **THEN** preparation returns a construction error retaining the decode error source
+
+#### Scenario: Launch a prepared stream
+
+- **WHEN** the runtime starts a successfully prepared stream
+- **THEN** launch can report input, runtime configuration, or resource failures but cannot report a compiler failure
+
+### Requirement: Own workflow construction in the compiler
+
+The compiler SHALL own workflow graph validation, domain partitioning, and workflow construction errors. The runtime SHALL consume validated executable plans and SHALL NOT depend on the compiler. Runtime execution APIs SHALL NOT reconstruct graphs or return workflow construction errors. Node factory contracts MAY remain runtime contracts without transferring workflow compilation responsibilities to the runtime.
+
+#### Scenario: Build an executable workflow
+
+- **WHEN** a caller constructs a workflow from an untrusted graph
+- **THEN** compiler construction APIs validate the graph and return a runtime executable plan or a typed compiler construction error
+
+#### Scenario: Bind a generated plan
+
+- **WHEN** a generated runner initializes executors for its compiled layout
+- **THEN** runtime binding consumes the validated layout without partitioning or validating a graph and without a compiler dependency

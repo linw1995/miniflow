@@ -250,8 +250,9 @@ nodes, data edges, and optional `control_edges` use the ordinary workflow graph 
 one body port for each item. Body node IDs belong to the body scope; outer edges cannot address them. All body nodes
 are constructed and validated before the runner is installed, including when the input collection is empty.
 
-`mode` defaults to `sequential`. `parallel` uses at most ten workers, keeps results in input order, and is suitable
-when body operations are independent. Nodes in the body may be invoked repeatedly and concurrently, so a plugin with
+`mode` defaults to `sequential`. `parallel` schedules up to ten item jobs through the runtime worker pool and keeps
+results in input order. Actual concurrency is also capped by `RuntimeOptions.max_parallel_domains` and, for stream
+instances, `execution.limits.workers`. Parallel mode is suitable when body operations are independent. Nodes in the body may be invoked repeatedly and concurrently, so a plugin with
 mutable internal state must synchronize it or use sequential mode. Each invocation gets fresh context values for
 `%iteration.item`, `%iteration.key`, and `%iteration.index`; body outputs from another item are never visible.
 
@@ -332,7 +333,23 @@ The first matching branch produces true; all other outputs are explicitly skippe
 
 No implicit conversion occurs. A present null exists and can be compared with an explicit null literal. Missing fields or explicitly skipped outputs are unavailable to existence checks; comparing them is an execution error. Unexpectedly omitted outputs and pending producers are errors even for existence checks. Objects and arrays cannot be compared in this version. Reached condition errors include the branch, qualified source, path, and operator.
 
-A selected output can fan out to multiple downstream nodes; all eligible consumers execute. Only one branch output is active per router invocation. Execution is sequential in topological order, and a node gated by mutually exclusive outputs is skipped rather than acting as a merge. Compound boolean expressions and field-to-field comparisons are deferred.
+A selected output can fan out to multiple downstream nodes; all eligible consumers execute. Only one branch output is active per router invocation. A node gated by mutually exclusive outputs is skipped rather than acting as a merge. Compound boolean expressions and field-to-field comparisons are deferred.
+
+Construction validates nodes, dependencies, message ownership, and execution-domain plans before returning an
+executable Flow. `FlowRuntime` consumes prepared plans; it does not construct nodes or return graph construction
+errors. Generated projects resolve linked providers in their Cargo build script and emit constant dependency,
+execution-domain, and message-ownership tables. `prepare_workflow` binds fresh executors to those tables; launch
+does not rebuild or repartition the graph. Loop and Iteration bodies use the same compiled layouts. Runtime
+input validation, worker startup, and node execution can still fail after construction succeeds.
+
+The runtime groups task nodes into synchronous execution domains. A linear chain stays in one domain and runs in
+topological order. Forks split into separate branch domains, which can run concurrently when ready; a join waits
+for every predecessor domain. Concurrency is bounded by `RuntimeOptions.max_parallel_domains`, which defaults to
+four. Independent domains may complete side effects in either order, while dependencies and selected output order
+remain stable. In stream workflows, execution domains are distinct from message domains, which continue to define
+message identity and FIFO ordering. Domains inside Loop and Iteration scopes run serially in topological order to
+preserve scope writes and exit behavior; Iteration can still process separate items in parallel through the same
+bounded worker pool.
 
 ## Workflow startup parameters
 

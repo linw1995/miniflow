@@ -38,6 +38,25 @@ pub enum DependencyProjectError {
     Write { path: PathBuf, source: io::Error },
 }
 
+const BUILD: &str = r#"
+fn main() {
+    println!("cargo:rerun-if-changed=workflow-plan.json");
+    if let Err(error) = generate() {
+        eprintln!("{error}");
+        std::process::exit(1);
+    }
+}
+
+fn generate() -> Result<(), Box<dyn std::error::Error>> {
+    let registry = mf_runtime::NodeRegistry::from_inventory()?;
+    let workflow = mf_compiler::CompiledWorkflow::from_json(include_str!("workflow-plan.json"))?;
+    let source = workflow.generate_execution_plans(&registry)?;
+    let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo output directory"));
+    std::fs::write(output.join("flow-plans.rs"), source)?;
+    Ok(())
+}
+"#;
+
 const MAIN: &str = r#"mod workflow;
 
 fn main() -> std::process::ExitCode {
@@ -70,9 +89,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
         mf_runtime::RunnerCommand::Validate => {
             let registry = mf_runtime::NodeRegistry::from_inventory()?;
-            let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
-            if plan.definition.execution.is_some() { mf_compiler::instantiate_stream(&plan, &registry)?; }
-            else { mf_compiler::instantiate_compiled(&plan, &registry)?; }
+            #[cfg(feature = "streaming")]
+            { workflow::prepare_stream(&registry)?; }
+            #[cfg(not(feature = "streaming"))]
+            { workflow::prepare_workflow(&registry, None)?; }
             return Ok(());
         }
         mf_runtime::RunnerCommand::Execute(_) => {}
@@ -116,7 +136,7 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments) -> Result<(), Box<dy
         prepared.plan().input_schema().validate(&arguments)?;
         let needs_stdin = prepared.plan().input_schema().stdin_owner(&arguments)?.is_some();
         let stdin = if needs_stdin { stdio.take_input() } else { None };
-        let instance = prepared.start_with_options(mf_runtime::StreamOptions { observation: observation.clone(), arguments, stdin, ..Default::default() })?;
+        let instance = mf_runtime::FlowRuntime::default().start_stream(prepared, mf_runtime::StreamOptions { observation: observation.clone(), arguments, stdin, ..Default::default() })?;
         stdio.run(instance)?;
         Ok(())
     })();
@@ -213,7 +233,8 @@ fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: 
         }
         if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.clone()); }
         let registry = mf_runtime::NodeRegistry::from_inventory()?;
-        Ok(workflow::run_workflow_in_context(&registry, state)?)
+        let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
+        Ok(workflow::run_workflow_in_context(&flow, state)?)
     });
     if let Some(snapshots) = snapshots {
         snapshots.finish();
@@ -264,8 +285,9 @@ pub fn write_dependency_project_with_options(
     }
     let default_features = features.join(", ");
     let mut manifest = format!(
-        "[package]\nname = \"mf-generated-workflow\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[features]\ndefault = [{default_features}]\ntelemetry = [\"mf-telemetry/otlp\"]\nstreaming = []\n\n[dependencies]\nserde_json = \"1.0.151\"\n"
+        "[package]\nname = \"mf-generated-workflow\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[workspace]\n\n[features]\ndefault = [{default_features}]\ntelemetry = [\"mf-telemetry/otlp\"]\nstreaming = []\n\n[dependencies]\nserde_json = \"1.0.151\"\nsnafu = \"0.9.2\"\n"
     );
+    let mut build_dependencies = String::from("\n[build-dependencies]\n");
     for package in ["mf-runtime", "mf-compiler", "mf-telemetry"] {
         let source = match support {
             SupportPackages::Registry => format!(
@@ -280,8 +302,18 @@ pub fn write_dependency_project_with_options(
         manifest.push_str(&format!(
             "{package} = {{ {source}, default-features = false }}\n"
         ));
+        if package == "mf-compiler" {
+            build_dependencies.push_str(&format!(
+                "{package} = {{ {source}, default-features = false, features = [\"codegen\"] }}\n"
+            ));
+        } else if package == "mf-runtime" {
+            build_dependencies.push_str(&format!(
+                "{package} = {{ {source}, default-features = false }}\n"
+            ));
+        }
     }
     let mut main = String::new();
+    let mut build = String::new();
     for (index, (alias, dependency)) in definition.dependencies.iter().enumerate() {
         dependency
             .validate()
@@ -291,6 +323,7 @@ pub fn write_dependency_project_with_options(
             })?;
         let name = format!("node_{index}");
         main.push_str(&format!("extern crate {name} as _;\n"));
+        build.push_str(&format!("extern crate {name} as _;\n"));
         let mut fields = vec![format!("package = {}", quoted(&dependency.package))];
         if let Some(version) = &dependency.version {
             fields.push(format!("version = {}", quoted(version)));
@@ -311,7 +344,13 @@ pub fn write_dependency_project_with_options(
         let features: Vec<_> = dependency.features.iter().map(|f| quoted(f)).collect();
         fields.push(format!("features = [{}]", features.join(", ")));
         manifest.push_str(&format!("{name} = {{ {} }}\n", fields.join(", ")));
+        build_dependencies.push_str(&format!("{name} = {{ {} }}\n", fields.join(", ")));
     }
+    let dependencies_offset = manifest
+        .find("\n[dependencies]\n")
+        .expect("generated dependency section");
+    manifest.insert_str(dependencies_offset, &build_dependencies);
+    build.push_str(BUILD);
     main.push_str(MAIN);
     for name in ["src", "target"] {
         let path = project.join(name);
@@ -330,6 +369,7 @@ pub fn write_dependency_project_with_options(
     for (name, value) in [
         ("Cargo.toml", manifest.as_str()),
         ("src/main.rs", main.as_str()),
+        ("build.rs", build.as_str()),
         ("src/workflow.rs", artifacts.rust_source.as_str()),
         ("workflow-plan.json", artifacts.plan_json.as_str()),
     ] {

@@ -57,9 +57,7 @@ pub enum WorkflowCompileError {
         display("could not prepare streaming workflow: {source}"),
         visibility(pub)
     )]
-    StreamConstruction {
-        source: mf_runtime::StreamBuildError,
-    },
+    StreamConstruction { source: crate::StreamBuildError },
     #[snafu(display("node at position {position} has a blank definition ID"))]
     InvalidNodeId { position: usize },
     #[snafu(display("node definition ID `{definition_id}` is used more than once"))]
@@ -387,9 +385,7 @@ pub fn prepare_definition(
     registry: &NodeRegistry,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    definition
-        .validate_execution()
-        .context(StreamConstructionSnafu)?;
+    crate::validate_execution(definition).context(StreamConstructionSnafu)?;
     prepare_graph(definition, registry, None, false)
 }
 
@@ -425,7 +421,7 @@ fn prepare_graph(
         && !allow_iteration_input;
     validate_base_metadata(definition, &nodes, &incoming, startup)?;
     if startup {
-        mf_runtime::WorkflowInputSchema::from_nodes(
+        crate::workflow_input_schema(
             nodes
                 .iter()
                 .map(|node| (node, !incoming.contains_key(node.definition_id.as_str()))),
@@ -736,7 +732,7 @@ fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCom
 fn control_error(edge: &crate::ControlEdgeDefinition, message: &str) -> WorkflowCompileError {
     WorkflowCompileError::InvalidControlEdge {
         from_node: edge.from_node.clone(),
-        from_output: edge.from_output.clone(),
+        from_output: edge.from_output.to_string(),
         to_node: edge.to_node.clone(),
         message: message.into(),
     }
@@ -760,9 +756,7 @@ pub fn structural_order(
     definition: &WorkflowDefinition,
 ) -> Result<Vec<DefinitionId>, WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    definition
-        .validate_execution()
-        .context(StreamConstructionSnafu)?;
+    crate::validate_execution(definition).context(StreamConstructionSnafu)?;
     structural_order_graph(definition)
 }
 
@@ -858,7 +852,7 @@ pub fn compile_definition(
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
     let (nodes, execution_order) = prepare_definition(definition, registry)?;
-    let flow = Flow::prepare(
+    let flow = crate::FlowBuilder::prepare(
         nodes,
         definition.edges.clone(),
         execution_order.clone(),
@@ -985,21 +979,20 @@ pub fn instantiate_compiled(
     if plan.execution_order != canonical_order {
         return NonCanonicalPlanOrderSnafu.fail();
     }
-    Flow::new(
+    let builder = crate::FlowBuilder::prepare(
         nodes,
         plan.definition.edges.clone(),
         plan.execution_order.clone(),
         plan.definition.outputs.clone(),
     )
     .and_then(|flow| flow.with_control_edges(plan.definition.control_edges.clone()))
-    .context(FlowConstructionSnafu)
-    .and_then(|flow| {
-        if plan.definition.version.supports_startup_inputs() {
-            Ok(flow.with_workflow_inputs()?)
-        } else {
-            Ok(flow)
-        }
-    })
+    .context(FlowConstructionSnafu)?;
+    let builder = if plan.definition.version.supports_startup_inputs() {
+        builder.with_workflow_inputs()?
+    } else {
+        builder
+    };
+    builder.into_tasks().context(FlowConstructionSnafu)
 }
 
 pub fn describe_workflow_inputs(
@@ -1032,12 +1025,14 @@ pub fn describe_interface(
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowExecutionError {
-    #[snafu(display("{source}"))]
+    #[snafu(display("{source}"), visibility(pub))]
     Preparation { source: WorkflowCompileError },
     #[snafu(display("{source}"))]
     Execution {
         source: mf_runtime::WorkflowRunError,
     },
+    #[snafu(display("{source}"), visibility(pub))]
+    StreamExecution { source: mf_runtime::StreamError },
 }
 
 #[derive(Debug, Snafu)]
@@ -1131,7 +1126,7 @@ pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription,
             .iter()
             .map(|edge| ControlEdge {
                 from_node: edge.from_node.to_string(),
-                from_output: edge.from_output.clone(),
+                from_output: edge.from_output.to_string(),
                 to_node: edge.to_node.to_string(),
             })
             .collect(),
@@ -1182,7 +1177,7 @@ fn describe_loop_bodies(
                 .iter()
                 .map(|edge| ControlEdge {
                     from_node: edge.from_node.to_string(),
-                    from_output: edge.from_output.clone(),
+                    from_output: edge.from_output.to_string(),
                     to_node: edge.to_node.to_string(),
                 })
                 .collect(),
@@ -1236,9 +1231,7 @@ pub fn resolve_nodes(
     registry: &NodeRegistry,
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
-    definition
-        .validate_execution()
-        .context(StreamConstructionSnafu)?;
+    crate::validate_execution(definition).context(StreamConstructionSnafu)?;
     resolve_nodes_in_scope(definition, registry, None, false)
 }
 
@@ -1294,7 +1287,11 @@ fn bind_subgraph_node(
                         .find(|port| port.name == output.port)
                 })
                 .expect("validated body output");
-            crate::PortSpec::owned(&output.name, port.value_type.clone(), !output.optional)
+            crate::PortSpec::owned(
+                output.name.as_ref(),
+                port.value_type.clone(),
+                !output.optional,
+            )
         })
         .collect();
     let identities = body
@@ -1307,8 +1304,9 @@ fn bind_subgraph_node(
             path: Vec::new(),
         })
         .collect();
-    let flow = Flow::new(nodes, body.edges.clone(), order, body.outputs.clone())
+    let flow = crate::FlowBuilder::prepare(nodes, body.edges.clone(), order, body.outputs.clone())
         .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
+        .and_then(|flow| flow.into_tasks())
         .context(FlowConstructionSnafu)?;
     let body = PreparedSubgraph::new(identities, outputs, move |state| {
         flow.execute_in_context(state)

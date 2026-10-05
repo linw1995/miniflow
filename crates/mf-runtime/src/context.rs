@@ -1,5 +1,6 @@
 use crate::ValueRef as Value;
-use crate::runner::{DependencySnafu, InputTypeSnafu, NodeExecutionSnafu};
+use crate::runner::{ContextSnafu, DependencySnafu, InputTypeSnafu, NodeExecutionSnafu};
+use crate::worker::{RuntimeWorkerHandle, WorkerJob, WorkerPool};
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use mf_telemetry::{
     event::{FailurePhase, LoopPathEntry, LoopSummary, SkipCause},
@@ -7,8 +8,13 @@ use mf_telemetry::{
 };
 use snafu::ResultExt;
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroUsize;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ExecutionScope {
     node_id: String,
     source_id: String,
@@ -16,7 +22,7 @@ pub struct ExecutionScope {
     types: BTreeMap<String, crate::ValueType>,
     index: usize,
     exit_requested: bool,
-    visited_steps: usize,
+    visited_steps: Arc<AtomicUsize>,
 }
 
 impl ExecutionScope {
@@ -37,14 +43,42 @@ impl ExecutionScope {
             types,
             index,
             exit_requested: false,
-            visited_steps: 0,
+            visited_steps: Arc::new(AtomicUsize::new(0)),
         })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct StepBudget(Arc<AtomicUsize>);
+
+impl StepBudget {
+    fn new(remaining: usize) -> Self {
+        Self(Arc::new(AtomicUsize::new(remaining)))
+    }
+
+    fn reserve(&self, id: &str) -> Result<(), WorkflowRunError> {
+        match self
+            .0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            }) {
+            Ok(_) => Ok(()),
+            Err(_) => ContextSnafu {
+                definition_id: crate::DefinitionId::from(id),
+                message: format!(
+                    "scheduled-step budget of {} exhausted",
+                    crate::MAX_SCHEDULED_STEPS
+                ),
+            }
+            .fail(),
+        }
     }
 }
 
 struct ScopeGuard<'a> {
     context: &'a mut ExecutionContext,
     parent_outputs: BTreeMap<String, Option<Value>>,
+    parent_exit_cutoff: Arc<AtomicUsize>,
     depth: usize,
 }
 
@@ -52,6 +86,7 @@ impl Drop for ScopeGuard<'_> {
     fn drop(&mut self) {
         self.context.scopes.truncate(self.depth);
         self.context.outputs = std::mem::take(&mut self.parent_outputs);
+        self.context.scope_exit_cutoff = self.parent_exit_cutoff.clone();
         self.context.pending_loop_write = None;
     }
 }
@@ -87,13 +122,17 @@ pub struct ExecutionContext {
     body_observation: Option<BodyObservation>,
     scopes: Vec<ExecutionScope>,
     pending_loop_write: Option<(String, Value)>,
-    remaining_steps: usize,
+    current_position: Option<usize>,
+    scope_exit_cutoff: Arc<AtomicUsize>,
+    remaining_steps: StepBudget,
     snapshots: Option<crate::SnapshotRecorder>,
     snapshot_prefix: Vec<LoopPathEntry>,
     workflow_arguments: crate::WorkflowArguments,
     startup_inputs_bound: bool,
     stdin: Option<std::sync::Arc<std::sync::Mutex<crate::TextInput>>>,
     cancellation: crate::StreamCancellation,
+    worker_handle: Option<RuntimeWorkerHandle>,
+    worker_limit: NonZeroUsize,
 }
 
 impl Default for ExecutionContext {
@@ -104,13 +143,17 @@ impl Default for ExecutionContext {
             body_observation: None,
             scopes: Vec::new(),
             pending_loop_write: None,
-            remaining_steps: crate::MAX_SCHEDULED_STEPS,
+            current_position: None,
+            scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
+            remaining_steps: StepBudget::new(crate::MAX_SCHEDULED_STEPS),
             snapshots: None,
             snapshot_prefix: Vec::new(),
             workflow_arguments: crate::WorkflowArguments::default(),
             startup_inputs_bound: false,
             stdin: None,
             cancellation: crate::StreamCancellation::default(),
+            worker_handle: None,
+            worker_limit: crate::RuntimeOptions::default().max_parallel_domains,
         }
     }
 }
@@ -129,7 +172,7 @@ impl ExecutionContext {
 
     pub fn stdin_line(&self) -> Result<Option<String>, crate::StreamError> {
         let input = self.stdin.as_ref().ok_or_else(|| {
-            crate::StreamPreparationSnafu {
+            crate::stream_instance::ExecutionSnafu {
                 message: "stdin is unavailable".to_owned(),
             }
             .build()
@@ -140,17 +183,21 @@ impl ExecutionContext {
     pub fn fork_stream(&self, observation: Option<RunObservation>) -> Self {
         Self {
             outputs: self.outputs.clone(),
-            remaining_steps: self.remaining_steps,
+            remaining_steps: self.remaining_steps.clone(),
             stdin: self.stdin.clone(),
             cancellation: self.cancellation.clone(),
             observation,
             body_observation: None,
             scopes: Vec::new(),
             pending_loop_write: None,
+            current_position: None,
+            scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             snapshots: None,
             snapshot_prefix: Vec::new(),
             workflow_arguments: crate::WorkflowArguments::default(),
             startup_inputs_bound: false,
+            worker_handle: self.worker_handle.clone(),
+            worker_limit: self.worker_limit,
         }
     }
 
@@ -185,6 +232,60 @@ impl ExecutionContext {
         self.observation = Some(observation);
     }
 
+    pub fn configure_worker_limit(&mut self, limit: NonZeroUsize) {
+        self.worker_limit = limit;
+    }
+
+    pub fn set_worker_handle(&mut self, handle: RuntimeWorkerHandle) {
+        self.worker_handle = Some(handle);
+    }
+
+    pub fn worker_handle(&self) -> Option<RuntimeWorkerHandle> {
+        self.worker_handle
+            .as_ref()
+            .filter(|handle| handle.is_active())
+            .cloned()
+    }
+
+    /// Runs independent synchronous jobs through the active runtime worker pool.
+    ///
+    /// The builder receives the context after a temporary pool has been attached
+    /// for direct node invocations. `max_jobs` bounds the number of jobs prepared
+    /// by the builder and limits any temporary pool to the same runtime setting.
+    pub fn run_parallel<T, F>(
+        &mut self,
+        max_jobs: usize,
+        build_jobs: impl FnOnce(&Self) -> Vec<F>,
+    ) -> Result<Vec<T>, crate::WorkerPoolError>
+    where
+        T: Send + 'static,
+        F: FnOnce() -> T + Send + 'static,
+    {
+        if max_jobs == 0 {
+            return Ok(Vec::new());
+        }
+        if let Some(handle) = self.worker_handle() {
+            return Ok(handle.run_parallel(build_jobs(self)));
+        }
+
+        let worker_count = max_jobs.min(self.worker_limit.get());
+        let workers = WorkerPool::new(worker_count, WorkerJob::run)?;
+        let handle = workers.handle();
+        self.worker_handle = Some(handle.clone());
+        let jobs = build_jobs(self);
+        let result = handle.run_parallel(jobs);
+        self.worker_handle = None;
+        Ok(result)
+    }
+
+    pub fn replace_execution_position(&mut self, position: Option<usize>) -> Option<usize> {
+        std::mem::replace(&mut self.current_position, position)
+    }
+
+    pub fn scope_exit_cutoff(&self) -> usize {
+        self.scope_exit_cutoff.load(Ordering::Acquire)
+    }
+
     pub fn for_message<N>(
         source: &FlowNode<N>,
         result: NodeResult,
@@ -194,10 +295,77 @@ impl ExecutionContext {
         Ok(context)
     }
 
+    pub fn fork_domain_with_visible_outputs(&self, visible_outputs: &BTreeSet<String>) -> Self {
+        self.fork_domain_with_observation_and_visible_outputs(
+            self.observation.clone(),
+            visible_outputs,
+        )
+    }
+
+    pub fn fork_domain_with_observation_and_visible_outputs(
+        &self,
+        observation: Option<RunObservation>,
+        visible_outputs: &BTreeSet<String>,
+    ) -> Self {
+        let mut context = self.fork_domain_with_observation(observation);
+        context
+            .outputs
+            .retain(|output, _| visible_outputs.contains(output));
+        context
+    }
+
+    pub fn fork_domain_with_observation(&self, observation: Option<RunObservation>) -> Self {
+        Self {
+            outputs: self.outputs.clone(),
+            observation,
+            body_observation: self.body_observation.clone(),
+            scopes: self.scopes.clone(),
+            pending_loop_write: None,
+            current_position: None,
+            scope_exit_cutoff: self.scope_exit_cutoff.clone(),
+            remaining_steps: self.remaining_steps.clone(),
+            snapshots: self.snapshots.clone(),
+            snapshot_prefix: self.snapshot_prefix.clone(),
+            workflow_arguments: self.workflow_arguments.clone(),
+            startup_inputs_bound: self.startup_inputs_bound,
+            stdin: self.stdin.clone(),
+            cancellation: self.cancellation.clone(),
+            worker_handle: self.worker_handle.clone(),
+            worker_limit: self.worker_limit,
+        }
+    }
+
+    pub fn merge_domain_outputs<'a, N: 'a>(
+        &mut self,
+        source: &Self,
+        nodes: impl IntoIterator<Item = &'a FlowNode<N>>,
+    ) {
+        for node in nodes {
+            for port in &node.metadata.ports.outputs {
+                let id = output_id(node.definition_id.as_str(), &port.name);
+                if let Some(value) = source.outputs.get(&id) {
+                    self.outputs.insert(id, value.clone());
+                }
+            }
+        }
+        for (scope_index, scope) in source.scopes.iter().enumerate() {
+            if let Some(target) = self.scopes.get_mut(scope_index) {
+                for (name, value) in &scope.variables {
+                    if target.variables.get(name) != Some(value) {
+                        target.variables.insert(name.clone(), value.clone());
+                        self.outputs
+                            .insert(output_id(&target.source_id, name), Some(value.clone()));
+                    }
+                }
+                target.exit_requested |= scope.exit_requested;
+            }
+        }
+    }
+
     pub fn event_inputs<N>(
         &mut self,
         node: &FlowNode<N>,
-        dependencies: &[crate::StreamDependency],
+        dependencies: &[crate::FlowDependency],
     ) -> Result<Option<Inputs>, WorkflowRunError> {
         let id = node.definition_id.as_str();
         self.reserve_step(id)?;
@@ -216,7 +384,7 @@ impl ExecutionContext {
             match value {
                 ContextValue::Value(value) => {
                     if let Some(input) = &dependency.input {
-                        inputs.insert(input.clone(), value.clone());
+                        inputs.insert(input.clone().into_owned(), value.clone());
                     }
                 }
                 ContextValue::Skipped => skipped = true,
@@ -254,6 +422,8 @@ impl ExecutionContext {
     pub fn fork_body(&self, observation: Option<BodyObservation>) -> Self {
         let mut child = Self::for_body(observation);
         child.cancellation = self.cancellation.clone();
+        child.worker_handle = self.worker_handle.clone();
+        child.worker_limit = self.worker_limit;
         if self.snapshots.is_some() {
             child.snapshots = self.snapshots.clone();
             child.snapshot_prefix = self.snapshot_path();
@@ -355,35 +525,6 @@ impl ExecutionContext {
         result
     }
 
-    pub fn prepare_node(
-        &mut self,
-        registry: &crate::NodeRegistry,
-        id: &str,
-        kind: &str,
-        config: &str,
-    ) -> Result<FlowNode, WorkflowRunError> {
-        let result = crate::instantiate_node_with_metadata(registry, id, kind, config);
-        if let Err(error) = &result {
-            self.preparation_failed(id, error);
-        }
-        result
-    }
-
-    pub fn prepare_node_in_loop(
-        &mut self,
-        registry: &crate::NodeRegistry,
-        id: &str,
-        kind: &str,
-        config: &str,
-        scope: &[&str],
-    ) -> Result<FlowNode, WorkflowRunError> {
-        let result = crate::instantiate_node_with_metadata(registry, id, kind, config);
-        if let Err(error) = &result {
-            self.preparation_failed_in_loop(scope, id, error);
-        }
-        result
-    }
-
     pub fn preparation_failed_in_loop(
         &mut self,
         scope: &[&str],
@@ -402,6 +543,29 @@ impl ExecutionContext {
         if let Some(run) = self.observation.as_mut() {
             run.preparation_failed(id, error.to_string());
         }
+    }
+
+    pub fn select_observation_failure(&mut self, error: &WorkflowRunError) {
+        let Some(observation) = self.observation.as_mut() else {
+            return;
+        };
+        let (node, phase) = match error {
+            WorkflowRunError::Dependency { definition_id, .. } => {
+                (Some(definition_id.to_string()), FailurePhase::Dependency)
+            }
+            WorkflowRunError::InputType { definition_id, .. } => {
+                (Some(definition_id.to_string()), FailurePhase::Dependency)
+            }
+            WorkflowRunError::NodeExecution { definition_id, .. } => {
+                (Some(definition_id.to_string()), FailurePhase::Execution)
+            }
+            WorkflowRunError::Context { definition_id, .. } => {
+                (Some(definition_id.to_string()), FailurePhase::Execution)
+            }
+            WorkflowRunError::WorkflowInputs { .. } => (None, FailurePhase::Dependency),
+            WorkflowRunError::WorkerPool { .. } => (None, FailurePhase::Execution),
+        };
+        observation.select_failure(node, phase, error.to_string());
     }
 
     pub fn select_output(
@@ -448,6 +612,9 @@ impl ExecutionContext {
                 message: "scope exit is outside an execution scope".into(),
             })?;
         frame.exit_requested = true;
+        if let Some(position) = self.current_position {
+            self.scope_exit_cutoff.fetch_min(position, Ordering::AcqRel);
+        }
         Ok(())
     }
 
@@ -456,7 +623,9 @@ impl ExecutionContext {
     }
 
     pub fn scope_visited_steps(&self) -> usize {
-        self.scopes.last().map_or(0, |scope| scope.visited_steps)
+        self.scopes
+            .last()
+            .map_or(0, |scope| scope.visited_steps.load(Ordering::Acquire))
     }
 
     pub(crate) fn stage_scope_write(
@@ -493,10 +662,15 @@ impl ExecutionContext {
     ) -> Result<(T, Outputs, bool), WorkflowRunError> {
         let depth = self.scopes.len();
         let parent_outputs = std::mem::take(&mut self.outputs);
+        let parent_exit_cutoff = std::mem::replace(
+            &mut self.scope_exit_cutoff,
+            Arc::new(AtomicUsize::new(usize::MAX)),
+        );
         self.scopes.push(scope);
         let guard = ScopeGuard {
             context: self,
             parent_outputs,
+            parent_exit_cutoff,
             depth,
         };
         let state = &mut *guard.context;
@@ -506,18 +680,9 @@ impl ExecutionContext {
     }
 
     fn reserve_step(&mut self, id: &str) -> Result<(), WorkflowRunError> {
-        if self.remaining_steps == 0 {
-            return Err(state_error(
-                id,
-                format!(
-                    "scheduled-step budget of {} exhausted",
-                    crate::MAX_SCHEDULED_STEPS
-                ),
-            ));
-        }
-        self.remaining_steps -= 1;
+        self.remaining_steps.reserve(id)?;
         if let Some(frame) = self.scopes.last_mut() {
-            frame.visited_steps += 1;
+            frame.visited_steps.fetch_add(1, Ordering::AcqRel);
         }
         Ok(())
     }
@@ -923,7 +1088,7 @@ pub fn select_context_output(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Flow, NodePorts, PortSpec, TaskNode, ValueType, WorkflowOutputDefinition};
+    use crate::{Flow, NodePorts, PortSpec, TaskNode, ValueType};
     use serde_json::json;
     use std::sync::{
         Arc,
@@ -1007,7 +1172,10 @@ mod tests {
             }
             assert_eq!(state.outputs, parent_outputs);
             assert!(state.scopes.is_empty());
-            assert_eq!(state.remaining_steps, crate::MAX_SCHEDULED_STEPS - 1);
+            assert_eq!(
+                state.remaining_steps.0.load(Ordering::Acquire),
+                crate::MAX_SCHEDULED_STEPS - 1
+            );
         }
     }
 
@@ -1172,7 +1340,7 @@ mod tests {
 
     #[test]
     fn a_failed_run_does_not_poison_the_next_run() {
-        let flow = Flow::new(
+        let flow = Flow::from_plan(
             vec![FlowNode::new(
                 "source",
                 crate::PreparedNode::new(
@@ -1182,17 +1350,36 @@ mod tests {
                         outputs: vec![port("value", ValueType::Int64, true)],
                     },
                 ),
-            )],
-            vec![],
-            vec!["source".into()],
-            vec![WorkflowOutputDefinition {
-                name: "result".into(),
-                node: "source".into(),
-                port: "value".into(),
-                optional: false,
-            }],
-        )
-        .unwrap();
+            )]
+            .into_iter()
+            .map(|node| node.into_task().unwrap())
+            .collect(),
+            crate::FlowPlan {
+                connections: vec![].into(),
+                dependencies: vec![std::borrow::Cow::Owned(vec![])].into(),
+                execution_order: vec![crate::NodeId::new(0)].into(),
+                outputs: vec![crate::FlowOutput {
+                    name: "result".into(),
+                    node_id: crate::NodeId::new(0),
+                    port: "value".into(),
+                    optional: false,
+                }]
+                .into(),
+                execution_domains: crate::ExecutionDomains::from_parts(
+                    vec![crate::ExecutionDomain {
+                        id: 0,
+                        nodes: vec![crate::NodeId::new(0)].into(),
+                        positions: vec![0].into(),
+                        predecessors: vec![].into(),
+                        successors: vec![].into(),
+                        first_position: 0,
+                    }]
+                    .into(),
+                    vec![std::borrow::Cow::Owned(vec![])].into(),
+                ),
+            },
+            Default::default(),
+        );
         assert!(
             flow.execute()
                 .unwrap_err()
@@ -1206,7 +1393,7 @@ mod tests {
     fn checks_any_source_before_a_refined_consumer_runs() {
         for (value, succeeds) in [(json!(21), true), (json!("21"), false)] {
             let calls = Arc::new(AtomicUsize::new(0));
-            let flow = Flow::new(
+            let flow = Flow::from_plan(
                 vec![
                     FlowNode::new(
                         "source",
@@ -1228,22 +1415,50 @@ mod tests {
                             },
                         ),
                     ),
-                ],
-                vec![crate::EdgeDefinition {
-                    from_node: "source".into(),
-                    from_output: "value".into(),
-                    to_node: "consumer".into(),
-                    to_input: "payload".into(),
-                }],
-                vec!["source".into(), "consumer".into()],
-                vec![WorkflowOutputDefinition {
-                    name: "result".into(),
-                    node: "consumer".into(),
-                    port: "value".into(),
-                    optional: false,
-                }],
-            )
-            .unwrap();
+                ]
+                .into_iter()
+                .map(|node| node.into_task().unwrap())
+                .collect(),
+                crate::FlowPlan {
+                    connections: vec![crate::FlowConnection {
+                        from_node: crate::NodeId::new(0),
+                        from_output: "value".into(),
+                        to_node: crate::NodeId::new(1),
+                        to_input: "payload".into(),
+                    }]
+                    .into(),
+                    dependencies: vec![
+                        std::borrow::Cow::Owned(vec![]),
+                        std::borrow::Cow::Owned(vec![crate::FlowDependency {
+                            input: Some("payload".into()),
+                            source_node: "source".into(),
+                            source_output: "value".into(),
+                        }]),
+                    ]
+                    .into(),
+                    execution_order: vec![crate::NodeId::new(0), crate::NodeId::new(1)].into(),
+                    outputs: vec![crate::FlowOutput {
+                        name: "result".into(),
+                        node_id: crate::NodeId::new(1),
+                        port: "value".into(),
+                        optional: false,
+                    }]
+                    .into(),
+                    execution_domains: crate::ExecutionDomains::from_parts(
+                        vec![crate::ExecutionDomain {
+                            id: 0,
+                            nodes: vec![crate::NodeId::new(0), crate::NodeId::new(1)].into(),
+                            positions: vec![0, 1].into(),
+                            predecessors: vec![].into(),
+                            successors: vec![].into(),
+                            first_position: 0,
+                        }]
+                        .into(),
+                        vec![std::borrow::Cow::Owned(vec![])].into(),
+                    ),
+                },
+                Default::default(),
+            );
             if succeeds {
                 assert_eq!(flow.execute().unwrap()["result"], json!(true));
                 assert_eq!(calls.load(Ordering::SeqCst), 1);

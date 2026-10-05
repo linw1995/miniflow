@@ -132,20 +132,24 @@ impl StreamObservation {
             workflow_id: self.0.description.workflow_id.clone(),
             run_id: self.0.run_id,
             nodes: Arc::clone(&self.0.nodes),
-            sequence: EventSequence::with_maximum(Count::try_from(i64::MAX).unwrap()),
+            sequence: Arc::new(Mutex::new(EventSequence::with_maximum(
+                Count::try_from(i64::MAX).unwrap(),
+            ))),
             started: self.0.started,
             context: self.0.context.clone(),
-            visited: Count::ZERO,
-            visited_steps: Count::ZERO,
+            visited: Arc::new(AtomicI64::new(0)),
+            visited_steps: Arc::new(AtomicI64::new(0)),
             description: Some(Arc::clone(&self.0.description)),
-            failure: None,
-            closed: false,
-            stream: Some(StreamFrame {
+            failure: Arc::new(Mutex::new(None)),
+            node_failures: Arc::new(Mutex::new(std::collections::BTreeMap::new())),
+            closed: Arc::new(AtomicBool::new(false)),
+            stream: Some(Arc::new(StreamFrame {
                 observation: self.clone(),
                 message,
                 trigger,
-                emission_count: None,
-            }),
+                emission_count: Arc::new(Mutex::new(None)),
+            })),
+            owner: true,
         }
     }
 
@@ -322,11 +326,12 @@ impl Drop for StreamInner {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct StreamFrame {
     observation: StreamObservation,
     message: Option<StreamMessage>,
     trigger: StreamTrigger,
-    emission_count: Option<Count>,
+    emission_count: Arc<Mutex<Option<Count>>>,
 }
 
 impl StreamFrame {
@@ -353,7 +358,9 @@ impl StreamFrame {
                 ..
             } => self
                 .emission_count
-                .or_else(|| Some(Count::try_from(1).unwrap())),
+                .lock()
+                .unwrap()
+                .or(Some(Count::try_from(1).unwrap())),
             Event::NodeSkipped { .. } => Some(Count::ZERO),
             _ => None,
         };
@@ -472,7 +479,14 @@ impl StreamCallback {
         self.run.node_started(self.step.as_mut().unwrap());
     }
     pub fn succeeded(mut self, emissions: usize, ports: Vec<String>) {
-        self.run.stream.as_mut().unwrap().emission_count = i64::try_from(emissions)
+        *self
+            .run
+            .stream
+            .as_ref()
+            .unwrap()
+            .emission_count
+            .lock()
+            .unwrap() = i64::try_from(emissions)
             .ok()
             .and_then(|value| Count::try_from(value).ok());
         self.run

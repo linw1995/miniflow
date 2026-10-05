@@ -187,7 +187,7 @@ fn failures_report_real_phases_and_never_publish_a_success_first() {
         (
             json!({"ports":["value","inactive"],"outputs":{},"skipped":["inactive"]}),
             "dependency",
-            2,
+            3,
             1,
         ),
     ] {
@@ -285,7 +285,9 @@ fn missing_dependency_takes_precedence_over_a_skip_without_invocation() {
             .contains("missing context output")
     );
     let records = harness.records();
-    assert!(!records.iter().any(|r| r.event_name == "mf.node.skipped"));
+    assert!(!records.iter().any(|record| {
+        record.event_name == "mf.node.skipped" && record.attributes["mf.node.id"] == "b"
+    }));
     assert!(
         !records
             .iter()
@@ -299,7 +301,7 @@ fn missing_dependency_takes_precedence_over_a_skip_without_invocation() {
 
 #[test]
 fn a_running_plugin_exposes_start_before_end_and_inherits_the_node_context() {
-    use mf_runtime::{Flow, FlowNode, Inputs, NodeExecutionError, NodePorts, Outputs, TaskNode};
+    use mf_runtime::{FlowNode, Inputs, NodeExecutionError, NodePorts, Outputs, TaskNode};
     use opentelemetry::{
         Context,
         trace::{Span, TraceContextExt, Tracer, TracerProvider},
@@ -334,7 +336,7 @@ fn a_running_plugin_exposes_start_before_end_and_inherits_the_node_context() {
     let _parent = parent.clone().attach();
     let (entered_tx, entered_rx) = mpsc::sync_channel(1);
     let (release_tx, release_rx) = mpsc::sync_channel(1);
-    let flow = Flow::new(
+    let flow = mf_compiler::build_flow(
         vec![FlowNode::new(
             "blocking",
             mf_runtime::PreparedNode::new(
@@ -454,7 +456,10 @@ fn dropped_logs_leave_sequence_gaps_without_changing_execution_or_provider_owner
             .filter(|r| r.attributes["mf.run.id"] == id)
             .map(|r| r.decode().unwrap().sequence.get())
             .collect();
-        assert_eq!(sequence, [1, 3, 5, 6, 7]);
+        assert_eq!(sequence.len(), 5);
+        assert_eq!(sequence.first(), Some(&1));
+        assert_eq!(sequence.last(), Some(&7));
+        assert!(sequence.windows(2).any(|pair| pair[1] > pair[0] + 1));
     }
     let mut after = harness.traces.tracer("caller").start("after.observer.drop");
     after.end();
@@ -471,7 +476,7 @@ fn dropped_logs_leave_sequence_gaps_without_changing_execution_or_provider_owner
 
 #[test]
 fn unwinding_restores_context_without_fabricating_completion() {
-    use mf_runtime::{Flow, FlowNode, Inputs, NodeExecutionError, NodePorts, TaskNode};
+    use mf_runtime::{FlowNode, Inputs, NodeExecutionError, NodePorts, TaskNode};
     use opentelemetry::{Context, trace::TraceContextExt};
     struct PanicPlugin;
     impl TaskNode for PanicPlugin {
@@ -497,7 +502,7 @@ fn unwinding_restores_context_without_fabricating_completion() {
             }],
         )
         .unwrap();
-    let flow = Flow::new(
+    let flow = mf_compiler::build_flow(
         vec![FlowNode::new(
             "a",
             mf_runtime::PreparedNode::new(PanicPlugin, NodePorts::default()),
@@ -585,13 +590,13 @@ fn an_embedded_run_closes_preparation_errors_and_restores_its_caller() {
         .unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let result = mf_runtime::ExecutionContext::run(Some(run), |state| {
-        state
-            .prepare_node(&registry, "a", "fixture.context", "{")
+        mf_compiler::instantiate_node_with_metadata(&registry, "a", "fixture.context", "{")
+            .inspect_err(|error| state.preparation_failed("a", error))
             .map(|_| ())
     });
     assert!(matches!(
         result,
-        Err(mf_runtime::WorkflowRunError::InvalidEmbeddedConfig { .. })
+        Err(mf_compiler::WorkflowBuildError::InvalidEmbeddedConfig { .. })
     ));
     let records = harness.records();
     assert_eq!(records.len(), 3);
@@ -600,7 +605,7 @@ fn an_embedded_run_closes_preparation_errors_and_restores_its_caller() {
 }
 
 fn semantic_records(records: &[WireRecord]) -> Vec<Value> {
-    records
+    let mut records: Vec<_> = records
         .iter()
         .map(|record| {
             record.decode().unwrap();
@@ -611,6 +616,10 @@ fn semantic_records(records: &[WireRecord]) -> Vec<Value> {
                 .as_object_mut()
                 .unwrap()
                 .remove("mf.run.id");
+            value["attributes"]
+                .as_object_mut()
+                .unwrap()
+                .remove("mf.event.sequence");
             value["body"]["elapsed_ns"] = json!(0);
             if value["body"].get("duration_ns").is_some() {
                 value["body"]["duration_ns"] = json!(0);
@@ -620,7 +629,9 @@ fn semantic_records(records: &[WireRecord]) -> Vec<Value> {
             }
             value
         })
-        .collect()
+        .collect();
+    records.sort_by_key(|record| serde_json::to_string(record).unwrap());
+    records
 }
 
 #[test]
@@ -669,7 +680,10 @@ fn main() {
     let harness = observation_capture::Harness::new(true);
     let observation = plan.start_observation(&harness.observer(), mf_telemetry::identity::RunId::new()).unwrap();
     let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
-    let result = workflow::run_workflow_with_observation(&registry, Some(observation));
+    let result = mf_runtime::ExecutionContext::run(Some(observation), |state| -> Result<_, Box<dyn std::error::Error>> {
+        let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
+        Ok(workflow::run_workflow_in_context(&flow, state)?)
+    });
     println!("{}", serde_json::json!({"ok":result.is_ok(), "outputs":result.ok(), "records":harness.records(), "spans":harness.spans.get_finished_spans().unwrap().len()}));
 }
 "#).unwrap();
@@ -678,6 +692,16 @@ fn main() {
             .args(["build", "--offline", "--locked"])
             .output()
             .unwrap();
+        if matches!(
+            &memory,
+            Err(mf_compiler::WorkflowExecutionError::Preparation { .. })
+        ) {
+            assert!(
+                !build.status.success(),
+                "invalid construction reached a runnable artifact"
+            );
+            continue;
+        }
         assert!(
             build.status.success(),
             "{}",

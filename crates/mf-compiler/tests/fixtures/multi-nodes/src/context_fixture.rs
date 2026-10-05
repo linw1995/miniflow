@@ -5,6 +5,8 @@ use mf_runtime::{
 use serde_json::Value;
 use std::io::Write;
 
+static TRACE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct ContextNode(Value);
 fn failure(message: impl Into<String>) -> NodeExecutionError {
     NodeExecutionError::ExecutionFailed {
@@ -18,6 +20,7 @@ impl TaskNode for ContextNode {
         ctx: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
         if let Some(path) = self.0["trace"].as_str() {
+            let _guard = TRACE_LOCK.lock().unwrap();
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)

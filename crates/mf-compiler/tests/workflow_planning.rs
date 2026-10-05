@@ -1,7 +1,7 @@
 use mf_compiler::{DefinitionId, WorkflowDefinition};
 use mf_compiler::{
-    Flow, Inputs, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry, Outputs,
-    PortSpec, TaskNode, ValueType, WorkflowCompileError, resolve_nodes, topological_order,
+    Inputs, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry, Outputs, PortSpec,
+    TaskNode, ValueType, WorkflowCompileError, resolve_nodes, topological_order,
 };
 use serde_json::{Value, json};
 
@@ -73,7 +73,7 @@ fn chooses_a_stable_order_when_multiple_nodes_are_ready() {
 
     assert_eq!(order, expected);
     assert!(
-        Flow::new(
+        mf_compiler::build_flow(
             resolve_nodes(&definition, &registry).unwrap(),
             definition.edges.clone(),
             order,

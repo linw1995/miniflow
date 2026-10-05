@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-10-05
+goal: Route oneshot, stream, and parallel iteration domain work through one
+  bounded runtime worker pool

@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-10-05
+goal: Represent both execution modes as one prepared Flow and execute them
+  through one runtime that supports bounded concurrency for independent nodes.

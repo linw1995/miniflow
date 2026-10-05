@@ -1,17 +1,22 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::{ResultExt, Snafu, ensure};
+use snafu::{ResultExt, Snafu};
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
-pub struct DefinitionId(String);
+pub struct DefinitionId(Cow<'static, str>);
 
 impl DefinitionId {
     pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
+        Self(id.into().into())
+    }
+
+    pub const fn from_static(id: &'static str) -> Self {
+        Self(Cow::Borrowed(id))
     }
 
     pub fn as_str(&self) -> &str {
@@ -65,29 +70,12 @@ fn deserialize_execution<'de, D: serde::Deserializer<'de>>(
 }
 
 impl WorkflowDefinition {
-    pub fn validate_execution(&self) -> Result<(), crate::StreamBuildError> {
-        if let Some(execution) = &self.execution {
-            ensure!(
-                self.version == WorkflowDefinitionVersion::V2026_10_03,
-                crate::stream_plan::InvalidPlanSnafu {
-                    message: "stream execution requires workflow schema 2026-10-03",
-                }
-            );
-            execution.limits.validate()?;
-        }
-        Ok(())
-    }
-
     pub fn from_json(input: &str) -> Result<Self, DefinitionParseError> {
         let value: Value = serde_json::from_str(input).context(JsonParseSnafu)?;
         if value.get("version").and_then(Value::as_str) == Some("2026-09-24") {
             return LegacyVersionSnafu.fail();
         }
         let definition: Self = serde_json::from_str(input).context(JsonParseSnafu)?;
-        definition
-            .validate_execution()
-            .map_err(<serde_json::Error as serde::de::Error>::custom)
-            .context(JsonParseSnafu)?;
         Ok(definition)
     }
 }
@@ -195,16 +183,16 @@ pub struct EdgeDefinition {
 #[serde(deny_unknown_fields)]
 pub struct ControlEdgeDefinition {
     pub from_node: DefinitionId,
-    pub from_output: String,
+    pub from_output: Cow<'static, str>,
     pub to_node: DefinitionId,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowOutputDefinition {
-    pub name: String,
+    pub name: Cow<'static, str>,
     pub node: DefinitionId,
-    pub port: String,
+    pub port: Cow<'static, str>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub optional: bool,
 }

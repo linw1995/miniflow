@@ -53,6 +53,19 @@ def main():
             f"{name} = {{ path = {json.dumps(str(workspace / path))}, "
             f"default-features = false{features} }}\n"
         )
+    manifest += "\n[build-dependencies]\n"
+    for name, path in [
+        ("mf-runtime", "crates/mf-runtime"),
+        ("mf-compiler", "crates/mf-compiler"),
+        ("mfn-core", "crates/builtin-nodes/core"),
+        ("mfn-code", "crates/builtin-nodes/code"),
+    ]:
+        features = ', features = ["codegen"]' if name == "mf-compiler" else ""
+        manifest += (
+            f"{name} = {{ path = {json.dumps(str(workspace / path))}, "
+            f"default-features = false{features} }}\n"
+        )
+    (project / "build.rs").write_text("fn main() {}\n")
     (project / "Cargo.toml").write_text(manifest)
     (project / "src/main.rs").write_text("fn main() {}\n")
     env = dict(os.environ, CARGO_TARGET_DIR=str(target))
