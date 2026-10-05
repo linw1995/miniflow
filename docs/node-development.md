@@ -133,8 +133,13 @@ carries multiple JSON types; a specific declaration must match every produced va
 
 `PreparedNode::new(task, metadata)` accepts `NodeMetadata` or plain `NodePorts` when no derivations or
 references are needed. `FlowNode::new(id, prepared)` binds the definition identity. Compiler preparation
-resolves the metadata before execution. Both in-memory execution and generated runners return
-`WorkflowRunError`; generated step helpers assume a validated plan and its execution order.
+resolves the metadata before execution. Both in-memory execution and generated runners build a prepared `Flow`
+and run it through `FlowRuntime`. Runtime execution partitions a DAG into synchronous domains: tasks in one
+domain run serially, while independent ready domains can run concurrently up to
+`RuntimeOptions.max_parallel_domains` (four by default). Fan-in waits for all predecessor domains. Results and
+context effects become visible to dependent domains only after validation and commit. Within Loop and Iteration
+scopes, domain dispatch stays serial in topological order so scope writes and exits retain their defined order;
+Iteration still parallelizes separate items.
 
 ## Migrate an existing plugin
 
@@ -168,9 +173,10 @@ emissions with a `TimerUpdate`. `EventContext.now` is monotonic elapsed time.
 Event state requires `Send`; mutable access is exclusive and
 `Sync` is not required.
 
-`Flow::new` rejects event and stream nodes during synchronous preparation. Direct callers of task execution
-helpers convert a prepared `FlowNode` with `into_task()` first. Generated synchronous bodies perform
-that conversion before capturing their task executors.
+Oneshot preparation accepts task nodes and rejects event or stream nodes with their definition IDs. Direct callers
+of the low-level task helper convert a prepared `FlowNode` with `into_task()` first. Normal `Flow::new` callers and
+generated oneshot runners pass a task Flow to `FlowRuntime`; streaming preparation keeps the same Flow graph and
+uses the runtime's stream lifecycle and message-domain scheduler.
 
 ## Startup input and resource declarations
 

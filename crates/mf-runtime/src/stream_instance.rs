@@ -1,3 +1,4 @@
+use crate::execution_domains::DomainBudget;
 use crate::{
     EventContext, EventEffects, EventEmission, EventNode, ExecutionContext, FlowOutputs, Inputs,
     NodeEvent, NodeExecution, NodeExecutionError, NodeResult, PreparedStream, StreamExecution,
@@ -202,7 +203,40 @@ pub struct StreamMetrics {
 struct Frame {
     message: MessageId,
     context: ExecutionContext,
-    cursor: usize,
+    execution_domains: Vec<ExecutionDomainState>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExecutionDomainState {
+    Pending,
+    Running,
+    Complete,
+}
+
+impl Frame {
+    fn new(
+        message: MessageId,
+        context: ExecutionContext,
+        message_domain: usize,
+        plan: &StreamPlan,
+    ) -> Self {
+        let mut execution_domains =
+            vec![ExecutionDomainState::Complete; plan.execution_domains().len()];
+        for &domain in plan.execution_domains_for_message(message_domain) {
+            execution_domains[domain] = ExecutionDomainState::Pending;
+        }
+        Self {
+            message,
+            context,
+            execution_domains,
+        }
+    }
+
+    fn complete(&self, message_domain: usize, plan: &StreamPlan) -> bool {
+        plan.execution_domains_for_message(message_domain)
+            .iter()
+            .all(|&domain| self.execution_domains[domain] == ExecutionDomainState::Complete)
+    }
 }
 
 #[derive(Default)]
@@ -236,15 +270,26 @@ struct Producer {
 }
 
 struct ProducerJob {
-    frame: Frame,
+    message: MessageId,
+    execution_domain: usize,
+    context: ExecutionContext,
     detached: bool,
     inputs: Inputs,
     callback: Option<StreamCallback>,
 }
 
+struct DomainJob {
+    message: MessageId,
+    execution_domain: usize,
+    context: ExecutionContext,
+}
+
 struct Completion {
-    frame: Frame,
+    message: MessageId,
+    execution_domain: usize,
+    context: ExecutionContext,
     result: Result<(), StreamError>,
+    failure_node: Option<String>,
     producer: bool,
     detached: bool,
 }
@@ -270,6 +315,7 @@ struct Shared {
     execution: StreamExecution,
     observation: Option<StreamObservation>,
     cancellation: crate::StreamCancellation,
+    domain_budget: Arc<DomainBudget>,
 }
 
 impl Shared {
@@ -374,7 +420,7 @@ fn run_producer(
     shared: &Arc<Shared>,
     plan: &Arc<StreamPlan>,
 ) {
-    let index = plan.domains()[job.frame.message.domain].steps[job.frame.cursor];
+    let index = plan.execution_domain(job.execution_domain).nodes[0].index();
     let _span = job.callback.as_ref().map(StreamCallback::enter);
     let mut emitter = Emitter {
         shared,
@@ -392,7 +438,7 @@ fn run_producer(
             callback.started();
         }
         catch_unwind(AssertUnwindSafe(|| {
-            node.execute(job.inputs, &mut job.frame.context, &mut emitter)
+            node.execute(job.inputs, &mut job.context, &mut emitter)
         }))
         .unwrap_or_else(|payload| {
             Err(NodeExecutionError::ExecutionFailed {
@@ -426,20 +472,40 @@ fn run_producer(
         }
     }
     if result.is_err() {
-        job.frame.context = ExecutionContext::default();
+        job.context = ExecutionContext::default();
     }
+    let failure_node = result
+        .is_err()
+        .then(|| plan.nodes()[index].definition_id.to_string());
     shared
         .state
         .lock()
         .unwrap()
         .completions
         .push_back(Completion {
-            frame: job.frame,
+            message: job.message,
+            execution_domain: job.execution_domain,
+            context: job.context,
             result,
+            failure_node,
             producer: true,
             detached: job.detached,
         });
     shared.changed.notify_all();
+}
+
+fn workflow_error_node(error: &crate::WorkflowRunError) -> String {
+    match error {
+        crate::WorkflowRunError::Dependency { definition_id, .. }
+        | crate::WorkflowRunError::InputType { definition_id, .. }
+        | crate::WorkflowRunError::Context { definition_id, .. }
+        | crate::WorkflowRunError::UnknownKind { definition_id, .. }
+        | crate::WorkflowRunError::InvalidEmbeddedConfig { definition_id, .. }
+        | crate::WorkflowRunError::NodeConstruction { definition_id, .. }
+        | crate::WorkflowRunError::NodeExecution { definition_id, .. } => definition_id.to_string(),
+        crate::WorkflowRunError::WorkflowInputs { .. }
+        | crate::WorkflowRunError::FlowBuild { .. } => "<workflow>".to_owned(),
+    }
 }
 
 struct ClockWake(Weak<Shared>);
@@ -523,8 +589,16 @@ impl PreparedStream {
     }
 
     pub fn start_with_options(self, options: StreamOptions) -> Result<StreamInstance, StreamError> {
+        self.start_with_runtime_options(options, crate::RuntimeOptions::default())
+    }
+
+    pub fn start_with_runtime_options(
+        self,
+        options: StreamOptions,
+        runtime_options: crate::RuntimeOptions,
+    ) -> Result<StreamInstance, StreamError> {
         let observation = options.observation.clone();
-        let result = self.start_inner(options);
+        let result = self.start_inner(options, runtime_options);
         if let (Err(error), Some(observation)) = (&result, observation) {
             observation.finish(
                 StreamCounts::default(),
@@ -538,7 +612,11 @@ impl PreparedStream {
         result
     }
 
-    fn start_inner(self, options: StreamOptions) -> Result<StreamInstance, StreamError> {
+    fn start_inner(
+        self,
+        options: StreamOptions,
+        runtime_options: crate::RuntimeOptions,
+    ) -> Result<StreamInstance, StreamError> {
         ensure!(
             options.snapshots.is_none(),
             PreparationSnafu {
@@ -555,12 +633,19 @@ impl PreparedStream {
             );
         }
         let (prepared, operator_states) = self.into_parts();
+        let domain_limit = prepared
+            .execution()
+            .limits
+            .workers
+            .min(runtime_options.max_parallel_domains.get());
+        let domain_budget = Arc::new(DomainBudget::new(domain_limit));
         let mut context = ExecutionContext::default();
         if let Some(input) = options.stdin {
             context.set_stdin(input);
         }
         let cancellation = context.cancellation();
         context.set_workflow_arguments(options.arguments);
+        context.set_domain_budget(domain_budget.clone());
         context
             .bind_workflow_inputs(prepared.input_schema())
             .context(InputValidationSnafu)?;
@@ -569,14 +654,15 @@ impl PreparedStream {
         }
         let domain_count = prepared.domains().len();
         let mut domains: Vec<_> = (0..domain_count).map(|_| Domain::default()).collect();
-        domains[0].frame = Some(Frame {
-            message: MessageId {
+        domains[0].frame = Some(Frame::new(
+            MessageId {
                 domain: 0,
                 sequence: 0,
             },
             context,
-            cursor: 0,
-        });
+            0,
+            &prepared,
+        ));
         domains[0].occupied = true;
         let operators = operator_states
             .into_iter()
@@ -620,6 +706,7 @@ impl PreparedStream {
             execution: plan.execution().clone(),
             observation: options.observation,
             cancellation,
+            domain_budget,
         });
         shared
             .cancellation
@@ -628,7 +715,7 @@ impl PreparedStream {
             .clock
             .register_waker(Waker::from(Arc::new(ClockWake(Arc::downgrade(&shared)))));
         let coordinator_shared = Arc::clone(&shared);
-        let workers = start_workers(&shared, &plan)?;
+        let workers = start_workers(&shared, &plan, runtime_options)?;
         let coordinator = thread::Builder::new()
             .name("workflow-stream".into())
             .spawn(move || {
@@ -750,47 +837,56 @@ impl Drop for StreamInstance {
 fn start_workers(
     shared: &Arc<Shared>,
     plan: &Arc<StreamPlan>,
-) -> Result<WorkerPool<Frame>, StreamError> {
+    runtime_options: crate::RuntimeOptions,
+) -> Result<WorkerPool<DomainJob>, StreamError> {
     let active_domains = plan
+        .execution_domains()
         .domains()
         .iter()
         .filter(|domain| {
             domain
-                .steps
+                .nodes
                 .iter()
-                .any(|&index| plan.nodes()[index].node.is_some())
+                .any(|node_id| plan.nodes()[node_id.index()].node.is_some())
         })
         .count();
-    let count = plan.execution().limits.workers.min(active_domains);
+    let count = plan
+        .execution()
+        .limits
+        .workers
+        .min(runtime_options.max_parallel_domains.get())
+        .min(active_domains);
     let shared = Arc::clone(shared);
     let plan = Arc::clone(plan);
-    WorkerPool::new(count, move |mut frame: Frame| {
-        let _context = frame
-            .context
-            .observation()
-            .map(crate::RunObservation::enter);
-        let steps = &plan.domains()[frame.message.domain].steps;
-        let result = (|| -> Result<(), StreamError> {
-            while let Some(&index) = steps.get(frame.cursor) {
-                if plan.nodes()[index].node.is_none() {
-                    break;
+    WorkerPool::new(count, move |mut job: DomainJob| {
+        let _context = job.context.observation().map(crate::RunObservation::enter);
+        let domain = plan.execution_domain(job.execution_domain);
+        let first_node = domain
+            .nodes
+            .first()
+            .map(|node_id| plan.nodes()[node_id.index()].definition_id.to_string());
+        let execution_result: (Result<(), StreamError>, Option<String>) =
+            if let Some(error) = shared.state.lock().unwrap().failure.clone() {
+                (Err(error), first_node.clone())
+            } else {
+                match catch_unwind(AssertUnwindSafe(|| {
+                    plan.execute_domain(job.execution_domain, &mut job.context)
+                })) {
+                    Ok(result) => {
+                        let failure_node = result.as_ref().err().map(workflow_error_node);
+                        let result = result.context(WorkflowSnafu {
+                            message: job.message,
+                        });
+                        (result, failure_node)
+                    }
+                    Err(payload) => (Err(panic_error(payload)), first_node.clone()),
                 }
-                if let Some(error) = shared.state.lock().unwrap().failure.clone() {
-                    return Err(error);
-                }
-                catch_unwind(AssertUnwindSafe(|| {
-                    plan.execute_step(index, &mut frame.context)
-                }))
-                .map_err(panic_error)?
-                .context(WorkflowSnafu {
-                    message: frame.message,
-                })?;
-                frame.cursor += 1;
-            }
-            Ok(())
-        })();
+            };
+        job.context.release_domain();
+        job.context.set_domain_worker(false);
+        let (result, failure_node) = execution_result;
         if result.is_err() {
-            frame.context = ExecutionContext::default();
+            job.context = ExecutionContext::default();
         }
         shared
             .state
@@ -798,8 +894,11 @@ fn start_workers(
             .unwrap()
             .completions
             .push_back(Completion {
-                frame,
+                message: job.message,
+                execution_domain: job.execution_domain,
+                context: job.context,
                 result,
+                failure_node,
                 producer: false,
                 detached: false,
             });
@@ -812,18 +911,18 @@ fn coordinate(
     shared: &Arc<Shared>,
     plan: &Arc<StreamPlan>,
     clock: &dyn StreamClock,
-    workers: &WorkerPool<Frame>,
+    workers: &WorkerPool<DomainJob>,
 ) {
     let mut state = shared.state.lock().unwrap();
     loop {
-        while let Some(mut completion) = state.completions.pop_front() {
+        while let Some(completion) = state.completions.pop_front() {
             if !completion.producer {
                 state.active_workers -= 1;
             }
-            let domain = completion.frame.message.domain;
+            let message_domain = completion.message.domain;
+            let node = plan.execution_domain(completion.execution_domain).nodes[0].index();
             if completion.producer {
-                let index = plan.domains()[domain].steps[completion.frame.cursor];
-                let operator = state.operators[index].as_mut().unwrap();
+                let operator = state.operators[node].as_mut().unwrap();
                 if let OperatorExecutor::Producer(producer) = &mut operator.executor {
                     producer.active = false;
                 }
@@ -833,16 +932,25 @@ fn coordinate(
             }
             if let Err(error) = completion.result {
                 if state.failure.is_none() {
-                    let index = plan.domains()[domain].steps[completion.frame.cursor];
-                    state.failure_node = Some(plan.nodes()[index].definition_id.to_string());
+                    state.failure_node = completion
+                        .failure_node
+                        .or_else(|| Some(plan.nodes()[node].definition_id.to_string()));
                 }
                 state.failure.get_or_insert(error);
             }
-            if state.failure.is_none() && !completion.detached {
-                if completion.producer {
-                    completion.frame.cursor += 1;
-                }
-                state.domains[domain].frame = Some(completion.frame);
+            if state.failure.is_none()
+                && !completion.detached
+                && let Some(frame) = state.domains[message_domain].frame.as_mut()
+            {
+                frame.context.merge_domain_outputs(
+                    &completion.context,
+                    plan.execution_domain(completion.execution_domain)
+                        .nodes
+                        .iter()
+                        .map(|node_id| &plan.nodes()[node_id.index()]),
+                );
+                frame.execution_domains[completion.execution_domain] =
+                    ExecutionDomainState::Complete;
             }
         }
         if let Some(failure) = state.failure.clone() {
@@ -897,7 +1005,7 @@ fn coordinate(
 fn tick(
     state: &mut State,
     plan: &Arc<StreamPlan>,
-    workers: &WorkerPool<Frame>,
+    workers: &WorkerPool<DomainJob>,
     clock: &dyn StreamClock,
     shared: &Arc<Shared>,
 ) -> Result<bool, StreamError> {
@@ -951,25 +1059,21 @@ fn tick(
                 },
             )?;
         context.set_cancellation(shared.cancellation.clone());
+        context.set_domain_budget(shared.domain_budget.clone());
         if let Some(observation) = &shared.observation {
             context.set_frame_observation(observation.frame(stream_message(queued.message)));
         }
-        state.domains[domain].frame = Some(Frame {
-            message: queued.message,
-            context,
-            cursor: 0,
-        });
+        state.domains[domain].frame = Some(Frame::new(queued.message, context, domain, plan));
         state.domains[domain].occupied = true;
         progress = true;
     }
-    for domain in 0..state.domains.len() {
-        let Some(mut frame) = state.domains[domain].frame.take() else {
+    for message_domain in 0..state.domains.len() {
+        let Some(mut frame) = state.domains[message_domain].frame.take() else {
             continue;
         };
-        let steps = &plan.domains()[domain].steps;
-        if frame.cursor == steps.len() {
+        if frame.complete(message_domain, plan) {
             take_sequence(&mut state.summary.completed_frames)?;
-            if plan.selected_domain() == Some(domain) {
+            if plan.selected_domain() == Some(message_domain) {
                 let mut outputs = FlowOutputs::new();
                 for output in plan.outputs() {
                     if let Some(value) = frame
@@ -992,138 +1096,193 @@ fn tick(
                     outputs,
                 });
             } else {
-                release_domain(state, domain);
+                release_domain(state, message_domain);
             }
             progress = true;
             continue;
         }
-        let index = steps[frame.cursor];
-        if let Some(operator) = &state.operators[index] {
-            if !operator.pending.is_empty() {
-                state.domains[domain].frame = Some(frame);
+
+        let ready_domains = plan.execution_domains_for_message(message_domain).to_vec();
+        for execution_domain in ready_domains {
+            if frame.execution_domains[execution_domain] != ExecutionDomainState::Pending {
                 continue;
             }
-            let mut callback = event_callback(
-                shared,
-                plan,
-                index,
-                (domain != 0).then_some(frame.message),
-                if domain == 0 {
-                    StreamTrigger::Startup
-                } else {
-                    StreamTrigger::Input
-                },
-            );
-            let _context = callback.as_ref().map(StreamCallback::enter);
-            let inputs = frame
-                .context
-                .event_inputs(&plan.nodes()[index], plan.dependencies(index))
-                .inspect_err(|error| {
-                    if let Some(callback) = callback.take() {
-                        callback.failed(FailurePhase::Dependency, error.to_string());
-                    }
-                    state.failure_node = Some(plan.nodes()[index].definition_id.to_string());
-                })
-                .context(WorkflowSnafu {
-                    message: frame.message,
-                })?;
-            if let Some(inputs) = inputs {
-                if let OperatorExecutor::Producer(producer) =
-                    &mut state.operators[index].as_mut().unwrap().executor
-                {
-                    if domain == 0 {
-                        let context = frame.context.fork_stream(
-                            shared
-                                .observation
-                                .as_ref()
-                                .map(StreamObservation::startup_frame),
-                        );
-                        let invocation = Frame {
-                            message: frame.message,
-                            context,
-                            cursor: frame.cursor,
+            let execution = plan.execution_domain(execution_domain);
+            if execution.predecessors.iter().any(|predecessor| {
+                frame.execution_domains[*predecessor] != ExecutionDomainState::Complete
+            }) {
+                continue;
+            }
+            let index = execution.nodes[0].index();
+            if let Some(operator) = state.operators[index].as_ref() {
+                if !operator.pending.is_empty() {
+                    continue;
+                }
+                let is_producer = matches!(&operator.executor, OperatorExecutor::Producer(_));
+                let _ = operator;
+                let mut callback = event_callback(
+                    shared,
+                    plan,
+                    index,
+                    (message_domain != 0).then_some(frame.message),
+                    if message_domain == 0 {
+                        StreamTrigger::Startup
+                    } else {
+                        StreamTrigger::Input
+                    },
+                );
+                let _context = callback.as_ref().map(StreamCallback::enter);
+                let inputs = frame
+                    .context
+                    .event_inputs(&plan.nodes()[index], plan.dependencies(index))
+                    .inspect_err(|error| {
+                        if let Some(callback) = callback.take() {
+                            callback.failed(FailurePhase::Dependency, error.to_string());
+                        }
+                        state.failure_node = Some(plan.nodes()[index].definition_id.to_string());
+                    })
+                    .context(WorkflowSnafu {
+                        message: frame.message,
+                    })?;
+                if let Some(inputs) = inputs {
+                    if is_producer {
+                        let observation = shared.observation.as_ref().map(|observation| {
+                            if message_domain == 0 {
+                                observation.startup_frame()
+                            } else {
+                                observation.frame(stream_message(frame.message))
+                            }
+                        });
+                        let context = frame.context.fork_stream(observation);
+                        let detached = message_domain == 0;
+                        let operator = state.operators[index].as_mut().unwrap();
+                        let OperatorExecutor::Producer(producer) = &mut operator.executor else {
+                            unreachable!("producer kind was checked above")
                         };
                         producer.submit(
                             ProducerJob {
-                                frame: invocation,
+                                message: frame.message,
+                                execution_domain,
+                                context,
                                 inputs,
                                 callback,
-                                detached: true,
+                                detached,
                             },
                             shared,
                             plan,
                         )?;
-                        frame.cursor += 1;
-                        state.domains[domain].frame = Some(frame);
-                    } else {
-                        producer.submit(
-                            ProducerJob {
-                                frame,
-                                inputs,
-                                callback,
-                                detached: false,
-                            },
-                            shared,
-                            plan,
-                        )?;
+                        frame.execution_domains[execution_domain] = if detached {
+                            ExecutionDomainState::Complete
+                        } else {
+                            ExecutionDomainState::Running
+                        };
+                        progress = true;
+                        continue;
                     }
-                    progress = true;
-                    continue;
+                    invoke_event(
+                        state,
+                        plan,
+                        index,
+                        NodeEvent::Input(inputs),
+                        EventContext {
+                            now: clock.now(),
+                            input: Some(&frame.context),
+                        },
+                        callback,
+                    )?;
+                } else if let Some(callback) = callback {
+                    let causes: std::collections::BTreeSet<_> = plan
+                        .dependencies(index)
+                        .iter()
+                        .filter(|dependency| {
+                            matches!(
+                                frame.context.output(&crate::output_id(
+                                    &dependency.source_node,
+                                    &dependency.source_output
+                                )),
+                                Ok(crate::ContextValue::Skipped)
+                            )
+                        })
+                        .map(|dependency| SkipCause {
+                            source_node: dependency.source_node.clone(),
+                            source_output: dependency.source_output.clone(),
+                        })
+                        .collect();
+                    callback.skipped(causes.into_iter().collect());
                 }
-                invoke_event(
-                    state,
-                    plan,
-                    index,
-                    NodeEvent::Input(inputs),
-                    EventContext {
-                        now: clock.now(),
-                        input: Some(&frame.context),
-                    },
-                    callback,
-                )?;
-            } else if let Some(callback) = callback {
-                let causes: std::collections::BTreeSet<_> = plan
-                    .dependencies(index)
-                    .iter()
-                    .filter(|dependency| {
-                        matches!(
-                            frame.context.output(&crate::output_id(
-                                &dependency.source_node,
-                                &dependency.source_output
-                            )),
-                            Ok(crate::ContextValue::Skipped)
-                        )
-                    })
-                    .map(|dependency| SkipCause {
-                        source_node: dependency.source_node.clone(),
-                        source_output: dependency.source_output.clone(),
-                    })
-                    .collect();
-                callback.skipped(causes.into_iter().collect());
-            }
-            if domain == 0
-                && matches!(
-                    state.operators[index].as_ref().unwrap().executor,
-                    OperatorExecutor::Producer(_)
-                )
+                if is_producer && message_domain == 0 {
+                    state.operators[index].as_mut().unwrap().closed = true;
+                }
+                frame.execution_domains[execution_domain] = ExecutionDomainState::Complete;
+                progress = true;
+            } else if state.active_workers < workers.worker_count()
+                && shared.domain_budget.try_acquire()
             {
-                state.operators[index].as_mut().unwrap().closed = true;
-            }
-            frame.cursor += 1;
-            state.domains[domain].frame = Some(frame);
-            progress = true;
-        } else if state.active_workers < workers.worker_count() {
-            // A failed send owns the frame; release its values instead of retaining them.
-            if workers.try_submit(frame).is_err() {
-                return ExecutionSnafu {
-                    message: "worker queue unavailable",
+                let observation = shared.observation.as_ref().map(|observation| {
+                    if frame.message.domain == 0 {
+                        observation.startup_frame()
+                    } else {
+                        observation.frame(stream_message(frame.message))
+                    }
+                });
+                let visible_outputs = plan.visible_outputs_for_execution(execution_domain);
+                let context = frame
+                    .context
+                    .fork_domain_with_observation_and_visible_outputs(
+                        observation,
+                        &visible_outputs,
+                    );
+                let mut context = context;
+                context.set_domain_worker(true);
+                if workers
+                    .try_submit(DomainJob {
+                        message: frame.message,
+                        execution_domain,
+                        context,
+                    })
+                    .is_err()
+                {
+                    shared.domain_budget.release();
+                    return ExecutionSnafu {
+                        message: "domain worker queue unavailable",
+                    }
+                    .fail();
                 }
-                .fail();
+                frame.execution_domains[execution_domain] = ExecutionDomainState::Running;
+                state.active_workers += 1;
+                progress = true;
             }
-            state.active_workers += 1;
-            progress = true;
+        }
+
+        if frame.complete(message_domain, plan) {
+            take_sequence(&mut state.summary.completed_frames)?;
+            if plan.selected_domain() == Some(message_domain) {
+                let mut outputs = FlowOutputs::new();
+                for output in plan.outputs() {
+                    if let Some(value) = frame
+                        .context
+                        .select_output(
+                            &output.name,
+                            output.node.as_str(),
+                            &output.port,
+                            output.optional,
+                        )
+                        .context(WorkflowSnafu {
+                            message: frame.message,
+                        })?
+                    {
+                        outputs.insert(output.name.clone(), value);
+                    }
+                }
+                state.output = Some(StreamOutput {
+                    message: frame.message,
+                    outputs,
+                });
+            } else {
+                release_domain(state, message_domain);
+            }
         } else {
-            state.domains[domain].frame = Some(frame);
+            state.domains[message_domain].frame = Some(frame);
         }
     }
     if !state.domains[0].occupied && !state.domains[0].closed {

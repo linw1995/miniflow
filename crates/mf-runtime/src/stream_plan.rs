@@ -1,3 +1,4 @@
+use crate::execution_domains::{ExecutionDomain, ExecutionDomains};
 use crate::message_domain::MessageDomains;
 use crate::runner::ContextSnafu;
 use crate::{
@@ -157,6 +158,43 @@ impl StreamPlan {
     pub fn domains(&self) -> &[StreamDomain] {
         self.domains.domains()
     }
+    pub fn execution_domains(&self) -> &ExecutionDomains {
+        self.domains.execution_domains()
+    }
+    pub fn execution_domains_for_message(&self, message_domain: usize) -> &[usize] {
+        self.domains.execution_domains_for_message(message_domain)
+    }
+    pub fn execution_domain(&self, id: usize) -> &ExecutionDomain {
+        &self.execution_domains().domains()[id]
+    }
+    pub fn message_domain_for_execution(&self, id: usize) -> usize {
+        self.domains.message_domain_for_execution(id)
+    }
+    pub(crate) fn visible_outputs_for_execution(
+        &self,
+        id: usize,
+    ) -> std::collections::BTreeSet<String> {
+        let message_domain = self.message_domain_for_execution(id);
+        let mut visible_nodes = std::collections::BTreeSet::new();
+        for &ancestor in self.execution_domains().ancestor_domains(id) {
+            visible_nodes.extend(self.execution_domain(ancestor).nodes.iter().copied());
+        }
+        if let Some(source) = self.domains()[message_domain].source {
+            visible_nodes.insert(crate::NodeId::new(source));
+        }
+        let mut visible_outputs = std::collections::BTreeSet::new();
+        for node_id in visible_nodes {
+            let node = &self.nodes[node_id.index()];
+            visible_outputs.extend(
+                node.metadata
+                    .ports
+                    .outputs
+                    .iter()
+                    .map(|port| crate::output_id(node.definition_id.as_str(), &port.name)),
+            );
+        }
+        visible_outputs
+    }
     pub fn output_domain(&self, node: usize) -> usize {
         self.domains.output_domain(node)
     }
@@ -187,5 +225,37 @@ impl StreamPlan {
                 .map(StreamDependency::borrowed),
             context,
         )
+    }
+
+    pub fn execute_domain(
+        &self,
+        id: usize,
+        context: &mut crate::ExecutionContext,
+    ) -> Result<(), crate::WorkflowRunError> {
+        let domain = self.execution_domain(id);
+        for &position in &domain.positions {
+            if context.cancellation().failure().is_some() {
+                break;
+            }
+            let node = self.nodes.get(position).context(ContextSnafu {
+                definition_id: "<stream>",
+                message: "invalid stream domain dispatch index",
+            })?;
+            crate::context::execute_ordered_task_in_context(
+                node,
+                node.node.as_deref().with_context(|| ContextSnafu {
+                    definition_id: node.definition_id.clone(),
+                    message: "stream execution domain contains a non-task node",
+                })?,
+                self.dependencies(position)
+                    .iter()
+                    .map(StreamDependency::borrowed),
+                context,
+            )?;
+            if context.scope_exit_requested() {
+                break;
+            }
+        }
+        Ok(())
     }
 }

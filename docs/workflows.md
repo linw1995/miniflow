@@ -332,7 +332,15 @@ The first matching branch produces true; all other outputs are explicitly skippe
 
 No implicit conversion occurs. A present null exists and can be compared with an explicit null literal. Missing fields or explicitly skipped outputs are unavailable to existence checks; comparing them is an execution error. Unexpectedly omitted outputs and pending producers are errors even for existence checks. Objects and arrays cannot be compared in this version. Reached condition errors include the branch, qualified source, path, and operator.
 
-A selected output can fan out to multiple downstream nodes; all eligible consumers execute. Only one branch output is active per router invocation. Execution is sequential in topological order, and a node gated by mutually exclusive outputs is skipped rather than acting as a merge. Compound boolean expressions and field-to-field comparisons are deferred.
+A selected output can fan out to multiple downstream nodes; all eligible consumers execute. Only one branch output is active per router invocation. A node gated by mutually exclusive outputs is skipped rather than acting as a merge. Compound boolean expressions and field-to-field comparisons are deferred.
+
+The runtime groups task nodes into synchronous execution domains. A linear chain stays in one domain and runs in
+topological order. Forks split into separate branch domains, which can run concurrently when ready; a join waits
+for every predecessor domain. Concurrency is bounded by `RuntimeOptions.max_parallel_domains`, which defaults to
+four. Independent domains may complete side effects in either order, while dependencies and selected output order
+remain stable. In stream workflows, execution domains are distinct from message domains, which continue to define
+message identity and FIFO ordering. Domains inside Loop and Iteration scopes run serially in topological order to
+preserve scope writes and exit behavior; Iteration can still process separate items in parallel.
 
 ## Workflow startup parameters
 

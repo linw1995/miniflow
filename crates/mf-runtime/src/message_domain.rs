@@ -1,12 +1,13 @@
+use crate::execution_domains::ExecutionDomains;
 use crate::stream_plan::InvalidPlanSnafu;
 use crate::{
-    FlowNode, NodeExecution, StreamBuildError, StreamDependency, WorkflowOutputDefinition,
+    FlowNode, NodeExecution, NodeId, StreamBuildError, StreamDependency, WorkflowOutputDefinition,
     output_id,
 };
 use snafu::{OptionExt, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// A message source and the ordered steps that consume its messages.
+/// A message source and the nodes that consume its messages, retained in topological order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StreamDomain {
     pub source: Option<usize>,
@@ -19,6 +20,9 @@ pub struct MessageDomains {
     domains: Vec<StreamDomain>,
     output_domains: Vec<usize>,
     selected_domain: Option<usize>,
+    execution_domains: ExecutionDomains,
+    execution_domains_by_message: Vec<Vec<usize>>,
+    message_domain_by_execution: Vec<usize>,
 }
 
 impl MessageDomains {
@@ -52,6 +56,7 @@ impl MessageDomains {
             steps: Vec::new(),
         }];
         let mut output_domains = vec![0; nodes.len()];
+        let mut node_message_domains = vec![0; nodes.len()];
         for (index, node) in nodes.iter().enumerate() {
             let mut incoming_domains = BTreeSet::new();
             for dependency in &dependencies[index] {
@@ -107,6 +112,7 @@ impl MessageDomains {
                 }
             );
             domains[domain].steps.push(index);
+            node_message_domains[index] = domain;
             output_domains[index] = match node.node.as_ref().with_context(|| InvalidPlanSnafu {
                 message: format!(
                     "node `{}` has no execution implementation",
@@ -164,10 +170,42 @@ impl MessageDomains {
             );
             selected_domain = Some(domain);
         }
+
+        let mut execution_edges = Vec::new();
+        for (target, node_dependencies) in dependencies.iter().enumerate() {
+            for dependency in node_dependencies {
+                let source = indices[dependency.source_node.as_str()];
+                if node_message_domains[source] == node_message_domains[target] {
+                    execution_edges.push((source, target));
+                }
+            }
+        }
+        let order: Vec<_> = (0..nodes.len()).map(NodeId::new).collect();
+        let boundaries: Vec<_> = nodes
+            .iter()
+            .map(|node| {
+                matches!(
+                    node.node,
+                    Some(NodeExecution::Event(_) | NodeExecution::Stream(_))
+                )
+            })
+            .collect();
+        let execution_domains = ExecutionDomains::partition(&order, &execution_edges, &boundaries);
+        let mut execution_domains_by_message = vec![Vec::new(); domains.len()];
+        let mut message_domain_by_execution = vec![0; execution_domains.len()];
+        for execution_domain in execution_domains.domains() {
+            let node = execution_domain.nodes[0].index();
+            let message_domain = node_message_domains[node];
+            execution_domains_by_message[message_domain].push(execution_domain.id);
+            message_domain_by_execution[execution_domain.id] = message_domain;
+        }
         Ok(Self {
             domains,
             output_domains,
             selected_domain,
+            execution_domains,
+            execution_domains_by_message,
+            message_domain_by_execution,
         })
     }
 
@@ -181,5 +219,17 @@ impl MessageDomains {
 
     pub fn selected_domain(&self) -> Option<usize> {
         self.selected_domain
+    }
+
+    pub fn execution_domains(&self) -> &ExecutionDomains {
+        &self.execution_domains
+    }
+
+    pub fn execution_domains_for_message(&self, message_domain: usize) -> &[usize] {
+        &self.execution_domains_by_message[message_domain]
+    }
+
+    pub fn message_domain_for_execution(&self, execution_domain: usize) -> usize {
+        self.message_domain_by_execution[execution_domain]
     }
 }

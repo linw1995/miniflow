@@ -18,7 +18,7 @@ pub fn start_stream(
         })
         .boxed()
         .context(mf_runtime::StreamCompilationSnafu)?;
-    prepared.start_with_options(options)
+    mf_runtime::FlowRuntime::default().start_stream(prepared, options)
 }
 
 pub fn instantiate_stream(
@@ -34,14 +34,15 @@ pub fn instantiate_stream(
         })?;
     let (nodes, order) = crate::compiler::prepare_definition(&plan.definition, registry)?;
     ensure!(order == plan.execution_order, NonCanonicalPlanOrderSnafu);
-    Flow::prepare(
+    let flow = Flow::prepare(
         nodes,
         plan.definition.edges.clone(),
         order,
         plan.definition.outputs.clone(),
     )
     .and_then(|flow| flow.with_control_edges(plan.definition.control_edges.clone()))
-    .context(FlowConstructionSnafu)?
-    .into_stream(execution)
-    .context(StreamConstructionSnafu)
+    .context(FlowConstructionSnafu)?;
+    mf_runtime::FlowRuntime::default()
+        .prepare_stream(flow, execution)
+        .context(StreamConstructionSnafu)
 }

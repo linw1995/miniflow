@@ -1,4 +1,5 @@
 use crate::ValueRef as Value;
+use crate::execution_domains::DomainBudget;
 use crate::runner::{DependencySnafu, InputTypeSnafu, NodeExecutionSnafu};
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use mf_telemetry::{
@@ -7,8 +8,12 @@ use mf_telemetry::{
 };
 use snafu::ResultExt;
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ExecutionScope {
     node_id: String,
     source_id: String,
@@ -16,7 +21,7 @@ pub struct ExecutionScope {
     types: BTreeMap<String, crate::ValueType>,
     index: usize,
     exit_requested: bool,
-    visited_steps: usize,
+    visited_steps: Arc<AtomicUsize>,
 }
 
 impl ExecutionScope {
@@ -37,14 +42,53 @@ impl ExecutionScope {
             types,
             index,
             exit_requested: false,
-            visited_steps: 0,
+            visited_steps: Arc::new(AtomicUsize::new(0)),
         })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct StepBudget(Arc<AtomicUsize>);
+
+impl StepBudget {
+    fn new(remaining: usize) -> Self {
+        Self(Arc::new(AtomicUsize::new(remaining)))
+    }
+
+    fn reserve(&self, id: &str) -> Result<(), WorkflowRunError> {
+        self.0
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                remaining.checked_sub(1)
+            })
+            .map(|_| ())
+            .map_err(|_| {
+                state_error(
+                    id,
+                    format!(
+                        "scheduled-step budget of {} exhausted",
+                        crate::MAX_SCHEDULED_STEPS
+                    ),
+                )
+            })
+    }
+}
+
+impl PartialEq<usize> for StepBudget {
+    fn eq(&self, other: &usize) -> bool {
+        self.0.load(Ordering::Acquire) == *other
+    }
+}
+
+impl PartialEq for StepBudget {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.load(Ordering::Acquire) == other.0.load(Ordering::Acquire)
     }
 }
 
 struct ScopeGuard<'a> {
     context: &'a mut ExecutionContext,
     parent_outputs: BTreeMap<String, Option<Value>>,
+    parent_exit_cutoff: Arc<AtomicUsize>,
     depth: usize,
 }
 
@@ -52,6 +96,7 @@ impl Drop for ScopeGuard<'_> {
     fn drop(&mut self) {
         self.context.scopes.truncate(self.depth);
         self.context.outputs = std::mem::take(&mut self.parent_outputs);
+        self.context.scope_exit_cutoff = self.parent_exit_cutoff.clone();
         self.context.pending_loop_write = None;
     }
 }
@@ -87,7 +132,12 @@ pub struct ExecutionContext {
     body_observation: Option<BodyObservation>,
     scopes: Vec<ExecutionScope>,
     pending_loop_write: Option<(String, Value)>,
-    remaining_steps: usize,
+    current_position: Option<usize>,
+    scope_exit_cutoff: Arc<AtomicUsize>,
+    domain_budget: Arc<DomainBudget>,
+    domain_budget_configured: bool,
+    domain_worker: bool,
+    remaining_steps: StepBudget,
     snapshots: Option<crate::SnapshotRecorder>,
     snapshot_prefix: Vec<LoopPathEntry>,
     workflow_arguments: crate::WorkflowArguments,
@@ -104,7 +154,12 @@ impl Default for ExecutionContext {
             body_observation: None,
             scopes: Vec::new(),
             pending_loop_write: None,
-            remaining_steps: crate::MAX_SCHEDULED_STEPS,
+            current_position: None,
+            scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
+            domain_budget: Arc::new(DomainBudget::new(4)),
+            domain_budget_configured: false,
+            domain_worker: false,
+            remaining_steps: StepBudget::new(crate::MAX_SCHEDULED_STEPS),
             snapshots: None,
             snapshot_prefix: Vec::new(),
             workflow_arguments: crate::WorkflowArguments::default(),
@@ -140,13 +195,18 @@ impl ExecutionContext {
     pub fn fork_stream(&self, observation: Option<RunObservation>) -> Self {
         Self {
             outputs: self.outputs.clone(),
-            remaining_steps: self.remaining_steps,
+            remaining_steps: self.remaining_steps.clone(),
             stdin: self.stdin.clone(),
             cancellation: self.cancellation.clone(),
             observation,
             body_observation: None,
             scopes: Vec::new(),
             pending_loop_write: None,
+            current_position: None,
+            scope_exit_cutoff: self.scope_exit_cutoff.clone(),
+            domain_budget: self.domain_budget.clone(),
+            domain_budget_configured: self.domain_budget_configured,
+            domain_worker: false,
             snapshots: None,
             snapshot_prefix: Vec::new(),
             workflow_arguments: crate::WorkflowArguments::default(),
@@ -185,6 +245,70 @@ impl ExecutionContext {
         self.observation = Some(observation);
     }
 
+    pub(crate) fn replace_execution_position(&mut self, position: Option<usize>) -> Option<usize> {
+        std::mem::replace(&mut self.current_position, position)
+    }
+
+    pub(crate) fn scope_exit_cutoff(&self) -> usize {
+        self.scope_exit_cutoff.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn configure_domain_budget(&mut self, limit: usize) {
+        if !self.domain_budget_configured {
+            self.domain_budget = Arc::new(DomainBudget::new(limit));
+            self.domain_budget_configured = true;
+        }
+    }
+
+    pub(crate) fn set_domain_budget(&mut self, budget: Arc<DomainBudget>) {
+        self.domain_budget = budget;
+        self.domain_budget_configured = true;
+    }
+
+    pub(crate) fn domain_budget(&self) -> Arc<DomainBudget> {
+        self.domain_budget.clone()
+    }
+
+    pub(crate) fn try_acquire_domain(&self) -> bool {
+        self.domain_budget.try_acquire()
+    }
+
+    pub(crate) fn acquire_domain(&self) {
+        self.domain_budget.acquire();
+    }
+
+    pub(crate) fn release_domain(&self) {
+        self.domain_budget.release();
+    }
+
+    pub(crate) fn domain_worker(&self) -> bool {
+        self.domain_worker
+    }
+
+    pub(crate) fn set_domain_worker(&mut self, active: bool) {
+        self.domain_worker = active;
+    }
+
+    /// Temporarily yields this execution domain's permit for structured child work.
+    #[doc(hidden)]
+    pub fn suspend_domain_worker(&mut self) -> bool {
+        if std::mem::replace(&mut self.domain_worker, false) {
+            self.domain_budget.release();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Reacquires a permit yielded by `suspend_domain_worker`.
+    #[doc(hidden)]
+    pub fn resume_domain_worker(&mut self, suspended: bool) {
+        if suspended {
+            self.domain_budget.acquire();
+            self.domain_worker = true;
+        }
+    }
+
     pub fn for_message<N>(
         source: &FlowNode<N>,
         result: NodeResult,
@@ -192,6 +316,81 @@ impl ExecutionContext {
         let mut context = Self::default();
         context.publish(source, Some(result))?;
         Ok(context)
+    }
+
+    pub(crate) fn fork_domain(&self) -> Self {
+        self.fork_domain_with_observation(self.observation.clone())
+    }
+
+    pub(crate) fn fork_domain_with_visible_outputs(
+        &self,
+        visible_outputs: &BTreeSet<String>,
+    ) -> Self {
+        self.fork_domain_with_observation_and_visible_outputs(
+            self.observation.clone(),
+            visible_outputs,
+        )
+    }
+
+    pub(crate) fn fork_domain_with_observation_and_visible_outputs(
+        &self,
+        observation: Option<RunObservation>,
+        visible_outputs: &BTreeSet<String>,
+    ) -> Self {
+        let mut context = self.fork_domain_with_observation(observation);
+        context
+            .outputs
+            .retain(|output, _| visible_outputs.contains(output));
+        context
+    }
+
+    pub(crate) fn fork_domain_with_observation(&self, observation: Option<RunObservation>) -> Self {
+        Self {
+            outputs: self.outputs.clone(),
+            observation,
+            body_observation: self.body_observation.clone(),
+            scopes: self.scopes.clone(),
+            pending_loop_write: None,
+            current_position: None,
+            scope_exit_cutoff: self.scope_exit_cutoff.clone(),
+            domain_budget: self.domain_budget.clone(),
+            domain_budget_configured: self.domain_budget_configured,
+            domain_worker: self.domain_worker,
+            remaining_steps: self.remaining_steps.clone(),
+            snapshots: self.snapshots.clone(),
+            snapshot_prefix: self.snapshot_prefix.clone(),
+            workflow_arguments: self.workflow_arguments.clone(),
+            startup_inputs_bound: self.startup_inputs_bound,
+            stdin: self.stdin.clone(),
+            cancellation: self.cancellation.clone(),
+        }
+    }
+
+    pub(crate) fn merge_domain_outputs<'a, N: 'a>(
+        &mut self,
+        source: &Self,
+        nodes: impl IntoIterator<Item = &'a FlowNode<N>>,
+    ) {
+        for node in nodes {
+            for port in &node.metadata.ports.outputs {
+                let id = output_id(node.definition_id.as_str(), &port.name);
+                if let Some(value) = source.outputs.get(&id) {
+                    self.outputs.insert(id, value.clone());
+                }
+            }
+        }
+        for (scope_index, scope) in source.scopes.iter().enumerate() {
+            if let Some(target) = self.scopes.get_mut(scope_index) {
+                for (name, value) in &scope.variables {
+                    if target.variables.get(name) != Some(value) {
+                        target.variables.insert(name.clone(), value.clone());
+                        self.outputs
+                            .insert(output_id(&target.source_id, name), Some(value.clone()));
+                    }
+                }
+                target.exit_requested |= scope.exit_requested;
+            }
+        }
     }
 
     pub fn event_inputs<N>(
@@ -254,6 +453,9 @@ impl ExecutionContext {
     pub fn fork_body(&self, observation: Option<BodyObservation>) -> Self {
         let mut child = Self::for_body(observation);
         child.cancellation = self.cancellation.clone();
+        child.domain_budget = self.domain_budget.clone();
+        child.domain_budget_configured = self.domain_budget_configured;
+        child.domain_worker = self.domain_worker;
         if self.snapshots.is_some() {
             child.snapshots = self.snapshots.clone();
             child.snapshot_prefix = self.snapshot_path();
@@ -404,6 +606,32 @@ impl ExecutionContext {
         }
     }
 
+    pub(crate) fn select_observation_failure(&mut self, error: &WorkflowRunError) {
+        let Some(observation) = self.observation.as_mut() else {
+            return;
+        };
+        let (node, phase) = match error {
+            WorkflowRunError::Dependency { definition_id, .. } => {
+                (Some(definition_id.to_string()), FailurePhase::Dependency)
+            }
+            WorkflowRunError::InputType { definition_id, .. } => {
+                (Some(definition_id.to_string()), FailurePhase::Dependency)
+            }
+            WorkflowRunError::NodeExecution { definition_id, .. } => {
+                (Some(definition_id.to_string()), FailurePhase::Execution)
+            }
+            WorkflowRunError::Context { definition_id, .. } => {
+                (Some(definition_id.to_string()), FailurePhase::Execution)
+            }
+            WorkflowRunError::WorkflowInputs { .. }
+            | WorkflowRunError::FlowBuild { .. }
+            | WorkflowRunError::UnknownKind { .. }
+            | WorkflowRunError::InvalidEmbeddedConfig { .. }
+            | WorkflowRunError::NodeConstruction { .. } => (None, FailurePhase::Preparation),
+        };
+        observation.select_failure(node, phase, error.to_string());
+    }
+
     pub fn select_output(
         &mut self,
         name: &str,
@@ -448,6 +676,9 @@ impl ExecutionContext {
                 message: "scope exit is outside an execution scope".into(),
             })?;
         frame.exit_requested = true;
+        if let Some(position) = self.current_position {
+            self.scope_exit_cutoff.fetch_min(position, Ordering::AcqRel);
+        }
         Ok(())
     }
 
@@ -456,7 +687,9 @@ impl ExecutionContext {
     }
 
     pub fn scope_visited_steps(&self) -> usize {
-        self.scopes.last().map_or(0, |scope| scope.visited_steps)
+        self.scopes
+            .last()
+            .map_or(0, |scope| scope.visited_steps.load(Ordering::Acquire))
     }
 
     pub(crate) fn stage_scope_write(
@@ -493,10 +726,15 @@ impl ExecutionContext {
     ) -> Result<(T, Outputs, bool), WorkflowRunError> {
         let depth = self.scopes.len();
         let parent_outputs = std::mem::take(&mut self.outputs);
+        let parent_exit_cutoff = std::mem::replace(
+            &mut self.scope_exit_cutoff,
+            Arc::new(AtomicUsize::new(usize::MAX)),
+        );
         self.scopes.push(scope);
         let guard = ScopeGuard {
             context: self,
             parent_outputs,
+            parent_exit_cutoff,
             depth,
         };
         let state = &mut *guard.context;
@@ -506,18 +744,9 @@ impl ExecutionContext {
     }
 
     fn reserve_step(&mut self, id: &str) -> Result<(), WorkflowRunError> {
-        if self.remaining_steps == 0 {
-            return Err(state_error(
-                id,
-                format!(
-                    "scheduled-step budget of {} exhausted",
-                    crate::MAX_SCHEDULED_STEPS
-                ),
-            ));
-        }
-        self.remaining_steps -= 1;
+        self.remaining_steps.reserve(id)?;
         if let Some(frame) = self.scopes.last_mut() {
-            frame.visited_steps += 1;
+            frame.visited_steps.fetch_add(1, Ordering::AcqRel);
         }
         Ok(())
     }

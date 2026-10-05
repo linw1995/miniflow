@@ -82,6 +82,20 @@ The runtime SHALL execute tasks in each domain synchronously in validated topolo
 - **WHEN** the effective worker limit is one
 - **THEN** ready domains execute serially in validated topological order
 
+### Requirement: Preserve ordered scope effects
+
+When a Flow executes inside a Loop or Iteration scope, the runtime SHALL schedule its execution domains serially in validated topological order. This preserves ordered Loop writes and lets a Loop exit prevent later body domains from running.
+
+#### Scenario: Stop later body domains after a Loop exit
+
+- **WHEN** a Loop body contains independent ready domains and one domain requests exit
+- **THEN** the runtime completes the exit domain before scheduling later body domains and skips domains after the exit position
+
+#### Scenario: Preserve iteration item parallelism
+
+- **WHEN** an Iteration node runs independent item bodies in parallel
+- **THEN** each item's body domains execute serially while item results retain input order
+
 ### Requirement: Bound and configure domain concurrency
 
 The runtime SHALL cap active execution domains per workflow instance at a finite limit, defaulting to four workers. Callers MAY override it. In stream mode, existing `execution.limits.workers` remains an upper bound; the effective limit is the lower of runtime and stream limits. Domain queues and frame retention MUST remain bounded.

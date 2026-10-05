@@ -116,7 +116,7 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments) -> Result<(), Box<dy
         prepared.plan().input_schema().validate(&arguments)?;
         let needs_stdin = prepared.plan().input_schema().stdin_owner(&arguments)?.is_some();
         let stdin = if needs_stdin { stdio.take_input() } else { None };
-        let instance = prepared.start_with_options(mf_runtime::StreamOptions { observation: observation.clone(), arguments, stdin, ..Default::default() })?;
+        let instance = mf_runtime::FlowRuntime::default().start_stream(prepared, mf_runtime::StreamOptions { observation: observation.clone(), arguments, stdin, ..Default::default() })?;
         stdio.run(instance)?;
         Ok(())
     })();

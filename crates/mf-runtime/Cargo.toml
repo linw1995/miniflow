@@ -9,6 +9,7 @@ description = "Runtime contracts and execution support for miniflow"
 [dependencies]
 # Workflow observation contracts.
 mf-telemetry.workspace = true
+opentelemetry.workspace = true
 
 # Node registration and persistent snapshot state.
 inventory.workspace = true

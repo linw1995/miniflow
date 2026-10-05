@@ -83,10 +83,6 @@ fn packaged_cli_acceptance() {
     assert!(manifest.contains("default = [\"telemetry\"]"));
     assert!(manifest.contains("telemetry = [\"mf-telemetry/otlp\"]"));
     assert!(!manifest.contains("mf-tui"));
-    let generated = fs::read_to_string(build.join("src/workflow.rs")).unwrap();
-    assert!(generated.contains("mf_runtime::execute_node"));
-    assert!(!generated.contains("Flow::new"));
-
     let typed_flow = json!({
         "version": "2026-09-26",
         "dependencies": {

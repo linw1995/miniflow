@@ -1,6 +1,7 @@
 mod cancellation;
 mod context;
 mod definition;
+mod execution_domains;
 mod flow;
 mod iteration;
 mod loop_node;
@@ -32,8 +33,10 @@ pub use definition::{
     MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition, NodeDependency, WorkflowDefinition,
     WorkflowDefinitionVersion, WorkflowOutputDefinition,
 };
+pub use execution_domains::{ExecutionDomain, ExecutionDomains};
 pub use flow::{
-    Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowOutputs, NodeId, TaskFlowNode,
+    Flow, FlowBuildError, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowRuntime, NodeId,
+    RuntimeOptions, TaskFlowNode,
 };
 pub use iteration::{
     ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,

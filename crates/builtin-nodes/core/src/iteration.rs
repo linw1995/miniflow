@@ -6,6 +6,7 @@ use mf_runtime::{
 use mf_telemetry::observation::{ItemObservation, IterationObservation};
 use std::{
     collections::{BTreeMap, VecDeque},
+    panic::{AssertUnwindSafe, catch_unwind, resume_unwind},
     sync::{
         Mutex,
         atomic::{AtomicBool, Ordering},
@@ -229,14 +230,18 @@ impl TaskNode for IterationNode {
         inputs: Inputs,
         ctx: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
-        self.execute_items(
-            inputs,
-            ctx.observation().and_then(|run| {
-                run.iteration_observation(&self.id, &ctx.scope_path(), self.body.nodes.clone())
-            }),
-            ctx,
-        )
-        .map(Into::into)
+        let observation = ctx.observation().and_then(|run| {
+            run.iteration_observation(&self.id, &ctx.scope_path(), self.body.nodes.clone())
+        });
+        let suspended = ctx.suspend_domain_worker();
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            self.execute_items(inputs, observation, ctx)
+        }));
+        ctx.resume_domain_worker(suspended);
+        match result {
+            Ok(result) => result.map(Into::into),
+            Err(payload) => resume_unwind(payload),
+        }
     }
 }
 

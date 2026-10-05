@@ -1,10 +1,16 @@
 use crate::definition::{DefinitionId, EdgeDefinition, WorkflowOutputDefinition};
+use crate::execution_domains::{ExecutionDomain, ExecutionDomains};
 #[cfg(test)]
 use crate::{Inputs, Outputs};
 use crate::{NodeMetadata, PreparedNode, TaskNode};
 use serde::{Deserialize, Serialize};
 use snafu::Snafu;
+use std::any::Any;
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroUsize;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::mpsc;
+use std::thread;
 
 /// A compact runtime node index into a `Flow`'s node vector.
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
@@ -109,6 +115,91 @@ impl FlowOutput {
 
 pub type FlowOutputs = crate::Outputs;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Runtime scheduling limits shared by oneshot and stream workflows.
+pub struct RuntimeOptions {
+    /// Maximum number of ready execution domains that can run concurrently.
+    pub max_parallel_domains: NonZeroUsize,
+}
+
+impl Default for RuntimeOptions {
+    fn default() -> Self {
+        Self {
+            max_parallel_domains: NonZeroUsize::new(4).unwrap(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+/// Executes prepared oneshot Flows and starts stream instances with one limit policy.
+pub struct FlowRuntime {
+    options: RuntimeOptions,
+}
+
+impl FlowRuntime {
+    /// Creates a runtime with explicit domain-concurrency options.
+    pub const fn new(options: RuntimeOptions) -> Self {
+        Self { options }
+    }
+
+    pub const fn options(&self) -> RuntimeOptions {
+        self.options
+    }
+
+    pub fn prepare_oneshot(
+        &self,
+        flow: Flow<Option<crate::NodeExecution>>,
+    ) -> Result<Flow, FlowBuildError> {
+        flow.into_tasks()
+    }
+
+    pub fn prepare_stream(
+        &self,
+        flow: Flow<Option<crate::NodeExecution>>,
+        execution: crate::StreamExecution,
+    ) -> Result<crate::PreparedStream, crate::StreamBuildError> {
+        flow.into_stream(execution)
+    }
+
+    pub fn execute(&self, flow: &Flow) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        self.execute_with_observation(flow, None)
+    }
+
+    pub fn execute_with_inputs(
+        &self,
+        flow: &Flow,
+        arguments: crate::WorkflowArguments,
+    ) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        let mut state = crate::ExecutionContext::default();
+        state.set_workflow_arguments(arguments);
+        self.execute_in_context(flow, &mut state)
+    }
+
+    pub fn execute_with_observation(
+        &self,
+        flow: &Flow,
+        observation: Option<crate::RunObservation>,
+    ) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        crate::ExecutionContext::run(observation, |state| self.execute_in_context(flow, state))
+    }
+
+    pub fn execute_in_context(
+        &self,
+        flow: &Flow,
+        state: &mut crate::ExecutionContext,
+    ) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        flow.execute_in_context_with_options(state, self.options)
+    }
+
+    pub fn start_stream(
+        &self,
+        prepared: crate::PreparedStream,
+        options: crate::StreamOptions,
+    ) -> Result<crate::StreamInstance, crate::StreamError> {
+        prepared.start_with_runtime_options(options, self.options)
+    }
+}
+
 #[derive(Debug, Snafu)]
 pub enum FlowBuildError {
     #[snafu(transparent)]
@@ -187,6 +278,7 @@ pub struct Flow<N = Box<dyn TaskNode>> {
     outputs: Vec<FlowOutput>,
     controls: Vec<crate::ControlEdgeDefinition>,
     input_schema: crate::WorkflowInputSchema,
+    execution_domains: Option<ExecutionDomains>,
 }
 
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -208,7 +300,8 @@ impl PreparedDependency {
 
 impl Flow<Option<crate::NodeExecution>> {
     pub fn into_tasks(self) -> Result<Flow, FlowBuildError> {
-        Ok(Flow {
+        let execution_domains = self.build_execution_domains();
+        let flow = Flow {
             nodes: self
                 .nodes
                 .into_iter()
@@ -220,7 +313,9 @@ impl Flow<Option<crate::NodeExecution>> {
             outputs: self.outputs,
             controls: self.controls,
             input_schema: self.input_schema,
-        })
+            execution_domains: Some(execution_domains),
+        };
+        Ok(flow)
     }
 
     pub fn into_stream(
@@ -272,7 +367,12 @@ impl Flow {
         execution_order: Vec<DefinitionId>,
         outputs: Vec<WorkflowOutputDefinition>,
     ) -> Result<Self, FlowBuildError> {
-        Flow::prepare(nodes, connections, execution_order, outputs)?.into_tasks()
+        FlowRuntime::default().prepare_oneshot(Flow::prepare(
+            nodes,
+            connections,
+            execution_order,
+            outputs,
+        )?)
     }
 }
 
@@ -447,6 +547,7 @@ impl<N> Flow<N> {
             outputs: resolved_outputs,
             controls: Vec::new(),
             input_schema: crate::WorkflowInputSchema::default(),
+            execution_domains: None,
         };
         flow.prepare_execution();
         Ok(flow)
@@ -483,8 +584,12 @@ impl<N> Flow<N> {
                 return Err(invalid());
             }
         }
+        let has_prepared_domains = self.execution_domains.is_some();
         self.controls = controls;
         self.prepare_execution();
+        if has_prepared_domains {
+            self.execution_domains = Some(self.build_execution_domains());
+        }
         if !self.input_schema.inputs.is_empty() {
             self = self.with_workflow_inputs()?;
         }
@@ -521,10 +626,38 @@ impl<N> Flow<N> {
         self.dependencies = incoming;
     }
 
+    fn build_execution_domains(&self) -> ExecutionDomains {
+        let positions: BTreeMap<_, _> = self
+            .execution_order
+            .iter()
+            .enumerate()
+            .map(|(position, node_id)| {
+                (self.nodes[node_id.index()].definition_id.as_str(), position)
+            })
+            .collect();
+        let mut edges = Vec::new();
+        for (target, dependencies) in self.dependencies.iter().enumerate() {
+            for dependency in dependencies {
+                if let Some(&source) = positions.get(dependency.source_node.as_str()) {
+                    edges.push((source, target));
+                }
+            }
+        }
+        ExecutionDomains::partition(
+            &self.execution_order,
+            &edges,
+            &vec![false; self.execution_order.len()],
+        )
+    }
+
     pub fn definition_node_id(&self, id: &NodeId) -> Option<&str> {
         self.nodes
             .get(id.index())
             .map(|node| node.definition_id.as_str())
+    }
+
+    pub fn node_metadata(&self, id: &NodeId) -> Option<&NodeMetadata> {
+        self.nodes.get(id.index()).map(|node| &node.metadata)
     }
 
     pub fn node_ids(&self) -> impl Iterator<Item = NodeId> + '_ {
@@ -545,24 +678,43 @@ impl Flow {
         self.nodes.get(id.index()).map(|node| node.node.as_ref())
     }
 
+    pub fn execution_domains(&self) -> &ExecutionDomains {
+        self.execution_domains
+            .as_ref()
+            .expect("task flows have a prepared execution-domain plan")
+    }
+
     pub fn execute_with_inputs(
         &self,
         arguments: crate::WorkflowArguments,
     ) -> Result<FlowOutputs, crate::WorkflowRunError> {
-        let mut state = crate::ExecutionContext::default();
-        state.set_workflow_arguments(arguments);
-        self.execute_in_context(&mut state)
+        FlowRuntime::default().execute_with_inputs(self, arguments)
+    }
+
+    pub fn execute_with_inputs_and_options(
+        &self,
+        arguments: crate::WorkflowArguments,
+        options: RuntimeOptions,
+    ) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        FlowRuntime::new(options).execute_with_inputs(self, arguments)
     }
 
     pub fn execute(&self) -> Result<FlowOutputs, crate::WorkflowRunError> {
         self.execute_with_observation(None)
     }
 
+    pub fn execute_with_options(
+        &self,
+        options: RuntimeOptions,
+    ) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        FlowRuntime::new(options).execute(self)
+    }
+
     pub fn execute_with_observation(
         &self,
         observation: Option<crate::RunObservation>,
     ) -> Result<FlowOutputs, crate::WorkflowRunError> {
-        crate::ExecutionContext::run(observation, |state| self.execute_in_context(state))
+        FlowRuntime::default().execute_with_observation(self, observation)
     }
 
     /// Executes already constructed nodes inside a caller-owned run scope.
@@ -570,22 +722,28 @@ impl Flow {
         &self,
         state: &mut crate::ExecutionContext,
     ) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        FlowRuntime::default().execute_in_context(self, state)
+    }
+
+    pub fn execute_in_context_with_options(
+        &self,
+        state: &mut crate::ExecutionContext,
+        options: RuntimeOptions,
+    ) -> Result<FlowOutputs, crate::WorkflowRunError> {
+        state.configure_domain_budget(options.max_parallel_domains.get());
         if state.scope_path().is_empty() {
             state.bind_workflow_inputs(&self.input_schema)?;
         }
-        for (position, node_id) in self.execution_order.iter().enumerate() {
-            let node = &self.nodes[node_id.index()];
-            crate::context::execute_ordered_node_in_context(
-                node,
-                self.dependencies[position]
-                    .iter()
-                    .map(PreparedDependency::borrowed),
-                state,
-            )?;
-            if state.scope_exit_requested() {
-                break;
-            }
-        }
+        let domains = self
+            .execution_domains
+            .as_ref()
+            .expect("prepared task Flows have an execution-domain plan");
+        let worker_limit = if state.scope_path().is_empty() {
+            options.max_parallel_domains.get()
+        } else {
+            1
+        };
+        self.execute_domains(domains, state, worker_limit)?;
         let mut workflow_outputs = FlowOutputs::new();
         for output in &self.outputs {
             let id = self.nodes[output.node_id.index()].definition_id.as_str();
@@ -597,6 +755,224 @@ impl Flow {
         }
         Ok(workflow_outputs)
     }
+
+    fn execute_domains(
+        &self,
+        plan: &ExecutionDomains,
+        state: &mut crate::ExecutionContext,
+        worker_limit: usize,
+    ) -> Result<(), crate::WorkflowRunError> {
+        if plan.is_empty() {
+            return Ok(());
+        }
+        if plan.len() == 1 {
+            let mut context = state.fork_domain();
+            let mut acquired = state.try_acquire_domain();
+            if !acquired && !state.domain_worker() {
+                state.acquire_domain();
+                acquired = true;
+            }
+            context.set_domain_worker(true);
+            let result = self.execute_domain(&plan.domains()[0], &mut context);
+            if acquired {
+                context.release_domain();
+            }
+            context.set_domain_worker(false);
+            result?;
+            state.merge_domain_outputs(
+                &context,
+                plan.domains()[0]
+                    .nodes
+                    .iter()
+                    .map(|node_id| &self.nodes[node_id.index()]),
+            );
+            return Ok(());
+        }
+        let worker_limit = worker_limit
+            .min(state.domain_budget().limit())
+            .min(plan.len());
+        let mut failures = Vec::new();
+        let mut panics: Vec<(usize, Box<dyn Any + Send>)> = Vec::new();
+        thread::scope(|scope| {
+            let (sender, receiver) = mpsc::channel();
+            let mut ready: BTreeSet<_> = plan
+                .domains()
+                .iter()
+                .filter(|domain| domain.predecessors.is_empty())
+                .map(|domain| (domain.first_position, domain.id))
+                .collect();
+            let mut scheduled: Vec<_> = plan
+                .domains()
+                .iter()
+                .map(|domain| domain.predecessors.is_empty())
+                .collect();
+            let mut completed_domains = vec![false; plan.len()];
+            let mut running = 0;
+
+            loop {
+                while failures.is_empty() && panics.is_empty() && running < worker_limit {
+                    let Some((_, domain_id)) = ready.pop_first() else {
+                        break;
+                    };
+                    let domain = &plan.domains()[domain_id];
+                    if domain.first_position > state.scope_exit_cutoff() {
+                        scheduled[domain_id] = true;
+                        completed_domains[domain_id] = true;
+                        for successor in &domain.successors {
+                            let successor = &plan.domains()[*successor];
+                            if !scheduled[successor.id]
+                                && successor
+                                    .predecessors
+                                    .iter()
+                                    .all(|predecessor| completed_domains[*predecessor])
+                            {
+                                scheduled[successor.id] = true;
+                                ready.insert((successor.first_position, successor.id));
+                            }
+                        }
+                        continue;
+                    }
+                    let visible_outputs = self.visible_outputs(plan, domain_id);
+                    let mut context = state.fork_domain_with_visible_outputs(&visible_outputs);
+                    let acquired = state.try_acquire_domain()
+                        || (!state.domain_worker() && running == 0 && {
+                            state.acquire_domain();
+                            true
+                        });
+                    if acquired {
+                        context.set_domain_worker(true);
+                        let sender = sender.clone();
+                        let parent_context = opentelemetry::Context::current();
+                        scope.spawn(move || {
+                            let _context = parent_context.attach();
+                            let result = catch_unwind(AssertUnwindSafe(|| {
+                                self.execute_domain(domain, &mut context)
+                            }));
+                            context.release_domain();
+                            context.set_domain_worker(false);
+                            let _ = sender.send((domain_id, context, result));
+                        });
+                        running += 1;
+                    } else if state.domain_worker() {
+                        context.set_domain_worker(true);
+                        let result = Ok(self.execute_domain(domain, &mut context));
+                        let _ = sender.send((domain_id, context, result));
+                        running += 1;
+                    } else {
+                        ready.insert((domain.first_position, domain_id));
+                        break;
+                    }
+                }
+
+                if running == 0 {
+                    break;
+                }
+
+                let (domain_id, context, result) = receiver
+                    .recv()
+                    .expect("an active execution domain must report completion");
+                running -= 1;
+                match result {
+                    Ok(Ok(())) if failures.is_empty() && panics.is_empty() => {
+                        let domain = &plan.domains()[domain_id];
+                        state.merge_domain_outputs(
+                            &context,
+                            domain
+                                .nodes
+                                .iter()
+                                .map(|node_id| &self.nodes[node_id.index()]),
+                        );
+                        completed_domains[domain_id] = true;
+                        for successor in &domain.successors {
+                            let successor = &plan.domains()[*successor];
+                            if !scheduled[successor.id]
+                                && successor
+                                    .predecessors
+                                    .iter()
+                                    .all(|predecessor| completed_domains[*predecessor])
+                            {
+                                scheduled[successor.id] = true;
+                                ready.insert((successor.first_position, successor.id));
+                            }
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        failures.push((plan.domains()[domain_id].first_position, error));
+                    }
+                    Err(payload) => {
+                        panics.push((plan.domains()[domain_id].first_position, payload));
+                    }
+                    Ok(Ok(())) => {}
+                }
+            }
+            drop(sender);
+            debug_assert!((failures.is_empty() && panics.is_empty()) || running == 0);
+        });
+
+        failures.sort_by_key(|(position, _)| *position);
+        panics.sort_by_key(|(position, _)| *position);
+        if let Some((panic_position, _)) = panics.first()
+            && failures
+                .first()
+                .is_none_or(|(failure_position, _)| panic_position < failure_position)
+        {
+            let (_, payload) = panics.remove(0);
+            std::panic::resume_unwind(payload);
+        }
+        if let Some((_, error)) = failures.into_iter().next() {
+            state.select_observation_failure(&error);
+            return Err(error);
+        }
+        if let Some((_, payload)) = panics.into_iter().next() {
+            std::panic::resume_unwind(payload);
+        }
+        Ok(())
+    }
+
+    fn execute_domain(
+        &self,
+        domain: &ExecutionDomain,
+        state: &mut crate::ExecutionContext,
+    ) -> Result<(), crate::WorkflowRunError> {
+        for &position in &domain.positions {
+            if position > state.scope_exit_cutoff() {
+                break;
+            }
+            let node_id = self.execution_order[position];
+            let node = &self.nodes[node_id.index()];
+            let previous_position = state.replace_execution_position(Some(position));
+            let result = crate::context::execute_ordered_node_in_context(
+                node,
+                self.dependencies[position]
+                    .iter()
+                    .map(PreparedDependency::borrowed),
+                state,
+            );
+            state.replace_execution_position(previous_position);
+            result?;
+            if state.scope_exit_requested() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn visible_outputs(&self, plan: &ExecutionDomains, domain_id: usize) -> BTreeSet<String> {
+        let mut visible = BTreeSet::new();
+        for &ancestor in plan.ancestor_domains(domain_id) {
+            for node_id in &plan.domains()[ancestor].nodes {
+                let node = &self.nodes[node_id.index()];
+                visible.extend(
+                    node.metadata
+                        .ports
+                        .outputs
+                        .iter()
+                        .map(|port| crate::output_id(node.definition_id.as_str(), &port.name)),
+                );
+            }
+        }
+        visible
+    }
 }
 
 #[cfg(test)]
@@ -604,7 +980,10 @@ mod tests {
     use super::*;
     use crate::NodeExecutionError;
     use serde_json::json;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        sync::{Arc, Condvar, Mutex},
+        time::{Duration, Instant},
+    };
 
     struct EmptyNode;
 
@@ -639,6 +1018,41 @@ mod tests {
         name: &'static str,
         action: Action,
         trace: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    struct RendezvousNode {
+        value: i64,
+        gate: Arc<(Mutex<usize>, Condvar)>,
+    }
+
+    impl TaskNode for RendezvousNode {
+        fn execute(
+            &self,
+            _inputs: Inputs,
+            _ctx: &mut crate::ExecutionContext,
+        ) -> Result<crate::NodeResult, NodeExecutionError> {
+            let (arrived, changed) = &*self.gate;
+            let mut arrived = arrived.lock().unwrap();
+            *arrived += 1;
+            changed.notify_all();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while *arrived < 2 {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    return Err(NodeExecutionError::ExecutionFailed {
+                        message: "independent domains did not overlap".to_owned(),
+                    });
+                }
+                let (next, timeout) = changed.wait_timeout(arrived, remaining).unwrap();
+                arrived = next;
+                if timeout.timed_out() && *arrived < 2 {
+                    return Err(NodeExecutionError::ExecutionFailed {
+                        message: "independent domains did not overlap".to_owned(),
+                    });
+                }
+            }
+            Ok((Outputs::from([("value".into(), json!(self.value).into())])).into())
+        }
     }
 
     impl TaskNode for TestNode {
@@ -899,7 +1313,11 @@ mod tests {
         assert!(flow.node(&join).is_some());
         assert_eq!(flow.definition_node_id(&join), Some("join"));
         assert_eq!(flow.execute().unwrap()["sum"], json!(8));
-        assert_eq!(*trace.lock().unwrap(), ["source-a", "source-b", "join"]);
+        let trace = trace.lock().unwrap();
+        assert!(
+            trace.as_slice() == ["source-a", "source-b", "join"]
+                || trace.as_slice() == ["source-b", "source-a", "join"]
+        );
     }
 
     #[test]
@@ -931,7 +1349,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            flow.execute().unwrap(),
+            flow.execute_with_options(RuntimeOptions {
+                max_parallel_domains: NonZeroUsize::new(1).unwrap(),
+            })
+            .unwrap(),
             FlowOutputs::from([("result".to_owned(), json!(4).into())])
         );
         assert_eq!(*trace.lock().unwrap(), ["source", "increment"]);
@@ -988,10 +1409,56 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            flow.execute().unwrap(),
+            flow.execute_with_options(RuntimeOptions {
+                max_parallel_domains: NonZeroUsize::new(1).unwrap(),
+            })
+            .unwrap(),
             FlowOutputs::from([("total".to_owned(), json!(22).into())])
         );
-        assert_eq!(*trace.lock().unwrap(), ["source", "left", "right", "sum"]);
+        let trace = trace.lock().unwrap();
+        assert_eq!(trace.as_slice(), ["source", "left", "right", "sum"]);
+    }
+
+    #[test]
+    fn runs_independent_domains_concurrently() {
+        let gate = Arc::new((Mutex::new(0), Condvar::new()));
+        let node = |id, value| {
+            FlowNode::new(
+                id,
+                crate::PreparedNode::new(
+                    RendezvousNode {
+                        value,
+                        gate: Arc::clone(&gate),
+                    },
+                    crate::NodePorts {
+                        inputs: Vec::new(),
+                        outputs: vec![crate::PortSpec::new(
+                            "value",
+                            crate::ValueType::Number,
+                            true,
+                        )],
+                    },
+                ),
+            )
+        };
+        let flow = Flow::new(
+            vec![node("left", 3), node("right", 5)],
+            Vec::new(),
+            order(&["left", "right"]),
+            vec![
+                selected_output("left", "left", "value"),
+                selected_output("right", "right", "value"),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            flow.execute().unwrap(),
+            FlowOutputs::from([
+                ("left".to_owned(), json!(3).into()),
+                ("right".to_owned(), json!(5).into()),
+            ])
+        );
     }
 
     #[test]

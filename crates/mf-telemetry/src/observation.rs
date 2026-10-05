@@ -19,7 +19,10 @@ use opentelemetry::{
 use std::{
     collections::BTreeMap,
     fmt,
-    sync::Arc,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicI64, Ordering},
+    },
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -30,6 +33,7 @@ use stream_observation::{StreamFrame, StreamInvocation};
 
 type EmitLog = dyn Fn(&WireRecord) -> Result<(), ContractError> + Send + Sync;
 type EmitNestedLog = dyn Fn(NestedLog) + Send + Sync;
+type FailureState = Option<(Option<String>, Failure)>;
 
 struct NestedLog {
     name: &'static str,
@@ -198,15 +202,17 @@ impl Observer {
             workflow_id,
             run_id,
             nodes: Arc::new(index),
-            sequence,
+            sequence: Arc::new(Mutex::new(sequence)),
             started,
             context,
-            visited: Count::ZERO,
-            visited_steps: Count::ZERO,
+            visited: Arc::new(AtomicI64::new(0)),
+            visited_steps: Arc::new(AtomicI64::new(0)),
             description: description.map(Arc::new),
-            failure: None,
-            closed: false,
+            failure: Arc::new(Mutex::new(None)),
+            node_failures: Arc::new(Mutex::new(BTreeMap::new())),
+            closed: Arc::new(AtomicBool::new(false)),
             stream: None,
+            owner: true,
         };
         run.record(
             Event::WorkflowStarted {
@@ -224,23 +230,47 @@ pub struct RunObservation {
     workflow_id: WorkflowId,
     run_id: RunId,
     nodes: Arc<BTreeMap<String, (Count, NodeIdentity)>>,
-    sequence: EventSequence,
+    sequence: Arc<Mutex<EventSequence>>,
     started: Instant,
     context: Context,
-    visited: Count,
-    visited_steps: Count,
+    visited: Arc<AtomicI64>,
+    visited_steps: Arc<AtomicI64>,
     description: Option<Arc<WorkflowDescription>>,
-    failure: Option<(Option<String>, Failure)>,
-    closed: bool,
-    stream: Option<StreamFrame>,
+    failure: Arc<Mutex<FailureState>>,
+    node_failures: Arc<Mutex<BTreeMap<String, Failure>>>,
+    closed: Arc<AtomicBool>,
+    stream: Option<Arc<StreamFrame>>,
+    owner: bool,
+}
+
+impl Clone for RunObservation {
+    fn clone(&self) -> Self {
+        Self {
+            backend: Arc::clone(&self.backend),
+            workflow_id: self.workflow_id.clone(),
+            run_id: self.run_id,
+            nodes: Arc::clone(&self.nodes),
+            sequence: Arc::clone(&self.sequence),
+            started: self.started,
+            context: self.context.clone(),
+            visited: Arc::clone(&self.visited),
+            visited_steps: Arc::clone(&self.visited_steps),
+            description: self.description.clone(),
+            failure: Arc::clone(&self.failure),
+            node_failures: Arc::clone(&self.node_failures),
+            closed: Arc::clone(&self.closed),
+            stream: self.stream.clone(),
+            owner: false,
+        }
+    }
 }
 
 impl fmt::Debug for RunObservation {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RunObservation")
             .field("run_id", &self.run_id)
-            .field("visited", &self.visited)
-            .field("closed", &self.closed)
+            .field("visited", &self.visited.load(Ordering::Acquire))
+            .field("closed", &self.closed.load(Ordering::Acquire))
             .finish_non_exhaustive()
     }
 }
@@ -260,7 +290,7 @@ impl RunObservation {
         path: &[LoopPathEntry],
         body_nodes: Vec<NodeIdentity>,
     ) -> Option<IterationObservation> {
-        if self.closed {
+        if self.closed.load(Ordering::Acquire) {
             return None;
         }
         if path.is_empty() {
@@ -294,7 +324,7 @@ impl RunObservation {
     }
 
     fn span(&self, id: &str) -> Option<NodeObservation> {
-        if self.closed {
+        if self.closed.load(Ordering::Acquire) {
             return None;
         }
         let (position, node) = self.nodes.get(id)?;
@@ -330,9 +360,13 @@ impl RunObservation {
     /// Marks a scheduled step as visited before resolving dependencies.
     pub fn begin_node(&mut self, id: &str) -> Option<NodeObservation> {
         let step = self.span(id)?;
-        self.visited =
-            Count::try_from(step.position.get() + 1).expect("node position is bounded at start");
-        self.visited_steps = Count::try_from(self.visited_steps.get() + 1).ok()?;
+        self.visited
+            .fetch_max(step.position.get() + 1, Ordering::AcqRel);
+        self.visited_steps
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_add(1)
+            })
+            .ok()?;
         Some(step)
     }
 
@@ -341,7 +375,7 @@ impl RunObservation {
         path: Vec<LoopPathEntry>,
         id: &str,
     ) -> Option<NodeObservation> {
-        if self.closed {
+        if self.closed.load(Ordering::Acquire) {
             return None;
         }
         let description = self.description.as_ref()?;
@@ -358,7 +392,11 @@ impl RunObservation {
             },
             position,
         );
-        self.visited_steps = Count::try_from(self.visited_steps.get() + 1).ok()?;
+        self.visited_steps
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_add(1)
+            })
+            .ok()?;
         Some(step)
     }
 
@@ -437,7 +475,11 @@ impl RunObservation {
         step.finished = true;
         let failure = Failure { phase, message };
         mark_failed(&step.context, &failure);
-        self.failure = Some((Some(step.node.id.clone()), failure.clone()));
+        self.node_failures
+            .lock()
+            .unwrap()
+            .insert(step.node.id.clone(), failure.clone());
+        *self.failure.lock().unwrap() = Some((Some(step.node.id.clone()), failure.clone()));
         let duration_ns = step.invoked.map(|time| nanos(time.elapsed()));
         self.record(
             Event::NodeFinished {
@@ -459,7 +501,7 @@ impl RunObservation {
         if let Some(step) = self.span(node_id) {
             self.node_failed(step, FailurePhase::Preparation, message);
         } else {
-            self.failure = Some((
+            *self.failure.lock().unwrap() = Some((
                 None,
                 Failure {
                     phase: FailurePhase::Preparation,
@@ -470,7 +512,7 @@ impl RunObservation {
     }
 
     pub fn preparation_failed_unattributed(&mut self, message: String) {
-        self.failure = Some((
+        *self.failure.lock().unwrap() = Some((
             None,
             Failure {
                 phase: FailurePhase::Preparation,
@@ -480,13 +522,27 @@ impl RunObservation {
     }
 
     pub fn output_selection_failed(&mut self, message: String) {
-        self.failure = Some((
+        *self.failure.lock().unwrap() = Some((
             None,
             Failure {
                 phase: FailurePhase::OutputSelection,
                 message,
             },
         ));
+    }
+
+    /// Selects the workflow-level failure after concurrent work has settled.
+    pub fn select_failure(
+        &mut self,
+        node_id: Option<String>,
+        phase: FailurePhase,
+        message: String,
+    ) {
+        let failure = node_id
+            .as_ref()
+            .and_then(|node_id| self.node_failures.lock().unwrap().get(node_id).cloned())
+            .unwrap_or(Failure { phase, message });
+        *self.failure.lock().unwrap() = Some((node_id, failure));
     }
 
     pub fn loop_pass_started(&mut self, path: Vec<LoopPathEntry>) {
@@ -521,15 +577,14 @@ impl RunObservation {
     /// Ends a handled run. Encoding or delivery failures never become workflow errors.
     pub fn finish(&mut self, error: Option<&dyn fmt::Display>) {
         if self.stream.is_some() {
-            self.closed = true;
+            self.closed.store(true, Ordering::Release);
             return;
         }
-        if self.closed {
+        if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
-        self.closed = true;
         let failure = error.map(|error| {
-            self.failure.take().unwrap_or_else(|| {
+            self.failure.lock().unwrap().take().unwrap_or_else(|| {
                 (
                     None,
                     Failure {
@@ -551,7 +606,7 @@ impl RunObservation {
                 .span()
                 .set_attribute(KeyValue::new("mf.outcome", "succeeded"));
         }
-        if let Ok(sequence) = self.sequence.finish() {
+        if let Ok(sequence) = self.sequence.lock().unwrap().finish() {
             let (failure_node_id, failure) = match failure {
                 Some((id, failure)) => (id, Some(failure)),
                 None => (None, None),
@@ -562,11 +617,16 @@ impl RunObservation {
                     final_sequence: sequence,
                     elapsed_ns: self.elapsed(),
                     visited_node_count: if self.description.is_some() {
-                        self.visited_steps
+                        Count::try_from(self.visited_steps.load(Ordering::Acquire))
+                            .expect("visited step count is bounded")
                     } else {
-                        self.visited
+                        Count::try_from(self.visited.load(Ordering::Acquire))
+                            .expect("visited node position is bounded")
                     },
-                    top_level_visited_count: self.description.as_ref().map(|_| self.visited),
+                    top_level_visited_count: self.description.as_ref().map(|_| {
+                        Count::try_from(self.visited.load(Ordering::Acquire))
+                            .expect("visited node position is bounded")
+                    }),
                     outcome,
                     failure_node_id,
                     failure,
@@ -578,14 +638,14 @@ impl RunObservation {
     }
 
     fn record(&mut self, event: Event, context: Option<&Context>) {
-        if self.closed {
+        if self.closed.load(Ordering::Acquire) {
             return;
         }
         if let Some(stream) = &self.stream {
             stream.record(event, context.unwrap_or(&self.context));
             return;
         }
-        if let Ok(sequence) = self.sequence.reserve() {
+        if let Ok(sequence) = self.sequence.lock().unwrap().reserve() {
             self.emit(sequence, event, context.unwrap_or(&self.context));
         }
     }
@@ -628,7 +688,7 @@ impl Drop for RunObservation {
         if self.stream.is_some() {
             return;
         }
-        if !self.closed {
+        if self.owner && !self.closed.load(Ordering::Acquire) {
             // An abandoned scope has no trustworthy terminal event, including during unwinding.
             self.context
                 .span()

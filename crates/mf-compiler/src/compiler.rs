@@ -867,11 +867,15 @@ pub fn compile_definition(
     .and_then(|flow| flow.with_control_edges(definition.control_edges.clone()))
     .context(FlowConstructionSnafu)?;
 
+    let runtime = mf_runtime::FlowRuntime::default();
     if let Some(execution) = &definition.execution {
-        flow.into_stream(execution.clone())
+        runtime
+            .prepare_stream(flow, execution.clone())
             .context(StreamConstructionSnafu)?;
     } else {
-        flow.into_tasks().context(FlowConstructionSnafu)?;
+        runtime
+            .prepare_oneshot(flow)
+            .context(FlowConstructionSnafu)?;
     }
 
     normalize_plan(definition, execution_order)

@@ -1339,6 +1339,7 @@ dependencies = [
  "inventory",
  "libc",
  "mf-telemetry",
+ "opentelemetry",
  "rpds",
  "serde",
  "serde_json",
