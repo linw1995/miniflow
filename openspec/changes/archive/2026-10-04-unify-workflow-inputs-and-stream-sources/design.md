@@ -143,8 +143,8 @@ instance-wide `input()`/`close_input()` API is removed in favor of these explici
 ### 6. Preserve graph description and add interface inspection
 
 Keep `--describe` factory-free and preserve its isolated graph output. Add a new graph description version,
-`2026-10-03`, identifying execution mode, required lifecycle schema, and support for `--describe-interface`.
-The latter returns one versioned JSON document containing the same workflow ID, derived input schema, and
+`2026-10-03`, identifying execution mode and required lifecycle schema. That version requires
+`--describe-interface` without an additional capability flag. The latter returns one versioned JSON document containing the same workflow ID, derived input schema, and
 declared runtime resource requirements. It prepares and validates linked nodes like `--validate`, redirects
 construction diagnostics to stderr, and never invokes executors, starts workers/timers/exporters, or reads
 source data. Both inspection operations have bounded output and deadlines in the CLI.
@@ -160,8 +160,8 @@ flags are execution arguments and cannot be combined with inspection/validation 
 ordinary JSON documents, not stdin streams. Resolve paths relative to the caller's working directory. `mf run`
 accepts the same flags, reads a parameter file once, validates the parsed object against the inspected
 interface, and forwards the same values to the child. Bound launcher parameter transport to 1 MiB; reject
-excess before launch. Use an owned private temporary file for the child's `--inputs-file` transport so payload
-size does not depend on command-line length. Do not export argument values in descriptions or lifecycle
+excess before launch. For nonempty arguments, use an owned private temporary file for the child's `--inputs-file` transport so
+payload size does not depend on command-line length. Empty arguments use the runner's `{}` default. Do not export argument values in descriptions or lifecycle
 metadata.
 
 Proposed invocations after implementation:
@@ -184,14 +184,17 @@ domain/message identity; every invocation and nested body remains distinguishabl
 synthetic `%input` node.
 
 Replace the old `accepted_inputs` total with `startup_frames` (zero before activation, otherwise one). Retain
-`emitted_messages`, `completed_frames`, and `delivered_outputs`, counting the internal startup frame in
-completion only after its outstanding calls settle. Validate `delivered_outputs <= completed_frames <=
+`emitted_messages`, `completed_frames`, and `delivered_outputs`. The startup frame completes after its
+traversal dispatches the ready producers; producer lifetimes remain tracked by their own output domains. This
+lets startup outputs and timers progress while an independent source remains open. Validate `delivered_outputs <= completed_frames <=
 startup_frames + emitted_messages` using checked counters. Successful drain has completed every admitted
 frame. Source return is a node outcome; workflow success remains a later boundary. Existing finite event
 versions keep their meaning. Old stream records retain their schema-3 interpretation for external decoders and
 cannot be relabeled as schema 4.
 
-Add a stream reducer beside the existing finite reducer, selected through the declared protocol. Display
+Add a stream reducer beside the existing finite reducer, selected through the declared protocol. Move the
+initial node observations and position map into the selected reducer; do not retain an unused finite copy
+for stream sessions. Startup binding validates and uses the owned argument map without another cache. Display
 active invocations, latest established outcome, observed completion/emission counts, batch buffering/flush
 information, and workflow totals. A producer can remain Running while downstream nodes complete many times.
 Keep up to 64 recent completed invocation details and bounded nested Loop details keyed by containing stream

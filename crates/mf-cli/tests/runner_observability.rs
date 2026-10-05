@@ -898,6 +898,7 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
     let mut value: Value =
         serde_json::from_str(include_str!("../../../examples/stream-batch.json")).unwrap();
     value["dependencies"]["core"]["path"] = json!(crates_dir().join("builtin-nodes/core"));
+    value["dependencies"]["code"]["path"] = json!(crates_dir().join("builtin-nodes/code"));
     value["nodes"][0]["config"]["max_wait_ms"] = json!(3_600_000);
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let runner = build(
@@ -996,11 +997,11 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         StreamPayload::Control(StreamEvent::Flushed { .. })
     )));
     assert!(
-        matches!(&records.last().unwrap().payload, StreamPayload::Control(StreamEvent::Finished { outcome: StreamOutcome::Succeeded, counts, .. }) if counts.accepted_inputs == 5 && counts.delivered_outputs == 2),
+        matches!(&records.last().unwrap().payload, StreamPayload::Control(StreamEvent::Finished { outcome: StreamOutcome::Succeeded, counts, .. }) if counts.startup_frames == 1 && counts.emitted_messages == 7 && counts.delivered_outputs == 2),
         "unexpected terminal record: {:?}",
         records.last()
     );
-    assert_eq!(spans.len(), 9);
+    assert_eq!(spans.len(), 15);
     assert!(
         spans
             .iter()

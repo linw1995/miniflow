@@ -6,8 +6,8 @@ use mf_compiler::{
     instantiate_compiled, plan_definition,
 };
 use mf_runtime::{
-    ExecutionContext, InputResource, Inputs, NodeBuildError, NodeExecutionError, NodeFactory,
-    NodeMetadata, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, PreparedNode,
+    ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeFactory, NodeMetadata,
+    NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, PreparedNode, StdinRequirement,
     TaskNode, ValueType, WorkflowArguments, WorkflowInput,
 };
 use serde_json::{Value, json};
@@ -39,16 +39,12 @@ impl TaskNode for Echo {
 fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     let inputs: BTreeMap<String, WorkflowInput> =
         mf_runtime::deserialize_config(config["inputs"].clone())?;
-    let resources = mf_runtime::deserialize_config(
-        config
-            .get("resources")
-            .cloned()
-            .unwrap_or_else(|| json!([])),
-    )?;
+    let stdin =
+        mf_runtime::deserialize_config(config.get("stdin").cloned().unwrap_or(Value::Null))?;
     Ok(PreparedNode::new(
         Echo,
         NodeMetadata {
-            resources,
+            stdin,
             ..NodeMetadata::new(NodePorts {
                 inputs: inputs
                     .into_iter()
@@ -239,7 +235,7 @@ fn describes_dynamic_source_inputs_and_exclusive_resources_without_execution() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut definition = definition_from_json(
         json!({"version":"2026-10-03", "dependencies":{}, "nodes":[
-            {"id":"source", "kind":"test.startup_echo", "config":{"inputs":{"path":{"type":"string", "required":true}}, "resources":["stdin"]}}
+            {"id":"source", "kind":"test.startup_echo", "config":{"inputs":{"path":{"type":"string", "required":true}}, "stdin":"always"}}
         ]}),
     );
     let schema =
@@ -248,10 +244,14 @@ fn describes_dynamic_source_inputs_and_exclusive_resources_without_execution() {
         schema.inputs["source"]["path"].value_type,
         ValueType::String
     );
-    assert_eq!(schema.resources["source"], [InputResource::Stdin]);
-    assert!(schema.validate_resources(|_, _| false).is_err());
+    assert_eq!(schema.stdin["source"], StdinRequirement::Always);
+    assert!(
+        schema
+            .validate_stdin(&WorkflowArguments::default(), false)
+            .is_err()
+    );
     schema
-        .validate_resources(|node, resource| node == "source" && resource == InputResource::Stdin)
+        .validate_stdin(&WorkflowArguments::default(), true)
         .unwrap();
     let mut other = definition.nodes[0].clone();
     other.id = "other".into();
@@ -259,16 +259,6 @@ fn describes_dynamic_source_inputs_and_exclusive_resources_without_execution() {
     let error =
         describe_workflow_inputs(&plan_definition(&definition).unwrap(), &registry).unwrap_err();
     assert!(error.to_string().contains("stdin is already required"));
-    definition.nodes[1].config["resources"] = json!(["channel"]);
-    let schema =
-        describe_workflow_inputs(&plan_definition(&definition).unwrap(), &registry).unwrap();
-    assert!(
-        schema
-            .validate_resources(|_, kind| kind == InputResource::Stdin)
-            .unwrap_err()
-            .to_string()
-            .contains("Channel")
-    );
 }
 
 #[test]
@@ -276,7 +266,8 @@ fn source_contracts_use_ports_and_node_ids_without_special_input_names() {
     let prepared = factory(json!({"inputs":{"path":{"type":"string", "required":true}}})).unwrap();
     let source =
         mf_runtime::FlowNode::new("%input", PreparedNode::stream(Source, prepared.metadata));
-    let schema = mf_runtime::WorkflowInputSchema::from_nodes([(&source, true)]).unwrap();
+    let schema =
+        mf_runtime::WorkflowInputSchema::from_nodes([(&source, true)], |_, _| false).unwrap();
     schema
         .validate(&WorkflowArguments::try_from(json!({"%input":{"path":"/missing/file"}})).unwrap())
         .unwrap();

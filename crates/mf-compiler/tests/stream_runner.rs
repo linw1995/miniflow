@@ -85,6 +85,24 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
         serde_json::from_str(include_str!("../../../examples/stream-batch.json")).unwrap();
     definition["dependencies"]["core"]["path"] =
         json!(common::crates_dir().join("builtin-nodes/core"));
+    definition["dependencies"]
+        .as_object_mut()
+        .unwrap()
+        .remove("code");
+    definition["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|node| node["id"] != "convert");
+    {
+        let edges = definition["edges"].as_array_mut().unwrap();
+        let input = edges
+            .iter_mut()
+            .find(|edge| edge["to_node"] == "convert")
+            .unwrap();
+        input["to_node"] = json!("collect");
+        input["to_input"] = json!("item");
+        edges.retain(|edge| edge["from_node"] != "convert");
+    }
     definition["dependencies"]["fixture"] = json!({"package":"fixture-multi-nodes", "path":Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/multi-nodes")});
     definition["nodes"][0]["config"]["max_wait_ms"] = json!(3_600_000);
     definition["nodes"][1] =
@@ -113,15 +131,15 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
             .generate_artifacts()
             .unwrap()
             .rust_source
-            .contains("stream_input_node")
+            .contains("builtin.readline")
     );
 
     fs::write(&trace, "").unwrap();
     let description = Process::spawn(&executable, &["--describe"]).finish();
     assert!(description.status.success());
     let description: Value = serde_json::from_slice(&description.stdout).unwrap();
-    assert_eq!(description["version"], "2026-10-02");
-    assert_eq!(description["nodes"][0]["id"], "%input");
+    assert_eq!(description["version"], "2026-10-03");
+    assert_eq!(description["nodes"][0]["id"], "feed");
     assert_eq!(fs::read_to_string(&trace).unwrap(), "");
     let validation = Process::spawn(&executable, &["--validate"]).finish();
     assert!(
@@ -145,7 +163,7 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
     let output = run(&executable, b"1\n2\r\n3\n4\n5");
     assert_eq!(
         records(&output),
-        [json!({"batch":[1,2,3]}), json!({"batch":[4,5]})]
+        [json!({"batch":["1","2","3"]}), json!({"batch":["4","5"]})]
     );
     assert_eq!(
         fs::read_to_string(&trace).unwrap(),
@@ -156,11 +174,9 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
         diagnostic.contains("factory diagnostic") && diagnostic.contains("execution diagnostic")
     );
     assert!(records(&run(&executable, b"")).is_empty());
-    for input in [b"\n".as_slice(), b"true\n", b"invalid\n", b"\xff\n"] {
-        let output = run(&executable, input);
-        assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("line 1"));
-    }
+    let invalid = run(&executable, b"\xff\n");
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("line 1"));
 
     definition["nodes"][0]["config"]["max_wait_ms"] = json!(50);
     compile(&definition, true).unwrap();
@@ -182,7 +198,7 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
     assert_eq!(
         serde_json::from_str::<Value>(&receiver.recv_timeout(Duration::from_secs(5)).unwrap())
             .unwrap(),
-        json!({"batch":[7]})
+        json!({"batch":["7"]})
     );
     drop(input);
     assert!(idle.finish().status.success());
@@ -198,12 +214,11 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
     assert!(String::from_utf8_lossy(&broken.stderr).contains("output failed"));
     drop(open_input);
 
-    definition["execution"]["input_type"] = json!({"list":"int"});
     definition["nodes"][0]["config"]["max_wait_ms"] = json!(3_600_000);
     compile(&definition, true).unwrap();
     assert_eq!(
         records(&run(&executable, b"[1,2]\n[3]\n")),
-        [json!({"batch":[[1,2],[3]]})]
+        [json!({"batch":["[1,2]","[3]"]})]
     );
     let generated_time = fs::metadata(build.join("src/workflow.rs"))
         .unwrap()
@@ -221,7 +236,6 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
     assert_eq!(fs::read(&executable).unwrap(), unchanged);
 
     let mut stalled_definition = definition.clone();
-    stalled_definition["execution"]["input_type"] = json!("string");
     stalled_definition["nodes"][0]["config"]["max_items"] = json!(1);
     compile(&stalled_definition, true).unwrap();
     let mut stalled = Process::spawn(&executable, &[]);
@@ -233,11 +247,11 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
         stalled_output.read_exact(&mut byte).unwrap();
         started.send(stalled_output).unwrap();
     });
-    writeln!(stalled_input, "{}", json!("x".repeat(200000))).unwrap();
+    writeln!(stalled_input, "{}", "x".repeat(200000)).unwrap();
     stalled_input.flush().unwrap();
     let blocked_output = ready.recv_timeout(Duration::from_secs(5)).unwrap();
     first_byte.join().unwrap();
-    stalled_input.write_all(b"true\n").unwrap();
+    stalled_input.write_all(b"\xff\n").unwrap();
     stalled_input.flush().unwrap();
     let stalled_result = stalled.finish();
     assert!(!stalled_result.status.success());
@@ -261,6 +275,6 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
     fs::remove_file(definition_path.with_extension("lock")).unwrap();
     assert_eq!(
         records(&run(&standalone, b"[9]\n")),
-        [json!({"batch":[[9]]})]
+        [json!({"batch":["[9]"]})]
     );
 }

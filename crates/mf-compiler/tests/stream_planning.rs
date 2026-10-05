@@ -1,3 +1,5 @@
+#[path = "fixtures/controlled_source.rs"]
+mod controlled;
 extern crate mfn_core as _;
 use mf_compiler::{
     CompiledWorkflow, Inputs, NodeExecutionError, NodeRegistration, NodeRegistry, PortSpec,
@@ -63,8 +65,12 @@ inventory::submit! {
 fn edge(source: &str, port: &str, target: &str, input: &str) -> Value {
     json!({"from_node":source, "from_output":port, "to_node":target, "to_input":input})
 }
-fn graph(nodes: Value, edges: Vec<Value>) -> Value {
-    json!({"version":"2026-10-02", "execution":{"mode":"stream", "input_type":"int"},
+fn graph(mut nodes: Value, edges: Vec<Value>) -> Value {
+    nodes
+        .as_array_mut()
+        .unwrap()
+        .push(controlled::source(json!("int")));
+    json!({"version":"2026-10-03", "execution":{"mode":"stream"},
         "dependencies":{}, "nodes":nodes, "edges":edges})
 }
 fn prepare(value: Value) -> Result<mf_runtime::PreparedStream, mf_compiler::WorkflowCompileError> {
@@ -78,7 +84,7 @@ fn collect_graph() -> Value {
     graph(
         json!([{"id":"collect", "kind":"test.collect"}, {"id":"copy", "kind":"builtin.identity"}]),
         vec![
-            edge("%input", "item", "collect", "item"),
+            edge("feed", "item", "collect", "item"),
             edge("collect", "items", "copy", "input"),
         ],
     )
@@ -89,7 +95,7 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
     let mut value = collect_graph();
     value["outputs"] = json!([{"name":"result", "node":"copy", "port":"value"}]);
     let prepared = prepare(value.clone()).unwrap();
-    assert_eq!(prepared.plan().nodes()[0].definition_id.as_str(), "%input");
+    assert_eq!(prepared.plan().nodes()[0].definition_id.as_str(), "feed");
     assert_eq!(
         prepared.plan().nodes()[0].metadata.ports.outputs[0].value_type,
         ValueType::Int64
@@ -98,24 +104,26 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
         prepared.plan().nodes()[1].metadata.ports.outputs[0].value_type,
         ValueType::Array
     );
-    assert_eq!(prepared.plan().domains().len(), 2);
-    assert_eq!(prepared.plan().domains()[0].source, 0);
-    assert_eq!(prepared.plan().domains()[0].steps, [1]);
-    assert_eq!(prepared.plan().domains()[1].source, 1);
-    assert_eq!(prepared.plan().domains()[1].steps, [2]);
+    assert_eq!(prepared.plan().domains().len(), 3);
+    assert_eq!(prepared.plan().domains()[0].source, None);
+    assert_eq!(prepared.plan().domains()[0].steps, [0]);
+    assert_eq!(prepared.plan().domains()[1].source, Some(0));
+    assert_eq!(prepared.plan().domains()[1].steps, [1]);
+    assert_eq!(prepared.plan().domains()[2].source, Some(1));
+    assert_eq!(prepared.plan().domains()[2].steps, [2]);
     assert_eq!(
         (0..3)
             .map(|node| prepared.plan().output_domain(node))
             .collect::<Vec<_>>(),
-        [0, 1, 1]
+        [1, 2, 2]
     );
-    assert_eq!(prepared.plan().selected_domain(), Some(1));
+    assert_eq!(prepared.plan().selected_domain(), Some(2));
     let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
     let plan = plan_definition(&definition).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     for (version, workers, expected) in [
-        ("2026-09-29", 4, "requires workflow schema 2026-10-02"),
-        ("2026-10-02", 0, "stream limits must be positive"),
+        ("2026-09-29", 4, "requires workflow schema 2026-10-03"),
+        ("2026-10-03", 0, "stream limits must be positive"),
     ] {
         let mut value = serde_json::to_value(&plan).unwrap();
         value["definition"]["version"] = json!(version);
@@ -131,13 +139,13 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
         assert!(error.contains(expected), "{error}");
     }
 
-    assert_eq!(plan.definition.nodes.len(), 2);
+    assert_eq!(plan.definition.nodes.len(), 3);
     assert_eq!(
         plan.execution_order
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>(),
-        ["collect", "copy"]
+        ["feed", "collect", "copy"]
     );
     assert_eq!(
         prepare(graph(json!([]), vec![]))
@@ -145,7 +153,7 @@ fn prepares_typed_input_and_new_message_domains_without_execution() {
             .plan()
             .domains()
             .len(),
-        1
+        2
     );
 }
 
@@ -157,27 +165,27 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
             {"id":"join", "kind":"test.join"}
         ]),
         vec![
-            edge("%input", "item", "left", "input"),
-            edge("%input", "item", "right", "input"),
+            edge("feed", "item", "left", "input"),
+            edge("feed", "item", "right", "input"),
             edge("left", "value", "join", "left"),
             edge("right", "value", "join", "right"),
         ],
     );
     let prepared = prepare(value).unwrap();
-    assert_eq!(prepared.plan().domains().len(), 1);
+    assert_eq!(prepared.plan().domains().len(), 2);
     assert!(
-        (0..prepared.plan().nodes().len()).all(|node| prepared.plan().output_domain(node) == 0)
+        (0..prepared.plan().nodes().len()).all(|node| prepared.plan().output_domain(node) == 1)
     );
 
     let chained = graph(
         json!([{"id":"first", "kind":"test.collect"}, {"id":"second", "kind":"test.collect"}]),
         vec![
-            edge("%input", "item", "first", "item"),
+            edge("feed", "item", "first", "item"),
             edge("first", "items", "second", "item"),
         ],
     );
     let prepared = prepare(chained).unwrap();
-    assert_eq!(prepared.plan().domains().len(), 3);
+    assert_eq!(prepared.plan().domains().len(), 4);
     assert_eq!(
         prepared
             .plan()
@@ -185,13 +193,18 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
             .iter()
             .map(|domain| (domain.source, domain.steps.as_slice()))
             .collect::<Vec<_>>(),
-        [(0, [1].as_slice()), (1, [2].as_slice()), (2, [].as_slice())]
+        [
+            (None, [0].as_slice()),
+            (Some(0), [1].as_slice()),
+            (Some(1), [2].as_slice()),
+            (Some(2), [].as_slice())
+        ]
     );
     assert_eq!(
         (0..3)
             .map(|node| prepared.plan().output_domain(node))
             .collect::<Vec<_>>(),
-        [0, 1, 2]
+        [1, 2, 3]
     );
 
     let mut independent = graph(
@@ -199,8 +212,8 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
             {"id":"first", "kind":"test.collect"}, {"id":"second", "kind":"test.collect"}, {"id":"join", "kind":"test.join"}
         ]),
         vec![
-            edge("%input", "item", "first", "item"),
-            edge("%input", "item", "second", "item"),
+            edge("feed", "item", "first", "item"),
+            edge("feed", "item", "second", "item"),
             edge("first", "items", "join", "left"),
             edge("second", "items", "join", "right"),
         ],
@@ -212,7 +225,7 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
             && error.contains("second.items"),
         "{error}"
     );
-    independent["edges"][3] = edge("%input", "item", "join", "right");
+    independent["edges"][3] = edge("feed", "item", "join", "right");
     assert!(
         prepare(independent)
             .unwrap_err()
@@ -221,7 +234,7 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
     );
 
     let mut selected = collect_graph();
-    selected["outputs"] = json!([{"name":"item", "node":"%input", "port":"item"}, {"name":"batch", "node":"collect", "port":"items"}]);
+    selected["outputs"] = json!([{"name":"item", "node":"feed", "port":"item"}, {"name":"batch", "node":"collect", "port":"items"}]);
     assert!(
         prepare(selected)
             .unwrap_err()
@@ -233,8 +246,7 @@ fn validates_fanout_rejoins_chained_batches_and_selected_domains() {
 #[test]
 fn controls_and_context_references_obey_the_message_boundary() {
     let mut value = collect_graph();
-    value["control_edges"] =
-        json!([{"from_node":"%input", "from_output":"item", "to_node":"copy"}]);
+    value["control_edges"] = json!([{"from_node":"feed", "from_output":"item", "to_node":"copy"}]);
     assert!(
         prepare(value)
             .unwrap_err()
@@ -243,43 +255,50 @@ fn controls_and_context_references_obey_the_message_boundary() {
     );
     let mut value = collect_graph();
     value["nodes"].as_array_mut().unwrap().push(json!({"id":"route", "kind":"builtin.if_else", "config":{"branches":[{
-        "id":"yes", "condition":{"source":{"output":"%input.item", "path":""}, "operator":"eq", "value":1}
+        "id":"yes", "condition":{"source":{"output":"feed.item", "path":""}, "operator":"eq", "value":1}
     }]}}));
     value["control_edges"] =
         json!([{"from_node":"copy", "from_output":"value", "to_node":"route"}]);
     let error = prepare(value.clone()).unwrap_err().to_string();
     assert!(
-        error.contains("context reference") && error.contains("%input.item"),
+        error.contains("context reference") && error.contains("feed.item"),
         "{error}"
     );
-    value["nodes"][2]["config"]["branches"][0]["condition"] =
+    value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|node| node["id"] == "route")
+        .unwrap()["config"]["branches"][0]["condition"] =
         json!({"source":{"output":"copy.value", "path":"/0"}, "operator":"eq", "value":1});
     value["outputs"] = json!([{"name":"selected", "node":"route", "port":"yes", "optional":true}]);
-    assert_eq!(prepare(value).unwrap().plan().selected_domain(), Some(1));
+    assert_eq!(prepare(value).unwrap().plan().selected_domain(), Some(2));
 }
 
 #[test]
-fn requires_explicit_activation_and_reserves_the_input_source() {
+fn sources_are_explicit_and_independent_initial_tasks_need_no_trigger() {
     let mut value = graph(
         json!([{"id":"constant", "kind":"builtin.constant", "config":{"value":42}}]),
         vec![],
     );
+    let prepared = prepare(value.clone()).unwrap();
     assert!(
-        prepare(value.clone())
-            .unwrap_err()
-            .to_string()
-            .contains("explicit path")
+        prepared
+            .plan()
+            .input_schema()
+            .inputs
+            .contains_key("constant")
     );
     value["control_edges"] =
-        json!([{"from_node":"%input", "from_output":"item", "to_node":"constant"}]);
-    prepare(value).unwrap();
-    for node in [
-        json!({"id":"%input", "kind":"builtin.identity"}),
-        json!({"id":"source", "kind":"%input"}),
-    ] {
-        let value = graph(json!([node]), vec![]);
-        assert!(prepare(value).unwrap_err().to_string().contains("reserved"));
-    }
+        json!([{"from_node":"feed", "from_output":"item", "to_node":"constant"}]);
+    let prepared = prepare(value).unwrap();
+    assert!(
+        !prepared
+            .plan()
+            .input_schema()
+            .inputs
+            .contains_key("constant")
+    );
     let mut value = collect_graph();
     value["edges"][0]["from_output"] = json!("unknown");
     assert!(prepare(value).unwrap_err().to_string().contains("unknown"));
@@ -310,9 +329,10 @@ fn rejects_event_nodes_in_single_runs_and_synchronous_bodies() {
     }}});
     let mut value = graph(
         json!([iteration]),
-        vec![edge("%input", "item", "iterate", "items")],
+        vec![edge("feed", "item", "iterate", "items")],
     );
-    value["execution"]["input_type"] = json!("array");
+    value["nodes"].as_array_mut().unwrap().last_mut().unwrap()["config"]["item_type"] =
+        json!("array");
     let error = prepare(value).unwrap_err().to_string();
     assert!(
         error.contains("iterate") && error.contains("synchronous scope"),
@@ -326,7 +346,7 @@ fn rejects_event_nodes_in_single_runs_and_synchronous_bodies() {
     }});
     let error = prepare(graph(
         json!([repeat]),
-        vec![edge("%input", "item", "repeat", "x")],
+        vec![edge("feed", "item", "repeat", "x")],
     ))
     .unwrap_err()
     .to_string();

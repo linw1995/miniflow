@@ -20,90 +20,100 @@ deleted together with its callers and transports so no compatibility scheduler o
 
 ## 2. Source execution, explicit inputs, and runner migration
 
-- [ ] 2.1 Completely remove synthetic input expansion, `execution.input_type`, the global sender API, and
+- [x] 2.1 Completely remove synthetic input expansion, `execution.input_type`, the global sender API, and
   position-zero/source-ID assumptions; implement one startup
   frame with initial bindings and shared task-domain semantics; verify root identity, two constants joining
   one task, task-only stream completion, empty graphs, root EventNode rejection, ordinary node-name handling, and unchanged finite execution.
-- [ ] 2.2 Dispatch producers activated by startup independently with isolated contexts and owned completion
+- [x] 2.2 Dispatch producers activated by startup independently with isolated contexts and owned completion
   tracking; verify two roots and two producers behind separate task branches progress while one producer stays
   active, including a one-worker dependency handshake.
-- [ ] 2.3 Preserve per-message producer serialization, domain isolation, typed publication, and skip behavior;
+- [x] 2.3 Preserve per-message producer serialization, domain isolation, typed publication, and skip behavior;
   verify mixed-domain data/control/context/output rejection, FIFO input-driven producers, source success with
   zero emissions, and skipped startup producers.
-- [ ] 2.4 Implement per-source closure, bounded capacity, and output-acknowledged drain; verify one source
+- [x] 2.4 Implement per-source closure, bounded capacity, and output-acknowledged drain; verify one source
   closing while another remains active, chained tail batches, source-only outputs, queue limits, and a pending
   final output preventing success.
-- [ ] 2.5 Integrate cancellation, failure, panic, and cleanup across startup and message invocations; verify
+- [x] 2.5 Integrate cancellation, failure, panic, and cleanup across startup and message invocations; verify
   blocked sends wake, no failure-time tail flush, delivered prefixes remain, and cleanup/destructor reentry
   occurs outside scheduler locks; update runtime documentation.
 
 ### Explicit external input sources
 
-- [ ] 2.6 Add the typed `builtin.stdin` StreamNode and resource binding; verify LF/CRLF/final-line framing,
+- [x] 2.6 Add the typed `builtin.stdin` StreamNode and resource binding; verify LF/CRLF/final-line framing,
   empty/malformed/type-invalid lines, arrays as one value, idle-input timer progress, EOF draining, and
   cancellation of idle reads; document the node configuration.
-- [ ] 2.7 Add an instance-isolated channel-source adapter and per-source sender APIs; verify bounded
+- [x] 2.7 Add an instance-isolated channel-source adapter and per-source sender APIs; verify bounded
   admission, nonblocking capacity errors, input validation, close/drop semantics, cancelled receives, and
   multiple sources/instances; migrate the in-memory stream example and API docs.
-- [ ] 2.8 Replace global `StreamInstance::input()` and `close_input()` fixtures/callers with explicit sources;
+- [x] 2.8 Replace global `StreamInstance::input()` and `close_input()` fixtures/callers with explicit sources;
   verify existing producer, Batch, capacity, failure, and parity cases through the new source contract and add
   a parameterized external line-source fixture.
 
 ### Runner interface, parameters, and transport
 
-- [ ] 2.9 Preserve factory-free `--describe` and add versioned `--describe-interface` from validated
+- [x] 2.9 Preserve factory-free `--describe` and add versioned `--describe-interface` from validated
   preparation; verify dynamic parameter/resource metadata, workflow-ID agreement, isolated stdout, no source
-  I/O/callbacks/export, bounded CLI preflight, and the same binary being validated and installed.
-- [ ] 2.10 Add shared `--inputs`/`--inputs-file` execution options and CLI forwarding; verify mutual exclusion,
-  duplicate JSON keys, the 1 MiB parameter limit, single-read file semantics, private child transport cleanup,
-  inspection-mode rejection, and equivalent argument failures across entry points.
-- [ ] 2.11 Refactor generated stream transport to bind declared input resources and preserve incremental JSON
+  I/O/callbacks/export, bounded interface decoding, and the same binary being validated and installed. Integrate bounded CLI process preflight in 4.1.
+- [x] 2.10 Add shared `--inputs`/`--inputs-file` runner execution options; verify mutual exclusion,
+  duplicate JSON keys, the 1 MiB parameter limit, single-read file semantics, inspection-mode rejection, and equivalent argument failures across entry points.
+  Integrate private CLI forwarding and cleanup in 4.1.
+- [x] 2.11 Refactor generated stream transport to bind declared input resources and preserve incremental JSON
   Lines stdout; verify autonomous sources with null stdin, explicit piped stdin, noisy factories/plugins,
   cancellation, sink failure, and standalone execution without build inputs.
-- [ ] 2.12 Migrate `examples/stream-batch.json`, runner tests, and packaged-CLI fixtures; verify the documented
+- [x] 2.12 Migrate `examples/stream-batch.json`, runner tests, and packaged-CLI fixtures; verify the documented
   migration commands and generated dependency boundaries, and update `docs/compiling.md` and
   `docs/node-development.md`. Verify removed fields and missing nodes use ordinary schema/graph diagnostics;
   retain no compatibility execution branch or special `%input` blacklist.
 
-## 3. Streaming observation and bounded reduction
-
-- [ ] 3.1 Add schema-4 startup trigger and startup-frame totals with checked count invariants; verify no
+- [x] 2.13 Add schema-4 startup trigger and startup-frame totals with checked count invariants; verify no
   `%input` events, startup versus emitted-message identity, producer return before workflow drain,
   preparation/input/resource failures, and unchanged interpretation of existing event versions.
-- [ ] 3.2 Add protocol-aware receiver admission and a bounded stream reducer; verify repeated and nested
+
+## 3. Streaming observation and bounded reduction
+
+- [x] 3.1 Add protocol-aware receiver admission and a bounded stream reducer; verify repeated and nested
   invocations, reordered/duplicate/conflicting records, graph/identity checks, invocation outcomes arriving
   before starts, and preservation of finite reducer behavior.
-- [ ] 3.3 Implement contiguous sequence compaction, the 4,096-record witness window, 64 recent completed
+- [x] 3.2 Implement contiguous sequence compaction, the 4,096-record witness window, 64 recent completed
   invocations, and bounded active/Loop details; verify large streams, ancient retransmissions, missing-record
   repair within retained state, visible uncertainty on overflow, and detail eviction independent of transport
   loss.
-- [ ] 3.4 Expose stream node activity, observed aggregates, batch state, and final workflow counts; verify
+- [x] 3.3 Expose stream node activity, observed aggregates, batch state, and final workflow counts; verify
   concurrent source/downstream status, zero-emission completion, missing telemetry, abrupt process death, and
   nested Loop paths across different messages; document schema and retention limits.
 
 ## 4. TUI launch and presentation
 
-- [ ] 4.1 Run graph/interface/argument/resource preflight before receiver and child execution; verify
+- [x] 4.1 Run bounded graph/interface/argument/resource preflight and private parameter forwarding before receiver and child execution; verify
   autonomous streams launch with no stdin, invalid parameters cause no business execution, legacy finite
   runners remain supported, and unsupported streaming protocols receive compatibility diagnostics.
-- [ ] 4.2 Add `--stream-input <PATH>` for declared stdin sources while retaining terminal input ownership;
+- [x] 4.2 Add `--stream-input <PATH>` for declared stdin sources while retaining terminal input ownership;
   verify absent/unreadable/unneeded paths and `-` fail before execution, explicit files reach the child,
   host-only resources are rejected, and source kind names do not control routing.
-- [ ] 4.3 Select schema-aware graph/detail rendering and disable stream snapshot capture in the child
+- [x] 4.3 Select schema-aware graph/detail rendering and disable stream snapshot capture in the child
   environment; verify unsupported history messaging, inherited capture settings, completed-view inspection,
   and unchanged finite data history.
-- [ ] 4.4 Add PTY acceptance coverage using an actual generated parameterized source runner and an explicit
+- [x] 4.4 Add PTY acceptance coverage using an actual generated parameterized source runner and an explicit
   stdin source; verify displayed repeated activity, exact captured outputs, Ctrl-C escalation, terminal
   restoration, capture limits, and process outcome independent of telemetry loss; update
   `docs/observability.md` and CLI usage.
 
 ## 5. Integration and review
 
-- [ ] 5.1 Run the same autonomous, stdin, and channel-source scenarios through applicable in-memory,
+- [x] 5.1 Run the same autonomous, stdin, and channel-source scenarios through applicable in-memory,
   standalone, and TUI paths; record parity for outputs, failures, type diagnostics, closure, resource
   ownership, and observation identity under `target/`.
-- [ ] 5.2 Validate this change with `openspec validate unify-workflow-inputs-and-stream-sources --strict`, run
+- [x] 5.2 Validate this change with `openspec validate unify-workflow-inputs-and-stream-sources --strict`, run
   `nix develop --command prek -a` and `nix flake check -L`, and record actual results and environment
   limitations before submitting implementation.
-- [ ] 5.3 Review every delta scenario against implementation evidence, confirm examples contain no implicit
+- [x] 5.3 Review every delta scenario against implementation evidence, confirm examples contain no implicit
   `%input` source, and archive only after the implementation tasks are complete.
+
+## 6. Ablation and implementation review
+
+- [x] 6.1 Establish a baseline and run independent deletion experiments for redundant protocol fields,
+  source dispatch, launch transport, observation state, and tests; keep reports under ignored `target/`.
+- [x] 6.2 Apply simplifications supported by the experiments and preserve the startup, resource,
+  cancellation, observation integrity, and terminal execution contracts.
+- [x] 6.3 Review the resulting implementation, run pinned validation, update the design and main specs,
+  and archive only after all review findings are resolved.

@@ -29,6 +29,7 @@ fn main() {
         data_edges: Vec::new(),
         control_edges: Vec::new(),
         execution_order: order,
+        execution: None,
         loop_bodies: Vec::new(),
     };
     let state = SessionState::new(description, RunId::new()).unwrap();

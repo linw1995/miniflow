@@ -56,32 +56,51 @@ iteration order of the plugin registry MUST NOT affect node resolution or workfl
 
 ### Requirement: Validate workflow structure before code generation
 
-Before generating a runner, the CLI SHALL validate nonblank unique node IDs, existing edge endpoints, selected output
-node references and names, and acyclicity. Before installing the executable, its validation mode SHALL validate
-registered kinds, configuration, existing ports, required input connections, and at most one connection per input.
-Validation mode MUST NOT call node execution methods. The normal mode SHALL execute statically generated orchestration.
-Compiler validation SHALL accept statically safe assignments from refined types to the same type, compatible refined
-collection types, legacy broad supertypes, or `Any`. It SHALL also accept broad or `Any` outputs feeding a refined input
+Before generating a runner, the CLI SHALL validate nonblank unique node IDs, existing edge endpoints, selected
+output
+node references and names, and acyclicity. Before installing the executable, its validation mode SHALL
+validate
+registered kinds, configuration, existing ports, required input connections or promoted initial-node
+parameters, and at most one connection per input. Promotion SHALL apply only to top-level initial nodes in
+schema `2026-10-03`; noninitial nodes, nested bodies, and older schemas SHALL retain their existing
+required-edge rules.
+Validation mode MUST NOT call node execution methods. The normal mode SHALL execute statically generated
+orchestration.
+Compiler validation SHALL accept statically safe assignments from refined types to the same type, compatible
+refined
+collection types, legacy broad supertypes, or `Any`. It SHALL also accept broad or `Any` outputs feeding a
+refined input
 when the source value is unknown and the shared runtime validates the actual value before invoking the target.
-Known source values MUST be checked against target port types during validation; a known mismatch MUST fail before
-installation even when its inferred source descriptor is broad. Disjoint concrete types and incompatible collection
+Known source values MUST be checked against target port types during validation; a known mismatch MUST fail
+before
+installation even when its inferred source descriptor is broad. Disjoint concrete types and incompatible
+collection
 shapes MUST fail validation; no implicit coercion SHALL occur.
-Validation failures MUST include diagnostics that identify the relevant definition node, port, output, or edge, and MUST NOT produce a successful binary.
-The system MUST produce a deterministic topological execution order, using ascending definition ID to break ties between ready nodes.
+Validation failures MUST include diagnostics that identify the relevant definition node, port, output, or
+edge, and MUST NOT produce a successful binary.
+The system MUST produce a deterministic topological execution order, using ascending definition ID to break
+ties between ready nodes.
 Port validation SHALL use a node instance's complete configuration-dependent port description when supplied,
 and otherwise its static registration. Port names MUST be nonempty and unique within each direction. Base
 descriptions and output derivations MUST depend only on configuration. Resolved output types MAY additionally
 depend on upstream data bindings and MUST be consistent between validation and execution for the same
 definition and linked plugins. Every node and branch MUST be validated even when it will be skipped during
 execution.
-Graph structure and topological order SHALL include both existing data edges and explicit control edges. Control edges
-MUST reference an existing source output and target node, MUST NOT create target input bindings, and MUST NOT contain
-duplicate identical entries. Required data-input and type compatibility rules SHALL continue to apply to data edges.
-Plugin validation SHALL build a unique index of `${node_id}.${output_name}` for all effective source outputs and check
-all declared context references by exact qualified-ID lookup. Qualified-ID collisions MUST fail with both source pairs
+Graph structure and topological order SHALL include both existing data edges and explicit control edges.
+Control edges
+MUST reference an existing source output and target node, MUST NOT create target input bindings, and MUST NOT
+contain
+duplicate identical entries. Required data-input and type compatibility rules SHALL continue to apply to data
+edges.
+Plugin validation SHALL build a unique index of `${node_id}.${output_name}` for all effective source outputs
+and check
+all declared context references by exact qualified-ID lookup. Qualified-ID collisions MUST fail with both
+source pairs
 before execution, regardless of whether the conflicting outputs could be skipped. Each referenced producer
-MUST be a strict ancestor of the consumer through explicit data or control dependencies. Context references MUST NOT
-implicitly add dependencies. Unordered, self, and descendant references MUST fail even when a topological tie-break
+MUST be a strict ancestor of the consumer through explicit data or control dependencies. Context references
+MUST NOT
+implicitly add dependencies. Unordered, self, and descendant references MUST fail even when a topological
+tie-break
 would place the referenced node first.
 
 #### Scenario: Reject a cyclic workflow
@@ -126,7 +145,8 @@ would place the referenced node first.
 
 #### Scenario: Reject an incomplete or ambiguous input
 
-- **WHEN** a required input has no connection or an input has more than one connection
+- **WHEN** a required input has neither a permitted startup parameter binding nor a data connection, or an
+  input has more than one connection
 - **THEN** compilation fails and identifies the node and input port
 
 #### Scenario: Reject an invalid selected output
@@ -151,13 +171,16 @@ would place the referenced node first.
 
 #### Scenario: Reject an unordered context reference
 
-- **WHEN** a predicate references an existing output from a node outside the consumer's explicit ancestor chain
-- **THEN** validation identifies the consumer, branch, and source and requires an explicit dependency instead of adding one
+- **WHEN** a predicate references an existing output from a node outside the consumer's explicit ancestor
+  chain
+- **THEN** validation identifies the consumer, branch, and source and requires an explicit dependency instead
+  of adding one
 
 #### Scenario: Reject self or future references
 
 - **WHEN** a predicate references its own node or a downstream node
-- **THEN** validation fails before executable installation even if that predicate follows an always-matching branch
+- **THEN** validation fails before executable installation even if that predicate follows an always-matching
+  branch
 
 #### Scenario: Reject an unknown referenced output
 
@@ -167,27 +190,37 @@ would place the referenced node first.
 #### Scenario: Reject ambiguous output identities
 
 - **WHEN** effective output pairs `(a.b, c)` and `(a, b.c)` both form `a.b.c`
-- **THEN** validation reports the collision before executable installation without splitting or resolving the key heuristically
+- **THEN** validation reports the collision before executable installation without splitting or resolving the
+  key heuristically
 
 #### Scenario: Include control dependencies in structural planning
 
-- **WHEN** data and control edges together form a cycle, or a control edge names an unknown endpoint or duplicates an existing control edge
+- **WHEN** data and control edges together form a cycle, or a control edge names an unknown endpoint or
+  duplicates an existing control edge
 - **THEN** structural validation fails before runner generation
 
 #### Scenario: Allow transitive source references
 
-- **WHEN** `load_order` precedes `audit`, `audit` precedes `route`, and a route predicate reads `load_order.value`
+- **WHEN** `load_order` precedes `audit`, `audit` precedes `route`, and a route predicate reads
+  `load_order.value`
 - **THEN** validation accepts the reference without requiring another direct edge from `load_order` to `route`
 
 #### Scenario: Validate every configured predicate
 
-- **WHEN** a later branch has malformed predicate syntax, an invalid path escape, or an invalid literal for its operator
+- **WHEN** a later branch has malformed predicate syntax, an invalid path escape, or an invalid literal for
+  its operator
 - **THEN** validation fails with node and branch context even if an earlier branch could match every input
 
 #### Scenario: Validate an unselected branch
 
 - **WHEN** a downstream node on an unselected branch has invalid configuration or a nonexistent port binding
 - **THEN** build validation fails without invoking any node execution method
+
+#### Scenario: Validate without startup values
+
+- **WHEN** a new-schema initial task or stream producer declares required input ports
+- **THEN** compilation validates and exposes those parameter requirements without executing the node or
+  requiring invocation values during the build
 
 ### Requirement: Report build failures
 
@@ -527,48 +560,38 @@ same input, output, skip, error, and type-checking semantics. The runner MUST re
 - **WHEN** a body node has invalid configuration or a missing required input
 - **THEN** validation rejects the new runner and preserves an existing installed executable
 
-### Requirement: Opt in to a typed streaming definition
-
-Schema `2026-10-02` SHALL accept an `execution` object with `mode: "stream"`, required `input_type`, and optional resource limits. Without it, execution SHALL retain single-run behavior. Existing schemas MUST reject the new field. Streaming definitions SHALL expose the engine-owned root source `%input.item` with the declared type.
-
-#### Scenario: Compile a typed stream
-
-- **WHEN** a new-schema workflow declares integer input and connects `%input.item` to Batch
-- **THEN** validation resolves integer input and list-of-integer batch output before installation
-
-#### Scenario: Preserve an older definition
-
-- **WHEN** a definition uses an existing accepted schema without streaming configuration
-- **THEN** its execution, dependencies, and single-result output behavior are unchanged
-
-#### Scenario: Require explicit streaming support
-
-- **WHEN** a single-run definition contains Batch, or an older schema contains `execution`
-- **THEN** validation fails with a mode or version diagnostic
-
-#### Scenario: Reserve the input source
-
-- **WHEN** a user node or plugin attempts to redefine the synthetic `%input` source
-- **THEN** validation rejects the conflict
-
 ### Requirement: Validate activation and message boundaries before installation
 
-Streaming validation SHALL require an explicit data or control path from `%input` to every ordinary root node. It SHALL reject mixed-domain dependencies, cross-domain context references, and mixed-domain selected outputs, including inactive branches. Graph, configuration, and type checks MUST run without executing nodes or reading input.
+Streaming validation SHALL recognize initial tasks and stream producers without requiring a path from an
+engine input node. It SHALL bind their declared inputs through the workflow interface and validate
+startup dependencies. It MUST reject initial event executors, mixed-domain dependencies, cross-domain context
+references, and mixed-domain selected outputs, including inactive branches. Graph, configuration, resource,
+and type checks MUST run without executing nodes or reading input data.
 
 #### Scenario: Activate a configured source per message
 
-- **WHEN** a configured constant has a control edge from `%input.item`
-- **THEN** it is activated within each input frame rather than treated as an implicit global value
+- **WHEN** a configured constant has a control edge from an explicit source's `item` output
+- **THEN** it is activated within each emitted frame and its output stays in that message domain
+
+#### Scenario: Start an unattached task once
+
+- **WHEN** a streaming graph contains an initial task with valid startup bindings
+- **THEN** it executes once in the startup frame without an external trigger
 
 #### Scenario: Reject an unattached root
 
-- **WHEN** a streaming graph contains an ordinary node with no path from `%input`
-- **THEN** validation requires an explicit activation dependency
+- **WHEN** an unattached root has an event executor whose contract defines no startup callback
+- **THEN** validation requires an explicit activation dependency instead of inventing an input or timer event
 
 #### Scenario: Reject a control edge across a batch boundary
 
-- **WHEN** a batch-domain node is also gated by an input-domain control output
+- **WHEN** a batch-domain node is also gated by an upstream item-domain control output
 - **THEN** validation reports the incompatible domains even if the value types otherwise fit
+
+#### Scenario: Join initial task outputs
+
+- **WHEN** two initial tasks feed an ordinary consumer in the startup frame
+- **THEN** validation accepts the shared frame and preserves deterministic dependency order
 
 ### Requirement: Keep synchronous bodies scoped to one message
 
@@ -598,32 +621,16 @@ Generated runners SHALL retain generated node preparation and fixed port binding
 - **WHEN** a changed streaming graph fails type or domain validation during a warm build
 - **THEN** the existing installed executable remains intact
 
-### Requirement: Read JSON Lines input while timers progress
-
-Normal streaming runner mode SHALL read one UTF-8 JSON value per stdin line and validate it against the declared input type. It SHALL accept LF, CRLF, and a final nonempty record without a newline. Empty, malformed, or type-invalid records MUST fail with their line number. EOF SHALL close input; idle reads MUST NOT block timers.
-
-#### Scenario: Flush while a pipe stays open
-
-- **WHEN** a writer sends one valid line, leaves stdin open, and waits longer than the batch deadline
-- **THEN** the runner emits the partial batch without needing another line or EOF
-
-#### Scenario: Treat an array as one input value
-
-- **WHEN** a valid input line contains an array
-- **THEN** that array is admitted as one item rather than implicitly expanded
-
-#### Scenario: Reject an invalid later line
-
-- **WHEN** valid earlier lines have produced results and a later line is malformed
-- **THEN** the runner exits unsuccessfully with the line number and leaves the already delivered output prefix intact
-
 ### Requirement: Deliver streaming results without waiting for EOF
 
-Each selected stream result SHALL be written and flushed as one JSON line without building a final aggregate. Slow output MUST apply message-count backpressure, and output failure MUST fail execution. In stream mode, runner transport MUST reserve result stdout and direct plugin stdout diagnostics to stderr, including construction diagnostics.
+Each selected stream result SHALL be written and flushed as one JSON line without building a final aggregate.
+Slow output MUST apply message-count backpressure, and output failure MUST fail execution. In stream mode,
+runner transport MUST reserve result stdout and direct plugin stdout diagnostics to stderr, including
+construction diagnostics.
 
 #### Scenario: Deliver a complete batch early
 
-- **WHEN** the first batch finishes while stdin remains open
+- **WHEN** the first batch finishes while its explicit source remains active
 - **THEN** its result line becomes available immediately to the output consumer
 
 #### Scenario: Preserve result framing with a noisy plugin
@@ -638,14 +645,107 @@ Each selected stream result SHALL be written and flushed as one JSON line withou
 
 ### Requirement: Describe streaming requirements without starting an instance
 
-Streaming runner descriptions SHALL identify execution mode, synthetic input, and required message-boundary protocol without exposing business values or configuration. `--describe` and `--validate` MUST NOT consume stdin, run event callbacks, arm timers, or emit workflow execution events.
+New streaming graph descriptions SHALL identify execution mode, required observation protocol, and support for
+interface inspection without exposing business values or configuration. Their separate interface document
+SHALL describe startup parameters and runtime input resources with matching workflow identity. `--describe`,
+`--describe-interface`, and `--validate` MUST NOT consume source input, invoke executors, arm timers, or emit
+workflow execution events.
 
 #### Scenario: Validate with an idle open stdin
 
 - **WHEN** a streaming runner is invoked with `--validate` while stdin remains open
-- **THEN** validation completes without waiting for input or executing Batch
+- **THEN** validation completes without waiting for input or executing any source or Batch callback
 
 #### Scenario: Inspect a streaming runner
 
-- **WHEN** a standalone runner is invoked with `--describe`
-- **THEN** its description allows a host to detect the streaming input and observation requirements before launching execution
+- **WHEN** a standalone runner's graph and startup interface are inspected
+- **THEN** the host can determine execution mode, required parameters, resource ownership, and observation
+  compatibility before launching execution
+
+### Requirement: Declare source-driven streaming execution
+
+Schema `2026-10-03` SHALL accept `execution` with `mode: "stream"` and optional resource limits. Startup
+parameters SHALL come from initial node ports, and stream item types from explicit source outputs. The engine
+input field, global sender, synthetic source, and their special-case validators SHALL be removed. Older
+single-run schemas SHALL retain their existing behavior.
+
+#### Scenario: Compile a typed source
+
+- **WHEN** an explicit integer source feeds Batch
+- **THEN** validation resolves integer items and list-of-integer batches through ordinary node ports
+
+#### Scenario: Handle a removed field normally
+
+- **WHEN** a definition supplies a field absent from the execution schema
+- **THEN** normal schema validation reports the unknown field without selecting a legacy input mode
+
+#### Scenario: Treat node names uniformly
+
+- **WHEN** a user declares a node named `%input` with a registered kind
+- **THEN** that node has the same ordinary graph and execution rules as any other user node, with no implicit outputs
+
+#### Scenario: Report an absent endpoint normally
+
+- **WHEN** an edge names `%input` and no such node is declared
+- **THEN** normal graph validation reports an unknown endpoint without injecting or specially banning that node
+
+### Requirement: Inspect configured startup interfaces in the installed runner
+
+New runners SHALL support `--describe-interface`, returning one versioned JSON document with workflow
+identity, startup input types/required flags, and resource requirements. It SHALL use linked provider
+preparation with isolated stdout and no business execution. Existing `--describe` MUST remain factory-free.
+Both operations SHALL work without build inputs or a second compilation.
+
+#### Scenario: Inspect dynamic input metadata
+
+- **WHEN** an external factory defines configuration-dependent root input ports
+- **THEN** interface inspection reports the complete effective input contract without calling node execution
+
+#### Scenario: Preserve clean output with noisy factories
+
+- **WHEN** a factory writes diagnostics during interface inspection
+- **THEN** stdout remains one complete interface document and construction diagnostics go to stderr
+
+#### Scenario: Preserve one-build standalone inspection
+
+- **WHEN** the validated executable is moved without source, plugin files, or a toolchain
+- **THEN** both graph and interface inspection still work using that same executable
+
+### Requirement: Accept startup parameters through shared execution arguments
+
+Runners and `mf run` SHALL accept mutually exclusive `--inputs <JSON>` and `--inputs-file <PATH>`, with
+omission meaning an empty object. Inspection/validation modes MUST reject execution arguments. CLI parameter
+transport SHALL be bounded to 1 MiB, preserve exact parsed values, and avoid interpreting parameter JSON as
+stream data. Relative files SHALL resolve from the invocation directory.
+
+#### Scenario: Start a file producer with a path parameter
+
+- **WHEN** standalone and TUI launches receive the same valid nested startup argument object
+- **THEN** both invoke the same initial nodes with equivalent values and selected results
+
+#### Scenario: Read a parameter file once
+
+- **WHEN** the TUI reads an inputs file and that user file changes before child execution
+- **THEN** the child receives the values already validated by the CLI rather than rereading the changed file
+
+#### Scenario: Reject excessive or conflicting arguments
+
+- **WHEN** parameter transport exceeds 1 MiB or both parameter flags are supplied
+- **THEN** launch fails with an argument diagnostic before node execution
+
+### Requirement: Route only declared input resources
+
+Streaming runners SHALL obtain data through explicit source nodes and SHALL supply only their declared runtime
+input resources. Runners MUST reserve result stdout before plugin construction and isolate diagnostics. A
+workflow with no stdin source MUST start and complete independently of stdin. EOF SHALL close only its owning
+source; result delivery remains incremental and backpressured.
+
+#### Scenario: Execute with null stdin
+
+- **WHEN** an autonomous file producer has valid startup parameters and no stdin resource requirement
+- **THEN** the standalone runner executes with null stdin and emits its complete result sequence
+
+#### Scenario: Keep one source active after stdin EOF
+
+- **WHEN** a graph has an explicit stdin source and a separate active producer
+- **THEN** stdin EOF drains only that source and does not declare the entire workflow complete

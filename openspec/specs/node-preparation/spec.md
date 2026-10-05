@@ -52,7 +52,8 @@ providers SHALL construct their state directly and MUST NOT require a task execu
 retain `Send + Sync`; event and stream state MAY be `Send` without `Sync` and SHALL be invoked through
 exclusive mutable access. The event contract SHALL accept input, timer, and upstream-close events and
 return complete emissions and deadline updates. Stream executors SHALL emit results incrementally
-during each input invocation.
+during each startup or input invocation. An initial EventNode without upstream dependencies MUST be
+rejected because the event contract does not define autonomous startup.
 
 #### Scenario: Construct event state directly
 
@@ -63,6 +64,12 @@ during each input invocation.
 
 - **WHEN** a factory returns a stream implementation containing Send-only mutable state
 - **THEN** preparation exposes its metadata without invoking the producer
+
+#### Scenario: Reject an autonomous event node
+
+- **WHEN** an event executor is placed at the workflow root without any incoming dependency
+- **THEN** preparation requires an explicit activation source and does not invent an initial input or timer
+  event
 
 ### Requirement: Restrict synchronous execution to tasks
 
@@ -77,3 +84,20 @@ Synchronous flows and generated task bodies SHALL contain only task executors. E
 
 - **WHEN** a stream node appears in a synchronous flow, Loop body, or Iteration body
 - **THEN** preparation fails with its definition identity before executing the producer
+
+### Requirement: Declare execution resources during preparation
+
+Prepared metadata SHALL declare at most one stdin requirement per node: unconditional ownership or ownership
+unless a named input is supplied. Data bindings and validated startup arguments SHALL resolve conditional
+ownership before execution. Validation SHALL reject competing active owners without acquiring input.
+Discovery MUST use provider metadata without built-in kind-name inference or a separate factory contract.
+
+#### Scenario: Prepare an external stdin provider
+
+- **WHEN** a third-party stream provider declares exclusive runtime stdin
+- **THEN** its resource requirements are available for validation and launch without reading stdin
+
+#### Scenario: Reject conflicting ownership
+
+- **WHEN** two prepared nodes actively require exclusive use of the same input resource
+- **THEN** validation reports both consumers and the resource before execution

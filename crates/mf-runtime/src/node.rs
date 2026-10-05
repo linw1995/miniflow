@@ -540,7 +540,7 @@ pub struct NodeMetadata {
     pub ports: NodePorts,
     pub output_derivations: Vec<OutputDerivation>,
     pub context_references: Vec<ContextReference>,
-    pub resources: Vec<crate::InputResource>,
+    pub stdin: Option<crate::StdinRequirement>,
 }
 
 impl NodeMetadata {

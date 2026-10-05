@@ -103,6 +103,19 @@ and outputs cannot refer to one another. CEL evaluation errors and values that c
 JSON type fail the node. Errors identify the Code input or output and a JSON Pointer path for nested values. The
 workflow publishes no Code outputs if any expression fails. A skipped Code node does not evaluate expressions.
 
+To convert text explicitly, declare a string input and call `int(text)` or `double(text)` in the expression.
+The checker infers `Int64` or `Float64` outputs. Integers must fit signed 64-bit range; doubles can use decimal
+or scientific notation and must produce a finite JSON number. Invalid numeric text fails the node.
+For example, a readline output connected to input `text` can use:
+
+```json
+{
+  "language": "cel",
+  "inputs": { "text": "string" },
+  "code": { "number": "int(text)" }
+}
+```
+
 Each expression is limited to 8 KiB. The serialized input map and output map are each limited to 1 MiB, with at most
 10,000 collection entries across input conversion and output conversion per execution. Type descriptors and values
 are limited to 16 nesting levels. These bounds limit accidental work; CEL evaluation runs in-process without a hard
@@ -347,19 +360,26 @@ Older single-run schemas keep their required-edge rules.
 
 ## Streaming through the in-memory API
 
-Definitions using schema `2026-10-02` can set `execution.mode` to `stream` and declare `input_type` with
-the existing port-type descriptor grammar. The engine provides `%input.item`. Root nodes require an
-explicit path from this source, including a control edge for nodes with no data inputs.
+Schema `2026-10-03` enables streams with `execution: {"mode": "stream"}` and optional limits. Initial
+nodes receive their workflow parameters once. Initial tasks and their ordinary dependencies execute in one
+startup frame; producers execute independently and emit messages into their own domains. An empty graph or a
+task-only graph finishes without external input. A producer reached through startup tasks also starts once.
 
-Task branches can rejoin within one message domain. An event emission creates a new domain, so joining
-an earlier item with a collected output or independently formed collections requires an explicit
-correlation operation, which is currently unsupported. Context references and selected outputs must
-respect the same domain boundary. Event nodes are rejected in single-run graphs and synchronous bodies.
+Use `builtin.readline` to read UTF-8 text lines from a file or stdin. Its optional string input `path`
+selects a text file when supplied; omission selects stdin. Its string output `line` preserves blank lines and
+whitespace and strips LF/CRLF delimiters. JSON parsing belongs in downstream nodes. Other StreamNodes can
+obtain data from files or services using their startup parameters. Every source is an ordinary declared node;
+there is no injected node or global input type. Initial event nodes require an upstream activation source.
 
-The host submits one value per message, consumes outputs independently, and explicitly closes input.
-An array remains one input value. See [the instance API](node-development.md#in-memory-streaming-instances)
-for admission, backpressure, drain, and failure handling. Compile streaming definitions as standalone
-JSON Lines runners using the [runner instructions](compiling.md#streaming-runners).
+Task branches can rejoin within one message domain. Event and producer emissions create new domains. Joining
+an earlier item with a collected output, broadcasting startup values into emitted frames, or joining
+independent sources requires an explicit correlation operation, which is currently unsupported. Context
+references and selected outputs respect the same boundary. Synchronous bodies still contain only tasks.
+
+Producers close by returning. Each source drains
+independently; workflow completion waits for every source, downstream work, and selected output delivery.
+See [the instance API](node-development.md#in-memory-streaming-instances) and
+[runner instructions](compiling.md#streaming-runners).
 
 ### Batch collection
 

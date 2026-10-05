@@ -57,6 +57,7 @@ pub struct StreamMessage {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamTrigger {
+    Startup,
     Message,
     Input,
     Timer,
@@ -88,7 +89,9 @@ pub enum StreamOutcome {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamCounts {
-    #[serde(with = "counter")]
+    #[serde(default, with = "counter")]
+    pub startup_frames: u64,
+    #[serde(default, with = "counter")]
     pub accepted_inputs: u64,
     #[serde(with = "counter")]
     pub emitted_messages: u64,
@@ -167,6 +170,7 @@ impl StreamPayload {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct StreamRecord {
+    pub schema_version: i64,
     pub workflow_id: WorkflowId,
     pub run_id: RunId,
     pub sequence: Count,
@@ -177,6 +181,25 @@ pub struct StreamRecord {
 
 impl StreamRecord {
     pub fn validate(&self) -> Result<(), ContractError> {
+        ensure!(
+            matches!(
+                self.schema_version,
+                crate::LEGACY_STREAM_EVENT_SCHEMA_VERSION | STREAM_EVENT_SCHEMA_VERSION
+            ),
+            InvalidSnafu {
+                message: "unsupported stream event schema"
+            }
+        );
+        ensure!(
+            self.schema_version == STREAM_EVENT_SCHEMA_VERSION
+                || !self
+                    .identity
+                    .as_ref()
+                    .is_some_and(|identity| identity.trigger == StreamTrigger::Startup),
+            InvalidSnafu {
+                message: "startup requires source-driven stream observation"
+            }
+        );
         ensure!(
             self.sequence.get() > 0,
             InvalidSnafu {
@@ -271,9 +294,20 @@ impl StreamRecord {
                     }
                 );
                 ensure!(
+                    if self.schema_version == STREAM_EVENT_SCHEMA_VERSION {
+                        counts.startup_frames <= 1 && counts.accepted_inputs == 0
+                    } else {
+                        counts.startup_frames == 0
+                    },
+                    InvalidSnafu {
+                        message: "stream counts disagree with protocol"
+                    }
+                );
+                ensure!(
                     counts.delivered_outputs <= counts.completed_frames
                         && u128::from(counts.completed_frames)
                             <= u128::from(counts.accepted_inputs)
+                                + u128::from(counts.startup_frames)
                                 + u128::from(counts.emitted_messages),
                     InvalidSnafu {
                         message: "stream terminal counts are inconsistent",
@@ -392,10 +426,15 @@ impl StreamRecord {
                 }
             }
         };
-        wire.attributes.insert(
-            "mf.schema.version".into(),
-            json!(STREAM_EVENT_SCHEMA_VERSION),
-        );
+        wire.attributes
+            .insert("mf.schema.version".into(), json!(self.schema_version));
+        if let Some(counts) = wire.body.get_mut("counts").and_then(Value::as_object_mut) {
+            counts.remove(if self.schema_version == STREAM_EVENT_SCHEMA_VERSION {
+                "accepted_inputs"
+            } else {
+                "startup_frames"
+            });
+        }
         if let Some(identity) = &self.identity {
             wire.body
                 .as_object_mut()
@@ -414,8 +453,12 @@ impl StreamRecord {
     pub fn decode(wire: &WireRecord) -> Result<Self, ContractError> {
         ensure!(
             wire.scope == INSTRUMENTATION_SCOPE
-                && wire.attributes.get("mf.schema.version")
-                    == Some(&json!(STREAM_EVENT_SCHEMA_VERSION)),
+                && matches!(
+                    wire.attributes
+                        .get("mf.schema.version")
+                        .and_then(Value::as_i64),
+                    Some(crate::LEGACY_STREAM_EVENT_SCHEMA_VERSION | STREAM_EVENT_SCHEMA_VERSION)
+                ),
             InvalidSnafu {
                 message: "unsupported stream event schema",
             }
@@ -467,6 +510,9 @@ impl StreamRecord {
             )?)
         };
         let record = Self {
+            schema_version: wire.attributes["mf.schema.version"]
+                .as_i64()
+                .expect("validated schema"),
             workflow_id: serde_json::from_value(attribute("mf.workflow.id")?)?,
             run_id: serde_json::from_value(attribute("mf.run.id")?)?,
             sequence: serde_json::from_value(attribute("mf.event.sequence")?)?,

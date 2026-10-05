@@ -22,3 +22,6 @@ snafu.workspace = true
 [target.'cfg(unix)'.dependencies]
 # Streaming standard I/O redirection and polling.
 libc.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

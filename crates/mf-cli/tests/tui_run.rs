@@ -625,6 +625,7 @@ fn description_json() -> String {
         control_edges: vec![],
         execution_order: vec!["step".into()],
 
+        execution: None,
         loop_bodies: Vec::new(),
     };
     String::from_utf8(description.to_json().unwrap()).unwrap()

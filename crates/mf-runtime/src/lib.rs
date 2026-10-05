@@ -1,3 +1,4 @@
+mod cancellation;
 mod context;
 mod definition;
 mod flow;
@@ -8,6 +9,7 @@ mod node;
 mod number;
 mod registry;
 mod runner;
+mod runner_arguments;
 mod snapshot;
 mod stream;
 mod stream_instance;
@@ -18,6 +20,7 @@ mod value;
 mod worker;
 mod workflow_inputs;
 
+pub use cancellation::StreamCancellation;
 pub use context::{
     ContextValue, ExecutionContext, ExecutionDependency, ExecutionScope, NodeResult,
     execute_node_in_context, select_context_output,
@@ -57,17 +60,17 @@ pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::{
     WorkflowRunError, instantiate_node_with_metadata, instantiate_subgraph_with_metadata,
 };
-pub use stream::stream_input_node;
 pub use stream::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
-    STREAM_INPUT_ID, StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate,
+    StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate,
 };
+pub(crate) use stream_instance::PreparationSnafu as StreamPreparationSnafu;
 pub use stream_instance::{
     CompilationSnafu as StreamCompilationSnafu, Emitter, MessageId, MonotonicClock, StreamClock,
     StreamDelivery, StreamError, StreamInstance, StreamMetrics, StreamOptions, StreamOutput,
-    StreamSender, StreamSummary,
+    StreamSummary,
 };
-pub use stream_io::StreamStdio;
+pub use stream_io::{StreamStdio, TextInput};
 pub use stream_plan::{PreparedStream, StreamBuildError, StreamDependency, StreamPlan};
 pub use subgraph::PreparedSubgraph;
 
@@ -80,6 +83,13 @@ pub use snapshot::{
 };
 
 pub use workflow_inputs::{
-    InputResource, MAX_WORKFLOW_INPUT_BYTES, WorkflowArguments, WorkflowInput, WorkflowInputError,
-    WorkflowInputSchema,
+    MAX_WORKFLOW_INPUT_BYTES, StdinRequirement, WorkflowArguments, WorkflowInput,
+    WorkflowInputError, WorkflowInputSchema,
+};
+
+pub use runner_arguments::{RunnerArgumentError, RunnerCommand};
+
+pub use workflow_inputs::{
+    JsonSnafu as WorkflowInputJsonSnafu, TooLargeSnafu as WorkflowInputTooLargeSnafu,
+    WorkflowInterface, WorkflowInterfaceVersion,
 };

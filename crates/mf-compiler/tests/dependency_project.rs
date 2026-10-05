@@ -20,7 +20,7 @@ fn generates_one_target_with_safe_aliases_and_feature_selections() {
     assert!(!manifest.contains("mf-bundle"));
     let main = std::fs::read_to_string(directory.path().join("src/main.rs")).unwrap();
     assert!(main.starts_with("extern crate node_0 as _;"));
-    assert!(main.contains("--validate"));
+    assert!(main.contains("mf_runtime::RunnerCommand::Validate"));
     assert!(directory.path().join("src/main.rs").is_file());
     assert!(!directory.path().join("src/bin").exists());
 }

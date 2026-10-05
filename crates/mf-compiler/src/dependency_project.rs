@@ -48,44 +48,50 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args.len() == 1 && args[0] == "--describe" {
-        use std::io::Write;
-        let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
-        let description = mf_compiler::describe_compiled(&plan)?;
-        let mut stdout = std::io::stdout().lock();
-        stdout.write_all(&description.to_json()?)?;
-        stdout.write_all(b"\n")?;
-        stdout.flush()?;
-        return Ok(());
-    }
-    if args.len() == 1 && args[0] == "--validate" {
-        let registry = mf_runtime::NodeRegistry::from_inventory()?;
-        let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
-        if plan.definition.execution.is_some() {
-            mf_compiler::instantiate_stream(&plan, &registry)?;
-        } else {
-            mf_compiler::instantiate_compiled(&plan, &registry)?;
+    let command = mf_runtime::RunnerCommand::parse(std::env::args_os().skip(1))?;
+    match command {
+        mf_runtime::RunnerCommand::Describe => {
+            use std::io::Write;
+            let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
+            let description = mf_compiler::describe_compiled(&plan)?;
+            let mut stdout = std::io::stdout().lock();
+            stdout.write_all(&description.to_json()?)?;
+            stdout.write_all(b"\n")?;
+            stdout.flush()?;
+            return Ok(());
         }
-        return Ok(());
+        mf_runtime::RunnerCommand::DescribeInterface => {
+            let mut stdio = mf_runtime::StreamStdio::claim()?;
+            let registry = mf_runtime::NodeRegistry::from_inventory()?;
+            let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
+            let interface = mf_compiler::describe_interface(&plan, &registry)?;
+            stdio.write_json(&interface)?;
+            return Ok(());
+        }
+        mf_runtime::RunnerCommand::Validate => {
+            let registry = mf_runtime::NodeRegistry::from_inventory()?;
+            let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
+            if plan.definition.execution.is_some() { mf_compiler::instantiate_stream(&plan, &registry)?; }
+            else { mf_compiler::instantiate_compiled(&plan, &registry)?; }
+            return Ok(());
+        }
+        mf_runtime::RunnerCommand::Execute(_) => {}
     }
-    if !args.is_empty() {
-        return Err("usage: workflow [--validate|--describe]".into());
-    }
+    let mf_runtime::RunnerCommand::Execute(arguments) = command else { unreachable!() };
     #[cfg(feature = "streaming")]
-    { execute_stream() }
+    { execute_stream(arguments) }
     #[cfg(not(feature = "streaming"))]
     {
-        let outputs = execute()?;
+        let outputs = execute(arguments)?;
         println!("{}", serde_json::to_string(&outputs)?);
         Ok(())
     }
 }
 
 #[cfg(feature = "streaming")]
-fn execute_stream() -> Result<(), Box<dyn std::error::Error>> {
+fn execute_stream(arguments: mf_runtime::WorkflowArguments) -> Result<(), Box<dyn std::error::Error>> {
     if capture_requested() { return Err("snapshot capture is unsupported for streaming instances".into()); }
-    let stdio = mf_runtime::StreamStdio::claim()?;
+    let mut stdio = mf_runtime::StreamStdio::claim()?;
     #[cfg(feature = "telemetry")]
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
@@ -107,7 +113,10 @@ fn execute_stream() -> Result<(), Box<dyn std::error::Error>> {
         let prepared = workflow::prepare_stream(&registry).inspect_err(|error| {
             if let Some(observation) = &observation { observation.preparation_failed(error.to_string()); }
         })?;
-        let instance = prepared.start_with_options(mf_runtime::StreamOptions { observation: observation.clone(), ..Default::default() })?;
+        prepared.plan().input_schema().validate(&arguments)?;
+        let needs_stdin = prepared.plan().input_schema().stdin_owner(&arguments)?.is_some();
+        let stdin = if needs_stdin { stdio.take_input() } else { None };
+        let instance = prepared.start_with_options(mf_runtime::StreamOptions { observation: observation.clone(), arguments, stdin, ..Default::default() })?;
         stdio.run(instance)?;
         Ok(())
     })();
@@ -142,15 +151,15 @@ fn capture_requested() -> bool {
 }
 
 #[cfg(all(not(feature = "telemetry"), not(feature = "streaming")))]
-fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+fn execute(arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     if capture_requested() {
         eprintln!("data history unavailable: recompile the runner without --no-telemetry");
     }
-    execute_workflow(None, None)
+    execute_workflow(None, None, arguments)
 }
 
 #[cfg(all(feature = "telemetry", not(feature = "streaming")))]
-fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+fn execute(arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
         Err(error) => { eprintln!("telemetry export unavailable: {error}"); None }
@@ -158,7 +167,7 @@ fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     let result = (|| {
         let Some(providers) = providers.as_ref() else {
             if capture_requested() { eprintln!("data history unavailable: configure an OTLP logs endpoint"); }
-            return execute_workflow(None, None);
+            return execute_workflow(None, None, arguments);
         };
         let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
         let run_id = run_id();
@@ -172,7 +181,7 @@ fn execute() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
                 Err(error) => { eprintln!("data history unavailable: {error}"); None }
             }
         } else { None };
-        execute_workflow(observation, snapshots)
+        execute_workflow(observation, snapshots, arguments)
     })();
     if let Some(providers) = providers {
         for diagnostic in providers.shutdown() { eprintln!("telemetry export incomplete: {diagnostic}"); }
@@ -192,8 +201,16 @@ fn snapshot_recorder(plan: &mf_compiler::CompiledWorkflow, run_id: mf_telemetry:
 }
 
 #[cfg(not(feature = "streaming"))]
-fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: Option<mf_runtime::SnapshotRecorder>) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: Option<mf_runtime::SnapshotRecorder>, arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     let result = mf_runtime::ExecutionContext::run(observation, |state| -> Result<_, Box<dyn std::error::Error>> {
+        state.set_workflow_arguments(arguments);
+        #[cfg(unix)]
+        {
+            let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
+            if plan.definition.version.supports_startup_inputs() {
+                state.set_stdin(mf_runtime::TextInput::claim()?);
+            }
+        }
         if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.clone()); }
         let registry = mf_runtime::NodeRegistry::from_inventory()?;
         Ok(workflow::run_workflow_in_context(&registry, state)?)

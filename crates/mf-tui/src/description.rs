@@ -186,7 +186,7 @@ pub fn describe_executable_with_limits(
         .ok_or(DescriptionError::MissingTerminator)?;
     let description = WorkflowDescription::from_json(json)
         .map_err(|source| DescriptionError::Invalid { source })?;
-    if description.version.is_streaming() {
+    if description.is_streaming() {
         return Err(DescriptionError::UnsupportedStream);
     }
     Ok(description)

@@ -91,7 +91,9 @@ pub struct ExecutionContext {
     snapshots: Option<crate::SnapshotRecorder>,
     snapshot_prefix: Vec<LoopPathEntry>,
     workflow_arguments: crate::WorkflowArguments,
-    startup_inputs: BTreeMap<String, Inputs>,
+    startup_inputs_bound: bool,
+    stdin: Option<std::sync::Arc<std::sync::Mutex<crate::TextInput>>>,
+    cancellation: crate::StreamCancellation,
 }
 
 impl Default for ExecutionContext {
@@ -106,31 +108,77 @@ impl Default for ExecutionContext {
             snapshots: None,
             snapshot_prefix: Vec::new(),
             workflow_arguments: crate::WorkflowArguments::default(),
-            startup_inputs: BTreeMap::new(),
+            startup_inputs_bound: false,
+            stdin: None,
+            cancellation: crate::StreamCancellation::default(),
         }
     }
 }
 
 impl ExecutionContext {
+    pub fn set_stdin(&mut self, input: crate::TextInput) {
+        self.stdin = Some(std::sync::Arc::new(std::sync::Mutex::new(input)));
+    }
+
+    pub fn set_cancellation(&mut self, cancellation: crate::StreamCancellation) {
+        self.cancellation = cancellation;
+    }
+    pub fn cancellation(&self) -> crate::StreamCancellation {
+        self.cancellation.clone()
+    }
+
+    pub fn stdin_line(&self) -> Result<Option<String>, crate::StreamError> {
+        let input = self.stdin.as_ref().ok_or_else(|| {
+            crate::StreamPreparationSnafu {
+                message: "stdin is unavailable".to_owned(),
+            }
+            .build()
+        })?;
+        input.lock().unwrap().next_line(&self.cancellation)
+    }
+
+    pub fn fork_stream(&self, observation: Option<RunObservation>) -> Self {
+        Self {
+            outputs: self.outputs.clone(),
+            remaining_steps: self.remaining_steps,
+            stdin: self.stdin.clone(),
+            cancellation: self.cancellation.clone(),
+            observation,
+            body_observation: None,
+            scopes: Vec::new(),
+            pending_loop_write: None,
+            snapshots: None,
+            snapshot_prefix: Vec::new(),
+            workflow_arguments: crate::WorkflowArguments::default(),
+            startup_inputs_bound: false,
+        }
+    }
+
     pub fn set_workflow_arguments(&mut self, arguments: crate::WorkflowArguments) {
         self.workflow_arguments = arguments;
-        self.startup_inputs.clear();
+        self.startup_inputs_bound = false;
     }
 
     pub fn bind_workflow_inputs(
         &mut self,
         schema: &crate::WorkflowInputSchema,
     ) -> Result<(), WorkflowRunError> {
+        self.startup_inputs_bound = false;
         schema.validate(&self.workflow_arguments)?;
-        self.startup_inputs = self.workflow_arguments.0.clone();
+        schema.validate_stdin(&self.workflow_arguments, self.stdin.is_some())?;
+        self.startup_inputs_bound = true;
         Ok(())
     }
 
     fn initial_inputs(&self, node: &str) -> Inputs {
-        if !self.scopes.is_empty() {
+        if !self.startup_inputs_bound || !self.scopes.is_empty() {
             return Inputs::new();
         }
-        self.startup_inputs.get(node).cloned().unwrap_or_default()
+        self.workflow_arguments
+            .0
+            .get(node)
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub(super) fn set_frame_observation(&mut self, observation: RunObservation) {
@@ -205,6 +253,7 @@ impl ExecutionContext {
 
     pub fn fork_body(&self, observation: Option<BodyObservation>) -> Self {
         let mut child = Self::for_body(observation);
+        child.cancellation = self.cancellation.clone();
         if self.snapshots.is_some() {
             child.snapshots = self.snapshots.clone();
             child.snapshot_prefix = self.snapshot_path();

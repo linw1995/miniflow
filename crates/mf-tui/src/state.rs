@@ -2,7 +2,7 @@
 
 use mf_telemetry::{
     ContractError, Count, EVENT_SCHEMA_VERSION, LOOP_EVENT_SCHEMA_VERSION,
-    description::{NodeDescription, WorkflowDescription, WorkflowDescriptionVersion},
+    description::{NodeDescription, WorkflowDescription},
     event::{
         Event, Failure, FailurePhase, LifecycleEvent, LoopPassOutcome, LoopPathEntry,
         LoopStopReason, LoopSummary, Outcome, SkipCause,
@@ -261,7 +261,7 @@ struct SequenceWitness {
 
 impl SessionState {
     pub fn new(description: WorkflowDescription, run_id: RunId) -> Result<Self, StateError> {
-        if description.version.is_streaming() {
+        if description.is_streaming() {
             return Err(StateError::UnsupportedStream);
         }
         description
@@ -277,7 +277,7 @@ impl SessionState {
                 limit: MAX_SESSION_NODES,
             });
         }
-        let max_sequence = if description.version == WorkflowDescriptionVersion::V2026_09_29 {
+        let max_sequence = if description.version.supports_loops() {
             maximum_loop_event_count()
         } else {
             maximum_event_count(
@@ -326,7 +326,7 @@ impl SessionState {
     }
 
     pub fn expected_event_schema_version(&self) -> i64 {
-        if self.description.version == WorkflowDescriptionVersion::V2026_09_29 {
+        if self.description.version.supports_loops() {
             LOOP_EVENT_SCHEMA_VERSION
         } else {
             EVENT_SCHEMA_VERSION

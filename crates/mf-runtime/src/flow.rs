@@ -290,6 +290,16 @@ impl<N> Flow<N> {
                 .iter()
                 .enumerate()
                 .map(|(index, node)| (node, initial.contains(&index))),
+            |node, input| {
+                self.execution_order
+                    .iter()
+                    .position(|id| self.nodes[id.index()].definition_id.as_str() == node)
+                    .is_some_and(|position| {
+                        self.dependencies[position]
+                            .iter()
+                            .any(|dependency| dependency.input.as_deref() == Some(input))
+                    })
+            },
         )?;
         Ok(self)
     }

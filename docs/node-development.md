@@ -179,11 +179,12 @@ Factories derive ports from configuration and do not need invocation values. Req
 descriptors retain their ordinary port meaning. `WorkflowArguments::from_json` rejects duplicate keys and
 limits JSON arguments to 1 MiB; `WorkflowInputSchema` validates the complete object before dispatch.
 
-`NodeMetadata.resources` declares `InputResource::Stdin` or `InputResource::Channel` for initial nodes.
-Resource metadata is available without opening files, claiming descriptors, or receiving messages.
-Validation rejects duplicate declarations, multiple exclusive stdin owners, and noninitial resource
-consumers. Hosts can check availability with `WorkflowInputSchema::validate_resources`. Resource discovery
-uses metadata for both built-in and external providers. Runtime handles are not JSON input values.
+`NodeMetadata.stdin` optionally declares exclusive `StdinRequirement::Always`, or
+`StdinRequirement::UnlessInput("path".into())` for a source whose optional input selects a file.
+A data-bound conditional input removes its stdin requirement. Otherwise validated startup arguments determine
+whether stdin is needed. Resource discovery uses metadata for built-in and external providers alike;
+preparation does not acquire business inputs. Launchers use `WorkflowInputSchema::stdin_owner` and
+`validate_stdin` to reject missing resources or competing active consumers before execution.
 
 ## Incremental stream producers
 
@@ -231,7 +232,7 @@ waits for running producer calls and releases their state and workers. Arbitrary
 cannot be interrupted by the runtime; plugins should propagate send errors and return promptly.
 Previously delivered outputs remain effective if a later read or operation fails.
 
-Stream producers are supported in streaming workflows using schema `2026-10-02`, including generated
+Stream producers are supported in streaming workflows using schema `2026-10-03`, including generated
 runners. They are rejected in synchronous flows, Loop bodies, and Iteration bodies. Existing task and
 event interfaces retain their behavior; downstream exhaustive matches on `NodeExecution` must handle
 the new `Stream` variant.
@@ -242,34 +243,35 @@ the new `Stream` variant.
 parsing. Direct Serde deserialization checks the document shape; compilation validates execution
 settings for definitions constructed or deserialized by the host.
 
-Schema `2026-10-02` accepts `execution: {"mode": "stream", "input_type": "int"}`. An absent
-`execution` field retains single-run behavior. Each root node needs an explicit data or control path
-from the engine's `%input.item` source. Task edges preserve message identity; event and producer emissions start a
-new message domain. Cross-domain joins and context reads are rejected during preparation.
+Schema `2026-10-03` accepts `execution: {"mode": "stream"}`. Initial task and stream nodes receive
+workflow arguments once; ordinary edges retain their message identity, while producer/event outputs create
+a new domain. Nodes and selected outputs cannot join different domains. Initial EventNodes require an
+activation source, and nested synchronous bodies remain task-only.
 
-Use `mf_compiler::instantiate_stream` to prepare an instance and inspect its immutable graph through
-`plan()`. Consume the prepared instance with `start` or `start_with_options`. Each preparation creates
-independent plugin state. Task, event, and stream executors are reused across messages for the instance lifetime.
-The coordinator serializes events and submits frames to `WorkerPool`, which owns the reusable threads
-and bounded job queue. Each submitted frame runs consecutive ordinary tasks in validated order, returning the frame before the next event or stream node or when
-it is complete. A recorded instance failure prevents the next task call within that dispatch.
+Use `mf_compiler::instantiate_stream` to prepare independent node state and inspect its `plan()`. Pass
+`WorkflowArguments` through `StreamOptions.arguments`, or use `start()` when no parameters are required.
+Startup validates every argument and required resource before dispatch. Initial producers, including those
+behind startup tasks, run on independent dedicated workers. Their contexts retain only values available at
+dispatch. Ordinary per-message producer invocations remain serialized.
 
-`instance.input()` returns a cloneable sender. `send` waits for admission capacity and completes once
-the input is accepted. Consume `instance.recv()` concurrently with production, close input when done,
-and call `join` after draining outputs. `try_send` borrows a value and reports capacity pressure without
-accepting it. `receive` returns a delivery that must be acknowledged or failed by an external sink.
+`builtin.readline` accepts optional string input `path` and emits string output `line`. Supplying a path
+reads that UTF-8 text file; omission selects stdin. It preserves blank lines and whitespace, strips LF or
+CRLF delimiters, and accepts a final unterminated line. It does not parse JSON. Runners supply a reserved
+`TextInput` when stdin is required; embedding hosts supply `StreamOptions.stdin` or use
+`ExecutionContext::set_stdin` for context-based execution.
+Factories and interface inspection do not open source files or read stdin. Runtime-owned reads respond to
+cancellation. Application-specific sources use ordinary `StreamNode` implementations and propagate emitter
+errors; arbitrary plugin I/O requires cooperation.
 
-Every message has fresh context bindings and a step budget. Frames execute in FIFO order within each
-domain, while different domains can progress independently. Close propagates after admitted work and
-emissions; success waits for output delivery. Failure stops scheduling and waits for task calls already
-running before releasing pending work, retained values, and nodes. A running task completes its
-synchronous bodies normally.
-Dropping an unfinished instance follows the same failure cleanup before releasing its nodes.
+Every emitted message has fresh bindings and a step budget. Frames execute in FIFO order in each domain,
+while domains progress independently. `receive` returns a delivery that its sink must acknowledge or fail.
+Success waits for all sources and output acknowledgements. Failure stops admission and dispatch, wakes source
+waits, suppresses later publication, and waits for started calls before releasing nodes. Dropping an unfinished
+instance uses the same cleanup. The ordinary task worker pool remains separate from producer workers.
 
-Limits default to 64 pending messages and four workers. Positive overrides live in `execution.limits`.
-Preparation reserves one frame slot per downstream domain; the remaining slots bound input admission.
-Each event or stream node's pending emissions are also limited by `max_pending_messages`. A full downstream
-queue propagates pressure to input admission. Payload sizes and plugin buffers have no byte quota.
+Limits default to 64 pending messages and four ordinary workers. Preparation reserves one startup frame and
+one frame per output domain. Every operator's pending queue has finite message capacity. Pressure propagates back to producer emitters. Payload size and plugin buffers have no byte
+quota in this layer.
 
 A custom `StreamClock` must advance monotonically and wake registered instances. Deadline expiry
 makes an emission ready; downstream execution remains subject to capacity. Snapshot capture is rejected
