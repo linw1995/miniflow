@@ -317,7 +317,7 @@ A worker SHALL execute the ordered ordinary task steps of one execution domain s
 
 ### Requirement: Invoke event plugins without the scheduler lock
 
-The runtime SHALL invoke EventNode callbacks and buffered inspection without the shared scheduler mutex while preserving serial ownership. Failure or cancellation recorded before effects publication SHALL discard returned emissions and timer updates. Reporting a completed event SHALL allow synchronous cancellation, and the coordinator SHALL recheck failure before further scheduling. The first recorded failure SHALL remain the terminal cause.
+The runtime SHALL invoke EventNode callbacks, buffered inspection, and terminal reporting without the scheduler mutex while preserving serial ownership. Failure or cancellation recorded before publication SHALL discard emissions and timer updates. After reacquiring the mutex, the coordinator SHALL check failure before propagating dependency errors or scheduling, including cancellation recorded before its waker acquires the mutex. The first recorded failure SHALL remain the terminal cause.
 
 #### Scenario: Cancel from an input callback
 
@@ -342,3 +342,15 @@ The runtime SHALL invoke EventNode callbacks and buffered inspection without the
 - **WHEN** a synchronous observer cancels the workflow while the runtime reports a committed event
 - **THEN** reporting completes without scheduler lock reentry
 - **AND** no subsequent event callback or selected output is scheduled after that failure
+
+#### Scenario: Cancel while reporting a dependency failure
+
+- **WHEN** a synchronous observer cancels the workflow while the runtime reports a stream operator dependency failure
+- **THEN** reporting completes without scheduler lock reentry
+- **AND** cancellation recorded before the scheduler reacquires the mutex remains the terminal cause
+
+#### Scenario: Cancel while reporting a skipped operator
+
+- **WHEN** a synchronous observer cancels the workflow while the runtime reports a skipped stream operator
+- **THEN** reporting completes without scheduler lock reentry
+- **AND** the coordinator does not complete the current frame, invoke further nodes, or publish selected outputs

@@ -5,9 +5,9 @@ extern crate mfn_core as _;
 
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_stream};
 use mf_runtime::{
-    EventContext, EventEffects, EventNode, NodeEvent, NodeExecutionError, NodeFactory, NodePorts,
-    NodeRegistration, NodeResult, Outputs, PortSpec, PreparedNode, StreamCancellation, StreamError,
-    StreamOptions, TimerUpdate, ValueType,
+    EventContext, EventEffects, EventNode, ExecutionContext, Inputs, NodeEvent, NodeExecutionError,
+    NodeFactory, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, PreparedNode,
+    StreamCancellation, StreamError, StreamOptions, TaskNode, TimerUpdate, ValueType,
 };
 use mf_telemetry::{
     INSTRUMENTATION_SCOPE,
@@ -15,7 +15,7 @@ use mf_telemetry::{
     observation::Observer,
     stream::{StreamEvent, StreamPayload, StreamRecord},
 };
-use opentelemetry::InstrumentationScope;
+use opentelemetry::{InstrumentationScope, logs::AnyValue};
 use opentelemetry_sdk::{
     error::OTelSdkResult,
     logs::{LogProcessor, SdkLogRecord, SdkLoggerProvider},
@@ -44,11 +44,17 @@ fn cancel(cancellation: &StreamCancellation) {
 }
 
 #[derive(Debug)]
-struct CancelOnFinish;
+struct CancelOnTerminal {
+    event_name: &'static str,
+}
 
-impl LogProcessor for CancelOnFinish {
+impl LogProcessor for CancelOnTerminal {
     fn emit(&self, record: &mut SdkLogRecord, _: &InstrumentationScope) {
-        if record.event_name() == Some("mf.node.finished")
+        if record.event_name() == Some(self.event_name)
+            && record.attributes_iter().any(|(key, value)| {
+                key.as_str() == "mf.node.id"
+                    && matches!(value, AnyValue::String(id) if id.as_str() == "event")
+            })
             && let Some(cancellation) = TELEMETRY_CANCELLATION.get()
         {
             cancel(cancellation);
@@ -61,6 +67,42 @@ impl LogProcessor for CancelOnFinish {
 
     fn shutdown_with_timeout(&self, _: Duration) -> OTelSdkResult {
         Ok(())
+    }
+}
+
+struct DependencyFeed {
+    skip: bool,
+}
+
+impl TaskNode for DependencyFeed {
+    fn execute(
+        &self,
+        _: Inputs,
+        context: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        TELEMETRY_CANCELLATION.set(context.cancellation()).unwrap();
+        Ok(NodeResult {
+            skipped: if self.skip {
+                ["value".into()].into()
+            } else {
+                Default::default()
+            },
+            ..Default::default()
+        })
+    }
+}
+
+inventory::submit! {
+    NodeRegistration {
+        kind: "test.dependency_feed",
+        factory: NodeFactory::Plain(|config| {
+            Ok(PreparedNode::new(DependencyFeed {
+                skip: config["skip"].as_bool().unwrap(),
+            }, NodePorts {
+                inputs: vec![],
+                outputs: vec![PortSpec::new("value", ValueType::Int64, false)],
+            }))
+        }),
     }
 }
 
@@ -131,10 +173,16 @@ inventory::submit! {
 }
 
 fn run_case(mode: &str) {
+    let dependency_case = matches!(mode, "dependency" | "skipped");
+    let feed = if dependency_case {
+        json!({"id":"feed", "kind":"test.dependency_feed", "config":{"skip":mode == "skipped"}})
+    } else {
+        json!({"id":"feed", "kind":"builtin.constant", "config":{"value":1}})
+    };
     let definition: WorkflowDefinition = serde_json::from_value(json!({
         "version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
         "nodes":[
-            {"id":"feed", "kind":"builtin.constant", "config":{"value":1}},
+            feed,
             {"id":"event", "kind":"test.cancel_event", "config":{"mode":mode}}],
         "edges":[{"from_node":"feed", "from_output":"value", "to_node":"event", "to_input":"item"}],
         "outputs":[{"name":"item", "node":"event", "port":"item"}]
@@ -146,7 +194,13 @@ fn run_case(mode: &str) {
     let traces = SdkTracerProvider::builder().build();
     let logs = SdkLoggerProvider::builder()
         .with_log_processor(capture.clone())
-        .with_log_processor(CancelOnFinish)
+        .with_log_processor(CancelOnTerminal {
+            event_name: if mode == "skipped" {
+                "mf.node.skipped"
+            } else {
+                "mf.node.finished"
+            },
+        })
         .build();
     let observer = Observer::new(&traces, &logs);
     let instance = instantiate_stream(&plan, &registry)
@@ -188,7 +242,7 @@ fn run_case(mode: &str) {
             .to_string()
             .contains("callback cancellation")
     );
-    assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+    assert_eq!(CALLS.load(Ordering::SeqCst), usize::from(!dependency_case));
     // recv can observe failure before the callback settles; only the terminal count is final.
     let records = capture.0.lock().unwrap();
     assert!(
@@ -209,7 +263,14 @@ fn event_callbacks_release_scheduler_lock_and_discard_cancelled_effects() {
         return;
     }
     // Bound a regression deadlock without leaving blocked workflow threads in the test runner.
-    for mode in ["input", "buffered", "external", "telemetry"] {
+    for mode in [
+        "input",
+        "buffered",
+        "external",
+        "telemetry",
+        "dependency",
+        "skipped",
+    ] {
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
                 "--exact",
