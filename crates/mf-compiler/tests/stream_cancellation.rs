@@ -7,7 +7,7 @@ use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instanti
 use mf_runtime::{
     EventContext, EventEffects, EventNode, ExecutionContext, Inputs, NodeEvent, NodeExecutionError,
     NodeFactory, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, PreparedNode,
-    StreamCancellation, StreamError, StreamOptions, TaskNode, TimerUpdate, ValueType,
+    StreamCancellation, StreamError, StreamNode, StreamOptions, TaskNode, TimerUpdate, ValueType,
 };
 use mf_telemetry::{
     INSTRUMENTATION_SCOPE,
@@ -19,7 +19,7 @@ use opentelemetry::{InstrumentationScope, logs::AnyValue};
 use opentelemetry_sdk::{
     error::OTelSdkResult,
     logs::{LogProcessor, SdkLogRecord, SdkLoggerProvider},
-    trace::SdkTracerProvider,
+    trace::{SdkTracerProvider, Span, SpanData, SpanProcessor},
 };
 use serde_json::json;
 use std::{
@@ -70,8 +70,38 @@ impl LogProcessor for CancelOnTerminal {
     }
 }
 
+#[derive(Debug)]
+struct CancelOnSpanStart {
+    invocation: usize,
+    seen: AtomicUsize,
+}
+
+impl SpanProcessor for CancelOnSpanStart {
+    fn on_start(&self, span: &mut Span, _: &opentelemetry::Context) {
+        if span.exported_data().is_some_and(|data| {
+            data.attributes.iter().any(|attribute| {
+                attribute.key.as_str() == "mf.node.id" && attribute.value.as_str() == "event"
+            })
+        }) && self.seen.fetch_add(1, Ordering::SeqCst) == self.invocation
+        {
+            cancel(TELEMETRY_CANCELLATION.get().unwrap());
+        }
+    }
+
+    fn on_end(&self, _: SpanData) {}
+
+    fn force_flush(&self) -> OTelSdkResult {
+        Ok(())
+    }
+
+    fn shutdown_with_timeout(&self, _: Duration) -> OTelSdkResult {
+        Ok(())
+    }
+}
+
 struct DependencyFeed {
     skip: bool,
+    value: bool,
 }
 
 impl TaskNode for DependencyFeed {
@@ -82,6 +112,11 @@ impl TaskNode for DependencyFeed {
     ) -> Result<NodeResult, NodeExecutionError> {
         TELEMETRY_CANCELLATION.set(context.cancellation()).unwrap();
         Ok(NodeResult {
+            outputs: if self.value {
+                Outputs::from([("value".into(), json!(1).into())])
+            } else {
+                Default::default()
+            },
             skipped: if self.skip {
                 ["value".into()].into()
             } else {
@@ -98,9 +133,40 @@ inventory::submit! {
         factory: NodeFactory::Plain(|config| {
             Ok(PreparedNode::new(DependencyFeed {
                 skip: config["skip"].as_bool().unwrap(),
+                value: config["value"].as_bool().unwrap_or(false),
             }, NodePorts {
                 inputs: vec![],
                 outputs: vec![PortSpec::new("value", ValueType::Int64, false)],
+            }))
+        }),
+    }
+}
+
+struct SpanProducer;
+
+impl StreamNode for SpanProducer {
+    fn execute(
+        &mut self,
+        _: Inputs,
+        context: &mut ExecutionContext,
+        emitter: &mut mf_runtime::Emitter<'_>,
+    ) -> Result<(), NodeExecutionError> {
+        TELEMETRY_CANCELLATION.set(context.cancellation()).unwrap();
+        emitter.send(Outputs::from([("item".into(), json!(1).into())]).into())?;
+        while context.cancellation().failure().is_none() {
+            thread::sleep(Duration::from_millis(1));
+        }
+        Ok(())
+    }
+}
+
+inventory::submit! {
+    NodeRegistration {
+        kind: "test.span_producer",
+        factory: NodeFactory::Plain(|_| {
+            Ok(PreparedNode::stream(SpanProducer, NodePorts {
+                inputs: vec![],
+                outputs: vec![PortSpec::new("item", ValueType::Int64, true)],
             }))
         }),
     }
@@ -133,6 +199,13 @@ impl EventNode for CancelEvent {
                 drop(changed.wait_while(state, |state| !state.1).unwrap());
             }
             "telemetry" => TELEMETRY_CANCELLATION.set(cancellation.clone()).unwrap(),
+            "span_timer" => {
+                return Ok(EventEffects {
+                    timer: TimerUpdate::Set(context.now + Duration::from_millis(1)),
+                    ..Default::default()
+                });
+            }
+            "span_closed" => return Ok(EventEffects::default()),
             _ => unreachable!(),
         }
         self.cancellation = Some(cancellation);
@@ -173,9 +246,12 @@ inventory::submit! {
 }
 
 fn run_case(mode: &str) {
+    let span_case = matches!(mode, "span_startup" | "span_timer" | "span_closed");
     let dependency_case = matches!(mode, "dependency" | "skipped");
-    let feed = if dependency_case {
-        json!({"id":"feed", "kind":"test.dependency_feed", "config":{"skip":mode == "skipped"}})
+    let feed = if mode == "span_timer" {
+        json!({"id":"feed", "kind":"test.span_producer"})
+    } else if dependency_case || span_case {
+        json!({"id":"feed", "kind":"test.dependency_feed", "config":{"skip":mode == "skipped", "value":span_case}})
     } else {
         json!({"id":"feed", "kind":"builtin.constant", "config":{"value":1}})
     };
@@ -184,24 +260,32 @@ fn run_case(mode: &str) {
         "nodes":[
             feed,
             {"id":"event", "kind":"test.cancel_event", "config":{"mode":mode}}],
-        "edges":[{"from_node":"feed", "from_output":"value", "to_node":"event", "to_input":"item"}],
+        "edges":[{"from_node":"feed", "from_output":if mode == "span_timer" {"item"} else {"value"}, "to_node":"event", "to_input":"item"}],
         "outputs":[{"name":"item", "node":"event", "port":"item"}]
     }))
     .unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     let capture = capture::Capture::default();
-    let traces = SdkTracerProvider::builder().build();
-    let logs = SdkLoggerProvider::builder()
-        .with_log_processor(capture.clone())
-        .with_log_processor(CancelOnTerminal {
+    let mut traces = SdkTracerProvider::builder();
+    if span_case {
+        traces = traces.with_span_processor(CancelOnSpanStart {
+            invocation: usize::from(mode != "span_startup"),
+            seen: AtomicUsize::new(0),
+        });
+    }
+    let traces = traces.build();
+    let mut logs = SdkLoggerProvider::builder().with_log_processor(capture.clone());
+    if !span_case {
+        logs = logs.with_log_processor(CancelOnTerminal {
             event_name: if mode == "skipped" {
                 "mf.node.skipped"
             } else {
                 "mf.node.finished"
             },
-        })
-        .build();
+        });
+    }
+    let logs = logs.build();
     let observer = Observer::new(&traces, &logs);
     let instance = instantiate_stream(&plan, &registry)
         .unwrap()
@@ -242,7 +326,10 @@ fn run_case(mode: &str) {
             .to_string()
             .contains("callback cancellation")
     );
-    assert_eq!(CALLS.load(Ordering::SeqCst), usize::from(!dependency_case));
+    assert_eq!(
+        CALLS.load(Ordering::SeqCst),
+        usize::from(!dependency_case && mode != "span_startup")
+    );
     // recv can observe failure before the callback settles; only the terminal count is final.
     let records = capture.0.lock().unwrap();
     assert!(
@@ -252,7 +339,7 @@ fn run_case(mode: &str) {
             .map(|record| StreamRecord::decode(record).unwrap())
             .any(|record| matches!(record.payload,
             StreamPayload::Control(StreamEvent::Finished { counts, .. })
-            if counts.emitted_messages == u64::from(mode == "telemetry")))
+            if counts.emitted_messages == u64::from(matches!(mode, "telemetry" | "span_timer"))))
     );
 }
 
@@ -270,6 +357,9 @@ fn event_callbacks_release_scheduler_lock_and_discard_cancelled_effects() {
         "telemetry",
         "dependency",
         "skipped",
+        "span_startup",
+        "span_timer",
+        "span_closed",
     ] {
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args([
