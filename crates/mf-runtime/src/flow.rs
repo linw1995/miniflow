@@ -291,15 +291,31 @@ impl Flow {
         state: &mut crate::ExecutionContext,
         options: RuntimeOptions,
     ) -> Result<FlowOutputs, crate::WorkflowRunError> {
-        state.configure_worker_limit(options.max_parallel_domains);
         if state.scope_path().is_empty() {
+            state.configure_worker_limit(options.max_parallel_domains);
             state.bind_workflow_inputs(&self.inner.input_schema)?;
         }
         let domains = &self.inner.plan.execution_domains;
+        // Scoped domains retain their ordering for Loop writes and exit cutoffs;
+        // parallel work inside those domains still uses the full shared pool.
         let worker_limit = if state.scope_path().is_empty() {
-            options.max_parallel_domains.get()
+            state.worker_limit().get()
         } else {
             1
+        };
+        // Keep the pool alive across all domains, Loop passes, and Iteration items,
+        // including workflows whose top-level plan contains only one domain.
+        let _owned_workers = if !domains.is_empty()
+            && state
+                .worker_handle()
+                .is_none_or(|handle| handle.worker_count() == 0)
+        {
+            let pool =
+                crate::WorkerPool::new(state.worker_limit().get(), crate::worker::WorkerJob::run)?;
+            state.set_worker_handle(pool.handle());
+            Some(pool)
+        } else {
+            None
         };
         self.execute_domains(domains, state, worker_limit)?;
         let mut workflow_outputs = FlowOutputs::new();
@@ -342,17 +358,9 @@ impl Flow {
             return self.execute_serial_domains(plan, state);
         }
         let worker_limit = worker_limit.min(plan.len());
-        let mut owned_workers = None;
-        let handle = match state.worker_handle() {
-            Some(handle) if handle.worker_count() > 0 => handle,
-            _ => {
-                let pool = crate::WorkerPool::new(worker_limit, crate::worker::WorkerJob::run)?;
-                let handle = pool.handle();
-                state.set_worker_handle(handle.clone());
-                owned_workers = Some(pool);
-                handle
-            }
-        };
+        let handle = state
+            .worker_handle()
+            .expect("Flow execution owns a worker pool");
         let worker_limit = worker_limit.min(handle.worker_count());
         let mut failures = Vec::new();
         let mut panics: Vec<(usize, Box<dyn Any + Send>)> = Vec::new();
@@ -479,7 +487,6 @@ impl Flow {
         }
         drop(sender);
         debug_assert!((failures.is_empty() && panics.is_empty()) || running == 0);
-        drop(owned_workers);
 
         failures.sort_by_key(|(position, _)| *position);
         panics.sort_by_key(|(position, _)| *position);

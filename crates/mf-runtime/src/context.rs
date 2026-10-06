@@ -236,6 +236,10 @@ impl ExecutionContext {
         self.worker_limit = limit;
     }
 
+    pub fn worker_limit(&self) -> NonZeroUsize {
+        self.worker_limit
+    }
+
     pub fn set_worker_handle(&mut self, handle: RuntimeWorkerHandle) {
         self.worker_handle = Some(handle);
     }
