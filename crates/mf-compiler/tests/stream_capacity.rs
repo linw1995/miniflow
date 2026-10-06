@@ -346,9 +346,10 @@ fn cancellation_suppresses_followup_work_after_a_running_call_returns() {
         running.calls.load(Ordering::SeqCst) == 1
     });
     instance.source.clone().send(json!(2)).unwrap();
+    // Both inputs emit a source message and a collector message.
     wait_until(
         "emitting the second message while the first sink is blocked",
-        || instance.summary().emitted_messages == 2,
+        || instance.summary().emitted_messages == 4,
     );
     instance.fail(StreamError::Execution {
         message: "cancelled during task".into(),

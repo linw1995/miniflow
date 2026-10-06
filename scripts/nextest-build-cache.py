@@ -27,6 +27,27 @@ def main():
     project = directory / "warmup"
     target = directory / "target"
     (project / "src").mkdir(parents=True)
+    vendor = directory / "vendor"
+    source_config = directory / "source.toml"
+    subprocess.run(
+        [
+            cargo,
+            "vendor",
+            "--offline",
+            "--locked",
+            "--respect-source-config",
+            "--versioned-dirs",
+            str(vendor),
+        ],
+        cwd=workspace,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    # Cargo fingerprints include source paths; fixtures must use the same vendor source.
+    source_config.write_text(
+        '[source.crates-io]\nreplace-with = "mf-package-fixture"\n'
+        f'[source.mf-package-fixture]\ndirectory = {json.dumps(str(vendor))}\n'
+    )
     compiler = next(
         package for package in metadata["packages"] if package["name"] == "mf-compiler"
     )
@@ -72,7 +93,7 @@ def main():
     # Preserve wrappers, flags, and coverage instrumentation used by the tests.
     for profile in ["release", "dev"]:
         subprocess.run(
-            [cargo, "build", "--offline", "--profile", profile],
+            [cargo, "build", "--offline", "--profile", profile, "--config", str(source_config)],
             cwd=project,
             env=env,
             check=True,
@@ -80,8 +101,12 @@ def main():
     with open(os.environ["NEXTEST_ENV"], "a") as output:
         for name, value in {
             "CARGO": workspace / "scripts/nextest-cargo.sh",
+            # Selected fixtures use local packages and already-fetched registry dependencies.
+            "CARGO_NET_OFFLINE": "true",
             "MF_TEST_REAL_CARGO": cargo,
             "MF_TEST_TARGET_DIR": target,
+            "MF_TEST_SOURCE_CONFIG": source_config,
+            "MF_TEST_VENDOR_DIR": vendor,
         }.items():
             output.write(f"{name}={value}\n")
 

@@ -127,6 +127,8 @@ fn build(project: &Path, flow_lock: &Path, definition: &WorkflowDefinition) -> P
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // Configuration-only rebuilds must retain the dependency versions warmed for this run.
+    fs::copy(project.join("Cargo.lock"), flow_lock).unwrap();
     target.join(format!(
         "release/mf-generated-workflow{}",
         std::env::consts::EXE_SUFFIX
@@ -513,6 +515,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     let trace = root.path().join("execution.trace");
     let definition = definition(&plugin, &trace);
     let runner = build(&project, &flow_lock, &definition);
+    let dependency_lock = fs::read(&flow_lock).unwrap();
     let validation = command(&runner).arg("--validate").output().unwrap();
     assert!(
         validation.status.success(),
@@ -750,6 +753,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     let mut failing = definition;
     failing.nodes[1].config["fail"] = json!(true);
     let failing_runner = build(&project, &flow_lock, &failing);
+    assert_eq!(fs::read(&flow_lock).unwrap(), dependency_lock);
     assert!(
         command(&failing_runner)
             .arg("--validate")
@@ -771,7 +775,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
 
     fs::remove_dir_all(&project).unwrap();
     fs::remove_dir_all(&plugin).unwrap();
-    assert!(!flow_lock.exists());
+    fs::remove_file(&flow_lock).unwrap();
     fs::remove_file(&trace).unwrap();
     let portable_description = command(&portable)
         .arg("--describe")

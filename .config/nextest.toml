@@ -4,6 +4,11 @@ experimental = ["setup-scripts"]
 [test-groups.shared-cargo]
 max-threads = 1
 
+[scripts.setup.package-dependencies]
+command = ["cargo", "fetch", "--locked"]
+capture-stdout = true
+capture-stderr = true
+
 [scripts.setup.build-cache]
 command = ["python3", "scripts/nextest-build-cache.py"]
 capture-stdout = true
@@ -24,6 +29,7 @@ filter = '''
     test(=repairs_partial_projects_and_updates_configuration) |
     test(=unknown_plugin_reports_node_and_kind)
 )) |
+(binary_id(=mf-cli::packaged_cli) & test(=packaged_cli_acceptance)) |
 (binary_id(=mf-cli::examples) &
     test(=documented_examples_compile_and_produce_expected_outputs)) |
 (binary_id(=mf-compiler::runner_validation) &
@@ -47,6 +53,11 @@ filter = '''
 '''
 setup = "build-cache"
 
+[[profile.default.scripts]]
+platform = 'cfg(unix)'
+filter = 'binary_id(=mf-cli::packaged_cli) & test(=packaged_cli_acceptance)'
+setup = "package-dependencies"
+
 [[profile.default.overrides]]
 platform = 'cfg(unix)'
 # Serialize generated builds that share the prewarmed Cargo target.
@@ -62,6 +73,7 @@ filter = '''
     test(=repairs_partial_projects_and_updates_configuration) |
     test(=unknown_plugin_reports_node_and_kind)
 )) |
+(binary_id(=mf-cli::packaged_cli) & test(=packaged_cli_acceptance)) |
 (binary_id(=mf-cli::examples) &
     test(=documented_examples_compile_and_produce_expected_outputs)) |
 (binary_id(=mf-compiler::runner_validation) &
@@ -99,8 +111,24 @@ inherits = "default"
 [[profile.ci.scripts]]
 platform = 'cfg(unix)'
 filter = '''
-(binary_id(=mf-cli::runner_observability) &
-    test(=generated_loop_runner_exports_complete_per_pass_observations)) |
+(binary_id(=mf-cli::compile) & (
+    test(=development_support_uses_checkout_crates_without_override) |
+    test(=compiles_a_runner_without_telemetry_and_preserves_its_commands)
+)) |
+(binary_id(=mf-cli::runner_observability) & (
+    test(=generated_loop_runner_exports_complete_per_pass_observations) |
+    test(=streaming_runner_exports_message_lifecycles_without_changing_results)
+)) |
+(binary_id(=mf-compiler::stream_runner) &
+    test(=generated_streams_preserve_protocol_boundaries_and_installation_guarantees)) |
+(binary_id(=mf-compiler::stream_parity) &
+    test(=generated_preparation_matches_memory_under_the_same_clock_and_inputs)) |
+(binary_id(=mf-compiler::stream_producer_runner) &
+    test(=external_line_producer_matches_memory_and_drains_after_stdin_closes)) |
+(binary_id(=mf-compiler::startup_runner) &
+    test(=standalone_sources_describe_parameters_and_run_without_stdin_or_build_inputs)) |
+(binary_id(=mf-compiler::workflow_inputs) &
+    test(=generated_tasks_share_startup_binding_and_validation)) |
 (binary_id(=mf-compiler::code_validation) &
     test(=build_rejects_inactive_code_without_replacing_output)) |
 (binary_id(=mf-compiler::loop_planning) & (
@@ -118,8 +146,24 @@ setup = "build-cache"
 platform = 'cfg(unix)'
 # Keep this selection identical to the CI setup rule above.
 filter = '''
-(binary_id(=mf-cli::runner_observability) &
-    test(=generated_loop_runner_exports_complete_per_pass_observations)) |
+(binary_id(=mf-cli::compile) & (
+    test(=development_support_uses_checkout_crates_without_override) |
+    test(=compiles_a_runner_without_telemetry_and_preserves_its_commands)
+)) |
+(binary_id(=mf-cli::runner_observability) & (
+    test(=generated_loop_runner_exports_complete_per_pass_observations) |
+    test(=streaming_runner_exports_message_lifecycles_without_changing_results)
+)) |
+(binary_id(=mf-compiler::stream_runner) &
+    test(=generated_streams_preserve_protocol_boundaries_and_installation_guarantees)) |
+(binary_id(=mf-compiler::stream_parity) &
+    test(=generated_preparation_matches_memory_under_the_same_clock_and_inputs)) |
+(binary_id(=mf-compiler::stream_producer_runner) &
+    test(=external_line_producer_matches_memory_and_drains_after_stdin_closes)) |
+(binary_id(=mf-compiler::startup_runner) &
+    test(=standalone_sources_describe_parameters_and_run_without_stdin_or_build_inputs)) |
+(binary_id(=mf-compiler::workflow_inputs) &
+    test(=generated_tasks_share_startup_binding_and_validation)) |
 (binary_id(=mf-compiler::code_validation) &
     test(=build_rejects_inactive_code_without_replacing_output)) |
 (binary_id(=mf-compiler::loop_planning) & (
