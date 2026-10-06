@@ -2,10 +2,12 @@ extern crate mfn_code as _;
 extern crate mfn_core as _;
 
 use mf_compiler::{
-    BuildGuard, CompileRequest, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError,
-    NodeFactory, NodePorts, NodeRegistration, NodeRegistry, NodeResult, PortSpec, PreparedNode,
-    SupportPackages, TaskNode, ValueType, WorkflowCompileError, WorkflowDefinition,
-    compile_definition, compile_project, instantiate_compiled, instantiate_stream, plan_definition,
+    BuildGuard, CompileRequest, ExecutionContext, ExecutionDependency, FlowNode, Inputs,
+    NodeBuildError, NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration,
+    NodeRegistry, NodeResult, OutputDerivation, OutputDerivationError, PortSpec, PreparedNode,
+    SupportPackages, TaskNode, TypeInferenceState, TypeMismatch, ValueType, WorkflowCompileError,
+    WorkflowDefinition, compile_definition, compile_project, instantiate_compiled,
+    instantiate_stream, plan_definition,
 };
 use serde_json::{Value, json};
 use std::{error::Error, fs, fs::TryLockError, io};
@@ -171,6 +173,125 @@ fn malformed_iteration_configuration_remains_a_typed_json_error() {
     let error = plan_definition(&definition).unwrap_err();
     assert!(error.to_string().contains("each"));
     assert!(find_source::<serde_json::Error>(&error).unwrap().is_data());
+}
+
+#[test]
+fn malformed_loop_assignment_configuration_preserves_json_sources_and_scope() {
+    let definition = loop_definition(json!({"nodes": [{
+        "id": "assign", "kind": "workflow.loop_assign", "config": {}
+    }]}));
+    let error = plan_definition(&definition).unwrap_err();
+    assert!(
+        matches!(error, WorkflowCompileError::LoopAssignmentConfiguration { ref path, .. }
+        if path == "[\"repeat\",\"assign\"]")
+    );
+    assert!(find_source::<serde_json::Error>(&error).unwrap().is_data());
+
+    let definition = loop_definition(json!({"nodes": [{
+        "id": "assign", "kind": "workflow.loop_assign", "config": {"variable": " "}
+    }]}));
+    let error = plan_definition(&definition).unwrap_err();
+    assert!(matches!(error, WorkflowCompileError::InvalidLoop { .. }));
+    assert!(
+        error
+            .to_string()
+            .contains("assignment variable must not be blank")
+    );
+}
+
+#[test]
+fn loop_structure_errors_preserve_the_typed_inner_compilation_error() {
+    let definition = loop_definition(json!({
+        "nodes": [{"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "x"}}],
+        "edges": [{"from_node": "missing", "from_output": "value", "to_node": "assign", "to_input": "value"}]
+    }));
+    let error = plan_definition(&definition).unwrap_err();
+    assert!(
+        matches!(error, WorkflowCompileError::LoopBody { ref path, .. }
+        if path == "[\"repeat\"]")
+    );
+    assert!(
+        matches!(find_source::<Box<WorkflowCompileError>>(&error).unwrap().as_ref(),
+        WorkflowCompileError::UnknownEdgeSource { from_node, .. } if from_node.as_str() == "missing")
+    );
+}
+
+fn inference_node(
+    id: &str,
+    output_type: ValueType,
+    derivations: Vec<OutputDerivation>,
+) -> FlowNode {
+    FlowNode::new(
+        id,
+        PreparedNode::new(
+            FailWithIo,
+            NodeMetadata {
+                output_derivations: derivations,
+                ..NodeMetadata::new(NodePorts {
+                    inputs: vec![PortSpec::new("input", ValueType::Any, false)],
+                    outputs: vec![PortSpec::new("value", output_type, true)],
+                })
+            },
+        ),
+    )
+}
+
+#[test]
+fn output_derivation_validation_preserves_typed_errors_and_nested_type_mismatches() {
+    let mut node = inference_node(
+        "bad",
+        ValueType::List(Box::new(ValueType::Int64)),
+        vec![OutputDerivation::literal("value", json!(["wrong"]))],
+    );
+    let error = TypeInferenceState::default()
+        .resolve_node(&mut node, &[])
+        .unwrap_err();
+    assert!(
+        matches!(error, WorkflowCompileError::OutputDerivation { ref definition_id, .. }
+        if definition_id.as_str() == "bad")
+    );
+    assert!(matches!(
+        find_source::<Box<OutputDerivationError>>(&error)
+            .unwrap()
+            .as_ref(),
+        OutputDerivationError::LiteralTypeMismatch { .. }
+    ));
+    let mismatch = find_source::<TypeMismatch>(&error).unwrap();
+    assert_eq!(mismatch.path, "/0");
+    assert_eq!(mismatch.expected, ValueType::Int64);
+}
+
+#[test]
+fn forwarded_known_output_values_preserve_typed_mismatches() {
+    let mut inference = TypeInferenceState::default();
+    let mut source = inference_node(
+        "source",
+        ValueType::Any,
+        vec![OutputDerivation::literal("value", json!([1, "wrong"]))],
+    );
+    inference.resolve_node(&mut source, &[]).unwrap();
+    let mut forward = inference_node(
+        "forward",
+        ValueType::List(Box::new(ValueType::Int64)),
+        vec![OutputDerivation::forward_input("value", "input")],
+    );
+    let error = inference
+        .resolve_node(
+            &mut forward,
+            &[ExecutionDependency {
+                source_node: "source",
+                source_output: "value",
+                input: Some("input"),
+            }],
+        )
+        .unwrap_err();
+    assert!(
+        matches!(error, WorkflowCompileError::KnownOutputValueTypeConflict { ref definition_id, ref output, .. }
+        if definition_id.as_str() == "forward" && output == "value")
+    );
+    let mismatch = find_source::<TypeMismatch>(&error).unwrap();
+    assert_eq!(mismatch.path, "/1");
+    assert_eq!(mismatch.expected, ValueType::Int64);
 }
 
 #[test]

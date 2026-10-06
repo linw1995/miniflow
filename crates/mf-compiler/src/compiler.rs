@@ -174,6 +174,29 @@ pub enum WorkflowCompileError {
         definition_id: DefinitionId,
         message: String,
     },
+    #[snafu(display("invalid node metadata for `{definition_id}`: {source}"))]
+    OutputDerivation {
+        definition_id: DefinitionId,
+        #[snafu(source(from(mf_runtime::OutputDerivationError, Box::new)))]
+        source: Box<mf_runtime::OutputDerivationError>,
+    },
+    #[snafu(display(
+        "invalid node metadata for `{definition_id}`: {direction} port `{port}`: {source}"
+    ))]
+    PortTypeDepth {
+        definition_id: DefinitionId,
+        direction: String,
+        port: String,
+        source: mf_runtime::TypeDepthError,
+    },
+    #[snafu(display(
+        "invalid node metadata for `{definition_id}`: output `{output}` known value: {source}"
+    ))]
+    KnownOutputValueTypeConflict {
+        definition_id: DefinitionId,
+        output: String,
+        source: TypeMismatch,
+    },
     #[snafu(display("invalid inferred output `{output}` for node `{definition_id}`: {source}"))]
     InferredOutputDepth {
         definition_id: DefinitionId,
@@ -189,8 +212,13 @@ pub enum WorkflowCompileError {
         to_node: DefinitionId,
         message: String,
     },
-    #[snafu(display("invalid Loop at {path}: {message}"))]
+    #[snafu(display("invalid Loop at {path}: {message}"), visibility(pub))]
     InvalidLoop { path: String, message: String },
+    #[snafu(display("invalid Loop at {path}: {source}"), visibility(pub))]
+    LoopAssignmentConfiguration {
+        path: String,
+        source: serde_json::Error,
+    },
     #[snafu(
         display("invalid iteration node `{definition_id}`: {message}"),
         visibility(pub)
@@ -246,9 +274,8 @@ impl TypeInferenceState {
         node.metadata
             .ports
             .validate_derivations(id.as_str(), &derivations)
-            .map_err(|error| WorkflowCompileError::InvalidNodeMetadata {
+            .with_context(|_| OutputDerivationSnafu {
                 definition_id: id.clone(),
-                message: error.to_string(),
             })?;
 
         let mut inputs = BTreeMap::new();
@@ -371,10 +398,10 @@ impl TypeInferenceState {
                     output: output.name.as_ref(),
                 })?;
             if let Some(value) = &fact.exact {
-                declared.validate_shared(value).map_err(|error| {
-                    WorkflowCompileError::InvalidNodeMetadata {
+                declared.validate_shared(value).with_context(|_| {
+                    KnownOutputValueTypeConflictSnafu {
                         definition_id: id.clone(),
-                        message: format!("output `{}` known value: {error}", output.name),
+                        output: output.name.as_ref(),
                     }
                 })?;
             } else if fact.value_type.compatibility_with(&declared)
@@ -544,12 +571,13 @@ fn validate_base_metadata(
                         format!("empty or duplicate {direction} port `{}`", port.name),
                     ));
                 }
-                port.value_type.check_depth().map_err(|error| {
-                    invalid(
-                        &node.definition_id,
-                        format!("{direction} port `{}`: {error}", port.name),
-                    )
-                })?;
+                port.value_type
+                    .check_depth()
+                    .with_context(|_| PortTypeDepthSnafu {
+                        definition_id: node.definition_id.clone(),
+                        direction,
+                        port: port.name.as_ref(),
+                    })?;
             }
         }
         for port in &ports.outputs {
@@ -1236,6 +1264,9 @@ pub fn execute_compiled_with_inputs(
             if let WorkflowCompileError::NodeConstruction { definition_id, .. }
             | WorkflowCompileError::UnknownNodeKind { definition_id, .. }
             | WorkflowCompileError::InvalidNodeMetadata { definition_id, .. }
+            | WorkflowCompileError::OutputDerivation { definition_id, .. }
+            | WorkflowCompileError::PortTypeDepth { definition_id, .. }
+            | WorkflowCompileError::KnownOutputValueTypeConflict { definition_id, .. }
             | WorkflowCompileError::InvalidIteration { definition_id, .. }
             | WorkflowCompileError::IterationBody { definition_id, .. }
             | WorkflowCompileError::IterationConfiguration { definition_id, .. } = error
@@ -1364,8 +1395,11 @@ fn resolve_nodes_in_scope(
                     return bind_subgraph_node(node, registry, &body, Some(&types), false, options);
                 }
                 crate::LOOP_ASSIGN_KIND => {
-                    let target = crate::loops::assignment_target(&node.config)
-                        .expect("validated assignment");
+                    let target = crate::loops::assignment_target(
+                        &node.config,
+                        std::slice::from_ref(&node.id),
+                    )
+                    .expect("validated assignment");
                     let value_type = enclosing.expect("assignment has a Loop")[&target].clone();
                     return Ok(mf_runtime::prepared_loop_assign(
                         node.id.as_str(),

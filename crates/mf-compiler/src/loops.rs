@@ -6,7 +6,8 @@ use mf_runtime::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use snafu::{ResultExt, ensure};
+use std::collections::BTreeMap;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,18 +21,30 @@ fn path_label(path: &[DefinitionId]) -> String {
 }
 
 fn invalid(path: &[DefinitionId], message: impl Into<String>) -> WorkflowCompileError {
-    WorkflowCompileError::InvalidLoop {
+    crate::compiler::InvalidLoopSnafu {
         path: path_label(path),
-        message: message.into(),
+        message,
     }
+    .build()
 }
 
-pub fn assignment_target(config: &Value) -> Result<String, String> {
+pub fn assignment_target(
+    config: &Value,
+    path: &[DefinitionId],
+) -> Result<String, WorkflowCompileError> {
     let assignment: AssignmentConfig =
-        serde_json::from_value(config.clone()).map_err(|error| error.to_string())?;
-    if assignment.variable.trim().is_empty() {
-        return Err("assignment variable must not be blank".into());
-    }
+        serde_json::from_value(config.clone()).with_context(|_| {
+            crate::compiler::LoopAssignmentConfigurationSnafu {
+                path: path_label(path),
+            }
+        })?;
+    ensure!(
+        !assignment.variable.trim().is_empty(),
+        crate::compiler::InvalidLoopSnafu {
+            path: path_label(path),
+            message: "assignment variable must not be blank",
+        }
+    );
     Ok(assignment.variable)
 }
 
@@ -106,8 +119,7 @@ fn validate_node(
             }
             let types =
                 enclosing.ok_or_else(|| invalid(&node_path, "assignment requires a Loop"))?;
-            let target =
-                assignment_target(&node.config).map_err(|message| invalid(&node_path, message))?;
+            let target = assignment_target(&node.config, &node_path)?;
             if !types.contains_key(&target) {
                 return Err(invalid(&node_path, format!("unknown variable `{target}`")));
             }
@@ -208,13 +220,12 @@ fn validate_loop(
         return Err(invalid(path, "Loop body must contain at least one node"));
     }
     let body = body_definition(&loop_definition.body, dependencies);
-    crate::compiler::structural_order_graph(&body)
-        .map_err(|error| invalid(path, error.to_string()))?;
-    let mut names = BTreeSet::new();
-    for node in &loop_definition.body.nodes {
-        if !names.insert(node.id.clone()) {
-            return Err(invalid(path, format!("duplicate body node `{}`", node.id)));
+    crate::compiler::structural_order_graph(&body).with_context(|_| {
+        crate::compiler::LoopBodySnafu {
+            path: path_label(path),
         }
+    })?;
+    for node in &loop_definition.body.nodes {
         validate_node(node, Some(&types), depth, path, dependencies)?;
     }
     Ok(())
