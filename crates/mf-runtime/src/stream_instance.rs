@@ -311,6 +311,7 @@ struct Shared {
     execution: StreamExecution,
     observation: Option<StreamObservation>,
     cancellation: crate::StreamCancellation,
+    worker_limit: std::num::NonZeroUsize,
 }
 
 impl Shared {
@@ -628,16 +629,15 @@ impl PreparedStream {
             .limits
             .workers
             .min(runtime_options.max_parallel_domains.get());
+        let worker_limit = std::num::NonZeroUsize::new(domain_limit)
+            .expect("validated stream worker limit is positive");
         let mut context = ExecutionContext::default();
         if let Some(input) = options.stdin {
             context.set_stdin(input);
         }
         let cancellation = context.cancellation();
         context.set_workflow_arguments(options.arguments);
-        context.configure_worker_limit(
-            std::num::NonZeroUsize::new(domain_limit)
-                .expect("validated stream worker limit is positive"),
-        );
+        context.configure_worker_limit(worker_limit);
         context
             .bind_workflow_inputs(prepared.input_schema())
             .context(InputValidationSnafu)?;
@@ -698,6 +698,7 @@ impl PreparedStream {
             execution: plan.execution().clone(),
             observation: options.observation,
             cancellation,
+            worker_limit,
         });
         shared
             .cancellation
@@ -1052,6 +1053,8 @@ fn tick<'a>(
                 },
             )?;
         context.set_cancellation(shared.cancellation.clone());
+        context.configure_worker_limit(shared.worker_limit);
+        context.set_worker_handle(workers.handle());
         if let Some(observation) = &shared.observation {
             context.set_frame_observation(observation.frame(stream_message(queued.message)));
         }
