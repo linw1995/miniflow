@@ -1018,6 +1018,9 @@ fn tick<'a>(
             });
         if due.is_some() {
             guard.operators[index].as_mut().unwrap().deadline = None;
+            let callback;
+            (guard, callback) =
+                event_callback(guard, shared, plan, index, None, StreamTrigger::Timer)?;
             guard = invoke_event(
                 guard,
                 shared,
@@ -1028,7 +1031,7 @@ fn tick<'a>(
                     now: clock.now(),
                     input: None,
                 },
-                event_callback(shared, plan, index, None, StreamTrigger::Timer),
+                callback,
             )?;
             progress = true;
         }
@@ -1115,7 +1118,9 @@ fn tick<'a>(
                 }
                 let is_producer = matches!(&operator.executor, OperatorExecutor::Producer(_));
                 let _ = operator;
-                let callback = event_callback(
+                let callback;
+                (guard, callback) = event_callback(
+                    guard,
                     shared,
                     plan,
                     index,
@@ -1125,7 +1130,7 @@ fn tick<'a>(
                     } else {
                         StreamTrigger::Input
                     },
-                );
+                )?;
                 let _context = callback.as_ref().map(StreamCallback::enter);
                 let inputs = match frame
                     .context
@@ -1311,6 +1316,15 @@ fn tick<'a>(
                         guard.operators[index].as_ref().unwrap().executor,
                         OperatorExecutor::Event(_)
                     ) {
+                        let callback;
+                        (guard, callback) = event_callback(
+                            guard,
+                            shared,
+                            plan,
+                            index,
+                            None,
+                            StreamTrigger::UpstreamClosed,
+                        )?;
                         guard = invoke_event(
                             guard,
                             shared,
@@ -1321,13 +1335,7 @@ fn tick<'a>(
                                 now: clock.now(),
                                 input: None,
                             },
-                            event_callback(
-                                shared,
-                                plan,
-                                index,
-                                None,
-                                StreamTrigger::UpstreamClosed,
-                            ),
+                            callback,
                         )?;
                     }
                     let operator = guard.operators[index].as_mut().unwrap();
@@ -1350,18 +1358,33 @@ fn tick<'a>(
     Ok((guard, progress))
 }
 
-fn event_callback(
-    shared: &Shared,
+fn event_callback<'a>(
+    guard: MutexGuard<'a, State>,
+    shared: &'a Shared,
     plan: &StreamPlan,
     index: usize,
     message: Option<MessageId>,
     trigger: StreamTrigger,
-) -> Option<StreamCallback> {
-    shared.observation.as_ref()?.callback(
+) -> Result<(MutexGuard<'a, State>, Option<StreamCallback>), StreamError> {
+    let Some(observation) = &shared.observation else {
+        return Ok((guard, None));
+    };
+    // Span creation synchronously invokes processors that may reenter cancellation.
+    drop(guard);
+    let callback = observation.callback(
         plan.nodes()[index].definition_id.as_str(),
         message.map(stream_message),
         trigger,
-    )
+    );
+    let mut guard = shared.state.lock().unwrap();
+    if let Err(error) = check_failure(&mut guard, shared) {
+        drop(guard);
+        if let Some(callback) = callback {
+            callback.failed(FailurePhase::Dependency, error.to_string());
+        }
+        return Err(error);
+    }
+    Ok((guard, callback))
 }
 
 fn check_failure(state: &mut State, shared: &Shared) -> Result<(), StreamError> {

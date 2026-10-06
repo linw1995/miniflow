@@ -317,7 +317,7 @@ A worker SHALL execute the ordered ordinary task steps of one execution domain s
 
 ### Requirement: Invoke event plugins without the scheduler lock
 
-The runtime SHALL invoke EventNode callbacks, buffered inspection, and terminal reporting without the scheduler mutex while preserving serial ownership. Failure or cancellation recorded before publication SHALL discard emissions and timer updates. After reacquiring the mutex, the coordinator SHALL check failure before propagating dependency errors or scheduling, including cancellation recorded before its waker acquires the mutex. The first recorded failure SHALL remain the terminal cause.
+The runtime SHALL create event and producer callback spans, invoke EventNode callbacks, inspect buffers, and report terminal events outside the scheduler mutex while preserving serial ownership. Failure or cancellation before publication SHALL discard emissions and timer updates. After reacquiring the mutex, the coordinator SHALL check failure, including cancellation awaiting its waker, before propagating dependency errors or scheduling. The first recorded failure SHALL be the terminal cause.
 
 #### Scenario: Cancel from an input callback
 
@@ -354,3 +354,22 @@ The runtime SHALL invoke EventNode callbacks, buffered inspection, and terminal 
 - **WHEN** a synchronous observer cancels the workflow while the runtime reports a skipped stream operator
 - **THEN** reporting completes without scheduler lock reentry
 - **AND** the coordinator does not complete the current frame, invoke further nodes, or publish selected outputs
+
+#### Scenario: Cancel while creating an operator callback span
+
+- **WHEN** a synchronous span processor cancels the workflow while an event or producer callback span is created for startup or a message
+- **THEN** cancellation completes without scheduler lock reentry deadlock
+- **AND** the coordinator checks failure after reacquiring the mutex and does not invoke or submit that operator
+- **AND** receiving outputs and joining retain the cancellation failure
+
+#### Scenario: Cancel while creating a timer callback span
+
+- **WHEN** a synchronous span processor cancels the workflow while a due timer callback span is created
+- **THEN** span creation completes without holding the scheduler mutex
+- **AND** the timer callback is not invoked and no timer effects are published
+
+#### Scenario: Cancel while creating an upstream-close callback span
+
+- **WHEN** a synchronous span processor cancels the workflow while an upstream-close callback span is created
+- **THEN** span creation completes without holding the scheduler mutex
+- **AND** the close callback is not invoked and failure cleanup does not flush a tail
