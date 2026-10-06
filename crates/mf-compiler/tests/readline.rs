@@ -32,12 +32,21 @@ fn readline_uses_initial_or_upstream_paths_and_stdin_as_text() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("lines.txt");
     fs::write(&path, "[1,2]\r\n\n  padded  \n\u{4f60}\u{597d}\nlast\r").unwrap();
-    for mode in ["initial", "upstream", "stdin"] {
+    let modes = ["initial", "upstream", "stdin"].into_iter();
+    #[cfg(unix)]
+    let modes = modes.chain(["symlink"]);
+    for mode in modes {
         let mut nodes = json!([{"id":"read", "kind":"builtin.readline"}]);
         let mut edges = json!([]);
         let mut options = StreamOptions::default();
         match mode {
             "initial" => options.arguments = arguments(json!({"read":{"path":path}})),
+            #[cfg(unix)]
+            "symlink" => {
+                let link = root.path().join("lines.link");
+                std::os::unix::fs::symlink(&path, &link).unwrap();
+                options.arguments = arguments(json!({"read":{"path":link}}));
+            }
             "upstream" => {
                 nodes
                     .as_array_mut()
@@ -114,7 +123,18 @@ fn readline_validates_conditional_ownership_and_reports_read_failures() {
                 .is_err()
         );
     }
-    for (path, expected) in [(root.path().join("missing"), "missing"), (path, "line 2")] {
+    let failures = [
+        (root.path().join("missing"), "missing"),
+        (path, "line 2"),
+        (root.path().to_path_buf(), "requires a regular file"),
+    ]
+    .into_iter();
+    #[cfg(unix)]
+    let failures = failures.chain([(
+        std::path::PathBuf::from("/dev/null"),
+        "requires a regular file",
+    )]);
+    for (path, expected) in failures {
         if expected == "line 2" {
             fs::write(&path, b"first\n\xff\n").unwrap();
         }
@@ -130,4 +150,65 @@ fn readline_validates_conditional_ownership_and_reports_read_failures() {
     let registry = NodeRegistry::from_inventory().unwrap();
     assert!(registry.get("builtin.channel").is_none());
     assert!(registry.get("builtin.stdin").is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn readline_rejects_fifos_without_waiting_for_a_writer() {
+    use nix::{sys::stat::Mode, unistd::mkfifo};
+    use std::{
+        os::unix::fs::symlink,
+        path::PathBuf,
+        process::{Command, Stdio},
+        time::{Duration, Instant},
+    };
+    if let Some(path) = std::env::var_os("MF_TEST_READLINE_PATH") {
+        let path = PathBuf::from(path);
+        let instance = prepare(json!([{"id":"read", "kind":"builtin.readline"}]), json!([]))
+            .start_with_options(StreamOptions {
+                arguments: arguments(json!({"read":{"path":path}})),
+                ..Default::default()
+            })
+            .unwrap();
+        let error = instance.recv().unwrap_err().to_string();
+        assert!(error.contains(&path.display().to_string()), "{error}");
+        assert!(error.contains("requires a regular file"), "{error}");
+        assert!(instance.join().is_err());
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let fifo = root.path().join("input.fifo");
+    let link = root.path().join("input.link");
+    mkfifo(&fifo, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
+    symlink(&fifo, &link).unwrap();
+    for path in [fifo, link] {
+        // Bound the entire invocation, including worker teardown, if FIFO opening regresses.
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "readline_rejects_fifos_without_waiting_for_a_writer",
+                "--nocapture",
+            ])
+            .env("MF_TEST_READLINE_PATH", &path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                child.wait().unwrap();
+                panic!("readline rejection timed out for {path:?}");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }

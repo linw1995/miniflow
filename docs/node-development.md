@@ -270,13 +270,17 @@ behind startup tasks, run on independent dedicated workers. Their contexts retai
 dispatch. Ordinary per-message producer invocations remain serialized.
 
 `builtin.readline` accepts optional string input `path` and emits string output `line`. Supplying a path
-reads that UTF-8 text file; omission selects stdin. It preserves blank lines and whitespace, strips LF or
+reads a regular UTF-8 text file, including through a symbolic link to a regular file. FIFO paths,
+directories, devices, and sockets are unsupported. Paths are opened nonblocking and the opened file's
+type is checked before reading, so rejecting a FIFO does not wait for a writer. Omission selects stdin,
+which continues to accept pipes and terminals. It preserves blank lines and whitespace, strips LF or
 CRLF delimiters, and accepts a final unterminated line. It does not parse JSON. Runners supply a reserved
 `TextInput` when stdin is required; embedding hosts supply `StreamOptions.stdin` or use
 `ExecutionContext::set_stdin` for context-based execution.
-Factories and interface inspection do not open source files or read stdin. Runtime-owned reads respond to
-cancellation. Application-specific sources use ordinary `StreamNode` implementations and propagate emitter
-errors; arbitrary plugin I/O requires cooperation.
+Factories and interface inspection do not open source files or read stdin. Runtime-owned reads check
+cancellation between reads and while waiting for stdin readiness. Nonblocking opens prevent FIFO writer
+waits; they do not make regular-file disk I/O interruptible. Application-specific sources use ordinary
+`StreamNode` implementations and propagate emitter errors; arbitrary plugin I/O requires cooperation.
 
 Every emitted message has fresh bindings and a step budget. Frames execute in FIFO order in each domain,
 while domains progress independently. `receive` returns a delivery that its sink must acknowledge or fail.

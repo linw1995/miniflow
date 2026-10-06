@@ -42,3 +42,7 @@ opentelemetry_sdk = { workspace = true, features = ["logs", "trace", "testing"] 
 
 # Isolated generated projects and build artifacts.
 tempfile.workspace = true
+
+[target.'cfg(unix)'.dev-dependencies]
+# Named pipe fixtures for source cancellation regressions.
+nix = { workspace = true, features = ["fs"] }
