@@ -95,6 +95,10 @@ slow-timeout = { period = "60s", terminate-after = 20 }
 [profile.ci]
 inherits = "default"
 
+[[profile.ci.overrides]]
+filter = 'binary_id(=mf-cli::runner_observability) & test(=generated_runner_describes_embedded_graph_and_exports_correlated_otel)'
+success-output = "immediate"
+
 # Reuse the shared target for more generated builds on constrained CI workers.
 [[profile.ci.scripts]]
 platform = 'cfg(unix)'

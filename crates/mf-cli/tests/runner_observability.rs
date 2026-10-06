@@ -105,6 +105,7 @@ fn definition(plugin: &Path, trace: &Path) -> WorkflowDefinition {
 }
 
 fn build(project: &Path, flow_lock: &Path, definition: &WorkflowDefinition) -> PathBuf {
+    let mut phase = Instant::now();
     let plan = plan_definition(definition).unwrap();
     write_dependency_project(
         project,
@@ -115,6 +116,7 @@ fn build(project: &Path, flow_lock: &Path, definition: &WorkflowDefinition) -> P
     )
     .unwrap();
     resolve_project(project, flow_lock, false).unwrap();
+    log_phase(&mut phase, "resolve runner");
     let target = std::env::var_os("MF_TEST_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| project.join("target"));
@@ -122,6 +124,8 @@ fn build(project: &Path, flow_lock: &Path, definition: &WorkflowDefinition) -> P
         .args(["build", "--offline", "--release", "--locked"])
         .output()
         .unwrap();
+    log_phase(&mut phase, "build runner");
+    eprintln!("{}", String::from_utf8_lossy(&output.stderr));
     assert!(
         output.status.success(),
         "{}",
@@ -131,6 +135,11 @@ fn build(project: &Path, flow_lock: &Path, definition: &WorkflowDefinition) -> P
         "release/mf-generated-workflow{}",
         std::env::consts::EXE_SUFFIX
     ))
+}
+
+fn log_phase(started: &mut Instant, phase: &str) {
+    eprintln!("phase {phase}: {:.3}s", started.elapsed().as_secs_f64());
+    *started = Instant::now();
 }
 
 fn command(executable: &Path) -> Command {
@@ -506,6 +515,7 @@ fn assert_service_name(attributes: &[opentelemetry_proto::tonic::common::v1::Key
 
 #[test]
 fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
+    let mut phase = Instant::now();
     let root = tempfile::tempdir().unwrap();
     let plugin = plugin(root.path());
     let project = root.path().join("build");
@@ -513,6 +523,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     let trace = root.path().join("execution.trace");
     let definition = definition(&plugin, &trace);
     let runner = build(&project, &flow_lock, &definition);
+    log_phase(&mut phase, "prepare runner");
     let validation = command(&runner).arg("--validate").output().unwrap();
     assert!(
         validation.status.success(),
@@ -594,6 +605,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     );
 
     let plain = command(&runner).output().unwrap();
+    log_phase(&mut phase, "validate and describe runner");
     assert!(
         plain.status.success(),
         "{}",
@@ -615,6 +627,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     );
     assert_eq!(observed.stdout, plain.stdout);
     let requests = worker.finish();
+    log_phase(&mut phase, "export logs and traces");
     check_otel(&requests, 3, 4, description.workflow_id.as_str());
     for (_, body) in requests.iter().filter(|(path, _)| path == "/v1/logs") {
         let export = ExportLogsServiceRequest::decode(body.as_slice()).unwrap();
@@ -639,6 +652,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     assert!(received.status.success());
     assert_eq!(received.stdout, plain.stdout);
     let snapshot = receiver.finish();
+    log_phase(&mut phase, "receive observations");
     assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
     assert_eq!(snapshot.lifecycle.known_missing_count, 0);
     assert!(
@@ -665,6 +679,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     );
     assert_eq!(recorded.stdout, plain.stdout);
     history_receiver.finish();
+    log_phase(&mut phase, "capture history");
     let history = history_receiver.history_snapshot(None, 10);
     assert_eq!(history.status, "Complete");
     assert_eq!(history.history_len, 6);
@@ -689,6 +704,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     assert!(logs_only.status.success());
     assert_eq!(logs_only.stdout, plain.stdout);
     let requests = worker.finish();
+    log_phase(&mut phase, "export logs only");
     assert_eq!(
         requests
             .iter()
@@ -715,6 +731,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     assert!(traces_only.status.success());
     assert_eq!(traces_only.stdout, plain.stdout);
     let requests = worker.finish();
+    log_phase(&mut phase, "export traces only");
     assert_eq!(
         requests
             .iter()
@@ -739,6 +756,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", format!("http://{closed}"))
         .output()
         .unwrap();
+    log_phase(&mut phase, "export to unavailable endpoint");
     assert!(unavailable.status.success());
     assert_eq!(unavailable.stdout, plain.stdout);
     assert!(String::from_utf8_lossy(&unavailable.stderr).contains("invalid MF_RUN_ID"));
@@ -750,6 +768,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     let mut failing = definition;
     failing.nodes[1].config["fail"] = json!(true);
     let failing_runner = build(&project, &flow_lock, &failing);
+    log_phase(&mut phase, "prepare failing runner");
     assert!(
         command(&failing_runner)
             .arg("--validate")
@@ -767,6 +786,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     assert!(!failed.status.success());
     assert!(String::from_utf8_lossy(&failed.stderr).contains("execution sentinel"));
     let requests = worker.finish();
+    log_phase(&mut phase, "export failed execution");
     check_otel(&requests, 3, 4, failing_description.workflow_id.as_str());
 
     fs::remove_dir_all(&project).unwrap();
@@ -781,6 +801,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     assert!(portable_description.status.success());
     assert_eq!(portable_description.stdout, raw.stdout);
     let portable_output = command(&portable).env("PATH", "").output().unwrap();
+    log_phase(&mut phase, "run portable executable");
     assert!(portable_output.status.success());
     assert_eq!(last_json(&portable_output.stdout), json!({"answer":14}));
     let trace = fs::read_to_string(&trace).unwrap();
