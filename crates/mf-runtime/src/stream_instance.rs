@@ -14,7 +14,7 @@ use std::{
     collections::{BTreeSet, VecDeque},
     error::Error,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Condvar, Mutex, Weak, mpsc},
+    sync::{Arc, Condvar, Mutex, MutexGuard, Weak, mpsc},
     task::{Wake, Waker},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -903,16 +903,16 @@ fn coordinate(
     clock: &dyn StreamClock,
     workers: &WorkerPool<crate::worker::WorkerJob>,
 ) {
-    let mut state = shared.state.lock().unwrap();
+    let mut guard = shared.state.lock().unwrap();
     loop {
-        while let Some(completion) = state.completions.pop_front() {
+        while let Some(completion) = guard.completions.pop_front() {
             if !completion.producer {
-                state.active_workers -= 1;
+                guard.active_workers -= 1;
             }
             let message_domain = completion.message.domain;
             let node = plan.execution_domain(completion.execution_domain).nodes[0].index();
             if completion.producer {
-                let operator = state.operators[node].as_mut().unwrap();
+                let operator = guard.operators[node].as_mut().unwrap();
                 if let OperatorExecutor::Producer(producer) = &mut operator.executor {
                     producer.active = false;
                 }
@@ -921,16 +921,16 @@ fn coordinate(
                 }
             }
             if let Err(error) = completion.result {
-                if state.failure.is_none() {
-                    state.failure_node = completion
+                if guard.failure.is_none() {
+                    guard.failure_node = completion
                         .failure_node
                         .or_else(|| Some(plan.nodes()[node].definition_id.to_string()));
                 }
-                state.failure.get_or_insert(error);
+                guard.failure.get_or_insert(error);
             }
-            if state.failure.is_none()
+            if guard.failure.is_none()
                 && !completion.detached
-                && let Some(frame) = state.domains[message_domain].frame.as_mut()
+                && let Some(frame) = guard.domains[message_domain].frame.as_mut()
             {
                 frame.context.merge_domain_outputs(
                     &completion.context,
@@ -943,30 +943,32 @@ fn coordinate(
                     ExecutionDomainState::Complete;
             }
         }
-        if let Some(failure) = state.failure.clone() {
-            drop(state);
+        if let Err(failure) = check_failure(&mut guard, shared) {
+            drop(guard);
             shared.cancellation.cancel(failure);
             shared.changed.notify_all();
             break;
         }
-        if let Some(domain) = state.delivered.take() {
-            release_domain(&mut state, domain);
+        if let Some(domain) = guard.delivered.take() {
+            release_domain(&mut guard, domain);
         }
-        match tick(&mut state, plan, workers, clock, shared) {
-            Ok(progress) => {
+        match tick(guard, plan, workers, clock, shared) {
+            Ok((next_guard, progress)) => {
+                guard = next_guard;
                 shared.changed.notify_all();
-                if state.domains.iter().all(|domain| domain.closed) && state.output.is_none() {
+                if guard.domains.iter().all(|domain| domain.closed) && guard.output.is_none() {
                     break;
                 }
                 if progress {
-                    drop(state);
+                    drop(guard);
                     thread::yield_now();
-                    state = shared.state.lock().unwrap();
+                    guard = shared.state.lock().unwrap();
                     continue;
                 }
             }
             Err(error) => {
-                state.failure = Some(error);
+                guard = shared.state.lock().unwrap();
+                guard.failure.get_or_insert(error);
                 shared.changed.notify_all();
                 continue;
             }
@@ -975,7 +977,7 @@ fn coordinate(
             .message_sources()
             .iter()
             .skip(1)
-            .filter_map(|domain| state.operators[domain.expect("emission domain")].as_ref())
+            .filter_map(|domain| guard.operators[domain.expect("emission domain")].as_ref())
             .filter(|operator| {
                 operator.pending.len() < plan.execution().limits.max_pending_messages
             })
@@ -985,24 +987,24 @@ fn coordinate(
                     .map(|deadline| deadline.saturating_sub(clock.now()))
             })
             .min();
-        state = match wait {
-            Some(wait) => shared.changed.wait_timeout(state, wait).unwrap().0,
-            None => shared.changed.wait(state).unwrap(),
+        guard = match wait {
+            Some(wait) => shared.changed.wait_timeout(guard, wait).unwrap().0,
+            None => shared.changed.wait(guard).unwrap(),
         };
     }
 }
 
-fn tick(
-    state: &mut State,
+fn tick<'a>(
+    mut guard: MutexGuard<'a, State>,
     plan: &Arc<StreamPlan>,
     workers: &WorkerPool<crate::worker::WorkerJob>,
     clock: &dyn StreamClock,
-    shared: &Arc<Shared>,
-) -> Result<bool, StreamError> {
+    shared: &'a Arc<Shared>,
+) -> Result<(MutexGuard<'a, State>, bool), StreamError> {
     let mut progress = false;
     for source in plan.message_sources().iter().skip(1) {
         let index = source.expect("emission domain");
-        let due = state.operators[index]
+        let due = guard.operators[index]
             .as_ref()
             .filter(|operator| {
                 !operator.closed
@@ -1014,9 +1016,10 @@ fn tick(
                     .filter(|deadline| *deadline <= clock.now())
             });
         if due.is_some() {
-            state.operators[index].as_mut().unwrap().deadline = None;
-            invoke_event(
-                state,
+            guard.operators[index].as_mut().unwrap().deadline = None;
+            guard = invoke_event(
+                guard,
+                shared,
                 plan,
                 index,
                 NodeEvent::Timer,
@@ -1029,12 +1032,12 @@ fn tick(
             progress = true;
         }
     }
-    for domain in 1..state.domains.len() {
-        if state.domains[domain].occupied {
+    for domain in 1..guard.domains.len() {
+        if guard.domains[domain].occupied {
             continue;
         }
         let source = plan.message_sources()[domain].expect("emission domain");
-        let Some(queued) = state.operators[source]
+        let Some(queued) = guard.operators[source]
             .as_mut()
             .unwrap()
             .pending
@@ -1052,16 +1055,16 @@ fn tick(
         if let Some(observation) = &shared.observation {
             context.set_frame_observation(observation.frame(stream_message(queued.message)));
         }
-        state.domains[domain].frame = Some(Frame::new(queued.message, context, domain, plan));
-        state.domains[domain].occupied = true;
+        guard.domains[domain].frame = Some(Frame::new(queued.message, context, domain, plan));
+        guard.domains[domain].occupied = true;
         progress = true;
     }
-    for message_domain in 0..state.domains.len() {
-        let Some(mut frame) = state.domains[message_domain].frame.take() else {
+    for message_domain in 0..guard.domains.len() {
+        let Some(mut frame) = guard.domains[message_domain].frame.take() else {
             continue;
         };
         if frame.complete(message_domain, plan) {
-            take_sequence(&mut state.summary.completed_frames)?;
+            take_sequence(&mut guard.summary.completed_frames)?;
             if plan.selected_domain() == Some(message_domain) {
                 let mut outputs = FlowOutputs::new();
                 for output in plan.outputs() {
@@ -1080,12 +1083,12 @@ fn tick(
                         outputs.insert(output.name.clone().into_owned(), value);
                     }
                 }
-                state.output = Some(StreamOutput {
+                guard.output = Some(StreamOutput {
                     message: frame.message,
                     outputs,
                 });
             } else {
-                release_domain(state, message_domain);
+                release_domain(&mut guard, message_domain);
             }
             progress = true;
             continue;
@@ -1103,7 +1106,7 @@ fn tick(
                 continue;
             }
             let index = execution.nodes[0].index();
-            if let Some(operator) = state.operators[index].as_ref() {
+            if let Some(operator) = guard.operators[index].as_ref() {
                 if !operator.pending.is_empty() {
                     continue;
                 }
@@ -1128,7 +1131,7 @@ fn tick(
                         if let Some(callback) = callback.take() {
                             callback.failed(FailurePhase::Dependency, error.to_string());
                         }
-                        state.failure_node = Some(plan.nodes()[index].definition_id.to_string());
+                        guard.failure_node = Some(plan.nodes()[index].definition_id.to_string());
                     })
                     .context(WorkflowSnafu {
                         message: frame.message,
@@ -1144,7 +1147,7 @@ fn tick(
                         });
                         let context = frame.context.fork_stream(observation);
                         let detached = message_domain == 0;
-                        let operator = state.operators[index].as_mut().unwrap();
+                        let operator = guard.operators[index].as_mut().unwrap();
                         let OperatorExecutor::Producer(producer) = &mut operator.executor else {
                             unreachable!("producer kind was checked above")
                         };
@@ -1168,8 +1171,9 @@ fn tick(
                         progress = true;
                         continue;
                     }
-                    invoke_event(
-                        state,
+                    guard = invoke_event(
+                        guard,
+                        shared,
                         plan,
                         index,
                         NodeEvent::Input(inputs),
@@ -1200,11 +1204,11 @@ fn tick(
                     callback.skipped(causes.into_iter().collect());
                 }
                 if is_producer && message_domain == 0 {
-                    state.operators[index].as_mut().unwrap().closed = true;
+                    guard.operators[index].as_mut().unwrap().closed = true;
                 }
                 frame.execution_domains[execution_domain] = ExecutionDomainState::Complete;
                 progress = true;
-            } else if state.active_workers < workers.worker_count() {
+            } else if guard.active_workers < workers.worker_count() {
                 let observation = shared.observation.as_ref().map(|observation| {
                     if frame.message.domain == 0 {
                         observation.startup_frame()
@@ -1231,7 +1235,7 @@ fn tick(
                 })) {
                     Ok(()) => {
                         frame.execution_domains[execution_domain] = ExecutionDomainState::Running;
-                        state.active_workers += 1;
+                        guard.active_workers += 1;
                         progress = true;
                     }
                     Err(mpsc::TrySendError::Full(_)) => {}
@@ -1246,7 +1250,7 @@ fn tick(
         }
 
         if frame.complete(message_domain, plan) {
-            take_sequence(&mut state.summary.completed_frames)?;
+            take_sequence(&mut guard.summary.completed_frames)?;
             if plan.selected_domain() == Some(message_domain) {
                 let mut outputs = FlowOutputs::new();
                 for output in plan.outputs() {
@@ -1265,38 +1269,39 @@ fn tick(
                         outputs.insert(output.name.clone().into_owned(), value);
                     }
                 }
-                state.output = Some(StreamOutput {
+                guard.output = Some(StreamOutput {
                     message: frame.message,
                     outputs,
                 });
             } else {
-                release_domain(state, message_domain);
+                release_domain(&mut guard, message_domain);
             }
         } else {
-            state.domains[message_domain].frame = Some(frame);
+            guard.domains[message_domain].frame = Some(frame);
         }
     }
-    if !state.domains[0].occupied && !state.domains[0].closed {
-        state.domains[0].closed = true;
+    if !guard.domains[0].occupied && !guard.domains[0].closed {
+        guard.domains[0].closed = true;
         progress = true;
     }
-    for domain in 0..state.domains.len() {
-        if state.domains[domain].closed {
+    for domain in 0..guard.domains.len() {
+        if guard.domains[domain].closed {
             for &index in plan
                 .execution_domains_for_message(domain)
                 .iter()
                 .flat_map(|&id| plan.execution_domain(id).positions.iter())
             {
-                if state.operators[index]
+                if guard.operators[index]
                     .as_ref()
                     .is_some_and(|operator| !operator.closed && !matches!(&operator.executor, OperatorExecutor::Producer(producer) if producer.active))
                 {
                     if matches!(
-                        state.operators[index].as_ref().unwrap().executor,
+                        guard.operators[index].as_ref().unwrap().executor,
                         OperatorExecutor::Event(_)
                     ) {
-                        invoke_event(
-                            state,
+                        guard = invoke_event(
+                            guard,
+                            shared,
                             plan,
                             index,
                             NodeEvent::UpstreamClosed,
@@ -1313,24 +1318,24 @@ fn tick(
                             ),
                         )?;
                     }
-                    let operator = state.operators[index].as_mut().unwrap();
+                    let operator = guard.operators[index].as_mut().unwrap();
                     operator.closed = true;
                     operator.deadline = None;
                     progress = true;
                 }
             }
-        } else if domain > 0 && !state.domains[domain].occupied {
-            let operator = state.operators
+        } else if domain > 0 && !guard.domains[domain].occupied {
+            let operator = guard.operators
                 [plan.message_sources()[domain].expect("emission domain")]
             .as_ref()
             .unwrap();
             if operator.closed && operator.pending.is_empty() {
-                state.domains[domain].closed = true;
+                guard.domains[domain].closed = true;
                 progress = true;
             }
         }
     }
-    Ok(progress)
+    Ok((guard, progress))
 }
 
 fn event_callback(
@@ -1347,68 +1352,110 @@ fn event_callback(
     )
 }
 
-fn invoke_event(
-    state: &mut State,
+fn check_failure(state: &mut State, shared: &Shared) -> Result<(), StreamError> {
+    // Cancellation may be recorded before its waker acquires the scheduler lock.
+    if let Some(error) = state
+        .failure
+        .clone()
+        .or_else(|| shared.cancellation.failure())
+    {
+        state.failure.get_or_insert(error.clone());
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn invoke_event<'a>(
+    mut guard: MutexGuard<'a, State>,
+    shared: &'a Shared,
     plan: &StreamPlan,
     index: usize,
     event: NodeEvent,
     context: EventContext<'_>,
     mut callback: Option<StreamCallback>,
-) -> Result<(), StreamError> {
+) -> Result<MutexGuard<'a, State>, StreamError> {
     let _span = callback.as_ref().map(StreamCallback::enter);
+    // Only the coordinator accesses event operators; workers retain their own producer slots.
+    let mut operator = guard.operators[index].take().unwrap();
+    drop(guard);
     if let Some(callback) = callback.as_mut() {
         callback.started();
     }
-    let mut phase = FailurePhase::Execution;
-    let old_pending = state.operators[index].as_ref().unwrap().pending.len();
-    let result = (|| -> Result<(usize, Vec<String>), StreamError> {
-        let effects = catch_unwind(AssertUnwindSafe(|| {
-            let OperatorExecutor::Event(node) =
-                &mut state.operators[index].as_mut().unwrap().executor
-            else {
-                unreachable!("only event nodes receive callbacks");
-            };
-            node.on_event(event, &context)
-        }))
-        .map_err(panic_error)?
-        .with_context(|_| EventSnafu {
-            definition_id: plan.nodes()[index].definition_id.clone(),
-        })?;
-        phase = FailurePhase::Publication;
-        let count = effects.emissions.len();
-        let ports: std::collections::BTreeSet<_> = effects
+    let execution = catch_unwind(AssertUnwindSafe(|| {
+        let OperatorExecutor::Event(node) = &mut operator.executor else {
+            unreachable!("only event nodes receive callbacks");
+        };
+        let effects = node.on_event(event, &context)?;
+        let buffered = callback.as_ref().and_then(|_| node.buffered_items());
+        let ports: BTreeSet<_> = effects
             .emissions
             .iter()
             .flat_map(|emission| emission.result.outputs.keys().cloned())
             .collect();
-        apply_effects(state, plan, index, effects, context.now)?;
-        Ok((count, ports.into_iter().collect()))
+        Ok((effects, buffered, ports.into_iter().collect()))
+    }))
+    .map_err(panic_error)
+    .and_then(|result| {
+        result.with_context(|_| EventSnafu {
+            definition_id: plan.nodes()[index].definition_id.clone(),
+        })
+    });
+    let mut guard = shared.state.lock().unwrap();
+    guard.operators[index] = Some(operator);
+    if let Err(error) = check_failure(&mut guard, shared) {
+        drop(guard);
+        drop(execution);
+        if let Some(callback) = callback {
+            callback.failed(FailurePhase::Execution, error.to_string());
+        }
+        return Err(error);
+    }
+
+    let mut phase = FailurePhase::Execution;
+    let old_pending = guard.operators[index].as_ref().unwrap().pending.len();
+    let result = (|| -> Result<_, StreamError> {
+        let (effects, buffered, ports) = execution?;
+        phase = FailurePhase::Publication;
+        let count = effects.emissions.len();
+        apply_effects(&mut guard, plan, index, effects, context.now)?;
+        let flushed: Vec<_> = guard.operators[index]
+            .as_ref()
+            .unwrap()
+            .pending
+            .iter()
+            .skip(old_pending)
+            .filter_map(|emitted| {
+                let batch = emitted.emission.batch?;
+                let reason = match batch.reason {
+                    crate::FlushReason::SizeExceed => "size_exceed",
+                    crate::FlushReason::TimeoutExceed => "timeout_exceed",
+                    crate::FlushReason::UpstreamClosed => "upstream_closed",
+                };
+                Some((stream_message(emitted.message), batch.item_count, reason))
+            })
+            .collect();
+        Ok((count, ports, buffered, flushed))
     })();
     match result {
-        Ok((count, ports)) => {
+        Ok((count, ports, buffered, flushed)) => {
             if let Some(callback) = callback {
-                let operator = state.operators[index].as_ref().unwrap();
-                if let OperatorExecutor::Event(node) = &operator.executor
-                    && let Some(items) = node.buffered_items()
-                {
+                drop(guard);
+                if let Some(items) = buffered {
                     callback.buffered(items);
                 }
-                for emitted in operator.pending.iter().skip(old_pending) {
-                    if let Some(batch) = emitted.emission.batch {
-                        let reason = match batch.reason {
-                            crate::FlushReason::SizeExceed => "size_exceed",
-                            crate::FlushReason::TimeoutExceed => "timeout_exceed",
-                            crate::FlushReason::UpstreamClosed => "upstream_closed",
-                        };
-                        callback.flushed(stream_message(emitted.message), batch.item_count, reason);
-                    }
+                for (message, count, reason) in flushed {
+                    callback.flushed(message, count, reason);
                 }
                 callback.succeeded(count, ports);
+                guard = shared.state.lock().unwrap();
             }
-            Ok(())
+            check_failure(&mut guard, shared)?;
+            Ok(guard)
         }
         Err(error) => {
-            state.failure_node = Some(plan.nodes()[index].definition_id.to_string());
+            guard.failure_node = Some(plan.nodes()[index].definition_id.to_string());
+            guard.failure.get_or_insert(error.clone());
+            drop(guard);
             if let Some(callback) = callback {
                 callback.failed(phase, error.to_string());
             }
