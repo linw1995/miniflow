@@ -419,12 +419,12 @@ fn generate_scope(
         });
         let constructor = match node.kind.as_str() {
             crate::LOOP_ASSIGN_KIND => {
-                let target = crate::loops::assignment_target(&node.config).map_err(|message| {
-                    PlanError::InvalidLoopConfig {
-                        definition_id: id.clone(),
-                        message,
-                    }
-                })?;
+                let mut path: Vec<_> = static_scope
+                    .iter()
+                    .map(|id| DefinitionId::from(id.as_str()))
+                    .collect();
+                path.push(id.clone());
+                let target = crate::loops::assignment_target(&node.config, &path)?;
                 let variable = enclosing
                     .and_then(|loop_definition| {
                         loop_definition

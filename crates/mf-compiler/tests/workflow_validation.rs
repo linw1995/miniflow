@@ -1,7 +1,7 @@
 use mf_compiler::WorkflowDefinition;
 use mf_compiler::{
     Inputs, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry, Outputs, PortSpec,
-    TaskNode, ValueType, WorkflowCompileError, validate_definition,
+    TaskNode, TypeDepthError, ValueType, WorkflowCompileError, validate_definition,
 };
 use serde_json::{Value, json};
 
@@ -230,10 +230,13 @@ fn rejects_excessively_nested_instance_port_types() {
     let mut value = valid_definition();
     value["nodes"][0]["kind"] = json!("source.deep_type");
     let error = validation_error(value);
-    assert!(matches!(
-        error,
-        WorkflowCompileError::InvalidNodeMetadata { .. }
-    ));
+    assert!(matches!(error, WorkflowCompileError::PortTypeDepth { .. }));
+    let source = std::error::Error::source(&error)
+        .unwrap()
+        .downcast_ref::<TypeDepthError>()
+        .unwrap();
+    assert_eq!(source.depth, ValueType::MAX_DEPTH + 1);
+    assert_eq!(source.maximum, ValueType::MAX_DEPTH);
     let message = error.to_string();
     assert!(message.contains("source"));
     assert!(message.contains("output port `value`"));
