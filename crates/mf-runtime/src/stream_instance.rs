@@ -14,7 +14,7 @@ use std::{
     collections::{BTreeSet, VecDeque},
     error::Error,
     panic::{AssertUnwindSafe, catch_unwind},
-    sync::{Arc, Condvar, Mutex, Weak, mpsc},
+    sync::{Arc, Condvar, Mutex, MutexGuard, Weak, mpsc},
     task::{Wake, Waker},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -943,7 +943,7 @@ fn coordinate(
                     ExecutionDomainState::Complete;
             }
         }
-        if let Some(failure) = state.failure.clone() {
+        if let Err(failure) = check_failure(&mut state, shared) {
             drop(state);
             shared.cancellation.cancel(failure);
             shared.changed.notify_all();
@@ -952,8 +952,9 @@ fn coordinate(
         if let Some(domain) = state.delivered.take() {
             release_domain(&mut state, domain);
         }
-        match tick(&mut state, plan, workers, clock, shared) {
-            Ok(progress) => {
+        match tick(state, plan, workers, clock, shared) {
+            Ok((next_state, progress)) => {
+                state = next_state;
                 shared.changed.notify_all();
                 if state.domains.iter().all(|domain| domain.closed) && state.output.is_none() {
                     break;
@@ -966,7 +967,8 @@ fn coordinate(
                 }
             }
             Err(error) => {
-                state.failure = Some(error);
+                state = shared.state.lock().unwrap();
+                state.failure.get_or_insert(error);
                 shared.changed.notify_all();
                 continue;
             }
@@ -992,13 +994,13 @@ fn coordinate(
     }
 }
 
-fn tick(
-    state: &mut State,
+fn tick<'a>(
+    mut state: MutexGuard<'a, State>,
     plan: &Arc<StreamPlan>,
     workers: &WorkerPool<crate::worker::WorkerJob>,
     clock: &dyn StreamClock,
-    shared: &Arc<Shared>,
-) -> Result<bool, StreamError> {
+    shared: &'a Arc<Shared>,
+) -> Result<(MutexGuard<'a, State>, bool), StreamError> {
     let mut progress = false;
     for source in plan.message_sources().iter().skip(1) {
         let index = source.expect("emission domain");
@@ -1015,8 +1017,9 @@ fn tick(
             });
         if due.is_some() {
             state.operators[index].as_mut().unwrap().deadline = None;
-            invoke_event(
+            state = invoke_event(
                 state,
+                shared,
                 plan,
                 index,
                 NodeEvent::Timer,
@@ -1085,7 +1088,7 @@ fn tick(
                     outputs,
                 });
             } else {
-                release_domain(state, message_domain);
+                release_domain(&mut state, message_domain);
             }
             progress = true;
             continue;
@@ -1168,8 +1171,9 @@ fn tick(
                         progress = true;
                         continue;
                     }
-                    invoke_event(
+                    state = invoke_event(
                         state,
+                        shared,
                         plan,
                         index,
                         NodeEvent::Input(inputs),
@@ -1270,7 +1274,7 @@ fn tick(
                     outputs,
                 });
             } else {
-                release_domain(state, message_domain);
+                release_domain(&mut state, message_domain);
             }
         } else {
             state.domains[message_domain].frame = Some(frame);
@@ -1295,8 +1299,9 @@ fn tick(
                         state.operators[index].as_ref().unwrap().executor,
                         OperatorExecutor::Event(_)
                     ) {
-                        invoke_event(
+                        state = invoke_event(
                             state,
+                            shared,
                             plan,
                             index,
                             NodeEvent::UpstreamClosed,
@@ -1330,7 +1335,7 @@ fn tick(
             }
         }
     }
-    Ok(progress)
+    Ok((state, progress))
 }
 
 fn event_callback(
@@ -1347,68 +1352,110 @@ fn event_callback(
     )
 }
 
-fn invoke_event(
-    state: &mut State,
+fn check_failure(state: &mut State, shared: &Shared) -> Result<(), StreamError> {
+    // Cancellation may be recorded before its waker acquires the scheduler lock.
+    if let Some(error) = state
+        .failure
+        .clone()
+        .or_else(|| shared.cancellation.failure())
+    {
+        state.failure.get_or_insert(error.clone());
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn invoke_event<'a>(
+    mut state: MutexGuard<'a, State>,
+    shared: &'a Shared,
     plan: &StreamPlan,
     index: usize,
     event: NodeEvent,
     context: EventContext<'_>,
     mut callback: Option<StreamCallback>,
-) -> Result<(), StreamError> {
+) -> Result<MutexGuard<'a, State>, StreamError> {
     let _span = callback.as_ref().map(StreamCallback::enter);
+    // Only the coordinator accesses event operators; workers retain their own producer slots.
+    let mut operator = state.operators[index].take().unwrap();
+    drop(state);
     if let Some(callback) = callback.as_mut() {
         callback.started();
     }
-    let mut phase = FailurePhase::Execution;
-    let old_pending = state.operators[index].as_ref().unwrap().pending.len();
-    let result = (|| -> Result<(usize, Vec<String>), StreamError> {
-        let effects = catch_unwind(AssertUnwindSafe(|| {
-            let OperatorExecutor::Event(node) =
-                &mut state.operators[index].as_mut().unwrap().executor
-            else {
-                unreachable!("only event nodes receive callbacks");
-            };
-            node.on_event(event, &context)
-        }))
-        .map_err(panic_error)?
-        .with_context(|_| EventSnafu {
-            definition_id: plan.nodes()[index].definition_id.clone(),
-        })?;
-        phase = FailurePhase::Publication;
-        let count = effects.emissions.len();
-        let ports: std::collections::BTreeSet<_> = effects
+    let execution = catch_unwind(AssertUnwindSafe(|| {
+        let OperatorExecutor::Event(node) = &mut operator.executor else {
+            unreachable!("only event nodes receive callbacks");
+        };
+        let effects = node.on_event(event, &context)?;
+        let buffered = callback.as_ref().and_then(|_| node.buffered_items());
+        let ports: BTreeSet<_> = effects
             .emissions
             .iter()
             .flat_map(|emission| emission.result.outputs.keys().cloned())
             .collect();
-        apply_effects(state, plan, index, effects, context.now)?;
-        Ok((count, ports.into_iter().collect()))
+        Ok((effects, buffered, ports.into_iter().collect()))
+    }))
+    .map_err(panic_error)
+    .and_then(|result| {
+        result.with_context(|_| EventSnafu {
+            definition_id: plan.nodes()[index].definition_id.clone(),
+        })
+    });
+    let mut state = shared.state.lock().unwrap();
+    state.operators[index] = Some(operator);
+    if let Err(error) = check_failure(&mut state, shared) {
+        drop(state);
+        drop(execution);
+        if let Some(callback) = callback {
+            callback.failed(FailurePhase::Execution, error.to_string());
+        }
+        return Err(error);
+    }
+
+    let mut phase = FailurePhase::Execution;
+    let old_pending = state.operators[index].as_ref().unwrap().pending.len();
+    let result = (|| -> Result<_, StreamError> {
+        let (effects, buffered, ports) = execution?;
+        phase = FailurePhase::Publication;
+        let count = effects.emissions.len();
+        apply_effects(&mut state, plan, index, effects, context.now)?;
+        let flushed: Vec<_> = state.operators[index]
+            .as_ref()
+            .unwrap()
+            .pending
+            .iter()
+            .skip(old_pending)
+            .filter_map(|emitted| {
+                let batch = emitted.emission.batch?;
+                let reason = match batch.reason {
+                    crate::FlushReason::SizeExceed => "size_exceed",
+                    crate::FlushReason::TimeoutExceed => "timeout_exceed",
+                    crate::FlushReason::UpstreamClosed => "upstream_closed",
+                };
+                Some((stream_message(emitted.message), batch.item_count, reason))
+            })
+            .collect();
+        Ok((count, ports, buffered, flushed))
     })();
     match result {
-        Ok((count, ports)) => {
+        Ok((count, ports, buffered, flushed)) => {
             if let Some(callback) = callback {
-                let operator = state.operators[index].as_ref().unwrap();
-                if let OperatorExecutor::Event(node) = &operator.executor
-                    && let Some(items) = node.buffered_items()
-                {
+                drop(state);
+                if let Some(items) = buffered {
                     callback.buffered(items);
                 }
-                for emitted in operator.pending.iter().skip(old_pending) {
-                    if let Some(batch) = emitted.emission.batch {
-                        let reason = match batch.reason {
-                            crate::FlushReason::SizeExceed => "size_exceed",
-                            crate::FlushReason::TimeoutExceed => "timeout_exceed",
-                            crate::FlushReason::UpstreamClosed => "upstream_closed",
-                        };
-                        callback.flushed(stream_message(emitted.message), batch.item_count, reason);
-                    }
+                for (message, count, reason) in flushed {
+                    callback.flushed(message, count, reason);
                 }
                 callback.succeeded(count, ports);
+                state = shared.state.lock().unwrap();
             }
-            Ok(())
+            check_failure(&mut state, shared)?;
+            Ok(state)
         }
         Err(error) => {
             state.failure_node = Some(plan.nodes()[index].definition_id.to_string());
+            state.failure.get_or_insert(error.clone());
+            drop(state);
             if let Some(callback) = callback {
                 callback.failed(phase, error.to_string());
             }
