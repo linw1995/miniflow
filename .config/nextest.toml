@@ -4,6 +4,11 @@ experimental = ["setup-scripts"]
 [test-groups.shared-cargo]
 max-threads = 1
 
+[scripts.setup.package-dependencies]
+command = ["cargo", "fetch", "--locked"]
+capture-stdout = true
+capture-stderr = true
+
 [scripts.setup.build-cache]
 command = ["python3", "scripts/nextest-build-cache.py"]
 capture-stdout = true
@@ -24,6 +29,7 @@ filter = '''
     test(=repairs_partial_projects_and_updates_configuration) |
     test(=unknown_plugin_reports_node_and_kind)
 )) |
+(binary_id(=mf-cli::packaged_cli) & test(=packaged_cli_acceptance)) |
 (binary_id(=mf-cli::examples) &
     test(=documented_examples_compile_and_produce_expected_outputs)) |
 (binary_id(=mf-compiler::runner_validation) &
@@ -47,6 +53,11 @@ filter = '''
 '''
 setup = "build-cache"
 
+[[profile.default.scripts]]
+platform = 'cfg(unix)'
+filter = 'binary_id(=mf-cli::packaged_cli) & test(=packaged_cli_acceptance)'
+setup = "package-dependencies"
+
 [[profile.default.overrides]]
 platform = 'cfg(unix)'
 # Serialize generated builds that share the prewarmed Cargo target.
@@ -62,6 +73,7 @@ filter = '''
     test(=repairs_partial_projects_and_updates_configuration) |
     test(=unknown_plugin_reports_node_and_kind)
 )) |
+(binary_id(=mf-cli::packaged_cli) & test(=packaged_cli_acceptance)) |
 (binary_id(=mf-cli::examples) &
     test(=documented_examples_compile_and_produce_expected_outputs)) |
 (binary_id(=mf-compiler::runner_validation) &
@@ -94,10 +106,6 @@ slow-timeout = { period = "60s", terminate-after = 20 }
 
 [profile.ci]
 inherits = "default"
-
-[[profile.ci.overrides]]
-filter = 'binary_id(=mf-cli::runner_observability) & test(=generated_runner_describes_embedded_graph_and_exports_correlated_otel)'
-success-output = "immediate"
 
 # Reuse the shared target for more generated builds on constrained CI workers.
 [[profile.ci.scripts]]

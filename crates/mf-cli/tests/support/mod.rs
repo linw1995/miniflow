@@ -45,7 +45,10 @@ pub fn checked(command: &mut Command) -> Output {
 }
 
 fn cargo_binary() -> OsString {
-    env::var_os("CARGO").unwrap_or_else(|| "cargo".into())
+    // Fixture builds must use their own target instead of the nextest wrapper's shared target.
+    env::var_os("MF_TEST_REAL_CARGO")
+        .or_else(|| env::var_os("CARGO"))
+        .unwrap_or_else(|| "cargo".into())
 }
 
 fn checksum(path: &Path) -> String {
@@ -118,7 +121,9 @@ impl PackagedCli {
         let root = directory.path();
         let workspace = workspace();
         let target = root.join("setup-target");
-        let vendor = root.join("vendor");
+        let vendor = env::var_os("MF_TEST_VENDOR_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.join("vendor"));
         let config = root.join("source.toml");
         let real_cargo = cargo_binary();
         let cargo = || {
@@ -130,18 +135,27 @@ impl PackagedCli {
         };
 
         // A filtered test run may not have fetched dependencies for other targets.
-        checked(cargo().args(["fetch", "--locked"]));
-        checked(
-            cargo()
-                .args([
-                    "vendor",
-                    "--offline",
-                    "--locked",
-                    "--respect-source-config",
-                    "--versioned-dirs",
-                ])
-                .arg(&vendor),
-        );
+        if env::var_os("MF_TEST_VENDOR_DIR").is_none() {
+            checked(cargo().args(["fetch", "--locked"]));
+            checked(
+                cargo()
+                    .args([
+                        "vendor",
+                        "--offline",
+                        "--locked",
+                        "--respect-source-config",
+                        "--versioned-dirs",
+                    ])
+                    .arg(&vendor),
+            );
+        }
+        if let Some(seed) = env::var_os("MF_TEST_TARGET_DIR") {
+            let seed = PathBuf::from(seed).join("release");
+            // Copy dependency artifacts while keeping fixture writes and executables isolated.
+            for name in ["deps", ".fingerprint", "build"] {
+                copy_directory(&seed.join(name), &target.join("release").join(name));
+            }
+        }
         fs::write(&config, format!(
             "[source.crates-io]\nreplace-with = \"mf-package-fixture\"\n[source.mf-package-fixture]\ndirectory = {}\n",
             serde_json::to_string(&vendor).unwrap(),
@@ -169,15 +183,20 @@ impl PackagedCli {
                 &vendor,
             );
         }
-        checked(cargo().args([
-            "build",
-            "--release",
-            "--locked",
-            "--offline",
-            "-p",
-            "mf-cli",
-            "--no-default-features",
-        ]));
+        checked(
+            cargo()
+                .args([
+                    "build",
+                    "--release",
+                    "--locked",
+                    "--offline",
+                    "-p",
+                    "mf-cli",
+                    "--no-default-features",
+                ])
+                .arg("--config")
+                .arg(&config),
+        );
         let cli = root
             .join("installed")
             .join(format!("mf{}", env::consts::EXE_SUFFIX));
@@ -270,6 +289,7 @@ impl PackagedCli {
             .arg("--build-dir")
             .arg(build)
             .env("CARGO_HOME", &self.cargo_home)
+            .env_remove("MF_TEST_SOURCE_CONFIG")
             .env(
                 "MF_DEV_SUPPORT_ROOT",
                 self.root().join("unavailable-checkout"),
