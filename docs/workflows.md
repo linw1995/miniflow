@@ -383,8 +383,11 @@ startup frame; producers execute independently and emit messages into their own 
 task-only graph finishes without external input. A producer reached through startup tasks also starts once.
 
 Use `builtin.readline` to read UTF-8 text lines from a file or stdin. Its optional string input `path`
-selects a text file when supplied; omission selects stdin. Its string output `line` preserves blank lines and
-whitespace and strips LF/CRLF delimiters. JSON parsing belongs in downstream nodes. Other StreamNodes can
+selects a regular text file when supplied, including through a symbolic link to a regular file. FIFO paths,
+directories, devices, and sockets are unsupported and cause execution to fail. A FIFO path is rejected
+without waiting for a writer. Omission selects stdin, which can be a pipe or terminal.
+Its string output `line` preserves blank lines and whitespace and strips LF/CRLF delimiters. JSON parsing
+belongs in downstream nodes. Other StreamNodes can
 obtain data from files or services using their startup parameters. Every source is an ordinary declared node;
 there is no injected node or global input type. Initial event nodes require an upstream activation source.
 

@@ -16,3 +16,7 @@ mf-telemetry.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 snafu.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# Nonblocking text file opens and terminal ownership.
+libc.workspace = true

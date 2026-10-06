@@ -5,8 +5,8 @@ use mf_runtime::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use snafu::{OptionExt, ResultExt, Snafu};
-use std::{error::Error, fs::File, io, path::PathBuf};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
+use std::{error::Error, fs::OpenOptions, io, path::PathBuf};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -20,6 +20,10 @@ enum ReadlineError {
     InvalidPath,
     #[snafu(display("could not open text file {path:?}: {source}"))]
     InputFile { path: PathBuf, source: io::Error },
+    #[snafu(display("could not inspect text file {path:?}: {source}"))]
+    InputMetadata { path: PathBuf, source: io::Error },
+    #[snafu(display("readline path {path:?} requires a regular file"))]
+    UnsupportedFileType { path: PathBuf },
 }
 
 impl From<ReadlineError> for NodeExecutionError {
@@ -37,9 +41,18 @@ impl StreamNode for Readline {
     ) -> Result<(), NodeExecutionError> {
         if let Some(path) = inputs.get("path") {
             let path = path.as_str().context(InvalidPathSnafu)?;
-            let file = File::open(path).context(InputFileSnafu {
-                path: PathBuf::from(path),
-            })?;
+            let mut options = OpenOptions::new();
+            options.read(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                // Reject FIFOs without waiting for a writer, and avoid claiming a terminal.
+                options.custom_flags(libc::O_NONBLOCK | libc::O_NOCTTY);
+            }
+            let file = options.open(path).context(InputFileSnafu { path })?;
+            let metadata = file.metadata().context(InputMetadataSnafu { path })?;
+            // Inspect the opened descriptor so path replacement cannot bypass the contract.
+            ensure!(metadata.is_file(), UnsupportedFileTypeSnafu { path });
             let mut input = TextInput::new(file);
             let cancellation = context.cancellation();
             while let Some(line) = input.next_line(&cancellation)? {

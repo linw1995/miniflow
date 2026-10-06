@@ -3,11 +3,7 @@
 use mf_compiler::{CompileRequest, RunnerOptions, SupportPackages, compile_project_with_options};
 use nix::{
     pty::{Winsize, openpty},
-    sys::{
-        stat::Mode,
-        termios::{LocalFlags, tcgetattr},
-    },
-    unistd::mkfifo,
+    sys::termios::{LocalFlags, tcgetattr},
 };
 use serde_json::{Value, json};
 use std::{
@@ -160,7 +156,12 @@ fn run_tui(
             let text = terminal.text();
             screen.push_str(&text);
             screen.push('\n');
-            if interrupt && !interrupted && text.contains("Observed calls: 1") {
+            if interrupt
+                && !interrupted
+                && text.contains("Observed calls:")
+                && !text.contains("Observed calls: 0")
+                && !text.contains("Exited:")
+            {
                 master.write_all(b"\x03").unwrap();
                 interrupted = true;
             }
@@ -292,29 +293,13 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
     assert_eq!(status.code(), Some(1), "{screen}");
     assert!(screen.contains("Workflow failure (input)"), "{screen}");
 
-    let fifo = root.join("interrupt.jsonl");
-    mkfifo(&fifo, Mode::S_IRUSR | Mode::S_IWUSR).unwrap();
-    let interrupt_parameters = json!({"read":{"path":fifo}}).to_string();
-    let writer_path = fifo.clone();
-    let writer = thread::spawn(move || -> std::io::Result<()> {
-        let mut writer = fs::OpenOptions::new().write(true).open(writer_path)?;
-        for _ in 0..100 {
-            if let Err(error) = writer.write_all(b"line\n") {
-                if error.kind() == std::io::ErrorKind::BrokenPipe {
-                    return Ok(());
-                }
-                return Err(error);
-            }
-            thread::sleep(Duration::from_millis(250));
-        }
-        Ok(())
-    });
+    // Keep a regular-file stream active until the TUI sends its interrupt.
+    fs::write(&data, "line\n".repeat(1_000_000)).unwrap();
     let (status, _, screen) = run_tui(
         &source,
-        &["--inputs".into(), interrupt_parameters.into()],
+        &["--inputs".into(), parameters.into()],
         true,
         false,
     );
     assert_eq!(status.code(), Some(130), "{screen}");
-    writer.join().unwrap().unwrap();
 }

@@ -1320,6 +1320,7 @@ dependencies = [
  "mf-telemetry",
  "mfn-code",
  "mfn-core",
+ "nix",
  "opentelemetry",
  "opentelemetry_sdk",
  "prettyplease",
@@ -1406,6 +1407,7 @@ name = "mfn-core"
 version = "0.1.0"
 dependencies = [
  "inventory",
+ "libc",
  "mf-runtime",
  "mf-telemetry",
  "serde",
