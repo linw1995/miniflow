@@ -1,5 +1,21 @@
-use mf_compiler::{BuildDirectory, default_build_directory};
-use std::fs;
+use mf_compiler::{BuildDirectory, CacheError, default_build_directory};
+use std::{error::Error, fs};
+
+#[test]
+fn invalid_ownership_metadata_preserves_json_error_sources() {
+    let root = tempfile::tempdir().unwrap();
+    let definition = root.path().join("flow.json");
+    let directory = root.path().join("build");
+    drop(BuildDirectory::open(&definition, Some(&directory)).unwrap());
+    let marker = fs::canonicalize(&directory).unwrap().join(".mf-owner.json");
+    fs::write(&marker, "{ invalid }").unwrap();
+
+    let error = BuildDirectory::open(&definition, Some(&directory))
+        .err()
+        .unwrap();
+    assert!(error.source().unwrap().is::<serde_json::Error>());
+    assert!(matches!(&error, CacheError::MetadataParse { path, .. } if path == &marker));
+}
 
 #[test]
 fn reuses_owned_directories_and_rejects_foreign_or_incompatible_entries() {
