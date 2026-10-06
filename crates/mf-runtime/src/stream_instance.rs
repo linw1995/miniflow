@@ -1115,7 +1115,7 @@ fn tick<'a>(
                 }
                 let is_producer = matches!(&operator.executor, OperatorExecutor::Producer(_));
                 let _ = operator;
-                let mut callback = event_callback(
+                let callback = event_callback(
                     shared,
                     plan,
                     index,
@@ -1127,18 +1127,24 @@ fn tick<'a>(
                     },
                 );
                 let _context = callback.as_ref().map(StreamCallback::enter);
-                let inputs = frame
+                let inputs = match frame
                     .context
                     .event_inputs(&plan.nodes()[index], plan.dependencies(index))
-                    .inspect_err(|error| {
-                        if let Some(callback) = callback.take() {
+                {
+                    Ok(inputs) => inputs,
+                    Err(error) => {
+                        guard.failure_node = Some(plan.nodes()[index].definition_id.to_string());
+                        drop(guard);
+                        if let Some(callback) = callback {
                             callback.failed(FailurePhase::Dependency, error.to_string());
                         }
-                        guard.failure_node = Some(plan.nodes()[index].definition_id.to_string());
-                    })
-                    .context(WorkflowSnafu {
-                        message: frame.message,
-                    })?;
+                        guard = shared.state.lock().unwrap();
+                        check_failure(&mut guard, shared)?;
+                        return Err(error).context(WorkflowSnafu {
+                            message: frame.message,
+                        });
+                    }
+                };
                 if let Some(inputs) = inputs {
                     if is_producer {
                         let observation = shared.observation.as_ref().map(|observation| {
@@ -1204,7 +1210,10 @@ fn tick<'a>(
                             source_output: dependency.source_output.clone().into_owned(),
                         })
                         .collect();
+                    drop(guard);
                     callback.skipped(causes.into_iter().collect());
+                    guard = shared.state.lock().unwrap();
+                    check_failure(&mut guard, shared)?;
                 }
                 if is_producer && message_domain == 0 {
                     guard.operators[index].as_mut().unwrap().closed = true;
