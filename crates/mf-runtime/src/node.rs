@@ -1,6 +1,6 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use snafu::{IntoError, Snafu};
+use snafu::{IntoError, ResultExt, Snafu, ensure};
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
@@ -67,42 +67,20 @@ pub enum TypeCompatibility {
     Incompatible,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("path `{path}`: expected {expected}, found {actual}"))]
 pub struct TypeMismatch {
     pub path: String,
     pub expected: ValueType,
     pub actual: &'static str,
 }
 
-impl fmt::Display for TypeMismatch {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "path `{}`: expected {}, found {}",
-            self.path, self.expected, self.actual
-        )
-    }
-}
-
-impl Error for TypeMismatch {}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
+#[snafu(display("type nesting depth {depth} exceeds maximum {maximum}"))]
 pub struct TypeDepthError {
     pub depth: usize,
     pub maximum: usize,
 }
-
-impl fmt::Display for TypeDepthError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "type nesting depth {} exceeds maximum {}",
-            self.depth, self.maximum
-        )
-    }
-}
-
-impl Error for TypeDepthError {}
 
 impl ValueType {
     pub const MAX_DEPTH: usize = 16;
@@ -230,12 +208,13 @@ impl ValueType {
         let mut current = self;
         while let Self::List(inner) | Self::Map(inner) = current {
             depth += 1;
-            if depth > Self::MAX_DEPTH {
-                return Err(TypeDepthError {
+            ensure!(
+                depth <= Self::MAX_DEPTH,
+                TypeDepthSnafu {
                     depth,
-                    maximum: Self::MAX_DEPTH,
-                });
-            }
+                    maximum: Self::MAX_DEPTH
+                }
+            );
             current = inner;
         }
         Ok(())
@@ -287,15 +266,15 @@ impl ValueType {
             }
             _ => false,
         };
-        if valid {
-            Ok(())
-        } else {
-            Err(TypeMismatch {
+        ensure!(
+            valid,
+            TypeMismatchSnafu {
                 path: String::new(),
                 expected: self.clone(),
                 actual: actual_type(value),
-            })
-        }
+            }
+        );
+        Ok(())
     }
 }
 
@@ -441,36 +420,32 @@ impl NodePorts {
         for derivation in derivations {
             let output = derivation.output();
             let Some(port) = self.outputs.iter().find(|port| port.name == output) else {
-                return Err(OutputDerivationError::UnknownOutput {
+                return UnknownOutputSnafu {
                     node_id: node_id.to_owned(),
                     output: output.to_owned(),
-                });
+                }
+                .fail();
             };
-            if !seen.insert(output) {
-                return Err(OutputDerivationError::DuplicateOutput {
-                    node_id: node_id.to_owned(),
-                    output: output.to_owned(),
-                });
-            }
+            ensure!(
+                seen.insert(output),
+                DuplicateOutputSnafu { node_id, output }
+            );
             match derivation {
                 OutputDerivation::Literal { value, .. } => {
-                    port.value_type.validate_shared(value).map_err(|source| {
-                        OutputDerivationError::LiteralTypeMismatch {
-                            node_id: node_id.to_owned(),
-                            output: output.to_owned(),
-                            source,
-                        }
-                    })?
+                    port.value_type
+                        .validate_shared(value)
+                        .context(LiteralTypeMismatchSnafu { node_id, output })?
                 }
                 OutputDerivation::ForwardInput { input, .. }
                 | OutputDerivation::CollectInput { input, .. }
                     if !self.inputs.iter().any(|port| port.name == *input) =>
                 {
-                    return Err(OutputDerivationError::UnknownInput {
+                    return UnknownInputSnafu {
                         node_id: node_id.to_owned(),
                         output: output.to_owned(),
                         input: input.clone(),
-                    });
+                    }
+                    .fail();
                 }
                 OutputDerivation::ForwardInput { .. } | OutputDerivation::CollectInput { .. } => {}
             }

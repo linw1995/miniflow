@@ -13,7 +13,7 @@ pub mod wire;
 
 pub const SNAPSHOT_CAPTURE_ENV: &str = "MF_CAPTURE_SNAPSHOTS";
 
-use snafu::Snafu;
+use snafu::{Snafu, ensure};
 
 pub const INSTRUMENTATION_SCOPE: &str = "mf.workflow";
 pub const EVENT_SCHEMA_VERSION: i64 = 1;
@@ -28,22 +28,23 @@ pub const MAX_LOOP_SCHEDULED_STEPS: i64 = 10_000;
 pub enum ContractError {
     #[snafu(display("invalid observation contract: {message}"))]
     Invalid { message: String },
+    #[snafu(display("invalid run ID: {source}"))]
+    RunId { source: uuid::Error },
+    #[snafu(display("invalid trace ID: {source}"))]
+    TraceId { source: std::num::ParseIntError },
+    #[snafu(display("invalid span ID: {source}"))]
+    SpanId { source: std::num::ParseIntError },
     #[snafu(display("invalid observation JSON: {source}"), context(false))]
     Json { source: serde_json::Error },
 }
 
 fn invalid(message: impl Into<String>) -> ContractError {
-    ContractError::Invalid {
-        message: message.into(),
-    }
+    InvalidSnafu { message }.build()
 }
 
 fn require(condition: bool, message: impl Into<String>) -> Result<(), ContractError> {
-    if condition {
-        Ok(())
-    } else {
-        Err(invalid(message))
-    }
+    ensure!(condition, InvalidSnafu { message });
+    Ok(())
 }
 
 /// Counts and monotonic offsets use OTel's nonnegative signed integer range.

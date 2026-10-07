@@ -61,6 +61,10 @@ enum IngestError {
     Contract { source: mf_telemetry::ContractError },
     #[snafu(transparent)]
     State { source: StateError },
+    #[snafu(transparent)]
+    Snapshot {
+        source: Arc<crate::snapshots::CaptureError>,
+    },
     #[snafu(display("{message}"))]
     Invalid { message: String },
 }
@@ -404,15 +408,12 @@ fn receive_snapshot(record: LogRecord, context: &Context) -> Result<(), IngestEr
         }
         .fail();
     }
-    match context
+    context
         .snapshots
         .lock()
         .expect("snapshot capture was not poisoned")
-        .admit(record)
-    {
-        Ok(()) => Ok(()),
-        Err(message) => Err(InvalidSnafu { message }.build()),
-    }
+        .admit(record)?;
+    Ok(())
 }
 
 fn receive_log(record: LogRecord, context: &Context) -> Result<(), IngestError> {

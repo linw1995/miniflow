@@ -18,7 +18,7 @@ use mf_telemetry::{
     identity::WorkflowId,
 };
 use serde_json::Value;
-use snafu::{ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
@@ -1086,8 +1086,16 @@ pub enum WorkflowExecutionError {
 
 #[derive(Debug, Snafu)]
 pub enum DescriptionError {
+    #[snafu(display("invalid observation setup: {message}"), visibility(pub))]
+    InvalidObservation { message: String },
     #[snafu(display("compiled workflow has incomplete or duplicate node definitions"))]
     InvalidPlan,
+    #[snafu(display("could not order described Loop body at {path:?}: {source}"))]
+    DescriptionOrder {
+        path: Vec<String>,
+        #[snafu(source(from(WorkflowCompileError, Box::new)))]
+        source: Box<WorkflowCompileError>,
+    },
     #[snafu(display("could not describe node `{definition_id}`"))]
     MissingNode { definition_id: DefinitionId },
     #[snafu(display("invalid workflow description: {source}"), visibility(pub))]
@@ -1101,19 +1109,17 @@ pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription,
         .iter()
         .map(|node| (node.id.as_str(), node))
         .collect();
-    if definitions.len() != plan.definition.nodes.len()
-        || plan.execution_order.len() != plan.definition.nodes.len()
-    {
-        return Err(DescriptionError::InvalidPlan);
-    }
+    ensure!(
+        definitions.len() == plan.definition.nodes.len()
+            && plan.execution_order.len() == plan.definition.nodes.len(),
+        InvalidPlanSnafu
+    );
     let mut nodes = Vec::with_capacity(plan.execution_order.len());
     for definition_id in &plan.execution_order {
         let id = definition_id.as_str();
-        let definition = definitions
-            .get(id)
-            .ok_or_else(|| DescriptionError::MissingNode {
-                definition_id: definition_id.clone(),
-            })?;
+        let definition = definitions.get(id).with_context(|| MissingNodeSnafu {
+            definition_id: definition_id.clone(),
+        })?;
         nodes.push(NodeDescription {
             id: id.into(),
             kind: definition.kind.clone(),
@@ -1197,7 +1203,8 @@ fn describe_loop_bodies(
         };
         path.push(node.id.to_string());
         let body = crate::loops::body_definition(&loop_definition.body, &definition.dependencies);
-        let order = structural_order_graph(&body).map_err(|_| DescriptionError::InvalidPlan)?;
+        let order = structural_order_graph(&body)
+            .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
         let nodes_by_id: BTreeMap<_, _> = body.nodes.iter().map(|node| (&node.id, node)).collect();
         bodies.push(LoopBodyDescription {
             path: path.clone(),

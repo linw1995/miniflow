@@ -11,6 +11,7 @@ use opentelemetry::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
+use snafu::ResultExt;
 use std::time::{Duration, UNIX_EPOCH};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -25,8 +26,8 @@ impl TraceContext {
         self.ids().map(|_| ())
     }
     fn ids(&self) -> Result<(TraceId, SpanId), ContractError> {
-        let trace = TraceId::from_hex(&self.trace_id).map_err(|e| crate::invalid(e.to_string()))?;
-        let span = SpanId::from_hex(&self.span_id).map_err(|e| crate::invalid(e.to_string()))?;
+        let trace = TraceId::from_hex(&self.trace_id).context(crate::TraceIdSnafu)?;
+        let span = SpanId::from_hex(&self.span_id).context(crate::SpanIdSnafu)?;
         require(
             trace != TraceId::INVALID
                 && span != SpanId::INVALID

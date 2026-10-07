@@ -7,8 +7,8 @@ use opentelemetry_sdk::{
     logs::{BatchConfigBuilder as LogBatchConfigBuilder, BatchLogProcessor, SdkLoggerProvider},
     trace::{BatchConfigBuilder as SpanBatchConfigBuilder, BatchSpanProcessor, SdkTracerProvider},
 };
-use snafu::{ResultExt, Snafu};
-use std::{env, time::Duration};
+use snafu::{IntoError, OptionExt, ResultExt, Snafu, ensure};
+use std::{env, sync::Arc, time::Duration};
 
 pub const INTERACTIVE_BATCH_DELAY: Duration = Duration::from_millis(100);
 pub const EXPORT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -27,6 +27,18 @@ pub enum SetupError {
     #[snafu(display("could not configure OTLP logs: {source}"))]
     Logs {
         source: opentelemetry_otlp::ExporterBuildError,
+    },
+}
+
+#[derive(Debug, Snafu)]
+pub enum ShutdownError {
+    #[snafu(display("OTLP logs: {source}"))]
+    LogsShutdown {
+        source: opentelemetry_sdk::error::OTelSdkError,
+    },
+    #[snafu(display("OTLP traces: {source}"))]
+    TracesShutdown {
+        source: opentelemetry_sdk::error::OTelSdkError,
     },
 }
 
@@ -114,13 +126,13 @@ impl TelemetryProviders {
     }
 
     /// Ends both pipelines within separate finite deadlines after a handled run.
-    pub fn shutdown(self) -> Vec<String> {
+    pub fn shutdown(self) -> Vec<ShutdownError> {
         let mut diagnostics = Vec::new();
         if let Err(error) = self.logs.shutdown_with_timeout(EXPORT_TIMEOUT) {
-            diagnostics.push(format!("OTLP logs: {error}"));
+            diagnostics.push(LogsShutdownSnafu.into_error(error));
         }
         if let Err(error) = self.traces.shutdown_with_timeout(EXPORT_TIMEOUT) {
-            diagnostics.push(format!("OTLP traces: {error}"));
+            diagnostics.push(TracesShutdownSnafu.into_error(error));
         }
         diagnostics
     }
@@ -130,12 +142,40 @@ fn configured(key: &str) -> bool {
     env::var(key).is_ok_and(|value| !value.trim().is_empty())
 }
 
+#[derive(Debug, Snafu)]
+pub enum SnapshotExportError {
+    #[snafu(transparent)]
+    Setup { source: SetupError },
+    #[snafu(transparent)]
+    Packet {
+        source: crate::snapshot::SnapshotError,
+    },
+    #[snafu(display("snapshot capture requires an OTLP logs endpoint"))]
+    MissingEndpoint,
+    #[snafu(display("snapshot exporter is closed"))]
+    Closed,
+    #[snafu(display("snapshot sequence overflow"))]
+    SequenceOverflow,
+    #[snafu(display("snapshot export failed: {source}"))]
+    Delivery {
+        source: Arc<opentelemetry_sdk::error::OTelSdkError>,
+    },
+    #[snafu(display("could not flush snapshot logs: {source}"))]
+    Flush {
+        source: opentelemetry_sdk::error::OTelSdkError,
+    },
+    #[snafu(display("could not shut down snapshot logs: {source}"))]
+    Shutdown {
+        source: opentelemetry_sdk::error::OTelSdkError,
+    },
+}
+
 const SNAPSHOT_BATCH_SIZE: usize = 64;
 
 #[derive(Debug)]
 struct SnapshotLogExporter<E> {
     inner: E,
-    error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    error: std::sync::Arc<std::sync::Mutex<Option<Arc<opentelemetry_sdk::error::OTelSdkError>>>>,
 }
 
 impl<E: opentelemetry_sdk::logs::LogExporter> opentelemetry_sdk::logs::LogExporter
@@ -147,10 +187,19 @@ impl<E: opentelemetry_sdk::logs::LogExporter> opentelemetry_sdk::logs::LogExport
     ) -> opentelemetry_sdk::error::OTelSdkResult {
         let result = self.inner.export(batch).await;
         if let Err(error) = &result {
+            use opentelemetry_sdk::error::OTelSdkError;
+            // The SDK error is not Clone; retain an equivalent typed failure for later calls.
+            let cached = match error {
+                OTelSdkError::AlreadyShutdown => OTelSdkError::AlreadyShutdown,
+                OTelSdkError::Timeout(duration) => OTelSdkError::Timeout(*duration),
+                OTelSdkError::InternalFailure(message) => {
+                    OTelSdkError::InternalFailure(message.clone())
+                }
+            };
             self.error
                 .lock()
                 .expect("snapshot exporter was not poisoned")
-                .get_or_insert_with(|| error.to_string());
+                .get_or_insert_with(|| Arc::new(cached));
         }
         result
     }
@@ -170,7 +219,7 @@ pub struct SnapshotExporter {
     run: String,
     sequence: usize,
     buffered: usize,
-    error: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    error: std::sync::Arc<std::sync::Mutex<Option<Arc<opentelemetry_sdk::error::OTelSdkError>>>>,
     closed: bool,
 }
 
@@ -178,16 +227,16 @@ impl SnapshotExporter {
     pub fn from_env(
         workflow: crate::identity::WorkflowId,
         run: crate::identity::RunId,
-    ) -> Result<Self, String> {
-        if !configured("OTEL_EXPORTER_OTLP_ENDPOINT")
-            && !configured("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT")
-        {
-            return Err("snapshot capture requires an OTLP logs endpoint".into());
-        }
+    ) -> Result<Self, SnapshotExportError> {
+        ensure!(
+            configured("OTEL_EXPORTER_OTLP_ENDPOINT")
+                || configured("OTEL_EXPORTER_OTLP_LOGS_ENDPOINT"),
+            MissingEndpointSnafu
+        );
         let client = reqwest::blocking::Client::builder()
             .timeout(EXPORT_TIMEOUT)
             .build()
-            .map_err(|error| error.to_string())?;
+            .context(HttpClientSnafu)?;
         let inner = LogExporter::builder()
             .with_http()
             .with_protocol(Protocol::HttpBinary)
@@ -195,7 +244,7 @@ impl SnapshotExporter {
             .with_http_client(client)
             .with_max_request_body_size(MAX_REQUEST_BYTES)
             .build()
-            .map_err(|error| error.to_string())?;
+            .context(LogsSnafu)?;
         Ok(Self::with_exporter(workflow, run, inner))
     }
 
@@ -239,12 +288,10 @@ impl SnapshotExporter {
         }
     }
 
-    pub fn emit(&mut self, body: serde_json::Value) -> Result<(), String> {
+    pub fn emit(&mut self, body: serde_json::Value) -> Result<(), SnapshotExportError> {
         use opentelemetry::logs::Logger as _;
         self.check_error()?;
-        if self.closed {
-            return Err("snapshot exporter is closed".into());
-        }
+        ensure!(!self.closed, ClosedSnafu);
         for packet in crate::snapshot::packets(self.sequence, body)? {
             self.check_error()?;
             let mut record = self.logger.create_log_record();
@@ -260,25 +307,29 @@ impl SnapshotExporter {
         self.sequence = self
             .sequence
             .checked_add(1)
-            .ok_or("snapshot sequence overflow")?;
+            .context(SequenceOverflowSnafu)?;
         Ok(())
     }
 
-    fn check_error(&self) -> Result<(), String> {
+    fn check_error(&self) -> Result<(), SnapshotExportError> {
         self.error
             .lock()
             .expect("snapshot exporter was not poisoned")
             .clone()
             .map_or(Ok(()), Err)
+            .context(DeliverySnafu)
     }
 
-    pub fn flush(&mut self) -> Result<(), String> {
-        self.logs.force_flush().map_err(|error| error.to_string())?;
+    pub fn flush(&mut self) -> Result<(), SnapshotExportError> {
+        let result = self.logs.force_flush().context(FlushSnafu);
+        // Prefer the exporter failure over the SDK's flush summary of that failure.
+        self.check_error()?;
+        result?;
         self.buffered = 0;
-        self.check_error()
+        Ok(())
     }
 
-    pub fn finish(&mut self) -> Result<(), String> {
+    pub fn finish(&mut self) -> Result<(), SnapshotExportError> {
         if self.closed {
             return self.check_error();
         }
@@ -287,7 +338,7 @@ impl SnapshotExporter {
         let shutdown = self
             .logs
             .shutdown_with_timeout(EXPORT_TIMEOUT)
-            .map_err(|error| error.to_string());
+            .context(ShutdownSnafu);
         result.and(shutdown).and_then(|_| self.check_error())
     }
 }
@@ -362,8 +413,22 @@ mod snapshot_tests {
         exporter
             .emit(serde_json::json!({"record":"header"}))
             .unwrap();
-        assert!(exporter.flush().is_err());
-        assert!(exporter.emit(serde_json::json!({"record":"end"})).is_err());
-        assert!(exporter.finish().is_err());
+        use std::error::Error;
+        for error in [
+            exporter.flush().unwrap_err(),
+            exporter
+                .emit(serde_json::json!({"record":"end"}))
+                .unwrap_err(),
+            exporter.finish().unwrap_err(),
+        ] {
+            let source = error
+                .source()
+                .unwrap()
+                .downcast_ref::<Arc<OTelSdkError>>()
+                .unwrap();
+            assert!(
+                matches!(source.as_ref(), OTelSdkError::InternalFailure(message) if message == "delivery failed")
+            );
+        }
     }
 }

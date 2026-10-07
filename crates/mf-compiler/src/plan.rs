@@ -10,7 +10,7 @@ use proc_macro2::{Span, TokenStream};
 #[cfg(feature = "codegen")]
 use quote::{format_ident, quote};
 use serde::{Deserialize, Serialize};
-use snafu::{ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::collections::BTreeMap;
 #[cfg(feature = "codegen")]
 use std::collections::BTreeSet;
@@ -90,42 +90,44 @@ impl CompiledWorkflow {
         &self,
         observer: &mf_telemetry::observation::Observer,
         run_id: mf_telemetry::identity::RunId,
-    ) -> Result<mf_runtime::RunObservation, mf_telemetry::ContractError> {
-        if self.definition.execution.is_some() {
-            return Err(mf_telemetry::ContractError::Invalid {
-                message: "use start_stream_observation for streaming workflows".into(),
-            });
-        }
+    ) -> Result<mf_runtime::RunObservation, crate::DescriptionError> {
+        ensure!(
+            self.definition.execution.is_none(),
+            crate::compiler::InvalidObservationSnafu {
+                message: "use start_stream_observation for streaming workflows",
+            }
+        );
         if self.definition.version != mf_runtime::WorkflowDefinitionVersion::V2026_09_26 {
-            let description = crate::describe_compiled(self).map_err(|error| {
-                mf_telemetry::ContractError::Invalid {
-                    message: error.to_string(),
-                }
-            })?;
-            return observer.start_with_description(description, run_id);
+            let description = crate::describe_compiled(self)?;
+            return observer
+                .start_with_description(description, run_id)
+                .context(crate::compiler::ContractSnafu);
         }
-        if self.execution_order.len() != self.definition.nodes.len() {
-            return Err(mf_telemetry::ContractError::Invalid {
-                message: "observation order is incomplete".into(),
-            });
-        }
+        ensure!(
+            self.execution_order.len() == self.definition.nodes.len(),
+            crate::compiler::InvalidObservationSnafu {
+                message: "observation order is incomplete",
+            }
+        );
         let nodes_by_id: BTreeMap<_, _> = self
             .definition
             .nodes
             .iter()
             .map(|node| (&node.id, node))
             .collect();
-        if nodes_by_id.len() != self.definition.nodes.len() {
-            return Err(mf_telemetry::ContractError::Invalid {
-                message: "duplicate observation node ID".into(),
-            });
-        }
+        ensure!(
+            nodes_by_id.len() == self.definition.nodes.len(),
+            crate::compiler::InvalidObservationSnafu {
+                message: "duplicate observation node ID",
+            }
+        );
         let order: Vec<String> = self
             .execution_order
             .iter()
             .map(ToString::to_string)
             .collect();
-        let id = mf_telemetry::identity::WorkflowId::from_definition(&self.definition, &order)?;
+        let id = mf_telemetry::identity::WorkflowId::from_definition(&self.definition, &order)
+            .context(crate::compiler::ContractSnafu)?;
         let nodes = self
             .execution_order
             .iter()
@@ -137,12 +139,14 @@ impl CompiledWorkflow {
                         kind: node.kind.clone(),
                         path: Vec::new(),
                     })
-                    .ok_or_else(|| mf_telemetry::ContractError::Invalid {
+                    .with_context(|| crate::compiler::InvalidObservationSnafu {
                         message: format!("unknown observation node {id}"),
                     })
             })
             .collect::<Result<_, _>>()?;
-        observer.start(id, run_id, nodes)
+        observer
+            .start(id, run_id, nodes)
+            .context(crate::compiler::ContractSnafu)
     }
 
     pub fn to_json(&self) -> Result<String, PlanError> {

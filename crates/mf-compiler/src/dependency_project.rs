@@ -119,8 +119,11 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments) -> Result<(), Box<dy
     };
     #[cfg(feature = "telemetry")]
     let observation = providers.as_ref().and_then(|providers| {
-        let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"));
-        match plan.map_err(|error| error.to_string()).and_then(|plan| plan.start_stream_observation(&providers.observer(), run_id()).map_err(|error| error.to_string())) {
+        let setup = (|| -> Result<_, Box<dyn std::error::Error>> {
+            let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
+            Ok(plan.start_stream_observation(&providers.observer(), run_id())?)
+        })();
+        match setup {
             Ok(observation) => Some(observation),
             Err(error) => { eprintln!("telemetry observation unavailable: {error}"); None }
         }
@@ -210,14 +213,14 @@ fn execute(arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowO
 }
 
 #[cfg(all(feature = "telemetry", not(feature = "streaming")))]
-fn snapshot_recorder(plan: &mf_compiler::CompiledWorkflow, run_id: mf_telemetry::identity::RunId) -> Result<mf_runtime::SnapshotRecorder, String> {
-    let description = mf_compiler::describe_compiled(plan).map_err(|error| error.to_string())?;
+fn snapshot_recorder(plan: &mf_compiler::CompiledWorkflow, run_id: mf_telemetry::identity::RunId) -> Result<mf_runtime::SnapshotRecorder, Box<dyn std::error::Error>> {
+    let description = mf_compiler::describe_compiled(plan)?;
     let mut exporter = mf_telemetry::otlp::SnapshotExporter::from_env(description.workflow_id, run_id)?;
-    mf_runtime::SnapshotRecorder::with_sink(move |record| {
-        exporter.emit(serde_json::to_value(record).map_err(|error| error.to_string())?)?;
+    Ok(mf_runtime::SnapshotRecorder::with_sink(move |record| {
+        exporter.emit(serde_json::to_value(record)?)?;
         if matches!(record, mf_runtime::SnapshotRecord::End) { exporter.finish()?; }
         Ok(())
-    })
+    })?)
 }
 
 #[cfg(not(feature = "streaming"))]

@@ -843,3 +843,35 @@ fn snapshots_preserve_inputs_and_outputs_from_all_loop_passes() {
             .is_empty()
     );
 }
+
+#[test]
+fn observation_preserves_description_and_structural_order_errors() {
+    use std::error::Error;
+    let mut plan = plan_definition(&parse(definition())).unwrap();
+    let body = &mut plan
+        .definition
+        .nodes
+        .iter_mut()
+        .find(|node| node.id.as_str() == "repeat")
+        .unwrap()
+        .loop_definition
+        .as_mut()
+        .unwrap()
+        .body;
+    body.edges[1].from_node = "missing".into();
+    let harness = capture::Harness::new(true);
+    let error = plan
+        .start_observation(&harness.observer(), RunId::new())
+        .unwrap_err();
+    let mf_compiler::DescriptionError::DescriptionOrder { path, .. } = &error else {
+        panic!("expected a structural ordering error: {error}");
+    };
+    assert_eq!(path, &["repeat"]);
+    assert!(
+        error
+            .source()
+            .unwrap()
+            .is::<Box<mf_compiler::WorkflowCompileError>>()
+    );
+    assert!(harness.records().is_empty());
+}
