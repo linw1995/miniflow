@@ -1,6 +1,8 @@
 use crate::ValueRef as Value;
+use crate::node::LoopVariableTypeSnafu;
 use crate::runner::{
-    ContextSnafu, DependencySnafu, InputTypeSnafu, NodeExecutionSnafu, OutputTypeSnafu,
+    ContextSnafu, DependencySnafu, InputTypeSnafu, NodeExecutionSnafu, OutputSelectionSnafu,
+    OutputTypeSnafu,
 };
 use crate::worker::{RuntimeWorkerHandle, WorkerJob, WorkerPool};
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
@@ -565,6 +567,7 @@ impl ExecutionContext {
             WorkflowRunError::OutputType { definition_id, .. } => {
                 (Some(definition_id.to_string()), FailurePhase::Publication)
             }
+            WorkflowRunError::OutputSelection { .. } => (None, FailurePhase::OutputSelection),
             WorkflowRunError::NodeExecution { definition_id, .. } => {
                 (Some(definition_id.to_string()), FailurePhase::Execution)
             }
@@ -655,11 +658,9 @@ impl ExecutionContext {
                 .ok_or_else(|| NodeExecutionError::ExecutionFailed {
                     message: format!("unknown Loop variable `{variable}`"),
                 })?;
-        value_type.validate_shared(&value).map_err(|error| {
-            NodeExecutionError::ExecutionFailed {
-                message: format!("Loop variable `{variable}`: {error}"),
-            }
-        })?;
+        value_type
+            .validate_shared(&value)
+            .context(LoopVariableTypeSnafu { variable })?;
         self.pending_loop_write = Some((variable.to_owned(), value));
         Ok(())
     }
@@ -921,14 +922,9 @@ pub(super) fn execute_ordered_task_in_context<'a, N>(
     for dependency in dependencies {
         let value = ctx
             .output(&output_id(dependency.source_node, dependency.source_output))
-            .map_err(|error| {
-                state_error(
-                    id,
-                    format!(
-                        "dependency {}: {error}",
-                        dependency.input.unwrap_or("<control>")
-                    ),
-                )
+            .with_context(|_| DependencySnafu {
+                definition_id: id,
+                input: dependency.input.unwrap_or("<control>"),
             });
         let value = match value {
             Ok(value) => value,
@@ -1086,8 +1082,10 @@ pub fn select_context_output(
 ) -> Result<Option<Value>, WorkflowRunError> {
     match ctx
         .output(&output_id(node, port))
-        .map_err(|error| state_error(node, format!("workflow output `{name}`: {error}")))?
-    {
+        .context(OutputSelectionSnafu {
+            definition_id: node,
+            output: name,
+        })? {
         ContextValue::Value(value) => Ok(Some(value.clone())),
         ContextValue::Skipped if optional => Ok(None),
         ContextValue::Skipped => Err(state_error(
@@ -1320,6 +1318,82 @@ mod tests {
     }
 
     #[test]
+    fn loop_assignment_preserves_nested_type_mismatch_sources() {
+        let value_type = ValueType::List(Box::new(ValueType::Map(Box::new(ValueType::Int64))));
+        let scope = ExecutionScope::new(
+            "repeat",
+            crate::LOOP_SOURCE_ID,
+            0,
+            Outputs::from([("count".into(), json!([{ "count": 1 }]).into())]),
+            BTreeMap::from([("count".into(), value_type)]),
+        )
+        .unwrap();
+        let node = crate::prepared_loop_assign("assign", "count", ValueType::Any)
+            .into_task()
+            .unwrap();
+        let mut context = ExecutionContext::default();
+        let error = context
+            .run_scope(scope, |context| {
+                context.outputs.insert(
+                    "source.value".into(),
+                    Some(json!([{ "count": "wrong" }]).into()),
+                );
+                let result = execute_node_in_context(
+                    &node,
+                    &[ExecutionDependency {
+                        input: Some("value"),
+                        source_node: "source",
+                        source_output: "value",
+                    }],
+                    context,
+                );
+                assert!(context.pending_loop_write.is_none());
+                result
+            })
+            .unwrap_err();
+        assert!(matches!(
+            &error,
+            WorkflowRunError::NodeExecution { definition_id, .. }
+                if definition_id.as_str() == "assign"
+        ));
+        let source = error.source().unwrap();
+        assert!(matches!(
+            source.downcast_ref::<NodeExecutionError>(),
+            Some(NodeExecutionError::LoopVariableType { variable, .. }) if variable == "count"
+        ));
+        let mismatch = source
+            .source()
+            .unwrap()
+            .downcast_ref::<Box<crate::TypeMismatch>>()
+            .unwrap();
+        assert_eq!(mismatch.path, "/0/count");
+        assert_eq!(mismatch.expected, ValueType::Int64);
+        assert_eq!(mismatch.actual, "string");
+        assert!(error.to_string().contains("Loop variable `count`"));
+    }
+
+    #[test]
+    fn output_selection_preserves_lookup_sources() {
+        let mut context = ExecutionContext::default();
+        for optional in [false, true] {
+            let error = context
+                .select_output("result", "source", "missing", optional)
+                .unwrap_err();
+            assert!(matches!(
+                &error,
+                WorkflowRunError::OutputSelection { definition_id, output, .. }
+                    if definition_id.as_str() == "source" && output == "result"
+            ));
+            assert!(matches!(
+                error.source().unwrap().downcast_ref::<NodeExecutionError>(),
+                Some(NodeExecutionError::ExecutionFailed { message })
+                    if message == "missing context output `source.missing`"
+            ));
+            assert!(error.to_string().contains("workflow output `result`"));
+        }
+    }
+
+    #[test]
     fn skips_without_type_checks_but_keeps_missing_output_precedence() {
         let calls = Arc::new(AtomicUsize::new(0));
         let node = FlowNode::new(
@@ -1339,17 +1413,29 @@ mod tests {
             source_node: "branch",
             source_output: "off",
         };
-        let missing = ExecutionDependency {
-            input: None,
-            source_node: "source",
-            source_output: "missing",
-        };
         let mut context = ExecutionContext::default();
         context.outputs.insert("branch.off".into(), None);
-        let error = execute_node_in_context(&node, &[skipped, missing], &mut context)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("source.missing"));
+        for input in [None, Some("payload")] {
+            let missing = ExecutionDependency {
+                input,
+                source_node: "source",
+                source_output: "missing",
+            };
+            let error =
+                execute_node_in_context(&node, &[skipped, missing], &mut context).unwrap_err();
+            assert!(matches!(
+                &error,
+                WorkflowRunError::Dependency { definition_id, input: actual, .. }
+                    if definition_id.as_str() == "consumer"
+                        && actual == input.unwrap_or("<control>")
+            ));
+            assert!(matches!(
+                error.source().unwrap().downcast_ref::<NodeExecutionError>(),
+                Some(NodeExecutionError::ExecutionFailed { message })
+                    if message == "missing context output `source.missing`"
+            ));
+            assert!(error.to_string().contains("source.missing"));
+        }
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(context.output("consumer.value").is_err());
 

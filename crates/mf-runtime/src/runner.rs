@@ -18,6 +18,15 @@ pub enum WorkflowRunError {
         source: NodeExecutionError,
     },
     #[snafu(
+        display("node `{definition_id}`: workflow output `{output}`: {source}"),
+        visibility(pub)
+    )]
+    OutputSelection {
+        definition_id: DefinitionId,
+        output: String,
+        source: NodeExecutionError,
+    },
+    #[snafu(
         display("node `{definition_id}` input `{input}`: {source}"),
         visibility(pub)
     )]
