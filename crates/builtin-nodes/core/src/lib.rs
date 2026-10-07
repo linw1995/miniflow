@@ -10,7 +10,7 @@ pub use batch::KIND as BATCH_KIND;
 pub use constant::{KIND as CONSTANT_KIND, kind as constant_kind};
 pub use identity::{KIND as IDENTITY_KIND, kind as identity_kind};
 pub use if_else::KIND as IF_ELSE_KIND;
-pub use iteration::{IterationNode, KIND as ITERATION_KIND, MAX_PARALLEL_ITEMS};
+pub use iteration::{IterationInputs, IterationNode, KIND as ITERATION_KIND, MAX_PARALLEL_ITEMS};
 pub use loop_declaration::KIND as LOOP_KIND;
 
 #[cfg(test)]
@@ -82,6 +82,10 @@ mod tests {
         let registration = registry.get(IDENTITY_KIND).unwrap();
         let node = registration.instantiate(json!({})).unwrap();
         let ports = &node.metadata.ports;
+        assert_eq!(ports.inputs.len(), 1);
+        assert_eq!(ports.inputs[0].name, "input");
+        assert_eq!(ports.inputs[0].value_type, ValueType::Any);
+        assert!(ports.inputs[0].required);
         assert_eq!(ports.outputs[0].value_type, ValueType::Any);
         assert_eq!(
             node.metadata.output_derivations,

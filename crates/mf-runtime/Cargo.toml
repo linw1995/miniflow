@@ -16,6 +16,7 @@ inventory.workspace = true
 rpds.workspace = true
 
 # Runtime values and error reporting.
+mf-runtime-derive.workspace = true
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json.workspace = true
 snafu.workspace = true

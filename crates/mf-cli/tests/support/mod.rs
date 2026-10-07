@@ -13,8 +13,9 @@ use std::{
 };
 use tempfile::TempDir;
 
-const SUPPORT_PACKAGES: [(&str, &str); 5] = [
+const SUPPORT_PACKAGES: [(&str, &str); 6] = [
     ("mf-telemetry", "crates/mf-telemetry"),
+    ("mf-runtime-derive", "crates/mf-runtime-derive"),
     ("mf-runtime", "crates/mf-runtime"),
     ("mfn-core", "crates/builtin-nodes/core"),
     ("mfn-code", "crates/builtin-nodes/code"),

@@ -1,0 +1,15 @@
+[package]
+name = "mf-runtime-derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Input definition derives for the miniflow runtime"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2.workspace = true
+quote.workspace = true
+syn = { workspace = true, features = ["derive", "parsing", "printing", "proc-macro", "visit"] }

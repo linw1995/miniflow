@@ -2,7 +2,7 @@
 
 Release archives target x86_64 and aarch64 Linux, and Apple Silicon macOS.
 
-A distributed CLI resolves exact-version `mf-runtime` and `mf-compiler` packages from crates.io. The runtime also requires `mf-telemetry`; publish it before packages depending on it. The bundled examples require available `mfn-core` and `mfn-code` packages. Prepare and publish these support packages before publishing the matching CLI release. `mf-tui` is a CLI dependency and is excluded from runner support packages.
+A distributed CLI resolves exact-version `mf-runtime` and `mf-compiler` packages from crates.io. The runtime also requires `mf-telemetry` and `mf-runtime-derive`; publish them before packages depending on them. The bundled examples require available `mfn-core` and `mfn-code` packages. Prepare and publish these support packages before publishing the matching CLI release. `mf-tui` is a CLI dependency and is excluded from runner support packages.
 
 The refined port-type API changes `ValueType` from `Copy` to `Clone` and enforces declared output types during execution. Publish matching runtime and compiler versions before rebuilding node packages; review plugin port declarations before distributing runners built with the new runtime.
 
@@ -14,7 +14,7 @@ nix develop --command cargo nextest run -p mf-cli --test packaged_cli --test rel
 
 The Rust setup in `crates/mf-cli/tests/support/` packages the support crates, calculates archive checksums, and prepares
 an isolated Cargo registry source. It builds a default CLI without development overrides. The generated registry runner
-compiles all five extracted support packages and the external node fixture outside the checkout, so separate package check builds are unnecessary.
+compiles all six extracted support packages and the external node fixture outside the checkout, so separate package check builds are unnecessary.
 Acceptance covers registry, pinned Git, and local-path nodes, CEL scalar and typed-list examples, locked rebuilds,
 and standalone execution. Temporary
 artifacts are owned by the fixture and cleaned up after the test.
@@ -23,7 +23,7 @@ Release prerequisite tests invoke the Bash gate with a stub Cargo executable. Th
 
 ## Publish support packages before the CLI
 
-A maintainer must verify ownership of the package names, configure authorized registry credentials, and publish the matching versions in dependency order: telemetry first, then runtime, then compiler and built-in nodes. Package publication is a separate release action; the test fixture and release check never perform it.
+A maintainer must verify ownership of the package names, configure authorized registry credentials, and publish the matching versions in dependency order: telemetry and runtime derives first, then runtime, then compiler and built-in nodes. Package publication is a separate release action; the test fixture and release check never perform it.
 
 After publication, check public availability and ownership:
 

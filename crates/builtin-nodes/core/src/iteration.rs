@@ -1,7 +1,8 @@
 use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, IterationConfig, IterationErrorPolicy, IterationMode,
-    NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec,
-    PreparedSubgraph, TaskNode, ValueKind, ValueRef, ValueType, deserialize_config,
+    NodeBuildError, NodeExecutionError, NodeInputs, NodePorts, NodeRegistration, NodeResult,
+    Outputs, PortSpec, PreparedSubgraph, TaskNode, TypedTaskNode, ValueKind, ValueRef, ValueType,
+    deserialize_config, execute_typed_task,
 };
 use mf_telemetry::observation::{ItemObservation, IterationObservation};
 use snafu::{ResultExt, Snafu};
@@ -25,8 +26,11 @@ fn factory(
 ) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let config: IterationConfig = deserialize_config(config)?;
     let node = IterationNode::new(id, config.mode, config.on_error, body)?;
-    let ports = node.ports();
-    Ok(mf_runtime::PreparedNode::new(node, ports))
+    let ports = NodePorts {
+        inputs: vec![],
+        outputs: vec![node.result_port()],
+    };
+    mf_runtime::PreparedNode::typed_task(node, ports)
 }
 
 inventory::submit! {
@@ -39,6 +43,12 @@ pub struct IterationNode {
     on_error: IterationErrorPolicy,
     result_type: ValueType,
     body: Arc<PreparedSubgraph>,
+}
+
+/// Fixed inputs shared by typed and dynamic Iteration task calls.
+#[derive(NodeInputs)]
+pub struct IterationInputs {
+    pub items: ValueRef,
 }
 
 #[derive(Debug, Snafu)]
@@ -80,19 +90,19 @@ impl IterationNode {
     }
 
     pub fn ports(&self) -> NodePorts {
+        NodePorts {
+            inputs: IterationInputs::ports(),
+            outputs: vec![self.result_port()],
+        }
+    }
+
+    fn result_port(&self) -> PortSpec {
         let item_type = if matches!(self.on_error, IterationErrorPolicy::ContinueOnError) {
             ValueType::Any
         } else {
             self.result_type.clone()
         };
-        NodePorts {
-            inputs: vec![PortSpec::new("items", ValueType::Any, true)],
-            outputs: vec![PortSpec::owned(
-                "results",
-                ValueType::List(Box::new(item_type)),
-                true,
-            )],
-        }
+        PortSpec::new("results", ValueType::List(Box::new(item_type)), true)
     }
 
     fn run_item(
@@ -137,17 +147,16 @@ impl IterationNode {
 
     fn execute_items(
         &self,
-        mut inputs: Inputs,
+        items: ValueRef,
         observation: Option<IterationObservation>,
         parent: &mut ExecutionContext,
     ) -> Result<Outputs, NodeExecutionError> {
-        let items = inputs.remove("items");
         let items: Box<dyn ExactSizeIterator<Item = (ValueRef, ValueRef)>> =
-            match items.as_ref().map(ValueRef::kind) {
-                Some(ValueKind::Array(items)) => {
+            match items.kind() {
+                ValueKind::Array(items) => {
                     Box::new(items.iter().map(|item| (ValueRef::null(), item.clone())))
                 }
-                Some(ValueKind::Object(items)) => Box::new(items.iter().map(|(key, item)| {
+                ValueKind::Object(items) => Box::new(items.iter().map(|(key, item)| {
                     (ValueRef::new(ValueKind::String(key.clone())), item.clone())
                 })),
                 _ => {
@@ -247,16 +256,29 @@ impl IterationNode {
     }
 }
 
+impl TypedTaskNode for IterationNode {
+    type Input = IterationInputs;
+
+    fn execute(
+        &self,
+        inputs: IterationInputs,
+        ctx: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        let observation = ctx.observation().and_then(|run| {
+            run.iteration_observation(&self.id, &ctx.scope_path(), self.body.nodes.clone())
+        });
+        self.execute_items(inputs.items, observation, ctx)
+            .map(Into::into)
+    }
+}
+
 impl TaskNode for IterationNode {
     fn execute(
         &self,
         inputs: Inputs,
         ctx: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
-        let observation = ctx.observation().and_then(|run| {
-            run.iteration_observation(&self.id, &ctx.scope_path(), self.body.nodes.clone())
-        });
-        self.execute_items(inputs, observation, ctx).map(Into::into)
+        execute_typed_task(self, inputs, ctx)
     }
 }
 
@@ -314,13 +336,13 @@ mod tests {
                 ),
             )
             .unwrap();
-            let output = node
-                .execute(
-                    Inputs::from([("items".into(), items.into())]),
-                    &mut mf_runtime::ExecutionContext::default(),
-                )
-                .unwrap()
-                .outputs;
+            let output = TaskNode::execute(
+                &node,
+                Inputs::from([("items".into(), items.into())]),
+                &mut mf_runtime::ExecutionContext::default(),
+            )
+            .unwrap()
+            .outputs;
             assert_eq!(output["results"], Value::Array(values.clone()));
             assert!((2..=MAX_PARALLEL_ITEMS).contains(&peak.load(Ordering::SeqCst)));
             assert_eq!(active.load(Ordering::SeqCst), 0);
@@ -328,7 +350,7 @@ mod tests {
     }
 
     #[test]
-    fn map_iteration_shares_value_handles_and_rejects_missing_input() {
+    fn typed_and_dynamic_iteration_share_values_and_validate_inputs() {
         for mode in [IterationMode::Sequential, IterationMode::Parallel] {
             let source = mf_runtime::iteration_input_flow_node().into_task().unwrap();
             let node = IterationNode::new(
@@ -349,19 +371,44 @@ mod tests {
             )
             .unwrap();
             let items: ValueRef = json!({"b": [2, 3], "a": {"nested": [1]}}).into();
-            let output = node
-                .execute(
-                    Inputs::from([("items".into(), items.clone())]),
-                    &mut ExecutionContext::default(),
-                )
-                .unwrap()
-                .outputs;
+            let output = TaskNode::execute(
+                &node,
+                Inputs::from([("items".into(), items.clone())]),
+                &mut ExecutionContext::default(),
+            )
+            .unwrap()
+            .outputs;
             assert!(output["results"][0].ptr_eq(&items["a"]));
             assert!(output["results"][1].ptr_eq(&items["b"]));
-            let error = node
-                .execute(Inputs::new(), &mut ExecutionContext::default())
-                .unwrap_err();
-            assert!(error.to_string().contains("array or object input `items`"));
+            let typed = TypedTaskNode::execute(
+                &node,
+                IterationInputs {
+                    items: items.clone(),
+                },
+                &mut ExecutionContext::default(),
+            )
+            .unwrap()
+            .outputs;
+            assert_eq!(typed, output);
+            assert!(typed["results"][0].ptr_eq(&items["a"]));
+            assert!(typed["results"][1].ptr_eq(&items["b"]));
+            for (inputs, port) in [
+                (Inputs::new(), "items"),
+                (
+                    Inputs::from([
+                        ("items".into(), items.clone()),
+                        ("unknown".into(), true.into()),
+                    ]),
+                    "unknown",
+                ),
+            ] {
+                let error =
+                    TaskNode::execute(&node, inputs, &mut ExecutionContext::default()).unwrap_err();
+                let NodeExecutionError::InputDecode { source } = error else {
+                    panic!("expected runtime decode failure");
+                };
+                assert_eq!(source.pointer(), format!("/{port}"));
+            }
         }
     }
 
@@ -387,7 +434,36 @@ mod tests {
             )
             .unwrap();
         let ports = &node.metadata.ports;
+        assert_eq!(ports.inputs, IterationInputs::ports());
         assert_eq!(ports.inputs[0].name, "items");
+        assert_eq!(ports.inputs[0].value_type, ValueType::Any);
+        assert!(ports.inputs[0].required);
         assert_eq!(ports.outputs[0].name, "results");
+        for policy in [
+            IterationErrorPolicy::Terminate,
+            IterationErrorPolicy::ContinueOnError,
+            IterationErrorPolicy::RemoveFailed,
+        ] {
+            let node = IterationNode::new(
+                "iteration",
+                IterationMode::Sequential,
+                policy,
+                PreparedSubgraph::new(
+                    Vec::new(),
+                    vec![PortSpec::new("result", ValueType::Int64, true)],
+                    |_| Ok(Outputs::new()),
+                ),
+            )
+            .unwrap();
+            let expected = if matches!(policy, IterationErrorPolicy::ContinueOnError) {
+                ValueType::Any
+            } else {
+                ValueType::Int64
+            };
+            assert_eq!(
+                node.ports().outputs[0].value_type,
+                ValueType::List(Box::new(expected))
+            );
+        }
     }
 }

@@ -43,11 +43,13 @@ fn plugin(root: &Path) -> PathBuf {
     }
     let lib = plugin.join("src/lib.rs");
     let source = fs::read_to_string(&lib).unwrap();
-    let minimal = source
-        .replace("mod interface_fixture;\n", "")
-        .replace("mod typed_fixture;\n", "")
-        .replace("mod line_producer;\n", "")
-        .replace("mod stream_fixture;\n", "");
+    // Keep the telemetry probe independent of additional provider modules.
+    let mut minimal = source
+        .lines()
+        .filter(|line| !line.starts_with("mod ") || *line == "mod context_fixture;")
+        .collect::<Vec<_>>()
+        .join("\n");
+    minimal.push('\n');
     assert_ne!(minimal, source);
     fs::write(lib, minimal).unwrap();
     let runtime = serde_json::to_string(&crates_dir().join("mf-runtime")).unwrap();

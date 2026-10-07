@@ -17,6 +17,7 @@ mod stream_instance;
 mod stream_io;
 mod stream_plan;
 mod subgraph;
+mod typed_inputs;
 mod value;
 mod worker;
 mod workflow_inputs;
@@ -49,6 +50,7 @@ pub use loop_node::{
     prepared_scope_source,
 };
 pub use message_domain::MessageDomains;
+pub use mf_runtime_derive::NodeInputs;
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
@@ -58,8 +60,8 @@ pub use node::{
     InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeExecution,
     NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration, OutputDerivation,
     OutputDerivationError, Outputs, PluginFailedSnafu as NodePluginFailedSnafu, PortSpec,
-    PreparedNode, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, ValueType,
-    deserialize_config, output_id,
+    PreparedNode, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, TypedTaskNode,
+    ValueType, deserialize_config, execute_typed_task, output_id,
 };
 pub use number::compare_json_numbers;
 pub use registry::{NodeRegistry, NodeRegistryError};
@@ -75,6 +77,9 @@ pub use stream_instance::{
 pub use stream_io::{StreamStdio, TextInput};
 pub use stream_plan::{FlowDependency, PreparedStream, StreamPlan};
 pub use subgraph::PreparedSubgraph;
+pub use typed_inputs::{
+    InputDecodeError, InputField, InputValue, NodeInputs, decode_input, reject_unknown_inputs,
+};
 
 pub use value::{ValueKind, ValueRef};
 pub use worker::{RuntimeWorkerHandle, WorkerHandle, WorkerJob, WorkerPool, WorkerPoolError};

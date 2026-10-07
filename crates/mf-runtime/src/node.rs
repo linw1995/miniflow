@@ -475,6 +475,8 @@ pub fn output_id(node: &str, port: &str) -> String {
 
 #[derive(Debug, Snafu)]
 pub enum NodeBuildError {
+    #[snafu(display("typed task input ports must be derived from its input struct"))]
+    ConflictingInputDeclarations,
     #[snafu(display("invalid prepared subgraph: {message}"), visibility(pub))]
     InvalidSubgraph { message: String },
     #[snafu(display("invalid node configuration: {source}"), context(false))]
@@ -487,6 +489,11 @@ pub enum NodeBuildError {
 
 #[derive(Debug, Snafu)]
 pub enum NodeExecutionError {
+    #[snafu(display("could not decode typed task inputs at `{}`: {source}", source.pointer()))]
+    InputDecode {
+        #[snafu(source(from(crate::InputDecodeError, Box::new)))]
+        source: Box<crate::InputDecodeError>,
+    },
     #[snafu(display("Loop variable `{variable}`: {source}"), visibility(pub))]
     LoopVariableType {
         variable: String,
@@ -546,6 +553,46 @@ pub trait TaskNode: Send + Sync {
     ) -> Result<crate::NodeResult, NodeExecutionError>;
 }
 
+/// A task whose input declaration and conversion are owned by the runtime.
+///
+/// Prepare through [`PreparedNode::typed_task`]. The runtime adapter implements
+/// the dynamic task contract, so business logic only receives decoded fields.
+pub trait TypedTaskNode: Send + Sync {
+    type Input: crate::NodeInputs;
+
+    fn execute(
+        &self,
+        input: Self::Input,
+        ctx: &mut crate::ExecutionContext,
+    ) -> Result<crate::NodeResult, NodeExecutionError>;
+}
+
+struct TypedTaskAdapter<N>(N);
+
+/// Decodes dynamic inputs and invokes a typed task with the supplied context.
+///
+/// Like direct `TaskNode::execute`, this does not schedule the task or publish its
+/// outputs. Providers retaining a dynamic task interface can delegate here to
+/// share the runtime adapter's decoding and error context.
+pub fn execute_typed_task<N: TypedTaskNode + ?Sized>(
+    task: &N,
+    inputs: Inputs,
+    ctx: &mut crate::ExecutionContext,
+) -> Result<crate::NodeResult, NodeExecutionError> {
+    let input = <N::Input as crate::NodeInputs>::from_inputs(inputs).context(InputDecodeSnafu)?;
+    task.execute(input, ctx)
+}
+
+impl<N: TypedTaskNode> TaskNode for TypedTaskAdapter<N> {
+    fn execute(
+        &self,
+        inputs: Inputs,
+        ctx: &mut crate::ExecutionContext,
+    ) -> Result<crate::NodeResult, NodeExecutionError> {
+        execute_typed_task(&self.0, inputs, ctx)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct NodeMetadata {
     pub ports: NodePorts,
@@ -597,6 +644,53 @@ impl NodeExecution {
 }
 
 impl PreparedNode {
+    /// Derives inputs from a typed task and preserves the other prepared metadata.
+    ///
+    /// Supplying any input ports is an error, including ports identical to the
+    /// derived declaration. Preparation never decodes values or executes the task.
+    ///
+    /// ```
+    /// use mf_runtime::{
+    ///     ExecutionContext, NodeBuildError, NodeExecutionError, NodeInputs,
+    ///     NodePorts, NodeResult, Outputs, PortSpec, PreparedNode, TypedTaskNode, ValueRef, ValueType,
+    /// };
+    ///
+    /// #[derive(NodeInputs)]
+    /// struct EchoInputs {
+    ///     input: ValueRef,
+    /// }
+    ///
+    /// struct Echo;
+    /// impl TypedTaskNode for Echo {
+    ///     type Input = EchoInputs;
+    ///
+    ///     fn execute(&self, input: EchoInputs, _: &mut ExecutionContext)
+    ///         -> Result<NodeResult, NodeExecutionError>
+    ///     {
+    ///         Ok(Outputs::from([("value".into(), input.input)]).into())
+    ///     }
+    /// }
+    ///
+    /// let prepared = PreparedNode::typed_task(Echo, NodePorts {
+    ///     inputs: vec![],
+    ///     outputs: vec![PortSpec::new("value", ValueType::Any, true)],
+    /// })?;
+    /// assert_eq!(prepared.metadata.ports.inputs, EchoInputs::ports());
+    /// # Ok::<(), NodeBuildError>(())
+    /// ```
+    pub fn typed_task<N: TypedTaskNode + 'static>(
+        task: N,
+        metadata: impl Into<NodeMetadata>,
+    ) -> Result<Self, NodeBuildError> {
+        let mut metadata = metadata.into();
+        ensure!(
+            metadata.ports.inputs.is_empty(),
+            ConflictingInputDeclarationsSnafu
+        );
+        metadata.ports.inputs = <N::Input as crate::NodeInputs>::ports();
+        Ok(Self::new(TypedTaskAdapter(task), metadata))
+    }
+
     pub fn new(task: impl TaskNode + 'static, metadata: impl Into<NodeMetadata>) -> Self {
         Self {
             metadata: metadata.into(),

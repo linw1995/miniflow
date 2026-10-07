@@ -1339,6 +1339,7 @@ version = "0.1.0"
 dependencies = [
  "inventory",
  "libc",
+ "mf-runtime-derive",
  "mf-telemetry",
  "opentelemetry",
  "rpds",
@@ -1346,6 +1347,15 @@ dependencies = [
  "serde_json",
  "snafu",
  "tempfile",
+]
+
+[[package]]
+name = "mf-runtime-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
 ]
 
 [[package]]
