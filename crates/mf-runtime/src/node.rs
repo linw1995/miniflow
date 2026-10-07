@@ -512,6 +512,12 @@ pub enum NodeBuildError {
 
 #[derive(Debug, Snafu)]
 pub enum NodeExecutionError {
+    #[snafu(display("Loop variable `{variable}`: {source}"), visibility(pub))]
+    LoopVariableType {
+        variable: String,
+        #[snafu(source(from(TypeMismatch, Box::new)))]
+        source: Box<TypeMismatch>,
+    },
     #[snafu(display("node execution failed: {message}"), visibility(pub))]
     ExecutionFailed { message: String },
     #[snafu(display("node plugin failed: {source}"), visibility(pub))]
