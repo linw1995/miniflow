@@ -1,5 +1,7 @@
 use crate::ValueRef as Value;
-use crate::runner::{ContextSnafu, DependencySnafu, InputTypeSnafu, NodeExecutionSnafu};
+use crate::runner::{
+    ContextSnafu, DependencySnafu, InputTypeSnafu, NodeExecutionSnafu, OutputTypeSnafu,
+};
 use crate::worker::{RuntimeWorkerHandle, WorkerJob, WorkerPool};
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use mf_telemetry::{
@@ -560,6 +562,9 @@ impl ExecutionContext {
             WorkflowRunError::InputType { definition_id, .. } => {
                 (Some(definition_id.to_string()), FailurePhase::Dependency)
             }
+            WorkflowRunError::OutputType { definition_id, .. } => {
+                (Some(definition_id.to_string()), FailurePhase::Publication)
+            }
             WorkflowRunError::NodeExecution { definition_id, .. } => {
                 (Some(definition_id.to_string()), FailurePhase::Execution)
             }
@@ -733,7 +738,10 @@ impl ExecutionContext {
                 };
                 port.value_type
                     .validate_shared(value)
-                    .map_err(|error| state_error(id, format!("output `{name}`: {error}")))?;
+                    .with_context(|_| OutputTypeSnafu {
+                        definition_id: id,
+                        output: name,
+                    })?;
             }
         }
         // Validate the complete result before making any values visible.
@@ -970,7 +978,10 @@ pub(super) fn execute_ordered_task_in_context<'a, N>(
                 .and_then(|port| {
                     port.value_type
                         .validate_shared(value)
-                        .map_err(|error| state_error(id, format!("input `{name}`: {error}")))
+                        .with_context(|_| InputTypeSnafu {
+                            definition_id: id,
+                            input: name,
+                        })
                 });
             if let Err(error) = validation {
                 if let Some(step) = step.take() {
@@ -1094,6 +1105,7 @@ mod tests {
     use super::*;
     use crate::{Flow, NodePorts, PortSpec, TaskNode, ValueType};
     use serde_json::json;
+    use std::error::Error;
     use std::sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -1204,11 +1216,23 @@ mod tests {
         .into_task()
         .unwrap();
         let mut context = ExecutionContext::default();
-        let error = execute_node_in_context(&node, &[], &mut context)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("producer") && error.contains("output `bad`"));
-        assert!(error.contains("expected int64, found string"));
+        let error = execute_node_in_context(&node, &[], &mut context).unwrap_err();
+        assert!(matches!(
+            &error,
+            WorkflowRunError::OutputType { definition_id, output, .. }
+                if definition_id.as_str() == "producer" && output == "bad"
+        ));
+        let source = error
+            .source()
+            .unwrap()
+            .downcast_ref::<crate::TypeMismatch>()
+            .unwrap();
+        assert_eq!(source.path, "");
+        assert_eq!(source.expected, ValueType::Int64);
+        assert_eq!(source.actual, "string");
+        let message = error.to_string();
+        assert!(message.contains("producer") && message.contains("output `bad`"));
+        assert!(message.contains("expected int64, found string"));
         assert!(context.output("producer.good").is_err());
         assert!(context.output("producer.bad").is_err());
     }
@@ -1242,11 +1266,23 @@ mod tests {
             source_node: "source",
             source_output: "value",
         };
-        let error = execute_node_in_context(&node, &[dependency], &mut context)
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("consumer") && error.contains("input `payload`"));
-        assert!(error.contains("/1/count") && error.contains("expected int64"));
+        let error = execute_node_in_context(&node, &[dependency], &mut context).unwrap_err();
+        assert!(matches!(
+            &error,
+            WorkflowRunError::InputType { definition_id, input, .. }
+                if definition_id.as_str() == "consumer" && input == "payload"
+        ));
+        let source = error
+            .source()
+            .unwrap()
+            .downcast_ref::<crate::TypeMismatch>()
+            .unwrap();
+        assert_eq!(source.path, "/1/count");
+        assert_eq!(source.expected, ValueType::Int64);
+        assert_eq!(source.actual, "string");
+        let message = error.to_string();
+        assert!(message.contains("consumer") && message.contains("input `payload`"));
+        assert!(message.contains("/1/count") && message.contains("expected int64"));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!(context.output("consumer.value").is_err());
     }

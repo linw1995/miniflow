@@ -492,6 +492,7 @@ fn workflow_error_node(error: &crate::WorkflowRunError) -> String {
     match error {
         crate::WorkflowRunError::Dependency { definition_id, .. }
         | crate::WorkflowRunError::InputType { definition_id, .. }
+        | crate::WorkflowRunError::OutputType { definition_id, .. }
         | crate::WorkflowRunError::Context { definition_id, .. }
         | crate::WorkflowRunError::NodeExecution { definition_id, .. } => definition_id.to_string(),
         crate::WorkflowRunError::WorkflowInputs { .. }
