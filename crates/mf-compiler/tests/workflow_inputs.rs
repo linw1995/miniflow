@@ -301,6 +301,11 @@ fn generated_tasks_share_startup_binding_and_validation() {
         &RunnerOptions { telemetry: false },
     )
     .unwrap();
+    fs::write(
+        project.join("src/workflow.rs"),
+        plan.generate_artifacts().unwrap().rust_source,
+    )
+    .unwrap();
     fs::write(project.join("src/main.rs"), r#"extern crate node_0 as _;
 mod workflow;
 fn main() {

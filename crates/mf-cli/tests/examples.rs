@@ -74,6 +74,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             .current_dir(&runtime)
             .env("MF_DEV_SUPPORT_ROOT", workspace().join("crates"))
             .env("CARGO_NET_OFFLINE", "true")
+            .env("CARGO_TERM_COLOR", "never")
             .arg("compile")
             .arg(&definition)
             .arg("--output")
@@ -88,6 +89,14 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             compiled.status,
             String::from_utf8_lossy(&compiled.stdout),
             String::from_utf8_lossy(&compiled.stderr),
+        );
+
+        let stderr = String::from_utf8_lossy(&compiled.stderr);
+        assert!(
+            !stderr
+                .lines()
+                .any(|line| line.starts_with("warning:") || line.starts_with("warning[")),
+            "{name}: compilation emitted warnings:\n{stderr}",
         );
 
         let mut child = Command::new(&executable)

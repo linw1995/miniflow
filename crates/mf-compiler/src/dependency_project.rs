@@ -296,7 +296,7 @@ pub fn write_dependency_project_with_options(
     support: &SupportPackages,
     options: &RunnerOptions,
 ) -> Result<(), DependencyProjectError> {
-    let artifacts = plan.generate_artifacts().context(PlanSnafu)?;
+    let artifacts = plan.generate_runner_artifacts().context(PlanSnafu)?;
     let definition = &plan.definition;
     let mut features = Vec::new();
     if options.telemetry {

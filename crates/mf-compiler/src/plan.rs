@@ -171,8 +171,23 @@ impl CompiledWorkflow {
         Ok(plan)
     }
 
+    /// Generate preparation and execution entry points for custom runners.
     #[cfg(feature = "codegen")]
     pub fn generate_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
+        self.generate_artifacts_with_helpers(true)
+    }
+
+    /// Generate only the entry points used by the standalone runner.
+    #[cfg(feature = "codegen")]
+    pub fn generate_runner_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
+        self.generate_artifacts_with_helpers(false)
+    }
+
+    #[cfg(feature = "codegen")]
+    fn generate_artifacts_with_helpers(
+        &self,
+        include_helpers: bool,
+    ) -> Result<GeneratedWorkflowArtifacts, PlanError> {
         if self.definition.execution.is_some() {
             return generate_stream_artifacts(self);
         }
@@ -252,6 +267,56 @@ impl CompiledWorkflow {
                 .fail();
             }
         }
+        let helpers = if include_helpers {
+            quote! {
+                pub fn run_workflow_with_inputs(flow: &mf_runtime::Flow, arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
+                    run_workflow_with_inputs_and_options(flow, arguments, mf_runtime::RuntimeOptions::default())
+                }
+
+                pub fn run_workflow_with_inputs_and_options(
+                    flow: &mf_runtime::Flow,
+                    arguments: mf_runtime::WorkflowArguments,
+                    options: mf_runtime::RuntimeOptions,
+                ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
+                    let mut state = mf_runtime::ExecutionContext::default();
+                    state.set_workflow_arguments(arguments);
+                    run_workflow_in_context_with_options(flow, &mut state, options)
+                }
+
+                pub fn run_workflow(
+                    flow: &mf_runtime::Flow,
+                ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
+                    run_workflow_with_observation(flow, None)
+                }
+
+                pub fn run_workflow_with_observation(
+                    flow: &mf_runtime::Flow,
+                    observation: Option<mf_runtime::RunObservation>,
+                ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
+                    run_workflow_with_observation_and_options(flow, observation, mf_runtime::RuntimeOptions::default())
+                }
+
+                pub fn run_workflow_with_observation_and_options(
+                    flow: &mf_runtime::Flow,
+                    observation: Option<mf_runtime::RunObservation>,
+                    options: mf_runtime::RuntimeOptions,
+                ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
+                    mf_runtime::ExecutionContext::run(observation, |state| {
+                        run_workflow_in_context_with_options(flow, state, options)
+                    })
+                }
+
+                pub fn run_workflow_in_context_with_options(
+                    flow: &mf_runtime::Flow,
+                    state: &mut mf_runtime::ExecutionContext,
+                    options: mf_runtime::RuntimeOptions,
+                ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
+                    mf_runtime::FlowRuntime::new(options).execute_in_context(flow, state)
+                }
+            }
+        } else {
+            TokenStream::new()
+        };
         let generated = quote! {
             include!(concat!(env!("OUT_DIR"), "/flow-plans.rs"));
 
@@ -264,56 +329,13 @@ impl CompiledWorkflow {
                 Ok(#root_flow)
             }
 
-            pub fn run_workflow_with_inputs(flow: &mf_runtime::Flow, arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                run_workflow_with_inputs_and_options(flow, arguments, mf_runtime::RuntimeOptions::default())
-            }
-
-            pub fn run_workflow_with_inputs_and_options(
-                flow: &mf_runtime::Flow,
-                arguments: mf_runtime::WorkflowArguments,
-                options: mf_runtime::RuntimeOptions,
-            ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                let mut state = mf_runtime::ExecutionContext::default();
-                state.set_workflow_arguments(arguments);
-                run_workflow_in_context_with_options(flow, &mut state, options)
-            }
-
-            pub fn run_workflow(
-                flow: &mf_runtime::Flow,
-            ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                run_workflow_with_observation(flow, None)
-            }
-
-            pub fn run_workflow_with_observation(
-                flow: &mf_runtime::Flow,
-                observation: Option<mf_runtime::RunObservation>,
-            ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                run_workflow_with_observation_and_options(flow, observation, mf_runtime::RuntimeOptions::default())
-            }
-
-            pub fn run_workflow_with_observation_and_options(
-                flow: &mf_runtime::Flow,
-                observation: Option<mf_runtime::RunObservation>,
-                options: mf_runtime::RuntimeOptions,
-            ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                mf_runtime::ExecutionContext::run(observation, |state| {
-                    run_workflow_in_context_with_options(flow, state, options)
-                })
-            }
+            #helpers
 
             pub fn run_workflow_in_context(
                 flow: &mf_runtime::Flow,
                 state: &mut mf_runtime::ExecutionContext,
             ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                run_workflow_in_context_with_options(flow, state, mf_runtime::RuntimeOptions::default())
-            }
-
-            pub fn run_workflow_in_context_with_options(
-                flow: &mf_runtime::Flow,
-                state: &mut mf_runtime::ExecutionContext,
-                options: mf_runtime::RuntimeOptions,
-            ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                mf_runtime::FlowRuntime::new(options).execute_in_context(flow, state)
+                mf_runtime::FlowRuntime::default().execute_in_context(flow, state)
             }
         };
         let syntax_tree: syn::File = syn::parse2(generated).context(GeneratedSyntaxSnafu)?;

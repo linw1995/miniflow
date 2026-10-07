@@ -614,6 +614,15 @@ fn skipped_body_nodes_report_their_item_and_dependency() {
 }
 
 fn assert_generated_observation(project: &Path, scratch: &Path) {
+    let plan = mf_compiler::CompiledWorkflow::from_json(
+        &fs::read_to_string(project.join("workflow-plan.json")).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        project.join("src/workflow.rs"),
+        plan.generate_artifacts().unwrap().rust_source,
+    )
+    .unwrap();
     let manifest = fs::read_to_string(project.join("Cargo.toml")).unwrap();
     fs::write(
         project.join("Cargo.toml"),
