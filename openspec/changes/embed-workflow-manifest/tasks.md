@@ -33,6 +33,6 @@
 
 ## 6. Integration validation
 
-- [ ] 6.1 Exercise standalone inspection after moving task, stream, and nested-body runners away from build inputs; verify direct records, compatibility commands, validation, arguments, and observed execution agree for the same artifact.
-- [ ] 6.2 Run `openspec validate embed-workflow-manifest --strict`, `nix develop --command prek install`, `nix develop --command prek -a`, and `nix flake check -L`; resolve failures and verify the change is ready for implementation review.
-- [ ] 6.3 Review release-retention results on supported Linux and macOS targets and confirm every delta scenario has meaningful coverage; verify no behavior change is left undocumented or untested before completing implementation tasks.
+- [x] 6.1 Exercise standalone inspection after moving task, stream, and nested-body runners away from build inputs; verify direct records, compatibility commands, validation, arguments, and observed execution agree for the same artifact.
+- [x] 6.2 Run `openspec validate embed-workflow-manifest --strict`, `nix develop --command prek install`, `nix develop --command prek -a`, and `nix flake check -L`; resolve failures and verify the change is ready for implementation review.
+- [x] 6.3 Review release-retention results on supported Linux and macOS targets and confirm every delta scenario has meaningful coverage; verify no behavior change is left undocumented or untested before completing implementation tasks.

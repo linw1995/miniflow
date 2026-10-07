@@ -138,7 +138,13 @@ filter = '''
 (binary_id(=mf-compiler::iteration) & (
     test(=generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node) |
     test(=loop_and_iteration_share_a_workflow_in_memory_and_generated_runners)
-))
+)) |
+(binary_id(=mf-cli::manifest) &
+    test(=moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts)) |
+(binary_id(=mf-compiler::interface_agreement) &
+    test(=generated_task_and_stream_runners_reject_runtime_contract_changes_before_dispatch)) |
+(binary_id(=mf-compiler::manifest_retention) &
+    test(=release_lto_and_strip_preserve_standalone_factory_free_manifest))
 '''
 setup = "build-cache"
 
@@ -173,6 +179,12 @@ filter = '''
 (binary_id(=mf-compiler::iteration) & (
     test(=generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node) |
     test(=loop_and_iteration_share_a_workflow_in_memory_and_generated_runners)
-))
+)) |
+(binary_id(=mf-cli::manifest) &
+    test(=moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts)) |
+(binary_id(=mf-compiler::interface_agreement) &
+    test(=generated_task_and_stream_runners_reject_runtime_contract_changes_before_dispatch)) |
+(binary_id(=mf-compiler::manifest_retention) &
+    test(=release_lto_and_strip_preserve_standalone_factory_free_manifest))
 '''
 test-group = "shared-cargo"

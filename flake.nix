@@ -109,8 +109,14 @@
           });
           test = craneLib.cargoNextest (cargoArgs // {
             inherit cargoArtifacts;
-            cargoNextestExtraArgs = "--locked --workspace --all-targets --all-features --profile ci";
+            postPatch = ''
+              patchShebangs scripts/nextest-cargo.sh
+            '';
+            cargoNextestExtraArgs = "--locked --workspace --all-targets --all-features --profile ci"
+              + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux " --no-fail-fast";
             nativeBuildInputs = [ pkgs.cmake pkgs.git pkgs.jq pkgs.python3 ];
+          } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
+            SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
           });
           workflows = pkgs.runCommand "check-workflows" {
             nativeBuildInputs = [ pkgs.actionlint ];
