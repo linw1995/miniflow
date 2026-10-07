@@ -62,7 +62,7 @@ The generated `build.rs` writes the layout and manifest into `OUT_DIR`; the runn
 
 Generate a fixed-length static byte array rather than a slice pointer or a Rust struct. Place it in `.mf_manifest` for ELF and `__DATA,__mf_manifest` for Mach-O using target-specific attributes in the generated runner. Target selection belongs to target compilation, not the host build script's platform.
 
-Use `#[used]` for compiler retention and a real runner reference to the array for decoding and contract comparison. `#[used]` alone does not prevent final linker removal. Select the final retention mechanism against the pinned Linux and macOS linkers, adding target linker retention only if needed; prove it with release, LTO, and strip tests rather than relying on exported symbols. Section lookup does not require a symbol table.
+Keep a real runner reference to the array for decoding and contract comparison. This reference retains the data through compilation and linking; an additional unused-static retention marker is unnecessary. Prove retention with release, LTO, and strip tests on the pinned Linux and macOS toolchains. Section lookup does not require a symbol table, and the retention test reads the actual section through the production reader.
 
 Compatibility inspection commands decode this array and print the existing graph/interface JSON formats without preparing providers. Validation and execution read it through the same runtime decoder, ensuring the normal binary keeps a live reference to the data. No object-file parser is linked into the generated runner.
 

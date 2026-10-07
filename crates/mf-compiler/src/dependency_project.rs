@@ -60,7 +60,6 @@ fn generate() -> Result<(), Box<dyn std::error::Error>> {
 
 const MAIN: &str = r#"mod workflow;
 
-#[used]
 #[cfg_attr(target_os = "linux", unsafe(link_section = ".mf_manifest"))]
 #[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mf_manifest"))]
 static WORKFLOW_MANIFEST: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/workflow-manifest.bin")).len()] =

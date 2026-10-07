@@ -36,3 +36,14 @@
 - [x] 6.1 Exercise standalone inspection after moving task, stream, and nested-body runners away from build inputs; verify direct records, compatibility commands, validation, arguments, and observed execution agree for the same artifact.
 - [x] 6.2 Run `openspec validate embed-workflow-manifest --strict`, `nix develop --command prek install`, `nix develop --command prek -a`, and `nix flake check -L`; resolve failures and verify the change is ready for implementation review.
 - [x] 6.3 Review release-retention results on supported Linux and macOS targets and confirm every delta scenario has meaningful coverage; verify no behavior change is left undocumented or untested before completing implementation tasks.
+
+## 7. Completion review
+
+- [x] 7.1 Review the complete change against AGENTS.md, checking existing module visibility and typed Snafu sources; document any remaining findings before archive.
+- [x] 7.2 Run isolated ablation variants and negative controls; retain reports, logs, and backups only under Git-ignored `target/ablation/`.
+- [x] 7.3 Remove redundant reader ownership/counters, unused-static retention, and independent test oracles while preserving meaningful regression coverage.
+- [x] 7.4 Validate the final implementation and record the completion review; verify no blocking requirement or review issue remains.
+
+## Workflow follow-up
+
+- Archive this change and validate the updated specifications after completion review.

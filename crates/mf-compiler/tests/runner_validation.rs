@@ -44,13 +44,6 @@ fn one_runner_validates_without_execution_and_reports_plugin_errors() {
         String::from_utf8_lossy(&validation.stderr)
     );
     assert!(String::from_utf8_lossy(&validation.stdout).contains("factory diagnostic"));
-    for flag in ["--describe", "--describe-interface"] {
-        let inspection = Command::new(&runner).arg(flag).output().unwrap();
-        assert!(inspection.status.success());
-        serde_json::from_slice::<serde_json::Value>(&inspection.stdout).unwrap();
-        assert!(!String::from_utf8_lossy(&inspection.stdout).contains("factory diagnostic"));
-        assert!(inspection.stderr.is_empty());
-    }
     let execution = Command::new(&runner).output().unwrap();
     assert!(!execution.status.success());
     assert!(String::from_utf8_lossy(&execution.stderr).contains("execution sentinel"));

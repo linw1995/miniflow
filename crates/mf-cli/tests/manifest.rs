@@ -1,6 +1,9 @@
 #![cfg(unix)]
 
-use mf_compiler::{CompileRequest, RunnerOptions, SupportPackages, compile_project_with_options};
+use mf_compiler::{
+    CompileRequest, RunnerOptions, SupportPackages, compile_project_with_options, plan_definition,
+    resolve_project, write_dependency_project_with_options,
+};
 use mf_tui::manifest::read_manifest;
 use serde_json::{Value, json};
 use std::{
@@ -116,5 +119,84 @@ fn moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts() 
             .unwrap();
         assert!(!invalid.status.success());
         assert!(invalid.stdout.is_empty());
+    }
+}
+
+#[test]
+fn release_lto_and_strip_preserve_standalone_factory_free_manifest() {
+    let root = tempfile::tempdir().unwrap();
+    let project = root.path().join("build");
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let definition = serde_json::from_value(json!({
+        "version":"2026-09-26", "dependencies": {"fixture": {
+            "package":"fixture-multi-nodes", "path":crates.join("mf-compiler/tests/fixtures/multi-nodes"),
+            "features":["double"], "default-features":false
+        }},
+        "nodes":[{"id":"a", "kind":"fixture.source", "config":{"print":true}}, {"id":"b", "kind":"fixture.echo"}],
+        "edges":[{"from_node":"a","from_output":"value","to_node":"b","to_input":"input"}],
+        "outputs":[{"name":"result","node":"b","port":"value"}]
+    })).unwrap();
+    let plan = plan_definition(&definition).unwrap();
+    for telemetry in [false, true] {
+        write_dependency_project_with_options(
+            &project,
+            &plan,
+            &SupportPackages::Local {
+                crates_dir: crates.to_owned(),
+            },
+            &RunnerOptions { telemetry },
+        )
+        .unwrap();
+        let manifest_path = project.join("Cargo.toml");
+        let mut cargo_manifest = fs::read_to_string(&manifest_path).unwrap();
+        cargo_manifest.push_str("\n[profile.release]\nlto = true\ncodegen-units = 1\n");
+        fs::write(manifest_path, cargo_manifest).unwrap();
+        resolve_project(&project, &root.path().join("flow.lock"), false).unwrap();
+        let output = mf_compiler::cargo_command(&project)
+            .args(["build", "--offline", "--release", "--locked"])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let runner = root.path().join("standalone");
+        let target = std::env::var_os("MF_TEST_TARGET_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| project.join("target"));
+        fs::copy(target.join("release/mf-generated-workflow"), &runner).unwrap();
+        let before = read_manifest(&runner).unwrap().unwrap();
+        let output = Command::new("strip").arg(&runner).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(read_manifest(&runner).unwrap().unwrap(), before);
+        for flag in ["--describe", "--describe-interface"] {
+            let output = Command::new(&runner)
+                .arg(flag)
+                .env("PATH", "")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(output.stderr.is_empty());
+            if flag == "--describe" {
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+                    serde_json::to_value(&before.description).unwrap()
+                );
+            } else {
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+                    serde_json::to_value(&before.interface).unwrap()
+                );
+            }
+        }
     }
 }

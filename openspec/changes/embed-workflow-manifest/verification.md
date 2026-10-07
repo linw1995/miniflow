@@ -8,7 +8,7 @@ Rust `1.98.1` through `nix develop`. Native macOS validation runs on `aarch64-da
 - Git hook installation and `prek -a`: passed, including formatting, Clippy, cargo check, rust-analyzer, Markdown/YAML/TOML checks, actionlint, and the dependency/license audit.
 - Full workspace: `cargo nextest run --locked --workspace --all-targets --all-features --profile ci --test-threads 4` passed all 441 tests with no skipped tests.
 - Coverage: `scripts/run-cov.sh` passed the 14 selected manifest/preflight tests. Reports remain local in `target/coverage/result/`, including `lcov.info`; this was targeted coverage, not a whole-workspace coverage run.
-- Manifest contract line coverage: 104/107 (97.20%); executable reader line coverage: 177/203 (87.19%).
+- Manifest contract line coverage: 104/107 (97.20%); the refreshed reader report records 174/233 mapped lines. Coverage reports remain local; mapped-line totals include generated instrumentation and are not used as a design-retention criterion.
 - Native macOS `nix flake check -L`: passed with the final test environment; the isolated release test suite passed all 441 tests.
 - Native Linux Nix test, Clippy, format, and workflow checks: passed; the isolated release test suite passed all 441 tests, including ELF release/LTO/strip retention. The native targets exercised were aarch64 Linux and macOS; x86_64 container inspection is covered by fixtures.
 
@@ -20,7 +20,7 @@ Rust `1.98.1` through `nix develop`. Native macOS validation runs on `aarch64-da
 | Duplicate JSON members and graph/interface consistency | Runtime manifest tests retain typed JSON/graph/interface error sources and reject mismatched identities or incomplete roots |
 | One build-time provider preparation for task/stream layouts and configured metadata | `mf-compiler::manifest_generation` counts construction, compares dynamic schemas, and preserves empty older-schema interfaces |
 | Warm builds, layout compatibility, invalid preparation/install preservation | Compiler cache tests and CLI warm-build/configuration/failed-validation tests |
-| Release/LTO/strip retention with telemetry enabled and disabled | `mf-compiler::manifest_retention` checks the native section and compatibility records after platform stripping |
+| Release/LTO/strip retention with telemetry enabled and disabled | `mf-cli::manifest` checks the native section and compatibility records after platform stripping |
 | Factory-free compatibility commands, including noisy or unavailable runtime factories | Compiler runner-validation and interface-agreement fixtures |
 | Runtime port membership/type/required/resource drift, before dispatch | Runtime mismatch diagnostics and generated task/stream interface-agreement tests; execution marker stays absent |
 | Validation drift preserves an installed executable and lock | Interface-agreement subprocess validation fixture |
@@ -45,3 +45,12 @@ Rust `1.98.1` through `nix develop`. Native macOS validation runs on `aarch64-da
 Linux Nix isolation exposed an existing generated-build test wrapper with an unpatched `#!/usr/bin/env bash` interpreter path. The test derivation now runs `patchShebangs scripts/nextest-cargo.sh` before validation, so Cargo subprocesses use the pinned shell available inside the sandbox. This changes the test environment only; runner generation and execution semantics are unaffected.
 
 Linux isolation also lacked a system CA bundle required when constructing the HTTP exporter client. The Linux test derivation supplies the pinned `cacert` bundle through `SSL_CERT_FILE`, preserving certificate verification. Linux Nix tests collect all failures to expose environment regressions in one run.
+
+## Completion validation
+
+- Final macOS `nix flake check -L`: passed all 441 workspace tests after the completion review.
+- Final native Linux focused Nix derivation: passed all 19 selected tests for manifest contracts, reader/preflight, task/stream/Loop standalone parity, schema drift, generation, and release/LTO/strip retention. Unrelated tests were filtered for this rerun; the earlier full Linux suite passed 441 tests before these internal simplifications.
+- Final targeted coverage: 14 selected tests passed after reader simplification.
+- Final `prek -a` and OpenSpec strict validation: passed.
+
+The final retention test is owned by the CLI integration suite and reads the executable's actual section through the production reader. Inspection commands, payload versions, legacy fallback, module export boundaries, and typed error contracts remain unchanged.

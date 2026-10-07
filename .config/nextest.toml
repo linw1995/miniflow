@@ -143,7 +143,7 @@ filter = '''
     test(=moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts)) |
 (binary_id(=mf-compiler::interface_agreement) &
     test(=generated_task_and_stream_runners_reject_runtime_contract_changes_before_dispatch)) |
-(binary_id(=mf-compiler::manifest_retention) &
+(binary_id(=mf-cli::manifest) &
     test(=release_lto_and_strip_preserve_standalone_factory_free_manifest))
 '''
 setup = "build-cache"
@@ -184,7 +184,7 @@ filter = '''
     test(=moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts)) |
 (binary_id(=mf-compiler::interface_agreement) &
     test(=generated_task_and_stream_runners_reject_runtime_contract_changes_before_dispatch)) |
-(binary_id(=mf-compiler::manifest_retention) &
+(binary_id(=mf-cli::manifest) &
     test(=release_lto_and_strip_preserve_standalone_factory_free_manifest))
 '''
 test-group = "shared-cargo"

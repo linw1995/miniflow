@@ -9,17 +9,15 @@ use object::{
 };
 use snafu::{ResultExt, Snafu, ensure};
 use std::{
-    cell::{Cell, RefCell},
+    cell::Cell,
     fs::File,
     io::{self, Read, Seek, SeekFrom},
     ops::Range,
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
-    rc::Rc,
 };
 
 const MAX_METADATA_BYTES: usize = 1024 * 1024;
-const MAX_METADATA_READS: usize = 8192;
 const MAX_SECTION_NAME_BYTES: u64 = 1024;
 const MAX_SECTIONS: usize = 4096;
 
@@ -50,16 +48,16 @@ pub enum ManifestReadError {
 struct FileSource {
     file: File,
     length: u64,
-    failure: Rc<RefCell<Option<io::Error>>>,
+    failure: Option<io::Error>,
 }
 
 impl FileSource {
     // The object cache erases I/O causes, so keep the original error for the caller.
-    fn capture<T>(&self, result: io::Result<T>) -> Result<T, ()> {
+    fn capture<T>(&mut self, result: io::Result<T>) -> Result<T, ()> {
         match result {
             Ok(value) => Ok(value),
             Err(source) => {
-                *self.failure.borrow_mut() = Some(source);
+                self.failure = Some(source);
                 Err(())
             }
         }
@@ -88,7 +86,6 @@ impl object::read::ReadCacheOps for FileSource {
 struct Metadata<'a> {
     cache: &'a ReadCache<FileSource>,
     bytes: &'a Cell<usize>,
-    reads: &'a Cell<usize>,
     exceeded: &'a Cell<bool>,
     length: u64,
 }
@@ -99,7 +96,7 @@ impl<'a> ReadRef<'a> for Metadata<'a> {
     }
 
     fn read_bytes_at(self, offset: u64, size: u64) -> Result<&'a [u8], ()> {
-        if size > self.bytes.get() as u64 || self.reads.get() == 0 {
+        if size > self.bytes.get() as u64 {
             self.exceeded.set(true);
             return Err(());
         }
@@ -107,7 +104,6 @@ impl<'a> ReadRef<'a> for Metadata<'a> {
             return Err(());
         }
         self.bytes.set(self.bytes.get() - size as usize);
-        self.reads.set(self.reads.get() - 1);
         self.cache.read_bytes_at(offset, size)
     }
 
@@ -256,19 +252,16 @@ pub fn read_manifest(path: &Path) -> Result<Option<WorkflowManifest>, ManifestRe
         }
     );
     let length = metadata.len();
-    let failure = Rc::new(RefCell::new(None));
     let cache = ReadCache::new(FileSource {
         file,
         length,
-        failure: failure.clone(),
+        failure: None,
     });
     let bytes = Cell::new(MAX_METADATA_BYTES);
-    let reads = Cell::new(MAX_METADATA_READS);
     let exceeded = Cell::new(false);
     let data = Metadata {
         cache: &cache,
         bytes: &bytes,
-        reads: &reads,
         exceeded: &exceeded,
         length,
     };
@@ -277,7 +270,10 @@ pub fn read_manifest(path: &Path) -> Result<Option<WorkflowManifest>, ManifestRe
         FileKind::MachO64 => macho_range(data),
         _ => UnsupportedContainerSnafu.fail(),
     })();
-    if let Some(source) = failure.borrow_mut().take() {
+    let FileSource {
+        mut file, failure, ..
+    } = cache.into_inner();
+    if let Some(source) = failure {
         return Err(source).context(IoSnafu {
             path: path.to_owned(),
         });
@@ -293,7 +289,6 @@ pub fn read_manifest(path: &Path) -> Result<Option<WorkflowManifest>, ManifestRe
         }
     );
     check_range(length, offset, size)?;
-    let mut file = cache.into_inner().file;
     file.seek(SeekFrom::Start(offset)).context(IoSnafu {
         path: path.to_owned(),
     })?;
