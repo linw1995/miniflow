@@ -96,6 +96,110 @@ Declare context reads in `NodeMetadata.context_references`. Each `ContextReferen
 
 ## Context-aware execution
 
+### Struct-defined inputs
+
+Use the runtime's `NodeInputs` derive to declare input ports and decode their values from one owned struct:
+
+```rust
+use mf_runtime::{Inputs, NodeInputs, ValueRef};
+use std::collections::BTreeMap;
+
+#[derive(NodeInputs)]
+struct RequestInputs {
+    url: String,
+    headers: Option<BTreeMap<String, String>>,
+    body: Option<ValueRef>,
+    #[input(rename = "request.path")]
+    path: Option<String>,
+}
+
+let ports = RequestInputs::ports();
+let request = RequestInputs::from_inputs(Inputs::from([
+    ("url".into(), "https://example.test".into()),
+]))?;
+```
+
+The derive delegates field decoding and diagnostics to runtime helpers. Supported owned fields are
+`bool`, `i64`, `f64`, `String`, `ValueRef`, recursive `Vec<T>` and `BTreeMap<String, T>`, and top-level
+`Option<T>`. Scalars retain strict JSON representations; integers do not become floating values.
+`Option<T>` permits omission but retains T's port descriptor: omitted `Option<String>` becomes `None`,
+explicit null is rejected, and supplied null for `Option<ValueRef>` becomes `Some` containing null.
+Collection elements cannot be optional, and nested `Option` fields are unsupported.
+
+Named-field structs support generics and type aliases. Tuple/unit structs, enums, and borrowed fields are
+unsupported. Field names define port names; raw identifiers omit their `r#` prefix. Use
+`#[input(rename = "port-name")]` for exact names, including punctuation. Empty and duplicate names fail
+compilation. Input attributes are independent of Serde attributes and do not implement defaults or flattening.
+
+The derive is re-exported by `mf-runtime`; providers do not need a separate macro dependency. A renamed
+runtime dependency requires `#[input(runtime = "::runtime_alias")]` on the struct. Use
+`#[input(runtime = "crate")]` when deriving within the runtime crate itself.
+
+`decode_input`, `reject_unknown_inputs`, `InputField`, and `InputValue` support manual input contracts. Their declarations and
+decoders must agree on accepted names, requiredness, and value types. Errors retain typed mismatches;
+`InputDecodeError::pointer()` adds the escaped port name to its nested path. Shared `ValueRef` payloads
+remain shared during decoding, including collection descendants; owned strings and typed containers may allocate.
+
+### Typed task execution
+
+Implement `TypedTaskNode` to receive the input struct directly. The runtime owns conversion and wraps the
+provider as an ordinary task executor:
+
+```rust
+use mf_runtime::{
+    ExecutionContext, NodeBuildError, NodeExecutionError, NodeInputs, NodePorts, NodeResult,
+    Outputs, PortSpec, PreparedNode, TypedTaskNode, ValueRef, ValueType,
+};
+
+#[derive(NodeInputs)]
+struct EchoInputs {
+    input: ValueRef,
+}
+
+struct Echo;
+impl TypedTaskNode for Echo {
+    type Input = EchoInputs;
+
+    fn execute(&self, input: EchoInputs, _: &mut ExecutionContext)
+        -> Result<NodeResult, NodeExecutionError>
+    {
+        Ok(Outputs::from([("value".into(), input.input)]).into())
+    }
+}
+
+fn factory(_: serde_json::Value) -> Result<PreparedNode, NodeBuildError> {
+    PreparedNode::typed_task(Echo, NodePorts {
+        inputs: vec![],
+        outputs: vec![PortSpec::new("value", ValueType::Any, true)],
+    })
+}
+```
+
+Pass ordinary `NodeMetadata` when the factory also supplies output derivations, context references, or
+stdin requirements. The typed constructor preserves those fields and requires an empty input declaration;
+even matching hand-written inputs return `NodeBuildError::ConflictingInputDeclarations`.
+Register the factory with the existing `NodeFactory::Plain` or `NodeFactory::Subgraph` contract.
+
+Typed tasks run through the same dependency resolution, skip rules, input checks, output publication,
+and context boundaries as dynamic tasks, including in stream task domains. Adapter conversion failures
+retain `InputDecodeError` and its typed sources through `NodeExecutionError::InputDecode`; provider business
+errors keep their existing plugin error chain. Typed event and stream producer interfaces are not provided.
+
+`execute_typed_task` exposes the same input conversion and invocation for providers that retain a
+dynamic `TaskNode` entry point. It does not schedule work or publish outputs. Iteration uses this function
+to preserve direct dynamic callers while its factory uses typed preparation. `mfn_core::IterationInputs`
+contains the shared `items` payload; callers using both traits can qualify `TaskNode::execute` for a map
+or `TypedTaskNode::execute` for the struct. Its results descriptor still depends on its body and error policy.
+
+Adoption is additive: replace a fixed-input task's map decoding with a derived struct, implement
+`TypedTaskNode`, and pass empty input ports to `PreparedNode::typed_task`. Output contracts and registrations
+retain their existing shape. The [identity provider](../crates/builtin-nodes/core/src/identity.rs) demonstrates
+shared-value forwarding with this API; [Iteration](../crates/builtin-nodes/core/src/iteration.rs) demonstrates
+fixed typed inputs with body-dependent outputs. Providers such as `builtin.code` whose ports depend on configuration
+continue to use `TaskNode`, dynamic metadata, and the existing `PreparedNode::new` constructor.
+
+### Dynamic task execution
+
 Implement `TaskNode::execute(inputs, &mut ExecutionContext)` and return `NodeResult`. Tasks can read
 declared outputs through `ctx.output("source.value")`. `ContextValue` distinguishes a produced JSON value from
 `Skipped`; unavailable outputs, including reads before production and unexpected omissions, are errors. Reference

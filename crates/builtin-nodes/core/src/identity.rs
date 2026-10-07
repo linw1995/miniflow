@@ -1,6 +1,6 @@
 use mf_runtime::{
-    Inputs, NodeBuildError, NodeExecutionError, NodeRegistration, OutputDerivation, Outputs,
-    PortSpec, TaskNode, ValueType,
+    NodeBuildError, NodeExecutionError, NodeInputs, NodeRegistration, OutputDerivation, Outputs,
+    PortSpec, TypedTaskNode, ValueRef, ValueType,
 };
 use serde_json::Value;
 
@@ -12,18 +12,20 @@ pub fn kind() -> &'static str {
 
 struct IdentityNode;
 
-impl TaskNode for IdentityNode {
+#[derive(NodeInputs)]
+struct IdentityInputs {
+    input: ValueRef,
+}
+
+impl TypedTaskNode for IdentityNode {
+    type Input = IdentityInputs;
+
     fn execute(
         &self,
-        mut inputs: Inputs,
+        inputs: IdentityInputs,
         _ctx: &mut mf_runtime::ExecutionContext,
     ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
-        let Some(value) = inputs.remove("input") else {
-            return Err(NodeExecutionError::ExecutionFailed {
-                message: "required input `input` was not provided".to_owned(),
-            });
-        };
-        Ok((Outputs::from([("value".to_owned(), value)])).into())
+        Ok((Outputs::from([("value".to_owned(), inputs.input)])).into())
     }
 }
 impl IdentityNode {
@@ -37,11 +39,11 @@ fn identity_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuil
     let metadata = mf_runtime::NodeMetadata {
         output_derivations: node.output_derivations(),
         ..mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
-            inputs: vec![PortSpec::new("input", ValueType::Any, true)],
+            inputs: vec![],
             outputs: vec![PortSpec::new("value", ValueType::Any, true)],
         })
     };
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    mf_runtime::PreparedNode::typed_task(node, metadata)
 }
 
 inventory::submit! {
