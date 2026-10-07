@@ -43,6 +43,13 @@ document containing the workflow identity, node IDs/kinds, named data/control ed
 the embedded plan without constructing plugins, and excludes configuration and business values. Edge names identify
 connected ports; the complete list of dynamic or unconnected ports is unavailable in this description.
 
+The generated Cargo build prepares the selected providers once to produce immutable execution layouts and a versioned
+workflow manifest containing the graph and startup interface. Both artifacts use the same validated preparation,
+including configured input types and conditional stdin requirements. The manifest is generated before linking during
+the existing runner build; it does not require a second compilation. Its wire format is documented in
+[observability](observability.md#embedded-manifest-format). The generated-project layout version is `2026-10-07`;
+explicit build directories owned by an older layout must be recreated at a compatible location.
+
 The runner exports workflow spans and lifecycle events over OTLP/HTTP protobuf when a collector endpoint is configured:
 
 ```sh

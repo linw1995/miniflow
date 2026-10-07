@@ -214,7 +214,7 @@ fn code_generation_escapes_definition_strings() {
     let layouts = plan.generate_execution_plans(&registry).unwrap();
 
     syn::parse_file(&artifacts.rust_source).unwrap();
-    syn::parse_file(&layouts).unwrap();
+    syn::parse_file(&layouts.rust_source).unwrap();
     assert!(artifacts.rust_source.contains("source\\\"quoted\\n"));
-    assert!(layouts.contains("answer\\\"quoted"));
+    assert!(layouts.rust_source.contains("answer\\\"quoted"));
 }

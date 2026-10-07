@@ -6,10 +6,10 @@
 
 ## 2. Coordinated build-time generation
 
-- [ ] 2.1 Extend `mf-compiler/src/plan.rs` to return execution-plan source and manifest bytes from one validated preparation, covering task and stream paths; verify an external-provider fixture observes no additional factory construction for manifest generation.
-- [ ] 2.2 Derive the startup schema from those same prepared nodes, including configuration-dependent ports and conditional stdin; verify generated records match dynamically prepared schemas and older workflow versions retain their empty startup interface.
-- [ ] 2.3 Update the generated build script and project-layout/cache identity in `mf-compiler`; verify cold and warm builds regenerate both outputs after configuration/provider changes and preserve the prior executable on invalid preparation.
-- [ ] 2.4 Update `docs/compiling.md` for manifest generation during the existing Cargo build; verify a generated project performs one runner build and needs no sidecar at inspection time.
+- [x] 2.1 Extend `mf-compiler/src/plan.rs` to return execution-plan source and manifest bytes from one validated preparation, covering task and stream paths; verify an external-provider fixture observes no additional factory construction for manifest generation.
+- [x] 2.2 Derive the startup schema from those same prepared nodes, including configuration-dependent ports and conditional stdin; verify generated records match dynamically prepared schemas and older workflow versions retain their empty startup interface.
+- [x] 2.3 Update the generated build script and project-layout/cache identity in `mf-compiler`; verify cold and warm builds regenerate both outputs after configuration/provider changes and preserve the prior executable on invalid preparation.
+- [x] 2.4 Update `docs/compiling.md` for manifest generation during the existing Cargo build; verify a generated project performs one runner build and needs no sidecar at inspection time.
 
 ## 3. Retained executable data and compatibility commands
 

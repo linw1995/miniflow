@@ -11,10 +11,12 @@ const OWNER: &str = ".mf-owner.json";
 enum BuildLayoutVersion {
     #[serde(rename = "2026-09-26")]
     V2026_09_26,
+    #[serde(rename = "2026-10-07")]
+    V2026_10_07,
 }
 
 impl BuildLayoutVersion {
-    const CURRENT: Self = Self::V2026_09_26;
+    const CURRENT: Self = Self::V2026_10_07;
 }
 
 #[derive(Debug, Snafu)]
