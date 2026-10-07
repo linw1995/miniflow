@@ -409,17 +409,6 @@ mod tests {
                 };
                 assert_eq!(source.pointer(), format!("/{port}"));
             }
-            for items in [json!(null), json!(false), json!(1), json!("text")] {
-                let error = TypedTaskNode::execute(
-                    &node,
-                    IterationInputs {
-                        items: items.into(),
-                    },
-                    &mut ExecutionContext::default(),
-                )
-                .unwrap_err();
-                assert!(error.to_string().contains("array or object input `items`"));
-            }
         }
     }
 

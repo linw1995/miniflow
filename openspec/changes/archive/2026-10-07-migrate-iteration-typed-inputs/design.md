@@ -9,7 +9,7 @@
 - Export `IterationInputs` with `items: ValueRef` and derive `NodeInputs`; array/map validation remains provider business logic.
 - Implement `TypedTaskNode` and use typed preparation in the registered factory. A private result-port helper shares output construction between the public complete `ports()` method and factory metadata.
 - Keep `TaskNode` for existing consumers. Its implementation delegates to `execute_typed_task`, a runtime function also used by the private typed adapter. This avoids provider-written map decoding and preserves existing dynamic callers without another wrapper type.
-- Retain the existing iteration tests and extend their assertions to cover metadata derivation, typed calls, shared handles, and input errors. Existing compiler tests cover policies, nested bodies, and generated execution.
+- Retain the existing iteration tests and extend their assertions to cover metadata derivation, typed calls, shared handles, and input errors. Existing compiler tests cover scalar rejection under every mode and policy, nested bodies, and generated execution; avoid duplicating those scalar cases in provider tests.
 
 ## Risks / Trade-offs
 
