@@ -6,6 +6,29 @@ use std::collections::BTreeMap;
 ///
 /// Implementations must accept exactly the names, requiredness, and JSON types
 /// reported by `ports()`, reject unknown names, and preserve shared JSON payloads.
+///
+/// ```
+/// use mf_runtime::{Inputs, NodeInputs, ValueRef};
+/// use std::collections::BTreeMap;
+///
+/// #[derive(NodeInputs)]
+/// struct RequestInputs {
+///     url: String,
+///     headers: Option<BTreeMap<String, String>>,
+///     body: Option<ValueRef>,
+///     #[input(rename = "request.path")]
+///     path: Option<String>,
+/// }
+///
+/// let ports = RequestInputs::ports();
+/// let request = RequestInputs::from_inputs(Inputs::from([
+///     ("url".into(), "https://example.test".into()),
+/// ]))?;
+/// assert_eq!(ports[3].name, "request.path");
+/// assert_eq!(request.url, "https://example.test");
+/// assert!(request.headers.is_none() && request.body.is_none() && request.path.is_none());
+/// # Ok::<(), mf_runtime::InputDecodeError>(())
+/// ```
 pub trait NodeInputs: Sized {
     fn ports() -> Vec<PortSpec>;
 

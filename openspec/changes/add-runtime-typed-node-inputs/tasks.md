@@ -9,10 +9,10 @@
 
 ## 2. Input derive macro
 
-- [ ] 2.1 Add `mf-runtime-derive`, workspace dependencies, lockfile updates, and the `mf-runtime` re-export without a reverse runtime dependency; verify both packages build with the pinned toolchain.
-- [ ] 2.2 Generate declarations and runtime-helper decoding for named-field structs, empty structs, generic bounds, raw identifiers, explicit field renames, and an explicit runtime path override; verify compile-pass fixtures including a renamed runtime dependency.
-- [ ] 2.3 Reject unsupported shapes/types, borrowed fields, nullable collection elements, nested Option fields, malformed attributes, and empty/duplicate port names; verify compile-fail fixtures provide actionable diagnostics.
-- [ ] 2.4 Document derive attributes and the boundary with Serde in `docs/node-development.md`; verify the documented input struct compiles and uses only runtime-owned conversion helpers.
+- [x] 2.1 Add `mf-runtime-derive`, workspace dependencies, lockfile updates, and the `mf-runtime` re-export without a reverse runtime dependency; verify both packages build with the pinned toolchain.
+- [x] 2.2 Generate declarations and runtime-helper decoding for named-field structs, empty structs, generic bounds, raw identifiers, explicit field renames, and an explicit runtime path override; verify compile-pass fixtures including a renamed runtime dependency.
+- [x] 2.3 Reject unsupported shapes/types, borrowed fields, nullable collection elements, nested Option fields, malformed attributes, and empty/duplicate port names; verify compile-fail fixtures provide actionable diagnostics.
+- [x] 2.4 Document derive attributes and the boundary with Serde in `docs/node-development.md`; verify the documented input struct compiles and uses only runtime-owned conversion helpers.
 
 ## 3. Typed task preparation and execution
 

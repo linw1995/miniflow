@@ -68,6 +68,7 @@ fn checks_owners_and_resolves_exact_workspace_versions() {
     let owners = fs::read_to_string(directory.path().join("owners-checked")).unwrap();
     for name in [
         "mf-telemetry",
+        "mf-runtime-derive",
         "mf-runtime",
         "mf-compiler",
         "mfn-core",

@@ -50,6 +50,7 @@ pub use loop_node::{
     prepared_scope_source,
 };
 pub use message_domain::MessageDomains;
+pub use mf_runtime_derive::NodeInputs;
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;

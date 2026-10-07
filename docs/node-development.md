@@ -97,6 +97,50 @@ Declare context reads in `NodeMetadata.context_references`. Each `ContextReferen
 
 ## Context-aware execution
 
+### Struct-defined inputs
+
+Use the runtime's `NodeInputs` derive to declare input ports and decode their values from one owned struct:
+
+```rust
+use mf_runtime::{Inputs, NodeInputs, ValueRef};
+use std::collections::BTreeMap;
+
+#[derive(NodeInputs)]
+struct RequestInputs {
+    url: String,
+    headers: Option<BTreeMap<String, String>>,
+    body: Option<ValueRef>,
+    #[input(rename = "request.path")]
+    path: Option<String>,
+}
+
+let ports = RequestInputs::ports();
+let request = RequestInputs::from_inputs(Inputs::from([
+    ("url".into(), "https://example.test".into()),
+]))?;
+```
+
+The derive delegates field decoding and diagnostics to runtime helpers. Supported owned fields are
+`bool`, `i64`, `f64`, `String`, `ValueRef`, recursive `Vec<T>` and `BTreeMap<String, T>`, and top-level
+`Option<T>`. Scalars retain strict JSON representations; integers do not become floating values.
+`Option<T>` permits omission but retains T's port descriptor: omitted `Option<String>` becomes `None`,
+explicit null is rejected, and supplied null for `Option<ValueRef>` becomes `Some` containing null.
+Collection elements cannot be optional, and nested `Option` fields are unsupported.
+
+Named-field structs support generics and type aliases. Tuple/unit structs, enums, and borrowed fields are
+unsupported. Field names define port names; raw identifiers omit their `r#` prefix. Use
+`#[input(rename = "port-name")]` for exact names, including punctuation. Empty and duplicate names fail
+compilation. Input attributes are independent of Serde attributes and do not implement defaults or flattening.
+
+The derive is re-exported by `mf-runtime`; providers do not need a separate macro dependency. A renamed
+runtime dependency requires `#[input(runtime = "::runtime_alias")]` on the struct. Use
+`#[input(runtime = "crate")]` when deriving within the runtime crate itself.
+
+`InputDecoder`, `InputField`, and `InputValue` support manual input contracts. Their declarations and
+decoders must agree on accepted names, requiredness, and value types. Errors retain typed mismatches;
+`InputDecodeError::pointer()` adds the escaped port name to its nested path. Shared `ValueRef` payloads
+remain shared during decoding, including collection descendants; owned strings and typed containers may allocate.
+
 Implement `TaskNode::execute(inputs, &mut ExecutionContext)` and return `NodeResult`. Tasks can read
 declared outputs through `ctx.output("source.value")`. `ContextValue` distinguishes a produced JSON value from
 `Skipped`; unavailable outputs, including reads before production and unexpected omissions, are errors. Reference
