@@ -3,11 +3,22 @@ use mf_telemetry::event::LoopPathEntry;
 use rpds::RedBlackTreeMapSync;
 use serde::{Deserialize, Serialize};
 use serde_json::Number;
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeMap, HashMap},
     hash::{Hash, Hasher},
     sync::{Arc, Mutex, Weak},
 };
+
+#[derive(Debug, Snafu)]
+pub enum SnapshotError {
+    #[snafu(display("{message}"))]
+    Invalid { message: String },
+    #[snafu(display("snapshot sink failed: {source}"))]
+    Sink {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+}
 
 pub const SNAPSHOT_VERSION: u32 = 1;
 pub type ValueId = usize;
@@ -116,30 +127,41 @@ impl SnapshotStore {
         self.values.get(id)
     }
 
-    pub fn apply(&mut self, record: SnapshotRecord) -> Result<bool, String> {
-        if self.complete {
-            return Err("snapshot record followed the end marker".into());
-        }
-        if let SnapshotRecord::Header { version } = record {
-            if self.initialized || version != SNAPSHOT_VERSION {
-                return Err("invalid snapshot header".into());
+    pub fn apply(&mut self, record: SnapshotRecord) -> Result<bool, SnapshotError> {
+        ensure!(
+            !self.complete,
+            InvalidSnafu {
+                message: "snapshot record followed the end marker"
             }
+        );
+        if let SnapshotRecord::Header { version } = record {
+            ensure!(
+                !self.initialized && version == SNAPSHOT_VERSION,
+                InvalidSnafu {
+                    message: "invalid snapshot header"
+                }
+            );
             self.initialized = true;
             return Ok(false);
         }
-        if !self.initialized {
-            return Err("snapshot stream omitted its header".into());
-        }
+        ensure!(
+            self.initialized,
+            InvalidSnafu {
+                message: "snapshot stream omitted its header"
+            }
+        );
         match record {
             SnapshotRecord::Value { id, value } => {
-                if id != self.values.len() {
-                    return Err("snapshot value IDs must be contiguous".into());
-                }
+                ensure!(
+                    id == self.values.len(),
+                    InvalidSnafu {
+                        message: "snapshot value IDs must be contiguous"
+                    }
+                );
                 let reference = |id| {
-                    self.values
-                        .get(id)
-                        .cloned()
-                        .ok_or_else(|| "unknown snapshot value reference".to_owned())
+                    self.values.get(id).cloned().context(InvalidSnafu {
+                        message: "unknown snapshot value reference",
+                    })
                 };
                 let value = match value {
                     ValueDefinition::Null => ValueRef::null(),
@@ -156,7 +178,7 @@ impl SnapshotStore {
                         entries
                             .into_iter()
                             .map(|(key, id)| Ok((key, reference(id)?)))
-                            .collect::<Result<Vec<_>, String>>()?,
+                            .collect::<Result<Vec<_>, SnapshotError>>()?,
                     ),
                 };
                 self.values.push(value);
@@ -171,19 +193,18 @@ impl SnapshotStore {
                 outcome,
                 error,
             } => {
-                let inputs = self
-                    .values
-                    .get(inputs)
-                    .cloned()
-                    .ok_or("unknown input snapshot")?;
-                let outputs = self
-                    .values
-                    .get(outputs)
-                    .cloned()
-                    .ok_or("unknown output snapshot")?;
-                if !inputs.is_object() || !outputs.is_object() {
-                    return Err("node snapshots require input and output objects".into());
-                }
+                let inputs = self.values.get(inputs).cloned().context(InvalidSnafu {
+                    message: "unknown input snapshot",
+                })?;
+                let outputs = self.values.get(outputs).cloned().context(InvalidSnafu {
+                    message: "unknown output snapshot",
+                })?;
+                ensure!(
+                    inputs.is_object() && outputs.is_object(),
+                    InvalidSnafu {
+                        message: "node snapshots require input and output objects"
+                    }
+                );
                 let next = NodeSnapshot {
                     inputs,
                     outputs,
@@ -251,18 +272,19 @@ fn definition_hash(value: &ValueDefinition) -> u64 {
     state.finish()
 }
 
-type SnapshotSink = Box<dyn FnMut(&SnapshotRecord) -> Result<(), String> + Send>;
+type SnapshotSink =
+    Box<dyn FnMut(&SnapshotRecord) -> Result<(), Box<dyn std::error::Error + Send + Sync>> + Send>;
 
 struct Recording {
     store: SnapshotStore,
     interned: HashMap<u64, Vec<ValueId>>,
     aliases: HashMap<usize, (Weak<ValueKind>, ValueId)>,
     sink: Option<SnapshotSink>,
-    error: Option<String>,
+    error: Option<Arc<SnapshotError>>,
 }
 
 impl Recording {
-    fn append(&mut self, record: SnapshotRecord) -> Result<(), String> {
+    fn append(&mut self, record: SnapshotRecord) -> Result<(), SnapshotError> {
         self.store.apply(record.clone())?;
         // The consumer owns history; the producer keeps the current root and value pool.
         if self.sink.is_some() {
@@ -270,10 +292,12 @@ impl Recording {
         }
         self.write(&record)
     }
-    fn write(&mut self, record: &SnapshotRecord) -> Result<(), String> {
-        self.sink.as_mut().map_or(Ok(()), |sink| sink(record))
+    fn write(&mut self, record: &SnapshotRecord) -> Result<(), SnapshotError> {
+        self.sink
+            .as_mut()
+            .map_or(Ok(()), |sink| sink(record).context(SinkSnafu))
     }
-    fn intern(&mut self, value: &ValueRef) -> Result<ValueId, String> {
+    fn intern(&mut self, value: &ValueRef) -> Result<ValueId, SnapshotError> {
         let alias = matches!(
             value.kind(),
             ValueKind::String(_) | ValueKind::Array(_) | ValueKind::Object(_)
@@ -301,7 +325,7 @@ impl Recording {
                 entries
                     .iter()
                     .map(|(key, value)| Ok((key.clone(), self.intern(value)?)))
-                    .collect::<Result<_, String>>()?,
+                    .collect::<Result<_, SnapshotError>>()?,
             ),
         };
         let canonical = match (&definition, value.kind()) {
@@ -393,8 +417,10 @@ impl SnapshotRecorder {
         Self(Arc::new(Mutex::new(recording)))
     }
     pub fn with_sink(
-        sink: impl FnMut(&SnapshotRecord) -> Result<(), String> + Send + 'static,
-    ) -> Result<Self, String> {
+        sink: impl FnMut(&SnapshotRecord) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+        + Send
+        + 'static,
+    ) -> Result<Self, SnapshotError> {
         let recorder = Self::memory();
         {
             let mut recording = recorder
@@ -431,7 +457,7 @@ impl SnapshotRecorder {
             .store
             .value_count()
     }
-    pub fn diagnostic(&self) -> Option<String> {
+    pub fn diagnostic(&self) -> Option<Arc<SnapshotError>> {
         self.0
             .lock()
             .expect("snapshot recorder was not poisoned")
@@ -464,10 +490,10 @@ impl SnapshotRecorder {
                 outcome: snapshot.outcome,
                 error: snapshot.error,
             })?;
-            Ok::<(), String>(())
+            Ok::<(), SnapshotError>(())
         })();
         if let Err(error) = result {
-            recording.error = Some(error);
+            recording.error = Some(Arc::new(error));
         }
     }
     pub fn finish(&self) {
@@ -477,7 +503,7 @@ impl SnapshotRecorder {
         }
         let result = recording.append(SnapshotRecord::End);
         if let Err(error) = result {
-            recording.error = Some(error);
+            recording.error = Some(Arc::new(error));
         }
     }
 }
@@ -495,6 +521,34 @@ mod tests {
             outcome: SnapshotOutcome::Succeeded,
             error: None,
         }
+    }
+
+    #[test]
+    fn recorder_retains_sink_sources_after_failure() {
+        use std::{error::Error, io};
+        let recorder = SnapshotRecorder::with_sink(|record| {
+            if matches!(record, SnapshotRecord::Header { .. }) {
+                return Ok(());
+            }
+            Err(Box::new(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "sink closed",
+            )))
+        })
+        .unwrap();
+        recorder.record(vec![], "node", completed(42.into()));
+        recorder.finish();
+        assert_eq!(
+            recorder
+                .diagnostic()
+                .unwrap()
+                .source()
+                .unwrap()
+                .downcast_ref::<io::Error>()
+                .unwrap()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
     }
 
     #[test]

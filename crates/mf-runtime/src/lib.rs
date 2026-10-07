@@ -78,8 +78,8 @@ pub use value::{ValueKind, ValueRef};
 pub use worker::{RuntimeWorkerHandle, WorkerHandle, WorkerJob, WorkerPool, WorkerPoolError};
 
 pub use snapshot::{
-    NodeSnapshot, SNAPSHOT_VERSION, Snapshot, SnapshotEntry, SnapshotOutcome, SnapshotRecord,
-    SnapshotRecorder, SnapshotStore, ValueDefinition, ValueId,
+    NodeSnapshot, SNAPSHOT_VERSION, Snapshot, SnapshotEntry, SnapshotError, SnapshotOutcome,
+    SnapshotRecord, SnapshotRecorder, SnapshotStore, ValueDefinition, ValueId,
 };
 
 pub use workflow_inputs::{

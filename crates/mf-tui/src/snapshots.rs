@@ -10,14 +10,38 @@ use ratatui::{
     text::Line,
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
 };
-use std::io::{self, Write};
+use snafu::{ResultExt, Snafu};
+use std::{
+    io::{self, Write},
+    sync::Arc,
+};
+
+#[derive(Debug, Snafu)]
+pub enum CaptureError {
+    #[snafu(transparent)]
+    Transport {
+        source: mf_telemetry::snapshot::SnapshotError,
+    },
+    #[snafu(display("invalid snapshot record: {source}"))]
+    Record { source: serde_json::Error },
+    #[snafu(transparent)]
+    Store { source: mf_runtime::SnapshotError },
+    #[snafu(display("snapshot capture is closed"))]
+    Closed,
+    #[snafu(display("{message}"))]
+    Unavailable { message: String },
+    #[snafu(display(
+        "snapshot history is incomplete at sequence {sequence}; received history remains available"
+    ))]
+    Incomplete { sequence: usize },
+}
 
 const PREVIEW_BYTES: usize = 64 * 1024;
 
 #[derive(Default)]
 pub struct SnapshotCapture {
     pub store: SnapshotStore,
-    pub diagnostic: Option<String>,
+    pub diagnostic: Option<Arc<CaptureError>>,
     assembler: Assembler,
     finished: bool,
 }
@@ -33,21 +57,21 @@ pub struct HistorySnapshot {
 }
 
 impl SnapshotCapture {
-    pub fn admit(&mut self, record: LogRecord) -> Result<(), String> {
+    pub fn admit(&mut self, record: LogRecord) -> Result<(), Arc<CaptureError>> {
         if self.finished {
-            return Err("snapshot capture is closed".into());
+            return Err(Arc::new(ClosedSnafu.build()));
         }
         if let Some(error) = &self.diagnostic {
             return Err(error.clone());
         }
-        let result: Result<(), String> = (|| {
+        let result = (|| -> Result<(), CaptureError> {
             for body in self.assembler.push(record)? {
-                let record = serde_json::from_value(body)
-                    .map_err(|error| format!("invalid snapshot record: {error}"))?;
+                let record = serde_json::from_value(body).context(RecordSnafu)?;
                 self.store.apply(record)?;
             }
             Ok(())
-        })();
+        })()
+        .map_err(Arc::new);
         if let Err(error) = &result {
             self.diagnostic = Some(error.clone());
         }
@@ -55,7 +79,8 @@ impl SnapshotCapture {
     }
 
     pub fn fail(&mut self, error: &str) {
-        self.diagnostic.get_or_insert_with(|| error.to_owned());
+        self.diagnostic
+            .get_or_insert_with(|| Arc::new(UnavailableSnafu { message: error }.build()));
     }
 
     pub fn finish(&mut self) {
@@ -64,9 +89,11 @@ impl SnapshotCapture {
             && (self.assembler.has_pending()
                 || (self.store.is_initialized() && !self.store.is_complete()))
         {
-            self.diagnostic = Some(format!(
-                "snapshot history is incomplete at sequence {}; received history remains available",
-                self.assembler.next_sequence()
+            self.diagnostic = Some(Arc::new(
+                IncompleteSnafu {
+                    sequence: self.assembler.next_sequence(),
+                }
+                .build(),
             ));
         }
     }
@@ -81,7 +108,7 @@ impl SnapshotCapture {
             .saturating_sub(rows / 2)
             .min(history.len().saturating_sub(rows));
         let status = if let Some(error) = &self.diagnostic {
-            error.clone()
+            error.to_string()
         } else if self.store.is_complete() {
             "Complete".into()
         } else if self.finished && !self.store.is_initialized() {
@@ -303,6 +330,23 @@ mod tests {
     }
 
     #[test]
+    fn capture_retains_record_decode_sources_until_presentation() {
+        use std::error::Error;
+        let mut capture = SnapshotCapture::default();
+        let record = packets(0, json!({"record":"unknown"}))
+            .unwrap()
+            .next()
+            .unwrap()
+            .into_log_record("workflow", "run");
+        let error = capture.admit(record.clone()).unwrap_err();
+        assert!(error.source().unwrap().is::<serde_json::Error>());
+        let repeated = capture.admit(record).unwrap_err();
+        assert!(repeated.source().unwrap().is::<serde_json::Error>());
+        capture.finish();
+        assert_eq!(capture.view(None, 1).status, error.to_string());
+    }
+
+    #[test]
     fn otlp_history_shares_payloads_and_preserves_historical_roots() {
         let capture = Arc::new(Mutex::new(SnapshotCapture::default()));
         let recorder = recorder(capture.clone());
@@ -359,7 +403,14 @@ mod tests {
                 .unwrap();
         }
         capture.finish();
-        assert!(capture.diagnostic.as_ref().unwrap().contains("sequence 1"));
+        assert!(
+            capture
+                .diagnostic
+                .as_ref()
+                .unwrap()
+                .to_string()
+                .contains("sequence 1")
+        );
         assert!(!capture.store.is_complete());
 
         let mut capture = SnapshotCapture::default();
@@ -384,6 +435,7 @@ mod tests {
                 .diagnostic
                 .as_ref()
                 .unwrap()
+                .to_string()
                 .contains("unknown snapshot value")
         );
         assert_eq!(capture.store.value_count(), 0);

@@ -579,3 +579,23 @@ fn fills_real_otel_records_with_structured_bodies_and_signed_integers() {
     );
     provider.shutdown().unwrap();
 }
+
+#[test]
+fn identifier_parsing_preserves_typed_sources() {
+    use std::error::Error;
+    let error = RunId::try_from("not-a-uuid".to_owned()).unwrap_err();
+    assert!(error.source().unwrap().is::<uuid::Error>());
+    let mut context = TraceContext {
+        trace_id: "invalid".into(),
+        span_id: "0123456789abcdef".into(),
+        trace_flags: 1,
+    };
+    let error = context.validate().unwrap_err();
+    assert!(matches!(error, mf_telemetry::ContractError::TraceId { .. }));
+    assert!(error.source().unwrap().is::<std::num::ParseIntError>());
+    context.trace_id = "0123456789abcdef0123456789abcdef".into();
+    context.span_id = "invalid".into();
+    let error = context.validate().unwrap_err();
+    assert!(matches!(error, mf_telemetry::ContractError::SpanId { .. }));
+    assert!(error.source().unwrap().is::<std::num::ParseIntError>());
+}

@@ -2,6 +2,7 @@ use crate::{ContractError, require};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use snafu::ResultExt;
 use std::fmt;
 use uuid::Uuid;
 
@@ -94,7 +95,7 @@ impl TryFrom<String> for RunId {
     type Error = ContractError;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        let uuid = Uuid::parse_str(&value).map_err(|e| crate::invalid(e.to_string()))?;
+        let uuid = Uuid::parse_str(&value).context(crate::RunIdSnafu)?;
         require(
             uuid.get_version_num() == 4 && uuid.get_variant() == uuid::Variant::RFC4122,
             "run ID must be an RFC 4122 UUID v4",

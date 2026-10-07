@@ -7,6 +7,7 @@ use opentelemetry_proto::tonic::{
 use prost::Message;
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::BTreeMap,
     time::{SystemTime, UNIX_EPOCH},
@@ -18,6 +19,23 @@ pub const FRAGMENT_EVENT: &str = "mf.snapshot.fragment";
 pub const SCHEMA_VERSION: i64 = 1;
 pub const CHUNK_BYTES: usize = 32 * 1024;
 pub const MAX_PENDING_RECORDS: usize = 1024;
+
+#[derive(Debug, Snafu)]
+pub enum SnapshotError {
+    #[snafu(display("{message}"))]
+    Invalid { message: String },
+    #[snafu(display("{message}: {source}"))]
+    Integer {
+        message: &'static str,
+        source: std::num::TryFromIntError,
+    },
+    #[snafu(display("invalid snapshot digest: {source}"))]
+    Digest {
+        source: std::array::TryFromSliceError,
+    },
+    #[snafu(display("invalid snapshot protobuf: {source}"))]
+    Protobuf { source: prost::DecodeError },
+}
 
 fn digest(value: &Value) -> [u8; 32] {
     fn hash(value: &Value, state: &mut Sha256) {
@@ -83,8 +101,10 @@ pub enum Packets {
     },
 }
 
-pub fn packets(sequence: usize, body: Value) -> Result<Packets, String> {
-    i64::try_from(sequence).map_err(|_| "snapshot sequence exceeds OTLP integer range")?;
+pub fn packets(sequence: usize, body: Value) -> Result<Packets, SnapshotError> {
+    i64::try_from(sequence).context(IntegerSnafu {
+        message: "snapshot sequence exceeds OTLP integer range",
+    })?;
     let digest = digest(&body);
     let body = encode(body, 0)?;
     if body.encoded_len() <= CHUNK_BYTES {
@@ -174,7 +194,7 @@ impl Packet {
         record: &mut impl SdkRecord,
         workflow: &str,
         run: &str,
-    ) -> Result<(), String> {
+    ) -> Result<(), SnapshotError> {
         let event_name = self.event_name;
         let wire = self.into_log_record(workflow, run);
         record.set_event_name(event_name);
@@ -186,45 +206,75 @@ impl Packet {
         Ok(())
     }
 
-    fn from_log(record: LogRecord) -> Result<Self, String> {
-        if record.dropped_attributes_count != 0 {
-            return Err("snapshot attributes were dropped".into());
-        }
+    fn from_log(record: LogRecord) -> Result<Self, SnapshotError> {
+        ensure!(
+            record.dropped_attributes_count == 0,
+            InvalidSnafu {
+                message: "snapshot attributes were dropped"
+            }
+        );
         let mut attributes = BTreeMap::new();
         for attribute in record.attributes {
-            if attribute.key_strindex != 0 {
-                return Err("indexed snapshot attributes are not supported".into());
-            }
-            if attributes.insert(attribute.key, attribute.value).is_some() {
-                return Err("duplicate snapshot attribute".into());
-            }
+            ensure!(
+                attribute.key_strindex == 0,
+                InvalidSnafu {
+                    message: "indexed snapshot attributes are not supported"
+                }
+            );
+            ensure!(
+                attributes.insert(attribute.key, attribute.value).is_none(),
+                InvalidSnafu {
+                    message: "duplicate snapshot attribute"
+                }
+            );
         }
         let attr = |name: &str| {
             attributes
                 .get(name)
                 .and_then(Option::as_ref)
-                .ok_or_else(|| format!("missing snapshot attribute {name}"))
+                .with_context(|| InvalidSnafu {
+                    message: format!("missing snapshot attribute {name}"),
+                })
         };
-        if read_int(attr("mf.snapshot.version")?)? != SCHEMA_VERSION {
-            return Err("unsupported snapshot transport version".into());
-        }
-        let sequence = usize::try_from(read_int(attr("mf.snapshot.sequence")?)?)
-            .map_err(|_| "invalid snapshot sequence")?;
+        ensure!(
+            read_int(attr("mf.snapshot.version")?)? == SCHEMA_VERSION,
+            InvalidSnafu {
+                message: "unsupported snapshot transport version"
+            }
+        );
+        let sequence =
+            usize::try_from(read_int(attr("mf.snapshot.sequence")?)?).context(IntegerSnafu {
+                message: "invalid snapshot sequence",
+            })?;
         let digest: [u8; 32] = match &attr("mf.snapshot.digest")?.value {
-            Some(any_value::Value::BytesValue(value)) => value
-                .as_slice()
-                .try_into()
-                .map_err(|_| "invalid snapshot digest")?,
-            _ => return Err("invalid snapshot digest".into()),
+            Some(any_value::Value::BytesValue(value)) => {
+                value.as_slice().try_into().context(DigestSnafu)?
+            }
+            _ => {
+                return InvalidSnafu {
+                    message: "invalid snapshot digest",
+                }
+                .fail();
+            }
         };
-        let body = record.body.ok_or("missing snapshot body")?;
-        if body.encoded_len() > CHUNK_BYTES + 512 {
-            return Err("snapshot packet exceeded the size limit".into());
-        }
+        let body = record.body.context(InvalidSnafu {
+            message: "missing snapshot body",
+        })?;
+        ensure!(
+            body.encoded_len() <= CHUNK_BYTES + 512,
+            InvalidSnafu {
+                message: "snapshot packet exceeded the size limit"
+            }
+        );
         let event_name = match record.event_name.as_str() {
             RECORD_EVENT => RECORD_EVENT,
             FRAGMENT_EVENT => FRAGMENT_EVENT,
-            _ => return Err("unknown snapshot event".into()),
+            _ => {
+                return InvalidSnafu {
+                    message: "unknown snapshot event",
+                }
+                .fail();
+            }
         };
         Ok(Self {
             sequence,
@@ -262,7 +312,7 @@ impl Assembler {
         self.applied.len()
     }
 
-    pub fn push(&mut self, record: LogRecord) -> Result<Vec<Value>, String> {
+    pub fn push(&mut self, record: LogRecord) -> Result<Vec<Value>, SnapshotError> {
         let Packet {
             sequence,
             digest: expected,
@@ -270,24 +320,31 @@ impl Assembler {
             body,
         } = Packet::from_log(record)?;
         if let Some(previous) = self.applied.get(sequence) {
-            if previous != &expected {
-                return Err("conflicting snapshot retransmission".into());
-            }
+            ensure!(
+                previous == &expected,
+                InvalidSnafu {
+                    message: "conflicting snapshot retransmission"
+                }
+            );
             if event_name == RECORD_EVENT {
                 verify(&decode(body, 0)?, &expected)?;
             }
             return Ok(Vec::new());
         }
-        if !self.pending.contains_key(&sequence) && self.pending.len() == MAX_PENDING_RECORDS {
-            return Err("snapshot sequence gap exceeded the pending record limit".into());
-        }
-        if self
-            .pending
-            .get(&sequence)
-            .is_some_and(|record| record.digest != expected)
-        {
-            return Err("conflicting snapshot retransmission".into());
-        }
+        ensure!(
+            self.pending.contains_key(&sequence) || self.pending.len() != MAX_PENDING_RECORDS,
+            InvalidSnafu {
+                message: "snapshot sequence gap exceeded the pending record limit"
+            }
+        );
+        ensure!(
+            self.pending
+                .get(&sequence)
+                .is_none_or(|record| record.digest == expected),
+            InvalidSnafu {
+                message: "conflicting snapshot retransmission"
+            }
+        );
         if event_name == RECORD_EVENT {
             let value = decode(body, 0)?;
             verify(&value, &expected)?;
@@ -300,26 +357,41 @@ impl Assembler {
             );
         } else {
             let mut fields = fields(body)?;
-            let index = usize::try_from(read_int(
-                &fields.remove("index").ok_or("missing fragment index")?,
-            )?)
-            .map_err(|_| "invalid fragment index")?;
-            let total = usize::try_from(read_int(
-                &fields.remove("total").ok_or("missing fragment total")?,
-            )?)
-            .map_err(|_| "invalid fragment total")?;
+            let index = usize::try_from(read_int(&fields.remove("index").context(
+                InvalidSnafu {
+                    message: "missing fragment index",
+                },
+            )?)?)
+            .context(IntegerSnafu {
+                message: "invalid fragment index",
+            })?;
+            let total = usize::try_from(read_int(&fields.remove("total").context(
+                InvalidSnafu {
+                    message: "missing fragment total",
+                },
+            )?)?)
+            .context(IntegerSnafu {
+                message: "invalid fragment total",
+            })?;
             let payload = match fields.remove("payload").and_then(|value| value.value) {
                 Some(any_value::Value::BytesValue(payload)) => payload,
-                _ => return Err("invalid snapshot fragment payload".into()),
+                _ => {
+                    return InvalidSnafu {
+                        message: "invalid snapshot fragment payload",
+                    }
+                    .fail();
+                }
             };
-            if !fields.is_empty()
-                || index >= total
-                || payload.is_empty()
-                || payload.len() > CHUNK_BYTES
-                || (index + 1 < total && payload.len() != CHUNK_BYTES)
-            {
-                return Err("invalid snapshot fragment bounds".into());
-            }
+            ensure!(
+                fields.is_empty()
+                    && index < total
+                    && !payload.is_empty()
+                    && payload.len() <= CHUNK_BYTES
+                    && (index + 1 >= total || payload.len() == CHUNK_BYTES),
+                InvalidSnafu {
+                    message: "invalid snapshot fragment bounds"
+                }
+            );
             let partial = self
                 .pending
                 .entry(sequence)
@@ -335,18 +407,20 @@ impl Assembler {
                 parts,
             } = &mut partial.contents
             {
-                if *prior_total != total || parts.get(&index).is_some_and(|prior| prior != &payload)
-                {
-                    return Err("conflicting snapshot fragment".into());
-                }
+                ensure!(
+                    *prior_total == total
+                        && parts.get(&index).is_none_or(|prior| prior == &payload),
+                    InvalidSnafu {
+                        message: "conflicting snapshot fragment"
+                    }
+                );
                 parts.insert(index, payload);
                 if parts.len() == total {
                     let encoded: Vec<_> = parts
                         .values()
                         .flat_map(|part| part.iter().copied())
                         .collect();
-                    let value =
-                        AnyValue::decode(encoded.as_slice()).map_err(|error| error.to_string())?;
+                    let value = AnyValue::decode(encoded.as_slice()).context(ProtobufSnafu)?;
                     let value = decode(value, 0)?;
                     verify(&value, &expected)?;
                     partial.contents = Contents::Complete(value);
@@ -370,11 +444,14 @@ impl Assembler {
     }
 }
 
-fn verify(value: &Value, expected: &[u8; 32]) -> Result<(), String> {
+fn verify(value: &Value, expected: &[u8; 32]) -> Result<(), SnapshotError> {
     if &digest(value) == expected {
         Ok(())
     } else {
-        Err("snapshot digest mismatch".into())
+        InvalidSnafu {
+            message: "snapshot digest mismatch",
+        }
+        .fail()
     }
 }
 fn pair(key: &str, value: AnyValue) -> KeyValue {
@@ -404,46 +481,66 @@ fn object<const N: usize>(items: [(&str, AnyValue); N]) -> AnyValue {
         })),
     }
 }
-fn read_int(value: &AnyValue) -> Result<i64, String> {
+fn read_int(value: &AnyValue) -> Result<i64, SnapshotError> {
     match value.value {
         Some(any_value::Value::IntValue(value)) => Ok(value),
-        _ => Err("expected OTLP integer".into()),
+        _ => InvalidSnafu {
+            message: "expected OTLP integer",
+        }
+        .fail(),
     }
 }
-fn fields(value: AnyValue) -> Result<BTreeMap<String, AnyValue>, String> {
+fn fields(value: AnyValue) -> Result<BTreeMap<String, AnyValue>, SnapshotError> {
     let Some(any_value::Value::KvlistValue(map)) = value.value else {
-        return Err("expected OTLP map".into());
+        return InvalidSnafu {
+            message: "expected OTLP map",
+        }
+        .fail();
     };
     let mut fields = BTreeMap::new();
     for pair in map.values {
-        if pair.key_strindex != 0 {
-            return Err("indexed snapshot keys are not supported".into());
-        }
+        ensure!(
+            pair.key_strindex == 0,
+            InvalidSnafu {
+                message: "indexed snapshot keys are not supported"
+            }
+        );
         if fields
-            .insert(pair.key, pair.value.ok_or("missing OTLP map value")?)
+            .insert(
+                pair.key,
+                pair.value.context(InvalidSnafu {
+                    message: "missing OTLP map value",
+                })?,
+            )
             .is_some()
         {
-            return Err("duplicate OTLP map key".into());
+            return InvalidSnafu {
+                message: "duplicate OTLP map key",
+            }
+            .fail();
         }
     }
     Ok(fields)
 }
-fn encode(value: Value, depth: usize) -> Result<AnyValue, String> {
-    if depth > 16 {
-        return Err("snapshot envelope nesting exceeded the limit".into());
-    }
+fn encode(value: Value, depth: usize) -> Result<AnyValue, SnapshotError> {
+    ensure!(
+        depth <= 16,
+        InvalidSnafu {
+            message: "snapshot envelope nesting exceeded the limit"
+        }
+    );
     let value = match value {
         Value::Null => None,
         Value::Bool(value) => Some(any_value::Value::BoolValue(value)),
         Value::String(value) => Some(any_value::Value::StringValue(value)),
         Value::Number(value) => Some(if value.is_f64() {
-            any_value::Value::DoubleValue(value.as_f64().ok_or("invalid floating-point value")?)
+            any_value::Value::DoubleValue(value.as_f64().context(InvalidSnafu {
+                message: "invalid floating-point value",
+            })?)
         } else {
-            any_value::Value::IntValue(
-                value
-                    .as_i64()
-                    .ok_or("OTLP integer exceeds signed 64-bit range")?,
-            )
+            any_value::Value::IntValue(value.as_i64().context(InvalidSnafu {
+                message: "OTLP integer exceeds signed 64-bit range",
+            })?)
         }),
         Value::Array(values) => Some(any_value::Value::ArrayValue(ArrayValue {
             values: values
@@ -461,22 +558,27 @@ fn encode(value: Value, depth: usize) -> Result<AnyValue, String> {
                         ..KeyValue::default()
                     })
                 })
-                .collect::<Result<_, String>>()?,
+                .collect::<Result<_, SnapshotError>>()?,
         })),
     };
     Ok(AnyValue { value })
 }
-fn decode(value: AnyValue, depth: usize) -> Result<Value, String> {
-    if depth > 16 {
-        return Err("snapshot envelope nesting exceeded the limit".into());
-    }
+fn decode(value: AnyValue, depth: usize) -> Result<Value, SnapshotError> {
+    ensure!(
+        depth <= 16,
+        InvalidSnafu {
+            message: "snapshot envelope nesting exceeded the limit"
+        }
+    );
     Ok(match value.value {
         None => Value::Null,
         Some(any_value::Value::StringValue(value)) => Value::String(value),
         Some(any_value::Value::BoolValue(value)) => Value::Bool(value),
         Some(any_value::Value::IntValue(value)) => Value::from(value),
         Some(any_value::Value::DoubleValue(value)) => {
-            Value::Number(serde_json::Number::from_f64(value).ok_or("non-finite snapshot number")?)
+            Value::Number(serde_json::Number::from_f64(value).context(InvalidSnafu {
+                message: "non-finite snapshot number",
+            })?)
         }
         Some(any_value::Value::ArrayValue(values)) => Value::Array(
             values
@@ -488,25 +590,41 @@ fn decode(value: AnyValue, depth: usize) -> Result<Value, String> {
         Some(any_value::Value::KvlistValue(values)) => {
             let mut map = Map::new();
             for pair in values.values {
-                if pair.key_strindex != 0 {
-                    return Err("indexed snapshot keys are not supported".into());
-                }
+                ensure!(
+                    pair.key_strindex == 0,
+                    InvalidSnafu {
+                        message: "indexed snapshot keys are not supported"
+                    }
+                );
                 if map
                     .insert(
                         pair.key,
-                        decode(pair.value.ok_or("missing OTLP map value")?, depth + 1)?,
+                        decode(
+                            pair.value.context(InvalidSnafu {
+                                message: "missing OTLP map value",
+                            })?,
+                            depth + 1,
+                        )?,
                     )
                     .is_some()
                 {
-                    return Err("duplicate OTLP map key".into());
+                    return InvalidSnafu {
+                        message: "duplicate OTLP map key",
+                    }
+                    .fail();
                 }
             }
             Value::Object(map)
         }
-        _ => return Err("unsupported snapshot body value".into()),
+        _ => {
+            return InvalidSnafu {
+                message: "unsupported snapshot body value",
+            }
+            .fail();
+        }
     })
 }
-fn sdk_value(value: AnyValue) -> Result<SdkValue, String> {
+fn sdk_value(value: AnyValue) -> Result<SdkValue, SnapshotError> {
     Ok(match value.value {
         Some(any_value::Value::StringValue(value)) => SdkValue::String(value.into()),
         Some(any_value::Value::BoolValue(value)) => SdkValue::Boolean(value),
@@ -527,13 +645,25 @@ fn sdk_value(value: AnyValue) -> Result<SdkValue, String> {
                 .map(|pair| {
                     Ok((
                         pair.key.into(),
-                        sdk_value(pair.value.ok_or("missing OTLP value")?)?,
+                        sdk_value(pair.value.context(InvalidSnafu {
+                            message: "missing OTLP value",
+                        })?)?,
                     ))
                 })
-                .collect::<Result<_, String>>()?,
+                .collect::<Result<_, SnapshotError>>()?,
         )),
-        None => return Err("snapshot envelopes must omit absent optional fields".into()),
-        _ => return Err("indexed OTLP strings are not supported in snapshot envelopes".into()),
+        None => {
+            return InvalidSnafu {
+                message: "snapshot envelopes must omit absent optional fields",
+            }
+            .fail();
+        }
+        _ => {
+            return InvalidSnafu {
+                message: "indexed OTLP strings are not supported in snapshot envelopes",
+            }
+            .fail();
+        }
     })
 }
 
@@ -541,6 +671,67 @@ fn sdk_value(value: AnyValue) -> Result<SdkValue, String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn malformed_fragment_protobuf_preserves_the_decode_error() {
+        use std::error::Error;
+        let body = object([
+            ("index", integer(0)),
+            ("total", integer(1)),
+            (
+                "payload",
+                AnyValue {
+                    value: Some(any_value::Value::BytesValue(vec![0xff])),
+                },
+            ),
+        ]);
+        let record = Packet {
+            sequence: 0,
+            digest: [0; 32],
+            event_name: FRAGMENT_EVENT,
+            body,
+        }
+        .into_log_record("workflow", "run");
+        let error = Assembler::default().push(record).unwrap_err();
+        assert!(error.source().unwrap().is::<prost::DecodeError>());
+    }
+
+    #[test]
+    fn invalid_snapshot_metadata_preserves_conversion_errors() {
+        use std::error::Error;
+        let record = || {
+            packets(0, json!({"record":"header","version":1}))
+                .unwrap()
+                .next()
+                .unwrap()
+                .into_log_record("workflow", "run")
+        };
+        let mut negative_sequence = record();
+        negative_sequence
+            .attributes
+            .iter_mut()
+            .find(|attribute| attribute.key == "mf.snapshot.sequence")
+            .unwrap()
+            .value = Some(integer(-1));
+        let error = Assembler::default().push(negative_sequence).unwrap_err();
+        assert!(error.source().unwrap().is::<std::num::TryFromIntError>());
+        let mut short_digest = record();
+        short_digest
+            .attributes
+            .iter_mut()
+            .find(|attribute| attribute.key == "mf.snapshot.digest")
+            .unwrap()
+            .value = Some(AnyValue {
+            value: Some(any_value::Value::BytesValue(vec![0])),
+        });
+        let error = Assembler::default().push(short_digest).unwrap_err();
+        assert!(
+            error
+                .source()
+                .unwrap()
+                .is::<std::array::TryFromSliceError>()
+        );
+    }
 
     #[test]
     fn structured_records_are_reordered_and_retransmissions_are_idempotent() {
@@ -610,6 +801,7 @@ mod tests {
             assembler
                 .push(conflict)
                 .unwrap_err()
+                .to_string()
                 .contains("conflicting")
         );
         let mut record = packets(1, json!({"record":"end"}))
@@ -618,6 +810,12 @@ mod tests {
             .unwrap()
             .into_log_record("workflow", "run");
         record.body = Some(string("corrupted"));
-        assert!(assembler.push(record).unwrap_err().contains("digest"));
+        assert!(
+            assembler
+                .push(record)
+                .unwrap_err()
+                .to_string()
+                .contains("digest")
+        );
     }
 }
