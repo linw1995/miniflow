@@ -130,6 +130,7 @@ pub enum WorkflowCompileError {
         to_node: DefinitionId,
         to_input: String,
         input_type: Box<ValueType>,
+        #[snafu(source(from(TypeMismatch, Box::new)))]
         source: Box<TypeMismatch>,
     },
     #[snafu(display(
@@ -304,20 +305,16 @@ impl TypeInferenceState {
                     to_input: input_name.to_owned(),
                 })?;
             if let Some(value) = &source.exact {
-                input
-                    .value_type
-                    .validate_shared(value)
-                    .map_err(
-                        |source_error| WorkflowCompileError::KnownValueTypeConflict {
-                            from_node: source_id.clone(),
-                            from_output: dependency.source_output.to_owned(),
-                            output_type: Box::new(source.value_type.clone()),
-                            to_node: id.clone(),
-                            to_input: input_name.to_owned(),
-                            input_type: Box::new(input.value_type.clone()),
-                            source: Box::new(source_error),
-                        },
-                    )?;
+                input.value_type.validate_shared(value).with_context(|_| {
+                    KnownValueTypeConflictSnafu {
+                        from_node: source_id.clone(),
+                        from_output: dependency.source_output.to_owned(),
+                        output_type: Box::new(source.value_type.clone()),
+                        to_node: id.clone(),
+                        to_input: input_name.to_owned(),
+                        input_type: Box::new(input.value_type.clone()),
+                    }
+                })?;
             } else if source.value_type.compatibility_with(&input.value_type)
                 == TypeCompatibility::Incompatible
             {

@@ -53,7 +53,8 @@ pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
 pub use node::{
     ContextReference, ExecutionFailedSnafu as NodeExecutionFailedSnafu,
-    FactoryFailedSnafu as NodeFactoryFailedSnafu, Inputs, NodeBuildError, NodeExecution,
+    FactoryFailedSnafu as NodeFactoryFailedSnafu, Inputs,
+    InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeExecution,
     NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration, OutputDerivation,
     OutputDerivationError, Outputs, PluginFailedSnafu as NodePluginFailedSnafu, PortSpec,
     PreparedNode, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, ValueType,

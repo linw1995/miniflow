@@ -402,10 +402,21 @@ fn producer_errors_and_panics_report_node_identity_and_preserve_delivered_output
             probe.release();
         }
         let error = instance.recv().unwrap_err();
-        assert!(
-            matches!(&error, mf_runtime::StreamError::Producer { definition_id, .. } if definition_id.as_str() == "produce"),
-            "{error}"
-        );
+        let mf_runtime::StreamError::Producer {
+            definition_id,
+            source,
+        } = &error
+        else {
+            panic!("expected a producer failure: {error}");
+        };
+        assert_eq!(definition_id.as_str(), "produce");
+        if mode == "panic" {
+            assert!(
+                std::error::Error::source(source.as_ref())
+                    .unwrap()
+                    .is::<mf_runtime::StreamError>()
+            );
+        }
         assert!(error.to_string().contains("sentinel"), "{error}");
         assert!(instance.join().is_err());
     }

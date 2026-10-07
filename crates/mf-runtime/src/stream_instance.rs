@@ -434,11 +434,7 @@ fn run_producer(
         catch_unwind(AssertUnwindSafe(|| {
             node.execute(job.inputs, &mut job.context, &mut emitter)
         }))
-        .unwrap_or_else(|payload| {
-            Err(NodeExecutionError::ExecutionFailed {
-                message: panic_error(payload).to_string(),
-            })
-        })
+        .unwrap_or_else(|payload| Err(panic_error(payload).into()))
         .context(ProducerSnafu {
             definition_id: plan.nodes()[index].definition_id.clone(),
         })

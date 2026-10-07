@@ -87,7 +87,7 @@ senders, prevent further publication, and wait for started producer calls before
 
 ### Requirement: Validate and attribute each emission
 
-Every emitted result SHALL pass existing output and skip validation before publication. Invalid emissions SHALL fail the instance even if a plugin ignores a send error. Producer errors and panics SHALL identify the producer node, preserve already delivered results, and suppress subsequent publication. Observations SHALL report invocation identity, successful emission counts, and failure phase.
+Emissions SHALL pass existing output and skip validation before publication. Invalid emissions SHALL fail the instance even if a plugin ignores a send error. Producer errors and panics SHALL identify the node, preserve delivered results, and suppress further publication. Panic failures SHALL retain the synthesized `StreamError` in their source chain. Observations SHALL report invocation identity, successful emission counts, and failure phase.
 
 #### Scenario: Ignore an invalid send
 
@@ -98,6 +98,11 @@ Every emitted result SHALL pass existing output and skip validation before publi
 
 - **WHEN** a producer fails after the consumer received earlier results
 - **THEN** those results remain effective and the terminal failure identifies the producer
+
+#### Scenario: Inspect a producer panic cause
+
+- **WHEN** a producer panics during execution
+- **THEN** the failure identifies that producer, retains the synthesized `StreamError` through the node error source, and includes the panic message in its diagnostic
 
 ### Requirement: Preserve generated runner behavior
 

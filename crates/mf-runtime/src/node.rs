@@ -475,7 +475,7 @@ pub fn output_id(node: &str, port: &str) -> String {
 
 #[derive(Debug, Snafu)]
 pub enum NodeBuildError {
-    #[snafu(display("invalid prepared subgraph: {message}"))]
+    #[snafu(display("invalid prepared subgraph: {message}"), visibility(pub))]
     InvalidSubgraph { message: String },
     #[snafu(display("invalid node configuration: {source}"), context(false))]
     InvalidConfiguration { source: serde_json::Error },

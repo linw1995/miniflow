@@ -10,7 +10,7 @@ use mf_telemetry::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use snafu::{ResultExt, Snafu};
+use snafu::{ResultExt, Snafu, ensure};
 use std::{cmp::Ordering, collections::BTreeMap};
 
 pub const KIND: &str = mf_runtime::LOOP_KIND;
@@ -27,13 +27,14 @@ fn factory(
 ) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let _: Config = deserialize_config(config)?;
     let config: ExecutionConfig = deserialize_config(options)?;
-    if !(1..=mf_runtime::MAX_LOOP_ITERATIONS).contains(&config.max_iterations) {
-        return Err(NodeBuildError::InvalidSubgraph {
-            message: "max_iterations must be in 1..=1000".into(),
-        });
-    }
+    ensure!(
+        (1..=mf_runtime::MAX_LOOP_ITERATIONS).contains(&config.max_iterations),
+        mf_runtime::NodeInvalidSubgraphSnafu {
+            message: "max_iterations must be in 1..=1000",
+        }
+    );
     let types = loop_variable_types(&config.variables)
-        .map_err(|message| NodeBuildError::InvalidSubgraph { message })?;
+        .map_err(|message| mf_runtime::NodeInvalidSubgraphSnafu { message }.build())?;
     let ports: Vec<_> = types
         .iter()
         .map(|(name, value_type)| PortSpec::owned(name, value_type.clone(), true))
