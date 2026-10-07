@@ -24,6 +24,11 @@ pub enum CacheError {
         path: PathBuf,
         source: serde_json::Error,
     },
+    #[snafu(display("could not parse build directory metadata at {path:?}: {source}"))]
+    MetadataParse {
+        path: PathBuf,
+        source: serde_json::Error,
+    },
     #[snafu(display("could not persist build directory metadata: {source}"))]
     State { source: crate::StateError },
     #[snafu(display("could not access build directory {path:?}: {source}"))]
@@ -138,11 +143,9 @@ impl BuildDirectory {
         let marker = path.join(OWNER);
         let reused = match fs::read(&marker) {
             Ok(bytes) => {
-                let actual: Owner =
-                    serde_json::from_slice(&bytes).map_err(|error| CacheError::Ownership {
-                        path: path.clone(),
-                        reason: error.to_string(),
-                    })?;
+                let actual: Owner = serde_json::from_slice(&bytes).context(MetadataParseSnafu {
+                    path: marker.clone(),
+                })?;
                 if actual != expected {
                     return OwnershipSnafu {
                         path,
