@@ -313,9 +313,13 @@ fn tui_stops_the_child_and_restores_input_after_render_failure() {
                 Ok(0) | Err(_) => break,
                 Ok(len) => {
                     output.extend_from_slice(&bytes[..len]);
-                    if output
+                    // Close the display only after Ratatui has hidden the cursor for a full frame.
+                    if let Some(position) = output
                         .windows(b"Running".len())
-                        .any(|part| part == b"Running")
+                        .position(|part| part == b"Running")
+                        && output[position + b"Running".len()..]
+                            .windows(b"\x1b[?25l".len())
+                            .any(|part| part == b"\x1b[?25l")
                     {
                         break;
                     }

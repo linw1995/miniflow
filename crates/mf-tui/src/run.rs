@@ -211,7 +211,7 @@ pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<
     let guard = TerminalGuard::enter().context(TerminalSnafu)?;
     // The backend's global size lookup can consult redirected stdout without a controlling TTY.
     let mut terminal = Terminal::with_options(
-        CrosstermBackend::new(io::stderr()),
+        CrosstermBackend::new(Box::new(io::stderr()) as Box<dyn Write>),
         TerminalOptions {
             viewport: Viewport::Fixed(area),
         },
@@ -263,6 +263,8 @@ pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<
     if let Some(worker) = capture_worker.as_mut() {
         worker.stop();
     }
+    // TerminalGuard restores the cursor; Ratatui's destructor can panic when stderr is broken.
+    *terminal.backend_mut() = CrosstermBackend::new(Box::new(io::sink()));
     drop(terminal);
     drop(guard);
     drop(signal);
@@ -680,7 +682,7 @@ fn supervise(
     receiver: &mut LoopbackReceiver,
     layout: &GraphLayout,
     body_layouts: &BTreeMap<Vec<String>, GraphLayout>,
-    terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
+    terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
     signal: &SignalGuard,
 ) -> Result<(ExitStatus, bool, bool), RunError> {
     let started = Instant::now();
@@ -879,7 +881,7 @@ fn navigate(key: KeyCode, offset: &mut (u32, u32), selected: &mut usize, nodes: 
 
 #[allow(clippy::too_many_arguments)]
 fn draw(
-    terminal: &mut Terminal<CrosstermBackend<io::Stderr>>,
+    terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
     root_layout: &GraphLayout,
     body_layouts: &BTreeMap<Vec<String>, GraphLayout>,
     snapshot: &StateSnapshot,
