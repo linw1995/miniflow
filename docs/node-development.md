@@ -186,6 +186,12 @@ and context boundaries as dynamic tasks, including in stream task domains. Adapt
 retain `InputDecodeError` and its typed sources through `NodeExecutionError::InputDecode`; provider business
 errors keep their existing plugin error chain. Typed event and stream producer interfaces are not provided.
 
+Adoption is additive: replace a fixed-input task's map decoding with a derived struct, implement
+`TypedTaskNode`, and pass empty input ports to `PreparedNode::typed_task`. Output contracts and registrations
+retain their existing shape. The [identity provider](../crates/builtin-nodes/core/src/identity.rs) demonstrates
+shared-value forwarding with this API. Providers such as `builtin.code` whose ports depend on configuration
+continue to use `TaskNode`, dynamic metadata, and the existing `PreparedNode::new` constructor.
+
 ### Dynamic task execution
 
 Implement `TaskNode::execute(inputs, &mut ExecutionContext)` and return `NodeResult`. Tasks can read

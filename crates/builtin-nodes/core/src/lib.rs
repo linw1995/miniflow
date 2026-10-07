@@ -82,6 +82,10 @@ mod tests {
         let registration = registry.get(IDENTITY_KIND).unwrap();
         let node = registration.instantiate(json!({})).unwrap();
         let ports = &node.metadata.ports;
+        assert_eq!(ports.inputs.len(), 1);
+        assert_eq!(ports.inputs[0].name, "input");
+        assert_eq!(ports.inputs[0].value_type, ValueType::Any);
+        assert!(ports.inputs[0].required);
         assert_eq!(ports.outputs[0].value_type, ValueType::Any);
         assert_eq!(
             node.metadata.output_derivations,

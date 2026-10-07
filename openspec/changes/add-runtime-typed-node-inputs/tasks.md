@@ -23,10 +23,10 @@
 
 ## 4. Reference provider and compiler integration
 
-- [ ] 4.1 Migrate `builtin.identity` to a derived ValueRef input struct and typed task preparation; verify its Any declaration, forwarding derivation, context publication, and shared payload identity remain intact.
-- [ ] 4.2 Extend external-provider fixtures with typed scalar, recursive collection, optional, and renamed inputs; verify incompatible-edge rejection, typed startup arguments, no execution during validation/description, and generated versus in-memory behavior.
-- [ ] 4.3 Verify derived startup declarations are frozen and checked by existing generated manifests without typed-provider special cases; cover matching declarations and drift rejection before dispatch.
-- [ ] 4.4 Verify dynamic configuration-dependent providers and existing external task/event/stream fixtures remain supported; document the additive migration path and run their existing regression suites.
+- [x] 4.1 Migrate `builtin.identity` to a derived ValueRef input struct and typed task preparation; verify its Any declaration, forwarding derivation, context publication, and shared payload identity remain intact.
+- [x] 4.2 Extend external-provider fixtures with typed scalar, recursive collection, optional, and renamed inputs; verify incompatible-edge rejection, typed startup arguments, no execution during validation/description, and generated versus in-memory behavior.
+- [x] 4.3 Verify derived startup declarations are frozen and checked by existing generated manifests without typed-provider special cases; cover matching declarations and drift rejection before dispatch.
+- [x] 4.4 Verify dynamic configuration-dependent providers and existing external task/event/stream fixtures remain supported; document the additive migration path and run their existing regression suites.
 
 ## 5. Integration validation
 
