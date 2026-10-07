@@ -174,3 +174,64 @@ fn limits_the_combined_serialized_payload() {
         Err(WorkflowManifestError::TooLarge { .. })
     ));
 }
+
+#[test]
+fn reports_exact_interface_drift_before_accepting_prepared_schemas() {
+    let manifest = sample();
+    let schema = manifest.interface.schema.clone();
+    manifest.validate_prepared_schema(&schema).unwrap();
+    for component in ["node", "port", "type", "required", "stdin", "condition"] {
+        let mut actual = schema.clone();
+        match component {
+            "node" => {
+                actual.inputs.insert("extra".into(), Default::default());
+            }
+            "port" => {
+                actual.inputs.get_mut("root.a/~").unwrap().clear();
+            }
+            "type" => {
+                actual
+                    .inputs
+                    .get_mut("root.a/~")
+                    .unwrap()
+                    .get_mut("port.a/~")
+                    .unwrap()
+                    .value_type = mf_runtime::ValueType::Int64;
+            }
+            "required" => {
+                actual
+                    .inputs
+                    .get_mut("root.a/~")
+                    .unwrap()
+                    .get_mut("port.a/~")
+                    .unwrap()
+                    .required = true;
+            }
+            "stdin" => {
+                actual.stdin.clear();
+            }
+            _ => {
+                actual
+                    .stdin
+                    .insert("root.a/~".into(), mf_runtime::StdinRequirement::Always);
+            }
+        }
+        let error = manifest.validate_prepared_schema(&actual).unwrap_err();
+        assert!(matches!(
+            error,
+            WorkflowManifestError::InterfaceDrift { .. }
+        ));
+        let diagnostic = error.to_string();
+        assert!(
+            diagnostic.contains(if component == "node" {
+                "/extra"
+            } else {
+                "/root.a~1~0"
+            }),
+            "{diagnostic}"
+        );
+        if matches!(component, "port" | "type" | "required") {
+            assert!(diagnostic.contains("/port.a~1~0"), "{diagnostic}");
+        }
+    }
+}

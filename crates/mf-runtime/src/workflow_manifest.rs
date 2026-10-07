@@ -1,4 +1,7 @@
-use crate::{WorkflowInputError, WorkflowInterface, workflow_inputs::from_unique_json};
+use crate::{
+    WorkflowInputError, WorkflowInputSchema, WorkflowInterface,
+    workflow_inputs::{from_unique_json, pointer},
+};
 use mf_telemetry::{ContractError, description::WorkflowDescription};
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu, ensure};
@@ -27,6 +30,11 @@ pub struct WorkflowManifest {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowManifestError {
+    #[snafu(display("compiled workflow interface drift at `{path}`: {component} differs"))]
+    InterfaceDrift {
+        path: String,
+        component: &'static str,
+    },
     #[snafu(display("invalid workflow manifest framing: {message}"))]
     Framing { message: &'static str },
     #[snafu(display("unsupported workflow manifest framing version {version}"))]
@@ -42,6 +50,59 @@ pub enum WorkflowManifestError {
 }
 
 impl WorkflowManifest {
+    pub fn validate_prepared_schema(
+        &self,
+        actual: &WorkflowInputSchema,
+    ) -> Result<(), WorkflowManifestError> {
+        let expected = &self.interface.schema;
+        for node in expected.inputs.keys().chain(actual.inputs.keys()) {
+            let path = pointer("", node);
+            let (Some(expected), Some(actual)) =
+                (expected.inputs.get(node), actual.inputs.get(node))
+            else {
+                return InterfaceDriftSnafu {
+                    path,
+                    component: "initial node declaration",
+                }
+                .fail();
+            };
+            for port in expected.keys().chain(actual.keys()) {
+                let path = pointer(&path, port);
+                let (Some(expected), Some(actual)) = (expected.get(port), actual.get(port)) else {
+                    return InterfaceDriftSnafu {
+                        path,
+                        component: "input port declaration",
+                    }
+                    .fail();
+                };
+                ensure!(
+                    expected.value_type == actual.value_type,
+                    InterfaceDriftSnafu {
+                        path: path.clone(),
+                        component: "input type"
+                    }
+                );
+                ensure!(
+                    expected.required == actual.required,
+                    InterfaceDriftSnafu {
+                        path,
+                        component: "required flag"
+                    }
+                );
+            }
+        }
+        for node in expected.stdin.keys().chain(actual.stdin.keys()) {
+            ensure!(
+                expected.stdin.get(node) == actual.stdin.get(node),
+                InterfaceDriftSnafu {
+                    path: pointer("", node),
+                    component: "stdin ownership condition"
+                }
+            );
+        }
+        Ok(())
+    }
+
     pub fn validate(&self) -> Result<(), WorkflowManifestError> {
         self.description.validate().context(GraphSnafu)?;
         self.interface

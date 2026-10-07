@@ -52,6 +52,9 @@ the existing runner build; it does not require a second compilation. Its wire fo
 explicit build directories owned by an older layout must be recreated at a compatible location.
 The runner links the manifest into a dedicated ELF or Mach-O section and needs no manifest sidecar after installation.
 Both `--describe` and `--describe-interface` print records from this frozen contract without constructing providers.
+`--validate` and normal execution compare freshly prepared startup declarations with the manifest before dispatch.
+Changes to input identities, types, required flags, or stdin conditions fail with node/port/resource context.
+Validation failure prevents installation; inspection commands intentionally do not initialize providers or refresh the contract.
 
 The runner exports workflow spans and lifecycle events over OTLP/HTTP protobuf when a collector endpoint is configured:
 

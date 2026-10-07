@@ -19,9 +19,9 @@
 
 ## 4. Runtime interface agreement
 
-- [ ] 4.1 Compare freshly prepared task and stream startup schemas against the embedded schema during generated `--validate` and execution, without a second preparation or graph reconstruction; verify matching runners retain generated/in-memory execution parity.
-- [ ] 4.2 Return typed node/port/resource mismatch errors before dispatch, source reads, timers, or workers; verify intentional provider-drift fixtures cover port membership, type, required flag, and stdin-condition differences and validation failure preserves the installed executable.
-- [ ] 4.3 Document stable configuration-derived provider declarations and host/target agreement in the relevant provider/compilation documentation; verify examples distinguish interface declarations from runtime executor initialization and in-memory APIs remain independent of manifests.
+- [x] 4.1 Compare freshly prepared task and stream startup schemas against the embedded schema during generated `--validate` and execution, without a second preparation or graph reconstruction; verify matching runners retain generated/in-memory execution parity.
+- [x] 4.2 Return typed node/port/resource mismatch errors before dispatch, source reads, timers, or workers; verify intentional provider-drift fixtures cover port membership, type, required flag, and stdin-condition differences and validation failure preserves the installed executable.
+- [x] 4.3 Document stable configuration-derived provider declarations and host/target agreement in the relevant provider/compilation documentation; verify examples distinguish interface declarations from runtime executor initialization and in-memory APIs remain independent of manifests.
 
 ## 5. TUI file-based preflight
 

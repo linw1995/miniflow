@@ -99,11 +99,18 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
         mf_runtime::RunnerCommand::Validate => {
+            let manifest = workflow_manifest()?;
             let registry = mf_runtime::NodeRegistry::from_inventory()?;
             #[cfg(feature = "streaming")]
-            { workflow::prepare_stream(&registry)?; }
+            {
+                let prepared = workflow::prepare_stream(&registry)?;
+                manifest.validate_prepared_schema(prepared.plan().input_schema())?;
+            }
             #[cfg(not(feature = "streaming"))]
-            { workflow::prepare_workflow(&registry, None)?; }
+            {
+                let flow = workflow::prepare_workflow(&registry, None)?;
+                manifest.validate_prepared_schema(flow.input_schema())?;
+            }
             return Ok(());
         }
         mf_runtime::RunnerCommand::Execute(_) => {}
@@ -147,6 +154,7 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments) -> Result<(), Box<dy
         let prepared = workflow::prepare_stream(&registry).inspect_err(|error| {
             if let Some(observation) = &observation { observation.preparation_failed(error.to_string()); }
         })?;
+        workflow_manifest()?.validate_prepared_schema(prepared.plan().input_schema())?;
         prepared.plan().input_schema().validate(&arguments)?;
         let needs_stdin = prepared.plan().input_schema().stdin_owner(&arguments)?.is_some();
         let stdin = if needs_stdin { stdio.take_input() } else { None };
@@ -248,6 +256,7 @@ fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: 
         if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.clone()); }
         let registry = mf_runtime::NodeRegistry::from_inventory()?;
         let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
+        workflow_manifest()?.validate_prepared_schema(flow.input_schema())?;
         Ok(workflow::run_workflow_in_context(&flow, state)?)
     });
     if let Some(snapshots) = snapshots {

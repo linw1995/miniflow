@@ -165,7 +165,7 @@ fn invalid(path: String, message: impl Into<String>) -> WorkflowInputError {
     InvalidSnafu { path, message }.build()
 }
 
-fn pointer(parent: &str, key: &str) -> String {
+pub(super) fn pointer(parent: &str, key: &str) -> String {
     format!("{parent}/{}", key.replace('~', "~0").replace('/', "~1"))
 }
 
