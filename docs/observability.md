@@ -334,8 +334,12 @@ mf run ./if-else --tui
 ```
 
 `mf run` requires terminal stdin and stderr. Stdout can be redirected: the CLI reserves it for the runner's byte-for-byte
-output after the final view closes. Preflight calls `--describe` and, for new runners, `--describe-interface` with
-bounded output and a 30-second deadline per inspection. It validates matching workflow identities, startup parameters,
+output after the final view closes. New runners are inspected directly through their embedded ELF64 or Mach-O64
+manifest without starting a process. Container metadata reads are limited to 1 MiB and 8,192 read requests, with at most
+4,096 sections/load commands and 1,024 bytes per section-name lookup; manifest payload and padding have separate bounds.
+Only a recognized executable missing that section falls back to `--describe` and, when required, `--describe-interface`
+with bounded output and a 30-second deadline per inspection. Invalid formats, ambiguous sections, unsupported versions,
+and corrupt records fail without fallback. Preflight validates matching workflow identities, startup parameters,
 and declared resources before starting the receiver or execution process. Older finite descriptions remain supported;
 older streaming descriptions require recompilation. A fresh run ID and loopback OTLP/HTTP receiver are prepared before launch. The
 execution child receives these session settings; inherited `OTEL_EXPORTER_OTLP_*` settings, including remote

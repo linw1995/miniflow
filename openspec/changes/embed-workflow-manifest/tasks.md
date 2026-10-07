@@ -25,11 +25,11 @@
 
 ## 5. TUI file-based preflight
 
-- [ ] 5.1 Add narrowly configured `object` read support only to `mf-tui` and implement bounded regular-file/header/table/section reads with typed causes; verify ELF/Mach-O fixtures, large executables, invalid offsets, duplicate sections, and unsupported formats without whole-file unbounded allocation.
-- [ ] 5.2 Integrate the manifest into `prepare_launch` while preserving argument transport, conditional stdin checks, observation-version checks, and receiver-before-child ordering; verify metadata preflight spawns no process and an invalid argument or active stdin requirement prevents execution.
-- [ ] 5.3 Restrict bounded legacy command dispatch to a successfully recognized executable missing its manifest section; verify supported legacy finite/parameterized runners still work and corrupted or unsupported manifests never trigger fallback.
-- [ ] 5.4 Update executable fixtures and legacy command-helper tests so script doubles do not masquerade as supported binary containers; verify cross-architecture inspection succeeds independently of execution and legacy timeout/output/exit/JSON failures retain existing behavior.
-- [ ] 5.5 Update TUI/observability documentation and dependency/license notices as required; verify documented fallback conditions match tests and generated runners remain free of object parsing and terminal dependencies.
+- [x] 5.1 Add narrowly configured `object` read support only to `mf-tui` and implement bounded regular-file/header/table/section reads with typed causes; verify ELF/Mach-O fixtures, large executables, invalid offsets, duplicate sections, and unsupported formats without whole-file unbounded allocation.
+- [x] 5.2 Integrate the manifest into `prepare_launch` while preserving argument transport, conditional stdin checks, observation-version checks, and receiver-before-child ordering; verify metadata preflight spawns no process and an invalid argument or active stdin requirement prevents execution.
+- [x] 5.3 Restrict bounded legacy command dispatch to a successfully recognized executable missing its manifest section; verify supported legacy finite/parameterized runners still work and corrupted or unsupported manifests never trigger fallback.
+- [x] 5.4 Update executable fixtures and legacy command-helper tests so script doubles do not masquerade as supported binary containers; verify cross-architecture inspection succeeds independently of execution and legacy timeout/output/exit/JSON failures retain existing behavior.
+- [x] 5.5 Update TUI/observability documentation and dependency/license notices as required; verify documented fallback conditions match tests and generated runners remain free of object parsing and terminal dependencies.
 
 ## 6. Integration validation
 

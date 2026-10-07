@@ -52,6 +52,8 @@ the existing runner build; it does not require a second compilation. Its wire fo
 explicit build directories owned by an older layout must be recreated at a compatible location.
 The runner links the manifest into a dedicated ELF or Mach-O section and needs no manifest sidecar after installation.
 Both `--describe` and `--describe-interface` print records from this frozen contract without constructing providers.
+TUI preflight reads the section directly; only recognized legacy executables without it use bounded inspection commands.
+Corrupt manifests and unsupported executable formats are rejected without launching an inspection process.
 `--validate` and normal execution compare freshly prepared startup declarations with the manifest before dispatch.
 Changes to input identities, types, required flags, or stdin conditions fail with node/port/resource context.
 Validation failure prevents installation; inspection commands intentionally do not initialize providers or refresh the contract.
@@ -167,9 +169,10 @@ Autonomous sources run with null stdin. For an initial file-reading node exposin
 Input options are mutually exclusive. Values are nested by exact node ID and port; all required values and
 types are validated before node execution. JSON argument transport is limited to 1 MiB and rejects duplicate
 keys. Parameter files are ordinary JSON documents. `--describe-interface` returns the configured parameter
-schema and input resource requirements with the workflow identity. It prepares linked providers without
-executing nodes, reading source data, or initializing telemetry, and isolates construction diagnostics on
-stderr. `--describe` remains a factory-free graph operation. Inspection modes do not accept execution options.
+schema and input resource requirements with the workflow identity. New runners serve it from the embedded
+manifest without preparing providers, reading source data, or initializing telemetry. Older runners may
+prepare providers and isolate construction diagnostics on stderr. `--describe` remains a factory-free graph operation.
+Inspection modes do not accept execution options.
 
 Streaming execution reserves protocol descriptors before plugin construction and routes plugin stdout to
 stderr. Private descriptors are not inherited by plugin subprocesses. Slow output backpressures production;

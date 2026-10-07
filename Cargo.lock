@@ -1376,6 +1376,7 @@ dependencies = [
  "mf-runtime",
  "mf-telemetry",
  "nix",
+ "object",
  "opentelemetry-proto",
  "process-wrap",
  "prost",
@@ -1471,6 +1472,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5c7398b9c8b70908f6371f47ed36737907c87c52af34c268fed0bf0ceb92ead9"
 dependencies = [
  "libc",
+]
+
+[[package]]
+name = "object"
+version = "0.40.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd229a0361b9d0d4396176e02d65897f487eebeab7caa6d443855ee152ca0b9c"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

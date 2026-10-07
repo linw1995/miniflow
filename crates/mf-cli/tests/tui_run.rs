@@ -90,9 +90,12 @@ SNAPSHOTS
     } else {
         String::new()
     };
-    fs::write(&runner, format!(
-        "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  exit 0\nfi\n{record}[ -z \"${{OTEL_EXPORTER_OTLP_HEADERS+x}}\" ] || exit 7\ncase \"$OTEL_EXPORTER_OTLP_ENDPOINT\" in http://127.0.0.1:*) ;; *) exit 8 ;; esac\n[ -n \"$MF_RUN_ID\" ] || exit 9\nprintf '\\001\\000\\377'\ndd if=/dev/zero bs=65536 count=2 2>/dev/null\nprintf 'diagnostic\\n' >&2\n"
-    )).unwrap();
+    write_legacy_runner(
+        &runner,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  exit 0\nfi\n{record}[ -z \"${{OTEL_EXPORTER_OTLP_HEADERS+x}}\" ] || exit 7\ncase \"$OTEL_EXPORTER_OTLP_ENDPOINT\" in http://127.0.0.1:*) ;; *) exit 8 ;; esac\n[ -n \"$MF_RUN_ID\" ] || exit 9\nprintf '\\001\\000\\377'\ndd if=/dev/zero bs=65536 count=2 2>/dev/null\nprintf 'diagnostic\\n' >&2\n"
+        ),
+    );
     fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
 
     let pty = openpty(
@@ -207,9 +210,12 @@ fn tui_restores_terminal_when_execution_spawn_fails_after_preflight() {
     let directory = tempfile::tempdir().unwrap();
     let runner = directory.path().join("vanishing-runner");
     let json = description_json();
-    fs::write(&runner, format!(
-        "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  rm \"$0\"\n  exit 0\nfi\nexit 99\n"
-    )).unwrap();
+    write_legacy_runner(
+        &runner,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  rm \"$0\"\n  exit 0\nfi\nexit 99\n"
+        ),
+    );
     fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
 
     let pty = openpty(
@@ -274,9 +280,12 @@ fn tui_stops_the_child_and_restores_input_after_render_failure() {
     let directory = tempfile::tempdir().unwrap();
     let runner = directory.path().join("long-runner");
     let json = description_json();
-    fs::write(&runner, format!(
-        "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  exit 0\nfi\nsleep 5\n"
-    )).unwrap();
+    write_legacy_runner(
+        &runner,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  exit 0\nfi\nsleep 5\n"
+        ),
+    );
     fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
 
     let size = Winsize {
@@ -356,9 +365,12 @@ fn tui_escalates_ignored_interrupt_and_restores_terminal() {
     let directory = tempfile::tempdir().unwrap();
     let runner = directory.path().join("stubborn-runner");
     let json = description_json();
-    fs::write(&runner, format!(
-        "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  exit 0\nfi\ntrap '' INT\nfor i in 1 2 3 4 5; do sleep 1; done\nexit 99\n"
-    )).unwrap();
+    write_legacy_runner(
+        &runner,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  exit 0\nfi\ntrap '' INT\nfor i in 1 2 3 4 5; do sleep 1; done\nexit 99\n"
+        ),
+    );
     fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
 
     let pty = openpty(
@@ -449,9 +461,12 @@ fn tui_marks_stdout_incomplete_when_descendant_keeps_pipe_open() {
     let directory = tempfile::tempdir().unwrap();
     let runner = directory.path().join("pipe-holding-runner");
     let json = description_json();
-    fs::write(&runner, format!(
-        "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  exit 0\nfi\nsleep 5 &\nprintf 'prefix'\n"
-    )).unwrap();
+    write_legacy_runner(
+        &runner,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  exit 0\nfi\nsleep 5 &\nprintf 'prefix'\n"
+        ),
+    );
     fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
 
     let pty = openpty(
@@ -543,9 +558,12 @@ fn failed_stdout_delivery_uses_cli_error_or_preserves_child_failure() {
         let directory = tempfile::tempdir().unwrap();
         let runner = directory.path().join("failing-runner");
         let json = description_json();
-        fs::write(&runner, format!(
-        "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  exit 0\nfi\nprintf 'result'\nexit {child_code}\n"
-    )).unwrap();
+        write_legacy_runner(
+            &runner,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = --describe ]; then\n  printf '%s\\n' '{json}'\n  exit 0\nfi\nprintf 'result'\nexit {child_code}\n"
+            ),
+        );
         fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
 
         let pty = openpty(
@@ -644,4 +662,24 @@ fn loopback_available() -> bool {
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => false,
         Err(error) => panic!("could not probe loopback availability: {error}"),
     }
+}
+
+fn write_legacy_runner(path: &std::path::Path, script: String) {
+    let source = path.with_extension("rs");
+    fs::write(&source, format!(
+        "use std::os::unix::process::CommandExt;\nfn main() {{\nlet error = std::process::Command::new(\"sh\").arg(\"-c\").arg({script:?}).arg(std::env::current_exe().unwrap()).args(std::env::args_os().skip(1)).exec();\npanic!(\"{{error}}\");\n}}\n"
+    )).unwrap();
+    let output = Command::new("rustc")
+        .arg(&source)
+        .arg("--crate-name")
+        .arg("legacy_runner")
+        .arg("-o")
+        .arg(path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
