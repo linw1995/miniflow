@@ -106,6 +106,23 @@ configuration, predicate values, or business inputs/outputs.
 
 Graph-relative event validation checks workflow/node identity, position, sequence bounds, and skip causes against known edges. It checks reported produced/skipped port names for nonempty uniqueness, but cannot prove that they enumerate every output or match unconnected dynamic ports. The runtime validates its own effective ports before emitting events; the TUI keeps unavailable port metadata distinct from a missing lifecycle record.
 
+## Embedded manifest format
+
+Manifest payload version `2026-10-07` contains `version`, `description`, and `interface`. The existing graph
+and interface protocol versions remain independent; both records must identify the same workflow.
+The manifest excludes node configuration and supplied business values. Its combined UTF-8 JSON payload is limited to 16 MiB.
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 8 bytes | Magic `MFMANIF\0` |
+| 8 | 4 bytes | Unsigned little-endian framing version, currently `1` |
+| 12 | 8 bytes | Unsigned little-endian JSON payload length |
+| 20 | Declared length | One complete JSON manifest |
+
+Readers reject duplicate JSON members, unsupported versions, truncated or oversized records, invalid graph/interface
+contracts, and trailing data other than at most 4 KiB of zero alignment padding. These bytes are a portable serialization,
+not a Rust object layout. The existing workflow ID identifies the compiled definition rather than authenticating plugin code.
+
 ## Lifecycle fields
 
 Use the instrumentation scope `mf.workflow`. Event names, timestamps, and optional trace/span context use native OTel fields. `WireRecord` is a transport-independent logical view of these fields for fixtures and adapters; its JSON representation is not an OTLP/HTTP request envelope.

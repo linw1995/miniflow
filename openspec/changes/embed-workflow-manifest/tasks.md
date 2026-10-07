@@ -1,8 +1,8 @@
 ## 1. Shared manifest contract
 
-- [ ] 1.1 Add the versioned manifest, fixed byte framing, shared validators, and typed Snafu errors in `mf-runtime`, following its existing module/export boundaries; verify round trips retain existing graph/interface versions and exact opaque node/port identities.
-- [ ] 1.2 Enforce the combined 16 MiB payload limit, bounded zero padding, checked lengths, supported versions, unique JSON members, and graph/interface consistency; verify malformed, duplicate, truncated, oversized, and mismatched records are rejected with retained typed causes.
-- [ ] 1.3 Document the framing and metadata exclusions in `docs/observability.md`; verify its field layout and version values match the format fixtures.
+- [x] 1.1 Add the versioned manifest, fixed byte framing, shared validators, and typed Snafu errors in `mf-runtime`, following its existing module/export boundaries; verify round trips retain existing graph/interface versions and exact opaque node/port identities.
+- [x] 1.2 Enforce the combined 16 MiB payload limit, bounded zero padding, checked lengths, supported versions, unique JSON members, and graph/interface consistency; verify malformed, duplicate, truncated, oversized, and mismatched records are rejected with retained typed causes.
+- [x] 1.3 Document the framing and metadata exclusions in `docs/observability.md`; verify its field layout and version values match the format fixtures.
 
 ## 2. Coordinated build-time generation
 

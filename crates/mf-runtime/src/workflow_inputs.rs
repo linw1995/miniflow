@@ -28,8 +28,7 @@ impl WorkflowInterface {
             }
             .fail();
         }
-        let value: UniqueValue = serde_json::from_slice(bytes).context(JsonSnafu)?;
-        serde_json::from_value(value.0).context(JsonSnafu)
+        from_unique_json(bytes).context(JsonSnafu)
     }
 
     pub fn validate_for_description(
@@ -291,6 +290,13 @@ impl WorkflowInputSchema {
 }
 
 struct UniqueValue(Value);
+
+pub(super) fn from_unique_json<T: de::DeserializeOwned>(
+    bytes: &[u8],
+) -> Result<T, serde_json::Error> {
+    let value: UniqueValue = serde_json::from_slice(bytes)?;
+    serde_json::from_value(value.0)
+}
 
 impl<'de> Deserialize<'de> for UniqueValue {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
