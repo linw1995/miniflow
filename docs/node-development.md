@@ -136,7 +136,7 @@ The derive is re-exported by `mf-runtime`; providers do not need a separate macr
 runtime dependency requires `#[input(runtime = "::runtime_alias")]` on the struct. Use
 `#[input(runtime = "crate")]` when deriving within the runtime crate itself.
 
-`InputDecoder`, `InputField`, and `InputValue` support manual input contracts. Their declarations and
+`decode_input`, `reject_unknown_inputs`, `InputField`, and `InputValue` support manual input contracts. Their declarations and
 decoders must agree on accepted names, requiredness, and value types. Errors retain typed mismatches;
 `InputDecodeError::pointer()` adds the escaped port name to its nested path. Shared `ValueRef` payloads
 remain shared during decoding, including collection descendants; owned strings and typed containers may allocate.

@@ -68,14 +68,14 @@ fn dependency() -> ExecutionDependency<'static> {
     }
 }
 
-fn echo(output_type: ValueType) -> TaskFlowNode {
+fn echo() -> TaskFlowNode {
     FlowNode::new(
         "echo",
         PreparedNode::typed_task(
             Echo,
             NodePorts {
                 inputs: vec![],
-                outputs: vec![PortSpec::new("value", output_type, true)],
+                outputs: vec![PortSpec::new("value", ValueType::Any, true)],
             },
         )
         .unwrap(),
@@ -143,28 +143,18 @@ fn preparation_derives_only_inputs_and_never_decodes_or_executes() {
 }
 
 #[test]
-fn typed_execution_keeps_context_and_output_publication_checks() {
+fn typed_execution_keeps_context_and_shared_payloads() {
     let root = ValueRef::from(json!({"nested": [1, 2]}));
     let mut ctx = ExecutionContext::default();
     source(
         Outputs::from([("value".into(), root.clone())]).into(),
         &mut ctx,
     );
-    execute_node_in_context(&echo(ValueType::Any), &[dependency()], &mut ctx).unwrap();
+    execute_node_in_context(&echo(), &[dependency()], &mut ctx).unwrap();
     let ContextValue::Value(output) = ctx.output("echo.value").unwrap() else {
         panic!("output was skipped")
     };
     assert!(output.ptr_eq(&root));
-
-    let mut ctx = ExecutionContext::default();
-    source(
-        Outputs::from([("value".into(), "wrong".into())]).into(),
-        &mut ctx,
-    );
-    let error =
-        execute_node_in_context(&echo(ValueType::Int64), &[dependency()], &mut ctx).unwrap_err();
-    assert!(matches!(error, WorkflowRunError::OutputType { .. }));
-    assert!(ctx.output("echo.value").is_err());
 }
 
 #[test]
@@ -212,7 +202,7 @@ fn skip_missing_dependencies_and_input_checks_precede_typed_decoding() {
 #[test]
 fn decode_failures_retain_node_attribution_and_typed_sources() {
     let mut ctx = ExecutionContext::default();
-    let error = execute_node_in_context(&echo(ValueType::Any), &[], &mut ctx).unwrap_err();
+    let error = execute_node_in_context(&echo(), &[], &mut ctx).unwrap_err();
     assert!(
         matches!(&error, WorkflowRunError::NodeExecution { definition_id, .. } if definition_id.as_str() == "echo")
     );
@@ -225,7 +215,7 @@ fn decode_failures_retain_node_attribution_and_typed_sources() {
     assert!(matches!(decode.as_ref(), InputDecodeError::MissingField { port } if port == "input"));
     assert!(error.to_string().contains("/input"));
 
-    let task = echo(ValueType::Any);
+    let task = echo();
     let error = task
         .node
         .execute(

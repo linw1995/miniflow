@@ -94,7 +94,7 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
             .predicates
             .push(parse_quote!(#ty: #runtime::InputField));
         ports.push(quote!(<#ty as #runtime::InputField>::port(#port)));
-        decoded.push(quote!(#ident: __mf_decoder.take::<#ty>(#port)?));
+        decoded.push(quote!(#ident: #runtime::decode_input::<#ty>(&mut __mf_inputs, #port)?));
     }
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
     Ok(quote! {
@@ -103,10 +103,9 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
                 ::std::vec![#(#ports),*]
             }
 
-            fn from_inputs(__mf_inputs: #runtime::Inputs) -> ::std::result::Result<Self, #runtime::InputDecodeError> {
-                let mut __mf_decoder = #runtime::InputDecoder::new(__mf_inputs);
+            fn from_inputs(mut __mf_inputs: #runtime::Inputs) -> ::std::result::Result<Self, #runtime::InputDecodeError> {
                 let __mf_result = Self { #(#decoded),* };
-                __mf_decoder.finish()?;
+                #runtime::reject_unknown_inputs(__mf_inputs)?;
                 ::std::result::Result::Ok(__mf_result)
             }
         }

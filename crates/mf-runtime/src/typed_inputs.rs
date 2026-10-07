@@ -92,44 +92,33 @@ impl InputDecodeError {
     }
 }
 
-/// Consumes a node input map using the runtime's field codecs.
+/// Consumes one declared input using its strict field codec.
 ///
 /// ```
-/// use mf_runtime::{InputDecoder, Inputs, ValueRef};
+/// use mf_runtime::{Inputs, ValueRef, decode_input, reject_unknown_inputs};
 ///
 /// let payload = ValueRef::from("shared");
-/// let mut decoder = InputDecoder::new(Inputs::from([
-///     ("payload".into(), payload.clone()),
-/// ]));
-/// let decoded: ValueRef = decoder.take("payload")?;
-/// let path: Option<String> = decoder.take("path")?;
-/// decoder.finish()?;
+/// let mut inputs = Inputs::from([("payload".into(), payload.clone())]);
+/// let decoded: ValueRef = decode_input(&mut inputs, "payload")?;
+/// let path: Option<String> = decode_input(&mut inputs, "path")?;
+/// reject_unknown_inputs(inputs)?;
 /// assert!(decoded.ptr_eq(&payload));
 /// assert!(path.is_none());
 /// # Ok::<(), mf_runtime::InputDecodeError>(())
 /// ```
-pub struct InputDecoder {
-    inputs: Inputs,
+pub fn decode_input<T: InputField>(inputs: &mut Inputs, port: &str) -> Result<T, InputDecodeError> {
+    T::value_type()
+        .check_depth()
+        .context(InvalidTypeSnafu { port })?;
+    T::decode_field(port, inputs.remove(port))
 }
 
-impl InputDecoder {
-    pub fn new(inputs: Inputs) -> Self {
-        Self { inputs }
+/// Rejects any bindings left after the declared input fields have been consumed.
+pub fn reject_unknown_inputs(inputs: Inputs) -> Result<(), InputDecodeError> {
+    if let Some((port, _)) = inputs.into_iter().next() {
+        return UnknownFieldSnafu { port }.fail();
     }
-
-    pub fn take<T: InputField>(&mut self, port: &str) -> Result<T, InputDecodeError> {
-        T::value_type()
-            .check_depth()
-            .context(InvalidTypeSnafu { port })?;
-        T::decode_field(port, self.inputs.remove(port))
-    }
-
-    pub fn finish(self) -> Result<(), InputDecodeError> {
-        if let Some((port, _)) = self.inputs.into_iter().next() {
-            return UnknownFieldSnafu { port }.fail();
-        }
-        Ok(())
-    }
+    Ok(())
 }
 
 fn decode_required<T: InputValue>(
@@ -205,7 +194,9 @@ impl<T: InputValue> InputValue for Vec<T> {
     }
 
     fn decode(value: ValueRef) -> Result<Self, TypeMismatch> {
-        <Self as InputValue>::value_type().validate_shared(&value)?;
+        if !value.is_array() {
+            <Self as InputValue>::value_type().validate_shared(&value)?;
+        }
         value
             .as_array()
             .expect("validated list")
@@ -228,7 +219,9 @@ impl<T: InputValue> InputValue for BTreeMap<String, T> {
     }
 
     fn decode(value: ValueRef) -> Result<Self, TypeMismatch> {
-        <Self as InputValue>::value_type().validate_shared(&value)?;
+        if !value.is_object() {
+            <Self as InputValue>::value_type().validate_shared(&value)?;
+        }
         value
             .as_object()
             .expect("validated map")
@@ -270,12 +263,11 @@ mod tests {
     use std::error::Error;
 
     fn decode<T: InputField>(value: Option<serde_json::Value>) -> Result<T, InputDecodeError> {
-        let inputs = value
+        let mut inputs = value
             .map(|value| Inputs::from([("input".into(), value.into())]))
             .unwrap_or_default();
-        let mut decoder = InputDecoder::new(inputs);
-        let decoded = decoder.take("input")?;
-        decoder.finish()?;
+        let decoded = decode_input(&mut inputs, "input")?;
+        reject_unknown_inputs(inputs)?;
         Ok(decoded)
     }
 
@@ -339,13 +331,15 @@ mod tests {
 
     #[test]
     fn unknown_names_and_escaped_paths_are_reported() {
-        let decoder = InputDecoder::new(Inputs::from([("a/b~c".into(), true.into())]));
-        let error = decoder.finish().unwrap_err();
+        let inputs = Inputs::from([("a/b~c".into(), true.into())]);
+        let error = reject_unknown_inputs(inputs).unwrap_err();
         assert_eq!(error.pointer(), "/a~1b~0c");
         assert!(matches!(error, InputDecodeError::UnknownField { port } if port == "a/b~c"));
-        let mut decoder = InputDecoder::new(Inputs::new());
+        let mut inputs = Inputs::new();
         assert_eq!(
-            decoder.take::<i64>("a/b~c").unwrap_err().pointer(),
+            decode_input::<i64>(&mut inputs, "a/b~c")
+                .unwrap_err()
+                .pointer(),
             "/a~1b~0c"
         );
     }
@@ -363,11 +357,11 @@ mod tests {
         assert!(rows[1].is_empty());
         assert!(decode::<Rows>(Some(json!({}))).is_err());
         assert!(decode::<BTreeMap<String, i64>>(Some(json!([]))).is_err());
-        let mut decoder = InputDecoder::new(Inputs::from([(
+        let mut inputs = Inputs::from([(
             "a/b~c".into(),
             json!([{"count": 1}, {"x/y~z": "two"}]).into(),
-        )]));
-        let error = decoder.take::<Rows>("a/b~c").unwrap_err();
+        )]);
+        let error = decode_input::<Rows>(&mut inputs, "a/b~c").unwrap_err();
         assert_eq!(error.pointer(), "/a~1b~0c/1/x~1y~0z");
         let source = error
             .source()
@@ -382,19 +376,19 @@ mod tests {
     #[test]
     fn raw_and_nested_values_keep_payload_identity() {
         let root = ValueRef::from(json!({"items": [{"value": [1, 2]}, null]}));
-        let mut decoder = InputDecoder::new(Inputs::from([
+        let mut inputs = Inputs::from([
             ("root".into(), root.clone()),
             ("items".into(), root["items"].clone()),
             ("map".into(), root.clone()),
-        ]));
-        let decoded: ValueRef = decoder.take("root").unwrap();
+        ]);
+        let decoded: ValueRef = decode_input(&mut inputs, "root").unwrap();
         assert!(decoded.ptr_eq(&root));
-        let items: Vec<ValueRef> = decoder.take("items").unwrap();
+        let items: Vec<ValueRef> = decode_input(&mut inputs, "items").unwrap();
         assert!(items[0].ptr_eq(&root["items"][0]));
         assert!(items[1].ptr_eq(&root["items"][1]));
-        let map: BTreeMap<String, Vec<ValueRef>> = decoder.take("map").unwrap();
+        let map: BTreeMap<String, Vec<ValueRef>> = decode_input(&mut inputs, "map").unwrap();
         assert!(map["items"][0].ptr_eq(&root["items"][0]));
-        decoder.finish().unwrap();
+        reject_unknown_inputs(inputs).unwrap();
     }
 
     #[test]
@@ -404,8 +398,8 @@ mod tests {
         type L4 = Vec<Vec<L2>>;
         type L8 = Vec<Vec<Vec<Vec<L4>>>>;
         type L16 = Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<L8>>>>>>>>;
-        let mut decoder = InputDecoder::new(Inputs::new());
-        let error = decoder.take::<L16>("deep").unwrap_err();
+        let mut inputs = Inputs::new();
+        let error = decode_input::<L16>(&mut inputs, "deep").unwrap_err();
         assert_eq!(error.pointer(), "/deep");
         assert_eq!(
             error

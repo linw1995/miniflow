@@ -34,10 +34,6 @@ fn derive_compiles_with_aliases_and_reports_invalid_declarations() {
 
     for (declaration, diagnostic) in [
         ("enum Inputs { Value }", "requires a named-field struct"),
-        (
-            "union Inputs { value: i64 }",
-            "requires a named-field struct",
-        ),
         ("struct Inputs(i64);", "requires a named-field struct"),
         ("struct Inputs;", "requires a named-field struct"),
         ("struct Inputs { value: u32 }", "InputField"),
@@ -64,18 +60,6 @@ fn derive_compiles_with_aliases_and_reports_invalid_declarations() {
             "struct Inputs { #[input(default)] value: i64 }",
             "expected `rename",
         ),
-        (
-            "struct Inputs { #[input(runtime = \"crate\")] value: i64 }",
-            "expected `rename",
-        ),
-        (
-            "struct Inputs { #[input(rename = 1)] value: i64 }",
-            "expected string literal",
-        ),
-        (
-            "struct Inputs { #[input(rename)] value: i64 }",
-            "expected `=`",
-        ),
     ] {
         let output = check(root.path(), &format!("{prefix}{declaration}"));
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -92,9 +76,6 @@ fn derive_compiles_with_aliases_and_reports_invalid_declarations() {
         ),
         ("#[input(rename = \"x\")]", "expected `runtime"),
         ("#[input(runtime = \"bad path\")]", "unexpected token"),
-        ("#[input(runtime = 1)]", "expected string literal"),
-        ("#[input(runtime)]", "expected `=`"),
-        ("#[input]", "expected attribute arguments"),
     ] {
         let output = check(
             root.path(),

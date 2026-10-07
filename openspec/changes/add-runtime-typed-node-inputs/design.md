@@ -79,7 +79,14 @@ Collection element/value types must implement the present-value codec. `Option<T
 
 Missing optional fields decode to `None`; supplied values decode to `Some(T)`. Supplied null is checked against `T`: `Option<String>` rejects null and `Option<ValueRef>` produces `Some(ValueRef::null())`. Required fields reject omission. Unknown input keys are rejected. No defaults or coercions are introduced, and decoding honors the existing descriptor depth limit.
 
-Decode directly from shared values. Move a `ValueRef` field's handle out of the map. For collections, decode children from shared handles; owned strings and typed collection storage may allocate. Do not serialize an entire input map into text or materialize an intermediate `serde_json::Value` tree. Runtime codecs reuse the existing type validation rules, including strict floating-point representation and nested JSON Pointer diagnostics.
+Use `decode_input` to consume a declared field from the existing input map, checking descriptor depth and applying its presence codec. Use `reject_unknown_inputs` to reject the remaining map after all declared fields are consumed. These runtime functions avoid a separate decoder state wrapper; Rust map ownership already prevents reuse after completion.
+
+Decode directly from shared values. Move a `ValueRef` field's handle out of the map. For collections, decode
+children from shared handles; owned strings and typed collection storage may allocate. Do not serialize an
+entire input map into text or materialize an intermediate `serde_json::Value` tree. Runtime codecs reuse the
+existing scalar and shape validation rules, including strict floating-point representation and nested JSON
+Pointer diagnostics. Collection codecs validate and decode children in one traversal instead of recursively
+validating the same descendants before each nested decoder.
 
 ### 4. Keep the derive package independent of the runtime implementation
 
@@ -110,7 +117,7 @@ Typed stream and event adapters can reuse the input contracts later. Their mutab
 - Schema and decoding drift in custom implementations: document the codec invariant and verify every provided codec against its advertised descriptor and requiredness.
 - Optional null behavior differing from Serde: document and test omission, `Some(null)` for shared JSON, and rejection of null for typed scalars.
 - Added proc-macro dependency and packaging requirements: verify workspace builds and an external provider importing only `mf-runtime`, including a renamed dependency.
-- Duplicate validation of supplied values: preserve current runtime checks for safety and use shared validation primitives in codecs; optimize only with evidence from subsequent profiling.
+- Validation at both the workflow boundary and the typed decoder: preserve runtime checks for dynamic providers and direct typed decoder checks for standalone callers. Avoid recursive prevalidation inside collection codecs; child codecs perform one traversal and attach their relative paths.
 - Shared-value regressions hidden by equal JSON results: assert shared payload identity as well as value equality in identity and nested collection tests.
 
 ## Migration Plan
