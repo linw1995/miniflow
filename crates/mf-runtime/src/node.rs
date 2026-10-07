@@ -569,15 +569,27 @@ pub trait TypedTaskNode: Send + Sync {
 
 struct TypedTaskAdapter<N>(N);
 
+/// Decodes dynamic inputs and invokes a typed task with the supplied context.
+///
+/// Like direct `TaskNode::execute`, this does not schedule the task or publish its
+/// outputs. Providers retaining a dynamic task interface can delegate here to
+/// share the runtime adapter's decoding and error context.
+pub fn execute_typed_task<N: TypedTaskNode + ?Sized>(
+    task: &N,
+    inputs: Inputs,
+    ctx: &mut crate::ExecutionContext,
+) -> Result<crate::NodeResult, NodeExecutionError> {
+    let input = <N::Input as crate::NodeInputs>::from_inputs(inputs).context(InputDecodeSnafu)?;
+    task.execute(input, ctx)
+}
+
 impl<N: TypedTaskNode> TaskNode for TypedTaskAdapter<N> {
     fn execute(
         &self,
         inputs: Inputs,
         ctx: &mut crate::ExecutionContext,
     ) -> Result<crate::NodeResult, NodeExecutionError> {
-        let input =
-            <N::Input as crate::NodeInputs>::from_inputs(inputs).context(InputDecodeSnafu)?;
-        self.0.execute(input, ctx)
+        execute_typed_task(&self.0, inputs, ctx)
     }
 }
 

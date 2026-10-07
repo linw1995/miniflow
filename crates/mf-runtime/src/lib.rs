@@ -61,7 +61,7 @@ pub use node::{
     NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration, OutputDerivation,
     OutputDerivationError, Outputs, PluginFailedSnafu as NodePluginFailedSnafu, PortSpec,
     PreparedNode, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, TypedTaskNode,
-    ValueType, deserialize_config, output_id,
+    ValueType, deserialize_config, execute_typed_task, output_id,
 };
 pub use number::compare_json_numbers;
 pub use registry::{NodeRegistry, NodeRegistryError};

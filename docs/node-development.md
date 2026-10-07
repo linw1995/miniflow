@@ -186,10 +186,17 @@ and context boundaries as dynamic tasks, including in stream task domains. Adapt
 retain `InputDecodeError` and its typed sources through `NodeExecutionError::InputDecode`; provider business
 errors keep their existing plugin error chain. Typed event and stream producer interfaces are not provided.
 
+`execute_typed_task` exposes the same input conversion and invocation for providers that retain a
+dynamic `TaskNode` entry point. It does not schedule work or publish outputs. Iteration uses this function
+to preserve direct dynamic callers while its factory uses typed preparation. `mfn_core::IterationInputs`
+contains the shared `items` payload; callers using both traits can qualify `TaskNode::execute` for a map
+or `TypedTaskNode::execute` for the struct. Its results descriptor still depends on its body and error policy.
+
 Adoption is additive: replace a fixed-input task's map decoding with a derived struct, implement
 `TypedTaskNode`, and pass empty input ports to `PreparedNode::typed_task`. Output contracts and registrations
 retain their existing shape. The [identity provider](../crates/builtin-nodes/core/src/identity.rs) demonstrates
-shared-value forwarding with this API. Providers such as `builtin.code` whose ports depend on configuration
+shared-value forwarding with this API; [Iteration](../crates/builtin-nodes/core/src/iteration.rs) demonstrates
+fixed typed inputs with body-dependent outputs. Providers such as `builtin.code` whose ports depend on configuration
 continue to use `TaskNode`, dynamic metadata, and the existing `PreparedNode::new` constructor.
 
 ### Dynamic task execution
