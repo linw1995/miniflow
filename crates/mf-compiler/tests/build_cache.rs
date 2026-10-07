@@ -39,7 +39,13 @@ fn reuses_owned_directories_and_rejects_foreign_or_incompatible_entries() {
     assert!(BuildDirectory::open(&root.path().join("other.json"), Some(&directory)).is_err());
     let marker = directory.join(".mf-owner.json");
     let mut owner: serde_json::Value = serde_json::from_slice(&fs::read(&marker).unwrap()).unwrap();
-    assert_eq!(owner["layout_version"], "2026-09-26");
+    assert_eq!(owner["layout_version"], "2026-10-07");
+    owner["layout_version"] = serde_json::json!("2026-09-26");
+    fs::write(&marker, owner.to_string()).unwrap();
+    assert!(matches!(
+        BuildDirectory::open(&definition, Some(&directory)),
+        Err(CacheError::Ownership { .. })
+    ));
     owner["layout_version"] = serde_json::json!("2099-01-01");
     fs::write(&marker, owner.to_string()).unwrap();
     assert!(BuildDirectory::open(&definition, Some(&directory)).is_err());

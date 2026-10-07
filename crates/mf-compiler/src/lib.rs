@@ -56,7 +56,9 @@ pub use pipeline::{
     CompileRequest, PipelineError, cargo_command, compile_project, compile_project_with_options,
     resolve_project,
 };
-pub use plan::{CompiledWorkflow, GeneratedWorkflowArtifacts, PlanError};
+pub use plan::{
+    CompiledWorkflow, GeneratedExecutionArtifacts, GeneratedWorkflowArtifacts, PlanError,
+};
 #[cfg(feature = "codegen")]
 pub use state::{BuildGuard, StateError, atomic_copy, atomic_write, write_if_changed};
 pub use streaming::{instantiate_stream, start_stream};

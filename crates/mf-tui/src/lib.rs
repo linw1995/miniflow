@@ -8,6 +8,8 @@
 pub mod description;
 mod duration;
 pub mod graph;
+#[cfg(unix)]
+pub mod manifest;
 pub mod receiver;
 #[cfg(unix)]
 pub mod run;
@@ -15,3 +17,7 @@ pub mod state;
 
 mod snapshots;
 pub use snapshots::HistorySnapshot;
+
+#[cfg(all(test, unix))]
+#[path = "../tests/common/mod.rs"]
+mod test_support;

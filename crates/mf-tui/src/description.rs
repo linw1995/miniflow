@@ -87,6 +87,11 @@ pub fn describe_executable_with_limits(
 ) -> Result<WorkflowDescription, DescriptionError> {
     let json = inspect_executable(path, "--describe", limits)?;
     let description = WorkflowDescription::from_json(&json).context(InvalidSnafu)?;
+    validate_protocol(&description)?;
+    Ok(description)
+}
+
+pub(super) fn validate_protocol(description: &WorkflowDescription) -> Result<(), DescriptionError> {
     if description.is_streaming()
         && description.event_schema_version() != mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
     {
@@ -95,7 +100,7 @@ pub fn describe_executable_with_limits(
         }
         .fail();
     }
-    Ok(description)
+    Ok(())
 }
 
 pub fn describe_interface(path: &Path) -> Result<WorkflowInterface, DescriptionError> {

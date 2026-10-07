@@ -30,8 +30,20 @@ pub struct GeneratedWorkflowArtifacts {
     pub plan_json: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GeneratedExecutionArtifacts {
+    pub rust_source: String,
+    pub manifest_bytes: Vec<u8>,
+}
+
 #[derive(Debug, Snafu)]
 pub enum PlanError {
+    #[snafu(transparent)]
+    Manifest {
+        source: mf_runtime::WorkflowManifestError,
+    },
+    #[snafu(transparent)]
+    Description { source: crate::DescriptionError },
     #[snafu(transparent)]
     Compilation {
         #[snafu(source(from(crate::WorkflowCompileError, Box::new)))]
@@ -673,7 +685,7 @@ impl CompiledWorkflow {
     pub fn generate_execution_plans(
         &self,
         registry: &mf_runtime::NodeRegistry,
-    ) -> Result<String, PlanError> {
+    ) -> Result<GeneratedExecutionArtifacts, PlanError> {
         let (nodes, order) = crate::compiler::prepare_definition(&self.definition, registry)?;
         if order != self.execution_order {
             return InvalidExecutionOrderSnafu.fail();
@@ -686,6 +698,13 @@ impl CompiledWorkflow {
         )
         .and_then(|flow| flow.with_control_edges(self.definition.control_edges.clone()))
         .map_err(crate::WorkflowBuildError::from)?;
+        let flow = if self.definition.version.supports_startup_inputs() {
+            flow.with_workflow_inputs()
+                .map_err(crate::WorkflowBuildError::from)?
+        } else {
+            flow
+        };
+        let schema = flow.input_schema().clone();
         let mut layouts = Vec::new();
         if let Some(execution) = &self.definition.execution {
             let prepared = flow
@@ -734,7 +753,21 @@ impl CompiledWorkflow {
         }
         let syntax: syn::File =
             syn::parse2(quote! { #(#layouts)* }).context(GeneratedSyntaxSnafu)?;
-        Ok(prettyplease::unparse(&syntax))
+        let description = crate::describe_compiled(self)?;
+        let interface = mf_runtime::WorkflowInterface {
+            version: mf_runtime::WorkflowInterfaceVersion::V2026_10_03,
+            workflow_id: description.workflow_id.clone(),
+            schema,
+        };
+        let manifest = mf_runtime::WorkflowManifest {
+            version: mf_runtime::WorkflowManifestVersion::V2026_10_07,
+            description,
+            interface,
+        };
+        Ok(GeneratedExecutionArtifacts {
+            rust_source: prettyplease::unparse(&syntax),
+            manifest_bytes: manifest.to_bytes()?,
+        })
     }
 }
 

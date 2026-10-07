@@ -29,6 +29,7 @@ nix = { workspace = true, features = ["fs", "signal", "process"] }
 process-wrap = { workspace = true, features = ["std", "process-group", "job-object"] }
 signal-hook.workspace = true
 tempfile.workspace = true
+object.workspace = true
 
 # Snapshot values, integrity checks, and diagnostics.
 serde_json.workspace = true

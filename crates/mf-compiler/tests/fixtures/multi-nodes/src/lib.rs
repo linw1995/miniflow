@@ -74,6 +74,7 @@ inventory::submit! {
 }
 
 mod context_fixture;
+mod interface_fixture;
 mod line_producer;
 mod stream_fixture;
 mod typed_fixture;

@@ -50,14 +50,24 @@ fn main() {
 fn generate() -> Result<(), Box<dyn std::error::Error>> {
     let registry = mf_runtime::NodeRegistry::from_inventory()?;
     let workflow = mf_compiler::CompiledWorkflow::from_json(include_str!("workflow-plan.json"))?;
-    let source = workflow.generate_execution_plans(&registry)?;
+    let artifacts = workflow.generate_execution_plans(&registry)?;
     let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo output directory"));
-    std::fs::write(output.join("flow-plans.rs"), source)?;
+    std::fs::write(output.join("flow-plans.rs"), artifacts.rust_source)?;
+    std::fs::write(output.join("workflow-manifest.bin"), artifacts.manifest_bytes)?;
     Ok(())
 }
 "#;
 
 const MAIN: &str = r#"mod workflow;
+
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".mf_manifest"))]
+#[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mf_manifest"))]
+static WORKFLOW_MANIFEST: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/workflow-manifest.bin")).len()] =
+    *include_bytes!(concat!(env!("OUT_DIR"), "/workflow-manifest.bin"));
+
+fn workflow_manifest() -> Result<mf_runtime::WorkflowManifest, mf_runtime::WorkflowManifestError> {
+    mf_runtime::WorkflowManifest::from_bytes(&WORKFLOW_MANIFEST)
+}
 
 fn main() -> std::process::ExitCode {
     match run() {
@@ -71,8 +81,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     match command {
         mf_runtime::RunnerCommand::Describe => {
             use std::io::Write;
-            let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
-            let description = mf_compiler::describe_compiled(&plan)?;
+            let description = workflow_manifest()?.description;
             let mut stdout = std::io::stdout().lock();
             stdout.write_all(&description.to_json()?)?;
             stdout.write_all(b"\n")?;
@@ -80,19 +89,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
         mf_runtime::RunnerCommand::DescribeInterface => {
-            let mut stdio = mf_runtime::StreamStdio::claim()?;
-            let registry = mf_runtime::NodeRegistry::from_inventory()?;
-            let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
-            let interface = mf_compiler::describe_interface(&plan, &registry)?;
-            stdio.write_json(&interface)?;
+            use std::io::Write;
+            let interface = workflow_manifest()?.interface;
+            let mut stdout = std::io::stdout().lock();
+            serde_json::to_writer(&mut stdout, &interface)?;
+            stdout.write_all(b"\n")?;
+            stdout.flush()?;
             return Ok(());
         }
         mf_runtime::RunnerCommand::Validate => {
+            let manifest = workflow_manifest()?;
             let registry = mf_runtime::NodeRegistry::from_inventory()?;
             #[cfg(feature = "streaming")]
-            { workflow::prepare_stream(&registry)?; }
+            {
+                let prepared = workflow::prepare_stream(&registry)?;
+                manifest.validate_prepared_schema(prepared.plan().input_schema())?;
+            }
             #[cfg(not(feature = "streaming"))]
-            { workflow::prepare_workflow(&registry, None)?; }
+            {
+                let flow = workflow::prepare_workflow(&registry, None)?;
+                manifest.validate_prepared_schema(flow.input_schema())?;
+            }
             return Ok(());
         }
         mf_runtime::RunnerCommand::Execute(_) => {}
@@ -136,6 +153,7 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments) -> Result<(), Box<dy
         let prepared = workflow::prepare_stream(&registry).inspect_err(|error| {
             if let Some(observation) = &observation { observation.preparation_failed(error.to_string()); }
         })?;
+        workflow_manifest()?.validate_prepared_schema(prepared.plan().input_schema())?;
         prepared.plan().input_schema().validate(&arguments)?;
         let needs_stdin = prepared.plan().input_schema().stdin_owner(&arguments)?.is_some();
         let stdin = if needs_stdin { stdio.take_input() } else { None };
@@ -237,6 +255,7 @@ fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: 
         if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.clone()); }
         let registry = mf_runtime::NodeRegistry::from_inventory()?;
         let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
+        workflow_manifest()?.validate_prepared_schema(flow.input_schema())?;
         Ok(workflow::run_workflow_in_context(&flow, state)?)
     });
     if let Some(snapshots) = snapshots {

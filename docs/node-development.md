@@ -14,6 +14,13 @@ The factory returns a `PreparedNode` containing the executor and its `NodeMetada
 [constant](../crates/builtin-nodes/core/src/constant.rs) and
 [identity](../crates/builtin-nodes/core/src/identity.rs) for working registrations.
 
+Configured input declarations and stdin conditions must depend on the fixed configuration and selected provider,
+not environment variables or process state. The generated build freezes them in the executable manifest, and
+`--validate` and normal execution compare them with runtime preparation before dispatching nodes or reading sources.
+Host and target implementations must expose the same configured interface even if executor initialization differs.
+Initialization can still fail for an unavailable runtime resource; inspection returns the frozen interface without
+initializing executors. Dynamic in-memory callers derive their interfaces normally and require no manifest.
+
 `mfn-core` registers a subgraph factory for `workflow.loop`. The compiler prepares its body and passes
 it to that factory, which constructs the complete Loop executor. A Flow using Loop must declare
 `mfn-core` in its dependencies. `workflow.loop_assign`, `workflow.exit_loop`, and `%loop` remain reserved

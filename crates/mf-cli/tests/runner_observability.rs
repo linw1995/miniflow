@@ -44,6 +44,7 @@ fn plugin(root: &Path) -> PathBuf {
     let lib = plugin.join("src/lib.rs");
     let source = fs::read_to_string(&lib).unwrap();
     let minimal = source
+        .replace("mod interface_fixture;\n", "")
         .replace("mod typed_fixture;\n", "")
         .replace("mod line_producer;\n", "")
         .replace("mod stream_fixture;\n", "");
@@ -223,6 +224,13 @@ fn generated_loop_runner_exports_complete_per_pass_observations() {
     })
     .unwrap();
     let description = describe_executable(&executable).unwrap();
+    assert_eq!(
+        mf_tui::manifest::read_manifest(&executable)
+            .unwrap()
+            .unwrap()
+            .description,
+        description
+    );
     assert_eq!(description.loop_bodies.len(), 1);
     let description_json = serde_json::to_string(&description).unwrap();
     assert!(!description_json.contains("count + 1"));

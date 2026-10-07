@@ -1,9 +1,10 @@
 //! Supervision and terminal presentation for one locally launched workflow.
 
 use crate::{
-    description::{DescriptionError, describe_executable, describe_interface},
+    description::{DescriptionError, describe_executable, describe_interface, validate_protocol},
     duration::format_duration_ns,
     graph::{GraphError, GraphLayout, GraphView},
+    manifest::{ManifestReadError, read_manifest},
     receiver::{LoopbackReceiver, ReceiverError},
     snapshots::HistoryView,
     state::{LoopPassObservation, NodeObservation, StateSnapshot},
@@ -68,6 +69,8 @@ pub enum RunError {
     ArgumentFile { source: io::Error },
     #[snafu(display("could not describe workflow: {source}"))]
     Description { source: DescriptionError },
+    #[snafu(display("could not inspect workflow: {source}"))]
+    Manifest { source: ManifestReadError },
     #[snafu(display("could not layout workflow graph: {source}"))]
     Graph { source: GraphError },
     #[snafu(display("could not create private stdout spool: {source}"))]
@@ -135,20 +138,30 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
     } else {
         WorkflowArguments::default()
     };
-    let description = describe_executable(path).context(DescriptionSnafu)?;
-    let interface = if description.execution.is_some() {
-        let interface = describe_interface(path).context(DescriptionSnafu)?;
-        interface.validate_for_description(&description)?;
+    let (description, interface) =
+        if let Some(manifest) = read_manifest(path).context(ManifestSnafu)? {
+            (manifest.description, Some(manifest.interface))
+        } else {
+            let description = describe_executable(path).context(DescriptionSnafu)?;
+            let interface = if description.execution.is_some() {
+                let interface = describe_interface(path).context(DescriptionSnafu)?;
+                interface.validate_for_description(&description)?;
+                Some(interface)
+            } else {
+                None
+            };
+            (description, interface)
+        };
+    validate_protocol(&description).context(DescriptionSnafu)?;
+    if let Some(interface) = &interface {
         interface.schema.validate(&arguments)?;
-        Some(interface)
     } else {
         if options.inputs.is_some() || options.inputs_file.is_some() {
             return option_error(
                 "this runner has no workflow input interface; recompile it to pass startup arguments or input resources",
             );
         }
-        None
-    };
+    }
     let needs_stdin = interface
         .as_ref()
         .map(|interface| interface.schema.stdin_owner(&arguments))
@@ -1192,11 +1205,7 @@ mod tests {
         identity::WorkflowId,
     };
 
-    fn source_runner(
-        directory: &Path,
-        resource: Option<StdinRequirement>,
-        on_describe: &str,
-    ) -> PathBuf {
+    fn source_runner(directory: &Path, resource: Option<StdinRequirement>) -> PathBuf {
         use std::{fs, os::unix::fs::PermissionsExt};
         let runner = directory.join("runner");
         let graph = serde_json::json!({"version":"2026-10-03", "workflow_id":format!("sha256:{}", "a".repeat(64)),
@@ -1209,8 +1218,17 @@ mod tests {
         }
         let interface = serde_json::json!({"version":"2026-10-03", "workflow_id":graph["workflow_id"],
             "schema":{"inputs":{"source/id":{"path":{"type":"string", "required":true}}}, "stdin":stdin}});
-        fs::write(&runner, format!("#!/bin/sh\ncase \"$1\" in\n--describe) printf '%s\\n' '{graph}';;\n--describe-interface) {on_describe}\nprintf '%s\\n' '{interface}';;\n*) exit 99;;\nesac\n")).unwrap();
-        fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+        let manifest = mf_runtime::WorkflowManifest {
+            version: mf_runtime::WorkflowManifestVersion::V2026_10_07,
+            description: serde_json::from_value(graph).unwrap(),
+            interface: serde_json::from_value(interface).unwrap(),
+        };
+        fs::write(
+            &runner,
+            crate::test_support::elf(Some(&manifest.to_bytes().unwrap()), 1),
+        )
+        .unwrap();
+        fs::set_permissions(&runner, fs::Permissions::from_mode(0o600)).unwrap();
         runner
     }
 
@@ -1227,7 +1245,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("arguments.json");
         fs::write(&path, valid_options().inputs.unwrap()).unwrap();
-        let runner = source_runner(root.path(), None, &format!("rm '{}'", path.display()));
+        let runner = source_runner(root.path(), None);
         let prepared = prepare_launch(
             &runner,
             &RunOptions {
@@ -1236,7 +1254,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(!path.exists());
+        fs::remove_file(&path).unwrap();
         let private = prepared.arguments.as_ref().unwrap();
         assert_eq!(
             private.as_file().metadata().unwrap().permissions().mode() & 0o777,
@@ -1249,7 +1267,7 @@ mod tests {
         );
         drop(prepared);
         assert!(!temporary_path.exists());
-        let runner = source_runner(root.path(), None, "");
+        let runner = source_runner(root.path(), None);
         for input in [
             "{}",
             r#"{"source/id":{"path":42}}"#,
@@ -1283,7 +1301,7 @@ mod tests {
     #[test]
     fn preflight_rejects_workflow_stdin() {
         let root = tempfile::tempdir().unwrap();
-        let runner = source_runner(root.path(), Some(StdinRequirement::Always), "");
+        let runner = source_runner(root.path(), Some(StdinRequirement::Always));
         assert!(
             prepare_launch(&runner, &valid_options())
                 .err()
@@ -1291,6 +1309,69 @@ mod tests {
                 .to_string()
                 .contains("cannot supply workflow stdin")
         );
+    }
+
+    #[test]
+    fn preflight_resolves_conditional_stdin_without_starting_a_runner() {
+        let root = tempfile::tempdir().unwrap();
+        let runner = source_runner(
+            root.path(),
+            Some(StdinRequirement::UnlessInput("path".into())),
+        );
+        let mut manifest = read_manifest(&runner).unwrap().unwrap();
+        manifest
+            .interface
+            .schema
+            .inputs
+            .get_mut("source/id")
+            .unwrap()
+            .get_mut("path")
+            .unwrap()
+            .required = false;
+        std::fs::write(
+            &runner,
+            crate::test_support::elf(Some(&manifest.to_bytes().unwrap()), 1),
+        )
+        .unwrap();
+        assert!(prepare_launch(&runner, &valid_options()).is_ok());
+        assert!(
+            prepare_launch(&runner, &RunOptions::default())
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("cannot supply workflow stdin")
+        );
+        let mut corrupt = std::fs::read(&runner).unwrap();
+        *corrupt.last_mut().unwrap() = 0xff;
+        std::fs::write(&runner, corrupt).unwrap();
+        assert!(matches!(
+            prepare_launch(&runner, &valid_options()),
+            Err(RunError::Manifest { .. })
+        ));
+    }
+
+    #[test]
+    fn preflight_preserves_legacy_finite_and_parameterized_executables() {
+        let root = tempfile::tempdir().unwrap();
+        let source = source_runner(root.path(), None);
+        let manifest = read_manifest(&source).unwrap().unwrap();
+        let graph = serde_json::to_string(&manifest.description).unwrap();
+        let interface = serde_json::to_string(&manifest.interface).unwrap();
+        let script = format!(
+            "case \"$1\" in\n--describe) printf '%s\\n' '{graph}';;\n--describe-interface) printf '%s\\n' '{interface}';;\n*) exit 99;;\nesac\n"
+        );
+        let runner = root.path().join("legacy");
+        crate::test_support::legacy_runner(&runner, &script);
+        assert!(read_manifest(&runner).unwrap().is_none());
+        assert!(prepare_launch(&runner, &valid_options()).is_ok());
+        let finite = crate::test_support::sample_manifest().description;
+        let script = format!(
+            "test \"$1\" = --describe || exit 99\nprintf '%s\\n' '{}'",
+            serde_json::to_string(&finite).unwrap()
+        );
+        crate::test_support::legacy_runner(&runner, &script);
+        assert!(prepare_launch(&runner, &RunOptions::default()).is_ok());
+        assert!(prepare_launch(&runner, &valid_options()).is_err());
     }
 
     #[test]

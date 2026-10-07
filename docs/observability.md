@@ -92,8 +92,8 @@ those contracts by constructing plugin instances.
 
 Version `2026-10-03` adds `execution` metadata with the execution mode and lifecycle schema, and requires
 interface inspection. The separate `--describe-interface` document exposes initial-node input types,
-required flags, and runtime resource declarations. Graph inspection stays factory-free; interface
-inspection performs validated preparation without executing a node or consuming source input.
+required flags, and runtime resource declarations. New runners serve both commands from their embedded manifest
+without constructing providers. Older runners may prepare providers during interface inspection.
 
 New runners name the synthetic Loop source `%loop`. Description readers also accept `$loop` from
 previously compiled runners, preserving its original node IDs and workflow identity.
@@ -105,6 +105,26 @@ unknown fields are accepted within the current version and omitted when re-encod
 configuration, predicate values, or business inputs/outputs.
 
 Graph-relative event validation checks workflow/node identity, position, sequence bounds, and skip causes against known edges. It checks reported produced/skipped port names for nonempty uniqueness, but cannot prove that they enumerate every output or match unconnected dynamic ports. The runtime validates its own effective ports before emitting events; the TUI keeps unavailable port metadata distinct from a missing lifecycle record.
+
+## Embedded manifest format
+
+Manifest payload version `2026-10-07` contains `version`, `description`, and `interface`. The existing graph
+and interface protocol versions remain independent; both records must identify the same workflow.
+The manifest excludes node configuration and supplied business values. Its combined UTF-8 JSON payload is limited to 16 MiB.
+New Linux and macOS runners embed these bytes in `.mf_manifest` (ELF) or `__DATA,__mf_manifest` (Mach-O), respectively.
+The section is retained through release optimization, LTO, and supported stripping, including telemetry-disabled builds.
+Compatibility commands print the same graph/interface records; they do not refresh the frozen contract by preparing providers.
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 0 | 8 bytes | Magic `MFMANIF\0` |
+| 8 | 4 bytes | Unsigned little-endian framing version, currently `1` |
+| 12 | 8 bytes | Unsigned little-endian JSON payload length |
+| 20 | Declared length | One complete JSON manifest |
+
+Readers reject duplicate JSON members, unsupported versions, truncated or oversized records, invalid graph/interface
+contracts, and trailing data other than at most 4 KiB of zero alignment padding. These bytes are a portable serialization,
+not a Rust object layout. The existing workflow ID identifies the compiled definition rather than authenticating plugin code.
 
 ## Lifecycle fields
 
@@ -314,8 +334,12 @@ mf run ./if-else --tui
 ```
 
 `mf run` requires terminal stdin and stderr. Stdout can be redirected: the CLI reserves it for the runner's byte-for-byte
-output after the final view closes. Preflight calls `--describe` and, for new runners, `--describe-interface` with
-bounded output and a 30-second deadline per inspection. It validates matching workflow identities, startup parameters,
+output after the final view closes. New runners are inspected directly through their embedded ELF64 or Mach-O64
+manifest without starting a process. Container metadata reads are limited to 1 MiB, with at most
+4,096 sections/load commands and 1,024 bytes per section-name lookup; manifest payload and padding have separate bounds.
+Only a recognized executable missing that section falls back to `--describe` and, when required, `--describe-interface`
+with bounded output and a 30-second deadline per inspection. Invalid formats, ambiguous sections, unsupported versions,
+and corrupt records fail without fallback. Preflight validates matching workflow identities, startup parameters,
 and declared resources before starting the receiver or execution process. Older finite descriptions remain supported;
 older streaming descriptions require recompilation. A fresh run ID and loopback OTLP/HTTP receiver are prepared before launch. The
 execution child receives these session settings; inherited `OTEL_EXPORTER_OTLP_*` settings, including remote
