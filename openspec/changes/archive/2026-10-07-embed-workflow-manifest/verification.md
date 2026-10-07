@@ -8,7 +8,7 @@ Rust `1.98.1` through `nix develop`. Native macOS validation runs on `aarch64-da
 - Git hook installation and `prek -a`: passed, including formatting, Clippy, cargo check, rust-analyzer, Markdown/YAML/TOML checks, actionlint, and the dependency/license audit.
 - Full workspace: `cargo nextest run --locked --workspace --all-targets --all-features --profile ci --test-threads 4` passed all 441 tests with no skipped tests.
 - Coverage: `scripts/run-cov.sh` passed the 14 selected manifest/preflight tests. Reports remain local in `target/coverage/result/`, including `lcov.info`; this was targeted coverage, not a whole-workspace coverage run.
-- Manifest contract line coverage: 104/107 (97.20%); the refreshed reader report records 174/233 mapped lines. Coverage reports remain local; mapped-line totals include generated instrumentation and are not used as a design-retention criterion.
+- Manifest contract line coverage: 104/107 (97.20%); the refreshed reader report records 174/233 mapped lines (74.68%). Coverage reports remain local and are not used as a design-retention criterion.
 - Native macOS `nix flake check -L`: passed with the final test environment; the isolated release test suite passed all 441 tests.
 - Native Linux Nix test, Clippy, format, and workflow checks: passed; the isolated release test suite passed all 441 tests, including ELF release/LTO/strip retention. The native targets exercised were aarch64 Linux and macOS; x86_64 container inspection is covered by fixtures.
 
@@ -54,3 +54,7 @@ Linux isolation also lacked a system CA bundle required when constructing the HT
 - Final `prek -a` and OpenSpec strict validation: passed.
 
 The final retention test is owned by the CLI integration suite and reads the executable's actual section through the production reader. Inspection commands, payload versions, legacy fallback, module export boundaries, and typed error contracts remain unchanged.
+
+## Archive validation
+
+All 19 current specifications passed validation after merging the four deltas. This archived change passed validation with all 25 tasks complete. Global archive validation reports one pre-existing failure in `2026-10-05-unify-flow-runtime`, whose 17 tasks remain unchecked; that unrelated archive was left unchanged.
