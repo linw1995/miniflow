@@ -24,6 +24,7 @@ The output directory must exist. A successful first build creates `flow.lock`. S
 
 Use `mf compile flow.json --output ./flow --no-telemetry` for a smaller runner when live observation is unnecessary.
 It retains workflow execution, `--validate`, and `--describe`, and omits the runner's OTLP SDK and HTTP client.
+It also retains its embedded manifest and factory-free `--describe-interface` command.
 This runner does not emit the lifecycle events used by `mf run --tui`. Omit `--no-telemetry` to keep observation support.
 Generated runners disable `mf-compiler`'s `codegen` feature; the compiler CLI enables that feature by default.
 
@@ -49,6 +50,8 @@ including configured input types and conditional stdin requirements. The manifes
 the existing runner build; it does not require a second compilation. Its wire format is documented in
 [observability](observability.md#embedded-manifest-format). The generated-project layout version is `2026-10-07`;
 explicit build directories owned by an older layout must be recreated at a compatible location.
+The runner links the manifest into a dedicated ELF or Mach-O section and needs no manifest sidecar after installation.
+Both `--describe` and `--describe-interface` print records from this frozen contract without constructing providers.
 
 The runner exports workflow spans and lifecycle events over OTLP/HTTP protobuf when a collector endpoint is configured:
 

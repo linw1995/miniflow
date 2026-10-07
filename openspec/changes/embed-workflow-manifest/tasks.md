@@ -13,9 +13,9 @@
 
 ## 3. Retained executable data and compatibility commands
 
-- [ ] 3.1 Generate a fixed byte array in the ELF or Mach-O manifest section using target attributes and a live runner reference; verify native Linux and macOS release/LTO/strip fixtures retain exactly one readable record, including telemetry-disabled runners.
-- [ ] 3.2 Serve `--describe` and `--describe-interface` from the embedded records without registry preparation; verify output preserves the existing JSON protocols and noisy or failing runtime factories are not called during inspection.
-- [ ] 3.3 Document the preserved flags and frozen inspection behavior; verify command output agrees with the manifest decoded directly from the same built executable.
+- [x] 3.1 Generate a fixed byte array in the ELF or Mach-O manifest section using target attributes and a live runner reference; verify native Linux and macOS release/LTO/strip fixtures retain exactly one readable record, including telemetry-disabled runners.
+- [x] 3.2 Serve `--describe` and `--describe-interface` from the embedded records without registry preparation; verify output preserves the existing JSON protocols and noisy or failing runtime factories are not called during inspection.
+- [x] 3.3 Document the preserved flags and frozen inspection behavior; verify command output agrees with the manifest decoded directly from the same built executable.
 
 ## 4. Runtime interface agreement
 

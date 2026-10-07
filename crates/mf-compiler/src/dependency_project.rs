@@ -60,6 +60,16 @@ fn generate() -> Result<(), Box<dyn std::error::Error>> {
 
 const MAIN: &str = r#"mod workflow;
 
+#[used]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".mf_manifest"))]
+#[cfg_attr(target_os = "macos", unsafe(link_section = "__DATA,__mf_manifest"))]
+static WORKFLOW_MANIFEST: [u8; include_bytes!(concat!(env!("OUT_DIR"), "/workflow-manifest.bin")).len()] =
+    *include_bytes!(concat!(env!("OUT_DIR"), "/workflow-manifest.bin"));
+
+fn workflow_manifest() -> Result<mf_runtime::WorkflowManifest, mf_runtime::WorkflowManifestError> {
+    mf_runtime::WorkflowManifest::from_bytes(&WORKFLOW_MANIFEST)
+}
+
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -72,8 +82,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     match command {
         mf_runtime::RunnerCommand::Describe => {
             use std::io::Write;
-            let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
-            let description = mf_compiler::describe_compiled(&plan)?;
+            let description = workflow_manifest()?.description;
             let mut stdout = std::io::stdout().lock();
             stdout.write_all(&description.to_json()?)?;
             stdout.write_all(b"\n")?;
@@ -81,11 +90,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Ok(());
         }
         mf_runtime::RunnerCommand::DescribeInterface => {
-            let mut stdio = mf_runtime::StreamStdio::claim()?;
-            let registry = mf_runtime::NodeRegistry::from_inventory()?;
-            let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
-            let interface = mf_compiler::describe_interface(&plan, &registry)?;
-            stdio.write_json(&interface)?;
+            use std::io::Write;
+            let interface = workflow_manifest()?.interface;
+            let mut stdout = std::io::stdout().lock();
+            serde_json::to_writer(&mut stdout, &interface)?;
+            stdout.write_all(b"\n")?;
+            stdout.flush()?;
             return Ok(());
         }
         mf_runtime::RunnerCommand::Validate => {

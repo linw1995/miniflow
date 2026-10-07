@@ -92,8 +92,8 @@ those contracts by constructing plugin instances.
 
 Version `2026-10-03` adds `execution` metadata with the execution mode and lifecycle schema, and requires
 interface inspection. The separate `--describe-interface` document exposes initial-node input types,
-required flags, and runtime resource declarations. Graph inspection stays factory-free; interface
-inspection performs validated preparation without executing a node or consuming source input.
+required flags, and runtime resource declarations. New runners serve both commands from their embedded manifest
+without constructing providers. Older runners may prepare providers during interface inspection.
 
 New runners name the synthetic Loop source `%loop`. Description readers also accept `$loop` from
 previously compiled runners, preserving its original node IDs and workflow identity.
@@ -111,6 +111,9 @@ Graph-relative event validation checks workflow/node identity, position, sequenc
 Manifest payload version `2026-10-07` contains `version`, `description`, and `interface`. The existing graph
 and interface protocol versions remain independent; both records must identify the same workflow.
 The manifest excludes node configuration and supplied business values. Its combined UTF-8 JSON payload is limited to 16 MiB.
+New Linux and macOS runners embed these bytes in `.mf_manifest` (ELF) or `__DATA,__mf_manifest` (Mach-O), respectively.
+The section is retained through release optimization, LTO, and supported stripping, including telemetry-disabled builds.
+Compatibility commands print the same graph/interface records; they do not refresh the frozen contract by preparing providers.
 
 | Offset | Size | Field |
 | --- | --- | --- |
