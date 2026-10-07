@@ -60,8 +60,8 @@ pub use node::{
     InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeExecution,
     NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration, OutputDerivation,
     OutputDerivationError, Outputs, PluginFailedSnafu as NodePluginFailedSnafu, PortSpec,
-    PreparedNode, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, ValueType,
-    deserialize_config, output_id,
+    PreparedNode, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, TypedTaskNode,
+    ValueType, deserialize_config, output_id,
 };
 pub use number::compare_json_numbers;
 pub use registry::{NodeRegistry, NodeRegistryError};

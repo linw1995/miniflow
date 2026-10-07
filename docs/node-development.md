@@ -141,6 +141,53 @@ decoders must agree on accepted names, requiredness, and value types. Errors ret
 `InputDecodeError::pointer()` adds the escaped port name to its nested path. Shared `ValueRef` payloads
 remain shared during decoding, including collection descendants; owned strings and typed containers may allocate.
 
+### Typed task execution
+
+Implement `TypedTaskNode` to receive the input struct directly. The runtime owns conversion and wraps the
+provider as an ordinary task executor:
+
+```rust
+use mf_runtime::{
+    ExecutionContext, NodeBuildError, NodeExecutionError, NodeInputs, NodePorts, NodeResult,
+    Outputs, PortSpec, PreparedNode, TypedTaskNode, ValueRef, ValueType,
+};
+
+#[derive(NodeInputs)]
+struct EchoInputs {
+    input: ValueRef,
+}
+
+struct Echo;
+impl TypedTaskNode for Echo {
+    type Input = EchoInputs;
+
+    fn execute(&self, input: EchoInputs, _: &mut ExecutionContext)
+        -> Result<NodeResult, NodeExecutionError>
+    {
+        Ok(Outputs::from([("value".into(), input.input)]).into())
+    }
+}
+
+fn factory(_: serde_json::Value) -> Result<PreparedNode, NodeBuildError> {
+    PreparedNode::typed_task(Echo, NodePorts {
+        inputs: vec![],
+        outputs: vec![PortSpec::new("value", ValueType::Any, true)],
+    })
+}
+```
+
+Pass ordinary `NodeMetadata` when the factory also supplies output derivations, context references, or
+stdin requirements. The typed constructor preserves those fields and requires an empty input declaration;
+even matching hand-written inputs return `NodeBuildError::ConflictingInputDeclarations`.
+Register the factory with the existing `NodeFactory::Plain` or `NodeFactory::Subgraph` contract.
+
+Typed tasks run through the same dependency resolution, skip rules, input checks, output publication,
+and context boundaries as dynamic tasks, including in stream task domains. Adapter conversion failures
+retain `InputDecodeError` and its typed sources through `NodeExecutionError::InputDecode`; provider business
+errors keep their existing plugin error chain. Typed event and stream producer interfaces are not provided.
+
+### Dynamic task execution
+
 Implement `TaskNode::execute(inputs, &mut ExecutionContext)` and return `NodeResult`. Tasks can read
 declared outputs through `ctx.output("source.value")`. `ContextValue` distinguishes a produced JSON value from
 `Skipped`; unavailable outputs, including reads before production and unexpected omissions, are errors. Reference

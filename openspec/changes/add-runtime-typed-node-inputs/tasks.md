@@ -16,10 +16,10 @@
 
 ## 3. Typed task preparation and execution
 
-- [ ] 3.1 Add `TypedTaskNode`, a private task adapter, and source-preserving decode conversion into `NodeExecutionError`; verify typed business invocation and decode failures with node attribution and original sources.
-- [ ] 3.2 Add fallible `PreparedNode::typed_task` using struct-derived inputs; verify rejection of competing input metadata, preservation of other metadata fields, and no execution or invocation decoding during preparation.
-- [ ] 3.3 Exercise the adapter through synchronous execution and stream task domains; verify contexts, skip/missing precedence, pre-invocation type checks, source-bearing business failures, and output validation/publication behavior.
-- [ ] 3.4 Document typed factory construction and execution alongside the existing dynamic API; verify both documented styles compile without changing task, event, or stream registrations.
+- [x] 3.1 Add `TypedTaskNode`, a private task adapter, and source-preserving decode conversion into `NodeExecutionError`; verify typed business invocation and decode failures with node attribution and original sources.
+- [x] 3.2 Add fallible `PreparedNode::typed_task` using struct-derived inputs; verify rejection of competing input metadata, preservation of other metadata fields, and no execution or invocation decoding during preparation.
+- [x] 3.3 Exercise the adapter through synchronous execution and stream task domains; verify contexts, skip/missing precedence, pre-invocation type checks, source-bearing business failures, and output validation/publication behavior.
+- [x] 3.4 Document typed factory construction and execution alongside the existing dynamic API; verify both documented styles compile without changing task, event, or stream registrations.
 
 ## 4. Reference provider and compiler integration
 
