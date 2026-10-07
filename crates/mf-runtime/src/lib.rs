@@ -17,6 +17,7 @@ mod stream_instance;
 mod stream_io;
 mod stream_plan;
 mod subgraph;
+mod typed_inputs;
 mod value;
 mod worker;
 mod workflow_inputs;
@@ -75,6 +76,7 @@ pub use stream_instance::{
 pub use stream_io::{StreamStdio, TextInput};
 pub use stream_plan::{FlowDependency, PreparedStream, StreamPlan};
 pub use subgraph::PreparedSubgraph;
+pub use typed_inputs::{InputDecodeError, InputDecoder, InputField, InputValue, NodeInputs};
 
 pub use value::{ValueKind, ValueRef};
 pub use worker::{RuntimeWorkerHandle, WorkerHandle, WorkerJob, WorkerPool, WorkerPoolError};

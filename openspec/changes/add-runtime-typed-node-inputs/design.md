@@ -121,4 +121,4 @@ Typed stream and event adapters can reuse the input contracts later. Their mutab
 4. Migrate identity and add external-provider integration coverage and documentation.
 5. Run the required repository and OpenSpec checks before implementation is submitted.
 
-The current task produces planning artifacts only. Implementation tasks remain unchecked. The additive implementation can be rolled back by restoring identity's dynamic input handling and removing the new typed API and derive package; workflow definitions require no migration.
+Implementation proceeds in task-group commits, with completion recorded in `tasks.md`. The additive implementation can be rolled back by restoring identity's dynamic input handling and removing the new typed API and derive package; workflow definitions require no migration.

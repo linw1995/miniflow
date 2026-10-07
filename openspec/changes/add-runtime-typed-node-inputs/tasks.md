@@ -2,10 +2,10 @@
 
 ## 1. Runtime input contracts and codecs
 
-- [ ] 1.1 Add `NodeInputs`, present-value and top-level field codecs, and Snafu-derived input decode errors through the existing runtime module entry point; verify missing/unknown field errors and inspectable typed sources in focused tests.
-- [ ] 1.2 Implement strict bool, i64, f64, String, ValueRef, Vec, string-keyed BTreeMap, and top-level Option codecs; verify descriptor/decoder agreement, type aliases, numeric representation, omission/null distinctions, and recursive depth limits.
-- [ ] 1.3 Decode shared values without an intermediate JSON tree; verify payload identity for raw fields and collection descendants, along with nested type mismatch paths and escaped port names.
-- [ ] 1.4 Document codec invariants and supported owned types in public API documentation; verify examples against the runtime test suite.
+- [x] 1.1 Add `NodeInputs`, present-value and top-level field codecs, and Snafu-derived input decode errors through the existing runtime module entry point; verify missing/unknown field errors and inspectable typed sources in focused tests.
+- [x] 1.2 Implement strict bool, i64, f64, String, ValueRef, Vec, string-keyed BTreeMap, and top-level Option codecs; verify descriptor/decoder agreement, type aliases, numeric representation, omission/null distinctions, and recursive depth limits.
+- [x] 1.3 Decode shared values without an intermediate JSON tree; verify payload identity for raw fields and collection descendants, along with nested type mismatch paths and escaped port names.
+- [x] 1.4 Document codec invariants and supported owned types in public API documentation; verify examples against the runtime test suite.
 
 ## 2. Input derive macro
 
