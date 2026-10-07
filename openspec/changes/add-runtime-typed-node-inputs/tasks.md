@@ -30,6 +30,6 @@
 
 ## 5. Integration validation
 
-- [ ] 5.1 Run `nix develop --command bash scripts/run-cov.sh` for the new runtime and macro execution branches; inspect meaningful gaps and retain reports only under ignored `target/`.
-- [ ] 5.2 Run `nix develop --command prek install`, `nix develop --command prek -a`, and `nix flake check -L`; resolve failures and verify all required repository checks complete successfully.
-- [ ] 5.3 Run `openspec validate add-runtime-typed-node-inputs --strict --no-interactive` and review implementation against every added scenario; verify the change is ready for review with accurate task completion state.
+- [x] 5.1 Run `nix develop --command bash scripts/run-cov.sh` for the new runtime and macro execution branches; inspect meaningful gaps and retain reports only under ignored `target/`.
+- [x] 5.2 Run `nix develop --command prek install`, `nix develop --command prek -a`, and `nix flake check -L`; resolve failures and verify all required repository checks complete successfully.
+- [x] 5.3 Run `openspec validate add-runtime-typed-node-inputs --strict --no-interactive` and review implementation against every added scenario; verify the change is ready for review with accurate task completion state.
