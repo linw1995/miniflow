@@ -22,13 +22,17 @@ nix develop --command cargo test -p mf-compiler --test telemetry_boundary
 
 Use `execute_compiled(&plan, &registry, Some(observation))` to cover node construction, dependency resolution, invocation, publication, and output selection in memory. `Flow::execute_with_observation(Some(observation))` covers execution of nodes that have already been constructed; it cannot report construction that happened before the run. Existing `Flow::execute()` and generated `run_workflow()` remain unobserved entry points.
 
-Generated source provides `prepare_workflow(registry, observation)` to construct a validated Flow and
+Source from `CompiledWorkflow::generate_artifacts()` provides `prepare_workflow(registry, observation)` to construct a validated Flow and
 `run_workflow_with_observation(&flow, Some(observation))` to execute it. Construction errors use
 `WorkflowBuildError`; execution errors use `WorkflowRunError`. For applications that need
 registry initialization inside the run, use `ExecutionContext::run(Some(observation), |state| ...)` and call generated
 `run_workflow_in_context(&flow, state)` or `Flow::execute_in_context(state)`. These low-level context entry points
 execute one matching plan per fresh scope; the surrounding scope owns the terminal event. An early error before a node
 is identified becomes a workflow preparation failure.
+
+Standalone projects use `CompiledWorkflow::generate_runner_artifacts()` to emit only the entry points their runner calls:
+`prepare_workflow` and `run_workflow_in_context` for task workflows, or `prepare_stream` for streaming workflows.
+Custom runners that need the convenience functions above can use `generate_artifacts()` instead.
 
 The runnable example uses in-memory SDK exporters and performs no network export:
 

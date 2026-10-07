@@ -90,12 +90,20 @@ fn compiles_a_runner_without_telemetry_and_preserves_its_commands() {
     fs::write(&definition, definition_json()).unwrap();
     let result = compile_command(&definition, &output)
         .arg("--no-telemetry")
+        .env("CARGO_TERM_COLOR", "never")
         .output()
         .unwrap();
     assert!(
         result.status.success(),
         "{}",
         String::from_utf8_lossy(&result.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(
+        !stderr
+            .lines()
+            .any(|line| line.starts_with("warning:") || line.starts_with("warning[")),
+        "compilation emitted warnings:\n{stderr}",
     );
     let execution = Command::new(&output)
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", "invalid endpoint")
