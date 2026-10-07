@@ -4,8 +4,6 @@
 //! depend on this package. Reception, state reduction, and rendering are added
 //! separately from the observation contract.
 
-#[cfg(any(unix, windows))]
-pub mod description;
 mod duration;
 pub mod graph;
 #[cfg(unix)]

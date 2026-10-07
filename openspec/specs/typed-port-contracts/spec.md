@@ -141,12 +141,12 @@ A collection derivation SHALL wrap the input type as `List(T)`, retain dynamic b
 #### Scenario: Reject an invalid derivation
 
 - **WHEN** a plugin derives an output from a nonexistent input port
-- **THEN** runner validation fails before installation and identifies the plugin node and invalid port reference
+- **THEN** build validation fails before installation and identifies the plugin node and invalid port reference
 
 #### Scenario: Reject a contradictory literal declaration
 
 - **WHEN** a plugin declares a `String` output but derives it from an exact integer literal
-- **THEN** runner validation rejects the node metadata before installation
+- **THEN** build validation rejects the node metadata before installation
 
 #### Scenario: Guard a false derivation
 

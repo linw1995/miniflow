@@ -17,10 +17,9 @@ The system SHALL provide terminal presentation through a separate `mf-tui` crate
 
 ### Requirement: Launch and observe an existing local executable
 
-`mf run <executable> --tui` SHALL read the supported embedded manifest of a new runner without starting an inspection
-process. Only a successfully recognized supported executable lacking a manifest section SHALL use the existing bounded
-description commands, requesting a matching startup interface when its description version requires one. Corrupt or
-unsupported manifest data MUST prevent launch without command fallback.
+`mf run <executable> --tui` SHALL read the supported embedded manifest without starting an inspection process.
+Executables lacking a manifest section SHALL be rejected with a recompilation diagnostic. Corrupt or unsupported
+manifest data MUST prevent launch without command fallback.
 
 The CLI SHALL validate supplied startup arguments, resource availability, and observation compatibility before launch,
 establish a loopback OTLP/HTTP receiver, and then launch the actual executable with the same arguments and session-specific
@@ -44,8 +43,13 @@ missing observations MUST NOT trigger workflow restart.
 
 #### Scenario: Reject an incompatible runner
 
-- **WHEN** a runner's manifest or legacy description uses an unsupported graph or observation version, or a manifest-free runner lacks required description support
+- **WHEN** a runner's manifest uses an unsupported graph or observation version, or the runner has no manifest
 - **THEN** the CLI reports an actionable compatibility error before starting workflow execution
+
+#### Scenario: Reject a runner without an embedded manifest
+
+- **WHEN** a supported older executable has no manifest section
+- **THEN** preflight reports that recompilation is required without starting an inspection process or workflow execution
 
 #### Scenario: Isolate a local observation session
 
@@ -62,11 +66,6 @@ missing observations MUST NOT trigger workflow restart.
 - **WHEN** a supplied startup argument is missing, unknown, or incompatible with the inspected interface
 - **THEN** the CLI reports the affected node/port before launching workflow execution
 
-#### Scenario: Preserve legacy finite runners
-
-- **WHEN** a supported older single-run binary has no manifest, does not require interface inspection, and receives no startup parameters
-- **THEN** existing bounded preflight, terminal launch, observation, and cleanup continue to work
-
 #### Scenario: Preflight a manifest without executing code
 
 - **WHEN** a runner with a supported manifest is inspected before launch
@@ -77,20 +76,10 @@ missing observations MUST NOT trigger workflow restart.
 - **WHEN** a valid supported-format executable has a manifest but targets an architecture different from the inspection host
 - **THEN** metadata discovery succeeds without executing it and does not claim the executable can run on that host
 
-#### Scenario: Preserve legacy parameterized runners
-
-- **WHEN** a supported older binary has no manifest and its description requires startup-interface inspection
-- **THEN** preflight obtains and validates both legacy documents through the existing bounded command path before launch
-
 #### Scenario: Resolve conditional stdin from the manifest
 
 - **WHEN** a manifest declares stdin ownership unless a particular optional input is supplied
 - **THEN** preflight evaluates that condition against the validated arguments and rejects active stdin requirements before launching the child
-
-#### Scenario: Bound legacy inspection failures
-
-- **WHEN** a manifest-free runner's inspection command times out, exceeds output limits, exits unsuccessfully, or returns an incomplete document
-- **THEN** preflight reports failure and does not launch workflow execution
 
 ### Requirement: Present graph structure and execution state
 

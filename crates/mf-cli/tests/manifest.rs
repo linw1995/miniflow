@@ -61,7 +61,7 @@ fn moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts() 
             &RunnerOptions { telemetry: false },
         )
         .unwrap();
-        let manifest = read_manifest(&installed).unwrap().unwrap();
+        let manifest = read_manifest(&installed).unwrap();
         if scenario == "nested" {
             assert_eq!(manifest.description.loop_bodies.len(), 1);
         }
@@ -69,7 +69,7 @@ fn moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts() 
         fs::remove_file(&definition_path).unwrap();
         fs::remove_file(definition_path.with_extension("lock")).unwrap();
         fs::remove_dir_all(&build).unwrap();
-        assert_eq!(read_manifest(&standalone).unwrap().unwrap(), manifest);
+        assert_eq!(read_manifest(&standalone).unwrap(), manifest);
         for flag in ["--describe", "--describe-interface", "--validate"] {
             let output = Command::new(&standalone)
                 .arg(flag)
@@ -77,22 +77,9 @@ fn moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts() 
                 .stdin(Stdio::null())
                 .output()
                 .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            match flag {
-                "--describe" => assert_eq!(
-                    serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-                    serde_json::to_value(&manifest.description).unwrap()
-                ),
-                "--describe-interface" => assert_eq!(
-                    serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-                    serde_json::to_value(&manifest.interface).unwrap()
-                ),
-                _ => {}
-            }
+            assert!(!output.status.success());
+            assert!(output.stdout.is_empty());
+            assert!(String::from_utf8_lossy(&output.stderr).contains("unknown workflow argument"));
         }
         assert!(!data.exists());
         fs::write(&data, "hello\n").unwrap();
@@ -166,37 +153,13 @@ fn release_lto_and_strip_preserve_standalone_factory_free_manifest() {
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| project.join("target"));
         fs::copy(target.join("release/mf-generated-workflow"), &runner).unwrap();
-        let before = read_manifest(&runner).unwrap().unwrap();
+        let before = read_manifest(&runner).unwrap();
         let output = Command::new("strip").arg(&runner).output().unwrap();
         assert!(
             output.status.success(),
             "{}",
             String::from_utf8_lossy(&output.stderr)
         );
-        assert_eq!(read_manifest(&runner).unwrap().unwrap(), before);
-        for flag in ["--describe", "--describe-interface"] {
-            let output = Command::new(&runner)
-                .arg(flag)
-                .env("PATH", "")
-                .output()
-                .unwrap();
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(output.stderr.is_empty());
-            if flag == "--describe" {
-                assert_eq!(
-                    serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-                    serde_json::to_value(&before.description).unwrap()
-                );
-            } else {
-                assert_eq!(
-                    serde_json::from_slice::<Value>(&output.stdout).unwrap(),
-                    serde_json::to_value(&before.interface).unwrap()
-                );
-            }
-        }
+        assert_eq!(read_manifest(&runner).unwrap(), before);
     }
 }

@@ -104,23 +104,3 @@ pub fn macho(manifest: Option<&[u8]>, copies: usize) -> Vec<u8> {
     bytes[payload_offset..].copy_from_slice(payload);
     bytes
 }
-
-pub fn legacy_runner(path: &std::path::Path, script: &str) {
-    let source = path.with_extension("rs");
-    std::fs::write(&source, format!(
-        "use std::os::unix::process::CommandExt;\nfn main() {{\nlet error = std::process::Command::new(\"sh\").arg(\"-c\").arg({script:?}).arg(std::env::current_exe().unwrap()).args(std::env::args_os().skip(1)).exec();\npanic!(\"{{error}}\");\n}}\n"
-    )).unwrap();
-    let output = std::process::Command::new("rustc")
-        .arg(&source)
-        .arg("--crate-name")
-        .arg("legacy_runner")
-        .arg("-o")
-        .arg(path)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-}

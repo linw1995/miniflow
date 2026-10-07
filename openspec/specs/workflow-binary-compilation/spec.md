@@ -58,13 +58,13 @@ iteration order of the plugin registry MUST NOT affect node resolution or workfl
 
 Before generating a runner, the CLI SHALL validate nonblank unique node IDs, existing edge endpoints, selected
 output
-node references and names, and acyclicity. Before installing the executable, its validation mode SHALL
+node references and names, and acyclicity. During the generated Cargo build, the build script SHALL
 validate
 registered kinds, configuration, existing ports, required input connections or promoted initial-node
 parameters, and at most one connection per input. Promotion SHALL apply only to top-level initial nodes in
 schema `2026-10-03`; noninitial nodes, nested bodies, and older schemas SHALL retain their existing
 required-edge rules.
-Validation mode MUST NOT call node execution methods. The normal mode SHALL execute statically generated
+Build validation MUST NOT call node execution methods. The normal mode SHALL execute statically generated
 orchestration.
 Compiler validation SHALL accept statically safe assignments from refined types to the same type, compatible
 refined
@@ -131,12 +131,12 @@ would place the referenced node first.
 #### Scenario: Reject a known constant conflict
 
 - **WHEN** a constant value `42` feeds a `String` input, directly or through an identity node
-- **THEN** runner validation fails before installation and identifies both edge endpoints and their types
+- **THEN** build validation fails before installation and identifies both edge endpoints and their types
 
 #### Scenario: Reject a nested known conflict
 
 - **WHEN** a constant value `[1, "x"]` feeds a `List(Int64)` input on an inactive branch
-- **THEN** runner validation fails without executing the branch and reports the failing path `/1`
+- **THEN** build validation fails without executing the branch and reports the failing path `/1`
 
 #### Scenario: Keep an unknown broad source checked
 
@@ -240,7 +240,7 @@ diagnostic output MUST NOT corrupt the transfer of generated artifacts between b
 - **WHEN** the CLI cannot resolve its required versioned compiler or runtime package
 - **THEN** compilation fails with the package and build-stage context instead of falling back to implicit source-checkout discovery
 
-#### Scenario: Runner validation fails
+#### Scenario: Build validation fails
 
 - **WHEN** the runner fails validation or exits unsuccessfully
 - **THEN** compilation fails, preserves the existing executable, and identifies the retained project
@@ -357,21 +357,24 @@ MUST NOT reside inside the managed build directory, including through canonical 
 - **WHEN** a reused build directory has a symbolic link at its generated source or Cargo target directory
 - **THEN** compilation fails before generating files or invoking Cargo and preserves the linked contents and existing user inputs
 
-### Requirement: Validate the same binary that is installed
+### Requirement: Validate providers during the runner build
 
-Compilation SHALL build one runner with a validation mode and a normal execution mode. The CLI MUST invoke validation on the newly built binary before installation, including warm builds. Successful validation MUST NOT require a second runner compilation. Validation and normal execution SHALL use the same linked plugin implementations, embedded configuration, and feature selections.
+Compilation SHALL validate selected providers and embedded configuration in the runner's Cargo build script while
+generating execution layouts and a manifest. Build validation and normal execution MUST use matching provider
+implementations, configuration, and features. Only a successful build SHALL be installed; the CLI MUST NOT launch
+post-build validation. Cargo SHALL track generated inputs and provider dependencies.
 
 #### Scenario: Build and validate once
 
 - **WHEN** a valid Flow is compiled
-- **THEN** one runner target is built, its validation mode succeeds without calling node execution, and that binary is installed
+- **THEN** one runner target is built, its build script validates providers without calling node execution, and that binary is installed
 
 ### Requirement: Preserve conditional semantics in generated execution
 
 Generated binaries SHALL implement the same per-run or streaming per-message context publication and reads, control activation, ordered selection,
 explicit skip propagation, missing-output errors, and optional selected-output behavior as in-memory workflows. Single-run execution MUST retain statically generated node order and bindings
 and MUST NOT require graph interpretation or special recognition of built-in kind names. Streaming execution SHALL execute generated node preparations and fixed bindings through the shared prepared executor using validated message boundaries, with the same order inside each frame. It MUST NOT interpret raw definition JSON or recognize built-in kinds to infer execution capabilities. Configuration and dependency
-changes MUST continue to regenerate inputs and validate the current binary before installation. Existing standalone and
+changes MUST continue to regenerate inputs and validate providers during the current build before installation. Existing standalone and
 failure-preservation guarantees SHALL apply to conditional workflows.
 
 #### Scenario: Match in-memory and compiled execution
@@ -429,16 +432,15 @@ recognize built-in kind names to perform inference.
 
 ### Requirement: Describe a compiled workflow without executing nodes
 
-Generated runners SHALL support `--describe` and return one date-versioned JSON graph description containing workflow
-identity, node IDs and kinds, named data edges, control edges, and deterministic execution order. New runners SHALL return
-the graph record from their embedded manifest without requiring original build inputs or invoking plugin factories.
-Unconnected or dynamic port metadata MUST NOT be inferred from graph edges. Description output MUST exclude embedded
-node configuration and business values.
+Generated runners SHALL embed a date-versioned JSON graph description containing workflow identity, node IDs and kinds,
+named data edges, control edges, and deterministic execution order. Hosts SHALL read the graph record directly from the
+embedded manifest without requiring original build inputs or invoking plugin factories. Unconnected or dynamic port
+metadata MUST NOT be inferred from graph edges. The record MUST exclude node configuration and business values.
 
-#### Scenario: Describe a standalone binary
+#### Scenario: Inspect a standalone binary
 
-- **WHEN** a generated runner is invoked with `--describe` after its build inputs are removed
-- **THEN** it returns its supported graph description without executing any node operation
+- **WHEN** a generated runner's manifest is read after its build inputs are removed
+- **THEN** it provides its supported graph description without executing any node operation
 
 #### Scenario: Describe a graph with configuration-dependent ports
 
@@ -448,43 +450,37 @@ node configuration and business values.
 #### Scenario: Avoid construction diagnostics
 
 - **WHEN** a linked plugin factory normally prints diagnostics during validation
-- **THEN** description mode does not invoke that factory and its stdout remains one JSON document
+- **THEN** manifest inspection does not invoke that factory or start a process
 
-### Requirement: Require complete isolated description output before execution
+### Requirement: Require a complete embedded manifest before TUI execution
 
-Description mode SHALL dispatch before registry preparation and write one complete JSON document to stdout. For legacy
-executables without manifests, CLI command-based inspection SHALL accept output only after successful process exit and
-parsing exactly one supported document within bounded size/time limits. Invalid or incomplete metadata MUST prevent
-execution. New manifest-bearing executables SHALL be inspected directly without starting a description process.
-Both paths MUST retain the existing single-build validation/install workflow without a second runner compilation.
+CLI inspection SHALL read supported graph and interface records directly from the executable with bounded metadata and
+payload reads. Missing, corrupt, incomplete, oversized, or unsupported metadata MUST prevent TUI execution. Inspection
+MUST NOT start the runner or invoke native startup code. Manifest generation and provider validation SHALL occur during
+the existing single runner build without recompilation to embed metadata.
 
-#### Scenario: Reject unexpected startup output
+#### Scenario: Reject a runner without a manifest
 
-- **WHEN** linked native startup code in a legacy runner writes to stdout before dispatching command-based description mode
-- **THEN** unexpected bytes cause preflight failure rather than heuristic recovery
-
-#### Scenario: Return partial metadata
-
-- **WHEN** legacy description output is truncated, oversized, timed out, or accompanied by an unsuccessful exit
-- **THEN** the CLI reports preflight failure and does not start workflow execution
+- **WHEN** a supported executable has no manifest section
+- **THEN** preflight reports that recompilation is required and does not start an inspection or execution process
 
 #### Scenario: Preserve one runner build
 
-- **WHEN** a workflow is compiled, validated, described, and installed
-- **THEN** manifest generation, validation, description, and installation use the same built runner without recompiling to embed metadata
+- **WHEN** a workflow is compiled and installed
+- **THEN** manifest generation and provider validation occur during that runner build without a post-build validation process
 
 #### Scenario: Avoid native startup during manifest inspection
 
-- **WHEN** a new runner contains native startup code that writes diagnostics or performs initialization
+- **WHEN** a runner contains native startup code that writes diagnostics or performs initialization
 - **THEN** direct manifest inspection does not start the runner or invoke that startup code
 
 ### Requirement: Generate standalone observable runners
 
 Generated runners SHALL include workflow observation boundaries and configurable OTel export initialization with bounded
-shutdown. They MUST preserve statically generated orchestration, selected-output JSON, validation behavior, and
+shutdown. They MUST preserve statically generated orchestration, selected-output JSON, build validation, and
 operation without the CLI, source definition, lockfile, plugin sources, Rust toolchain, or telemetry receiver.
 Support-package resolution SHALL include matching observation support without including terminal UI dependencies.
-Validation and description modes MUST NOT be interpreted as workflow execution runs.
+Build validation and manifest inspection MUST NOT emit workflow execution events.
 
 #### Scenario: Run with a Collector
 
@@ -496,10 +492,10 @@ Validation and description modes MUST NOT be interpreted as workflow execution r
 - **WHEN** the same runner is launched normally without export configuration
 - **THEN** it follows the existing generated execution plan and returns the same selected output JSON and workflow exit behavior
 
-#### Scenario: Validate with inherited export settings
+#### Scenario: Build with inherited export settings
 
-- **WHEN** compilation invokes the generated runner with `--validate` in an environment containing export settings
-- **THEN** validation remains free of node execution and does not emit a workflow execution run
+- **WHEN** compilation runs in an environment containing export settings
+- **THEN** build validation remains free of node execution and does not emit a workflow execution run
 
 ### Requirement: Compile structured Loop definitions into executable binaries
 
@@ -528,7 +524,7 @@ plugin sources. Definitions in `2026-09-26` SHALL retain their existing DAG beha
 Before generating a runner, the CLI SHALL validate nonblank unique node IDs within each scope,
 existing local edge endpoints, selected output node references and names, scope boundaries, reserved
 engine controls, Loop count and nesting limits, and acyclicity within every graph. Before
-installing the executable, its validation mode SHALL require a registered Loop declaration and
+installing the executable, its build script SHALL require a registered Loop declaration and
 validate ordinary registered kinds, configuration, existing ports, required input connections, typed Loop variables, assignments,
 termination conditions, and context references in every scope. Validation MUST NOT execute node
 implementations. A failed validation MUST preserve any previously installed output binary.
@@ -541,7 +537,7 @@ implementations. A failed validation MUST preserve any previously installed outp
 #### Scenario: Reject an invalid body plugin before installation
 
 - **WHEN** a body node has an unknown kind or invalid configuration
-- **THEN** runner validation fails before installation without running that node
+- **THEN** build validation fails before installation without running that node
 
 #### Scenario: Preserve an existing binary after invalid Loop edit
 
@@ -615,7 +611,7 @@ Root Loop and Iteration nodes in streaming workflows SHALL execute as ordinary o
 
 ### Requirement: Share prepared streaming orchestration across execution paths
 
-Generated runners SHALL retain generated node preparation and fixed port bindings, prepare node instances once per workflow instance, and share prepared execution, resolved capabilities, and boundary validation with in-memory execution. Validation and execution MUST use the installed runner without a second build or source files at runtime.
+Generated runners SHALL retain generated node preparation and fixed port bindings, prepare node instances once per workflow instance, and share prepared execution, resolved capabilities, and boundary validation with in-memory execution. Normal execution MUST use the installed runner without a second build or source files at runtime.
 
 #### Scenario: Run standalone after removing build inputs
 
@@ -653,13 +649,13 @@ construction diagnostics.
 
 New streaming graph descriptions SHALL identify execution mode and required observation protocol without exposing
 business values or configuration. Their manifest interface record SHALL describe startup parameters and runtime input
-resources with matching workflow identity. Direct manifest inspection, `--describe`, `--describe-interface`, and
-`--validate` MUST NOT consume source input, invoke executors, arm timers, or emit workflow execution events.
+resources with matching workflow identity. Direct manifest inspection and build validation MUST NOT consume source
+input, invoke executors, arm timers, or emit workflow execution events.
 
-#### Scenario: Validate with an idle open stdin
+#### Scenario: Inspect with an idle open stdin
 
-- **WHEN** a streaming runner is invoked with `--validate` while stdin remains open
-- **THEN** validation completes without waiting for input or executing any source or Batch callback
+- **WHEN** a streaming runner's manifest is inspected while stdin remains open
+- **THEN** inspection completes without waiting for input or executing any source or Batch callback
 
 #### Scenario: Inspect a streaming runner
 
@@ -695,10 +691,9 @@ single-run schemas SHALL retain their existing behavior.
 
 ### Requirement: Inspect configured startup interfaces in the installed runner
 
-New runners SHALL retain `--describe-interface`, returning the existing versioned interface JSON with workflow identity,
-startup input types/required flags, and resource requirements from the embedded manifest. Both inspection commands MUST
-remain factory-free and work without build inputs or a second compilation. Their output MUST agree with direct manifest
-inspection; interface discovery MUST NOT infer requirements from built-in kind names.
+Runners SHALL embed a versioned interface record with workflow identity, startup input types/required flags, and resource
+requirements. Hosts SHALL read it directly from the manifest without constructing providers, requiring build inputs, or
+a second compilation. Interface discovery MUST NOT infer requirements from built-in kind names.
 
 #### Scenario: Inspect dynamic input metadata
 
@@ -708,7 +703,7 @@ inspection; interface discovery MUST NOT infer requirements from built-in kind n
 #### Scenario: Preserve clean output with noisy factories
 
 - **WHEN** a linked factory normally writes diagnostics during preparation
-- **THEN** `--describe-interface` does not invoke it and stdout contains one complete interface document
+- **THEN** manifest inspection does not invoke it and returns the frozen interface record
 
 #### Scenario: Preserve one-build standalone inspection
 
@@ -718,7 +713,8 @@ inspection; interface discovery MUST NOT infer requirements from built-in kind n
 ### Requirement: Accept startup parameters through shared execution arguments
 
 Runners and `mf run` SHALL accept mutually exclusive `--inputs <JSON>` and `--inputs-file <PATH>`, with
-omission meaning an empty object. Inspection/validation modes MUST reject execution arguments. CLI parameter
+omission meaning an empty object. Removed `--validate`, `--describe`, and `--describe-interface` options SHALL be rejected
+as unknown workflow arguments. CLI parameter
 transport SHALL be bounded to 1 MiB, preserve exact parsed values, and avoid interpreting parameter JSON as
 stream data. Relative files SHALL resolve from the invocation directory.
 
@@ -780,7 +776,7 @@ API or additional preparation solely to generate the manifest.
 #### Scenario: Regenerate changed metadata in a warm build
 
 - **WHEN** a workflow configuration, selected provider implementation, or provider feature changes in a reusable build directory
-- **THEN** the current build regenerates affected layouts and the manifest together and validates the current binary before installation
+- **THEN** the current build regenerates affected layouts and the manifest together and validates providers before installation
 
 ### Requirement: Preserve ownership metadata parsing errors
 
@@ -842,7 +838,7 @@ Standard task runners SHALL generate only workflow preparation and context execu
 #### Scenario: Compile without telemetry
 
 - **WHEN** the CLI compiles a task runner with `--no-telemetry`
-- **THEN** unused convenience functions are not generated, compilation remains warning-free, and runner execution and inspection commands remain available
+- **THEN** unused convenience functions are not generated, compilation remains warning-free, and runner execution and direct manifest inspection remain available
 
 #### Scenario: Generate a custom runner
 

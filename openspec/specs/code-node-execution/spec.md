@@ -57,7 +57,7 @@ input types MUST be rejected. All ports SHALL be required. Unknown configuration
 
 ### Requirement: Type-check every expression before installation
 
-The runner's validation mode SHALL parse and type-check every configured CEL expression against an environment
+The generated Cargo build script SHALL parse and type-check every configured CEL expression against an environment
 containing exactly the declared inputs. It MUST reject unknown identifiers, invalid operators or function calls,
 explicit `dyn(...)` calls, dynamic result types, and inferred result types that the shared JSON port contract cannot
 represent. It SHALL derive output port types from the checked results. Validation MUST check expressions on branches

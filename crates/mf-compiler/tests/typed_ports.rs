@@ -129,11 +129,6 @@ fn generated_runner_matches_memory_for_checked_connections() {
             String::from_utf8_lossy(&build.stderr)
         );
         let executable = common::runner_executable(&project, "debug");
-        let validation = Command::new(&executable)
-            .arg("--validate")
-            .output()
-            .unwrap();
-        assert!(validation.status.success());
         let actual = Command::new(executable).output().unwrap();
         match expected {
             Ok(outputs) => {

@@ -88,18 +88,6 @@ fn external_line_producer_matches_memory_and_drains_after_stdin_closes() {
         &RunnerOptions { telemetry: false },
     )
     .unwrap();
-    for argument in ["--validate", "--describe"] {
-        let output = Command::new(&executable)
-            .arg(argument)
-            .stdin(Stdio::null())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
     assert!(!document.exists());
     let mut expected_lines = vec![
         String::from("first"),

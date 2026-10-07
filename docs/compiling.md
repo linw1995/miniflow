@@ -15,7 +15,6 @@ With Cargo, a compatible Rust toolchain, CMake, a C compiler, and the declared n
 ```sh
 mf compile flow.json --output ./flow
 ./flow
-./flow --describe
 mf run ./flow --tui
 mf compile flow.json --output ./flow --locked
 ```
@@ -23,26 +22,23 @@ mf compile flow.json --output ./flow --locked
 The output directory must exist. A successful first build creates `flow.lock`. See [workflow definitions](workflows.md) for dependency sources, features, and lock behavior. Native libraries required by plugins must be installed separately.
 
 Use `mf compile flow.json --output ./flow --no-telemetry` for a smaller runner when live observation is unnecessary.
-It retains workflow execution, `--validate`, and `--describe`, and omits the runner's OTLP SDK and HTTP client.
-It also retains its embedded manifest and factory-free `--describe-interface` command.
+It retains workflow execution and the embedded manifest, and omits the runner's OTLP SDK and HTTP client.
 This runner does not emit the lifecycle events used by `mf run --tui`. Omit `--no-telemetry` to keep observation support.
 Generated runners disable `mf-compiler`'s `codegen` feature; the compiler CLI enables that feature by default.
 
 The CLI checks graph structure in every scope and generates fixed node orchestration, including structured repeated execution for Loop bodies, then compiles one runner
-using `cargo build --release --locked`. It invokes that binary with `--validate` to check registered
-kinds, configuration, inferred port types, and port contracts without executing node operations.
-Only the validated binary is installed. A constant such as `[1, "x"]` connected to a `List(Int64)`
-input fails validation at `/1`, even on an inactive branch. Plugin errors can therefore be reported
-after Rust compilation.
+using `cargo build --release --locked`. Its build script checks registered kinds, configuration, inferred
+port types, and port contracts without executing node operations. Only a successfully built binary is installed.
+A constant such as `[1, "x"]` connected to a `List(Int64)` input fails build validation at `/1`, even on an inactive
+branch. No validation process is launched after compilation.
 
 The generated executable embeds the graph metadata and node configuration. Node configuration is emitted as Rust string
 literals in the generated workflow source. Normal execution resolves type metadata along fixed bindings, then uses
 generated node calls and prints selected outputs as JSON. It does not require the definition, lock, plugin sources, or
-Cargo at runtime. It retains `--validate` for
-checking its embedded configuration without executing the workflow. `--describe` prints one date-versioned JSON
-document containing the workflow identity, node IDs/kinds, named data/control edges, and execution order. Loop-capable runners use description version `2026-09-29` and also describe each nested body's path and local graph. It reads
-the embedded plan without constructing plugins, and excludes configuration and business values. Edge names identify
-connected ports; the complete list of dynamic or unconnected ports is unavailable in this description.
+Cargo at runtime. The embedded manifest contains a date-versioned JSON graph record with workflow identity,
+node IDs/kinds, named data/control edges, and execution order. Loop-capable runners use description version
+`2026-09-29` and also describe each nested body's path and local graph. The record excludes configuration and business
+values. Edge names identify connected ports; the complete list of dynamic or unconnected ports is unavailable in this record.
 
 The generated Cargo build prepares the selected providers once to produce immutable execution layouts and a versioned
 workflow manifest containing the graph and startup interface. Both artifacts use the same validated preparation,
@@ -51,12 +47,11 @@ the existing runner build; it does not require a second compilation. Its wire fo
 [observability](observability.md#embedded-manifest-format). The generated-project layout version is `2026-10-07`;
 explicit build directories owned by an older layout must be recreated at a compatible location.
 The runner links the manifest into a dedicated ELF or Mach-O section and needs no manifest sidecar after installation.
-Both `--describe` and `--describe-interface` print records from this frozen contract without constructing providers.
-TUI preflight reads the section directly; only recognized legacy executables without it use bounded inspection commands.
-Corrupt manifests and unsupported executable formats are rejected without launching an inspection process.
-`--validate` and normal execution compare freshly prepared startup declarations with the manifest before dispatch.
+TUI preflight reads the section directly without constructing providers. Missing or corrupt manifests and unsupported
+executable formats are rejected without launching an inspection process; older runners must be recompiled.
+Normal execution compares freshly prepared startup declarations with the manifest before dispatch.
 Changes to input identities, types, required flags, or stdin conditions fail with node/port/resource context.
-Validation failure prevents installation; inspection commands intentionally do not initialize providers or refresh the contract.
+Runtime initialization failures and interface drift are reported at startup, before business execution or source consumption.
 
 The runner exports workflow spans and lifecycle events over OTLP/HTTP protobuf when a collector endpoint is configured:
 
@@ -73,7 +68,7 @@ canonical lowercase UUID v4; otherwise each observed invocation generates one.
 Without an endpoint, normal execution opens no telemetry connection. The runner buffers up to 1,024 records per signal,
 uses a 100 ms batch delay with batches of up to 128, and applies a two-second HTTP timeout. On handled success or failure,
 each provider gets a two-second shutdown deadline. Export failures are reported on stderr while workflow output and exit
-status follow the workflow result. Existing compiled binaries must be rebuilt to gain `--describe` and export support.
+status follow the workflow result. Existing compiled binaries must be rebuilt to gain embedded manifest and export support.
 Rebuild without `--locked` once to refresh an older adjacent Flow lock for the new support dependencies.
 
 ## Repository development
@@ -108,13 +103,12 @@ for its Loop declaration and initial constant, and `mfn-code` for its body trans
 
 ## Build failures
 
-Diagnostics identify the failed stage: input parsing, graph validation, dependency resolution, runtime compatibility, compilation, runner validation, lock persistence, or installation. Cargo diagnostics remain visible. Failures after project creation report its retained location for inspection, including `Cargo.toml`, `workflow-plan.json`, generated source, and build artifacts.
+Diagnostics identify the failed stage: input parsing, graph validation, dependency resolution, runtime compatibility, compilation, lock persistence, or installation. Cargo diagnostics remain visible. Failures after project creation report its retained location for inspection, including `Cargo.toml`, `workflow-plan.json`, generated source, and build artifacts.
 
 A failed build never replaces an existing executable. If editing a constant introduces a known type
-conflict, runner validation reports the source and target ports, their types, and a nested JSON
-Pointer path where applicable. The previous executable and dependency lock remain intact. Runner
-validation must succeed on every invocation; a previous executable is not evidence of current
-success. A lock persistence failure prevents installation. If installation fails after an unlocked
+conflict, build validation reports the source and target ports, their types, and a nested JSON
+Pointer path where applicable. The previous executable and dependency lock remain intact. Cargo tracks the generated build inputs; changed definitions or providers must pass build validation
+before installation. A lock persistence failure prevents installation. If installation fails after an unlocked
 build persists its dependency lock, the error states that the lock was updated.
 
 Building third-party Rust code executes build scripts, procedural macros, and configuration factories with the user's
@@ -163,16 +157,13 @@ Autonomous sources run with null stdin. For an initial file-reading node exposin
 ```sh
 ./read-workflow --inputs '{"read":{"path":"/data/lines.txt"}}'
 ./read-workflow --inputs-file ./parameters.json
-./read-workflow --describe-interface
 ```
 
 Input options are mutually exclusive. Values are nested by exact node ID and port; all required values and
 types are validated before node execution. JSON argument transport is limited to 1 MiB and rejects duplicate
-keys. Parameter files are ordinary JSON documents. `--describe-interface` returns the configured parameter
-schema and input resource requirements with the workflow identity. New runners serve it from the embedded
-manifest without preparing providers, reading source data, or initializing telemetry. Older runners may
-prepare providers and isolate construction diagnostics on stderr. `--describe` remains a factory-free graph operation.
-Inspection modes do not accept execution options.
+keys. Parameter files are ordinary JSON documents. The embedded manifest exposes the configured parameter schema
+and input resource requirements with the workflow identity. Inspection reads executable metadata without preparing
+providers, reading source data, or initializing telemetry.
 
 Streaming execution reserves protocol descriptors before plugin construction and routes plugin stdout to
 stderr. Private descriptors are not inherited by plugin subprocesses. Slow output backpressures production;

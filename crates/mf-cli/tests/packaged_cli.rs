@@ -160,8 +160,12 @@ fn packaged_cli_acceptance() {
     let loop_build = fixture.root().join("loop-build");
     fs::write(&loop_definition, loop_flow.to_string()).unwrap();
     fixture.compile(&loop_definition, &loop_output, &loop_build, false, false);
-    let described = checked(Command::new(&loop_output).arg("--describe"));
-    let description: Value = serde_json::from_slice(&described.stdout).unwrap();
+    let description = serde_json::to_value(
+        mf_tui::manifest::read_manifest(&loop_output)
+            .unwrap()
+            .description,
+    )
+    .unwrap();
     assert_eq!(description["version"], "2026-09-29");
     assert_eq!(description["loop_bodies"].as_array().unwrap().len(), 1);
     let loop_result = checked(Command::new(&loop_output).env_clear().env("PATH", ""));
@@ -244,7 +248,6 @@ fn packaged_cli_acceptance() {
         command.current_dir(&runtime).env_clear().env("PATH", "");
         command
     };
-    assert!(checked(command().arg("--validate")).stdout.is_empty());
     let invalid = command().arg("--unknown").output().unwrap();
     assert!(!invalid.status.success());
     assert!(String::from_utf8_lossy(&invalid.stderr).contains("usage:"));

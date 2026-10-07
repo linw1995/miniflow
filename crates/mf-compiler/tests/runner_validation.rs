@@ -3,7 +3,7 @@ use mf_compiler::{SupportPackages, plan_definition, resolve_project, write_depen
 use std::process::Command;
 
 #[test]
-fn one_runner_validates_without_execution_and_reports_plugin_errors() {
+fn build_validates_without_execution_and_reports_plugin_errors() {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("build");
     let mut definition = common::fixture_definition();
@@ -37,13 +37,6 @@ fn one_runner_validates_without_execution_and_reports_plugin_errors() {
         String::from_utf8_lossy(&first.stderr)
     );
     let runner = common::runner_executable(&project, "release");
-    let validation = Command::new(&runner).arg("--validate").output().unwrap();
-    assert!(
-        validation.status.success(),
-        "{}",
-        String::from_utf8_lossy(&validation.stderr)
-    );
-    assert!(String::from_utf8_lossy(&validation.stdout).contains("factory diagnostic"));
     let execution = Command::new(&runner).output().unwrap();
     assert!(!execution.status.success());
     assert!(String::from_utf8_lossy(&execution.stderr).contains("execution sentinel"));

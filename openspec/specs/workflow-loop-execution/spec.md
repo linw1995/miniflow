@@ -32,7 +32,7 @@ plugin registrations. Earlier definition versions SHALL retain their existing be
 #### Scenario: Reject a missing Loop declaration
 
 - **WHEN** the selected node bundle does not register `workflow.loop`
-- **THEN** runner validation fails before installation and identifies the missing kind
+- **THEN** build validation fails before installation and identifies the missing kind
 
 ### Requirement: Validate every loop body as a local DAG
 
@@ -52,7 +52,7 @@ outside a Loop.
 #### Scenario: Validate an inactive body branch
 
 - **WHEN** a body branch would be skipped at runtime but contains an unknown plugin kind, invalid configuration, or incompatible port
-- **THEN** runner validation fails before executing any node
+- **THEN** build validation fails before executing any node
 
 #### Scenario: Reject assignment outside a Loop
 

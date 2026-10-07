@@ -83,7 +83,7 @@ fn development_support_uses_checkout_crates_without_override() {
 }
 
 #[test]
-fn compiles_a_runner_without_telemetry_and_preserves_its_commands() {
+fn compiles_a_runner_without_telemetry_and_preserves_execution() {
     let temporary = temporary_directory();
     let definition = temporary.path().join("workflow.json");
     let output = temporary.path().join("workflow");
@@ -120,17 +120,11 @@ fn compiles_a_runner_without_telemetry_and_preserves_its_commands() {
         json!(41)
     );
     assert!(
-        Command::new(&output)
-            .arg("--validate")
-            .status()
+        !mf_tui::manifest::read_manifest(&output)
             .unwrap()
-            .success()
-    );
-    let description = Command::new(&output).arg("--describe").output().unwrap();
-    assert!(description.status.success());
-    assert!(
-        serde_json::from_slice::<serde_json::Value>(&description.stdout).unwrap()["nodes"]
-            .is_array()
+            .description
+            .nodes
+            .is_empty()
     );
     let requested = Command::new(&output)
         .env("MF_CAPTURE_SNAPSHOTS", "1")
@@ -193,13 +187,6 @@ fn compiled_binary_replaces_target_and_runs_without_the_definition() {
     fs::remove_file(&definition).unwrap();
     fs::remove_file(definition.with_extension("lock")).unwrap();
     fs::remove_dir_all(temporary.path().join(".mf-build-test")).unwrap();
-    let validation = Command::new(&target)
-        .arg("--validate")
-        .env("PATH", "")
-        .output()
-        .unwrap();
-    assert!(validation.status.success());
-    assert!(validation.stdout.is_empty());
     let output = Command::new(&target)
         .env("PATH", "")
         .current_dir(temporary.path())

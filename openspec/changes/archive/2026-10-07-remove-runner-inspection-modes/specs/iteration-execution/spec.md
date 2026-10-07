@@ -1,10 +1,4 @@
-# iteration-execution Specification
-
-## Purpose
-
-Run a validated body graph once per array element or map entry and collect its selected results.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Bind item, key, and index within a scoped body
 
@@ -62,37 +56,3 @@ another item MUST NOT be visible. The body MUST NOT contain the reserved source 
 
 - **WHEN** a Flow uses `builtin.iteration` without declaring a package that registers it
 - **THEN** build validation reports the unavailable kind and preserves an existing installed executable
-
-### Requirement: Bound scheduling and preserve result order
-
-`mode` SHALL default to `sequential`. In sequential mode, the body SHALL run one item at a time using the same scoped body execution mechanism as Loop. In `parallel` mode, at most ten items SHALL run concurrently. Successful results SHALL retain array input order or lexicographic map key order regardless of completion order.
-
-#### Scenario: Complete out of order
-
-- **WHEN** independent parallel items finish in an order different from their input positions
-- **THEN** `results` retains the original input positions
-
-### Requirement: Apply item failure policies
-
-`on_error` SHALL default to `terminate`. `terminate` SHALL stop sequential execution at the first
-failure or stop scheduling parallel work after a failure, drain started work, report the lowest
-failed started index, and publish no partial result. `continue_on_error` SHALL place JSON null at
-each failed position. `remove_failed` SHALL omit failed positions and retain successful order. A
-required body result that is skipped SHALL count as a failed item. Errors SHALL include the outer
-node and failing item index.
-These policies SHALL apply equally to array elements and map entries, using the map's sorted entry positions.
-
-#### Scenario: Continue with null
-
-- **WHEN** the middle item fails under `continue_on_error`
-- **THEN** output contains the first result, null, and the third result
-
-#### Scenario: Remove failed results
-
-- **WHEN** the middle item fails under `remove_failed`
-- **THEN** output contains only the first and third results
-
-#### Scenario: Terminate without partial publication
-
-- **WHEN** any item fails under `terminate`
-- **THEN** the Iteration node fails and does not publish `results`

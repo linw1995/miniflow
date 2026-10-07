@@ -1,7 +1,6 @@
 #![cfg(unix)]
 mod common;
 use mf_compiler::{CompileRequest, RunnerOptions, SupportPackages, compile_project_with_options};
-use mf_runtime::{WorkflowInput, WorkflowInterface};
 use serde_json::{Value, json};
 use std::{
     fs,
@@ -42,34 +41,11 @@ fn standalone_sources_describe_parameters_and_run_without_stdin_or_build_inputs(
             .output()
             .unwrap()
     };
-    assert!(run(&["--validate"]).status.success());
-    let graph = run(&["--describe"]);
-    let graph = mf_telemetry::description::WorkflowDescription::from_json(
-        &graph.stdout[..graph.stdout.len() - 1],
-    )
-    .unwrap();
-    let interface = run(&["--describe-interface"]);
-    assert!(
-        interface.status.success(),
-        "{}",
-        String::from_utf8_lossy(&interface.stderr)
-    );
-    let interface = WorkflowInterface::from_json(&interface.stdout).unwrap();
-    interface.validate_for_description(&graph).unwrap();
-    assert_eq!(
-        interface.schema.inputs["read"]["path"],
-        WorkflowInput {
-            value_type: mf_runtime::ValueType::String,
-            required: true
-        }
-    );
-    assert!(interface.schema.stdin.is_empty());
     assert!(!data.exists());
     for arguments in [
         vec![],
         vec!["--inputs", "{}"],
         vec!["--inputs", "{\"read\":{\"path\":42}}"],
-        vec!["--describe-interface", "--inputs", "{}"],
     ] {
         assert!(!run(&arguments).status.success());
     }
