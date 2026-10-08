@@ -175,6 +175,11 @@ pub enum WorkflowCompileError {
         definition_id: DefinitionId,
         message: String,
     },
+    #[snafu(display("invalid typed generation for `{definition_id}`: {source}"))]
+    TypedGeneration {
+        definition_id: DefinitionId,
+        source: mf_runtime::TypedGenerationError,
+    },
     #[snafu(display("invalid node metadata for `{definition_id}`: {source}"))]
     OutputDerivation {
         definition_id: DefinitionId,
@@ -559,6 +564,13 @@ fn validate_base_metadata(
     let mut output_index = BTreeMap::new();
     for node in nodes {
         let ports = registrations[&node.definition_id];
+        if let Some(generation) = &node.metadata.typed_generation {
+            generation
+                .validate(ports)
+                .with_context(|_| TypedGenerationSnafu {
+                    definition_id: node.definition_id.clone(),
+                })?;
+        }
         for (direction, specs) in [("input", &ports.inputs), ("output", &ports.outputs)] {
             let mut names = BTreeSet::new();
             for port in specs {
@@ -1268,6 +1280,7 @@ pub fn execute_compiled_with_inputs(
             if let WorkflowCompileError::NodeConstruction { definition_id, .. }
             | WorkflowCompileError::UnknownNodeKind { definition_id, .. }
             | WorkflowCompileError::InvalidNodeMetadata { definition_id, .. }
+            | WorkflowCompileError::TypedGeneration { definition_id, .. }
             | WorkflowCompileError::OutputDerivation { definition_id, .. }
             | WorkflowCompileError::PortTypeDepth { definition_id, .. }
             | WorkflowCompileError::KnownOutputValueTypeConflict { definition_id, .. }

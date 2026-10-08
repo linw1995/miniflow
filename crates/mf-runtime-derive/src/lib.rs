@@ -84,9 +84,17 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
         ));
     };
     let mut runtime = None;
+    let mut typed = false;
     for attr in &input.attrs {
         if attr.path().is_ident(attribute) {
             attr.parse_nested_meta(|meta| {
+                if matches!(direction, Direction::Value) && meta.path.is_ident("typed") {
+                    if typed {
+                        return Err(meta.error("duplicate typed generation marker"));
+                    }
+                    typed = true;
+                    return Ok(());
+                }
                 if !meta.path.is_ident("runtime") {
                     return Err(meta.error(format!(
                         "expected `runtime = \"path\"` on the {attribute} struct"
@@ -108,6 +116,10 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
     let mut decoded = Vec::new();
     let mut encoded = Vec::new();
     let mut names = BTreeSet::new();
+    let mut field_types = Vec::new();
+    let mut field_names = Vec::new();
+    let mut typed_ports = Vec::new();
+    let mut typed_checks = Vec::new();
     for field in fields.named {
         let ident = field.ident.expect("named field");
         let mut renamed = None;
@@ -141,6 +153,19 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
             ));
         }
         let ty = field.ty;
+        field_types.push(ty.clone());
+        field_names.push(ident.clone());
+        if typed {
+            typed_ports.push(quote!(#runtime::TypedPort {
+                port: <#ty as #runtime::InputField>::port(#port),
+                rust_type: <#ty as #runtime::TypedField>::rust_type(),
+            }));
+            typed_checks.push(
+                quote!(if #runtime::validate_typed_output(&self.#ident, #port)? {
+                    __mf_present.push(#port);
+                }),
+            );
+        }
         let mut borrowed = BorrowedField {
             error: None,
             derive_name,
@@ -163,6 +188,12 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
                 .make_where_clause()
                 .predicates
                 .push(parse_quote!(#ty: #runtime::OutputField));
+        }
+        if typed {
+            generics
+                .make_where_clause()
+                .predicates
+                .push(parse_quote!(#ty: #runtime::TypedField));
         }
         ports.push(quote!(<#ty as #field_trait>::port(#port)));
         decoded.push(quote!(#ident: #runtime::decode_input::<#ty>(&mut __mf_inputs, #port)?));
@@ -234,8 +265,29 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
     } else {
         quote!()
     };
+    let typed_impl = if typed {
+        quote! {
+            impl #impl_generics #runtime::TypedNodeValue for #name #type_generics #where_clause {
+                type Fields = (#(#field_types,)*);
+                fn typed_ports() -> ::std::vec::Vec<#runtime::TypedPort> { vec![#(#typed_ports),*] }
+                fn into_fields(self) -> Self::Fields { (#(self.#field_names,)*) }
+                fn from_fields(fields: Self::Fields) -> Self {
+                    let (#(#field_names,)*) = fields;
+                    Self { #(#field_names),* }
+                }
+                fn validate_typed(&self) -> ::std::result::Result<::std::vec::Vec<&'static str>, #runtime::OutputEncodeError> {
+                    let mut __mf_present = vec![];
+                    #(#typed_checks)*
+                    Ok(__mf_present)
+                }
+            }
+        }
+    } else {
+        quote!()
+    };
     Ok(quote! {
         #bridges
+        #typed_impl
         impl #impl_generics #contract for #name #type_generics #where_clause {
             fn ports() -> ::std::vec::Vec<#runtime::PortSpec> {
                 ::std::vec![#(#ports),*]

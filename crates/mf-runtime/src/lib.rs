@@ -65,6 +65,10 @@ pub use node::{
     TypeCompatibility, TypeDepthError, TypeMismatch, TypedTaskNode, ValueType, deserialize_config,
     execute_typed_task, output_id,
 };
+pub use node::{
+    TypedConstructor, TypedGeneration, TypedGenerationError, TypedNodeValue, TypedPort,
+    TypedTaskHandle,
+};
 pub use number::compare_json_numbers;
 pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::WorkflowRunError;
@@ -83,7 +87,10 @@ pub use typed_inputs::{
     InputDecodeError, InputField, InputValue, NodeInputs, decode_input, reject_unknown_inputs,
 };
 
-pub use typed_outputs::{NodeOutputs, OutputEncodeError, OutputField, OutputValue, encode_output};
+pub use typed_outputs::{
+    NodeOutputs, OutputEncodeError, OutputField, OutputValue, RustValueType, TypedField,
+    TypedValueCodec, encode_output, validate_typed_output,
+};
 
 pub use value::{ValueKind, ValueRef};
 pub use worker::{RuntimeWorkerHandle, WorkerHandle, WorkerJob, WorkerPool, WorkerPoolError};

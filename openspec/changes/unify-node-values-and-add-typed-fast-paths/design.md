@@ -64,8 +64,9 @@ Collect descriptors in the generated Cargo build with linked providers, and emit
 alongside `flow-plans.rs`. The CLI keeps generating the dependency project without inspecting plugin source or naming
 plugin internals. Provider crate references resolve through the Flow's dependency aliases; host-only generation metadata
 must not introduce a compiler dependency into runtime execution or provider business logic. A provider can expose one
-dedicated shim while keeping its executor and fields private. The derive supplies public helper items only through that
-explicitly exported provider boundary.
+dedicated shim while keeping its executor and fields private. The derive supplies tuple construction/decomposition through `TypedNodeValue`, so private fields stay private.
+The first version uses a closed, runtime-owned Rust representation enum for certified scalar and collection types;
+custom Rust types remain opaque to generation. Exhaustive metadata literals must include the new optional field.
 
 Use structured, validated paths and identifiers, not arbitrary code strings or whole-crate visibility changes. For
 candidate matching, use provider-declared canonical type references with package identity. Generated Rust assignments

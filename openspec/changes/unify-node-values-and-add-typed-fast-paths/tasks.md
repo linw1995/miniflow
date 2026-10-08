@@ -17,16 +17,16 @@
 
 ## 2. Provider generation contract
 
-- [ ] 2.1 Add optional structured generation descriptors at the registration boundary without introducing a
+- [x] 2.1 Add optional structured generation descriptors at the registration boundary without introducing a
   runtime-to-compiler dependency; verify providers lacking descriptors prepare and execute unchanged.
-- [ ] 2.2 Add provider-owned exported construction/invocation and field-access shims while keeping executor
+- [x] 2.2 Add provider-owned exported construction/invocation and field-access shims while keeping executor
   implementations private; verify an external multi-node fixture compiles against the documented public boundary.
-- [ ] 2.3 Resolve crate references and concrete type candidates through dependency aliases and selected package
+- [x] 2.3 Resolve crate references and concrete type candidates through dependency aliases and selected package
   identities; verify aliased dependencies work and equal JSON descriptors cannot establish Rust type equality.
-- [ ] 2.4 Validate descriptor agreement with ordinary configured metadata and preserve construction error sources;
+- [x] 2.4 Validate descriptor agreement with ordinary configured metadata and preserve construction error sources;
   verify contradictory interfaces and malformed advertised references fail before execution while missing optional
   support falls back.
-- [ ] 2.5 Document provider opt-in, certified codec validation, and the context-read contract; verify the external
+- [x] 2.5 Document provider opt-in, certified codec validation, and the context-read contract; verify the external
   fixture demonstrates both opted-in and ordinary dynamic providers.
 
 ## 3. Conservative segment planning

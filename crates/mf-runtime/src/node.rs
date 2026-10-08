@@ -1,6 +1,6 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use snafu::{IntoError, ResultExt, Snafu, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, Snafu, ensure};
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
@@ -498,6 +498,9 @@ pub fn output_id(node: &str, port: &str) -> String {
 
 #[derive(Debug, Snafu)]
 pub enum NodeBuildError {
+    #[snafu(transparent)]
+    Generation { source: TypedGenerationError },
+
     #[snafu(display("typed task input ports must be derived from its input struct"))]
     ConflictingInputDeclarations,
     #[snafu(display("typed task output ports must be derived from its output struct"))]
@@ -647,6 +650,7 @@ pub struct NodeMetadata {
     pub output_derivations: Vec<OutputDerivation>,
     pub context_references: Vec<ContextReference>,
     pub stdin: Option<crate::StdinRequirement>,
+    pub typed_generation: Option<TypedGeneration>,
 }
 
 impl NodeMetadata {
@@ -661,6 +665,175 @@ impl NodeMetadata {
 impl From<NodePorts> for NodeMetadata {
     fn from(ports: NodePorts) -> Self {
         Self::new(ports)
+    }
+}
+
+/// Field metadata emitted by the unified derive for certified generation.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypedPort {
+    pub port: PortSpec,
+    pub rust_type: crate::RustValueType,
+}
+
+/// Named structs with runtime-owned field validation and private-field access helpers.
+pub trait TypedNodeValue: NodeValue {
+    type Fields;
+    fn typed_ports() -> Vec<TypedPort>;
+    fn into_fields(self) -> Self::Fields;
+    fn from_fields(fields: Self::Fields) -> Self;
+    fn validate_typed(&self) -> Result<Vec<&'static str>, crate::OutputEncodeError>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypedConstructor {
+    pub package: &'static str,
+    pub path: &'static [&'static str],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypedGeneration {
+    pub constructor: TypedConstructor,
+    pub inputs: Vec<TypedPort>,
+    pub outputs: Vec<TypedPort>,
+    pub context_free: bool,
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(display("invalid typed generation contract: {message}"))]
+pub struct TypedGenerationError {
+    pub message: String,
+}
+
+impl TypedConstructor {
+    pub fn dependency_alias<'a>(
+        &self,
+        dependencies: &'a std::collections::BTreeMap<String, crate::NodeDependency>,
+    ) -> Result<&'a str, TypedGenerationError> {
+        dependencies
+            .iter()
+            .find(|(_, dependency)| dependency.package == self.package)
+            .map(|(alias, _)| alias.as_str())
+            .context(TypedGenerationSnafu {
+                message: format!("provider package `{}` is not selected", self.package),
+            })
+    }
+}
+
+impl TypedGeneration {
+    pub fn validate(&self, ports: &NodePorts) -> Result<(), TypedGenerationError> {
+        let valid_ident = |s: &str| {
+            let mut chars = s.chars();
+            chars
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        };
+        ensure!(
+            !self.constructor.package.is_empty()
+                && !self.constructor.path.is_empty()
+                && self.constructor.path.iter().all(|part| valid_ident(part)),
+            TypedGenerationSnafu {
+                message: "constructor must name a package and Rust identifier path"
+            }
+        );
+        ensure!(
+            self.inputs.iter().map(|p| &p.port).eq(ports.inputs.iter())
+                && self.outputs.len() == ports.outputs.len()
+                && self
+                    .outputs
+                    .iter()
+                    .zip(&ports.outputs)
+                    .all(|(declared, actual)| {
+                        declared.port.name == actual.name
+                            && declared.port.required == actual.required
+                            && actual
+                                .value_type
+                                .is_assignable_to(&declared.port.value_type)
+                    }),
+            TypedGenerationSnafu {
+                message: "generated declarations differ from the configured ports"
+            }
+        );
+        Ok(())
+    }
+}
+
+/// Typed and dynamic invocation strategies share one initialized task instance.
+pub struct TypedTaskHandle<N> {
+    task: std::sync::Arc<N>,
+    metadata: NodeMetadata,
+}
+
+impl<N> Clone for TypedTaskHandle<N> {
+    fn clone(&self) -> Self {
+        Self {
+            task: self.task.clone(),
+            metadata: self.metadata.clone(),
+        }
+    }
+}
+
+struct SharedTypedTask<N>(std::sync::Arc<N>);
+
+impl<N: TypedTaskNode> TypedTaskNode for SharedTypedTask<N> {
+    type Input = N::Input;
+    type Output = N::Output;
+    fn output_ports(&self) -> Vec<PortSpec> {
+        self.0.output_ports()
+    }
+    fn execute(
+        &self,
+        input: Self::Input,
+        ctx: &mut crate::ExecutionContext,
+    ) -> Result<crate::TypedNodeResult<Self::Output>, NodeExecutionError> {
+        self.0.execute(input, ctx)
+    }
+}
+
+impl<N: TypedTaskNode + 'static> TypedTaskHandle<N>
+where
+    N::Input: TypedNodeValue,
+    N::Output: TypedNodeValue,
+{
+    pub fn new(
+        task: N,
+        metadata: impl Into<NodeMetadata>,
+        constructor: TypedConstructor,
+        context_free: bool,
+    ) -> Result<Self, NodeBuildError> {
+        let task = std::sync::Arc::new(task);
+        let mut prepared = PreparedNode::typed_task(SharedTypedTask(task.clone()), metadata)?;
+        let generation = TypedGeneration {
+            constructor,
+            inputs: N::Input::typed_ports(),
+            outputs: N::Output::typed_ports(),
+            context_free,
+        };
+        generation.validate(&prepared.metadata.ports)?;
+        prepared.metadata.typed_generation = Some(generation);
+        Ok(Self {
+            task,
+            metadata: prepared.metadata,
+        })
+    }
+
+    pub fn prepared(&self) -> PreparedNode {
+        PreparedNode::new(
+            TypedTaskAdapter(SharedTypedTask(self.task.clone())),
+            self.metadata.clone(),
+        )
+    }
+
+    pub fn input_from_fields(&self, fields: <N::Input as TypedNodeValue>::Fields) -> N::Input {
+        N::Input::from_fields(fields)
+    }
+
+    pub fn execute(
+        &self,
+        input: N::Input,
+        ctx: &mut crate::ExecutionContext,
+    ) -> Result<crate::TypedNodeResult<N::Output>, NodeExecutionError> {
+        self.task.execute(input, ctx)
     }
 }
 

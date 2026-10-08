@@ -125,6 +125,25 @@ collection, optional-port, shared-value, and typed error semantics described bel
 `#[value(runtime = "::runtime_alias")]` for a renamed runtime dependency. Value attributes are independent of Serde.
 A value struct describes an entire port bag; it does not automatically implement a nested JSON-object field codec.
 
+### Typed generation opt-in
+
+A provider can opt a named value into certified field access and borrowed validation with `#[value(typed)]`.
+Only the runtime's owned scalar, collection, and top-level optional codecs qualify. Custom field codecs
+retain dynamic execution. `TypedNodeValue` exposes tuple decomposition/construction helpers, so generated
+code does not need public struct fields.
+
+Export a configuration constructor returning `TypedTaskHandle<impl TypedTaskNode<Input = I, Output = O>>`.
+Construct the handle with `TypedTaskHandle::new`, an ordinary empty-port metadata value, and a
+`TypedConstructor` naming the provider package and exported item path. Its ordinary registered factory
+returns `Ok(handle.prepared())`. Both handles share one initialized executor; fallback never calls
+another factory. The prepared metadata records the optional generation declaration.
+
+Set the constructor's `context_free` flag only when business logic does not read context outputs.
+A matching Rust representation does not authorize skipping business validation. The first version
+certifies only runtime-owned codecs and still validates all produced fields before successor calls.
+Missing generation support leaves dynamic providers unchanged. Exhaustive `NodeMetadata` literals must
+include `typed_generation: None`; constructors and literals using `..Default::default()` need no change.
+
 ### Struct-defined inputs
 
 Use the runtime's `NodeInputs` derive to declare input ports and decode their values from one owned struct:

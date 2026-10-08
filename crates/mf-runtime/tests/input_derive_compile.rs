@@ -111,6 +111,16 @@ fn struct_derives_compile_with_aliases_and_report_invalid_declarations() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    let typed = valid.replace(
+        "#[derive(NodeValue)]",
+        "#[derive(NodeValue)]\n#[value(typed)]",
+    );
+    let output = check(root.path(), &typed, false);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     for (declaration, diagnostic) in [
         ("enum Values { Item }", "requires a named-field struct"),
         ("struct Values(i64);", "requires a named-field struct"),

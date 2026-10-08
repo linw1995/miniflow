@@ -79,3 +79,5 @@ mod line_producer;
 mod stream_fixture;
 mod struct_inputs;
 mod typed_fixture;
+
+pub mod generated_fixture;

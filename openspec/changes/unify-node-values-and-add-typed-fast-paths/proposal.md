@@ -12,6 +12,7 @@ even when the compiler can prove direct Rust field transfer is safe.
   dynamic conversion. Input and output remain roles of a task's associated types.
 - Keep existing directional contracts as compatibility adapters during migration; migrate built-in typed providers and
   documentation to the unified contract.
+- **BREAKING**: Exhaustive `NodeMetadata` literals must include the new optional `typed_generation` field.
 - Add optional provider-supplied typed code-generation metadata without requiring the CLI to know plugin implementations
   or making private implementation types public.
 - Generate direct typed field transfers for proven compatible, single-consumer task connections inside a top-level
