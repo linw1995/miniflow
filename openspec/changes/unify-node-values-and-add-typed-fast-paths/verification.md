@@ -27,25 +27,16 @@
 - The nextest integration test uses the existing Cargo wrapper's source configuration once; it does not append a
   duplicate configuration file.
 - Focused instrumented coverage ran 79 tests successfully. Input codecs reach 100% line coverage, output codecs
-  94.38%, the typed planner 93.75%, and the derive implementation 80.10%. This selection intentionally does not claim
+  94.38%, the typed planner 93.75%, and the derive implementation 79.57%. This selection intentionally does not claim
   whole-workspace coverage. Reports are local under `target/coverage/result/`, including `lcov.info`.
 - Repository hooks, codegen-disabled compilation, and final complete Nix validation pass. The final pinned suite
   ran all 477 tests successfully on aarch64-darwin; other platforms were not executed locally.
 
-## Local performance observations
+## Local experiments
 
-The ignored `target/typed-fast-path-ablation/` directory contains the reproducible local harness, JSON measurements,
-and report. A release microbenchmark uses 24 nodes, 64 KiB owned strings, 30 invocations, and one reused worker.
-
-| Path | Allocated bytes | Allocation calls | Total execution, ms | Standard binary bytes |
-| --- | ---: | ---: | ---: | ---: |
-| Dynamic | 95,293,860 | 13,590 | 2.176 | 2,849,824 |
-| Typed | 4,318,530 | 7,410 | 0.355 | 3,305,152 |
-| Mixed | 39,909,360 | 9,810 | 1.002 | 3,211,680 |
-
-The typed sample allocates about 95.5% fewer bytes and has a roughly 16% larger standard binary. Timing is a small
-local observation, not a portable performance guarantee or test threshold. Build times are recorded in the local
-report, but differing cache histories make them unsuitable for a comparative claim.
+Performance measurements and implementation/test ablation details are kept under the ignored `target/` directory.
+The local review directory is `target/typed-fast-path-review/`; the performance harness remains in
+`target/typed-fast-path-ablation/`. These records are not committed.
 
 ## Compatibility and scope
 

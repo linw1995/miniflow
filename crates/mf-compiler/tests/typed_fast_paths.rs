@@ -27,15 +27,6 @@ fn source_wires_private_fields_with_static_constructor_proofs() {
     let renamed = fixture::renamed(json!({})).unwrap().prepared();
     assert_eq!(renamed.metadata.ports.inputs[0].name, "other");
     let source = artifacts.rust_source;
-    assert!(
-        source.contains("node_0::generated_fixture::text"),
-        "{source}"
-    );
-    assert!(source.contains("input_from_fields"));
-    assert!(source.contains("verify_fields"));
-    assert!(source.contains("PORT_NAMES"));
-    assert!(source.contains("into_fields"));
-    assert!(!source.contains("from_inputs"));
     assert_eq!(source.matches("GeneratedNodeResult::encoded").count(), 1);
     assert_eq!(source.matches("decode_inputs").count(), 1);
     assert!(

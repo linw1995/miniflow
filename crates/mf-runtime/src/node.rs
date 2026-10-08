@@ -798,18 +798,13 @@ impl<N> Clone for TypedTaskHandle<N> {
 
 struct SharedTypedTask<N>(std::sync::Arc<N>);
 
-impl<N: TypedTaskNode> TypedTaskNode for SharedTypedTask<N> {
-    type Input = N::Input;
-    type Output = N::Output;
-    fn output_ports(&self) -> Vec<PortSpec> {
-        self.0.output_ports()
-    }
+impl<N: TypedTaskNode> TaskNode for SharedTypedTask<N> {
     fn execute(
         &self,
-        input: Self::Input,
+        inputs: Inputs,
         ctx: &mut crate::ExecutionContext,
-    ) -> Result<crate::TypedNodeResult<Self::Output>, NodeExecutionError> {
-        self.0.execute(input, ctx)
+    ) -> Result<crate::NodeResult, NodeExecutionError> {
+        execute_typed_task(self.0.as_ref(), inputs, ctx)
     }
 }
 
@@ -824,27 +819,23 @@ where
         constructor: TypedConstructor,
         context_free: bool,
     ) -> Result<Self, NodeBuildError> {
-        let task = std::sync::Arc::new(task);
-        let mut prepared = PreparedNode::typed_task(SharedTypedTask(task.clone()), metadata)?;
+        let mut metadata = typed_task_metadata(&task, metadata.into())?;
         let generation = TypedGeneration {
             constructor,
             inputs: N::Input::typed_ports(),
             outputs: N::Output::typed_ports(),
             context_free,
         };
-        generation.validate(&prepared.metadata.ports)?;
-        prepared.metadata.typed_generation = Some(generation);
+        generation.validate(&metadata.ports)?;
+        metadata.typed_generation = Some(generation);
         Ok(Self {
-            task,
-            metadata: prepared.metadata,
+            task: std::sync::Arc::new(task),
+            metadata,
         })
     }
 
     pub fn prepared(&self) -> PreparedNode {
-        PreparedNode::new(
-            TypedTaskAdapter(SharedTypedTask(self.task.clone())),
-            self.metadata.clone(),
-        )
+        PreparedNode::new(SharedTypedTask(self.task.clone()), self.metadata.clone())
     }
 
     pub fn decode_inputs(&self, inputs: Inputs) -> Result<N::Input, NodeExecutionError> {
@@ -894,6 +885,38 @@ pub fn verify_generated_metadata(
     let actual = serde_json::to_value(actual).context(GenerationMetadataSnafu)?;
     ensure!(actual == *expected, GenerationMetadataMismatchSnafu);
     Ok(())
+}
+
+fn typed_task_metadata<N: TypedTaskNode + ?Sized>(
+    task: &N,
+    mut metadata: NodeMetadata,
+) -> Result<NodeMetadata, NodeBuildError> {
+    ensure!(
+        metadata.ports.inputs.is_empty(),
+        ConflictingInputDeclarationsSnafu
+    );
+    ensure!(
+        metadata.ports.outputs.is_empty(),
+        ConflictingOutputDeclarationsSnafu
+    );
+    let declared = <N::Output as crate::NodeOutputs>::ports();
+    let mut fields: std::collections::BTreeMap<_, _> =
+        declared.iter().map(|port| (&port.name, port)).collect();
+    let outputs = task.output_ports();
+    ensure!(
+        fields.len() == declared.len()
+            && outputs.len() == fields.len()
+            && outputs.iter().all(|port| {
+                fields.remove(&port.name).is_some_and(|field| {
+                    field.required == port.required
+                        && port.value_type.is_assignable_to(&field.value_type)
+                })
+            }),
+        InvalidOutputRefinementSnafu
+    );
+    metadata.ports.outputs = outputs;
+    metadata.ports.inputs = <N::Input as crate::NodeInputs>::ports();
+    Ok(metadata)
 }
 
 pub struct PreparedNode {
@@ -966,32 +989,7 @@ impl PreparedNode {
         task: N,
         metadata: impl Into<NodeMetadata>,
     ) -> Result<Self, NodeBuildError> {
-        let mut metadata = metadata.into();
-        ensure!(
-            metadata.ports.inputs.is_empty(),
-            ConflictingInputDeclarationsSnafu
-        );
-        ensure!(
-            metadata.ports.outputs.is_empty(),
-            ConflictingOutputDeclarationsSnafu
-        );
-        let declared = <N::Output as crate::NodeOutputs>::ports();
-        let mut fields: std::collections::BTreeMap<_, _> =
-            declared.iter().map(|port| (&port.name, port)).collect();
-        let outputs = task.output_ports();
-        ensure!(
-            fields.len() == declared.len()
-                && outputs.len() == fields.len()
-                && outputs.iter().all(|port| {
-                    fields.remove(&port.name).is_some_and(|field| {
-                        field.required == port.required
-                            && port.value_type.is_assignable_to(&field.value_type)
-                    })
-                }),
-            InvalidOutputRefinementSnafu
-        );
-        metadata.ports.outputs = outputs;
-        metadata.ports.inputs = <N::Input as crate::NodeInputs>::ports();
+        let metadata = typed_task_metadata(&task, metadata.into())?;
         Ok(Self::new(TypedTaskAdapter(task), metadata))
     }
 

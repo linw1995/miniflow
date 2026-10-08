@@ -112,7 +112,6 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
     let runtime: Path = runtime.unwrap_or_else(|| parse_quote!(::mf_runtime));
     let mut generics = input.generics;
     let mut ports = Vec::new();
-    let mut converted = Vec::new();
     let mut decoded = Vec::new();
     let mut encoded = Vec::new();
     let mut names = BTreeSet::new();
@@ -201,15 +200,6 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
         decoded.push(quote!(#ident: #runtime::decode_input::<#ty>(&mut __mf_inputs, #port)?));
         encoded
             .push(quote!(#runtime::encode_output::<#ty>(&mut __mf_outputs, #port, self.#ident)?;));
-        converted.push(match direction {
-            Direction::Input => {
-                quote!(#ident: #runtime::decode_input::<#ty>(&mut __mf_inputs, #port)?)
-            }
-            Direction::Output => {
-                quote!(#runtime::encode_output::<#ty>(&mut __mf_outputs, #port, self.#ident)?;)
-            }
-            Direction::Value => quote!(),
-        });
     }
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
     let (contract, conversion) = match direction {
@@ -217,7 +207,7 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
             quote!(#runtime::NodeInputs),
             quote! {
                 fn from_inputs(mut __mf_inputs: #runtime::Inputs) -> ::std::result::Result<Self, #runtime::InputDecodeError> {
-                    let __mf_result = Self { #(#converted),* };
+                    let __mf_result = Self { #(#decoded),* };
                     #runtime::reject_unknown_inputs(__mf_inputs)?;
                     ::std::result::Result::Ok(__mf_result)
                 }
@@ -243,7 +233,7 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
             quote! {
                 fn into_outputs(self) -> ::std::result::Result<#runtime::Outputs, #runtime::OutputEncodeError> {
                     let mut __mf_outputs = #runtime::Outputs::new();
-                    #(#converted)*
+                    #(#encoded)*
                     ::std::result::Result::Ok(__mf_outputs)
                 }
             },

@@ -799,7 +799,21 @@ impl ExecutionContext {
             Some(GeneratedNodeResult::Dynamic(result)) => return self.publish(node, Some(result)),
             None => return self.publish(node, None),
         };
-        validate_output_presence(node, produced.iter().copied(), &skipped)?;
+        validate_skipped_outputs(node, &skipped, |name| produced.contains(&name))?;
+        for name in &produced {
+            if !node
+                .metadata
+                .ports
+                .outputs
+                .iter()
+                .any(|port| port.name == *name)
+            {
+                return Err(state_error(
+                    node.definition_id.as_str(),
+                    format!("produced undeclared output `{name}`"),
+                ));
+            }
+        }
         for name in &produced {
             let key = output_id(node.definition_id.as_str(), name);
             self.outputs.remove(&key);
@@ -821,19 +835,22 @@ impl ExecutionContext {
     ) -> Result<(), WorkflowRunError> {
         let id = node.definition_id.as_str();
         if let Some(result) = &result {
-            validate_output_presence(
-                node,
-                result.outputs.keys().map(String::as_str),
-                &result.skipped,
-            )?;
+            validate_skipped_outputs(node, &result.skipped, |name| {
+                result.outputs.contains_key(name)
+            })?;
             for (name, value) in &result.outputs {
-                let port = node
+                let Some(port) = node
                     .metadata
                     .ports
                     .outputs
                     .iter()
                     .find(|port| port.name == *name)
-                    .expect("validated output name");
+                else {
+                    return Err(state_error(
+                        id,
+                        format!("produced undeclared output `{name}`"),
+                    ));
+                };
                 port.value_type
                     .validate_shared(value)
                     .with_context(|_| OutputTypeSnafu {
@@ -874,15 +891,14 @@ impl ExecutionContext {
     }
 }
 
-fn validate_output_presence<'a, N>(
+fn validate_skipped_outputs<N>(
     node: &FlowNode<N>,
-    produced: impl IntoIterator<Item = &'a str>,
     skipped: &BTreeSet<String>,
+    produced: impl Fn(&str) -> bool,
 ) -> Result<(), WorkflowRunError> {
     let id = node.definition_id.as_str();
-    let produced: BTreeSet<_> = produced.into_iter().collect();
     for name in skipped {
-        if produced.contains(name.as_str()) {
+        if produced(name) {
             return Err(state_error(
                 id,
                 format!("output `{name}` is both produced and skipped"),
@@ -898,20 +914,6 @@ fn validate_output_presence<'a, N>(
             return Err(state_error(
                 id,
                 format!("cannot explicitly skip unknown or required output `{name}`"),
-            ));
-        }
-    }
-    for name in &produced {
-        if !node
-            .metadata
-            .ports
-            .outputs
-            .iter()
-            .any(|port| port.name == *name)
-        {
-            return Err(state_error(
-                id,
-                format!("produced undeclared output `{name}`"),
             ));
         }
     }
@@ -1374,6 +1376,7 @@ mod tests {
                 EmitNode(Outputs::from([
                     ("good".into(), json!(1).into()),
                     ("bad".into(), json!("wrong").into()),
+                    ("later".into(), json!(false).into()),
                 ])),
                 NodePorts {
                     inputs: vec![],

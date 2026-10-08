@@ -90,3 +90,16 @@
 - [x] 6.5 Run focused coverage when runtime/compiler behavior changes and `openspec validate
   unify-node-values-and-add-typed-fast-paths --strict`; verify spec scenarios are covered and mark tasks complete only
   after their stated evidence exists.
+
+## 7. Final review and simplification
+
+- [x] 7.1 Review the complete change against AGENTS.md and resolve blocking findings; record the outcome in `review.md`.
+- [x] 7.2 Remove unnecessary production/test design through reversible ablations and retained-guard negative controls;
+  keep all experiment details under ignored `target/` and verify the simplified paths with focused regressions.
+- [x] 7.3 Run required pinned hooks, complete Nix checks, relevant coverage, and strict OpenSpec validation after the
+  final simplifications; commit the reviewed implementation before archival.
+
+## Workflow follow-up
+
+- Archive the reviewed change and synchronize its capability deltas after the implementation commit.
+- Validate the synchronized specifications and commit the archive result.
