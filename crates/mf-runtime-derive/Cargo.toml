@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Input definition derives for the miniflow runtime"
+description = "Input and output definition derives for the miniflow runtime"
 
 [lib]
 proc-macro = true

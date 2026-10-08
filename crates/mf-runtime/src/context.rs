@@ -95,18 +95,23 @@ impl Drop for ScopeGuard<'_> {
     }
 }
 
+/// Dynamic task results retain the map-based execution contract.
+pub type NodeResult = TypedNodeResult<Outputs>;
+
+/// Output fields and execution control metadata returned by a typed task.
 #[derive(Clone, Debug, Default)]
-pub struct NodeResult {
-    pub outputs: Outputs,
+pub struct TypedNodeResult<O> {
+    pub outputs: O,
     pub skipped: BTreeSet<String>,
     pub loop_summary: Option<LoopSummary>,
 }
 
-impl From<Outputs> for NodeResult {
-    fn from(outputs: Outputs) -> Self {
+impl<O> From<O> for TypedNodeResult<O> {
+    fn from(outputs: O) -> Self {
         Self {
             outputs,
-            ..Self::default()
+            skipped: BTreeSet::new(),
+            loop_summary: None,
         }
     }
 }
