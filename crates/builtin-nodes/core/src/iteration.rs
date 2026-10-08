@@ -1,8 +1,8 @@
 use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, IterationConfig, IterationErrorPolicy, IterationMode,
-    NodeBuildError, NodeExecutionError, NodeInputs, NodePorts, NodeRegistration, NodeResult,
-    Outputs, PortSpec, PreparedSubgraph, TaskNode, TypedTaskNode, ValueKind, ValueRef, ValueType,
-    deserialize_config, execute_typed_task,
+    NodeBuildError, NodeExecutionError, NodeInputs, NodeOutputs, NodePorts, NodeRegistration,
+    NodeResult, Outputs, PortSpec, PreparedSubgraph, TaskNode, TypedNodeResult, TypedTaskNode,
+    ValueKind, ValueRef, ValueType, deserialize_config, execute_typed_task,
 };
 use mf_telemetry::observation::{ItemObservation, IterationObservation};
 use snafu::{ResultExt, Snafu};
@@ -26,11 +26,7 @@ fn factory(
 ) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let config: IterationConfig = deserialize_config(config)?;
     let node = IterationNode::new(id, config.mode, config.on_error, body)?;
-    let ports = NodePorts {
-        inputs: vec![],
-        outputs: vec![node.result_port()],
-    };
-    mf_runtime::PreparedNode::typed_task(node, ports)
+    mf_runtime::PreparedNode::typed_task(node, NodePorts::default())
 }
 
 inventory::submit! {
@@ -49,6 +45,12 @@ pub struct IterationNode {
 #[derive(NodeInputs)]
 pub struct IterationInputs {
     pub items: ValueRef,
+}
+
+/// Collected results shared by typed and dynamic Iteration task calls.
+#[derive(NodeOutputs)]
+pub struct IterationOutputs {
+    pub results: Vec<ValueRef>,
 }
 
 #[derive(Debug, Snafu)]
@@ -150,7 +152,7 @@ impl IterationNode {
         items: ValueRef,
         observation: Option<IterationObservation>,
         parent: &mut ExecutionContext,
-    ) -> Result<Outputs, NodeExecutionError> {
+    ) -> Result<IterationOutputs, NodeExecutionError> {
         let items: Box<dyn ExactSizeIterator<Item = (ValueRef, ValueRef)>> =
             match items.kind() {
                 ValueKind::Array(items) => {
@@ -249,21 +251,23 @@ impl IterationNode {
                 (IterationErrorPolicy::RemoveFailed, Err(_)) => {}
             }
         }
-        Ok(Outputs::from([(
-            "results".into(),
-            mf_runtime::ValueRef::array(values),
-        )]))
+        Ok(IterationOutputs { results: values })
     }
 }
 
 impl TypedTaskNode for IterationNode {
     type Input = IterationInputs;
+    type Output = IterationOutputs;
+
+    fn output_ports(&self) -> Vec<PortSpec> {
+        vec![self.result_port()]
+    }
 
     fn execute(
         &self,
         inputs: IterationInputs,
         ctx: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
+    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
         let observation = ctx.observation().and_then(|run| {
             run.iteration_observation(&self.id, &ctx.scope_path(), self.body.nodes.clone())
         });
@@ -389,9 +393,9 @@ mod tests {
             )
             .unwrap()
             .outputs;
-            assert_eq!(typed, output);
-            assert!(typed["results"][0].ptr_eq(&items["a"]));
-            assert!(typed["results"][1].ptr_eq(&items["b"]));
+            assert_eq!(typed.results, output["results"].as_array().unwrap());
+            assert!(typed.results[0].ptr_eq(&items["a"]));
+            assert!(typed.results[1].ptr_eq(&items["b"]));
             for (inputs, port) in [
                 (Inputs::new(), "items"),
                 (
@@ -464,6 +468,10 @@ mod tests {
                 node.ports().outputs[0].value_type,
                 ValueType::List(Box::new(expected))
             );
+            let expected_ports = node.ports();
+            let prepared =
+                mf_runtime::PreparedNode::typed_task(node, NodePorts::default()).unwrap();
+            assert_eq!(prepared.metadata.ports, expected_ports);
         }
     }
 }

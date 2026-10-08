@@ -68,7 +68,10 @@ pub enum TypeCompatibility {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Snafu)]
-#[snafu(display("path `{path}`: expected {expected}, found {actual}"))]
+#[snafu(
+    display("path `{path}`: expected {expected}, found {actual}"),
+    visibility(pub(super))
+)]
 pub struct TypeMismatch {
     pub path: String,
     pub expected: ValueType,
@@ -477,6 +480,12 @@ pub fn output_id(node: &str, port: &str) -> String {
 pub enum NodeBuildError {
     #[snafu(display("typed task input ports must be derived from its input struct"))]
     ConflictingInputDeclarations,
+    #[snafu(display("typed task output ports must be derived from its output struct"))]
+    ConflictingOutputDeclarations,
+    #[snafu(display(
+        "typed task output refinement must preserve names and requiredness and narrow field types"
+    ))]
+    InvalidOutputRefinement,
     #[snafu(display("invalid prepared subgraph: {message}"), visibility(pub))]
     InvalidSubgraph { message: String },
     #[snafu(display("invalid node configuration: {source}"), context(false))]
@@ -493,6 +502,11 @@ pub enum NodeExecutionError {
     InputDecode {
         #[snafu(source(from(crate::InputDecodeError, Box::new)))]
         source: Box<crate::InputDecodeError>,
+    },
+    #[snafu(display("could not encode typed task outputs at `{}`: {source}", source.pointer()))]
+    OutputEncode {
+        #[snafu(source(from(crate::OutputEncodeError, Box::new)))]
+        source: Box<crate::OutputEncodeError>,
     },
     #[snafu(display("Loop variable `{variable}`: {source}"), visibility(pub))]
     LoopVariableType {
@@ -553,18 +567,26 @@ pub trait TaskNode: Send + Sync {
     ) -> Result<crate::NodeResult, NodeExecutionError>;
 }
 
-/// A task whose input declaration and conversion are owned by the runtime.
+/// A task whose input and output declarations and conversion are owned by the runtime.
 ///
 /// Prepare through [`PreparedNode::typed_task`]. The runtime adapter implements
 /// the dynamic task contract, so business logic only receives decoded fields.
 pub trait TypedTaskNode: Send + Sync {
     type Input: crate::NodeInputs;
+    type Output: crate::NodeOutputs;
+
+    /// Refines output descriptors using fixed configuration or a prepared body.
+    /// Names and requiredness must agree with `Self::Output::ports()`, and the
+    /// encoded values must satisfy these descriptors whenever they are produced.
+    fn output_ports(&self) -> Vec<PortSpec> {
+        <Self::Output as crate::NodeOutputs>::ports()
+    }
 
     fn execute(
         &self,
         input: Self::Input,
         ctx: &mut crate::ExecutionContext,
-    ) -> Result<crate::NodeResult, NodeExecutionError>;
+    ) -> Result<crate::TypedNodeResult<Self::Output>, NodeExecutionError>;
 }
 
 struct TypedTaskAdapter<N>(N);
@@ -580,7 +602,13 @@ pub fn execute_typed_task<N: TypedTaskNode + ?Sized>(
     ctx: &mut crate::ExecutionContext,
 ) -> Result<crate::NodeResult, NodeExecutionError> {
     let input = <N::Input as crate::NodeInputs>::from_inputs(inputs).context(InputDecodeSnafu)?;
-    task.execute(input, ctx)
+    let result = task.execute(input, ctx)?;
+    Ok(crate::NodeResult {
+        outputs: <N::Output as crate::NodeOutputs>::into_outputs(result.outputs)
+            .context(OutputEncodeSnafu)?,
+        skipped: result.skipped,
+        loop_summary: result.loop_summary,
+    })
 }
 
 impl<N: TypedTaskNode> TaskNode for TypedTaskAdapter<N> {
@@ -644,15 +672,15 @@ impl NodeExecution {
 }
 
 impl PreparedNode {
-    /// Derives inputs from a typed task and preserves the other prepared metadata.
+    /// Derives ports from a typed task and preserves the other prepared metadata.
     ///
-    /// Supplying any input ports is an error, including ports identical to the
-    /// derived declaration. Preparation never decodes values or executes the task.
+    /// Supplying input or output ports is an error, including ports identical to
+    /// the derived declaration. Preparation never converts values or executes the task.
     ///
     /// ```
     /// use mf_runtime::{
-    ///     ExecutionContext, NodeBuildError, NodeExecutionError, NodeInputs,
-    ///     NodePorts, NodeResult, Outputs, PortSpec, PreparedNode, TypedTaskNode, ValueRef, ValueType,
+    ///     ExecutionContext, NodeBuildError, NodeExecutionError, NodeInputs, NodeOutputs,
+    ///     NodePorts, PreparedNode, TypedNodeResult, TypedTaskNode, ValueRef,
     /// };
     ///
     /// #[derive(NodeInputs)]
@@ -660,22 +688,26 @@ impl PreparedNode {
     ///     input: ValueRef,
     /// }
     ///
+    /// #[derive(NodeOutputs)]
+    /// struct EchoOutputs {
+    ///     value: ValueRef,
+    /// }
+    ///
     /// struct Echo;
     /// impl TypedTaskNode for Echo {
     ///     type Input = EchoInputs;
+    ///     type Output = EchoOutputs;
     ///
     ///     fn execute(&self, input: EchoInputs, _: &mut ExecutionContext)
-    ///         -> Result<NodeResult, NodeExecutionError>
+    ///         -> Result<TypedNodeResult<EchoOutputs>, NodeExecutionError>
     ///     {
-    ///         Ok(Outputs::from([("value".into(), input.input)]).into())
+    ///         Ok(EchoOutputs { value: input.input }.into())
     ///     }
     /// }
     ///
-    /// let prepared = PreparedNode::typed_task(Echo, NodePorts {
-    ///     inputs: vec![],
-    ///     outputs: vec![PortSpec::new("value", ValueType::Any, true)],
-    /// })?;
+    /// let prepared = PreparedNode::typed_task(Echo, NodePorts::default())?;
     /// assert_eq!(prepared.metadata.ports.inputs, EchoInputs::ports());
+    /// assert_eq!(prepared.metadata.ports.outputs, EchoOutputs::ports());
     /// # Ok::<(), NodeBuildError>(())
     /// ```
     pub fn typed_task<N: TypedTaskNode + 'static>(
@@ -687,6 +719,26 @@ impl PreparedNode {
             metadata.ports.inputs.is_empty(),
             ConflictingInputDeclarationsSnafu
         );
+        ensure!(
+            metadata.ports.outputs.is_empty(),
+            ConflictingOutputDeclarationsSnafu
+        );
+        let declared = <N::Output as crate::NodeOutputs>::ports();
+        let mut fields: std::collections::BTreeMap<_, _> =
+            declared.iter().map(|port| (&port.name, port)).collect();
+        let outputs = task.output_ports();
+        ensure!(
+            fields.len() == declared.len()
+                && outputs.len() == fields.len()
+                && outputs.iter().all(|port| {
+                    fields.remove(&port.name).is_some_and(|field| {
+                        field.required == port.required
+                            && port.value_type.is_assignable_to(&field.value_type)
+                    })
+                }),
+            InvalidOutputRefinementSnafu
+        );
+        metadata.ports.outputs = outputs;
         metadata.ports.inputs = <N::Input as crate::NodeInputs>::ports();
         Ok(Self::new(TypedTaskAdapter(task), metadata))
     }

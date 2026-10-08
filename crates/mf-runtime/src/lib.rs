@@ -18,6 +18,7 @@ mod stream_io;
 mod stream_plan;
 mod subgraph;
 mod typed_inputs;
+mod typed_outputs;
 mod value;
 mod worker;
 mod workflow_inputs;
@@ -26,7 +27,7 @@ mod workflow_manifest;
 pub use cancellation::StreamCancellation;
 pub use context::{
     ContextValue, ExecutionContext, ExecutionDependency, ExecutionScope, NodeResult,
-    execute_node_in_context, select_context_output,
+    TypedNodeResult, execute_node_in_context, select_context_output,
 };
 pub use definition::{
     ControlEdgeDefinition, DefinitionId, DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition,
@@ -50,7 +51,7 @@ pub use loop_node::{
     prepared_scope_source,
 };
 pub use message_domain::MessageDomains;
-pub use mf_runtime_derive::NodeInputs;
+pub use mf_runtime_derive::{NodeInputs, NodeOutputs};
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
@@ -80,6 +81,8 @@ pub use subgraph::PreparedSubgraph;
 pub use typed_inputs::{
     InputDecodeError, InputField, InputValue, NodeInputs, decode_input, reject_unknown_inputs,
 };
+
+pub use typed_outputs::{NodeOutputs, OutputEncodeError, OutputField, OutputValue, encode_output};
 
 pub use value::{ValueKind, ValueRef};
 pub use worker::{RuntimeWorkerHandle, WorkerHandle, WorkerJob, WorkerPool, WorkerPoolError};

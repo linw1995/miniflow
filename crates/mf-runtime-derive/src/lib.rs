@@ -13,32 +13,71 @@ use syn::{
 #[proc_macro_derive(NodeInputs, attributes(input))]
 pub fn derive_node_inputs(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
-    match expand(input) {
+    match expand(input, Direction::Input) {
         Ok(output) => output.into(),
         Err(error) => error.into_compile_error().into(),
     }
 }
 
-fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+/// Derives port declarations and runtime-owned encoding for a named-field struct.
+///
+/// Use `#[output(rename = "port-name")]` on a field and
+/// `#[output(runtime = "::runtime_alias")]` on the struct when needed.
+#[proc_macro_derive(NodeOutputs, attributes(output))]
+pub fn derive_node_outputs(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match expand(input, Direction::Output) {
+        Ok(output) => output.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Direction {
+    Input,
+    Output,
+}
+
+impl Direction {
+    fn attribute(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+        }
+    }
+
+    fn derive_name(self) -> &'static str {
+        match self {
+            Self::Input => "NodeInputs",
+            Self::Output => "NodeOutputs",
+        }
+    }
+}
+
+fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::TokenStream> {
+    let attribute = direction.attribute();
+    let derive_name = direction.derive_name();
     let name = input.ident;
     let Data::Struct(data) = input.data else {
         return Err(syn::Error::new(
             name.span(),
-            "NodeInputs requires a named-field struct",
+            format!("{derive_name} requires a named-field struct"),
         ));
     };
     let Fields::Named(fields) = data.fields else {
         return Err(syn::Error::new(
             name.span(),
-            "NodeInputs requires a named-field struct",
+            format!("{derive_name} requires a named-field struct"),
         ));
     };
     let mut runtime = None;
     for attr in &input.attrs {
-        if attr.path().is_ident("input") {
+        if attr.path().is_ident(attribute) {
             attr.parse_nested_meta(|meta| {
                 if !meta.path.is_ident("runtime") {
-                    return Err(meta.error("expected `runtime = \"path\"` on the input struct"));
+                    return Err(meta.error(format!(
+                        "expected `runtime = \"path\"` on the {attribute} struct"
+                    )));
                 }
                 if runtime.is_some() {
                     return Err(meta.error("duplicate runtime path"));
@@ -52,21 +91,21 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
     let runtime: Path = runtime.unwrap_or_else(|| parse_quote!(::mf_runtime));
     let mut generics = input.generics;
     let mut ports = Vec::new();
-    let mut decoded = Vec::new();
+    let mut converted = Vec::new();
     let mut names = BTreeSet::new();
     for field in fields.named {
         let ident = field.ident.expect("named field");
         let mut renamed = None;
         for attr in &field.attrs {
-            if attr.path().is_ident("input") {
+            if attr.path().is_ident(attribute) {
                 attr.parse_nested_meta(|meta| {
                     if !meta.path.is_ident("rename") {
-                        return Err(
-                            meta.error("expected `rename = \"port-name\"` on an input field")
-                        );
+                        return Err(meta.error(format!(
+                            "expected `rename = \"port-name\"` on an {attribute} field"
+                        )));
                     }
                     if renamed.is_some() {
-                        return Err(meta.error("duplicate input rename"));
+                        return Err(meta.error(format!("duplicate {attribute} rename")));
                     }
                     renamed = Some(meta.value()?.parse::<LitStr>()?);
                     Ok(())
@@ -77,48 +116,91 @@ fn expand(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
         if port.value().is_empty() {
             return Err(syn::Error::new(
                 port.span(),
-                "input port name must not be empty",
+                format!("{attribute} port name must not be empty"),
             ));
         }
         if !names.insert(port.value()) {
-            return Err(syn::Error::new(port.span(), "duplicate input port name"));
+            return Err(syn::Error::new(
+                port.span(),
+                format!("duplicate {attribute} port name"),
+            ));
         }
         let ty = field.ty;
-        let mut borrowed = BorrowedField(None);
+        let mut borrowed = BorrowedField {
+            error: None,
+            derive_name,
+            attribute,
+        };
         borrowed.visit_type(&ty);
-        if let Some(error) = borrowed.0 {
+        if let Some(error) = borrowed.error {
             return Err(error);
         }
+        let field_trait = match direction {
+            Direction::Input => quote!(#runtime::InputField),
+            Direction::Output => quote!(#runtime::OutputField),
+        };
         generics
             .make_where_clause()
             .predicates
-            .push(parse_quote!(#ty: #runtime::InputField));
-        ports.push(quote!(<#ty as #runtime::InputField>::port(#port)));
-        decoded.push(quote!(#ident: #runtime::decode_input::<#ty>(&mut __mf_inputs, #port)?));
+            .push(parse_quote!(#ty: #field_trait));
+        ports.push(quote!(<#ty as #field_trait>::port(#port)));
+        converted.push(match direction {
+            Direction::Input => {
+                quote!(#ident: #runtime::decode_input::<#ty>(&mut __mf_inputs, #port)?)
+            }
+            Direction::Output => {
+                quote!(#runtime::encode_output::<#ty>(&mut __mf_outputs, #port, self.#ident)?;)
+            }
+        });
     }
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
+    let (contract, conversion) = match direction {
+        Direction::Input => (
+            quote!(#runtime::NodeInputs),
+            quote! {
+                fn from_inputs(mut __mf_inputs: #runtime::Inputs) -> ::std::result::Result<Self, #runtime::InputDecodeError> {
+                    let __mf_result = Self { #(#converted),* };
+                    #runtime::reject_unknown_inputs(__mf_inputs)?;
+                    ::std::result::Result::Ok(__mf_result)
+                }
+            },
+        ),
+        Direction::Output => (
+            quote!(#runtime::NodeOutputs),
+            quote! {
+                fn into_outputs(self) -> ::std::result::Result<#runtime::Outputs, #runtime::OutputEncodeError> {
+                    let mut __mf_outputs = #runtime::Outputs::new();
+                    #(#converted)*
+                    ::std::result::Result::Ok(__mf_outputs)
+                }
+            },
+        ),
+    };
     Ok(quote! {
-        impl #impl_generics #runtime::NodeInputs for #name #type_generics #where_clause {
+        impl #impl_generics #contract for #name #type_generics #where_clause {
             fn ports() -> ::std::vec::Vec<#runtime::PortSpec> {
                 ::std::vec![#(#ports),*]
             }
 
-            fn from_inputs(mut __mf_inputs: #runtime::Inputs) -> ::std::result::Result<Self, #runtime::InputDecodeError> {
-                let __mf_result = Self { #(#decoded),* };
-                #runtime::reject_unknown_inputs(__mf_inputs)?;
-                ::std::result::Result::Ok(__mf_result)
-            }
+            #conversion
         }
     })
 }
 
-struct BorrowedField(Option<syn::Error>);
+struct BorrowedField {
+    error: Option<syn::Error>,
+    derive_name: &'static str,
+    attribute: &'static str,
+}
 
 impl<'ast> Visit<'ast> for BorrowedField {
     fn visit_type_reference(&mut self, reference: &'ast syn::TypeReference) {
-        self.0 = Some(syn::Error::new(
+        self.error = Some(syn::Error::new(
             reference.span(),
-            "NodeInputs requires owned input fields; references are unsupported",
+            format!(
+                "{} requires owned {} fields; references are unsupported",
+                self.derive_name, self.attribute
+            ),
         ));
     }
 }

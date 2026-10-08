@@ -1,9 +1,9 @@
 use mf_runtime::{
     ContextReference, ContextValue, ExecutionContext, ExecutionDependency, FlowNode,
     InputDecodeError, Inputs, NodeBuildError, NodeExecutionError, NodeInputs, NodeMetadata,
-    NodePorts, NodeResult, OutputDerivation, Outputs, PortSpec, PreparedNode, StdinRequirement,
-    TaskFlowNode, TaskNode, TypedTaskNode, ValueRef, ValueType, WorkflowRunError,
-    execute_node_in_context,
+    NodeOutputs, NodePorts, NodeResult, OutputDerivation, Outputs, PortSpec, PreparedNode,
+    StdinRequirement, TaskFlowNode, TaskNode, TypedNodeResult, TypedTaskNode, ValueRef, ValueType,
+    WorkflowRunError, execute_node_in_context,
 };
 use serde_json::json;
 use snafu::ResultExt;
@@ -15,21 +15,32 @@ struct EchoInputs {
     label: Option<String>,
 }
 
+#[derive(NodeOutputs)]
+struct EchoOutputs {
+    value: ValueRef,
+}
+
+#[derive(NodeOutputs)]
+struct CountOutputs {
+    value: i64,
+}
+
 struct Echo;
 impl TypedTaskNode for Echo {
     type Input = EchoInputs;
+    type Output = EchoOutputs;
 
     fn execute(
         &self,
         input: EchoInputs,
         ctx: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
+    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
         let ContextValue::Value(source) = ctx.output("source.value")? else {
             panic!("source must be present");
         };
         assert!(input.input.ptr_eq(source));
         assert!(input.label.is_none());
-        Ok(Outputs::from([("value".into(), input.input)]).into())
+        Ok(EchoOutputs { value: input.input }.into())
     }
 }
 
@@ -71,14 +82,7 @@ fn dependency() -> ExecutionDependency<'static> {
 fn echo() -> TaskFlowNode {
     FlowNode::new(
         "echo",
-        PreparedNode::typed_task(
-            Echo,
-            NodePorts {
-                inputs: vec![],
-                outputs: vec![PortSpec::new("value", ValueType::Any, true)],
-            },
-        )
-        .unwrap(),
+        PreparedNode::typed_task(Echo, NodePorts::default()).unwrap(),
     )
     .into_task()
     .unwrap()
@@ -98,30 +102,28 @@ impl NodeInputs for NeverDecode {
 struct NeverExecute;
 impl TypedTaskNode for NeverExecute {
     type Input = NeverDecode;
+    type Output = CountOutputs;
 
     fn execute(
         &self,
         _: NeverDecode,
         _: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
+    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
         panic!("business execution must not run");
     }
 }
 
 #[test]
-fn preparation_derives_only_inputs_and_never_decodes_or_executes() {
+fn preparation_derives_ports_and_never_decodes_or_executes() {
     let metadata = NodeMetadata {
-        ports: NodePorts {
-            inputs: vec![],
-            outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
-        },
+        ports: NodePorts::default(),
         output_derivations: vec![OutputDerivation::forward_input("value", "input")],
         context_references: vec![ContextReference::new("source.value", "source")],
         stdin: Some(StdinRequirement::UnlessInput("input".into())),
     };
     let prepared = PreparedNode::typed_task(NeverExecute, metadata.clone()).unwrap();
     assert_eq!(prepared.metadata.ports.inputs, NeverDecode::ports());
-    assert_eq!(prepared.metadata.ports.outputs, metadata.ports.outputs);
+    assert_eq!(prepared.metadata.ports.outputs, CountOutputs::ports());
     assert_eq!(
         prepared.metadata.output_derivations,
         metadata.output_derivations
@@ -139,6 +141,14 @@ fn preparation_derives_only_inputs_and_never_decodes_or_executes() {
     assert!(matches!(
         PreparedNode::typed_task(NeverExecute, conflict),
         Err(NodeBuildError::ConflictingInputDeclarations)
+    ));
+    let conflict = NodePorts {
+        inputs: vec![],
+        outputs: CountOutputs::ports(),
+    };
+    assert!(matches!(
+        PreparedNode::typed_task(NeverExecute, conflict),
+        Err(NodeBuildError::ConflictingOutputDeclarations)
     ));
 }
 
@@ -161,14 +171,7 @@ fn typed_execution_keeps_context_and_shared_payloads() {
 fn skip_missing_dependencies_and_input_checks_precede_typed_decoding() {
     let node = FlowNode::new(
         "never",
-        PreparedNode::typed_task(
-            NeverExecute,
-            NodePorts {
-                inputs: vec![],
-                outputs: vec![PortSpec::new("value", ValueType::Any, true)],
-            },
-        )
-        .unwrap(),
+        PreparedNode::typed_task(NeverExecute, NodePorts::default()).unwrap(),
     )
     .into_task()
     .unwrap();
@@ -246,13 +249,14 @@ fn decode_failures_retain_node_attribution_and_typed_sources() {
 struct BusinessFailure;
 impl TypedTaskNode for BusinessFailure {
     type Input = EchoInputs;
+    type Output = EchoOutputs;
 
     fn execute(
         &self,
         _: EchoInputs,
         _: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
-        let result: Result<NodeResult, Box<dyn Error + Send + Sync>> =
+    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
+        let result: Result<TypedNodeResult<Self::Output>, Box<dyn Error + Send + Sync>> =
             Err(Box::new(io::Error::other("business sentinel")));
         result.context(mf_runtime::NodePluginFailedSnafu)
     }
@@ -279,5 +283,161 @@ fn business_failures_keep_the_plugin_source_chain() {
             .unwrap()
             .to_string(),
         "business sentinel"
+    );
+}
+
+#[derive(NodeInputs)]
+struct NoInputs {}
+
+#[derive(NodeOutputs)]
+struct BranchOutputs {
+    selected: Option<ValueRef>,
+    other: Option<ValueRef>,
+}
+
+struct Branch;
+impl TypedTaskNode for Branch {
+    type Input = NoInputs;
+    type Output = BranchOutputs;
+
+    fn execute(
+        &self,
+        _: NoInputs,
+        _: &mut ExecutionContext,
+    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
+        Ok(TypedNodeResult {
+            outputs: BranchOutputs {
+                selected: Some(ValueRef::null()),
+                other: None,
+            },
+            skipped: ["other".into()].into(),
+            loop_summary: Some(mf_telemetry::event::LoopSummary {
+                pass_count: mf_telemetry::Count::try_from(3).unwrap(),
+                reason: mf_telemetry::event::LoopStopReason::Maximum,
+            }),
+        })
+    }
+}
+
+#[test]
+fn output_encoding_preserves_explicit_skips_null_and_loop_summary() {
+    let prepared = PreparedNode::typed_task(Branch, NodePorts::default()).unwrap();
+    let result = prepared
+        .execution
+        .as_task_node()
+        .unwrap()
+        .execute(Inputs::new(), &mut ExecutionContext::default())
+        .unwrap();
+    assert!(result.outputs["selected"].is_null());
+    assert!(!result.outputs.contains_key("other"));
+    assert_eq!(result.skipped, ["other".into()].into());
+    assert_eq!(result.loop_summary.unwrap().pass_count.get(), 3);
+    let node = FlowNode::new("branch", prepared).into_task().unwrap();
+    let mut ctx = ExecutionContext::default();
+    execute_node_in_context(&node, &[], &mut ctx).unwrap();
+    assert_eq!(ctx.output("branch.other").unwrap(), ContextValue::Skipped);
+    assert!(
+        matches!(ctx.output("branch.selected").unwrap(), ContextValue::Value(value) if value.is_null())
+    );
+}
+
+#[derive(NodeOutputs)]
+struct Ratios {
+    valid: i64,
+    #[output(rename = "ratios./~")]
+    ratios: Vec<f64>,
+}
+
+struct NonFinite;
+impl TypedTaskNode for NonFinite {
+    type Input = NoInputs;
+    type Output = Ratios;
+
+    fn execute(
+        &self,
+        _: NoInputs,
+        _: &mut ExecutionContext,
+    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
+        Ok(Ratios {
+            valid: 1,
+            ratios: vec![1.0, f64::NAN],
+        }
+        .into())
+    }
+}
+
+#[test]
+fn encoding_failure_keeps_node_attribution_and_publishes_no_partial_outputs() {
+    let node = FlowNode::new(
+        "nonfinite",
+        PreparedNode::typed_task(NonFinite, NodePorts::default()).unwrap(),
+    )
+    .into_task()
+    .unwrap();
+    let mut ctx = ExecutionContext::default();
+    let error = execute_node_in_context(&node, &[], &mut ctx).unwrap_err();
+    assert!(
+        matches!(&error, WorkflowRunError::NodeExecution { definition_id, .. } if definition_id.as_str() == "nonfinite")
+    );
+    let encode = error
+        .source()
+        .unwrap()
+        .source()
+        .unwrap()
+        .downcast_ref::<Box<mf_runtime::OutputEncodeError>>()
+        .unwrap();
+    assert_eq!(encode.pointer(), "/ratios.~1~0/1");
+    assert_eq!(
+        encode
+            .source()
+            .unwrap()
+            .downcast_ref::<mf_runtime::TypeMismatch>()
+            .unwrap()
+            .expected,
+        ValueType::Float64
+    );
+    assert!(ctx.output("nonfinite.valid").is_err());
+    assert!(ctx.output("nonfinite.ratios./~").is_err());
+}
+
+struct Refined(Vec<PortSpec>);
+impl TypedTaskNode for Refined {
+    type Input = NoInputs;
+    type Output = CountOutputs;
+
+    fn output_ports(&self) -> Vec<PortSpec> {
+        self.0.clone()
+    }
+
+    fn execute(
+        &self,
+        _: NoInputs,
+        _: &mut ExecutionContext,
+    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
+        panic!("preparation must not run business logic")
+    }
+}
+
+#[test]
+fn output_refinement_cannot_change_names_presence_or_widen_types() {
+    for ports in [
+        vec![],
+        vec![PortSpec::new("other", ValueType::Int64, true)],
+        vec![PortSpec::new("value", ValueType::Int64, false)],
+        vec![PortSpec::new("value", ValueType::Any, true)],
+        vec![PortSpec::new("value", ValueType::String, true)],
+        vec![PortSpec::new("value", ValueType::Int64, true); 2],
+    ] {
+        assert!(matches!(
+            PreparedNode::typed_task(Refined(ports), NodePorts::default()),
+            Err(NodeBuildError::InvalidOutputRefinement)
+        ));
+    }
+    assert!(
+        PreparedNode::typed_task(
+            Refined(vec![PortSpec::new("value", ValueType::Int64, true)]),
+            NodePorts::default()
+        )
+        .is_ok()
     );
 }

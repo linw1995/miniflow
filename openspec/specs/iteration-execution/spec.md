@@ -97,9 +97,9 @@ These policies SHALL apply equally to array elements and map entries, using the 
 - **WHEN** any item fails under `terminate`
 - **THEN** the Iteration node fails and does not publish `results`
 
-### Requirement: Share struct-defined Iteration inputs across task interfaces
+### Requirement: Share struct-defined Iteration inputs and outputs across task interfaces
 
-Iteration SHALL expose a typed input struct containing one required shared JSON value named items and use its declaration during preparation. Its existing dynamic task interface SHALL remain supported through runtime-owned decoding. Missing or unknown bindings SHALL retain typed runtime decode errors. Supplied scalar items SHALL retain the array-or-object domain error. Body-dependent output declarations and iteration policies SHALL remain unchanged.
+Iteration SHALL expose owned inputs containing required shared items and owned outputs containing collected shared results. Preparation SHALL retain body-dependent list types and error policies. Its dynamic task interface SHALL use runtime conversion and remain supported. Missing or unknown bindings SHALL retain typed decode errors; scalar items SHALL retain the array-or-object domain error.
 
 #### Scenario: Prepare a typed iteration
 
@@ -114,7 +114,7 @@ Iteration SHALL expose a typed input struct containing one required shared JSON 
 #### Scenario: Invoke the typed interface
 
 - **WHEN** a caller supplies the typed Iteration input struct directly
-- **THEN** its body executes with the same item scopes and result behavior as dynamic invocation
+- **THEN** its body executes with the same item scopes and ordering, returning typed collected results whose shared payloads match dynamic invocation
 
 #### Scenario: Reject invalid bindings before the body
 

@@ -3,8 +3,9 @@ use mf_compiler::{
 };
 use mf_runtime::{
     ContextReference, ContextValue, Emitter, ExecutionContext, Inputs, NodeBuildError,
-    NodeExecutionError, NodeFactory, NodeInputs, NodeMetadata, NodePorts, NodeRegistration,
-    NodeResult, Outputs, PortSpec, PreparedNode, StreamNode, TaskNode, TypedTaskNode, ValueType,
+    NodeExecutionError, NodeFactory, NodeInputs, NodeMetadata, NodeOutputs, NodePorts,
+    NodeRegistration, NodeResult, Outputs, PortSpec, PreparedNode, StreamNode, TaskNode,
+    TypedNodeResult, TypedTaskNode, ValueType,
 };
 use serde_json::{Value, json};
 
@@ -14,21 +15,30 @@ struct AddInputs {
     label: Option<String>,
 }
 
+#[derive(NodeOutputs)]
+struct AddOutputs {
+    value: i64,
+}
+
 struct Add;
 impl TypedTaskNode for Add {
     type Input = AddInputs;
+    type Output = AddOutputs;
 
     fn execute(
         &self,
         input: AddInputs,
         ctx: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
+    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
         let ContextValue::Value(source) = ctx.output("source.item")? else {
             panic!("source was skipped")
         };
         assert_eq!(source.as_i64(), Some(input.item));
         assert!(input.label.is_none());
-        Ok(Outputs::from([("value".into(), (input.item + 1).into())]).into())
+        Ok(AddOutputs {
+            value: input.item + 1,
+        }
+        .into())
     }
 }
 
@@ -37,10 +47,7 @@ fn add(_: Value) -> Result<PreparedNode, NodeBuildError> {
         Add,
         NodeMetadata {
             context_references: vec![ContextReference::new("source.item", "source")],
-            ..NodeMetadata::new(NodePorts {
-                inputs: vec![],
-                outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
-            })
+            ..NodeMetadata::default()
         },
     )
 }
@@ -121,4 +128,39 @@ fn typed_tasks_use_the_same_adapter_and_context_in_task_and_stream_domains() {
             assert_eq!(flow.execute().unwrap()["result"], json!(4));
         }
     }
+}
+
+fn string_sink(_: Value) -> Result<PreparedNode, NodeBuildError> {
+    Ok(PreparedNode::new(
+        Source,
+        NodePorts {
+            inputs: vec![PortSpec::new("value", ValueType::String, true)],
+            outputs: vec![PortSpec::new("item", ValueType::Int64, true)],
+        },
+    ))
+}
+
+inventory::submit! { NodeRegistration { kind: "test.typed_output_sink", factory: NodeFactory::Plain(string_sink) } }
+
+#[test]
+fn derived_outputs_reject_disjoint_consumers_before_execution() {
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-10-03", "dependencies":{},
+        "nodes":[
+            {"id":"source", "kind":"test.typed_task_source"},
+            {"id":"add", "kind":"test.typed_add"},
+            {"id":"sink", "kind":"test.typed_output_sink"}
+        ],
+        "edges":[
+            {"from_node":"source", "from_output":"item", "to_node":"add", "to_input":"item"},
+            {"from_node":"add", "from_output":"value", "to_node":"sink", "to_input":"value"}
+        ], "outputs":[]
+    }))
+    .unwrap();
+    let error =
+        compile_definition(&definition, &NodeRegistry::from_inventory().unwrap()).unwrap_err();
+    assert!(
+        matches!(error, mf_compiler::WorkflowCompileError::IncompatiblePortTypes { output_type, input_type, .. }
+        if *output_type == ValueType::Int64 && *input_type == ValueType::String)
+    );
 }

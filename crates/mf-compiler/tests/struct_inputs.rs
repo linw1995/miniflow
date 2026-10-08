@@ -30,20 +30,24 @@ type FourLevels = Vec<Vec<Vec<Vec<mf_runtime::ValueRef>>>>;
 type EightLevels = Vec<Vec<Vec<Vec<FourLevels>>>>;
 type SixteenLevels = Vec<Vec<Vec<Vec<Vec<Vec<Vec<Vec<EightLevels>>>>>>>>;
 
-#[derive(mf_runtime::NodeInputs)]
+#[derive(mf_runtime::NodeInputs, mf_runtime::NodeOutputs)]
 struct DeepInputs {
     items: SixteenLevels,
 }
 
+#[derive(mf_runtime::NodeInputs, mf_runtime::NodeOutputs)]
+struct DeepOutputs {}
+
 struct DeepTask;
 impl mf_runtime::TypedTaskNode for DeepTask {
     type Input = DeepInputs;
+    type Output = DeepOutputs;
 
     fn execute(
         &self,
         input: Self::Input,
         _: &mut mf_runtime::ExecutionContext,
-    ) -> Result<mf_runtime::NodeResult, mf_runtime::NodeExecutionError> {
+    ) -> Result<mf_runtime::TypedNodeResult<Self::Output>, mf_runtime::NodeExecutionError> {
         let _ = input.items;
         panic!("excessive derived depth must fail before execution");
     }
@@ -55,24 +59,46 @@ inventory::submit! { mf_runtime::NodeRegistration {
     })
 } }
 
+struct DeepOutputTask;
+impl mf_runtime::TypedTaskNode for DeepOutputTask {
+    type Input = DeepOutputs;
+    type Output = DeepInputs;
+
+    fn execute(
+        &self,
+        _: Self::Input,
+        _: &mut mf_runtime::ExecutionContext,
+    ) -> Result<mf_runtime::TypedNodeResult<Self::Output>, mf_runtime::NodeExecutionError> {
+        panic!("excessive derived depth must fail before execution");
+    }
+}
+
+inventory::submit! { mf_runtime::NodeRegistration {
+    kind: "test.deep_output_struct", factory: mf_runtime::NodeFactory::Plain(|_| {
+        mf_runtime::PreparedNode::typed_task(DeepOutputTask, mf_runtime::NodePorts::default())
+    })
+} }
+
 #[test]
 fn compiler_rejects_excessive_derived_descriptor_depth() {
     use std::error::Error;
 
-    let definition: WorkflowDefinition = serde_json::from_value(json!({
-        "version":"2026-10-03", "dependencies":{},
-        "nodes":[{"id":"deep", "kind":"test.deep_struct"}], "outputs":[]
-    }))
-    .unwrap();
-    let error =
-        compile_definition(&definition, &NodeRegistry::from_inventory().unwrap()).unwrap_err();
-    assert!(error.to_string().contains("items"));
-    let depth = error
-        .source()
-        .unwrap()
-        .downcast_ref::<mf_runtime::TypeDepthError>()
+    for kind in ["test.deep_struct", "test.deep_output_struct"] {
+        let definition: WorkflowDefinition = serde_json::from_value(json!({
+            "version":"2026-10-03", "dependencies":{},
+            "nodes":[{"id":"deep", "kind":kind}], "outputs":[]
+        }))
         .unwrap();
-    assert_eq!(depth.depth, ValueType::MAX_DEPTH + 1);
+        let error =
+            compile_definition(&definition, &NodeRegistry::from_inventory().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("items"));
+        let depth = error
+            .source()
+            .unwrap()
+            .downcast_ref::<mf_runtime::TypeDepthError>()
+            .unwrap();
+        assert_eq!(depth.depth, ValueType::MAX_DEPTH + 1);
+    }
 }
 
 #[test]
@@ -212,16 +238,19 @@ fn generated_struct_inputs_match_memory_and_freeze_the_interface() {
         assert!(!marker.exists());
         let registry = NodeRegistry::from_inventory().unwrap();
         let compiled = compile_definition(&definition, &registry).unwrap();
-        let run = |flags: &[&str], drift: bool| {
+        let run = |flags: &[&str], drift: Option<&str>| {
             let mut command = Command::new(&executable);
             command.args(flags).stdin(Stdio::null());
-            if drift {
-                command.env("MF_FIXTURE_TYPED_INPUT_DRIFT", "1");
+            if let Some(drift) = drift {
+                command.env(drift, "1");
             }
             command.output().unwrap()
         };
         let args = arguments().to_string();
-        let output = run(&["--inputs", args.as_str()], true);
+        let output = run(
+            &["--inputs", args.as_str()],
+            Some("MF_FIXTURE_TYPED_INPUT_DRIFT"),
+        );
         let diagnostic = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success());
         assert!(
@@ -231,10 +260,21 @@ fn generated_struct_inputs_match_memory_and_freeze_the_interface() {
         assert!(!marker.exists());
         let mut invalid = arguments();
         invalid["typed./~"]["rows./~"] = json!([{"count":1},{"count":"wrong"}]);
-        let output = run(&["--inputs", &invalid.to_string()], false);
+        let output = run(&["--inputs", &invalid.to_string()], None);
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("/typed.~1~0/rows.~1~0/1/count"));
         assert!(!marker.exists());
+        let mut non_finite = arguments();
+        non_finite["typed./~"]["ratio"] = json!(-1.0);
+        let output = run(&["--inputs", &non_finite.to_string()], None);
+        assert!(!output.status.success());
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            diagnostic.contains("/sqrt") && diagnostic.contains("non-finite float"),
+            "{diagnostic}"
+        );
+        assert!(output.stdout.is_empty());
+        fs::remove_file(&marker).unwrap();
         for raw in [None, Some(json!(null)), Some(json!({"nested":[1,true]}))] {
             let mut args = arguments();
             if let Some(raw) = raw {
@@ -259,7 +299,7 @@ fn generated_struct_inputs_match_memory_and_freeze_the_interface() {
                     .unwrap()
             };
             fs::remove_file(&marker).unwrap();
-            let actual = run(&["--inputs", &args.to_string()], false);
+            let actual = run(&["--inputs", &args.to_string()], None);
             assert!(
                 actual.status.success(),
                 "{}",

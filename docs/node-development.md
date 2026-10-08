@@ -140,15 +140,58 @@ decoders must agree on accepted names, requiredness, and value types. Errors ret
 `InputDecodeError::pointer()` adds the escaped port name to its nested path. Shared `ValueRef` payloads
 remain shared during decoding, including collection descendants; owned strings and typed containers may allocate.
 
+### Struct-defined outputs
+
+Use `NodeOutputs` to declare output ports and encode their values from one owned struct:
+
+```rust
+use mf_runtime::{NodeOutputs, ValueRef};
+use std::collections::BTreeMap;
+
+#[derive(NodeOutputs)]
+struct ResponseOutputs {
+    status: i64,
+    headers: BTreeMap<String, String>,
+    body: ValueRef,
+    #[output(rename = "response.label")]
+    label: Option<String>,
+}
+
+let ports = ResponseOutputs::ports();
+let outputs = ResponseOutputs {
+    status: 200,
+    headers: BTreeMap::new(),
+    body: ValueRef::null(),
+    label: None,
+}.into_outputs()?;
+```
+
+Output fields support the same owned scalar and recursive collection types as inputs. Required fields
+always produce a value. `Option<T>` declares an optional port: `None` omits the output, while
+`Some(ValueRef::null())` produces JSON null. Omission does not mark an output as skipped; branch nodes
+must declare explicit skips in the task result. Non-finite `f64` values fail encoding, including inside
+collections, rather than becoming null. Finite floating values retain their representation, including negative zero.
+
+The derive supports named-field structs, generics, type aliases, raw identifiers, and
+`#[output(rename = "port-name")]`. Empty and duplicate names fail compilation. Use
+`#[output(runtime = "::runtime_alias")]` for a renamed runtime dependency, or
+`#[output(runtime = "crate")]` within the runtime crate. Output attributes are independent of Serde.
+Tuple/unit structs, enums, borrowed fields, optional collection elements, and nested `Option` are unsupported.
+
+`NodeOutputs`, `OutputField`, `OutputValue`, and `encode_output` also support manual output contracts.
+Declarations and encoders must agree on names, requiredness, and JSON types. `OutputEncodeError::pointer()`
+adds the escaped port name to nested failures and preserves the typed error source. Encoding shared
+`ValueRef` fields and collection descendants retains payload identity without an intermediate Serde tree.
+
 ### Typed task execution
 
-Implement `TypedTaskNode` to receive the input struct directly. The runtime owns conversion and wraps the
-provider as an ordinary task executor:
+Implement `TypedTaskNode` to receive an input struct and return an output struct. The runtime owns
+conversion in both directions and wraps the provider as an ordinary task executor:
 
 ```rust
 use mf_runtime::{
-    ExecutionContext, NodeBuildError, NodeExecutionError, NodeInputs, NodePorts, NodeResult,
-    Outputs, PortSpec, PreparedNode, TypedTaskNode, ValueRef, ValueType,
+    ExecutionContext, NodeBuildError, NodeExecutionError, NodeInputs, NodeOutputs,
+    NodePorts, PreparedNode, TypedNodeResult, TypedTaskNode, ValueRef,
 };
 
 #[derive(NodeInputs)]
@@ -156,47 +199,64 @@ struct EchoInputs {
     input: ValueRef,
 }
 
+#[derive(NodeOutputs)]
+struct EchoOutputs {
+    value: ValueRef,
+}
+
 struct Echo;
 impl TypedTaskNode for Echo {
     type Input = EchoInputs;
+    type Output = EchoOutputs;
 
     fn execute(&self, input: EchoInputs, _: &mut ExecutionContext)
-        -> Result<NodeResult, NodeExecutionError>
+        -> Result<TypedNodeResult<EchoOutputs>, NodeExecutionError>
     {
-        Ok(Outputs::from([("value".into(), input.input)]).into())
+        Ok(EchoOutputs { value: input.input }.into())
     }
 }
 
 fn factory(_: serde_json::Value) -> Result<PreparedNode, NodeBuildError> {
-    PreparedNode::typed_task(Echo, NodePorts {
-        inputs: vec![],
-        outputs: vec![PortSpec::new("value", ValueType::Any, true)],
-    })
+    PreparedNode::typed_task(Echo, NodePorts::default())
 }
 ```
 
-Pass ordinary `NodeMetadata` when the factory also supplies output derivations, context references, or
-stdin requirements. The typed constructor preserves those fields and requires an empty input declaration;
-even matching hand-written inputs return `NodeBuildError::ConflictingInputDeclarations`.
-Register the factory with the existing `NodeFactory::Plain` or `NodeFactory::Subgraph` contract.
+`TypedNodeResult<O>` carries typed outputs, explicit skipped names, and an optional loop summary.
+`NodeResult` remains the dynamic result type with map outputs. Converting an output struct with `.into()`
+creates a result with no skips or loop summary; construct `TypedNodeResult` explicitly when needed.
+
+Pass ordinary `NodeMetadata` when the factory supplies output derivations, context references, or stdin
+requirements. The typed constructor preserves those fields and requires empty input and output declarations;
+even matching hand-written ports return `NodeBuildError::ConflictingInputDeclarations` or
+`ConflictingOutputDeclarations`. Register the factory with the existing `NodeFactory::Plain` or
+`NodeFactory::Subgraph` contract.
+
+By default output ports come from `Self::Output::ports()`. Override `TypedTaskNode::output_ports(&self)`
+when fixed configuration or a prepared body refines output types. Refinements must preserve all names
+and requiredness and narrow the struct's field descriptors; preparation rejects other changes with
+`NodeBuildError::InvalidOutputRefinement`. The provider must produce values satisfying the refinement.
+The compiler and runtime apply their normal port checks to these instance-specific types.
 
 Typed tasks run through the same dependency resolution, skip rules, input checks, output publication,
-and context boundaries as dynamic tasks, including in stream task domains. Adapter conversion failures
-retain `InputDecodeError` and its typed sources through `NodeExecutionError::InputDecode`; provider business
-errors keep their existing plugin error chain. Typed event and stream producer interfaces are not provided.
+and context boundaries as dynamic tasks, including in stream task domains. Input conversion failures
+retain `InputDecodeError` through `NodeExecutionError::InputDecode`; output conversion failures retain
+`OutputEncodeError` through `NodeExecutionError::OutputEncode`. Encoding completes before any outputs
+are published. Provider business errors keep their existing plugin error chain. Typed event and stream
+producer interfaces are not provided.
 
-`execute_typed_task` exposes the same input conversion and invocation for providers that retain a
-dynamic `TaskNode` entry point. It does not schedule work or publish outputs. Iteration uses this function
-to preserve direct dynamic callers while its factory uses typed preparation. `mfn_core::IterationInputs`
-contains the shared `items` payload; callers using both traits can qualify `TaskNode::execute` for a map
-or `TypedTaskNode::execute` for the struct. Its results descriptor still depends on its body and error policy.
+`execute_typed_task` exposes the same conversion and invocation for providers retaining a dynamic
+`TaskNode` entry point. It does not schedule work or publish outputs. Iteration uses this function to
+preserve direct dynamic callers while its factory uses typed preparation. `mfn_core::IterationInputs`
+contains the shared `items` payload and `IterationOutputs` contains collected `results`. Callers can qualify
+`TaskNode::execute` for map inputs/results or `TypedTaskNode::execute` for structs. Its output refinement
+still depends on its body and error policy.
 
-Adoption is additive: replace a fixed-input task's map decoding with a derived struct, implement
-`TypedTaskNode`, and pass empty input ports to `PreparedNode::typed_task`. Output contracts and registrations
-retain their existing shape. The [identity provider](../crates/builtin-nodes/core/src/identity.rs) demonstrates
-shared-value forwarding with this API; [Iteration](../crates/builtin-nodes/core/src/iteration.rs) demonstrates
-fixed typed inputs with body-dependent outputs. Providers such as `builtin.code` whose ports depend on configuration
-continue to use `TaskNode`, dynamic metadata, and the existing `PreparedNode::new` constructor.
+To migrate an existing typed task, derive `NodeOutputs` on its output struct, set `type Output`, return
+`TypedNodeResult<Self::Output>`, and remove factory-supplied output ports. Keep existing derivations and
+other metadata. The [identity provider](../crates/builtin-nodes/core/src/identity.rs) demonstrates shared-value
+forwarding; [Iteration](../crates/builtin-nodes/core/src/iteration.rs) demonstrates body-dependent output refinement.
+Providers such as `builtin.code` whose port names depend on configuration continue to use `TaskNode`,
+dynamic metadata, and `PreparedNode::new`.
 
 ### Dynamic task execution
 

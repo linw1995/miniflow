@@ -1,7 +1,7 @@
 use mf_runtime::{
-    ExecutionContext, NodeBuildError, NodeExecutionError, NodeFactory, NodeInputs, NodePorts,
-    NodeRegistration, NodeResult, Outputs, PortSpec, PreparedNode, TypedTaskNode, ValueRef,
-    ValueType, deserialize_config,
+    ExecutionContext, NodeBuildError, NodeExecutionError, NodeFactory, NodeInputs, NodeOutputs,
+    NodePorts, NodeRegistration, PreparedNode, TypedNodeResult, TypedTaskNode, ValueRef,
+    deserialize_config,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -24,20 +24,27 @@ struct Config {
     marker: Option<PathBuf>,
 }
 
+#[derive(NodeOutputs)]
+struct StructOutputs {
+    value: BTreeMap<String, ValueRef>,
+    sqrt: f64,
+}
+
 struct StructTask(Config);
 impl TypedTaskNode for StructTask {
     type Input = StructInputs<i64>;
+    type Output = StructOutputs;
 
     fn execute(
         &self,
         input: Self::Input,
         _: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
+    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
         if let Some(path) = &self.0.marker {
             std::fs::write(path, b"executed").unwrap();
         }
         let raw_present = input.raw.is_some();
-        let summary = ValueRef::object([
+        let summary = BTreeMap::from([
             ("count".into(), input.count.into()),
             ("ratio".into(), json!(input.ratio).into()),
             ("active".into(), input.active.into()),
@@ -46,29 +53,31 @@ impl TypedTaskNode for StructTask {
             ("raw".into(), input.raw.unwrap_or_else(ValueRef::null)),
             ("raw_present".into(), raw_present.into()),
         ]);
-        Ok(Outputs::from([("value".into(), summary)]).into())
+        Ok(StructOutputs {
+            value: summary,
+            sqrt: input.ratio.sqrt(),
+        }
+        .into())
     }
 }
 
 struct DriftTask;
 impl TypedTaskNode for DriftTask {
     type Input = StructInputs<String>;
+    type Output = StructOutputs;
 
     fn execute(
         &self,
         _: Self::Input,
         _: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
+    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
         panic!("manifest drift must prevent business dispatch");
     }
 }
 
 fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     let config = deserialize_config(config)?;
-    let ports = NodePorts {
-        inputs: vec![],
-        outputs: vec![PortSpec::new("value", ValueType::Object, true)],
-    };
+    let ports = NodePorts::default();
     // Deliberately violate interface stability to exercise the manifest guard.
     if std::env::var_os("MF_FIXTURE_TYPED_INPUT_DRIFT").is_some() {
         PreparedNode::typed_task(DriftTask, ports)
