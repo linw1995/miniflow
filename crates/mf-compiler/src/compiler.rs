@@ -922,7 +922,7 @@ pub fn compile_definition(
     normalize_plan(definition, execution_order)
 }
 
-/// Plans graph structure without loading plugins. Validate the generated runner before installation.
+/// Plans graph structure without loading plugins. The generated Cargo build validates providers.
 pub fn plan_definition(
     definition: &WorkflowDefinition,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {

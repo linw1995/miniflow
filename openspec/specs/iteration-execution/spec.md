@@ -56,12 +56,12 @@ another item MUST NOT be visible. The body MUST NOT contain the reserved source 
 #### Scenario: Reject a scope violation
 
 - **WHEN** a body redefines `%iteration`, includes another Iteration node or a structured Loop construct, or selects a missing result port
-- **THEN** runner validation fails before installation with the outer iteration ID and body error
+- **THEN** build validation fails before installation with the outer iteration ID and body error
 
 #### Scenario: Reject an undeclared Iteration package
 
 - **WHEN** a Flow uses `builtin.iteration` without declaring a package that registers it
-- **THEN** runner validation reports the unavailable kind and preserves an existing installed executable
+- **THEN** build validation reports the unavailable kind and preserves an existing installed executable
 
 ### Requirement: Bound scheduling and preserve result order
 

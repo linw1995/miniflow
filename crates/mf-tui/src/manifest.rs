@@ -23,6 +23,8 @@ const MAX_SECTIONS: usize = 4096;
 
 #[derive(Debug, Snafu)]
 pub enum ManifestReadError {
+    #[snafu(display("workflow executable has no embedded manifest; recompile the workflow"))]
+    MissingManifest,
     #[snafu(display("could not read workflow executable {path:?}: {source}"))]
     Io { path: PathBuf, source: io::Error },
     #[snafu(display("workflow executable {path:?} must be a regular file"))]
@@ -233,8 +235,8 @@ fn macho_range(data: Metadata<'_>) -> Result<Option<(u64, u64)>, ManifestReadErr
     Ok(selected)
 }
 
-/// Returns None only for a recognized executable with no manifest section.
-pub fn read_manifest(path: &Path) -> Result<Option<WorkflowManifest>, ManifestReadError> {
+/// Reads a required manifest from a supported executable without launching it.
+pub fn read_manifest(path: &Path) -> Result<WorkflowManifest, ManifestReadError> {
     let file = File::options()
         .read(true)
         .custom_flags(nix::libc::O_NONBLOCK)
@@ -279,9 +281,7 @@ pub fn read_manifest(path: &Path) -> Result<Option<WorkflowManifest>, ManifestRe
         });
     }
     ensure!(!exceeded.get(), MetadataLimitSnafu);
-    let Some((offset, size)) = range? else {
-        return Ok(None);
-    };
+    let (offset, size) = range?.ok_or_else(|| MissingManifestSnafu.build())?;
     ensure!(
         size <= MAX_MANIFEST_SECTION_BYTES as u64,
         TooLargeSnafu {
@@ -296,7 +296,5 @@ pub fn read_manifest(path: &Path) -> Result<Option<WorkflowManifest>, ManifestRe
     file.read_exact(&mut payload).context(IoSnafu {
         path: path.to_owned(),
     })?;
-    Ok(Some(
-        WorkflowManifest::from_bytes(&payload).context(ManifestSnafu)?,
-    ))
+    WorkflowManifest::from_bytes(&payload).context(ManifestSnafu)
 }

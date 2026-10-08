@@ -26,13 +26,6 @@ fn compile(root: &Path) -> Result<(), mf_compiler::PipelineError> {
 }
 
 #[test]
-fn validation_drift_child() {
-    if let Some(root) = std::env::var_os("MF_FIXTURE_DRIFT_ROOT") {
-        assert!(compile(Path::new(&root)).is_err());
-    }
-}
-
-#[test]
 fn generated_task_and_stream_runners_reject_runtime_contract_changes_before_dispatch() {
     let root = tempfile::tempdir().unwrap();
     let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/multi-nodes");
@@ -49,34 +42,21 @@ fn generated_task_and_stream_runners_reject_runtime_contract_changes_before_disp
         let runner = root.path().join("runner");
         let marker = root.path().join("executed");
         for mode in ["type", "required", "remove", "add", "stdin", "condition"] {
-            for flags in [
-                vec!["--validate"],
-                vec!["--inputs", "{\"source./~\":{\"path./~\":\"ignored\"}}"],
-            ] {
-                let output = Command::new(&runner)
-                    .args(flags)
-                    .env("MF_FIXTURE_INTERFACE_CHANGE", mode)
-                    .env("MF_FIXTURE_EXECUTION_MARKER", &marker)
-                    .stdin(Stdio::null())
-                    .output()
-                    .unwrap();
-                assert!(!output.status.success(), "{mode} was accepted");
-                let diagnostic = String::from_utf8_lossy(&output.stderr);
-                assert!(
-                    diagnostic.contains("interface drift") && diagnostic.contains("/source.~1~0"),
-                    "{diagnostic}"
-                );
-                assert!(!marker.exists(), "{mode} dispatched business execution");
-            }
-        }
-        for flag in ["--describe", "--describe-interface"] {
+            let flags = ["--inputs", "{\"source./~\":{\"path./~\":\"ignored\"}}"];
             let output = Command::new(&runner)
-                .arg(flag)
-                .env("MF_FIXTURE_INTERFACE_CHANGE", "initialization")
+                .args(flags)
+                .env("MF_FIXTURE_INTERFACE_CHANGE", mode)
+                .env("MF_FIXTURE_EXECUTION_MARKER", &marker)
+                .stdin(Stdio::null())
                 .output()
                 .unwrap();
-            assert!(output.status.success());
-            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap();
+            assert!(!output.status.success(), "{mode} was accepted");
+            let diagnostic = String::from_utf8_lossy(&output.stderr);
+            assert!(
+                diagnostic.contains("interface drift") && diagnostic.contains("/source.~1~0"),
+                "{diagnostic}"
+            );
+            assert!(!marker.exists(), "{mode} dispatched business execution");
         }
         let output = Command::new(&runner)
             .env("MF_FIXTURE_EXECUTION_MARKER", &marker)
@@ -94,21 +74,5 @@ fn generated_task_and_stream_runners_reject_runtime_contract_changes_before_disp
         );
         assert!(marker.exists());
         fs::remove_file(marker).unwrap();
-        let installed = fs::read(&runner).unwrap();
-        let lock = fs::read(root.path().join("workflow.lock")).unwrap();
-        let child = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "validation_drift_child"])
-            .env("MF_FIXTURE_DRIFT_ROOT", root.path())
-            .env("MF_FIXTURE_VALIDATE_DRIFT", "1")
-            .output()
-            .unwrap();
-        assert!(
-            child.status.success(),
-            "{}\n{}",
-            String::from_utf8_lossy(&child.stdout),
-            String::from_utf8_lossy(&child.stderr)
-        );
-        assert_eq!(fs::read(&runner).unwrap(), installed);
-        assert_eq!(fs::read(root.path().join("workflow.lock")).unwrap(), lock);
     }
 }

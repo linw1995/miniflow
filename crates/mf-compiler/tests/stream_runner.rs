@@ -135,19 +135,7 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
     );
 
     fs::write(&trace, "").unwrap();
-    let description = Process::spawn(&executable, &["--describe"]).finish();
-    assert!(description.status.success());
-    let description: Value = serde_json::from_slice(&description.stdout).unwrap();
-    assert_eq!(description["version"], "2026-10-03");
-    assert_eq!(description["nodes"][0]["id"], "feed");
     assert_eq!(fs::read_to_string(&trace).unwrap(), "");
-    let validation = Process::spawn(&executable, &["--validate"]).finish();
-    assert!(
-        validation.status.success(),
-        "{}",
-        String::from_utf8_lossy(&validation.stderr)
-    );
-    assert_eq!(fs::read_to_string(&trace).unwrap(), "prepare\n");
 
     fs::write(&trace, "").unwrap();
     let capture = Command::new(&executable)

@@ -180,7 +180,6 @@ fn generated_struct_inputs_match_memory_and_freeze_the_interface() {
     use mf_compiler::{
         CompileRequest, RunnerOptions, SupportPackages, compile_project_with_options,
     };
-    use mf_runtime::WorkflowInterface;
     use std::{
         fs,
         process::{Command, Stdio},
@@ -213,7 +212,6 @@ fn generated_struct_inputs_match_memory_and_freeze_the_interface() {
         assert!(!marker.exists());
         let registry = NodeRegistry::from_inventory().unwrap();
         let compiled = compile_definition(&definition, &registry).unwrap();
-        let schema = describe_workflow_inputs(&compiled, &registry).unwrap();
         let run = |flags: &[&str], drift: bool| {
             let mut command = Command::new(&executable);
             command.args(flags).stdin(Stdio::null());
@@ -222,34 +220,15 @@ fn generated_struct_inputs_match_memory_and_freeze_the_interface() {
             }
             command.output().unwrap()
         };
-        let interface = run(&["--describe-interface"], false);
-        assert!(interface.status.success());
-        assert_eq!(
-            WorkflowInterface::from_json(&interface.stdout)
-                .unwrap()
-                .schema,
-            schema
-        );
-        for flag in ["--validate", "--describe", "--describe-interface"] {
-            let output = run(&[flag], false);
-            assert!(
-                output.status.success(),
-                "{}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            assert!(!marker.exists());
-        }
         let args = arguments().to_string();
-        for flags in [vec!["--validate"], vec!["--inputs", args.as_str()]] {
-            let output = run(&flags, true);
-            let diagnostic = String::from_utf8_lossy(&output.stderr);
-            assert!(!output.status.success());
-            assert!(
-                diagnostic.contains("interface drift") && diagnostic.contains("/typed.~1~0/count"),
-                "{diagnostic}"
-            );
-            assert!(!marker.exists());
-        }
+        let output = run(&["--inputs", args.as_str()], true);
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success());
+        assert!(
+            diagnostic.contains("interface drift") && diagnostic.contains("/typed.~1~0/count"),
+            "{diagnostic}"
+        );
+        assert!(!marker.exists());
         let mut invalid = arguments();
         invalid["typed./~"]["rows./~"] = json!([{"count":1},{"count":"wrong"}]);
         let output = run(&["--inputs", &invalid.to_string()], false);

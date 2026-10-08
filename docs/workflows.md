@@ -91,7 +91,7 @@ The common input and output port contract is language-independent. A future back
 without changing existing CEL definitions. CEL input types include `int`, `double`, `bool`, `string`, `null`, and nested
 `{"list": T}` or `{"map": T}` descriptors; maps have string keys and homogeneous values.
 
-Runner validation parses and type-checks every CEL output expression, including nodes on inactive branches, without
+Build validation parses and type-checks every CEL output expression, including nodes on inactive branches, without
 evaluating it. Output port types are inferred from the checked expression. Unknown names, incompatible operations,
 explicit `dyn(...)` calls, and result types outside the JSON port contract fail before executable installation. CEL
 compilation produces a checked AST for in-process evaluation; it does not generate native machine code.

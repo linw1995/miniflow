@@ -5,7 +5,7 @@ use mf_compiler::{
     resolve_project, write_dependency_project,
 };
 use mf_tui::{
-    description::describe_executable,
+    manifest::read_manifest,
     receiver::LoopbackReceiver,
     state::{Completeness, NodeStatus},
 };
@@ -225,14 +225,7 @@ fn generated_loop_runner_exports_complete_per_pass_observations() {
         },
     })
     .unwrap();
-    let description = describe_executable(&executable).unwrap();
-    assert_eq!(
-        mf_tui::manifest::read_manifest(&executable)
-            .unwrap()
-            .unwrap()
-            .description,
-        description
-    );
+    let description = read_manifest(&executable).unwrap().description;
     assert_eq!(description.loop_bodies.len(), 1);
     let description_json = serde_json::to_string(&description).unwrap();
     assert!(!description_json.contains("count + 1"));
@@ -526,41 +519,9 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     let definition = definition(&plugin, &trace);
     let runner = build(&project, &flow_lock, &definition);
     let dependency_lock = fs::read(&flow_lock).unwrap();
-    let validation = command(&runner).arg("--validate").output().unwrap();
-    assert!(
-        validation.status.success(),
-        "{}",
-        String::from_utf8_lossy(&validation.stderr)
-    );
-    assert!(
-        validation
-            .stdout
-            .windows(b"factory diagnostic".len())
-            .any(|w| w == b"factory diagnostic")
-    );
-    let raw = command(&runner).arg("--describe").output().unwrap();
-    assert!(
-        raw.status.success(),
-        "{}",
-        String::from_utf8_lossy(&raw.stderr)
-    );
-    assert!(raw.stdout.ends_with(b"\n"));
-    assert_eq!(raw.stdout.iter().filter(|byte| **byte == b'\n').count(), 1);
-    assert!(
-        !raw.stdout
-            .windows(b"diagnostic".len())
-            .any(|w| w == b"diagnostic")
-    );
-    assert!(raw.stderr.is_empty());
-    assert!(
-        !trace.exists(),
-        "description constructed or executed a plugin"
-    );
-    let description = describe_executable(&runner).unwrap();
-    assert_eq!(
-        raw.stdout[..raw.stdout.len() - 1],
-        description.to_json().unwrap()
-    );
+    assert!(!trace.exists(), "build executed a plugin");
+    let description = read_manifest(&runner).unwrap().description;
+    let raw = description.to_json().unwrap();
     assert_eq!(description.execution_order, ["a", "b", "c"]);
     assert_eq!(description.data_edges.len(), 1);
     assert_eq!(description.control_edges.len(), 1);
@@ -570,41 +531,15 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     assert_eq!(description.data_edges[0].to_input, "input");
     assert_eq!(description.control_edges[0].from_output, "value");
     assert!(
-        serde_json::from_slice::<Value>(&raw.stdout).unwrap()["nodes"][0]
+        serde_json::from_slice::<Value>(&raw).unwrap()["nodes"][0]
             .get("outputs")
             .is_none()
     );
-    assert!(!String::from_utf8_lossy(&raw.stdout).contains("configuration-sentinel"));
+    assert!(!String::from_utf8_lossy(&raw).contains("configuration-sentinel"));
 
     if !loopback_available() {
         return;
     }
-
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let endpoint = format!("http://{}", listener.local_addr().unwrap());
-    assert!(
-        command(&runner)
-            .arg("--validate")
-            .env("OTEL_EXPORTER_OTLP_ENDPOINT", &endpoint)
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
-    assert!(
-        command(&runner)
-            .arg("--describe")
-            .env("OTEL_EXPORTER_OTLP_ENDPOINT", &endpoint)
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
-    assert_eq!(
-        listener.accept().unwrap_err().kind(),
-        std::io::ErrorKind::WouldBlock
-    );
 
     let plain = command(&runner).output().unwrap();
     assert!(
@@ -764,15 +699,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     failing.nodes[1].config["fail"] = json!(true);
     let failing_runner = build(&project, &flow_lock, &failing);
     assert_eq!(fs::read(&flow_lock).unwrap(), dependency_lock);
-    assert!(
-        command(&failing_runner)
-            .arg("--validate")
-            .output()
-            .unwrap()
-            .status
-            .success()
-    );
-    let failing_description = describe_executable(&failing_runner).unwrap();
+    let failing_description = read_manifest(&failing_runner).unwrap().description;
     let (endpoint, worker) = collector();
     let failed = command(&failing_runner)
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
@@ -787,13 +714,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     fs::remove_dir_all(&plugin).unwrap();
     fs::remove_file(&flow_lock).unwrap();
     fs::remove_file(&trace).unwrap();
-    let portable_description = command(&portable)
-        .arg("--describe")
-        .env("PATH", "")
-        .output()
-        .unwrap();
-    assert!(portable_description.status.success());
-    assert_eq!(portable_description.stdout, raw.stdout);
+    assert_eq!(read_manifest(&portable).unwrap().description, description);
     let portable_output = command(&portable).env("PATH", "").output().unwrap();
     assert!(portable_output.status.success());
     assert_eq!(last_json(&portable_output.stdout), json!({"answer":14}));

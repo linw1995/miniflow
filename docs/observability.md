@@ -2,7 +2,7 @@
 
 ## Availability and package boundaries
 
-`mf-telemetry` provides versioned descriptions, lifecycle events, workflow/run identities, sequence reservation, validation, and mapping into OpenTelemetry log records. Shared runtime instrumentation and generated execution accept caller-owned observations. Compiled runners also provide `--describe` and initialize OTel export only when an endpoint is configured.
+`mf-telemetry` provides versioned descriptions, lifecycle events, workflow/run identities, sequence reservation, validation, and mapping into OpenTelemetry log records. Shared runtime instrumentation and generated execution accept caller-owned observations. Compiled runners embed graph and interface records and initialize OTel export only when an endpoint is configured.
 
 `mf-tui` contains the local OTLP receiver, state reducer, graph renderer, and CLI-only process supervisor used by `mf run <executable> --tui`.
 
@@ -90,14 +90,13 @@ Description version `2026-09-27` contains `workflow_id`, `nodes`, `data_edges`, 
 `execution_order`. Version `2026-09-29` adds `loop_bodies`: each entry has a static path of
 enclosing Loop IDs and a local graph with the same node and edge metadata. The synthetic `%loop`
 source appears in its body graph. Nodes contain `id` and `kind`; edge endpoints carry connected port
-names. Description mode excludes Loop configuration, variable values, predicates, and ordinary node
+names. The graph record excludes Loop configuration, variable values, predicates, and ordinary node
 configuration. The graph does not include the full effective port table. Compile validation checks
 those contracts by constructing plugin instances.
 
 Version `2026-10-03` adds `execution` metadata with the execution mode and lifecycle schema, and requires
-interface inspection. The separate `--describe-interface` document exposes initial-node input types,
-required flags, and runtime resource declarations. New runners serve both commands from their embedded manifest
-without constructing providers. Older runners may prepare providers during interface inspection.
+interface inspection. The manifest interface record exposes initial-node input types,
+required flags, and runtime resource declarations. Inspection reads the embedded manifest without constructing providers.
 
 New runners name the synthetic Loop source `%loop`. Description readers also accept `$loop` from
 previously compiled runners, preserving its original node IDs and workflow identity.
@@ -259,10 +258,8 @@ endpoints override the generic URL; a missing signal endpoint without a generic 
 selected explicitly. When configured, both providers share a blocking TLS-capable HTTP client and use bounded background
 processors. Their shutdown attempts to export remaining records within a finite deadline even when execution fails.
 
-Validation and description modes do not initialize execution export. `--describe` reads only the embedded plan and
-emits one JSON graph document on stdout; it does not initialize the registry or invoke plugin factories. The CLI-only
-`mf-tui::description::describe_executable` preflight runs a child in an owned process group, applies a 30-second deadline
-and 16 MiB document limit, drains both streams, and rejects malformed or unsupported descriptions.
+Build validation and direct manifest inspection do not initialize execution export or execute workflow nodes.
+The CLI reads graph and interface metadata directly from the executable with bounded file reads.
 
 ## Local reception and state aggregation
 
@@ -341,9 +338,8 @@ mf run ./if-else --tui
 output after the final view closes. New runners are inspected directly through their embedded ELF64 or Mach-O64
 manifest without starting a process. Container metadata reads are limited to 1 MiB, with at most
 4,096 sections/load commands and 1,024 bytes per section-name lookup; manifest payload and padding have separate bounds.
-Only a recognized executable missing that section falls back to `--describe` and, when required, `--describe-interface`
-with bounded output and a 30-second deadline per inspection. Invalid formats, ambiguous sections, unsupported versions,
-and corrupt records fail without fallback. Preflight validates matching workflow identities, startup parameters,
+Executables missing that section must be recompiled. Unsupported containers, ambiguous sections, invalid ranges,
+and corrupt records fail without launching an inspection process. Preflight validates matching workflow identities, startup parameters,
 and declared resources before starting the receiver or execution process. Older finite descriptions remain supported;
 older streaming descriptions require recompilation. A fresh run ID and loopback OTLP/HTTP receiver are prepared before launch. The
 execution child receives these session settings; inherited `OTEL_EXPORTER_OTLP_*` settings, including remote

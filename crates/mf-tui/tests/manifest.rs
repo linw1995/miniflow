@@ -6,7 +6,7 @@ use mf_runtime::{MAX_MANIFEST_SECTION_BYTES, WorkflowManifestError};
 use mf_tui::manifest::{ManifestReadError, read_manifest};
 use std::{error::Error, fs, io::Write, os::unix::fs::PermissionsExt};
 
-fn read(bytes: &[u8]) -> Result<Option<mf_runtime::WorkflowManifest>, ManifestReadError> {
+fn read(bytes: &[u8]) -> Result<mf_runtime::WorkflowManifest, ManifestReadError> {
     let mut file = tempfile::NamedTempFile::new().unwrap();
     file.write_all(bytes).unwrap();
     read_manifest(file.path())
@@ -17,22 +17,25 @@ fn reads_both_formats_and_architectures_without_executable_permission() {
     let manifest = sample_manifest();
     let payload = manifest.to_bytes().unwrap();
     for mut bytes in [elf(Some(&payload), 1), macho(Some(&payload), 1)] {
-        assert_eq!(read(&bytes).unwrap(), Some(manifest.clone()));
+        assert_eq!(read(&bytes).unwrap(), manifest.clone());
         if &bytes[..4] == b"\x7fELF" {
             put16(&mut bytes, 18, 183);
         } else {
             put32(&mut bytes, 4, 0x0100000c);
         }
-        assert_eq!(read(&bytes).unwrap(), Some(manifest.clone()));
+        assert_eq!(read(&bytes).unwrap(), manifest.clone());
     }
     for bytes in [elf(None, 0), macho(None, 0)] {
-        assert_eq!(read(&bytes).unwrap(), None);
+        assert!(matches!(
+            read(&bytes),
+            Err(ManifestReadError::MissingManifest)
+        ));
     }
     let file = tempfile::NamedTempFile::new().unwrap();
     fs::write(file.path(), elf(Some(&payload), 1)).unwrap();
     fs::set_permissions(file.path(), fs::Permissions::from_mode(0o600)).unwrap();
     file.as_file().set_len(512 * 1024 * 1024).unwrap();
-    assert_eq!(read_manifest(file.path()).unwrap(), Some(manifest));
+    assert_eq!(read_manifest(file.path()).unwrap(), manifest);
 }
 
 #[test]

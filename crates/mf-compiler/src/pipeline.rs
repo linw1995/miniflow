@@ -130,7 +130,6 @@ pub fn compile_project_with_options(
         validate_runtime_identity(&metadata),
     )?;
     let executable = build_runner(&project)?;
-    validate_runner(&project, &executable)?;
     if !request.locked {
         let lock = at("lock read", &project, fs::read(project.join("Cargo.lock")))?;
         at(
@@ -208,26 +207,6 @@ fn build_runner(project: &Path) -> Result<PathBuf, PipelineError> {
             "Cargo did not produce a runner executable",
         )
     })
-}
-
-fn validate_runner(project: &Path, executable: &Path) -> Result<(), PipelineError> {
-    let status = at(
-        "runner validation",
-        project,
-        Command::new(executable)
-            .arg("--validate")
-            .current_dir(project)
-            .stdin(Stdio::null())
-            .status(),
-    )?;
-    if !status.success() {
-        return Err(failure(
-            "runner validation",
-            project,
-            format!("validation exited with {status}"),
-        ));
-    }
-    Ok(())
 }
 
 pub fn cargo_command(project: &Path) -> Command {

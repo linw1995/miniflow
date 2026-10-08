@@ -77,44 +77,7 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let command = mf_runtime::RunnerCommand::parse(std::env::args_os().skip(1))?;
-    match command {
-        mf_runtime::RunnerCommand::Describe => {
-            use std::io::Write;
-            let description = workflow_manifest()?.description;
-            let mut stdout = std::io::stdout().lock();
-            stdout.write_all(&description.to_json()?)?;
-            stdout.write_all(b"\n")?;
-            stdout.flush()?;
-            return Ok(());
-        }
-        mf_runtime::RunnerCommand::DescribeInterface => {
-            use std::io::Write;
-            let interface = workflow_manifest()?.interface;
-            let mut stdout = std::io::stdout().lock();
-            serde_json::to_writer(&mut stdout, &interface)?;
-            stdout.write_all(b"\n")?;
-            stdout.flush()?;
-            return Ok(());
-        }
-        mf_runtime::RunnerCommand::Validate => {
-            let manifest = workflow_manifest()?;
-            let registry = mf_runtime::NodeRegistry::from_inventory()?;
-            #[cfg(feature = "streaming")]
-            {
-                let prepared = workflow::prepare_stream(&registry)?;
-                manifest.validate_prepared_schema(prepared.plan().input_schema())?;
-            }
-            #[cfg(not(feature = "streaming"))]
-            {
-                let flow = workflow::prepare_workflow(&registry, None)?;
-                manifest.validate_prepared_schema(flow.input_schema())?;
-            }
-            return Ok(());
-        }
-        mf_runtime::RunnerCommand::Execute(_) => {}
-    }
-    let mf_runtime::RunnerCommand::Execute(arguments) = command else { unreachable!() };
+    let arguments = mf_runtime::WorkflowArguments::parse(std::env::args_os().skip(1))?;
     #[cfg(feature = "streaming")]
     { execute_stream(arguments) }
     #[cfg(not(feature = "streaming"))]

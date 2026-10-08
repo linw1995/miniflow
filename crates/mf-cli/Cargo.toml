@@ -30,7 +30,8 @@ sha2.workspace = true
 tar.workspace = true
 tempfile.workspace = true
 
-# Pseudo-terminal integration tests.
+# Pseudo-terminal integration tests and embedded manifest fixtures.
+mf-runtime.workspace = true
 nix = { workspace = true, features = ["fs", "term"] }
 
 # OTLP export assertions.

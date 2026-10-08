@@ -94,7 +94,7 @@ pub use workflow_inputs::{
     WorkflowInputError, WorkflowInputSchema,
 };
 
-pub use runner_arguments::{RunnerArgumentError, RunnerCommand};
+pub use runner_arguments::RunnerArgumentError;
 
 pub use workflow_inputs::{
     JsonSnafu as WorkflowInputJsonSnafu, TooLargeSnafu as WorkflowInputTooLargeSnafu,

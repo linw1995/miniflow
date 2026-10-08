@@ -16,7 +16,7 @@ The factory returns a `PreparedNode` containing the executor and its `NodeMetada
 
 Configured input declarations and stdin conditions must depend on the fixed configuration and selected provider,
 not environment variables or process state. The generated build freezes them in the executable manifest, and
-`--validate` and normal execution compare them with runtime preparation before dispatching nodes or reading sources.
+normal execution compares them with runtime preparation before dispatching nodes or reading sources.
 Host and target implementations must expose the same configured interface even if executor initialization differs.
 Initialization can still fail for an unavailable runtime resource; inspection returns the frozen interface without
 initializing executors. Dynamic in-memory callers derive their interfaces normally and require no manifest.
@@ -33,10 +33,9 @@ A plugin can register several unique kinds from one crate. Dependency aliases do
 All plugins and the consumer must resolve the same `mf-runtime` package identity, including its version and source. Registrations from a different runtime identity are not entries in the consumer's inventory.
 
 Factories validate configuration and construct instances during build validation and execution. Keep external I/O
-and business side effects in `TaskNode::execute` or `StreamNode::execute`; validation and `--describe` must not execute
-the workflow. Description mode reads the embedded graph without calling factories, so factory diagnostics cannot
-enter its JSON output. Building a Rust plugin can execute its build scripts and procedural macros with the build
-user's permissions.
+and business side effects in `TaskNode::execute` or `StreamNode::execute`; build validation must not execute
+the workflow. Manifest inspection reads the frozen graph and interface without calling factories.
+Building a Rust plugin can execute its build scripts and procedural macros with the build user's permissions.
 
 Use `NodeFactory::Plain` for a factory taking configuration and returning `PreparedNode`.
 Use `NodeFactory::Subgraph` when construction also needs the occurrence ID, execution options, and a
@@ -47,7 +46,7 @@ or inappropriate body arguments fail during preparation; an executor is returned
 
 Declare plugin crates in the Flow's top-level `dependencies` object. The CLI generates imports for those packages and compiles a runner that validates and executes against the same registry. No predefined bundle or CLI rebuild is needed. See [workflow definitions](workflows.md) for registry, pinned Git, local-path, and feature syntax.
 
-The CLI first checks graph structure, then builds the runner and invokes its `--validate` mode. Unknown kinds,
+The CLI first checks graph structure, then builds the runner. The build script validates the selected providers. Unknown kinds,
 duplicate registrations, invalid configuration, and incompatible ports fail before installation. The runner's
 normal mode executes generated node calls; validation never calls `TaskNode::execute` or `StreamNode::execute`.
 
@@ -223,7 +222,7 @@ nodes and scopes. A repeated identical node state does not create a new snapshot
 Iteration items retain separate scope paths. Generated runners enable capture only when
 `MF_CAPTURE_SNAPSHOTS=1` requests OTLP snapshot events. `SnapshotRecorder::with_sink` supports
 other explicit consumers; records define each value once and reference its ID.
-`--validate` and `--describe` do not capture data. Call `finish()` after an explicitly recorded run.
+Build validation and manifest inspection do not capture data. Call `finish()` after an explicitly recorded run.
 
 The runtime calls the task's single execution method. Loop assignment and exit use engine-owned scope
 operations; publication remains validated by the runtime. A Loop body has its own output scope for

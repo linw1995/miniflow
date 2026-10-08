@@ -249,7 +249,7 @@ Runner export SHALL be disabled without configuration and SHALL support OTLP/HTT
 or external Collector. Export SHALL use bounded buffering and finite network/shutdown timeouts. Disabled export,
 unreachable endpoints, queue overflow, and export errors MUST NOT change node invocation order, selected results, or
 workflow success/failure. Both success and handled failure paths SHALL attempt bounded final flush after ending
-execution spans. Description and validation modes MUST NOT emit workflow execution events.
+execution spans. Manifest inspection and build validation MUST NOT emit workflow execution events.
 
 #### Scenario: Run without telemetry configuration
 
@@ -306,7 +306,7 @@ including in parallel workers. Automatically exported metadata MUST NOT include 
 
 #### Scenario: Describe a compiled Iteration workflow
 
-- **WHEN** a runner containing an Iteration node is invoked with `--describe`
+- **WHEN** the embedded manifest of a runner containing an Iteration node is inspected
 - **THEN** it reports the outer node and edges without expanding repeated body nodes into static lifecycle positions
 
 #### Scenario: Report an item failure

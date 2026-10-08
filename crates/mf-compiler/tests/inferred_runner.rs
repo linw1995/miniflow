@@ -100,8 +100,6 @@ fn generated_runner_matches_inference_and_preserves_installed_binary_on_conflict
     });
     fs::write(&definition_path, unknown.to_string()).unwrap();
     compile_project(&request).unwrap();
-    let validation = Command::new(&output).arg("--validate").output().unwrap();
-    assert!(validation.status.success());
     let actual = Command::new(&output).output().unwrap();
     assert!(!actual.status.success());
     assert_eq!(

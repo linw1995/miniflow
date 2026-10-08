@@ -166,15 +166,6 @@ fn compiled_branches_match_memory_and_rebuild_when_precedence_changes() {
             String::from_utf8_lossy(&build.stderr)
         );
         let executable = common::runner_executable(&project, "debug");
-        let validation = Command::new(&executable)
-            .arg("--validate")
-            .output()
-            .unwrap();
-        assert!(
-            validation.status.success(),
-            "{}",
-            String::from_utf8_lossy(&validation.stderr)
-        );
         assert!(!trace.exists());
         let result = Command::new(executable).output().unwrap();
         assert!(

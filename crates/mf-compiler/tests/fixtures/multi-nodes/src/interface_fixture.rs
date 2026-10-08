@@ -35,16 +35,9 @@ fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     if mode == "initialization" {
         let _: bool = mf_runtime::deserialize_config(Value::Null)?;
     }
-    let mode = if std::env::var_os("MF_FIXTURE_VALIDATE_DRIFT").is_some()
-        && std::env::args().any(|argument| argument == "--validate")
-    {
-        "type"
-    } else {
-        mode.as_str()
-    };
     let mut inputs = vec![PortSpec::new("path./~", ValueType::String, false)];
     let mut stdin = None;
-    match mode {
+    match mode.as_str() {
         "type" => inputs[0].value_type = ValueType::Int64,
         "required" => inputs[0].required = true,
         "remove" => inputs.clear(),
