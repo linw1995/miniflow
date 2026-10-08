@@ -34,10 +34,16 @@ pub struct GeneratedWorkflowArtifacts {
 pub struct GeneratedExecutionArtifacts {
     pub rust_source: String,
     pub manifest_bytes: Vec<u8>,
+    pub typed_plan_json: String,
 }
 
 #[derive(Debug, Snafu)]
 pub enum PlanError {
+    #[snafu(display("invalid typed constructor for node `{definition_id}`: {source}"))]
+    TypedConstructor {
+        definition_id: DefinitionId,
+        source: mf_runtime::TypedGenerationError,
+    },
     #[snafu(transparent)]
     Manifest {
         source: mf_runtime::WorkflowManifestError,
@@ -249,7 +255,7 @@ impl CompiledWorkflow {
             &[],
             None,
             None,
-            true,
+            ScopeBuild::Dynamic,
         )?;
 
         let mut output_names = BTreeSet::new();
@@ -317,16 +323,19 @@ impl CompiledWorkflow {
         } else {
             TokenStream::new()
         };
+        let preparation_body = if include_helpers {
+            quote! { use snafu::ResultExt as _; let mut observation = observation; #(#preparations)* Ok(#root_flow) }
+        } else {
+            quote! { mf_prepare_generated_workflow!(registry, observation) }
+        };
         let generated = quote! {
             include!(concat!(env!("OUT_DIR"), "/flow-plans.rs"));
 
             pub fn prepare_workflow(
                 registry: &mf_runtime::NodeRegistry,
-                mut observation: Option<&mut mf_runtime::RunObservation>,
+                observation: Option<&mut mf_runtime::RunObservation>,
             ) -> Result<mf_runtime::Flow, mf_compiler::WorkflowBuildError> {
-                use snafu::ResultExt as _;
-                #(#preparations)*
-                Ok(#root_flow)
+                #preparation_body
             }
 
             #helpers
@@ -357,7 +366,15 @@ fn generate_stream_artifacts(
     }
     let definition = &plan.definition;
     let order = &plan.execution_order;
-    let (preparations, _, _) = generate_scope(definition, order, "stream", &[], None, None, false)?;
+    let (preparations, _, _) = generate_scope(
+        definition,
+        order,
+        "stream",
+        &[],
+        None,
+        None,
+        ScopeBuild::PreparationOnly,
+    )?;
     let nodes = (0..order.len()).map(|index| format_ident!("node_stream_{index}"));
     let execution = LitStr::new(
         &serde_json::to_string(definition.execution.as_ref().unwrap()).context(SerializeSnafu)?,
@@ -389,6 +406,13 @@ fn generate_stream_artifacts(
 }
 
 #[cfg(feature = "codegen")]
+enum ScopeBuild<'a> {
+    PreparationOnly,
+    Dynamic,
+    Typed(&'a BTreeMap<DefinitionId, (TokenStream, LitStr)>),
+}
+
+#[cfg(feature = "codegen")]
 fn generate_scope(
     definition: &WorkflowDefinition,
     order: &[DefinitionId],
@@ -396,7 +420,7 @@ fn generate_scope(
     static_scope: &[String],
     enclosing: Option<&LoopDefinition>,
     preparation_error_override: Option<&TokenStream>,
-    build_flow: bool,
+    build: ScopeBuild<'_>,
 ) -> Result<(Vec<TokenStream>, Vec<TokenStream>, syn::Ident), PlanError> {
     let nodes_by_id: BTreeMap<_, _> = definition
         .nodes
@@ -455,6 +479,26 @@ fn generate_scope(
                 }
             }
         });
+        if let ScopeBuild::Typed(constructors) = &build
+            && let Some((constructor, expected)) = constructors.get(id)
+        {
+            let handle = format_ident!("typed_root_{index}");
+            preparations.push(quote! {
+                let #handle = #constructor.inspect_err(|error| { #preparation_report })?;
+                let mut #node_ident = mf_runtime::FlowNode::new(#id_lit, #handle.prepared());
+                #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*])
+                    .inspect_err(|error| { #preparation_report })
+                    .boxed().context(mf_compiler::WorkflowMetadataSnafu { definition_id: #id_lit })?;
+                let expected = serde_json::from_str(#expected).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {
+                    definition_id: mf_runtime::DefinitionId::from(#id_lit),
+                })?;
+                mf_runtime::verify_generated_metadata(&#node_ident.metadata, &expected)
+                    .context(mf_compiler::WorkflowNodeConstructionSnafu { definition_id: mf_runtime::DefinitionId::from(#id_lit) })
+                    .inspect_err(|error| { #preparation_report })?;
+            });
+            node_idents.push(node_ident);
+            continue;
+        }
         let constructor = match node.kind.as_str() {
             crate::LOOP_ASSIGN_KIND => {
                 let mut path: Vec<_> = static_scope
@@ -512,7 +556,7 @@ fn generate_scope(
     }
     preparations.push(quote! { drop(#inference_ident); });
     let flow_ident = format_ident!("flow_{scope}");
-    if build_flow {
+    if !matches!(build, ScopeBuild::PreparationOnly) {
         let nodes = node_idents.iter();
         let plan_ident = format_ident!("FLOW_PLAN_{}", scope.to_uppercase());
         let bind_inputs = scope == "root" && definition.version.supports_startup_inputs();
@@ -622,7 +666,7 @@ fn subgraph_preparation(
         &body_static_scope,
         enclosing,
         preparation_error.as_ref(),
-        true,
+        ScopeBuild::Dynamic,
     )?;
     let nodes = body.nodes.iter()
         .filter(|node| node.kind != ITERATION_INPUT_KIND && node.kind != crate::LOOP_SOURCE_ID)
@@ -708,6 +752,21 @@ impl CompiledWorkflow {
         &self,
         registry: &mf_runtime::NodeRegistry,
     ) -> Result<GeneratedExecutionArtifacts, PlanError> {
+        self.generate_execution_plans_with_typed(registry, false)
+    }
+
+    pub fn generate_runner_execution_plans(
+        &self,
+        registry: &mf_runtime::NodeRegistry,
+    ) -> Result<GeneratedExecutionArtifacts, PlanError> {
+        self.generate_execution_plans_with_typed(registry, true)
+    }
+
+    fn generate_execution_plans_with_typed(
+        &self,
+        registry: &mf_runtime::NodeRegistry,
+        standard: bool,
+    ) -> Result<GeneratedExecutionArtifacts, PlanError> {
         let (nodes, order) = crate::compiler::prepare_definition(&self.definition, registry)?;
         if order != self.execution_order {
             return InvalidExecutionOrderSnafu.fail();
@@ -728,7 +787,24 @@ impl CompiledWorkflow {
         };
         let schema = flow.input_schema().clone();
         let mut layouts = Vec::new();
+        let mut typed_plan = crate::TypedPlan::default();
         if let Some(execution) = &self.definition.execution {
+            typed_plan.connections = self
+                .definition
+                .edges
+                .iter()
+                .map(|edge| crate::TypedConnectionReport {
+                    source: edge.from_node.to_string(),
+                    output: edge.from_output.clone(),
+                    target: edge.to_node.to_string(),
+                    input: edge.to_input.clone(),
+                    fallback: Some(crate::TypedFallbackReason::UnsupportedMode),
+                })
+                .collect();
+            typed_plan.connections.sort_by(|a, b| {
+                (&a.source, &a.output, &a.target, &a.input)
+                    .cmp(&(&b.source, &b.output, &b.target, &b.input))
+            });
             let prepared = flow
                 .into_stream(execution.clone())
                 .map_err(crate::WorkflowBuildError::from)?;
@@ -765,6 +841,10 @@ impl CompiledWorkflow {
             collect_body_layouts(&self.definition, &order, "stream", &mut layouts)?;
         } else {
             let flow = flow.into_tasks().map_err(crate::WorkflowBuildError::from)?;
+            typed_plan = crate::plan_typed_segments(&flow, standard, true);
+            if standard {
+                layouts.push(typed_preparation_tokens(self, &flow, &typed_plan)?);
+            }
             layouts.push(task_layout_tokens(
                 &self.definition,
                 &order,
@@ -789,6 +869,7 @@ impl CompiledWorkflow {
         Ok(GeneratedExecutionArtifacts {
             rust_source: prettyplease::unparse(&syntax),
             manifest_bytes: manifest.to_bytes()?,
+            typed_plan_json: serde_json::to_string_pretty(&typed_plan).context(SerializeSnafu)?,
         })
     }
 }
@@ -823,6 +904,265 @@ fn dependency_layout_tokens(
             quote! { std::borrow::Cow::Borrowed(&[#(#values),*]) }
         })
         .collect()
+}
+
+#[cfg(feature = "codegen")]
+fn rust_value_tokens(value: &mf_runtime::RustValueType) -> TokenStream {
+    use mf_runtime::RustValueType::*;
+    match value {
+        Boolean => quote!(bool),
+        Int64 => quote!(i64),
+        Float64 => quote!(f64),
+        String => quote!(std::string::String),
+        Shared => quote!(mf_runtime::ValueRef),
+        List(inner) => {
+            let inner = rust_value_tokens(inner);
+            quote!(std::vec::Vec<#inner>)
+        }
+        Map(inner) => {
+            let inner = rust_value_tokens(inner);
+            quote!(std::collections::BTreeMap<std::string::String, #inner>)
+        }
+        Optional(inner) => {
+            let inner = rust_value_tokens(inner);
+            quote!(std::option::Option<#inner>)
+        }
+    }
+}
+
+#[cfg(feature = "codegen")]
+fn typed_preparation_tokens(
+    workflow: &CompiledWorkflow,
+    flow: &mf_runtime::Flow,
+    plan: &crate::TypedPlan,
+) -> Result<TokenStream, PlanError> {
+    let typed_positions: BTreeSet<_> = plan
+        .segments
+        .iter()
+        .flat_map(|segment| segment.positions.iter().copied())
+        .collect();
+    let mut constructors = BTreeMap::new();
+    for &position in &typed_positions {
+        let node = &flow.nodes()[flow.execution_order()[position].index()];
+        let generation = node
+            .metadata
+            .typed_generation
+            .as_ref()
+            .expect("planned typed provider");
+        let alias = generation
+            .constructor
+            .dependency_alias(&workflow.definition.dependencies)
+            .with_context(|_| TypedConstructorSnafu {
+                definition_id: node.definition_id.clone(),
+            })?;
+        // Dependency projects deliberately use ordinal Rust crate names, independently of user aliases.
+        let index = workflow
+            .definition
+            .dependencies
+            .keys()
+            .position(|key| key == alias)
+            .expect("selected alias");
+        let provider = format_ident!("node_{index}");
+        let parts: Vec<_> = generation
+            .constructor
+            .path
+            .iter()
+            .map(|part| format_ident!("{part}"))
+            .collect();
+        let id = LitStr::new(node.definition_id.as_str(), Span::call_site());
+        let definition = workflow
+            .definition
+            .nodes
+            .iter()
+            .find(|definition| definition.id == node.definition_id)
+            .expect("validated definition");
+        let kind = LitStr::new(&definition.kind, Span::call_site());
+        let config = LitStr::new(
+            &serde_json::to_string(&definition.config).context(SerializeSnafu)?,
+            Span::call_site(),
+        );
+        let input_types: Vec<_> = generation
+            .inputs
+            .iter()
+            .map(|field| rust_value_tokens(&field.rust_type))
+            .collect();
+        let output_types: Vec<_> = generation
+            .outputs
+            .iter()
+            .map(|field| rust_value_tokens(&field.rust_type))
+            .collect();
+        let input_names: Vec<_> = generation
+            .inputs
+            .iter()
+            .map(|field| LitStr::new(&field.port.name, Span::call_site()))
+            .collect();
+        let output_names: Vec<_> = generation
+            .outputs
+            .iter()
+            .map(|field| LitStr::new(&field.port.name, Span::call_site()))
+            .collect();
+        let expected = LitStr::new(
+            &serde_json::to_string(&node.metadata).context(SerializeSnafu)?,
+            Span::call_site(),
+        );
+        constructors.insert(node.definition_id.clone(), (quote! {
+            (|| -> Result<_, mf_compiler::WorkflowBuildError> {
+                use snafu::OptionExt as _;
+                registry.get(#kind).context(mf_compiler::WorkflowUnknownKindSnafu {
+                    definition_id: mf_runtime::DefinitionId::from(#id), kind: #kind,
+                })?;
+                let config = serde_json::from_str(#config).context(mf_compiler::WorkflowInvalidEmbeddedConfigSnafu {
+                    definition_id: mf_runtime::DefinitionId::from(#id),
+                })?;
+                let handle = ::#provider::#(#parts)::* (config).context(mf_compiler::WorkflowNodeConstructionSnafu {
+                    definition_id: mf_runtime::DefinitionId::from(#id),
+                })?;
+                fn verify_fields<N: mf_runtime::TypedTaskNode>(_: &mf_runtime::TypedTaskHandle<N>)
+                where N::Input: mf_runtime::TypedNodeValue<Fields = (#(#input_types,)*)>,
+                    N::Output: mf_runtime::TypedNodeValue<Fields = (#(#output_types,)*)> {
+                    const {
+                        assert!(mf_runtime::port_names_match(<N::Input as mf_runtime::TypedNodeValue>::PORT_NAMES, &[#(#input_names),*]), "typed constructor input ports differ");
+                        assert!(mf_runtime::port_names_match(<N::Output as mf_runtime::TypedNodeValue>::PORT_NAMES, &[#(#output_names),*]), "typed constructor output ports differ");
+                    }
+                }
+                verify_fields(&handle);
+                Ok(handle)
+            })()
+        }, expected));
+    }
+    let (preparations, _, root) = generate_scope(
+        &workflow.definition,
+        &workflow.execution_order,
+        "root",
+        &[],
+        None,
+        None,
+        ScopeBuild::Typed(&constructors),
+    )?;
+    let mut bindings = Vec::new();
+    for domain in flow.execution_domains().domains() {
+        let segments: Vec<_> = plan
+            .segments
+            .iter()
+            .filter(|segment| segment.domain == domain.id)
+            .collect();
+        if segments.is_empty() {
+            continue;
+        }
+        let mut statements = Vec::new();
+        for &position in domain.positions.iter() {
+            statements.push(if position == 0 {
+                quote! { if state.scope_exit_requested() { return Ok(()); } }
+            } else { quote! { if #position > state.scope_exit_cutoff() || state.scope_exit_requested() { return Ok(()); } } });
+            let Some(segment) = segments
+                .iter()
+                .find(|segment| segment.positions.contains(&position))
+            else {
+                statements.push(quote! { flow.execute_position(#position, state)?; });
+                continue;
+            };
+            let node = &flow.nodes()[flow.execution_order()[position].index()];
+            let generation = node.metadata.typed_generation.as_ref().expect("typed node");
+            let handle = format_ident!("typed_root_{position}");
+            let offset = segment
+                .positions
+                .iter()
+                .position(|index| *index == position)
+                .expect("segment membership");
+            let mut transfers = Vec::new();
+            let input = if offset == 0 {
+                quote! { #handle.decode_inputs(_inputs)? }
+            } else {
+                let previous = segment.positions[offset - 1];
+                let previous_node = &flow.nodes()[flow.execution_order()[previous].index()];
+                let previous_generation = previous_node
+                    .metadata
+                    .typed_generation
+                    .as_ref()
+                    .expect("typed predecessor");
+                let fields: Vec<_> = previous_generation
+                    .outputs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| format_ident!("_mf_field_{previous}_{index}"))
+                    .collect();
+                let arguments = generation
+                    .inputs
+                    .iter()
+                    .map(|field| {
+                        if let Some(edge) = flow.connections().iter().find(|edge| {
+                            edge.to_node == flow.execution_order()[position]
+                                && edge.to_input == field.port.name
+                        }) {
+                            transfers.push(LitStr::new(&field.port.name, Span::call_site()));
+                            let index = previous_generation
+                                .outputs
+                                .iter()
+                                .position(|field| field.port.name == edge.from_output)
+                                .expect("planned output mapping");
+                            let field = &fields[index];
+                            quote! { #field }
+                        } else {
+                            quote! { None }
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let slot = format_ident!("_mf_fields_{previous}");
+                quote! { {
+                    let (#(#fields,)*) = #slot.take().expect("validated typed predecessor presence");
+                    #handle.input_from_fields((#(#arguments,)*))
+                } }
+            };
+            let publication = if offset + 1 == segment.positions.len() {
+                quote! { mf_runtime::GeneratedNodeResult::encoded(result) }
+            } else {
+                let slot = format_ident!("_mf_fields_{position}");
+                statements.push(quote! { let mut #slot = None; });
+                quote! {
+                    let publication = mf_runtime::GeneratedNodeResult::typed(&result)?;
+                    #slot = Some(result.outputs.into_fields());
+                    Ok(publication)
+                }
+            };
+            statements.push(quote! {
+                flow.execute_generated_position(#position, &[#(#transfers),*], state, |_inputs, ctx| {
+                    let input = #input;
+                    let result = #handle.execute(input, ctx)?;
+                    #publication
+                })?;
+            });
+        }
+        let id = domain.id;
+        bindings.push(quote! { (#id, std::sync::Arc::new(move |flow: &mf_runtime::Flow, state: &mut mf_runtime::ExecutionContext| {
+            #(#statements)*
+            Ok(())
+        }) as std::sync::Arc<mf_runtime::GeneratedDomainExecutor>) });
+    }
+    let registry_binding = if workflow.definition.nodes.is_empty() {
+        quote!(let _registry = $registry;)
+    } else {
+        quote!(let registry = $registry;)
+    };
+    let typed_import = if typed_positions.is_empty() {
+        quote!()
+    } else {
+        quote! { use mf_runtime::TypedNodeValue as _; }
+    };
+    // Expansion is requested only by standalone entry points; custom runners do not instantiate unused typed bodies.
+    Ok(quote! {
+        #[macro_export]
+        macro_rules! mf_prepare_generated_workflow {
+            ($registry:expr, $observation:expr) => {{
+                use snafu::ResultExt as _;
+                #typed_import
+                #registry_binding
+                let mut observation = $observation;
+                #(#preparations)*
+                let #root = #root.with_generated_domains(vec![#(#bindings),*]);
+                Ok(#root)
+            }};
+        }
+    })
 }
 
 #[cfg(feature = "codegen")]

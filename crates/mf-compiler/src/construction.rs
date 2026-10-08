@@ -503,7 +503,10 @@ pub enum WorkflowBuildError {
     FlowBuild { source: FlowBuildError },
     #[snafu(transparent)]
     StreamBuild { source: StreamBuildError },
-    #[snafu(display("node `{definition_id}` references unavailable kind `{kind}`"))]
+    #[snafu(
+        display("node `{definition_id}` references unavailable kind `{kind}`"),
+        visibility(pub)
+    )]
     UnknownKind {
         definition_id: DefinitionId,
         kind: String,
@@ -516,7 +519,10 @@ pub enum WorkflowBuildError {
         source: serde_json::Error,
         definition_id: DefinitionId,
     },
-    #[snafu(display("could not construct node `{definition_id}`: {source}"))]
+    #[snafu(
+        display("could not construct node `{definition_id}`: {source}"),
+        visibility(pub)
+    )]
     NodeConstruction {
         source: NodeBuildError,
         definition_id: DefinitionId,

@@ -119,6 +119,7 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
     let mut field_types = Vec::new();
     let mut field_names = Vec::new();
     let mut typed_ports = Vec::new();
+    let mut field_ports = Vec::new();
     let mut typed_checks = Vec::new();
     for field in fields.named {
         let ident = field.ident.expect("named field");
@@ -152,6 +153,7 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
                 format!("duplicate {attribute} port name"),
             ));
         }
+        field_ports.push(port.clone());
         let ty = field.ty;
         field_types.push(ty.clone());
         field_names.push(ident.clone());
@@ -273,6 +275,7 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
     let typed_impl = if typed {
         quote! {
             impl #impl_generics #runtime::TypedNodeValue for #name #type_generics #where_clause {
+                const PORT_NAMES: &'static [&'static str] = &[#(#field_ports),*];
                 type Fields = (#(#field_types,)*);
                 fn typed_ports() -> ::std::vec::Vec<#runtime::TypedPort> { vec![#(#typed_ports),*] }
                 fn into_fields(self) -> Self::Fields { #into_fields }

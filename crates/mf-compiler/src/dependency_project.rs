@@ -50,10 +50,11 @@ fn main() {
 fn generate() -> Result<(), Box<dyn std::error::Error>> {
     let registry = mf_runtime::NodeRegistry::from_inventory()?;
     let workflow = mf_compiler::CompiledWorkflow::from_json(include_str!("workflow-plan.json"))?;
-    let artifacts = workflow.generate_execution_plans(&registry)?;
+    let artifacts = workflow.generate_runner_execution_plans(&registry)?;
     let output = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo output directory"));
     std::fs::write(output.join("flow-plans.rs"), artifacts.rust_source)?;
     std::fs::write(output.join("workflow-manifest.bin"), artifacts.manifest_bytes)?;
+    std::fs::write(output.join("typed-fast-paths.json"), artifacts.typed_plan_json)?;
     Ok(())
 }
 "#;

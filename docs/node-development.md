@@ -171,6 +171,21 @@ an exit. Prepared refinements not certified by direct transfer remain dynamic. I
 records are not context-readable payloads: generation must exclude every output observer before moving
 an owned field. Explicit skips and unexpectedly missing dependencies keep their ordinary semantics.
 
+### Build inspection and generated contracts
+
+Standard task projects use `generate_runner_artifacts` and `generate_runner_execution_plans`.
+The linked-provider build emits a preparation macro with the frozen layout items in `flow-plans.rs`,
+and records eligible segments and fallback reasons in `OUT_DIR/typed-fast-paths.json`.
+General-purpose artifact/plan generation keeps ordinary dynamic preparation and context inspection.
+The preparation macro is expanded only by standard runners, so custom runners do not compile unused
+monomorphized typed bodies or acquire resources for them.
+
+Generated constructors receive the existing configured JSON. Target Rust compilation proves each
+constructor's field tuple types and exact port names against the build-time contract. Launch compares
+its complete resolved metadata before dispatch, covering target-specific interfaces, resources,
+derivations, context references, and generation flags. These build-time records are separate from the
+embedded inspection manifest. Provider changes regenerate them through Cargo's ordinary dependency tracking.
+
 ### Struct-defined inputs
 
 Use the runtime's `NodeInputs` derive to declare input ports and decode their values from one owned struct:

@@ -61,18 +61,18 @@
 
 ## 5. Generated execution
 
-- [ ] 5.1 Emit typed domain source alongside frozen layouts in the linked-provider Cargo build; verify target
+- [x] 5.1 Emit typed domain source alongside frozen layouts in the linked-provider Cargo build; verify target
   compilation, warning-free symbols, private-provider shims, and retained diagnostics for incorrect advertised Rust
   assignments.
-- [ ] 5.2 Generate typed input assembly and direct field moves with dynamic entry/exit conversion; verify generated
-  source and an isolated conversion-counter fixture show no internal maps or encode/decode round trips for owned
-  string/list chains.
-- [ ] 5.3 Bind generated segments and fallbacks during ordinary preparation; verify matching configured metadata,
+- [x] 5.2 Generate typed input assembly and direct field moves with dynamic entry/exit conversion; verify generated
+  source conversion counts and isolated owned-allocation identity checks show no internal maps or encode/decode
+  round trips for owned string/list chains.
+- [x] 5.3 Bind generated segments and fallbacks during ordinary preparation; verify matching configured metadata,
   construction failures, startup manifest comparison, and dynamic mixed-provider execution.
-- [ ] 5.4 Track generator and descriptor inputs through reusable build directories; verify
+- [x] 5.4 Track generator and descriptor inputs through reusable build directories; verify
   provider/configuration/feature changes regenerate source and failed builds preserve the previously installed
   executable.
-- [ ] 5.5 Document standard-runner fast paths and custom-runner compatibility; verify documented task, stream, and
+- [x] 5.5 Document standard-runner fast paths and custom-runner compatibility; verify documented task, stream, and
   telemetry-disabled examples remain warning-free and manifest inspection needs no generation sidecars.
 
 ## 6. Integration and completion

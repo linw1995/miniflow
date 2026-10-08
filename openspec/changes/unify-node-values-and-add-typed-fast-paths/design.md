@@ -60,8 +60,8 @@ dynamic behavior. The descriptor supplies structured references to a provider-ow
 shim, concrete input and output contracts, field access/construction helpers, and the codec/validation evidence needed
 for planning. It must agree with the ordinary factory's configured metadata.
 
-Collect descriptors in the generated Cargo build with linked providers, and emit a separate generated source fragment
-alongside `flow-plans.rs`. The CLI keeps generating the dependency project without inspecting plugin source or naming
+Collect descriptors in the generated Cargo build with linked providers, and emit a preparation macro alongside the
+frozen layout items in `flow-plans.rs`. Standard runners expand it; custom runners retain dynamic preparation. The CLI keeps generating the dependency project without inspecting plugin source or naming
 plugin internals. Provider crate references resolve through the Flow's dependency aliases; host-only generation metadata
 must not introduce a compiler dependency into runtime execution or provider business logic. A provider can expose one
 dedicated shim while keeping its executor and fields private. The derive supplies tuple construction/decomposition through `TypedNodeValue`, so private fields stay private.
@@ -157,8 +157,8 @@ non-finite nested floats, refinements, and worker limits. Exercise runtime snaps
 compatibility.
 
 For eligible chains, assert that generated source contains typed construction/field transfer and no internal
-encode/decode or intermediate map operations. Use an isolated fixture with conversion counters and concrete owned
-string/list fields to demonstrate that boundary conversion remains but internal round trips disappear. Test unproven
+encode/decode or intermediate map operations. Count generated boundary conversion calls and check owned allocation identity with concrete string/list fields to
+demonstrate that boundary conversion remains but internal round trips disappear. Test unproven
 custom validation as a fallback case. Keep timing/allocation comparisons and ablation reports under ignored `target/`;
 functional tests should not depend on noisy timing thresholds.
 

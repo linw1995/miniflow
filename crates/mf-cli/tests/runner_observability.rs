@@ -46,7 +46,10 @@ fn plugin(root: &Path) -> PathBuf {
     // Keep the telemetry probe independent of additional provider modules.
     let mut minimal = source
         .lines()
-        .filter(|line| !line.starts_with("mod ") || *line == "mod context_fixture;")
+        .filter(|line| {
+            !(line.starts_with("mod ") || line.starts_with("pub mod "))
+                || *line == "mod context_fixture;"
+        })
         .collect::<Vec<_>>()
         .join("\n");
     minimal.push('\n');

@@ -71,12 +71,14 @@ pub use typed_plan::{
 
 pub use construction::{
     FlowBuildError, FlowBuilder, InvalidDefinitionSnafu as WorkflowInvalidDefinitionSnafu,
-    MetadataSnafu as WorkflowMetadataSnafu, StreamBuildError,
-    SubgraphSnafu as WorkflowSubgraphSnafu, WorkflowBuildError, bind_workflow_inputs, build_flow,
-    build_message_domains, instantiate_node_with_metadata, instantiate_subgraph_with_metadata,
-    into_task, partition_execution_domains, prepare_stream, prepared_loop_assign_from_json,
-    prepared_loop_source_from_json, stream_workflow_inputs, validate_execution,
-    validate_stream_limits, workflow_input_schema,
+    InvalidEmbeddedConfigSnafu as WorkflowInvalidEmbeddedConfigSnafu,
+    MetadataSnafu as WorkflowMetadataSnafu, NodeConstructionSnafu as WorkflowNodeConstructionSnafu,
+    StreamBuildError, SubgraphSnafu as WorkflowSubgraphSnafu,
+    UnknownKindSnafu as WorkflowUnknownKindSnafu, WorkflowBuildError, bind_workflow_inputs,
+    build_flow, build_message_domains, instantiate_node_with_metadata,
+    instantiate_subgraph_with_metadata, into_task, partition_execution_domains, prepare_stream,
+    prepared_loop_assign_from_json, prepared_loop_source_from_json, stream_workflow_inputs,
+    validate_execution, validate_stream_limits, workflow_input_schema,
 };
 pub use mf_runtime::{
     FlowRuntime, RuntimeOptions, TaskFlowNode, WorkflowInputError, WorkflowInputSchema,

@@ -64,7 +64,8 @@ pub use node::{
     NodeValues, OutputDerivation, OutputDerivationError, Outputs,
     PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, TaskNode,
     TypeCompatibility, TypeDepthError, TypeMismatch, TypedTaskNode, ValueType, deserialize_config,
-    encode_typed_result, execute_typed_task, output_id,
+    encode_typed_result, execute_typed_task, output_id, port_names_match,
+    verify_generated_metadata,
 };
 pub use node::{
     TypedConstructor, TypedGeneration, TypedGenerationError, TypedNodeValue, TypedPort,

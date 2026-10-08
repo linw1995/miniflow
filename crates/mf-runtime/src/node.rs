@@ -334,7 +334,7 @@ impl fmt::Display for ValueType {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PortSpec {
     pub name: Cow<'static, str>,
     pub value_type: ValueType,
@@ -358,13 +358,13 @@ impl PortSpec {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct NodePorts {
     pub inputs: Vec<PortSpec>,
     pub outputs: Vec<PortSpec>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub enum OutputDerivation {
     Literal {
         output: String,
@@ -477,7 +477,7 @@ impl NodePorts {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ContextReference {
     pub output: String,
     pub label: String,
@@ -498,6 +498,10 @@ pub fn output_id(node: &str, port: &str) -> String {
 
 #[derive(Debug, Snafu)]
 pub enum NodeBuildError {
+    #[snafu(display("could not serialize generated metadata: {source}"))]
+    GenerationMetadata { source: serde_json::Error },
+    #[snafu(display("prepared metadata differs from the compiled typed generation contract"))]
+    GenerationMetadataMismatch,
     #[snafu(transparent)]
     Generation { source: TypedGenerationError },
 
@@ -649,7 +653,7 @@ impl<N: TypedTaskNode> TaskNode for TypedTaskAdapter<N> {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct NodeMetadata {
     pub ports: NodePorts,
     pub output_derivations: Vec<OutputDerivation>,
@@ -674,14 +678,19 @@ impl From<NodePorts> for NodeMetadata {
 }
 
 /// Field metadata emitted by the unified derive for certified generation.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct TypedPort {
     pub port: PortSpec,
     pub rust_type: crate::RustValueType,
 }
 
 /// Named structs with runtime-owned field validation and private-field access helpers.
+///
+/// Implementations certify the exact runtime-owned field codecs without additional
+/// conversion constraints or transformations. Prefer the unified derive; business
+/// invariants belong in task execution rather than a certified field conversion.
 pub trait TypedNodeValue: NodeValue {
+    const PORT_NAMES: &'static [&'static str];
     type Fields;
     fn typed_ports() -> Vec<TypedPort>;
     fn into_fields(self) -> Self::Fields;
@@ -689,13 +698,13 @@ pub trait TypedNodeValue: NodeValue {
     fn validate_typed(&self) -> Result<Vec<&'static str>, crate::OutputEncodeError>;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct TypedConstructor {
     pub package: &'static str,
     pub path: &'static [&'static str],
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct TypedGeneration {
     pub constructor: TypedConstructor,
     pub inputs: Vec<TypedPort>,
@@ -853,6 +862,38 @@ where
     ) -> Result<crate::TypedNodeResult<N::Output>, NodeExecutionError> {
         self.task.execute(input, ctx)
     }
+}
+
+pub const fn port_names_match(actual: &[&str], expected: &[&str]) -> bool {
+    if actual.len() != expected.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < actual.len() {
+        let left = actual[index].as_bytes();
+        let right = expected[index].as_bytes();
+        if left.len() != right.len() {
+            return false;
+        }
+        let mut byte = 0;
+        while byte < left.len() {
+            if left[byte] != right[byte] {
+                return false;
+            }
+            byte += 1;
+        }
+        index += 1;
+    }
+    true
+}
+
+pub fn verify_generated_metadata(
+    actual: &NodeMetadata,
+    expected: &serde_json::Value,
+) -> Result<(), NodeBuildError> {
+    let actual = serde_json::to_value(actual).context(GenerationMetadataSnafu)?;
+    ensure!(actual == *expected, GenerationMetadataMismatchSnafu);
+    Ok(())
 }
 
 pub struct PreparedNode {
