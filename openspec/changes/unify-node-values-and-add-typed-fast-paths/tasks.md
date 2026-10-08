@@ -31,16 +31,16 @@
 
 ## 3. Conservative segment planning
 
-- [ ] 3.1 Compute typed connection eligibility and deterministic fallback reasons from resolved ports and generation
+- [x] 3.1 Compute typed connection eligibility and deterministic fallback reasons from resolved ports and generation
   descriptors; verify required same-type chains qualify while optional connections, opaque codecs, unsupported
   refinements, and distinct Rust types fall back.
-- [ ] 3.2 Extend use analysis to data/control readers, context references, selected outputs, retained context
+- [x] 3.2 Extend use analysis to data/control readers, context references, selected outputs, retained context
   visibility, and payload observation; verify no moved value loses a second observer and no hidden `Clone` bound is
   introduced.
-- [ ] 3.3 Lower maximal eligible serial segments inside existing top-level oneshot domains; verify forks, joins,
+- [x] 3.3 Lower maximal eligible serial segments inside existing top-level oneshot domains; verify forks, joins,
   cross-domain connections, streams, nested bodies, and custom-runner generation preserve dynamic execution and existing
   domain layouts.
-- [ ] 3.4 Document supported connections and build inspection fallback reasons; verify the documented eligible and
+- [x] 3.4 Document supported connections and build inspection fallback reasons; verify the documented eligible and
   fallback examples match planner results.
 
 ## 4. Common runtime lifecycle

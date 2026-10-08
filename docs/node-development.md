@@ -144,6 +144,19 @@ certifies only runtime-owned codecs and still validates all produced fields befo
 Missing generation support leaves dynamic providers unchanged. Exhaustive `NodeMetadata` literals must
 include `typed_generation: None`; constructors and literals using `..Default::default()` need no change.
 
+### Generated typed segments
+
+The planner keeps existing execution domains and identifies maximal eligible serial task chains.
+Direct internal transfer requires required ports, the same certified Rust representation, unchanged
+resolved output descriptors, and a single remaining observer. Unconnected optional fields keep their
+ordinary omission semantics; connected optional fields currently use dynamic conversion.
+
+Build inspection records one deterministic fallback reason per data connection. Reasons include
+missing provider support, context reads, unproven refinement, observed outputs, optional bindings,
+different Rust representations, domain boundaries, and multiple predecessors. Fan-out, joins,
+stream/event execution, nested bodies, and custom-runner context inspection stay dynamic. A connection
+whose output is also selected by the workflow or read by a condition cannot consume the only owned copy.
+
 ### Struct-defined inputs
 
 Use the runtime's `NodeInputs` derive to declare input ports and decode their values from one owned struct:

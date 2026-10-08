@@ -16,6 +16,8 @@ mod plan;
 #[cfg(feature = "codegen")]
 mod state;
 mod streaming;
+#[cfg(feature = "codegen")]
+mod typed_plan;
 
 #[cfg(feature = "codegen")]
 pub use cache::{BuildDirectory, CacheError, default_build_directory};
@@ -62,6 +64,10 @@ pub use plan::{
 #[cfg(feature = "codegen")]
 pub use state::{BuildGuard, StateError, atomic_copy, atomic_write, write_if_changed};
 pub use streaming::{instantiate_stream, start_stream};
+#[cfg(feature = "codegen")]
+pub use typed_plan::{
+    TypedConnectionReport, TypedFallbackReason, TypedPlan, TypedSegment, plan_typed_segments,
+};
 
 pub use construction::{
     FlowBuildError, FlowBuilder, InvalidDefinitionSnafu as WorkflowInvalidDefinitionSnafu,
