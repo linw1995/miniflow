@@ -157,6 +157,20 @@ different Rust representations, domain boundaries, and multiple predecessors. Fa
 stream/event execution, nested bodies, and custom-runner context inspection stay dynamic. A connection
 whose output is also selected by the workflow or read by a condition cannot consume the only owned copy.
 
+### Generated invocation lifecycle
+
+Generated domain bodies bind to the existing `FlowRuntime` scheduler and share prepared task instances
+with their dynamic adapters. `execute_generated_position` uses the ordinary dependency checks,
+node observations, failure phases, and scope-effect publication. Runtime payload snapshot capture
+selects the domain's prepared dynamic fallback; scoped execution also keeps its existing dynamic path.
+
+A provider invocation must call `GeneratedNodeResult::typed(&result)` before decomposing intermediate
+outputs. This borrows and validates every field, including unused descendants, before recording
+presence or calling a successor. `GeneratedNodeResult::encoded(result)` performs ordinary encoding at
+an exit. Prepared refinements not certified by direct transfer remain dynamic. Internal presence
+records are not context-readable payloads: generation must exclude every output observer before moving
+an owned field. Explicit skips and unexpectedly missing dependencies keep their ordinary semantics.
+
 ### Struct-defined inputs
 
 Use the runtime's `NodeInputs` derive to declare input ports and decode their values from one owned struct:

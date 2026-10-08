@@ -213,6 +213,21 @@ pub enum RustValueType {
     Optional(Box<Self>),
 }
 
+impl RustValueType {
+    pub fn value_type(&self) -> ValueType {
+        match self {
+            Self::Boolean => ValueType::Boolean,
+            Self::Int64 => ValueType::Int64,
+            Self::Float64 => ValueType::Float64,
+            Self::String => ValueType::String,
+            Self::Shared => ValueType::Any,
+            Self::List(inner) => ValueType::List(Box::new(inner.value_type())),
+            Self::Map(inner) => ValueType::Map(Box::new(inner.value_type())),
+            Self::Optional(inner) => inner.value_type(),
+        }
+    }
+}
+
 /// Seals certified codecs to the implementations whose validation is runtime-owned.
 pub trait CertifiedCodec {}
 

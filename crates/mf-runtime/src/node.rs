@@ -526,7 +526,7 @@ pub enum NodeExecutionError {
         #[snafu(source(from(crate::InputDecodeError, Box::new)))]
         source: Box<crate::InputDecodeError>,
     },
-    #[snafu(display("could not encode typed task outputs at `{}`: {source}", source.pointer()))]
+    #[snafu(display("could not encode typed task outputs at `{}`: {source}", source.pointer()), visibility(pub(super)))]
     OutputEncode {
         #[snafu(source(from(crate::OutputEncodeError, Box::new)))]
         source: Box<crate::OutputEncodeError>,
@@ -626,9 +626,14 @@ pub fn execute_typed_task<N: TypedTaskNode + ?Sized>(
 ) -> Result<crate::NodeResult, NodeExecutionError> {
     let input = <N::Input as crate::NodeInputs>::from_inputs(inputs).context(InputDecodeSnafu)?;
     let result = task.execute(input, ctx)?;
+    encode_typed_result(result)
+}
+
+pub fn encode_typed_result<O: crate::NodeOutputs>(
+    result: crate::TypedNodeResult<O>,
+) -> Result<crate::NodeResult, NodeExecutionError> {
     Ok(crate::NodeResult {
-        outputs: <N::Output as crate::NodeOutputs>::into_outputs(result.outputs)
-            .context(OutputEncodeSnafu)?,
+        outputs: O::into_outputs(result.outputs).context(OutputEncodeSnafu)?,
         skipped: result.skipped,
         loop_summary: result.loop_summary,
     })
@@ -737,6 +742,15 @@ impl TypedGeneration {
             }
         );
         ensure!(
+            self.inputs
+                .iter()
+                .chain(&self.outputs)
+                .all(|field| { field.rust_type.value_type() == field.port.value_type }),
+            TypedGenerationSnafu {
+                message: "Rust representation does not certify its port descriptor"
+            }
+        );
+        ensure!(
             self.inputs.iter().map(|p| &p.port).eq(ports.inputs.iter())
                 && self.outputs.len() == ports.outputs.len()
                 && self
@@ -822,6 +836,10 @@ where
             TypedTaskAdapter(SharedTypedTask(self.task.clone())),
             self.metadata.clone(),
         )
+    }
+
+    pub fn decode_inputs(&self, inputs: Inputs) -> Result<N::Input, NodeExecutionError> {
+        <N::Input as crate::NodeInputs>::from_inputs(inputs).context(InputDecodeSnafu)
     }
 
     pub fn input_from_fields(&self, fields: <N::Input as TypedNodeValue>::Fields) -> N::Input {

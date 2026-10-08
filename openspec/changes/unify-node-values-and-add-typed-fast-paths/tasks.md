@@ -45,18 +45,18 @@
 
 ## 4. Common runtime lifecycle
 
-- [ ] 4.1 Extract shared per-node lifecycle operations needed by typed bodies within existing runtime modules; verify
+- [x] 4.1 Extract shared per-node lifecycle operations needed by typed bodies within existing runtime modules; verify
   ordinary task behavior remains unchanged for skip/missing precedence, observations, error phases, and staged effects.
-- [ ] 4.2 Add prepared generated-domain binding with a dynamic fallback to the existing scheduler; verify worker limits,
+- [x] 4.2 Add prepared generated-domain binding with a dynamic fallback to the existing scheduler; verify worker limits,
   private contexts, repeated invocation, failure draining, and launch without graph reconstruction. Verify both
   strategies share one initialized provider instance without duplicate factory calls or resource acquisition.
-- [ ] 4.3 Add certified typed result validation before field availability; verify invalid unused outputs, nested
+- [x] 4.3 Add certified typed result validation before field availability; verify invalid unused outputs, nested
   non-finite floats, prepared refinements, explicit skips, and escaped source-bearing failures prevent successor
   invocation and partial publication.
-- [ ] 4.4 Dispatch affected domains to their prepared dynamic fallback for payload snapshots; verify snapshots and
+- [x] 4.4 Dispatch affected domains to their prepared dynamic fallback for payload snapshots; verify snapshots and
   custom-runner context inspection retain ordinary intermediate values while lifecycle-only telemetry remains supported
   on typed segments.
-- [ ] 4.5 Document lifecycle and boundary-validation responsibilities for provider shims; verify an external fixture
+- [x] 4.5 Document lifecycle and boundary-validation responsibilities for provider shims; verify an external fixture
   cannot bypass required validation simply by advertising a matching Rust type.
 
 ## 5. Generated execution

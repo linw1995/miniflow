@@ -265,12 +265,17 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
     } else {
         quote!()
     };
+    let into_fields = if field_names.is_empty() {
+        quote!()
+    } else {
+        quote!((#(self.#field_names,)*))
+    };
     let typed_impl = if typed {
         quote! {
             impl #impl_generics #runtime::TypedNodeValue for #name #type_generics #where_clause {
                 type Fields = (#(#field_types,)*);
                 fn typed_ports() -> ::std::vec::Vec<#runtime::TypedPort> { vec![#(#typed_ports),*] }
-                fn into_fields(self) -> Self::Fields { (#(self.#field_names,)*) }
+                fn into_fields(self) -> Self::Fields { #into_fields }
                 fn from_fields(fields: Self::Fields) -> Self {
                     let (#(#field_names,)*) = fields;
                     Self { #(#field_names),* }
