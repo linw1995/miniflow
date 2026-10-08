@@ -7,6 +7,6 @@
 - [x] Review the final change against AGENTS.md and resolve blocking findings.
 - [x] Run focused regressions, coverage, repository hooks, pinned Nix checks, and OpenSpec validation.
 
-## Workflow follow-up
+## Archive outcome
 
-After final validation, commit the implementation and archive the reviewed change. Validate and commit the synchronized specifications before pushing and creating the pull request.
+The reviewed implementation was committed before this change was archived. The synchronized specifications and completed tasks were validated before publication.
