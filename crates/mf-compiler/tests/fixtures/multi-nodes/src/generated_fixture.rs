@@ -55,9 +55,11 @@ pub fn text(
 
 inventory::submit! {
     NodeRegistration { kind: "fixture.typed_text", factory: mf_runtime::NodeFactory::Plain(|config| {
+        let dynamic = config.get("dynamic").and_then(serde_json::Value::as_bool).unwrap_or(false);
         let bad_constructor = config.get("bad_constructor").and_then(serde_json::Value::as_bool).unwrap_or(false);
         let bad_names = config.get("bad_names").and_then(serde_json::Value::as_bool).unwrap_or(false);
         let mut prepared = text(config)?.prepared();
+        if dynamic { prepared.metadata.typed_generation = None; }
         if bad_constructor { prepared.metadata.typed_generation.as_mut().unwrap().constructor.path = &["generated_fixture", "items"]; }
         if bad_names { prepared.metadata.typed_generation.as_mut().unwrap().constructor.path = &["generated_fixture", "renamed"]; }
         Ok(prepared)

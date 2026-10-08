@@ -77,16 +77,16 @@
 
 ## 6. Integration and completion
 
-- [ ] 6.1 Run differential generated/in-memory regressions covering successes, business failures, dynamic boundary
+- [x] 6.1 Run differential generated/in-memory regressions covering successes, business failures, dynamic boundary
   mismatches, omission/skip/missing precedence, context reads, snapshots, refinements, and concurrency; verify
   equivalent selected outputs, node attribution, phases, and typed error provenance.
-- [ ] 6.2 Measure allocations, runtime, generated binary size, and build time for eligible chains and mixed-provider
+- [x] 6.2 Measure allocations, runtime, generated binary size, and build time for eligible chains and mixed-provider
   graphs; retain reports under ignored `target/` and verify conversion elimination without timing-dependent pass
   thresholds.
-- [ ] 6.3 Review implementation against AGENTS.md module boundaries and Snafu error rules; verify no visibility-only
+- [x] 6.3 Review implementation against AGENTS.md module boundaries and Snafu error rules; verify no visibility-only
   facade, source stringification, accidental dependency update, or unrequested remote operation is introduced.
-- [ ] 6.4 Run `nix develop --command prek install`, `nix develop --command prek -a`, and `nix flake check -L`; verify
+- [x] 6.4 Run `nix develop --command prek install`, `nix develop --command prek -a`, and `nix flake check -L`; verify
   required repository checks pass and record any environment limitations accurately.
-- [ ] 6.5 Run focused coverage when runtime/compiler behavior changes and `openspec validate
+- [x] 6.5 Run focused coverage when runtime/compiler behavior changes and `openspec validate
   unify-node-values-and-add-typed-fast-paths --strict`; verify spec scenarios are covered and mark tasks complete only
   after their stated evidence exists.

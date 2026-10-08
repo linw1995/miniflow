@@ -95,9 +95,6 @@ fn generated_owned_values_preserve_contracts_and_installation() {
     );
     let mut command = mf_compiler::cargo_command(&build);
     command.args(["build", "--release", "--offline"]);
-    if let Some(config) = std::env::var_os("MF_TEST_SOURCE_CONFIG") {
-        command.arg("--config").arg(config);
-    }
     let diagnostics = command.output().unwrap();
     assert!(
         diagnostics.status.success(),
