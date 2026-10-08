@@ -2,17 +2,17 @@
 
 ## 1. Unified value contract
 
-- [ ] 1.1 Add the canonical `NodeValue` trait and common `NodeValues` alias with existing directional errors; verify
+- [x] 1.1 Add the canonical `NodeValue` trait and common `NodeValues` alias with existing directional errors; verify
   existing dynamic callers compile with the retained `Inputs` and `Outputs` aliases.
-- [ ] 1.2 Add the unified derive and explicit directional compatibility implementations through the existing derive
+- [x] 1.2 Add the unified derive and explicit directional compatibility implementations through the existing derive
   parser; verify same-struct input/output use, old derives and manual implementations, generics, aliases, renames,
   private fields, and renamed runtime dependencies with compile cases.
-- [ ] 1.3 Preserve strict codec and presence behavior; verify missing and unknown ports, optional null/omission,
+- [x] 1.3 Preserve strict codec and presence behavior; verify missing and unknown ports, optional null/omission,
   integer/float representations, non-finite descendants, depth limits, escaped pointers, and shared payload identity
   through existing codec tests and focused additions.
-- [ ] 1.4 Migrate Identity and Iteration to the unified derive without changing task associated-type bounds; verify
+- [x] 1.4 Migrate Identity and Iteration to the unified derive without changing task associated-type bounds; verify
   forwarding identity, body-dependent output refinements, and direct dynamic callers in their existing regressions.
-- [ ] 1.5 Document the unified contract, compatibility period, and port-bag versus nested-record boundary in
+- [x] 1.5 Document the unified contract, compatibility period, and port-bag versus nested-record boundary in
   `docs/node-development.md`; verify documented examples compile with the pinned toolchain.
 
 ## 2. Provider generation contract

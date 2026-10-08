@@ -32,10 +32,21 @@ pub fn derive_node_outputs(input: TokenStream) -> TokenStream {
     }
 }
 
+/// Derives one bidirectional contract for an owned named-port struct.
+#[proc_macro_derive(NodeValue, attributes(value))]
+pub fn derive_node_value(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match expand(input, Direction::Value) {
+        Ok(output) => output.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Direction {
     Input,
     Output,
+    Value,
 }
 
 impl Direction {
@@ -43,6 +54,7 @@ impl Direction {
         match self {
             Self::Input => "input",
             Self::Output => "output",
+            Self::Value => "value",
         }
     }
 
@@ -50,6 +62,7 @@ impl Direction {
         match self {
             Self::Input => "NodeInputs",
             Self::Output => "NodeOutputs",
+            Self::Value => "NodeValue",
         }
     }
 }
@@ -92,6 +105,8 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
     let mut generics = input.generics;
     let mut ports = Vec::new();
     let mut converted = Vec::new();
+    let mut decoded = Vec::new();
+    let mut encoded = Vec::new();
     let mut names = BTreeSet::new();
     for field in fields.named {
         let ident = field.ident.expect("named field");
@@ -136,14 +151,23 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
             return Err(error);
         }
         let field_trait = match direction {
-            Direction::Input => quote!(#runtime::InputField),
+            Direction::Input | Direction::Value => quote!(#runtime::InputField),
             Direction::Output => quote!(#runtime::OutputField),
         };
         generics
             .make_where_clause()
             .predicates
             .push(parse_quote!(#ty: #field_trait));
+        if matches!(direction, Direction::Value) {
+            generics
+                .make_where_clause()
+                .predicates
+                .push(parse_quote!(#ty: #runtime::OutputField));
+        }
         ports.push(quote!(<#ty as #field_trait>::port(#port)));
+        decoded.push(quote!(#ident: #runtime::decode_input::<#ty>(&mut __mf_inputs, #port)?));
+        encoded
+            .push(quote!(#runtime::encode_output::<#ty>(&mut __mf_outputs, #port, self.#ident)?;));
         converted.push(match direction {
             Direction::Input => {
                 quote!(#ident: #runtime::decode_input::<#ty>(&mut __mf_inputs, #port)?)
@@ -151,6 +175,7 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
             Direction::Output => {
                 quote!(#runtime::encode_output::<#ty>(&mut __mf_outputs, #port, self.#ident)?;)
             }
+            Direction::Value => quote!(),
         });
     }
     let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
@@ -165,6 +190,21 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
                 }
             },
         ),
+        Direction::Value => (
+            quote!(#runtime::NodeValue),
+            quote! {
+                fn from_values(mut __mf_inputs: #runtime::NodeValues) -> ::std::result::Result<Self, #runtime::InputDecodeError> {
+                    let __mf_result = Self { #(#decoded),* };
+                    #runtime::reject_unknown_inputs(__mf_inputs)?;
+                    Ok(__mf_result)
+                }
+                fn into_values(self) -> ::std::result::Result<#runtime::NodeValues, #runtime::OutputEncodeError> {
+                    let mut __mf_outputs = #runtime::NodeValues::new();
+                    #(#encoded)*
+                    Ok(__mf_outputs)
+                }
+            },
+        ),
         Direction::Output => (
             quote!(#runtime::NodeOutputs),
             quote! {
@@ -176,7 +216,26 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
             },
         ),
     };
+    let bridges = if matches!(direction, Direction::Value) {
+        quote! {
+            impl #impl_generics #runtime::NodeInputs for #name #type_generics #where_clause {
+                fn ports() -> ::std::vec::Vec<#runtime::PortSpec> { <Self as #runtime::NodeValue>::ports() }
+                fn from_inputs(values: #runtime::Inputs) -> ::std::result::Result<Self, #runtime::InputDecodeError> {
+                    <Self as #runtime::NodeValue>::from_values(values)
+                }
+            }
+            impl #impl_generics #runtime::NodeOutputs for #name #type_generics #where_clause {
+                fn ports() -> ::std::vec::Vec<#runtime::PortSpec> { <Self as #runtime::NodeValue>::ports() }
+                fn into_outputs(self) -> ::std::result::Result<#runtime::Outputs, #runtime::OutputEncodeError> {
+                    <Self as #runtime::NodeValue>::into_values(self)
+                }
+            }
+        }
+    } else {
+        quote!()
+    };
     Ok(quote! {
+        #bridges
         impl #impl_generics #contract for #name #type_generics #where_clause {
             fn ports() -> ::std::vec::Vec<#runtime::PortSpec> {
                 ::std::vec![#(#ports),*]

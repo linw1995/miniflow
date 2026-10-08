@@ -5,8 +5,28 @@ use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
 
-pub type Inputs = std::collections::BTreeMap<String, crate::ValueRef>;
-pub type Outputs = Inputs;
+pub type NodeValues = std::collections::BTreeMap<String, crate::ValueRef>;
+pub type Inputs = NodeValues;
+pub type Outputs = NodeValues;
+
+/// One declaration and bidirectional conversion for an owned named-port struct.
+///
+/// Input and output are roles, rather than distinct data representations.
+///
+/// ```
+/// use mf_runtime::{NodeValue, NodeValues};
+/// #[derive(NodeValue)]
+/// struct Message { text: String, limit: Option<i64> }
+/// let message = Message::from_values(NodeValues::from([("text".into(), "hello".into())]))?;
+/// let values = message.into_values()?;
+/// assert_eq!(values["text"].as_str(), Some("hello"));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub trait NodeValue: Sized {
+    fn ports() -> Vec<PortSpec>;
+    fn from_values(values: NodeValues) -> Result<Self, crate::InputDecodeError>;
+    fn into_values(self) -> Result<NodeValues, crate::OutputEncodeError>;
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ValueType {

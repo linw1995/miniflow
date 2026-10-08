@@ -1,6 +1,6 @@
 use mf_runtime::{
-    NodeBuildError, NodeExecutionError, NodeInputs, NodeOutputs, NodeRegistration,
-    OutputDerivation, TypedTaskNode, ValueRef,
+    NodeBuildError, NodeExecutionError, NodeRegistration, NodeValue, OutputDerivation,
+    TypedTaskNode, ValueRef,
 };
 use serde_json::Value;
 
@@ -12,12 +12,12 @@ pub fn kind() -> &'static str {
 
 struct IdentityNode;
 
-#[derive(NodeInputs)]
+#[derive(NodeValue)]
 struct IdentityInputs {
     input: ValueRef,
 }
 
-#[derive(NodeOutputs)]
+#[derive(NodeValue)]
 struct IdentityOutputs {
     value: ValueRef,
 }

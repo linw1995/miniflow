@@ -1,8 +1,8 @@
 use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, IterationConfig, IterationErrorPolicy, IterationMode,
-    NodeBuildError, NodeExecutionError, NodeInputs, NodeOutputs, NodePorts, NodeRegistration,
-    NodeResult, Outputs, PortSpec, PreparedSubgraph, TaskNode, TypedNodeResult, TypedTaskNode,
-    ValueKind, ValueRef, ValueType, deserialize_config, execute_typed_task,
+    NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, NodeResult, NodeValue,
+    Outputs, PortSpec, PreparedSubgraph, TaskNode, TypedNodeResult, TypedTaskNode, ValueKind,
+    ValueRef, ValueType, deserialize_config, execute_typed_task,
 };
 use mf_telemetry::observation::{ItemObservation, IterationObservation};
 use snafu::{ResultExt, Snafu};
@@ -42,13 +42,13 @@ pub struct IterationNode {
 }
 
 /// Fixed inputs shared by typed and dynamic Iteration task calls.
-#[derive(NodeInputs)]
+#[derive(NodeValue)]
 pub struct IterationInputs {
     pub items: ValueRef,
 }
 
 /// Collected results shared by typed and dynamic Iteration task calls.
-#[derive(NodeOutputs)]
+#[derive(NodeValue)]
 pub struct IterationOutputs {
     pub results: Vec<ValueRef>,
 }

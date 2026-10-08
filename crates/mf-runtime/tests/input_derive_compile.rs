@@ -102,4 +102,34 @@ fn struct_derives_compile_with_aliases_and_report_invalid_declarations() {
             );
         }
     }
+    let prefix = "use runtime_alias::NodeValue;\n#[derive(NodeValue)]\n#[value(runtime = \"::runtime_alias\")]\n";
+    let valid =
+        format!("{prefix}pub struct Values<T> {{ data: T, label: Option<String>, items: Vec<T> }}");
+    let output = check(root.path(), &valid, false);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    for (declaration, diagnostic) in [
+        ("enum Values { Item }", "requires a named-field struct"),
+        ("struct Values(i64);", "requires a named-field struct"),
+        ("struct Values<'a> { item: &'a str }", "owned value fields"),
+        (
+            "struct Values { #[value(rename = \"\")] item: i64 }",
+            "must not be empty",
+        ),
+        (
+            "struct Values { #[value(rename = \"x\")] a: i64, #[value(rename = \"x\")] b: i64 }",
+            "duplicate value port name",
+        ),
+        ("struct Values { item: Vec<Option<i64>> }", "InputValue"),
+    ] {
+        let output = check(root.path(), &format!("{prefix}{declaration}"), false);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success() && stderr.contains(diagnostic),
+            "{stderr}"
+        );
+    }
 }

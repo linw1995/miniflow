@@ -96,6 +96,35 @@ Declare context reads in `NodeMetadata.context_references`. Each `ContextReferen
 
 ## Context-aware execution
 
+### Unified value structs
+
+Use `NodeValue` to declare one owned named-port contract for either task role:
+
+```rust
+use mf_runtime::{NodeValue, NodeValues};
+
+#[derive(NodeValue)]
+struct Message {
+    text: String,
+    #[value(rename = "request.limit")]
+    limit: Option<i64>,
+}
+
+let message = Message::from_values(NodeValues::from([("text".into(), "hello".into())]))?;
+let values = message.into_values()?;
+assert_eq!(values["text"].as_str(), Some("hello"));
+```
+
+The same struct can be a task's `Input`, `Output`, or both. The derive generates one `ports()` declaration,
+`from_values`, and `into_values`, plus explicit adapters for the existing `NodeInputs` and `NodeOutputs` contracts.
+Existing directional derives and manual implementations remain supported. When importing multiple contract traits,
+qualify the shared declaration as `<Message as NodeValue>::ports()`.
+
+`NodeValues`, `Inputs`, and `Outputs` name the same dynamic map. Conversion preserves the strict scalar,
+collection, optional-port, shared-value, and typed error semantics described below. Use
+`#[value(runtime = "::runtime_alias")]` for a renamed runtime dependency. Value attributes are independent of Serde.
+A value struct describes an entire port bag; it does not automatically implement a nested JSON-object field codec.
+
 ### Struct-defined inputs
 
 Use the runtime's `NodeInputs` derive to declare input ports and decode their values from one owned struct:

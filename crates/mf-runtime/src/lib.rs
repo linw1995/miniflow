@@ -51,7 +51,7 @@ pub use loop_node::{
     prepared_scope_source,
 };
 pub use message_domain::MessageDomains;
-pub use mf_runtime_derive::{NodeInputs, NodeOutputs};
+pub use mf_runtime_derive::{NodeInputs, NodeOutputs, NodeValue};
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
@@ -59,10 +59,11 @@ pub use node::{
     ContextReference, ExecutionFailedSnafu as NodeExecutionFailedSnafu,
     FactoryFailedSnafu as NodeFactoryFailedSnafu, Inputs,
     InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeExecution,
-    NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration, OutputDerivation,
-    OutputDerivationError, Outputs, PluginFailedSnafu as NodePluginFailedSnafu, PortSpec,
-    PreparedNode, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, TypedTaskNode,
-    ValueType, deserialize_config, execute_typed_task, output_id,
+    NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration, NodeValue,
+    NodeValues, OutputDerivation, OutputDerivationError, Outputs,
+    PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, TaskNode,
+    TypeCompatibility, TypeDepthError, TypeMismatch, TypedTaskNode, ValueType, deserialize_config,
+    execute_typed_task, output_id,
 };
 pub use number::compare_json_numbers;
 pub use registry::{NodeRegistry, NodeRegistryError};

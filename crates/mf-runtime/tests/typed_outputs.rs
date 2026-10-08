@@ -1,7 +1,7 @@
 extern crate mf_runtime as runtime_alias;
 use mf_runtime::{
-    NodeInputs, NodeOutputs, OutputEncodeError, Outputs, TypeDepthError, TypeMismatch, ValueRef,
-    ValueType, encode_output,
+    NodeInputs, NodeOutputs, NodeValue, OutputEncodeError, Outputs, TypeDepthError, TypeMismatch,
+    ValueRef, ValueType, encode_output,
 };
 use serde_json::json;
 use std::{collections::BTreeMap, error::Error};
@@ -9,15 +9,14 @@ use std::{collections::BTreeMap, error::Error};
 type Label = Option<String>;
 type Rows<T> = Vec<BTreeMap<String, T>>;
 
-#[derive(NodeInputs, NodeOutputs)]
-#[output(runtime = "::runtime_alias")]
+#[derive(NodeValue)]
+#[value(runtime = "::runtime_alias")]
 struct Fields<T> {
     active: bool,
     count: i64,
     ratio: f64,
     r#type: String,
-    #[input(rename = "rows./~")]
-    #[output(rename = "rows./~")]
+    #[value(rename = "rows./~")]
     rows: Rows<T>,
     shared: ValueRef,
     label: Label,
@@ -31,7 +30,7 @@ fn output_descriptors_and_encoded_values_round_trip_through_input_codecs() {
         <Contract as NodeOutputs>::ports(),
         <Contract as NodeInputs>::ports()
     );
-    let ports = <Contract as NodeOutputs>::ports();
+    let ports = <Contract as NodeValue>::ports();
     assert_eq!(ports[3].name, "type");
     assert_eq!(ports[4].name, "rows./~");
     assert_eq!(
@@ -61,7 +60,7 @@ fn output_descriptors_and_encoded_values_round_trip_through_input_codecs() {
             assert!(!port.required);
         }
     }
-    let decoded = Contract::from_inputs(outputs).unwrap();
+    let decoded = Contract::from_values(outputs).unwrap();
     assert!(decoded.active);
     assert_eq!(decoded.count, i64::MIN);
     assert_eq!(decoded.ratio.to_bits(), (-0.0_f64).to_bits());
