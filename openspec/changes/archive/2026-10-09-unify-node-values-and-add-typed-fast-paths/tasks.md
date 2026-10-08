@@ -103,3 +103,10 @@
 
 - Archive the reviewed change and synchronize its capability deltas after the implementation commit.
 - Validate the synchronized specifications and commit the archive result.
+
+## Archive outcome
+
+The reviewed implementation was committed as `73e6af8` before archival. The archive synchronized four capabilities,
+adding thirteen requirements and modifying one existing requirement. This archive has no incomplete tasks or validation
+issues, and all nineteen main specifications pass normal validation. Repository-wide archived-task validation retains
+an unrelated pre-existing incomplete archive at `2026-10-05-unify-flow-runtime`; it was not changed by this work.
