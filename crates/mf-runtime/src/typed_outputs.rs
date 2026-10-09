@@ -60,7 +60,7 @@ pub trait OutputField: Sized {
     }
 }
 
-#[derive(Debug, Snafu)]
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 pub enum OutputEncodeError {
     #[snafu(display("output `{port}`: {source}"))]
     InvalidValue { port: String, source: TypeMismatch },
@@ -95,6 +95,28 @@ pub fn encode_output<T: OutputField>(
         outputs.insert(port.to_owned(), value);
     }
     Ok(())
+}
+
+/// Encodes a named-port contract as a shared JSON object.
+pub fn encode_node_value<T: crate::NodeValue>(value: T) -> Result<ValueRef, TypeMismatch> {
+    let values = value.into_values().with_context(|error| {
+        let (expected, actual) = match error {
+            OutputEncodeError::InvalidValue { source, .. } => {
+                (source.expected.clone(), source.actual)
+            }
+            OutputEncodeError::InvalidType { .. } => (ValueType::Object, "invalid descriptor"),
+        };
+        crate::node::OutputSnafu {
+            details: crate::TypeMismatchDetails {
+                path: error.pointer(),
+                expected,
+                actual,
+            },
+        }
+    })?;
+    Ok(ValueRef::object(
+        values.into_iter().map(|(key, value)| (key.into(), value)),
+    ))
 }
 
 impl<T: OutputValue> OutputField for T {
@@ -136,12 +158,13 @@ impl OutputValue for f64 {
     fn encode(self) -> Result<ValueRef, TypeMismatch> {
         // JSON cannot represent non-finite floats; silently converting them to
         // null would violate the declared Float64 contract.
-        let number =
-            serde_json::Number::from_f64(self).context(crate::node::TypeMismatchSnafu {
-                path: "",
+        let number = serde_json::Number::from_f64(self).context(crate::node::ValueSnafu {
+            details: crate::TypeMismatchDetails {
+                path: String::new(),
                 expected: ValueType::Float64,
                 actual: "non-finite float",
-            })?;
+            },
+        })?;
         Ok(ValueRef::new(ValueKind::Number(number)))
     }
 }
@@ -278,10 +301,12 @@ impl TypedValueCodec for f64 {
     }
 
     fn validate_typed(&self) -> Result<(), TypeMismatch> {
-        serde_json::Number::from_f64(*self).context(crate::node::TypeMismatchSnafu {
-            path: "",
-            expected: ValueType::Float64,
-            actual: "non-finite float",
+        serde_json::Number::from_f64(*self).context(crate::node::ValueSnafu {
+            details: crate::TypeMismatchDetails {
+                path: String::new(),
+                expected: ValueType::Float64,
+                actual: "non-finite float",
+            },
         })?;
         Ok(())
     }

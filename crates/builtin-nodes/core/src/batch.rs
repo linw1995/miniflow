@@ -20,7 +20,7 @@ struct BatchInputs {
 
 #[derive(NodeValue)]
 struct BatchOutputs {
-    items: ValueRef,
+    items: Vec<ValueRef>,
 }
 
 #[derive(Debug, Snafu)]
@@ -118,7 +118,7 @@ impl BatchState {
             return Ok(());
         }
         let item_count = self.items.len();
-        let items = ValueRef::array(std::mem::take(&mut self.items));
+        let items = std::mem::take(&mut self.items);
         self.deadline = None;
         emissions.push(EventEmission {
             result: encode_typed_result(BatchOutputs { items }.into())?,
@@ -219,7 +219,11 @@ mod tests {
 
     #[test]
     fn configuration_requires_positive_representable_limits() {
-        assert!(factory(json!({"max_items":1, "max_wait_ms":1})).is_ok());
+        let prepared = factory(json!({"max_items":1, "max_wait_ms":1})).unwrap();
+        assert_eq!(
+            prepared.metadata.ports.outputs[0].value_type,
+            ValueType::Array
+        );
         for field in ["max_items", "max_wait_ms"] {
             for invalid in [json!(0), json!(-1), json!(1.5), json!("1"), Value::Null] {
                 let mut config = json!({"max_items":3, "max_wait_ms":100});

@@ -253,6 +253,25 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
                     <Self as #runtime::NodeValue>::into_values(self)
                 }
             }
+            impl #impl_generics #runtime::InputValue for #name #type_generics #where_clause {
+                fn value_type() -> #runtime::ValueType { #runtime::ValueType::Object }
+                fn decode(value: #runtime::ValueRef) -> ::std::result::Result<Self, #runtime::TypeMismatch> {
+                    #runtime::decode_node_value(value)
+                }
+            }
+            impl #impl_generics #runtime::InputField for #name #type_generics #where_clause {
+                const REQUIRED: bool = true;
+                fn value_type() -> #runtime::ValueType { #runtime::ValueType::Object }
+                fn decode_field(port: &str, value: ::std::option::Option<#runtime::ValueRef>) -> ::std::result::Result<Self, #runtime::InputDecodeError> {
+                    #runtime::decode_required_input(port, value)
+                }
+            }
+            impl #impl_generics #runtime::OutputValue for #name #type_generics #where_clause {
+                fn value_type() -> #runtime::ValueType { #runtime::ValueType::Object }
+                fn encode(self) -> ::std::result::Result<#runtime::ValueRef, #runtime::TypeMismatch> {
+                    #runtime::encode_node_value(self)
+                }
+            }
         }
     } else {
         quote!()

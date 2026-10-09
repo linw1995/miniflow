@@ -12,6 +12,7 @@ pub type Outputs = NodeValues;
 /// One declaration and bidirectional conversion for an owned named-port struct.
 ///
 /// Input and output are roles, rather than distinct data representations.
+/// The derive also supplies object codecs for nested fields and collections.
 ///
 /// ```
 /// use mf_runtime::{NodeValue, NodeValues};
@@ -87,15 +88,50 @@ pub enum TypeCompatibility {
     Incompatible,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
-#[snafu(
-    display("path `{path}`: expected {expected}, found {actual}"),
-    visibility(pub(super))
-)]
-pub struct TypeMismatch {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TypeMismatchDetails {
     pub path: String,
     pub expected: ValueType,
     pub actual: &'static str,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
+#[snafu(visibility(pub(super)))]
+pub enum TypeMismatch {
+    #[snafu(display("path `{}`: expected {}, found {}", details.path, details.expected, details.actual))]
+    Value { details: TypeMismatchDetails },
+    #[snafu(display("path `{}`: {source}", details.path))]
+    Input {
+        details: Box<TypeMismatchDetails>,
+        #[snafu(source(from(crate::InputDecodeError, Box::new)))]
+        source: Box<crate::InputDecodeError>,
+    },
+    #[snafu(display("path `{}`: {source}", details.path))]
+    Output {
+        details: Box<TypeMismatchDetails>,
+        #[snafu(source(from(crate::OutputEncodeError, Box::new)))]
+        source: Box<crate::OutputEncodeError>,
+    },
+}
+
+impl std::ops::Deref for TypeMismatch {
+    type Target = TypeMismatchDetails;
+
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Value { details } => details,
+            Self::Input { details, .. } | Self::Output { details, .. } => details,
+        }
+    }
+}
+
+impl std::ops::DerefMut for TypeMismatch {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Self::Value { details } => details,
+            Self::Input { details, .. } | Self::Output { details, .. } => details,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Snafu)]
@@ -291,10 +327,12 @@ impl ValueType {
         };
         ensure!(
             valid,
-            TypeMismatchSnafu {
-                path: String::new(),
-                expected: self.clone(),
-                actual: actual_type(value),
+            ValueSnafu {
+                details: TypeMismatchDetails {
+                    path: String::new(),
+                    expected: self.clone(),
+                    actual: actual_type(value),
+                },
             }
         );
         Ok(())
