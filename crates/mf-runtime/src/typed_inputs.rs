@@ -39,7 +39,8 @@ pub trait NodeInputs: Sized {
 ///
 /// The decoder must agree with `value_type()` and report paths relative to the
 /// supplied value. Supported implementations are bool, i64, f64, String, ValueRef,
-/// Vec of supported values, and string-keyed BTreeMap of supported values.
+/// Vec of supported values, string-keyed BTreeMap of supported values, and
+/// objects deriving [`crate::NodeValue`].
 /// `Option` is intentionally only an [`InputField`], not an element value codec.
 pub trait InputValue: Sized {
     fn value_type() -> ValueType;
@@ -64,7 +65,7 @@ pub trait InputField: Sized {
     }
 }
 
-#[derive(Debug, Snafu)]
+#[derive(Clone, Debug, PartialEq, Eq, Snafu)]
 pub enum InputDecodeError {
     #[snafu(display("required input `{port}` was not provided"))]
     MissingField { port: String },
@@ -121,7 +122,8 @@ pub fn reject_unknown_inputs(inputs: Inputs) -> Result<(), InputDecodeError> {
     Ok(())
 }
 
-fn decode_required<T: InputValue>(
+/// Decodes a required field using its single-value codec.
+pub fn decode_required_input<T: InputValue>(
     port: &str,
     value: Option<ValueRef>,
 ) -> Result<T, InputDecodeError> {
@@ -139,10 +141,38 @@ macro_rules! required_field {
             }
 
             fn decode_field(port: &str, value: Option<ValueRef>) -> Result<Self, InputDecodeError> {
-                decode_required(port, value)
+                decode_required_input(port, value)
             }
         }
     };
+}
+
+/// Decodes a named-port contract from a shared JSON object.
+pub fn decode_node_value<T: crate::NodeValue>(value: ValueRef) -> Result<T, TypeMismatch> {
+    ValueType::Object.validate_shared(&value)?;
+    let values = value
+        .as_object()
+        .expect("validated object")
+        .iter()
+        .map(|(key, value)| (key.to_string(), value.clone()))
+        .collect();
+    T::from_values(values).with_context(|error| {
+        let (expected, actual) = match error {
+            InputDecodeError::InvalidValue { source, .. } => {
+                (source.expected.clone(), source.actual)
+            }
+            InputDecodeError::MissingField { .. } => (ValueType::Object, "missing field"),
+            InputDecodeError::InvalidType { .. } => (ValueType::Object, "invalid descriptor"),
+            InputDecodeError::UnknownField { .. } => (ValueType::Object, "unknown field"),
+        };
+        crate::node::InputSnafu {
+            details: crate::TypeMismatchDetails {
+                path: error.pointer(),
+                expected,
+                actual,
+            },
+        }
+    })
 }
 
 macro_rules! scalar_value {

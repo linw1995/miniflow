@@ -123,7 +123,17 @@ qualify the shared declaration as `<Message as NodeValue>::ports()`.
 `NodeValues`, `Inputs`, and `Outputs` name the same dynamic map. Conversion preserves the strict scalar,
 collection, optional-port, shared-value, and typed error semantics described below. Use
 `#[value(runtime = "::runtime_alias")]` for a renamed runtime dependency. Value attributes are independent of Serde.
-A value struct describes an entire port bag; it does not automatically implement a nested JSON-object field codec.
+The derive also implements `InputValue`, `InputField`, and `OutputValue`, so a value struct can be a nested
+field or an element of `Vec<T>` and `BTreeMap<String, T>`. Nested structs use the broad `Object` descriptor;
+their codecs enforce declared field names, requiredness, and field types. Optional fields retain omission
+semantics, and unknown fields are rejected. Nested failures retain JSON Pointer paths and typed sources.
+These object codecs do not certify custom structs for typed generation.
+Remove equivalent manual codec implementations when adopting the derive. Manual `NodeValue` implementations remain
+responsible for their own nested value codecs.
+
+`TypeMismatch` includes variants for scalar mismatches and nested input/output failures. Its `path`,
+`expected`, and `actual` details remain readable through dereferencing. Direct construction and struct patterns must
+use its enum variants; construct scalar mismatches with `TypeMismatch::Value { details: TypeMismatchDetails { ... } }`.
 
 ### Typed generation opt-in
 

@@ -63,8 +63,8 @@ pub use node::{
     NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration, NodeValue,
     NodeValues, OutputDerivation, OutputDerivationError, Outputs,
     PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, TaskNode,
-    TypeCompatibility, TypeDepthError, TypeMismatch, TypedTaskNode, ValueType, deserialize_config,
-    encode_typed_result, execute_typed_task, output_id, port_names_match,
+    TypeCompatibility, TypeDepthError, TypeMismatch, TypeMismatchDetails, TypedTaskNode, ValueType,
+    deserialize_config, encode_typed_result, execute_typed_task, output_id, port_names_match,
     verify_generated_metadata,
 };
 pub use node::{
@@ -86,12 +86,13 @@ pub use stream_io::{StreamStdio, TextInput};
 pub use stream_plan::{FlowDependency, PreparedStream, StreamPlan};
 pub use subgraph::PreparedSubgraph;
 pub use typed_inputs::{
-    InputDecodeError, InputField, InputValue, NodeInputs, decode_input, reject_unknown_inputs,
+    InputDecodeError, InputField, InputValue, NodeInputs, decode_input, decode_node_value,
+    decode_required_input, reject_unknown_inputs,
 };
 
 pub use typed_outputs::{
     NodeOutputs, OutputEncodeError, OutputField, OutputValue, RustValueType, TypedField,
-    TypedValueCodec, encode_output, validate_typed_output,
+    TypedValueCodec, encode_node_value, encode_output, validate_typed_output,
 };
 
 pub use value::{ValueKind, ValueRef};
