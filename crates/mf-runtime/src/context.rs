@@ -1372,12 +1372,12 @@ mod tests {
     fn rejects_a_bad_output_without_publishing_any_result() {
         let node = FlowNode::new(
             "producer",
-            crate::PreparedNode::new(
-                EmitNode(Outputs::from([
+            crate::PreparedNode::from_parts(
+                crate::NodeExecution::Task(Box::new(EmitNode(Outputs::from([
                     ("good".into(), json!(1).into()),
                     ("bad".into(), json!("wrong").into()),
                     ("later".into(), json!(false).into()),
-                ])),
+                ])))),
                 NodePorts {
                     inputs: vec![],
                     outputs: vec![
@@ -1416,8 +1416,8 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let node = FlowNode::new(
             "consumer",
-            crate::PreparedNode::new(
-                CountNode(Arc::clone(&calls)),
+            crate::PreparedNode::from_parts(
+                crate::NodeExecution::Task(Box::new(CountNode(Arc::clone(&calls)))),
                 NodePorts {
                     inputs: vec![port(
                         "payload",
@@ -1466,8 +1466,8 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let node = FlowNode::new(
             "consumer",
-            crate::PreparedNode::new(
-                CountNode(Arc::clone(&calls)),
+            crate::PreparedNode::from_parts(
+                crate::NodeExecution::Task(Box::new(CountNode(Arc::clone(&calls)))),
                 NodePorts {
                     inputs: vec![],
                     outputs: vec![port("value", ValueType::Boolean, true)],
@@ -1574,8 +1574,8 @@ mod tests {
         let calls = Arc::new(AtomicUsize::new(0));
         let node = FlowNode::new(
             "consumer",
-            crate::PreparedNode::new(
-                CountNode(Arc::clone(&calls)),
+            crate::PreparedNode::from_parts(
+                crate::NodeExecution::Task(Box::new(CountNode(Arc::clone(&calls)))),
                 NodePorts {
                     inputs: vec![port("payload", ValueType::Int64, true)],
                     outputs: vec![port("value", ValueType::Boolean, true)],
@@ -1645,8 +1645,8 @@ mod tests {
         let flow = Flow::from_plan(
             vec![FlowNode::new(
                 "source",
-                crate::PreparedNode::new(
-                    AlternatingNode(AtomicUsize::new(0)),
+                crate::PreparedNode::from_parts(
+                    crate::NodeExecution::Task(Box::new(AlternatingNode(AtomicUsize::new(0)))),
                     NodePorts {
                         inputs: vec![],
                         outputs: vec![port("value", ValueType::Int64, true)],
@@ -1699,8 +1699,11 @@ mod tests {
                 vec![
                     FlowNode::new(
                         "source",
-                        crate::PreparedNode::new(
-                            EmitNode(Outputs::from([("value".into(), value.into())])),
+                        crate::PreparedNode::from_parts(
+                            crate::NodeExecution::Task(Box::new(EmitNode(Outputs::from([(
+                                "value".into(),
+                                value.into(),
+                            )])))),
                             NodePorts {
                                 inputs: vec![],
                                 outputs: vec![port("value", ValueType::Any, true)],
@@ -1709,8 +1712,8 @@ mod tests {
                     ),
                     FlowNode::new(
                         "consumer",
-                        crate::PreparedNode::new(
-                            CountNode(Arc::clone(&calls)),
+                        crate::PreparedNode::from_parts(
+                            crate::NodeExecution::Task(Box::new(CountNode(Arc::clone(&calls)))),
                             NodePorts {
                                 inputs: vec![port("payload", ValueType::Int64, true)],
                                 outputs: vec![port("value", ValueType::Boolean, true)],

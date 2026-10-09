@@ -353,6 +353,10 @@ impl TypeInferenceState {
         for output in &mut node.metadata.ports.outputs {
             let declared = output.value_type.clone();
             let mut fact = match derivations.get(output.name.as_ref()) {
+                Some(OutputDerivation::KnownType { value_type, .. }) => TypeFact {
+                    value_type: value_type.clone(),
+                    exact: None,
+                },
                 Some(OutputDerivation::Literal { value, .. }) => TypeFact {
                     value_type: ValueType::infer_shared(value),
                     exact: Some(value.clone()),

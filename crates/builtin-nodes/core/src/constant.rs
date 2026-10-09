@@ -1,6 +1,6 @@
 use mf_runtime::{
-    NodeBuildError, NodeExecutionError, NodeRegistration, NodeValue, OutputDerivation, PortSpec,
-    TypedNodeResult, TypedTaskNode, ValueRef, ValueType, deserialize_config,
+    NodeBuildError, NodeExecutionError, NodeRegistration, NodeValue, OutputDerivation,
+    TypedNodeResult, TypedTaskNode, ValueRef, deserialize_config,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -41,12 +41,6 @@ impl TypedTaskNode for ConstantNode {
             value: self.value.clone(),
         }
         .into())
-    }
-
-    fn output_ports(&self) -> Vec<PortSpec> {
-        let mut ports = ConstantOutputs::ports();
-        ports[0].value_type = ValueType::infer_shared(&self.value);
-        ports
     }
 }
 

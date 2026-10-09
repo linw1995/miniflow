@@ -64,7 +64,7 @@ inventory::submit! { NodeRegistration { kind: "test.autonomous_source", factory:
     let gate = config.get("gate").and_then(Value::as_str).map(|key| {
         GATES.get_or_init(Mutex::default).lock().unwrap().entry(key.into()).or_insert_with(|| Arc::new((Mutex::new(false), Condvar::new()))).clone()
     });
-    Ok(PreparedNode::stream(Source { gate, signal: config["signal"].as_bool().unwrap_or(false), count: config["count"].as_u64().unwrap_or(1) as usize, check_future: config["check_future"].as_bool().unwrap_or(false) }, NodePorts {
+    Ok(PreparedNode::from_parts(mf_runtime::NodeExecution::Stream(Box::new(Source { gate, signal: config["signal"].as_bool().unwrap_or(false), count: config["count"].as_u64().unwrap_or(1) as usize, check_future: config["check_future"].as_bool().unwrap_or(false) })), NodePorts {
         inputs: vec![PortSpec::new("start", ValueType::Int64, true)],
         outputs: vec![PortSpec::new("item", ValueType::Int64, true)],
     }))

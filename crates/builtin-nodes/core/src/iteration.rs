@@ -1,8 +1,8 @@
 use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, IterationConfig, IterationErrorPolicy, IterationMode,
     NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, NodeResult, NodeValue,
-    Outputs, PortSpec, PreparedSubgraph, TaskNode, TypedNodeResult, TypedTaskNode, ValueKind,
-    ValueRef, ValueType, deserialize_config, execute_typed_task,
+    OutputDerivation, Outputs, PreparedSubgraph, TaskNode, TypedNodeResult, TypedTaskNode,
+    ValueKind, ValueRef, ValueType, deserialize_config, execute_typed_task,
 };
 use mf_telemetry::observation::{ItemObservation, IterationObservation};
 use snafu::{ResultExt, Snafu};
@@ -26,7 +26,11 @@ fn factory(
 ) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let config: IterationConfig = deserialize_config(config)?;
     let node = IterationNode::new(id, config.mode, config.on_error, body)?;
-    mf_runtime::PreparedNode::typed_task(node, NodePorts::default())
+    let metadata = mf_runtime::NodeMetadata {
+        output_derivations: vec![node.result_derivation()],
+        ..Default::default()
+    };
+    mf_runtime::PreparedNode::typed_task(node, metadata)
 }
 
 inventory::submit! {
@@ -92,19 +96,16 @@ impl IterationNode {
     }
 
     pub fn ports(&self) -> NodePorts {
-        NodePorts {
-            inputs: IterationInputs::ports(),
-            outputs: vec![self.result_port()],
-        }
+        NodePorts::from_types::<IterationInputs, IterationOutputs>()
     }
 
-    fn result_port(&self) -> PortSpec {
+    fn result_derivation(&self) -> OutputDerivation {
         let item_type = if matches!(self.on_error, IterationErrorPolicy::ContinueOnError) {
             ValueType::Any
         } else {
             self.result_type.clone()
         };
-        PortSpec::new("results", ValueType::List(Box::new(item_type)), true)
+        OutputDerivation::known_type("results", ValueType::List(Box::new(item_type)))
     }
 
     fn run_item(
@@ -259,10 +260,6 @@ impl TypedTaskNode for IterationNode {
     type Input = IterationInputs;
     type Output = IterationOutputs;
 
-    fn output_ports(&self) -> Vec<PortSpec> {
-        vec![self.result_port()]
-    }
-
     fn execute(
         &self,
         inputs: IterationInputs,
@@ -289,7 +286,7 @@ impl TaskNode for IterationNode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mf_runtime::{NodeRegistry, execute_node_in_context};
+    use mf_runtime::{NodeRegistry, PortSpec, execute_node_in_context};
     use serde_json::json;
     use std::sync::{Arc, atomic::AtomicUsize};
     use std::time::Duration;
@@ -464,9 +461,10 @@ mod tests {
             } else {
                 ValueType::Int64
             };
+            assert_eq!(node.ports().outputs, IterationOutputs::ports());
             assert_eq!(
-                node.ports().outputs[0].value_type,
-                ValueType::List(Box::new(expected))
+                node.result_derivation(),
+                OutputDerivation::known_type("results", ValueType::List(Box::new(expected)))
             );
             let expected_ports = node.ports();
             let prepared =

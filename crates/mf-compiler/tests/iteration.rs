@@ -42,7 +42,10 @@ fn map_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
         ],
         outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
     });
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 inventory::submit! {
@@ -72,7 +75,10 @@ fn trace_probe_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildEr
         inputs: vec![],
         outputs: vec![PortSpec::new("span", ValueType::String, true)],
     });
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 inventory::submit! {

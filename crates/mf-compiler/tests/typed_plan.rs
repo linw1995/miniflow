@@ -4,7 +4,7 @@ use mf_compiler::{
     instantiate_compiled, plan_typed_segments,
 };
 use mf_runtime::{
-    NodeMetadata, NodePorts, NodeValue, PortSpec, TypedConstructor, TypedNodeResult,
+    NodeMetadata, NodePorts, NodeValue, OutputDerivation, TypedConstructor, TypedNodeResult,
     TypedTaskHandle, TypedTaskNode, ValueType,
 };
 use serde_json::{Value, json};
@@ -16,19 +16,11 @@ struct Payload<T> {
 }
 
 struct Echo<T> {
-    refinement: Option<ValueType>,
     _type: std::marker::PhantomData<fn() -> T>,
 }
 impl<T: mf_runtime::TypedField> TypedTaskNode for Echo<T> {
     type Input = Payload<T>;
     type Output = Payload<T>;
-    fn output_ports(&self) -> Vec<PortSpec> {
-        self.refinement
-            .clone()
-            .map_or_else(<Payload<T> as NodeValue>::ports, |value_type| {
-                vec![PortSpec::new("value", value_type, true)]
-            })
-    }
     fn execute(
         &self,
         input: Self::Input,
@@ -47,8 +39,12 @@ fn prepare<T: mf_runtime::TypedField + 'static>(
             .context_references
             .push(mf_runtime::ContextReference::new("a.value", "ancestor"));
     }
+    if config["refine"] == true {
+        metadata
+            .output_derivations
+            .push(OutputDerivation::known_type("value", ValueType::Int64));
+    }
     let task = Echo::<T> {
-        refinement: (config["refine"] == true).then_some(ValueType::Int64),
         _type: Default::default(),
     };
     Ok(TypedTaskHandle::new(

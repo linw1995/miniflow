@@ -281,8 +281,8 @@ fn generated_calls_preserve_missing_before_skip_without_input_assembly() {
         let mut ctx = ExecutionContext::default();
         let gate = FlowNode::new(
             "gate",
-            mf_runtime::PreparedNode::new(
-                Gate,
+            mf_runtime::PreparedNode::from_parts(
+                mf_runtime::NodeExecution::Task(Box::new(Gate)),
                 NodePorts {
                     inputs: vec![],
                     outputs: vec![mf_runtime::PortSpec::new(

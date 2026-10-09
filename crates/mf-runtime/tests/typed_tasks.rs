@@ -58,8 +58,8 @@ impl TaskNode for Emit {
 fn source(result: NodeResult, ctx: &mut ExecutionContext) {
     let node = FlowNode::new(
         "source",
-        PreparedNode::new(
-            Emit(result),
+        PreparedNode::from_parts(
+            mf_runtime::NodeExecution::Task(Box::new(Emit(result))),
             NodePorts {
                 inputs: vec![],
                 outputs: vec![PortSpec::new("value", ValueType::Any, false)],
@@ -401,44 +401,38 @@ fn encoding_failure_keeps_node_attribution_and_publishes_no_partial_outputs() {
     assert!(ctx.output("nonfinite.ratios./~").is_err());
 }
 
-struct Refined(Vec<PortSpec>);
-impl TypedTaskNode for Refined {
-    type Input = NoInputs;
-    type Output = CountOutputs;
-
-    fn output_ports(&self) -> Vec<PortSpec> {
-        self.0.clone()
-    }
-
-    fn execute(
-        &self,
-        _: NoInputs,
-        _: &mut ExecutionContext,
-    ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
-        panic!("preparation must not run business logic")
-    }
-}
-
 #[test]
-fn output_refinement_cannot_change_names_presence_or_widen_types() {
-    for ports in [
-        vec![],
-        vec![PortSpec::new("other", ValueType::Int64, true)],
-        vec![PortSpec::new("value", ValueType::Int64, false)],
-        vec![PortSpec::new("value", ValueType::Any, true)],
-        vec![PortSpec::new("value", ValueType::String, true)],
-        vec![PortSpec::new("value", ValueType::Int64, true); 2],
-    ] {
-        assert!(matches!(
-            PreparedNode::typed_task(Refined(ports), NodePorts::default()),
-            Err(NodeBuildError::InvalidOutputRefinement)
-        ));
-    }
-    assert!(
-        PreparedNode::typed_task(
-            Refined(vec![PortSpec::new("value", ValueType::Int64, true)]),
-            NodePorts::default()
-        )
-        .is_ok()
+fn type_evidence_does_not_override_reflected_ports() {
+    let derivations = vec![OutputDerivation::known_type("value", ValueType::Int64)];
+    let prepared = PreparedNode::typed_task(
+        NeverExecute,
+        NodeMetadata {
+            output_derivations: derivations.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        prepared.metadata.ports,
+        NodePorts::from_types::<NeverDecode, CountOutputs>()
     );
+    assert_eq!(prepared.metadata.output_derivations, derivations);
+    prepared
+        .metadata
+        .ports
+        .validate_derivations("typed", &derivations)
+        .unwrap();
+    for derivation in [
+        OutputDerivation::known_type("other", ValueType::Int64),
+        OutputDerivation::known_type("value", ValueType::Any),
+        OutputDerivation::known_type("value", ValueType::String),
+    ] {
+        assert!(
+            prepared
+                .metadata
+                .ports
+                .validate_derivations("typed", &[derivation])
+                .is_err()
+        );
+    }
 }

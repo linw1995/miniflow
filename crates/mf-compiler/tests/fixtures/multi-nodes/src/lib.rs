@@ -47,7 +47,10 @@ fn source(
     let _: serde_json::Map<String, Value> = mf_runtime::deserialize_config(config)?;
     let node = Source;
     let metadata = mf_runtime::NodeMetadata::new(declared_ports);
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 fn echo(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
@@ -57,7 +60,10 @@ fn echo(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
         inputs: vec![PortSpec::new("input", ValueType::Number, true)],
         outputs: vec![PortSpec::new("value", ValueType::Number, true)],
     });
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 inventory::submit! {

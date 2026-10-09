@@ -23,7 +23,10 @@ fn noop_factory(
 ) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = NoopNode;
     let metadata = mf_runtime::NodeMetadata::new(declared_ports);
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 inventory::submit! {

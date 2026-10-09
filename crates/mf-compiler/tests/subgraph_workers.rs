@@ -50,15 +50,15 @@ impl TaskNode for WorkerProbe {
 
 fn probe_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     let value_type = ValueType::List(Box::new(ValueType::String));
-    Ok(PreparedNode::new(
-        WorkerProbe {
+    Ok(PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(WorkerProbe {
             workers: config["workers"].as_u64().unwrap() as usize,
             pool_workers: config["pool_workers"]
                 .as_u64()
                 .unwrap_or_else(|| config["workers"].as_u64().unwrap())
                 as usize,
             threads: Mutex::default(),
-        },
+        })),
         mf_runtime::NodePorts {
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("value", value_type, true)],

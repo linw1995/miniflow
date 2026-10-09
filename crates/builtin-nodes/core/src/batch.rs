@@ -1,7 +1,7 @@
 use mf_runtime::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeBuildError,
-    NodeEvent, NodeExecutionError, NodeRegistration, NodeValue, OutputDerivation, TimerUpdate,
-    ValueRef, ValueType, deserialize_config, encode_typed_result,
+    NodeEvent, NodeExecutionError, NodePortContract, NodeRegistration, NodeValue, OutputDerivation,
+    TimerUpdate, ValueRef, deserialize_config, encode_typed_result,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -71,18 +71,13 @@ fn max_wait_ms<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Err
 
 fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let config = deserialize_config(config)?;
-    let mut outputs = BatchOutputs::ports();
-    outputs[0].value_type = ValueType::Array;
-    Ok(mf_runtime::PreparedNode::event(
+    mf_runtime::PreparedNode::event(
         BatchState::new(config),
         mf_runtime::NodeMetadata {
             output_derivations: vec![OutputDerivation::collect_input("items", "item")],
-            ..mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
-                inputs: BatchInputs::ports(),
-                outputs,
-            })
+            ..Default::default()
         },
-    ))
+    )
 }
 
 inventory::submit! { NodeRegistration {
@@ -94,6 +89,12 @@ struct BatchState {
     config: Config,
     items: Vec<ValueRef>,
     deadline: Option<Duration>,
+}
+
+impl NodePortContract for BatchState {
+    fn ports(&self) -> mf_runtime::NodePorts {
+        mf_runtime::NodePorts::from_types::<BatchInputs, BatchOutputs>()
+    }
 }
 
 impl BatchState {
@@ -220,10 +221,7 @@ mod tests {
     #[test]
     fn configuration_requires_positive_representable_limits() {
         let prepared = factory(json!({"max_items":1, "max_wait_ms":1})).unwrap();
-        assert_eq!(
-            prepared.metadata.ports.outputs[0].value_type,
-            ValueType::Array
-        );
+        assert_eq!(prepared.metadata.ports.outputs, BatchOutputs::ports());
         for field in ["max_items", "max_wait_ms"] {
             for invalid in [json!(0), json!(-1), json!(1.5), json!("1"), Value::Null] {
                 let mut config = json!({"max_items":3, "max_wait_ms":100});

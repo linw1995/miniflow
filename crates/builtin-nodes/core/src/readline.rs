@@ -1,6 +1,6 @@
 use mf_runtime::{
     Emitter, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeFactory,
-    NodeMetadata, NodePorts, NodeRegistration, NodeValue, PreparedNode, StdinRequirement,
+    NodeMetadata, NodePortContract, NodeRegistration, NodeValue, PreparedNode, StdinRequirement,
     StreamNode, TextInput, deserialize_config, encode_typed_result,
 };
 use serde::Deserialize;
@@ -22,6 +22,12 @@ struct ReadlineInputs {
 #[derive(NodeValue)]
 struct ReadlineOutputs {
     line: String,
+}
+
+impl NodePortContract for Readline {
+    fn ports(&self) -> mf_runtime::NodePorts {
+        mf_runtime::NodePorts::from_types::<ReadlineInputs, ReadlineOutputs>()
+    }
 }
 
 #[derive(Debug, Snafu)]
@@ -82,16 +88,13 @@ impl StreamNode for Readline {
 
 fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     let _: Config = deserialize_config(config)?;
-    Ok(PreparedNode::stream(
+    PreparedNode::stream(
         Readline,
         NodeMetadata {
             stdin: Some(StdinRequirement::UnlessInput("path".into())),
-            ..NodeMetadata::new(NodePorts {
-                inputs: ReadlineInputs::ports(),
-                outputs: ReadlineOutputs::ports(),
-            })
+            ..Default::default()
         },
-    ))
+    )
 }
 
 inventory::submit! { NodeRegistration { kind: "builtin.readline", factory: NodeFactory::Plain(factory) } }

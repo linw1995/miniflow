@@ -404,6 +404,10 @@ pub struct NodePorts {
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub enum OutputDerivation {
+    KnownType {
+        output: String,
+        value_type: ValueType,
+    },
     Literal {
         output: String,
         value: crate::ValueRef,
@@ -419,6 +423,13 @@ pub enum OutputDerivation {
 }
 
 impl OutputDerivation {
+    pub fn known_type(output: impl Into<String>, value_type: ValueType) -> Self {
+        Self::KnownType {
+            output: output.into(),
+            value_type,
+        }
+    }
+
     pub fn literal(output: impl Into<String>, value: impl Into<crate::ValueRef>) -> Self {
         Self::Literal {
             output: output.into(),
@@ -435,7 +446,8 @@ impl OutputDerivation {
 
     pub fn output(&self) -> &str {
         match self {
-            Self::Literal { output, .. }
+            Self::KnownType { output, .. }
+            | Self::Literal { output, .. }
             | Self::ForwardInput { output, .. }
             | Self::CollectInput { output, .. } => output,
         }
@@ -451,6 +463,15 @@ impl OutputDerivation {
 
 #[derive(Debug, Snafu)]
 pub enum OutputDerivationError {
+    #[snafu(display(
+        "node `{node_id}` output `{output}` inferred type {inferred} does not narrow {declared}"
+    ))]
+    InvalidKnownType {
+        node_id: String,
+        output: String,
+        inferred: ValueType,
+        declared: ValueType,
+    },
     #[snafu(display("node `{node_id}` derivation references unknown output `{output}`"))]
     UnknownOutput { node_id: String, output: String },
     #[snafu(display("node `{node_id}` output `{output}` has more than one derivation"))]
@@ -472,6 +493,14 @@ pub enum OutputDerivationError {
 }
 
 impl NodePorts {
+    /// Reflects both directions from the value contracts, without constructing a node.
+    pub fn from_types<I: crate::NodeInputs, O: crate::NodeOutputs>() -> Self {
+        Self {
+            inputs: I::ports(),
+            outputs: O::ports(),
+        }
+    }
+
     pub fn validate_derivations(
         &self,
         node_id: &str,
@@ -492,6 +521,17 @@ impl NodePorts {
                 DuplicateOutputSnafu { node_id, output }
             );
             match derivation {
+                OutputDerivation::KnownType { value_type, .. } => {
+                    ensure!(
+                        value_type.is_assignable_to(&port.value_type),
+                        InvalidKnownTypeSnafu {
+                            node_id,
+                            output,
+                            inferred: value_type.clone(),
+                            declared: port.value_type.clone(),
+                        }
+                    );
+                }
                 OutputDerivation::Literal { value, .. } => {
                     port.value_type
                         .validate_shared(value)
@@ -543,14 +583,10 @@ pub enum NodeBuildError {
     #[snafu(transparent)]
     Generation { source: TypedGenerationError },
 
-    #[snafu(display("typed task input ports must be derived from its input struct"))]
+    #[snafu(display("input ports must be reflected from the node contract"))]
     ConflictingInputDeclarations,
-    #[snafu(display("typed task output ports must be derived from its output struct"))]
+    #[snafu(display("output ports must be reflected from the node contract"))]
     ConflictingOutputDeclarations,
-    #[snafu(display(
-        "typed task output refinement must preserve names and requiredness and narrow field types"
-    ))]
-    InvalidOutputRefinement,
     #[snafu(display("invalid prepared subgraph: {message}"), visibility(pub))]
     InvalidSubgraph { message: String },
     #[snafu(display("invalid node configuration: {source}"), context(false))]
@@ -632,6 +668,12 @@ pub trait TaskNode: Send + Sync {
     ) -> Result<crate::NodeResult, NodeExecutionError>;
 }
 
+/// Reflects an instance's dynamic input and output contracts before execution.
+/// Use value types for fixed interfaces and this contract for compiled programs or schemas.
+pub trait NodePortContract {
+    fn ports(&self) -> NodePorts;
+}
+
 /// A task whose input and output declarations and conversion are owned by the runtime.
 ///
 /// Prepare through [`PreparedNode::typed_task`]. The runtime adapter implements
@@ -639,13 +681,6 @@ pub trait TaskNode: Send + Sync {
 pub trait TypedTaskNode: Send + Sync {
     type Input: crate::NodeInputs;
     type Output: crate::NodeOutputs;
-
-    /// Refines output descriptors using fixed configuration or a prepared body.
-    /// Names and requiredness must agree with `Self::Output::ports()`, and the
-    /// encoded values must satisfy these descriptors whenever they are produced.
-    fn output_ports(&self) -> Vec<PortSpec> {
-        <Self::Output as crate::NodeOutputs>::ports()
-    }
 
     fn execute(
         &self,
@@ -857,7 +892,10 @@ where
         constructor: TypedConstructor,
         context_free: bool,
     ) -> Result<Self, NodeBuildError> {
-        let mut metadata = typed_task_metadata(&task, metadata.into())?;
+        let mut metadata = reflected_node_metadata(
+            NodePorts::from_types::<N::Input, N::Output>(),
+            metadata.into(),
+        )?;
         let generation = TypedGeneration {
             constructor,
             inputs: N::Input::typed_ports(),
@@ -873,7 +911,10 @@ where
     }
 
     pub fn prepared(&self) -> PreparedNode {
-        PreparedNode::new(SharedTypedTask(self.task.clone()), self.metadata.clone())
+        PreparedNode::from_parts(
+            NodeExecution::Task(Box::new(SharedTypedTask(self.task.clone()))),
+            self.metadata.clone(),
+        )
     }
 
     pub fn decode_inputs(&self, inputs: Inputs) -> Result<N::Input, NodeExecutionError> {
@@ -925,8 +966,8 @@ pub fn verify_generated_metadata(
     Ok(())
 }
 
-fn typed_task_metadata<N: TypedTaskNode + ?Sized>(
-    task: &N,
+fn reflected_node_metadata(
+    ports: NodePorts,
     mut metadata: NodeMetadata,
 ) -> Result<NodeMetadata, NodeBuildError> {
     ensure!(
@@ -937,23 +978,7 @@ fn typed_task_metadata<N: TypedTaskNode + ?Sized>(
         metadata.ports.outputs.is_empty(),
         ConflictingOutputDeclarationsSnafu
     );
-    let declared = <N::Output as crate::NodeOutputs>::ports();
-    let mut fields: std::collections::BTreeMap<_, _> =
-        declared.iter().map(|port| (&port.name, port)).collect();
-    let outputs = task.output_ports();
-    ensure!(
-        fields.len() == declared.len()
-            && outputs.len() == fields.len()
-            && outputs.iter().all(|port| {
-                fields.remove(&port.name).is_some_and(|field| {
-                    field.required == port.required
-                        && port.value_type.is_assignable_to(&field.value_type)
-                })
-            }),
-        InvalidOutputRefinementSnafu
-    );
-    metadata.ports.outputs = outputs;
-    metadata.ports.inputs = <N::Input as crate::NodeInputs>::ports();
+    metadata.ports = ports;
     Ok(metadata)
 }
 
@@ -985,6 +1010,40 @@ impl NodeExecution {
 }
 
 impl PreparedNode {
+    /// Reflects a task's dynamic contracts and preserves the other prepared metadata.
+    pub fn new<N: TaskNode + NodePortContract + 'static>(
+        task: N,
+        metadata: impl Into<NodeMetadata>,
+    ) -> Result<Self, NodeBuildError> {
+        let metadata = reflected_node_metadata(task.ports(), metadata.into())?;
+        Ok(Self::from_parts(
+            NodeExecution::Task(Box::new(task)),
+            metadata,
+        ))
+    }
+
+    pub fn event<N: crate::EventNode + NodePortContract + 'static>(
+        state: N,
+        metadata: impl Into<NodeMetadata>,
+    ) -> Result<Self, NodeBuildError> {
+        let metadata = reflected_node_metadata(state.ports(), metadata.into())?;
+        Ok(Self::from_parts(
+            NodeExecution::Event(Box::new(state)),
+            metadata,
+        ))
+    }
+
+    pub fn stream<N: crate::StreamNode + NodePortContract + 'static>(
+        producer: N,
+        metadata: impl Into<NodeMetadata>,
+    ) -> Result<Self, NodeBuildError> {
+        let metadata = reflected_node_metadata(producer.ports(), metadata.into())?;
+        Ok(Self::from_parts(
+            NodeExecution::Stream(Box::new(producer)),
+            metadata,
+        ))
+    }
+
     /// Derives ports from a typed task and preserves the other prepared metadata.
     ///
     /// Supplying input or output ports is an error, including ports identical to
@@ -1027,34 +1086,22 @@ impl PreparedNode {
         task: N,
         metadata: impl Into<NodeMetadata>,
     ) -> Result<Self, NodeBuildError> {
-        let metadata = typed_task_metadata(&task, metadata.into())?;
-        Ok(Self::new(TypedTaskAdapter(task), metadata))
+        let metadata = reflected_node_metadata(
+            NodePorts::from_types::<N::Input, N::Output>(),
+            metadata.into(),
+        )?;
+        Ok(Self::from_parts(
+            NodeExecution::Task(Box::new(TypedTaskAdapter(task))),
+            metadata,
+        ))
     }
 
-    pub fn new(task: impl TaskNode + 'static, metadata: impl Into<NodeMetadata>) -> Self {
+    /// Assembles existing execution and metadata without reflecting or validating contracts.
+    /// Provider factories should use `new`, `event`, `stream`, or `typed_task`.
+    pub fn from_parts(execution: NodeExecution, metadata: impl Into<NodeMetadata>) -> Self {
         Self {
             metadata: metadata.into(),
-            execution: NodeExecution::Task(Box::new(task)),
-        }
-    }
-
-    pub fn event(
-        state: impl crate::EventNode + 'static,
-        metadata: impl Into<NodeMetadata>,
-    ) -> Self {
-        Self {
-            metadata: metadata.into(),
-            execution: NodeExecution::Event(Box::new(state)),
-        }
-    }
-
-    pub fn stream(
-        producer: impl crate::StreamNode + 'static,
-        metadata: impl Into<NodeMetadata>,
-    ) -> Self {
-        Self {
-            metadata: metadata.into(),
-            execution: NodeExecution::Stream(Box::new(producer)),
+            execution,
         }
     }
 }

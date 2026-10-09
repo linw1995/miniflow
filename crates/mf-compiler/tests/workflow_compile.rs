@@ -35,7 +35,10 @@ fn constant_factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuild
         inputs: vec![],
         outputs: vec![PortSpec::new("value", ValueType::Number, true)],
     });
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 inventory::submit! {

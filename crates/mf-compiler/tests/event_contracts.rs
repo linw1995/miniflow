@@ -20,10 +20,10 @@ impl EventNode for EventState {
 }
 
 fn factory(_: Value) -> Result<PreparedNode, NodeBuildError> {
-    Ok(PreparedNode::event(
-        EventState {
+    Ok(PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Event(Box::new(EventState {
             _not_sync: Cell::new(()),
-        },
+        })),
         NodePorts::default(),
     ))
 }

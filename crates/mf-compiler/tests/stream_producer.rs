@@ -151,13 +151,13 @@ impl Drop for Producer {
 fn producer(config: Value) -> Result<PreparedNode, mf_runtime::NodeBuildError> {
     let key = config["key"].as_str().unwrap();
     let mode = config["mode"].as_str().unwrap_or("range");
-    Ok(PreparedNode::stream(
-        Producer {
+    Ok(PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Stream(Box::new(Producer {
             count: config["count"].as_u64().unwrap_or(1) as usize,
             mode: mode.into(),
             calls: Cell::new(0),
             probe: probe(key),
-        },
+        })),
         mf_runtime::NodeMetadata {
             context_references: if mode == "context" {
                 vec![mf_runtime::ContextReference::new(
@@ -195,8 +195,7 @@ impl TaskNode for Sink {
 inventory::submit! {
     NodeRegistration {
         kind: "test.producer_sink",
-        factory: NodeFactory::Plain(|config| Ok(PreparedNode::new(
-            Sink(probe(config["key"].as_str().unwrap())),
+        factory: NodeFactory::Plain(|config| Ok(PreparedNode::from_parts(mf_runtime::NodeExecution::Task(Box::new(Sink(probe(config["key"].as_str().unwrap())))),
             NodePorts {
                 inputs: vec![PortSpec::new("input", ValueType::Int64, true)],
                 outputs: vec![PortSpec::new("value", ValueType::Int64, true)],

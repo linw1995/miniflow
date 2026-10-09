@@ -339,12 +339,12 @@ fn a_running_plugin_exposes_start_before_end_and_inherits_the_node_context() {
     let flow = mf_compiler::build_flow(
         vec![FlowNode::new(
             "blocking",
-            mf_runtime::PreparedNode::new(
-                BlockingPlugin {
+            mf_runtime::PreparedNode::from_parts(
+                mf_runtime::NodeExecution::Task(Box::new(BlockingPlugin {
                     tracer,
                     entered: entered_tx,
                     release: Mutex::new(release_rx),
-                },
+                })),
                 NodePorts::default(),
             ),
         )],
@@ -505,7 +505,10 @@ fn unwinding_restores_context_without_fabricating_completion() {
     let flow = mf_compiler::build_flow(
         vec![FlowNode::new(
             "a",
-            mf_runtime::PreparedNode::new(PanicPlugin, NodePorts::default()),
+            mf_runtime::PreparedNode::from_parts(
+                mf_runtime::NodeExecution::Task(Box::new(PanicPlugin)),
+                NodePorts::default(),
+            ),
         )],
         vec![],
         vec!["a".into()],

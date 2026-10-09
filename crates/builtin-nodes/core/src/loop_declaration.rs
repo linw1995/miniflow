@@ -1,8 +1,8 @@
 use mf_runtime::{
     ExecutionContext, ExecutionScope, Inputs, LoopComparisonOperator, LoopConditionDefinition,
-    LoopVariableDefinition, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration,
-    NodeResult, Outputs, PortSpec, PreparedSubgraph, TaskNode, ValueType, compare_json_numbers,
-    deserialize_config, loop_variable_types,
+    LoopVariableDefinition, NodeBuildError, NodeExecutionError, NodePortContract, NodePorts,
+    NodeRegistration, NodeResult, Outputs, PortSpec, PreparedSubgraph, TaskNode, ValueType,
+    compare_json_numbers, deserialize_config, loop_variable_types,
 };
 use mf_telemetry::{
     Count,
@@ -35,11 +35,7 @@ fn factory(
     );
     let types = loop_variable_types(&config.variables)
         .map_err(|message| mf_runtime::NodeInvalidSubgraphSnafu { message }.build())?;
-    let ports: Vec<_> = types
-        .iter()
-        .map(|(name, value_type)| PortSpec::owned(name, value_type.clone(), true))
-        .collect();
-    Ok(mf_runtime::PreparedNode::new(
+    mf_runtime::PreparedNode::new(
         LoopNode {
             id: id.into(),
             max_iterations: config.max_iterations,
@@ -47,11 +43,8 @@ fn factory(
             types,
             body,
         },
-        NodePorts {
-            inputs: ports.clone(),
-            outputs: ports,
-        },
-    ))
+        mf_runtime::NodeMetadata::default(),
+    )
 }
 
 inventory::submit! {
@@ -107,6 +100,20 @@ struct LoopNode {
     until: Option<LoopConditionDefinition>,
     types: BTreeMap<String, ValueType>,
     body: PreparedSubgraph,
+}
+
+impl NodePortContract for LoopNode {
+    fn ports(&self) -> NodePorts {
+        let ports: Vec<_> = self
+            .types
+            .iter()
+            .map(|(name, value_type)| PortSpec::owned(name, value_type.clone(), true))
+            .collect();
+        NodePorts {
+            inputs: ports.clone(),
+            outputs: ports,
+        }
+    }
 }
 
 #[derive(Debug, Snafu)]

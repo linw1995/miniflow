@@ -82,9 +82,9 @@ fn source(config: Value) -> Result<PreparedNode, NodeBuildError> {
         outputs: vec![PortSpec::new("item", ValueType::Int64, true)],
     };
     Ok(if config["stream"] == true {
-        PreparedNode::stream(Source, ports)
+        PreparedNode::from_parts(mf_runtime::NodeExecution::Stream(Box::new(Source)), ports)
     } else {
-        PreparedNode::new(Source, ports)
+        PreparedNode::from_parts(mf_runtime::NodeExecution::Task(Box::new(Source)), ports)
     })
 }
 
@@ -131,8 +131,8 @@ fn typed_tasks_use_the_same_adapter_and_context_in_task_and_stream_domains() {
 }
 
 fn string_sink(_: Value) -> Result<PreparedNode, NodeBuildError> {
-    Ok(PreparedNode::new(
-        Source,
+    Ok(PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(Source)),
         NodePorts {
             inputs: vec![PortSpec::new("value", ValueType::String, true)],
             outputs: vec![PortSpec::new("item", ValueType::Int64, true)],

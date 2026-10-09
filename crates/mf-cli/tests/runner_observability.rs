@@ -777,7 +777,10 @@ fn blocked_otel_export_does_not_block_flow_execution() {
         .map(|id| {
             mf_compiler::FlowNode::new(
                 id.clone(),
-                mf_compiler::PreparedNode::new(EmptyNode, mf_compiler::NodePorts::default()),
+                mf_compiler::PreparedNode::from_parts(
+                    mf_runtime::NodeExecution::Task(Box::new(EmptyNode)),
+                    mf_compiler::NodePorts::default(),
+                ),
             )
         })
         .collect();

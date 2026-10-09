@@ -124,10 +124,10 @@ In-memory Flow execution and generated binaries SHALL apply the same refined out
 
 ### Requirement: Expose optional output derivation metadata
 
-Nodes MAY declare that an output is an exact configured JSON value, an unchanged copy of a named input, or a collection of values from a named input.
+Nodes MAY declare that an output is an exact configured JSON value, an unchanged copy of a named input, a collection of values from a named input, or a type proven by a prepared contract.
 Validation SHALL use such declarations only for the node's existing ports and MUST reject malformed derivation
 metadata or an exact value that contradicts its own output declaration, with node and port context. Nodes that
-provide no derivation metadata SHALL retain their declared or configuration-derived port types and existing
+provide no derivation metadata SHALL retain their reflected port types and existing
 runtime boundary checks. Execution SHALL continue to validate actual produced and bound values against the
 resolved ports.
 
@@ -167,6 +167,25 @@ A collection derivation SHALL wrap the input type as `List(T)`, retain dynamic b
 
 - **WHEN** wrapping the bound input type in a list exceeds the descriptor depth limit
 - **THEN** validation fails with the deriving node and output port
+
+A proven-type derivation SHALL narrow the descriptor of an existing reflected output without changing its name or
+requiredness. It SHALL carry type evidence without an exact value and MUST respect the shared descriptor-depth limit.
+Compilation and runtime publication SHALL enforce it through the existing validation path.
+
+#### Scenario: Resolve a type proven by a prepared body
+
+- **WHEN** an output field reflects `List(Any)` and its prepared body proves `List(Int64)`
+- **THEN** compiler inference resolves `List(Int64)` without treating the output as an exact known array
+
+#### Scenario: Reject widening type evidence
+
+- **WHEN** an `Int64` output supplies proven-type evidence for `Any` or `String`
+- **THEN** validation rejects the evidence with node and output context
+
+#### Scenario: Guard a false proven type
+
+- **WHEN** an output proves `Int64` but business execution returns a string
+- **THEN** runtime publication rejects the result before exposing any output
 
 ### Requirement: Preserve typed compiler validation sources
 
@@ -481,7 +500,7 @@ consumer invocation.
 
 ### Requirement: Fixed builtin port bags use the unified contract
 
-Constant, Batch, and Readline SHALL express fixed named input and output bags with `NodeValue`. Migration SHALL retain configured Constant output refinements, shared payload identity, Batch's broad array metadata and flush behavior, and Readline's optional non-null path and stdin ownership. Configured-port providers such as IfElse, Loop, and Code SHALL retain dynamic interfaces.
+Constant, Batch, and Readline SHALL express fixed named input and output bags with `NodeValue`. Their raw ports SHALL reflect the value bags without factory overrides. Constant SHALL retain literal type evidence and shared payload identity. Batch SHALL reflect `List(Any)` before collection inference while preserving flush behavior. Readline SHALL retain its optional non-null path and stdin ownership. IfElse, Loop, and Code SHALL reflect validated dynamic execution contracts.
 
 #### Scenario: Preserve constant evidence and shared values
 
@@ -492,6 +511,11 @@ Constant, Batch, and Readline SHALL express fixed named input and output bags wi
 
 - **WHEN** Batch accepts items or Readline receives an optional path
 - **THEN** unified conversion preserves batching semantics and text source ownership without enabling task-only generated segments
+
+#### Scenario: Keep fixed declarations independent of output evidence
+
+- **WHEN** Constant, Batch, or Readline is prepared without invocation values
+- **THEN** its port names, field descriptors, and requiredness come from the declared value bags while evidence is preserved separately
 
 ### Requirement: Builtin Identity advertises certified generation
 

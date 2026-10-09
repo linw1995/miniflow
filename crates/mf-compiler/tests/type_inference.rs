@@ -141,7 +141,10 @@ fn forwarding_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBu
         output_derivations: node.output_derivations(),
         ..mf_runtime::NodeMetadata::new(node.ports())
     };
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 inventory::submit! {
@@ -239,7 +242,10 @@ fn invalid_metadata_factory(_config: Value) -> Result<mf_runtime::PreparedNode, 
             outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
         })
     };
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 inventory::submit! {

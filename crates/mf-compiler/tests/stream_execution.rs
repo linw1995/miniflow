@@ -68,14 +68,13 @@ inventory::submit! {
     NodeRegistration {
         kind: "test.counter",
         factory: mf_runtime::NodeFactory::Plain(|config| {
-            Ok(mf_runtime::PreparedNode::new(
-                Counter {
+            Ok(mf_runtime::PreparedNode::from_parts(mf_runtime::NodeExecution::Task(Box::new(Counter {
                     count: AtomicUsize::new(0),
                     omit_after_first: config
                         .get("omit_after_first")
                         .and_then(Value::as_bool)
                         .unwrap_or(false),
-                },
+                })),
                 mf_runtime::NodePorts {
                         inputs: vec![PortSpec::new("input", ValueType::Any, true)],
                         outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
@@ -127,10 +126,9 @@ inventory::submit! {
     NodeRegistration {
         kind: "test.slow",
         factory: mf_runtime::NodeFactory::Plain(|config| {
-            Ok(mf_runtime::PreparedNode::new(
-                Slow(Arc::clone(
+            Ok(mf_runtime::PreparedNode::from_parts(mf_runtime::NodeExecution::Task(Box::new(Slow(Arc::clone(
                     &gates().lock().unwrap()[config["gate"].as_str().unwrap()],
-                )),
+                )))),
                 mf_runtime::NodePorts {
                         inputs: vec![PortSpec::new("input", ValueType::Any, true)],
                         outputs: vec![PortSpec::new("value", ValueType::Any, true)],
@@ -391,7 +389,10 @@ impl mf_runtime::TaskNode for Exhaust {
     ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
         let inner = mf_runtime::FlowNode::new(
             "inner",
-            mf_runtime::PreparedNode::new(Empty, mf_runtime::NodePorts::default()),
+            mf_runtime::PreparedNode::from_parts(
+                mf_runtime::NodeExecution::Task(Box::new(Empty)),
+                mf_runtime::NodePorts::default(),
+            ),
         )
         .into_task()
         .unwrap();
@@ -407,8 +408,7 @@ inventory::submit! {
     NodeRegistration {
         kind: "test.exhaust",
         factory: mf_runtime::NodeFactory::Plain(|_| {
-            Ok(mf_runtime::PreparedNode::new(
-                Exhaust,
+            Ok(mf_runtime::PreparedNode::from_parts(mf_runtime::NodeExecution::Task(Box::new(Exhaust)),
                 mf_runtime::NodePorts {
                         inputs: vec![PortSpec::new("input", ValueType::Any, true)],
                         outputs: vec![],

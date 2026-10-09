@@ -1,7 +1,7 @@
 use mf_runtime::{
     ContextReference, ContextValue, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError,
-    NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, TaskNode, ValueType,
-    deserialize_config,
+    NodePortContract, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, TaskNode,
+    ValueType, deserialize_config,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -213,7 +213,7 @@ impl TaskNode for IfElse {
         })
     }
 }
-impl IfElse {
+impl NodePortContract for IfElse {
     fn ports(&self) -> NodePorts {
         NodePorts {
             inputs: vec![],
@@ -226,6 +226,8 @@ impl IfElse {
                 .collect(),
         }
     }
+}
+impl IfElse {
     fn context_references(&self) -> Vec<ContextReference> {
         self.branches
             .iter()
@@ -268,9 +270,9 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = IfElse { branches };
     let metadata = mf_runtime::NodeMetadata {
         context_references: node.context_references(),
-        ..mf_runtime::NodeMetadata::new(node.ports())
+        ..Default::default()
     };
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    mf_runtime::PreparedNode::new(node, metadata)
 }
 inventory::submit! { NodeRegistration { kind: KIND, factory: mf_runtime::NodeFactory::Plain(factory) } }
 

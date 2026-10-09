@@ -3,8 +3,8 @@ mod value;
 use cel_core::types::{Expr, SpannedExpr};
 use cel_core::{CelType, Env, MapActivation, Program, Value as CelValue};
 use mf_runtime::{
-    Inputs, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, Outputs, PortSpec,
-    TaskNode, ValueType, deserialize_config,
+    Inputs, NodeBuildError, NodeExecutionError, NodePortContract, NodePorts, NodeRegistration,
+    Outputs, PortSpec, TaskNode, ValueType, deserialize_config,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -188,9 +188,14 @@ fn json_size(value: &(impl Serialize + ?Sized)) -> Result<usize, serde_json::Err
     Ok(counter.0)
 }
 
+struct CheckedOutput {
+    program: Program,
+    value_type: ValueType,
+}
+
 struct CodeNode {
-    ports: NodePorts,
-    programs: BTreeMap<String, Program>,
+    inputs: BTreeMap<String, ValueType>,
+    outputs: BTreeMap<String, CheckedOutput>,
 }
 
 impl TaskNode for CodeNode {
@@ -206,30 +211,30 @@ impl TaskNode for CodeNode {
             )));
         }
         for name in inputs.keys() {
-            if !self.ports.inputs.iter().any(|port| port.name == *name) {
+            if !self.inputs.contains_key(name) {
                 return Err(execution_error(format!("undeclared input `{name}`")));
             }
         }
         let mut budget = Budget::default();
         let mut activation = MapActivation::new();
-        for port in &self.ports.inputs {
-            let name = port.name.as_ref();
+        for (name, value_type) in &self.inputs {
+            let name = name.as_str();
             let value = inputs
                 .get(name)
                 .ok_or_else(|| execution_error(format!("missing input `{name}`")))?;
-            let converted = json_to_cel(value, &port.value_type, &mut budget, "", 1)
+            let converted = json_to_cel(value, value_type, &mut budget, "", 1)
                 .map_err(|error| execution_error(format!("input `{name}`: {error}")))?;
             activation.insert(name, converted);
         }
         let mut outputs = Outputs::new();
         let mut output_size = 2usize;
-        for port in &self.ports.outputs {
-            let name = port.name.as_ref();
-            let result = self.programs[name].eval(&activation);
+        for (name, output) in &self.outputs {
+            let name = name.as_str();
+            let result = output.program.eval(&activation);
             if let CelValue::Error(error) = &result {
                 Err(error.as_ref().clone()).context(EvaluateSnafu { output: name })?;
             }
-            let converted = cel_to_json(&result, &port.value_type, &mut budget, "", 1)
+            let converted = cel_to_json(&result, &output.value_type, &mut budget, "", 1)
                 .map_err(|error| execution_error(format!("output `{name}`: {error}")))?;
             let encoded_name = json_size(name).context(MeasureOutputSnafu { output: name })?;
             let encoded_value =
@@ -245,9 +250,20 @@ impl TaskNode for CodeNode {
         Ok(outputs.into())
     }
 }
-impl CodeNode {
+impl NodePortContract for CodeNode {
     fn ports(&self) -> NodePorts {
-        self.ports.clone()
+        NodePorts {
+            inputs: self
+                .inputs
+                .iter()
+                .map(|(name, value_type)| PortSpec::owned(name, value_type.clone(), true))
+                .collect(),
+            outputs: self
+                .outputs
+                .iter()
+                .map(|(name, output)| PortSpec::owned(name, output.value_type.clone(), true))
+                .collect(),
+        }
     }
 }
 
@@ -260,7 +276,7 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
         )));
     }
     let mut env = Env::with_standard_library();
-    let mut inputs = Vec::with_capacity(config.inputs.len());
+    let mut inputs = BTreeMap::new();
     for (name, descriptor) in &config.inputs {
         if !valid_identifier(name) {
             return Err(invalid(format!("invalid input name `{name}`")));
@@ -268,15 +284,14 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
         let value_type =
             parse_type(descriptor).map_err(|error| invalid(format!("input `{name}`: {error}")))?;
         env = env.with_variable(name, cel_type(&value_type));
-        inputs.push(PortSpec::owned(name, value_type, true));
+        inputs.insert(name.clone(), value_type);
     }
     let code = config
         .code
         .as_object()
         .filter(|code| !code.is_empty())
         .ok_or_else(|| invalid("code must map output names to CEL expressions"))?;
-    let mut outputs = Vec::with_capacity(code.len());
-    let mut programs = BTreeMap::new();
+    let mut outputs = BTreeMap::new();
     for (name, expression) in code {
         if !valid_identifier(name) {
             return Err(invalid(format!("invalid output name `{name}`")));
@@ -308,15 +323,18 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
             .check_depth()
             .context(DepthSnafu { output: name })?;
         let program = env.program(&ast).context(CompileSnafu { output: name })?;
-        outputs.push(PortSpec::owned(name, value_type, true));
-        programs.insert(name.clone(), program);
+        outputs.insert(
+            name.clone(),
+            CheckedOutput {
+                program,
+                value_type,
+            },
+        );
     }
-    let node = CodeNode {
-        ports: NodePorts { inputs, outputs },
-        programs,
-    };
-    let metadata = mf_runtime::NodeMetadata::new(node.ports());
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    mf_runtime::PreparedNode::new(
+        CodeNode { inputs, outputs },
+        mf_runtime::NodeMetadata::default(),
+    )
 }
 
 inventory::submit! {

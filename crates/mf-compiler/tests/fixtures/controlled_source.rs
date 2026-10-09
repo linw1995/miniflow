@@ -96,7 +96,7 @@ inventory::submit! { NodeRegistration {
     kind: "test.controlled_source",
     factory: NodeFactory::Plain(|config| {
         let value_type: ValueType = serde_json::from_value(config["item_type"].clone()).unwrap();
-        Ok(PreparedNode::stream(Source, NodePorts {
+        Ok(PreparedNode::from_parts(mf_runtime::NodeExecution::Stream(Box::new(Source)), NodePorts {
             inputs: vec![PortSpec::new("control", ValueType::String, true)],
             outputs: vec![PortSpec::new("item", value_type, true)],
         }))
