@@ -1,8 +1,8 @@
 ## 1. Fixed builtin contracts
 
-- [ ] 1.1 Migrate Constant to `NodeValue` and `TypedTaskNode`, preserving literal evidence and output refinements.
-- [ ] 1.2 Migrate Batch and Readline fixed bags to `NodeValue`, preserving broad metadata, timing, ownership, and error sources.
-- [ ] 1.3 Review configured-port nodes and document their dynamic boundary without adding artificial schemas.
+- [x] 1.1 Migrate Constant to `NodeValue` and `TypedTaskNode`, preserving literal evidence and output refinements.
+- [x] 1.2 Migrate Batch and Readline fixed bags to `NodeValue`, preserving broad metadata, timing, ownership, and error sources.
+- [x] 1.3 Review configured-port nodes and document their dynamic boundary without adding artificial schemas.
 
 ## 2. Builtin generation and completion
 

@@ -402,6 +402,18 @@ scopes, domain dispatch stays serial in topological order so scope writes and ex
 Iteration still parallelizes separate items through that same bounded worker pool. Workers waiting for nested item work
 help execute queued pool jobs on their existing thread, so nested Iteration work shares the configured worker bound.
 
+## Builtin contract boundaries
+
+Identity, Constant, and Iteration use `NodeValue` bags with `TypedTaskNode`. Constant retains its
+configured literal output refinement, and Iteration retains its body-dependent result refinement.
+Batch and Readline use `NodeValue` conversion at their event and stream boundaries: Batch preserves
+its broad `Array` output declaration, and Readline preserves its optional non-null string path and
+conditional stdin ownership.
+
+IfElse branch names, Loop variables, and Code input/output names depend on configuration. These
+providers retain dynamic port declarations and execution instead of manufacturing fixed Rust structs.
+Event, stream, and nested-scope execution retain the existing dynamic scheduler contracts.
+
 ## Migrate an existing plugin
 
 - Replace `impl Node` with `impl TaskNode`. Keep one `execute` implementation taking inputs and a
