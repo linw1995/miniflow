@@ -50,19 +50,13 @@ impl TypedTaskNode for ConstantNode {
     }
 }
 
-impl ConstantNode {
-    fn output_derivations(&self) -> Vec<OutputDerivation> {
-        vec![OutputDerivation::literal("value", self.value.clone())]
-    }
-}
-
 fn constant_factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let config: ConstantConfig = deserialize_config(config)?;
     let node = ConstantNode {
         value: config.value.into(),
     };
     let metadata = mf_runtime::NodeMetadata {
-        output_derivations: node.output_derivations(),
+        output_derivations: vec![OutputDerivation::literal("value", node.value.clone())],
         ..mf_runtime::NodeMetadata::default()
     };
     mf_runtime::PreparedNode::typed_task(node, metadata)

@@ -8,7 +8,9 @@ mod readline;
 
 pub use batch::KIND as BATCH_KIND;
 pub use constant::{KIND as CONSTANT_KIND, kind as constant_kind};
-pub use identity::{KIND as IDENTITY_KIND, kind as identity_kind};
+pub use identity::{
+    IdentityInputs, IdentityOutputs, KIND as IDENTITY_KIND, kind as identity_kind, prepare_identity,
+};
 pub use if_else::KIND as IF_ELSE_KIND;
 pub use iteration::{
     IterationInputs, IterationNode, IterationOutputs, KIND as ITERATION_KIND, MAX_PARALLEL_ITEMS,

@@ -6,7 +6,7 @@
 
 ## 2. Builtin generation and completion
 
-- [ ] 2.1 Advertise certified Identity generation through an exported constructor and one shared typed handle.
-- [ ] 2.2 Extend existing behavioral regressions with builtin generation, refined fallback, invalid inputs, and payload identity.
-- [ ] 2.3 Review AGENTS.md compliance, ablate unnecessary code/tests, run pinned hooks, complete Nix checks, focused coverage, and strict change validation.
+- [x] 2.1 Advertise certified Identity generation through an exported constructor and one shared typed handle.
+- [x] 2.2 Extend existing behavioral regressions with builtin generation, refined fallback, invalid inputs, and payload identity.
+- [x] 2.3 Review AGENTS.md compliance, ablate unnecessary code/tests, run pinned hooks, complete Nix checks, focused coverage, and strict change validation.
 - [ ] 2.4 Commit each implementation group, archive the reviewed change, validate main specifications, and update the current PR.

@@ -188,23 +188,23 @@ embedded inspection manifest. Provider changes regenerate them through Cargo's o
 
 ### Struct-defined inputs
 
-Use the runtime's `NodeInputs` derive to declare input ports and decode their values from one owned struct:
+Use the runtime's `NodeValue` derive to declare input ports and decode their values from one owned struct:
 
 ```rust
-use mf_runtime::{Inputs, NodeInputs, ValueRef};
+use mf_runtime::{NodeValue, NodeValues, ValueRef};
 use std::collections::BTreeMap;
 
-#[derive(NodeInputs)]
+#[derive(NodeValue)]
 struct RequestInputs {
     url: String,
     headers: Option<BTreeMap<String, String>>,
     body: Option<ValueRef>,
-    #[input(rename = "request.path")]
+    #[value(rename = "request.path")]
     path: Option<String>,
 }
 
 let ports = RequestInputs::ports();
-let request = RequestInputs::from_inputs(Inputs::from([
+let request = RequestInputs::from_values(NodeValues::from([
     ("url".into(), "https://example.test".into()),
 ]))?;
 ```
@@ -218,12 +218,12 @@ Collection elements cannot be optional, and nested `Option` fields are unsupport
 
 Named-field structs support generics and type aliases. Tuple/unit structs, enums, and borrowed fields are
 unsupported. Field names define port names; raw identifiers omit their `r#` prefix. Use
-`#[input(rename = "port-name")]` for exact names, including punctuation. Empty and duplicate names fail
-compilation. Input attributes are independent of Serde attributes and do not implement defaults or flattening.
+`#[value(rename = "port-name")]` for exact names, including punctuation. Empty and duplicate names fail
+compilation. Value attributes are independent of Serde attributes and do not implement defaults or flattening.
 
 The derive is re-exported by `mf-runtime`; providers do not need a separate macro dependency. A renamed
-runtime dependency requires `#[input(runtime = "::runtime_alias")]` on the struct. Use
-`#[input(runtime = "crate")]` when deriving within the runtime crate itself.
+runtime dependency requires `#[value(runtime = "::runtime_alias")]` on the struct. Use
+`#[value(runtime = "crate")]` when deriving within the runtime crate itself.
 
 `decode_input`, `reject_unknown_inputs`, `InputField`, and `InputValue` support manual input contracts. Their declarations and
 decoders must agree on accepted names, requiredness, and value types. Errors retain typed mismatches;
@@ -232,18 +232,18 @@ remain shared during decoding, including collection descendants; owned strings a
 
 ### Struct-defined outputs
 
-Use `NodeOutputs` to declare output ports and encode their values from one owned struct:
+Use `NodeValue` to declare output ports and encode their values from one owned struct:
 
 ```rust
-use mf_runtime::{NodeOutputs, ValueRef};
+use mf_runtime::{NodeValue, ValueRef};
 use std::collections::BTreeMap;
 
-#[derive(NodeOutputs)]
+#[derive(NodeValue)]
 struct ResponseOutputs {
     status: i64,
     headers: BTreeMap<String, String>,
     body: ValueRef,
-    #[output(rename = "response.label")]
+    #[value(rename = "response.label")]
     label: Option<String>,
 }
 
@@ -253,7 +253,7 @@ let outputs = ResponseOutputs {
     headers: BTreeMap::new(),
     body: ValueRef::null(),
     label: None,
-}.into_outputs()?;
+}.into_values()?;
 ```
 
 Output fields support the same owned scalar and recursive collection types as inputs. Required fields
@@ -263,9 +263,9 @@ must declare explicit skips in the task result. Non-finite `f64` values fail enc
 collections, rather than becoming null. Finite floating values retain their representation, including negative zero.
 
 The derive supports named-field structs, generics, type aliases, raw identifiers, and
-`#[output(rename = "port-name")]`. Empty and duplicate names fail compilation. Use
-`#[output(runtime = "::runtime_alias")]` for a renamed runtime dependency, or
-`#[output(runtime = "crate")]` within the runtime crate. Output attributes are independent of Serde.
+`#[value(rename = "port-name")]`. Empty and duplicate names fail compilation. Use
+`#[value(runtime = "::runtime_alias")]` for a renamed runtime dependency, or
+`#[value(runtime = "crate")]` within the runtime crate. Value attributes are independent of Serde.
 Tuple/unit structs, enums, borrowed fields, optional collection elements, and nested `Option` are unsupported.
 
 `NodeOutputs`, `OutputField`, `OutputValue`, and `encode_output` also support manual output contracts.
@@ -280,16 +280,16 @@ conversion in both directions and wraps the provider as an ordinary task executo
 
 ```rust
 use mf_runtime::{
-    ExecutionContext, NodeBuildError, NodeExecutionError, NodeInputs, NodeOutputs,
+    ExecutionContext, NodeBuildError, NodeExecutionError, NodeValue,
     NodePorts, PreparedNode, TypedNodeResult, TypedTaskNode, ValueRef,
 };
 
-#[derive(NodeInputs)]
+#[derive(NodeValue)]
 struct EchoInputs {
     input: ValueRef,
 }
 
-#[derive(NodeOutputs)]
+#[derive(NodeValue)]
 struct EchoOutputs {
     value: ValueRef,
 }
@@ -341,7 +341,7 @@ contains the shared `items` payload and `IterationOutputs` contains collected `r
 `TaskNode::execute` for map inputs/results or `TypedTaskNode::execute` for structs. Its output refinement
 still depends on its body and error policy.
 
-To migrate an existing typed task, derive `NodeOutputs` on its output struct, set `type Output`, return
+To migrate an existing typed task, derive `NodeValue` on its input and output structs, set their associated types, return
 `TypedNodeResult<Self::Output>`, and remove factory-supplied output ports. Keep existing derivations and
 other metadata. The [identity provider](../crates/builtin-nodes/core/src/identity.rs) demonstrates shared-value
 forwarding; [Iteration](../crates/builtin-nodes/core/src/iteration.rs) demonstrates body-dependent output refinement.
@@ -409,6 +409,10 @@ configured literal output refinement, and Iteration retains its body-dependent r
 Batch and Readline use `NodeValue` conversion at their event and stream boundaries: Batch preserves
 its broad `Array` output declaration, and Readline preserves its optional non-null string path and
 conditional stdin ownership.
+
+Identity advertises certified generation through the exported `prepare_identity` constructor.
+Its executor and struct fields remain private. Required sole-consumer Identity chains can move
+`ValueRef` fields directly; configured refinements and observers retain dynamic fallback.
 
 IfElse branch names, Loop variables, and Code input/output names depend on configuration. These
 providers retain dynamic port declarations and execution instead of manufacturing fixed Rust structs.

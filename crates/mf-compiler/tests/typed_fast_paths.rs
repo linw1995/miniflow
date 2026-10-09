@@ -1,4 +1,5 @@
 #![cfg(feature = "codegen")]
+extern crate mfn_core as _;
 mod common;
 #[path = "fixtures/multi-nodes/src/generated_fixture.rs"]
 mod fixture;
@@ -14,6 +15,16 @@ fn text_definition() -> WorkflowDefinition {
         "nodes":[{"id":"a", "kind":"fixture.typed_text"}, {"id":"b", "kind":"fixture.typed_text"}, {"id":"c", "kind":"fixture.typed_text"}],
         "edges":[{"from_node":"a", "from_output":"text", "to_node":"b", "to_input":"text"}, {"from_node":"b", "from_output":"text", "to_node":"c", "to_input":"text"}],
         "outputs":[{"name":"result", "node":"c", "port":"text"}]
+    })).unwrap()
+}
+
+fn identity_definition() -> WorkflowDefinition {
+    serde_json::from_value(json!({
+        "version":"2026-10-03",
+        "dependencies":{"arbitrary.core":{"package":"mfn-core", "path": common::crates_dir().join("builtin-nodes/core")}},
+        "nodes":[{"id":"a", "kind":"builtin.identity"}, {"id":"b", "kind":"builtin.identity"}, {"id":"c", "kind":"builtin.identity"}],
+        "edges":[{"from_node":"a", "from_output":"value", "to_node":"b", "to_input":"input"}, {"from_node":"b", "from_output":"value", "to_node":"c", "to_input":"input"}],
+        "outputs":[{"name":"result", "node":"c", "port":"value"}]
     })).unwrap()
 }
 
@@ -35,6 +46,16 @@ fn source_wires_private_fields_with_static_constructor_proofs() {
             .unwrap()
             .rust_source
             .contains("mf_prepare_generated_workflow!(")
+    );
+    let builtins = compile_definition(&identity_definition(), &registry).unwrap();
+    let artifacts = builtins.generate_runner_execution_plans(&registry).unwrap();
+    let report: mf_compiler::TypedPlan = serde_json::from_str(&artifacts.typed_plan_json).unwrap();
+    assert_eq!(report.segments[0].positions, [0, 1, 2]);
+    assert!(
+        report
+            .connections
+            .iter()
+            .all(|edge| edge.fallback.is_none())
     );
 }
 
@@ -150,6 +171,60 @@ fn generated_owned_values_preserve_contracts_and_installation() {
         serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
         json!({"result":[1,-2,i64::MAX]})
     );
+    let shared = json!({"nested":[null,true,42,"shared payload"]});
+    for refined in [false, true] {
+        definition = identity_definition();
+        let args =
+            if refined {
+                definition.nodes.insert(
+                    0,
+                    serde_json::from_value(json!({
+                        "id":"constant", "kind":"builtin.constant", "config":{"value":shared}
+                    }))
+                    .unwrap(),
+                );
+                definition.edges.push(serde_json::from_value(json!({
+                "from_node":"constant", "from_output":"value", "to_node":"a", "to_input":"input"
+            })).unwrap());
+                json!({})
+            } else {
+                json!({"a":{"input":shared}})
+            };
+        let plan = compile_definition(&definition, &registry).unwrap();
+        let report: mf_compiler::TypedPlan = serde_json::from_str(
+            &plan
+                .generate_runner_execution_plans(&registry)
+                .unwrap()
+                .typed_plan_json,
+        )
+        .unwrap();
+        assert_eq!(report.segments.is_empty(), refined);
+        if refined {
+            assert!(
+                report.connections.iter().any(|edge| edge.fallback
+                    == Some(mf_compiler::TypedFallbackReason::UnprovenRefinement))
+            );
+        }
+        let expected = instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute_with_inputs(WorkflowArguments::try_from(args.clone()).unwrap())
+            .unwrap();
+        fs::write(&definition_path, serde_json::to_vec(&definition).unwrap()).unwrap();
+        compile_project_with_options(&request(), &RunnerOptions { telemetry: false }).unwrap();
+        let output = Command::new(&executable)
+            .args(["--inputs", &args.to_string()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+    }
     let installed = fs::read(&executable).unwrap();
     for flag in ["bad_constructor", "bad_names"] {
         let mut invalid = text_definition();
