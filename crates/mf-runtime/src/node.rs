@@ -1,12 +1,32 @@
 use serde::de::DeserializeOwned;
 use serde_json::Value;
-use snafu::{IntoError, ResultExt, Snafu, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, Snafu, ensure};
 use std::borrow::Cow;
 use std::error::Error;
 use std::fmt;
 
-pub type Inputs = std::collections::BTreeMap<String, crate::ValueRef>;
-pub type Outputs = Inputs;
+pub type NodeValues = std::collections::BTreeMap<String, crate::ValueRef>;
+pub type Inputs = NodeValues;
+pub type Outputs = NodeValues;
+
+/// One declaration and bidirectional conversion for an owned named-port struct.
+///
+/// Input and output are roles, rather than distinct data representations.
+///
+/// ```
+/// use mf_runtime::{NodeValue, NodeValues};
+/// #[derive(NodeValue)]
+/// struct Message { text: String, limit: Option<i64> }
+/// let message = Message::from_values(NodeValues::from([("text".into(), "hello".into())]))?;
+/// let values = message.into_values()?;
+/// assert_eq!(values["text"].as_str(), Some("hello"));
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
+pub trait NodeValue: Sized {
+    fn ports() -> Vec<PortSpec>;
+    fn from_values(values: NodeValues) -> Result<Self, crate::InputDecodeError>;
+    fn into_values(self) -> Result<NodeValues, crate::OutputEncodeError>;
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ValueType {
@@ -314,7 +334,7 @@ impl fmt::Display for ValueType {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct PortSpec {
     pub name: Cow<'static, str>,
     pub value_type: ValueType,
@@ -338,13 +358,13 @@ impl PortSpec {
     }
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize)]
 pub struct NodePorts {
     pub inputs: Vec<PortSpec>,
     pub outputs: Vec<PortSpec>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize)]
 pub enum OutputDerivation {
     Literal {
         output: String,
@@ -457,7 +477,7 @@ impl NodePorts {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ContextReference {
     pub output: String,
     pub label: String,
@@ -478,6 +498,13 @@ pub fn output_id(node: &str, port: &str) -> String {
 
 #[derive(Debug, Snafu)]
 pub enum NodeBuildError {
+    #[snafu(display("could not serialize generated metadata: {source}"))]
+    GenerationMetadata { source: serde_json::Error },
+    #[snafu(display("prepared metadata differs from the compiled typed generation contract"))]
+    GenerationMetadataMismatch,
+    #[snafu(transparent)]
+    Generation { source: TypedGenerationError },
+
     #[snafu(display("typed task input ports must be derived from its input struct"))]
     ConflictingInputDeclarations,
     #[snafu(display("typed task output ports must be derived from its output struct"))]
@@ -503,7 +530,7 @@ pub enum NodeExecutionError {
         #[snafu(source(from(crate::InputDecodeError, Box::new)))]
         source: Box<crate::InputDecodeError>,
     },
-    #[snafu(display("could not encode typed task outputs at `{}`: {source}", source.pointer()))]
+    #[snafu(display("could not encode typed task outputs at `{}`: {source}", source.pointer()), visibility(pub(super)))]
     OutputEncode {
         #[snafu(source(from(crate::OutputEncodeError, Box::new)))]
         source: Box<crate::OutputEncodeError>,
@@ -603,9 +630,14 @@ pub fn execute_typed_task<N: TypedTaskNode + ?Sized>(
 ) -> Result<crate::NodeResult, NodeExecutionError> {
     let input = <N::Input as crate::NodeInputs>::from_inputs(inputs).context(InputDecodeSnafu)?;
     let result = task.execute(input, ctx)?;
+    encode_typed_result(result)
+}
+
+pub fn encode_typed_result<O: crate::NodeOutputs>(
+    result: crate::TypedNodeResult<O>,
+) -> Result<crate::NodeResult, NodeExecutionError> {
     Ok(crate::NodeResult {
-        outputs: <N::Output as crate::NodeOutputs>::into_outputs(result.outputs)
-            .context(OutputEncodeSnafu)?,
+        outputs: O::into_outputs(result.outputs).context(OutputEncodeSnafu)?,
         skipped: result.skipped,
         loop_summary: result.loop_summary,
     })
@@ -621,12 +653,13 @@ impl<N: TypedTaskNode> TaskNode for TypedTaskAdapter<N> {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct NodeMetadata {
     pub ports: NodePorts,
     pub output_derivations: Vec<OutputDerivation>,
     pub context_references: Vec<ContextReference>,
     pub stdin: Option<crate::StdinRequirement>,
+    pub typed_generation: Option<TypedGeneration>,
 }
 
 impl NodeMetadata {
@@ -642,6 +675,248 @@ impl From<NodePorts> for NodeMetadata {
     fn from(ports: NodePorts) -> Self {
         Self::new(ports)
     }
+}
+
+/// Field metadata emitted by the unified derive for certified generation.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct TypedPort {
+    pub port: PortSpec,
+    pub rust_type: crate::RustValueType,
+}
+
+/// Named structs with runtime-owned field validation and private-field access helpers.
+///
+/// Implementations certify the exact runtime-owned field codecs without additional
+/// conversion constraints or transformations. Prefer the unified derive; business
+/// invariants belong in task execution rather than a certified field conversion.
+pub trait TypedNodeValue: NodeValue {
+    const PORT_NAMES: &'static [&'static str];
+    type Fields;
+    fn typed_ports() -> Vec<TypedPort>;
+    fn into_fields(self) -> Self::Fields;
+    fn from_fields(fields: Self::Fields) -> Self;
+    fn validate_typed(&self) -> Result<Vec<&'static str>, crate::OutputEncodeError>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct TypedConstructor {
+    pub package: &'static str,
+    pub path: &'static [&'static str],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct TypedGeneration {
+    pub constructor: TypedConstructor,
+    pub inputs: Vec<TypedPort>,
+    pub outputs: Vec<TypedPort>,
+    pub context_free: bool,
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(display("invalid typed generation contract: {message}"))]
+pub struct TypedGenerationError {
+    pub message: String,
+}
+
+impl TypedConstructor {
+    pub fn dependency_alias<'a>(
+        &self,
+        dependencies: &'a std::collections::BTreeMap<String, crate::NodeDependency>,
+    ) -> Result<&'a str, TypedGenerationError> {
+        dependencies
+            .iter()
+            .find(|(_, dependency)| dependency.package == self.package)
+            .map(|(alias, _)| alias.as_str())
+            .context(TypedGenerationSnafu {
+                message: format!("provider package `{}` is not selected", self.package),
+            })
+    }
+}
+
+impl TypedGeneration {
+    pub fn validate(&self, ports: &NodePorts) -> Result<(), TypedGenerationError> {
+        let valid_ident = |s: &str| {
+            let mut chars = s.chars();
+            chars
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        };
+        ensure!(
+            !self.constructor.package.is_empty()
+                && !self.constructor.path.is_empty()
+                && self.constructor.path.iter().all(|part| valid_ident(part)),
+            TypedGenerationSnafu {
+                message: "constructor must name a package and Rust identifier path"
+            }
+        );
+        ensure!(
+            self.inputs
+                .iter()
+                .chain(&self.outputs)
+                .all(|field| { field.rust_type.value_type() == field.port.value_type }),
+            TypedGenerationSnafu {
+                message: "Rust representation does not certify its port descriptor"
+            }
+        );
+        ensure!(
+            self.inputs.iter().map(|p| &p.port).eq(ports.inputs.iter())
+                && self.outputs.len() == ports.outputs.len()
+                && self
+                    .outputs
+                    .iter()
+                    .zip(&ports.outputs)
+                    .all(|(declared, actual)| {
+                        declared.port.name == actual.name
+                            && declared.port.required == actual.required
+                            && actual
+                                .value_type
+                                .is_assignable_to(&declared.port.value_type)
+                    }),
+            TypedGenerationSnafu {
+                message: "generated declarations differ from the configured ports"
+            }
+        );
+        Ok(())
+    }
+}
+
+/// Typed and dynamic invocation strategies share one initialized task instance.
+pub struct TypedTaskHandle<N> {
+    task: std::sync::Arc<N>,
+    metadata: NodeMetadata,
+}
+
+impl<N> Clone for TypedTaskHandle<N> {
+    fn clone(&self) -> Self {
+        Self {
+            task: self.task.clone(),
+            metadata: self.metadata.clone(),
+        }
+    }
+}
+
+struct SharedTypedTask<N>(std::sync::Arc<N>);
+
+impl<N: TypedTaskNode> TaskNode for SharedTypedTask<N> {
+    fn execute(
+        &self,
+        inputs: Inputs,
+        ctx: &mut crate::ExecutionContext,
+    ) -> Result<crate::NodeResult, NodeExecutionError> {
+        execute_typed_task(self.0.as_ref(), inputs, ctx)
+    }
+}
+
+impl<N: TypedTaskNode + 'static> TypedTaskHandle<N>
+where
+    N::Input: TypedNodeValue,
+    N::Output: TypedNodeValue,
+{
+    pub fn new(
+        task: N,
+        metadata: impl Into<NodeMetadata>,
+        constructor: TypedConstructor,
+        context_free: bool,
+    ) -> Result<Self, NodeBuildError> {
+        let mut metadata = typed_task_metadata(&task, metadata.into())?;
+        let generation = TypedGeneration {
+            constructor,
+            inputs: N::Input::typed_ports(),
+            outputs: N::Output::typed_ports(),
+            context_free,
+        };
+        generation.validate(&metadata.ports)?;
+        metadata.typed_generation = Some(generation);
+        Ok(Self {
+            task: std::sync::Arc::new(task),
+            metadata,
+        })
+    }
+
+    pub fn prepared(&self) -> PreparedNode {
+        PreparedNode::new(SharedTypedTask(self.task.clone()), self.metadata.clone())
+    }
+
+    pub fn decode_inputs(&self, inputs: Inputs) -> Result<N::Input, NodeExecutionError> {
+        <N::Input as crate::NodeInputs>::from_inputs(inputs).context(InputDecodeSnafu)
+    }
+
+    pub fn input_from_fields(&self, fields: <N::Input as TypedNodeValue>::Fields) -> N::Input {
+        N::Input::from_fields(fields)
+    }
+
+    pub fn execute(
+        &self,
+        input: N::Input,
+        ctx: &mut crate::ExecutionContext,
+    ) -> Result<crate::TypedNodeResult<N::Output>, NodeExecutionError> {
+        self.task.execute(input, ctx)
+    }
+}
+
+pub const fn port_names_match(actual: &[&str], expected: &[&str]) -> bool {
+    if actual.len() != expected.len() {
+        return false;
+    }
+    let mut index = 0;
+    while index < actual.len() {
+        let left = actual[index].as_bytes();
+        let right = expected[index].as_bytes();
+        if left.len() != right.len() {
+            return false;
+        }
+        let mut byte = 0;
+        while byte < left.len() {
+            if left[byte] != right[byte] {
+                return false;
+            }
+            byte += 1;
+        }
+        index += 1;
+    }
+    true
+}
+
+pub fn verify_generated_metadata(
+    actual: &NodeMetadata,
+    expected: &serde_json::Value,
+) -> Result<(), NodeBuildError> {
+    let actual = serde_json::to_value(actual).context(GenerationMetadataSnafu)?;
+    ensure!(actual == *expected, GenerationMetadataMismatchSnafu);
+    Ok(())
+}
+
+fn typed_task_metadata<N: TypedTaskNode + ?Sized>(
+    task: &N,
+    mut metadata: NodeMetadata,
+) -> Result<NodeMetadata, NodeBuildError> {
+    ensure!(
+        metadata.ports.inputs.is_empty(),
+        ConflictingInputDeclarationsSnafu
+    );
+    ensure!(
+        metadata.ports.outputs.is_empty(),
+        ConflictingOutputDeclarationsSnafu
+    );
+    let declared = <N::Output as crate::NodeOutputs>::ports();
+    let mut fields: std::collections::BTreeMap<_, _> =
+        declared.iter().map(|port| (&port.name, port)).collect();
+    let outputs = task.output_ports();
+    ensure!(
+        fields.len() == declared.len()
+            && outputs.len() == fields.len()
+            && outputs.iter().all(|port| {
+                fields.remove(&port.name).is_some_and(|field| {
+                    field.required == port.required
+                        && port.value_type.is_assignable_to(&field.value_type)
+                })
+            }),
+        InvalidOutputRefinementSnafu
+    );
+    metadata.ports.outputs = outputs;
+    metadata.ports.inputs = <N::Input as crate::NodeInputs>::ports();
+    Ok(metadata)
 }
 
 pub struct PreparedNode {
@@ -714,32 +989,7 @@ impl PreparedNode {
         task: N,
         metadata: impl Into<NodeMetadata>,
     ) -> Result<Self, NodeBuildError> {
-        let mut metadata = metadata.into();
-        ensure!(
-            metadata.ports.inputs.is_empty(),
-            ConflictingInputDeclarationsSnafu
-        );
-        ensure!(
-            metadata.ports.outputs.is_empty(),
-            ConflictingOutputDeclarationsSnafu
-        );
-        let declared = <N::Output as crate::NodeOutputs>::ports();
-        let mut fields: std::collections::BTreeMap<_, _> =
-            declared.iter().map(|port| (&port.name, port)).collect();
-        let outputs = task.output_ports();
-        ensure!(
-            fields.len() == declared.len()
-                && outputs.len() == fields.len()
-                && outputs.iter().all(|port| {
-                    fields.remove(&port.name).is_some_and(|field| {
-                        field.required == port.required
-                            && port.value_type.is_assignable_to(&field.value_type)
-                    })
-                }),
-            InvalidOutputRefinementSnafu
-        );
-        metadata.ports.outputs = outputs;
-        metadata.ports.inputs = <N::Input as crate::NodeInputs>::ports();
+        let metadata = typed_task_metadata(&task, metadata.into())?;
         Ok(Self::new(TypedTaskAdapter(task), metadata))
     }
 

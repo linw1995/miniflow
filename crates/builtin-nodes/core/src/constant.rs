@@ -1,6 +1,6 @@
 use mf_runtime::{
-    Inputs, NodeBuildError, NodeExecutionError, NodePorts, NodeRegistration, OutputDerivation,
-    Outputs, PortSpec, TaskNode, ValueType, deserialize_config,
+    NodeBuildError, NodeExecutionError, NodeRegistration, NodeValue, OutputDerivation, PortSpec,
+    TypedNodeResult, TypedTaskNode, ValueRef, ValueType, deserialize_config,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -17,31 +17,36 @@ struct ConstantConfig {
 }
 
 struct ConstantNode {
-    value: mf_runtime::ValueRef,
+    value: ValueRef,
 }
 
-impl TaskNode for ConstantNode {
+#[derive(NodeValue)]
+struct ConstantInputs {}
+
+#[derive(NodeValue)]
+struct ConstantOutputs {
+    value: ValueRef,
+}
+
+impl TypedTaskNode for ConstantNode {
+    type Input = ConstantInputs;
+    type Output = ConstantOutputs;
+
     fn execute(
         &self,
-        _inputs: Inputs,
+        _inputs: ConstantInputs,
         _ctx: &mut mf_runtime::ExecutionContext,
-    ) -> Result<mf_runtime::NodeResult, NodeExecutionError> {
-        Ok((Outputs::from([("value".to_owned(), self.value.clone())])).into())
-    }
-}
-impl ConstantNode {
-    fn ports(&self) -> NodePorts {
-        NodePorts {
-            inputs: Vec::new(),
-            outputs: vec![PortSpec::new(
-                "value",
-                ValueType::infer_shared(&self.value),
-                true,
-            )],
+    ) -> Result<TypedNodeResult<ConstantOutputs>, NodeExecutionError> {
+        Ok(ConstantOutputs {
+            value: self.value.clone(),
         }
+        .into())
     }
-    fn output_derivations(&self) -> Vec<OutputDerivation> {
-        vec![OutputDerivation::literal("value", self.value.clone())]
+
+    fn output_ports(&self) -> Vec<PortSpec> {
+        let mut ports = ConstantOutputs::ports();
+        ports[0].value_type = ValueType::infer_shared(&self.value);
+        ports
     }
 }
 
@@ -51,10 +56,10 @@ fn constant_factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuild
         value: config.value.into(),
     };
     let metadata = mf_runtime::NodeMetadata {
-        output_derivations: node.output_derivations(),
-        ..mf_runtime::NodeMetadata::new(node.ports())
+        output_derivations: vec![OutputDerivation::literal("value", node.value.clone())],
+        ..mf_runtime::NodeMetadata::default()
     };
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    mf_runtime::PreparedNode::typed_task(node, metadata)
 }
 
 inventory::submit! {

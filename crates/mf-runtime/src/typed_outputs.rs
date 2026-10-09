@@ -199,3 +199,151 @@ impl<T: OutputValue> OutputField for Option<T> {
 fn escape_pointer(value: &str) -> String {
     value.replace('~', "~0").replace('/', "~1")
 }
+
+/// Closed Rust representations for which direct transfer has a runtime-owned codec proof.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+pub enum RustValueType {
+    Boolean,
+    Int64,
+    Float64,
+    String,
+    Shared,
+    List(Box<Self>),
+    Map(Box<Self>),
+    Optional(Box<Self>),
+}
+
+impl RustValueType {
+    pub fn value_type(&self) -> ValueType {
+        match self {
+            Self::Boolean => ValueType::Boolean,
+            Self::Int64 => ValueType::Int64,
+            Self::Float64 => ValueType::Float64,
+            Self::String => ValueType::String,
+            Self::Shared => ValueType::Any,
+            Self::List(inner) => ValueType::List(Box::new(inner.value_type())),
+            Self::Map(inner) => ValueType::Map(Box::new(inner.value_type())),
+            Self::Optional(inner) => inner.value_type(),
+        }
+    }
+}
+
+/// Seals certified codecs to the implementations whose validation is runtime-owned.
+pub trait CertifiedCodec {}
+
+pub trait TypedValueCodec: crate::InputValue + OutputValue + CertifiedCodec {
+    fn rust_type() -> RustValueType;
+    fn validate_typed(&self) -> Result<(), TypeMismatch>;
+}
+
+pub trait TypedField: crate::InputField + OutputField + CertifiedCodec {
+    fn rust_type() -> RustValueType;
+    fn validate_typed(&self) -> Result<bool, TypeMismatch>;
+}
+
+impl<T: TypedValueCodec + crate::InputField> TypedField for T {
+    fn rust_type() -> RustValueType {
+        <T as TypedValueCodec>::rust_type()
+    }
+
+    fn validate_typed(&self) -> Result<bool, TypeMismatch> {
+        <T as TypedValueCodec>::validate_typed(self)?;
+        Ok(true)
+    }
+}
+
+macro_rules! certified_scalar {
+    ($ty:ty, $kind:ident) => {
+        impl CertifiedCodec for $ty {}
+        impl TypedValueCodec for $ty {
+            fn rust_type() -> RustValueType {
+                RustValueType::$kind
+            }
+            fn validate_typed(&self) -> Result<(), TypeMismatch> {
+                Ok(())
+            }
+        }
+    };
+}
+
+certified_scalar!(bool, Boolean);
+certified_scalar!(i64, Int64);
+certified_scalar!(String, String);
+certified_scalar!(ValueRef, Shared);
+
+impl CertifiedCodec for f64 {}
+impl TypedValueCodec for f64 {
+    fn rust_type() -> RustValueType {
+        RustValueType::Float64
+    }
+
+    fn validate_typed(&self) -> Result<(), TypeMismatch> {
+        serde_json::Number::from_f64(*self).context(crate::node::TypeMismatchSnafu {
+            path: "",
+            expected: ValueType::Float64,
+            actual: "non-finite float",
+        })?;
+        Ok(())
+    }
+}
+
+impl<T: TypedValueCodec> CertifiedCodec for Vec<T> {}
+impl<T: TypedValueCodec> TypedValueCodec for Vec<T> {
+    fn rust_type() -> RustValueType {
+        RustValueType::List(Box::new(T::rust_type()))
+    }
+
+    fn validate_typed(&self) -> Result<(), TypeMismatch> {
+        for (index, value) in self.iter().enumerate() {
+            value.validate_typed().map_err(|mut error| {
+                error.path = format!("/{index}{}", error.path);
+                error
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl<T: TypedValueCodec> CertifiedCodec for BTreeMap<String, T> {}
+impl<T: TypedValueCodec> TypedValueCodec for BTreeMap<String, T> {
+    fn rust_type() -> RustValueType {
+        RustValueType::Map(Box::new(T::rust_type()))
+    }
+
+    fn validate_typed(&self) -> Result<(), TypeMismatch> {
+        for (key, value) in self {
+            value.validate_typed().map_err(|mut error| {
+                error.path = format!("/{}{}", escape_pointer(key), error.path);
+                error
+            })?;
+        }
+        Ok(())
+    }
+}
+
+impl<T: TypedValueCodec> CertifiedCodec for Option<T> {}
+impl<T: TypedValueCodec> TypedField for Option<T> {
+    fn rust_type() -> RustValueType {
+        RustValueType::Optional(Box::new(T::rust_type()))
+    }
+
+    fn validate_typed(&self) -> Result<bool, TypeMismatch> {
+        if let Some(value) = self {
+            value.validate_typed()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+}
+
+/// Validates a field before generated execution makes any typed payload available.
+pub fn validate_typed_output<T: TypedField>(
+    value: &T,
+    port: &'static str,
+) -> Result<bool, OutputEncodeError> {
+    <T as OutputField>::value_type()
+        .check_depth()
+        .context(InvalidTypeSnafu { port })?;
+    value.validate_typed().context(InvalidValueSnafu { port })
+}

@@ -96,25 +96,115 @@ Declare context reads in `NodeMetadata.context_references`. Each `ContextReferen
 
 ## Context-aware execution
 
-### Struct-defined inputs
+### Unified value structs
 
-Use the runtime's `NodeInputs` derive to declare input ports and decode their values from one owned struct:
+Use `NodeValue` to declare one owned named-port contract for either task role:
 
 ```rust
-use mf_runtime::{Inputs, NodeInputs, ValueRef};
+use mf_runtime::{NodeValue, NodeValues};
+
+#[derive(NodeValue)]
+struct Message {
+    text: String,
+    #[value(rename = "request.limit")]
+    limit: Option<i64>,
+}
+
+let message = Message::from_values(NodeValues::from([("text".into(), "hello".into())]))?;
+let values = message.into_values()?;
+assert_eq!(values["text"].as_str(), Some("hello"));
+```
+
+The same struct can be a task's `Input`, `Output`, or both. The derive generates one `ports()` declaration,
+`from_values`, and `into_values`, plus explicit adapters for the existing `NodeInputs` and `NodeOutputs` contracts.
+Existing directional derives and manual implementations remain supported. When importing multiple contract traits,
+qualify the shared declaration as `<Message as NodeValue>::ports()`.
+
+`NodeValues`, `Inputs`, and `Outputs` name the same dynamic map. Conversion preserves the strict scalar,
+collection, optional-port, shared-value, and typed error semantics described below. Use
+`#[value(runtime = "::runtime_alias")]` for a renamed runtime dependency. Value attributes are independent of Serde.
+A value struct describes an entire port bag; it does not automatically implement a nested JSON-object field codec.
+
+### Typed generation opt-in
+
+A provider can opt a named value into certified field access and borrowed validation with `#[value(typed)]`.
+Only the runtime's owned scalar, collection, and top-level optional codecs qualify. Custom field codecs
+retain dynamic execution. `TypedNodeValue` exposes tuple decomposition/construction helpers, so generated
+code does not need public struct fields.
+
+Export a configuration constructor returning `TypedTaskHandle<impl TypedTaskNode<Input = I, Output = O>>`.
+Construct the handle with `TypedTaskHandle::new`, an ordinary empty-port metadata value, and a
+`TypedConstructor` naming the provider package and exported item path. Its ordinary registered factory
+returns `Ok(handle.prepared())`. Both handles share one initialized executor; fallback never calls
+another factory. The prepared metadata records the optional generation declaration.
+
+Set the constructor's `context_free` flag only when business logic does not read context outputs.
+A matching Rust representation does not authorize skipping business validation. The first version
+certifies only runtime-owned codecs and still validates all produced fields before successor calls.
+Missing generation support leaves dynamic providers unchanged. Exhaustive `NodeMetadata` literals must
+include `typed_generation: None`; constructors and literals using `..Default::default()` need no change.
+
+### Generated typed segments
+
+The planner keeps existing execution domains and identifies maximal eligible serial task chains.
+Direct internal transfer requires required ports, the same certified Rust representation, unchanged
+resolved output descriptors, and a single remaining observer. Unconnected optional fields keep their
+ordinary omission semantics; connected optional fields currently use dynamic conversion.
+
+Build inspection records one deterministic fallback reason per data connection. Reasons include
+missing provider support, context reads, unproven refinement, observed outputs, optional bindings,
+different Rust representations, domain boundaries, and multiple predecessors. Fan-out, joins,
+stream/event execution, nested bodies, and custom-runner context inspection stay dynamic. A connection
+whose output is also selected by the workflow or read by a condition cannot consume the only owned copy.
+
+### Generated invocation lifecycle
+
+Generated domain bodies bind to the existing `FlowRuntime` scheduler and share prepared task instances
+with their dynamic adapters. `execute_generated_position` uses the ordinary dependency checks,
+node observations, failure phases, and scope-effect publication. Runtime payload snapshot capture
+selects the domain's prepared dynamic fallback; scoped execution also keeps its existing dynamic path.
+
+A provider invocation must call `GeneratedNodeResult::typed(&result)` before decomposing intermediate
+outputs. This borrows and validates every field, including unused descendants, before recording
+presence or calling a successor. `GeneratedNodeResult::encoded(result)` performs ordinary encoding at
+an exit. Prepared refinements not certified by direct transfer remain dynamic. Internal presence
+records are not context-readable payloads: generation must exclude every output observer before moving
+an owned field. Explicit skips and unexpectedly missing dependencies keep their ordinary semantics.
+
+### Build inspection and generated contracts
+
+Standard task projects use `generate_runner_artifacts` and `generate_runner_execution_plans`.
+The linked-provider build emits a preparation macro with the frozen layout items in `flow-plans.rs`,
+and records eligible segments and fallback reasons in `OUT_DIR/typed-fast-paths.json`.
+General-purpose artifact/plan generation keeps ordinary dynamic preparation and context inspection.
+The preparation macro is expanded only by standard runners, so custom runners do not compile unused
+monomorphized typed bodies or acquire resources for them.
+
+Generated constructors receive the existing configured JSON. Target Rust compilation proves each
+constructor's field tuple types and exact port names against the build-time contract. Launch compares
+its complete resolved metadata before dispatch, covering target-specific interfaces, resources,
+derivations, context references, and generation flags. These build-time records are separate from the
+embedded inspection manifest. Provider changes regenerate them through Cargo's ordinary dependency tracking.
+
+### Struct-defined inputs
+
+Use the runtime's `NodeValue` derive to declare input ports and decode their values from one owned struct:
+
+```rust
+use mf_runtime::{NodeValue, NodeValues, ValueRef};
 use std::collections::BTreeMap;
 
-#[derive(NodeInputs)]
+#[derive(NodeValue)]
 struct RequestInputs {
     url: String,
     headers: Option<BTreeMap<String, String>>,
     body: Option<ValueRef>,
-    #[input(rename = "request.path")]
+    #[value(rename = "request.path")]
     path: Option<String>,
 }
 
 let ports = RequestInputs::ports();
-let request = RequestInputs::from_inputs(Inputs::from([
+let request = RequestInputs::from_values(NodeValues::from([
     ("url".into(), "https://example.test".into()),
 ]))?;
 ```
@@ -128,12 +218,12 @@ Collection elements cannot be optional, and nested `Option` fields are unsupport
 
 Named-field structs support generics and type aliases. Tuple/unit structs, enums, and borrowed fields are
 unsupported. Field names define port names; raw identifiers omit their `r#` prefix. Use
-`#[input(rename = "port-name")]` for exact names, including punctuation. Empty and duplicate names fail
-compilation. Input attributes are independent of Serde attributes and do not implement defaults or flattening.
+`#[value(rename = "port-name")]` for exact names, including punctuation. Empty and duplicate names fail
+compilation. Value attributes are independent of Serde attributes and do not implement defaults or flattening.
 
 The derive is re-exported by `mf-runtime`; providers do not need a separate macro dependency. A renamed
-runtime dependency requires `#[input(runtime = "::runtime_alias")]` on the struct. Use
-`#[input(runtime = "crate")]` when deriving within the runtime crate itself.
+runtime dependency requires `#[value(runtime = "::runtime_alias")]` on the struct. Use
+`#[value(runtime = "crate")]` when deriving within the runtime crate itself.
 
 `decode_input`, `reject_unknown_inputs`, `InputField`, and `InputValue` support manual input contracts. Their declarations and
 decoders must agree on accepted names, requiredness, and value types. Errors retain typed mismatches;
@@ -142,18 +232,18 @@ remain shared during decoding, including collection descendants; owned strings a
 
 ### Struct-defined outputs
 
-Use `NodeOutputs` to declare output ports and encode their values from one owned struct:
+Use `NodeValue` to declare output ports and encode their values from one owned struct:
 
 ```rust
-use mf_runtime::{NodeOutputs, ValueRef};
+use mf_runtime::{NodeValue, ValueRef};
 use std::collections::BTreeMap;
 
-#[derive(NodeOutputs)]
+#[derive(NodeValue)]
 struct ResponseOutputs {
     status: i64,
     headers: BTreeMap<String, String>,
     body: ValueRef,
-    #[output(rename = "response.label")]
+    #[value(rename = "response.label")]
     label: Option<String>,
 }
 
@@ -163,7 +253,7 @@ let outputs = ResponseOutputs {
     headers: BTreeMap::new(),
     body: ValueRef::null(),
     label: None,
-}.into_outputs()?;
+}.into_values()?;
 ```
 
 Output fields support the same owned scalar and recursive collection types as inputs. Required fields
@@ -173,9 +263,9 @@ must declare explicit skips in the task result. Non-finite `f64` values fail enc
 collections, rather than becoming null. Finite floating values retain their representation, including negative zero.
 
 The derive supports named-field structs, generics, type aliases, raw identifiers, and
-`#[output(rename = "port-name")]`. Empty and duplicate names fail compilation. Use
-`#[output(runtime = "::runtime_alias")]` for a renamed runtime dependency, or
-`#[output(runtime = "crate")]` within the runtime crate. Output attributes are independent of Serde.
+`#[value(rename = "port-name")]`. Empty and duplicate names fail compilation. Use
+`#[value(runtime = "::runtime_alias")]` for a renamed runtime dependency, or
+`#[value(runtime = "crate")]` within the runtime crate. Value attributes are independent of Serde.
 Tuple/unit structs, enums, borrowed fields, optional collection elements, and nested `Option` are unsupported.
 
 `NodeOutputs`, `OutputField`, `OutputValue`, and `encode_output` also support manual output contracts.
@@ -190,16 +280,16 @@ conversion in both directions and wraps the provider as an ordinary task executo
 
 ```rust
 use mf_runtime::{
-    ExecutionContext, NodeBuildError, NodeExecutionError, NodeInputs, NodeOutputs,
+    ExecutionContext, NodeBuildError, NodeExecutionError, NodeValue,
     NodePorts, PreparedNode, TypedNodeResult, TypedTaskNode, ValueRef,
 };
 
-#[derive(NodeInputs)]
+#[derive(NodeValue)]
 struct EchoInputs {
     input: ValueRef,
 }
 
-#[derive(NodeOutputs)]
+#[derive(NodeValue)]
 struct EchoOutputs {
     value: ValueRef,
 }
@@ -251,7 +341,7 @@ contains the shared `items` payload and `IterationOutputs` contains collected `r
 `TaskNode::execute` for map inputs/results or `TypedTaskNode::execute` for structs. Its output refinement
 still depends on its body and error policy.
 
-To migrate an existing typed task, derive `NodeOutputs` on its output struct, set `type Output`, return
+To migrate an existing typed task, derive `NodeValue` on its input and output structs, set their associated types, return
 `TypedNodeResult<Self::Output>`, and remove factory-supplied output ports. Keep existing derivations and
 other metadata. The [identity provider](../crates/builtin-nodes/core/src/identity.rs) demonstrates shared-value
 forwarding; [Iteration](../crates/builtin-nodes/core/src/iteration.rs) demonstrates body-dependent output refinement.
@@ -311,6 +401,22 @@ context effects become visible to dependent domains only after validation and co
 scopes, domain dispatch stays serial in topological order so scope writes and exits retain their defined order;
 Iteration still parallelizes separate items through that same bounded worker pool. Workers waiting for nested item work
 help execute queued pool jobs on their existing thread, so nested Iteration work shares the configured worker bound.
+
+## Builtin contract boundaries
+
+Identity, Constant, and Iteration use `NodeValue` bags with `TypedTaskNode`. Constant retains its
+configured literal output refinement, and Iteration retains its body-dependent result refinement.
+Batch and Readline use `NodeValue` conversion at their event and stream boundaries: Batch preserves
+its broad `Array` output declaration, and Readline preserves its optional non-null string path and
+conditional stdin ownership.
+
+Identity advertises certified generation through the exported `prepare_identity` constructor.
+Its executor and struct fields remain private. Required sole-consumer Identity chains can move
+`ValueRef` fields directly; configured refinements and observers retain dynamic fallback.
+
+IfElse branch names, Loop variables, and Code input/output names depend on configuration. These
+providers retain dynamic port declarations and execution instead of manufacturing fixed Rust structs.
+Event, stream, and nested-scope execution retain the existing dynamic scheduler contracts.
 
 ## Migrate an existing plugin
 

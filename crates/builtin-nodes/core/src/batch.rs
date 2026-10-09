@@ -1,14 +1,39 @@
 use mf_runtime::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeBuildError,
-    NodeEvent, NodeExecutionError, NodeRegistration, NodeResult, OutputDerivation, Outputs,
-    PortSpec, TimerUpdate, ValueRef, ValueType, deserialize_config,
+    NodeEvent, NodeExecutionError, NodeRegistration, NodeValue, OutputDerivation, TimerUpdate,
+    ValueRef, ValueType, deserialize_config, encode_typed_result,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use snafu::OptionExt;
-use std::time::{Duration, Instant};
+use snafu::{OptionExt, ResultExt, Snafu};
+use std::{
+    error::Error,
+    time::{Duration, Instant},
+};
 
 pub const KIND: &str = "builtin.batch";
+
+#[derive(NodeValue)]
+struct BatchInputs {
+    item: ValueRef,
+}
+
+#[derive(NodeValue)]
+struct BatchOutputs {
+    items: ValueRef,
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(display("could not decode batch inputs: {source}"))]
+struct BatchInputError {
+    source: mf_runtime::InputDecodeError,
+}
+
+impl From<BatchInputError> for NodeExecutionError {
+    fn from(source: BatchInputError) -> Self {
+        Box::<dyn Error + Send + Sync>::from(source).into()
+    }
+}
 
 #[derive(Clone, Copy, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -46,13 +71,15 @@ fn max_wait_ms<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Err
 
 fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let config = deserialize_config(config)?;
+    let mut outputs = BatchOutputs::ports();
+    outputs[0].value_type = ValueType::Array;
     Ok(mf_runtime::PreparedNode::event(
         BatchState::new(config),
         mf_runtime::NodeMetadata {
             output_derivations: vec![OutputDerivation::collect_input("items", "item")],
             ..mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
-                inputs: vec![PortSpec::new("item", ValueType::Any, true)],
-                outputs: vec![PortSpec::new("items", ValueType::Array, true)],
+                inputs: BatchInputs::ports(),
+                outputs,
             })
         },
     ))
@@ -82,17 +109,22 @@ impl BatchState {
         self.deadline.is_some_and(|deadline| deadline <= now)
     }
 
-    fn seal(&mut self, reason: FlushReason, emissions: &mut Vec<EventEmission>) {
+    fn seal(
+        &mut self,
+        reason: FlushReason,
+        emissions: &mut Vec<EventEmission>,
+    ) -> Result<(), NodeExecutionError> {
         if self.items.is_empty() {
-            return;
+            return Ok(());
         }
         let item_count = self.items.len();
         let items = ValueRef::array(std::mem::take(&mut self.items));
         self.deadline = None;
         emissions.push(EventEmission {
-            result: NodeResult::from(Outputs::from([("items".into(), items)])),
+            result: encode_typed_result(BatchOutputs { items }.into())?,
             batch: Some(BatchInfo { item_count, reason }),
         });
+        Ok(())
     }
 }
 
@@ -104,14 +136,11 @@ impl EventNode for BatchState {
     ) -> Result<EventEffects, NodeExecutionError> {
         let mut emissions = Vec::new();
         match event {
-            NodeEvent::Input(mut inputs) => {
-                let item = inputs
-                    .remove("item")
-                    .context(mf_runtime::NodeExecutionFailedSnafu {
-                        message: "required input `item` was not provided",
-                    })?;
+            NodeEvent::Input(inputs) => {
+                let BatchInputs { item } =
+                    BatchInputs::from_values(inputs).context(BatchInputSnafu)?;
                 if self.due(context.now) {
-                    self.seal(FlushReason::TimeoutExceed, &mut emissions);
+                    self.seal(FlushReason::TimeoutExceed, &mut emissions)?;
                 }
                 if self.items.is_empty() {
                     let at = context
@@ -124,12 +153,12 @@ impl EventNode for BatchState {
                 }
                 self.items.push(item);
                 if self.items.len() >= self.config.max_items {
-                    self.seal(FlushReason::SizeExceed, &mut emissions);
+                    self.seal(FlushReason::SizeExceed, &mut emissions)?;
                 }
             }
             NodeEvent::Timer => {
                 if self.due(context.now) {
-                    self.seal(FlushReason::TimeoutExceed, &mut emissions);
+                    self.seal(FlushReason::TimeoutExceed, &mut emissions)?;
                 }
             }
             NodeEvent::UpstreamClosed => {
@@ -138,7 +167,7 @@ impl EventNode for BatchState {
                 } else {
                     FlushReason::UpstreamClosed
                 };
-                self.seal(reason, &mut emissions);
+                self.seal(reason, &mut emissions)?;
             }
         }
         Ok(EventEffects {
@@ -244,6 +273,23 @@ mod tests {
         let first = event(&mut state, input(json!(1)), 10);
         assert_eq!(first.timer, TimerUpdate::Set(Duration::from_millis(110)));
         assert_eq!(event(&mut state, input(json!(2)), 100).timer, first.timer);
+        let error = state
+            .on_event(
+                NodeEvent::Input(Inputs::new()),
+                &EventContext {
+                    now: Duration::from_millis(110),
+                    input: None,
+                },
+            )
+            .unwrap_err();
+        let source = error
+            .source()
+            .unwrap()
+            .downcast_ref::<BatchInputError>()
+            .unwrap();
+        assert_eq!(source.source.pointer(), "/item");
+        assert_eq!(state.items.len(), 2);
+        assert_eq!(state.deadline, Some(Duration::from_millis(110)));
         let early = event(&mut state, NodeEvent::Timer, 109);
         assert!(early.emissions.is_empty());
         assert_eq!(early.timer, first.timer);

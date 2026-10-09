@@ -4,7 +4,7 @@ use crate::{NodeMetadata, PreparedNode, TaskNode};
 use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::borrow::Cow;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
@@ -147,6 +147,10 @@ impl FlowRuntime {
     }
 }
 
+pub type GeneratedDomainExecutor = dyn Fn(&Flow, &mut crate::ExecutionContext) -> Result<(), crate::WorkflowRunError>
+    + Send
+    + Sync;
+
 pub struct Flow {
     inner: Arc<FlowData>,
 }
@@ -155,6 +159,7 @@ struct FlowData {
     nodes: Vec<TaskFlowNode>,
     plan: FlowPlan,
     input_schema: crate::WorkflowInputSchema,
+    generated_domains: BTreeMap<usize, Arc<GeneratedDomainExecutor>>,
 }
 
 impl Flow {
@@ -217,9 +222,64 @@ impl Flow {
                 nodes,
                 plan,
                 input_schema,
+                generated_domains: BTreeMap::new(),
             }),
         }
     }
+    /// Binds compiler-validated typed bodies without changing the domain graph.
+    pub fn with_generated_domains(
+        mut self,
+        domains: impl IntoIterator<Item = (usize, Arc<GeneratedDomainExecutor>)>,
+    ) -> Self {
+        self.data_mut().generated_domains.extend(domains);
+        self
+    }
+
+    pub fn execute_position(
+        &self,
+        position: usize,
+        state: &mut crate::ExecutionContext,
+    ) -> Result<(), crate::WorkflowRunError> {
+        let node_id = self.inner.plan.execution_order[position];
+        let node = &self.inner.nodes[node_id.index()];
+        let previous = state.replace_execution_position(Some(position));
+        let result = crate::context::execute_ordered_node_in_context(
+            node,
+            self.inner.plan.dependencies[position]
+                .iter()
+                .map(crate::FlowDependency::borrowed),
+            state,
+        );
+        state.replace_execution_position(previous);
+        result
+    }
+
+    pub fn execute_generated_position(
+        &self,
+        position: usize,
+        transferred_inputs: &[&str],
+        state: &mut crate::ExecutionContext,
+        invoke: impl FnOnce(
+            crate::Inputs,
+            &mut crate::ExecutionContext,
+        ) -> Result<crate::GeneratedNodeResult, crate::NodeExecutionError>,
+    ) -> Result<(), crate::WorkflowRunError> {
+        let node_id = self.inner.plan.execution_order[position];
+        let node = &self.inner.nodes[node_id.index()];
+        let previous = state.replace_execution_position(Some(position));
+        let result = crate::execute_generated_node_in_context(
+            node,
+            self.inner.plan.dependencies[position]
+                .iter()
+                .map(crate::FlowDependency::borrowed),
+            state,
+            transferred_inputs,
+            invoke,
+        );
+        state.replace_execution_position(previous);
+        result
+    }
+
     pub fn plan(&self) -> &FlowPlan {
         &self.inner.plan
     }
@@ -539,22 +599,17 @@ impl Flow {
         domain: &ExecutionDomain,
         state: &mut crate::ExecutionContext,
     ) -> Result<(), crate::WorkflowRunError> {
+        if state.snapshot_recorder().is_none()
+            && state.scope_path().is_empty()
+            && let Some(executor) = self.inner.generated_domains.get(&domain.id)
+        {
+            return executor(self, state);
+        }
         for &position in domain.positions.iter() {
             if position > state.scope_exit_cutoff() {
                 break;
             }
-            let node_id = self.inner.plan.execution_order[position];
-            let node = &self.inner.nodes[node_id.index()];
-            let previous_position = state.replace_execution_position(Some(position));
-            let result = crate::context::execute_ordered_node_in_context(
-                node,
-                self.inner.plan.dependencies[position]
-                    .iter()
-                    .map(crate::FlowDependency::borrowed),
-                state,
-            );
-            state.replace_execution_position(previous_position);
-            result?;
+            self.execute_position(position, state)?;
             if state.scope_exit_requested() {
                 break;
             }

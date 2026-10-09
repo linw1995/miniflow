@@ -26,8 +26,9 @@ mod workflow_manifest;
 
 pub use cancellation::StreamCancellation;
 pub use context::{
-    ContextValue, ExecutionContext, ExecutionDependency, ExecutionScope, NodeResult,
-    TypedNodeResult, execute_node_in_context, select_context_output,
+    ContextValue, ExecutionContext, ExecutionDependency, ExecutionScope, GeneratedNodeResult,
+    NodeResult, TypedNodeResult, execute_generated_node_in_context, execute_node_in_context,
+    select_context_output,
 };
 pub use definition::{
     ControlEdgeDefinition, DefinitionId, DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition,
@@ -38,8 +39,8 @@ pub use definition::{
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
 pub use flow::{
-    Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowPlan, FlowRuntime, NodeId,
-    RuntimeOptions, TaskFlowNode,
+    Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowPlan, FlowRuntime,
+    GeneratedDomainExecutor, NodeId, RuntimeOptions, TaskFlowNode,
 };
 pub use iteration::{
     ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
@@ -51,7 +52,7 @@ pub use loop_node::{
     prepared_scope_source,
 };
 pub use message_domain::MessageDomains;
-pub use mf_runtime_derive::{NodeInputs, NodeOutputs};
+pub use mf_runtime_derive::{NodeInputs, NodeOutputs, NodeValue};
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
@@ -59,10 +60,16 @@ pub use node::{
     ContextReference, ExecutionFailedSnafu as NodeExecutionFailedSnafu,
     FactoryFailedSnafu as NodeFactoryFailedSnafu, Inputs,
     InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeExecution,
-    NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration, OutputDerivation,
-    OutputDerivationError, Outputs, PluginFailedSnafu as NodePluginFailedSnafu, PortSpec,
-    PreparedNode, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, TypedTaskNode,
-    ValueType, deserialize_config, execute_typed_task, output_id,
+    NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration, NodeValue,
+    NodeValues, OutputDerivation, OutputDerivationError, Outputs,
+    PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, TaskNode,
+    TypeCompatibility, TypeDepthError, TypeMismatch, TypedTaskNode, ValueType, deserialize_config,
+    encode_typed_result, execute_typed_task, output_id, port_names_match,
+    verify_generated_metadata,
+};
+pub use node::{
+    TypedConstructor, TypedGeneration, TypedGenerationError, TypedNodeValue, TypedPort,
+    TypedTaskHandle,
 };
 pub use number::compare_json_numbers;
 pub use registry::{NodeRegistry, NodeRegistryError};
@@ -82,7 +89,10 @@ pub use typed_inputs::{
     InputDecodeError, InputField, InputValue, NodeInputs, decode_input, reject_unknown_inputs,
 };
 
-pub use typed_outputs::{NodeOutputs, OutputEncodeError, OutputField, OutputValue, encode_output};
+pub use typed_outputs::{
+    NodeOutputs, OutputEncodeError, OutputField, OutputValue, RustValueType, TypedField,
+    TypedValueCodec, encode_output, validate_typed_output,
+};
 
 pub use value::{ValueKind, ValueRef};
 pub use worker::{RuntimeWorkerHandle, WorkerHandle, WorkerJob, WorkerPool, WorkerPoolError};

@@ -1,6 +1,6 @@
 use mf_runtime::{
-    NodeBuildError, NodeExecutionError, NodeInputs, NodeOutputs, NodeRegistration,
-    OutputDerivation, TypedTaskNode, ValueRef,
+    NodeBuildError, NodeExecutionError, NodeRegistration, NodeValue, OutputDerivation,
+    TypedConstructor, TypedTaskHandle, TypedTaskNode, ValueRef,
 };
 use serde_json::Value;
 
@@ -12,13 +12,15 @@ pub fn kind() -> &'static str {
 
 struct IdentityNode;
 
-#[derive(NodeInputs)]
-struct IdentityInputs {
+#[derive(NodeValue)]
+#[value(typed)]
+pub struct IdentityInputs {
     input: ValueRef,
 }
 
-#[derive(NodeOutputs)]
-struct IdentityOutputs {
+#[derive(NodeValue)]
+#[value(typed)]
+pub struct IdentityOutputs {
     value: ValueRef,
 }
 
@@ -37,21 +39,31 @@ impl TypedTaskNode for IdentityNode {
         .into())
     }
 }
-impl IdentityNode {
-    fn output_derivations(&self) -> Vec<OutputDerivation> {
-        vec![OutputDerivation::forward_input("value", "input")]
-    }
-}
 
-fn identity_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
-    let node = IdentityNode;
+/// Constructs one Identity instance shared by typed and dynamic execution.
+pub fn prepare_identity(
+    _config: Value,
+) -> Result<
+    TypedTaskHandle<impl TypedTaskNode<Input = IdentityInputs, Output = IdentityOutputs>>,
+    NodeBuildError,
+> {
     let metadata = mf_runtime::NodeMetadata {
-        output_derivations: node.output_derivations(),
+        output_derivations: vec![OutputDerivation::forward_input("value", "input")],
         ..mf_runtime::NodeMetadata::default()
     };
-    mf_runtime::PreparedNode::typed_task(node, metadata)
+    TypedTaskHandle::new(
+        IdentityNode,
+        metadata,
+        TypedConstructor {
+            package: env!("CARGO_PKG_NAME"),
+            path: &["prepare_identity"],
+        },
+        true,
+    )
 }
 
 inventory::submit! {
-    NodeRegistration { kind: KIND, factory: mf_runtime::NodeFactory::Plain(identity_factory) }
+    NodeRegistration { kind: KIND, factory: mf_runtime::NodeFactory::Plain(|config| {
+        Ok(prepare_identity(config)?.prepared())
+    }) }
 }
