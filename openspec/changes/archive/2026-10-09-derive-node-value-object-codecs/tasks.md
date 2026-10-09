@@ -9,9 +9,14 @@
 
 - [x] 2.1 Review AGENTS.md compliance and complete reversible production/test ablations with retained-guard controls.
 - [x] 2.2 Run pinned hooks, full Nix checks, focused coverage, and strict change validation; resolve all findings.
-- [ ] 2.3 Record final review and validation evidence, then commit the implementation.
+- [x] 2.3 Record final review and validation evidence, then commit the implementation.
 
 ## Workflow follow-up
 
 Archive the reviewed change after the implementation commit, synchronize its capability requirements, validate the
 resulting main specifications, and commit the archive.
+
+## Archive outcome
+
+The reviewed implementation was committed as `cc1e2d7` before archival. The archive synchronized two added requirements
+into `typed-port-contracts`. All nineteen main specifications pass validation, and this archive has no incomplete tasks.
