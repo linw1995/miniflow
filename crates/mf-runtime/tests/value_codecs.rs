@@ -192,7 +192,7 @@ fn nullable_distinguishes_absent_null_and_values_in_both_directions() {
 }
 
 #[test]
-fn numeric_codecs_enforce_range_representation_and_finite_values() {
+fn numeric_codecs_enforce_lossless_range_and_finite_values() {
     assert_eq!(
         <u64 as InputValue>::decode(u64::MAX.into()).unwrap(),
         u64::MAX
@@ -201,7 +201,7 @@ fn numeric_codecs_enforce_range_representation_and_finite_values() {
         <usize as InputValue>::decode((usize::MAX as u64).into()).unwrap(),
         usize::MAX
     );
-    for value in [json!(-1), json!(1.0), json!(null), json!("1")] {
+    for value in [json!(-1), json!(1.5), json!(null), json!("1")] {
         assert!(<u64 as InputValue>::decode(value.clone().into()).is_err());
         assert!(<usize as InputValue>::decode(value.into()).is_err());
     }
@@ -221,7 +221,7 @@ fn numeric_codecs_enforce_range_representation_and_finite_values() {
             value.to_bits()
         );
     }
-    for value in [json!(1), json!(f64::MAX), json!(-f64::MAX), json!(null)] {
+    for value in [json!(0.1), json!(f64::MAX), json!(-f64::MAX), json!(null)] {
         assert!(<f32 as InputValue>::decode(value.into()).is_err());
     }
     for value in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
@@ -348,4 +348,91 @@ fn nullable_values_reject_noncanonical_null_in_dynamic_and_typed_outputs() {
     let value = Nullable::Value(ValueRef::from("text"));
     mf_runtime::TypedValueCodec::validate_typed(&value).unwrap();
     assert_eq!(value.encode().unwrap(), json!("text"));
+}
+
+#[test]
+fn implicit_numeric_conversions_are_exact_and_do_not_saturate() {
+    for value in [
+        0_u64,
+        42,
+        1 << 24,
+        (1 << 24) + 2,
+        1 << 63,
+        u64::MAX - ((1 << 40) - 1),
+    ] {
+        let decoded = <f32 as InputValue>::decode(value.into()).unwrap();
+        assert_eq!(decoded as u64, value);
+    }
+    for value in [(1_u64 << 24) + 1, (1 << 53) + 1, (1 << 63) + 1, u64::MAX] {
+        assert!(<f32 as InputValue>::decode(value.into()).is_err());
+    }
+    for value in [0_u64, 42, 1 << 53, (1 << 53) + 2, 1 << 63, u64::MAX - 2047] {
+        let decoded = <f64 as InputValue>::decode(value.into()).unwrap();
+        assert_eq!(decoded as u64, value);
+    }
+    for value in [(1_u64 << 53) + 1, (1 << 63) + 1, u64::MAX] {
+        assert!(<f64 as InputValue>::decode(value.into()).is_err());
+    }
+    for value in [
+        0.1,
+        1.0 + f64::EPSILON,
+        f64::MIN_POSITIVE,
+        -f64::MIN_POSITIVE,
+    ] {
+        assert!(<f32 as InputValue>::decode(json!(value).into()).is_err());
+    }
+    for value in [0.0, 42.0, -42.0, i64::MIN as f64] {
+        assert_eq!(
+            <i64 as InputValue>::decode(json!(value).into()).unwrap() as f64,
+            value
+        );
+    }
+    for value in [0.0, 42.0, (u64::MAX - 2047) as f64] {
+        assert_eq!(
+            <u64 as InputValue>::decode(json!(value).into()).unwrap() as f64,
+            value
+        );
+    }
+    for value in [-0.0, 1.5, i64::MAX as f64, -f64::MAX] {
+        assert!(<i64 as InputValue>::decode(json!(value).into()).is_err());
+    }
+    for value in [-0.0, -1.0, 1.5, u64::MAX as f64] {
+        assert!(<u64 as InputValue>::decode(json!(value).into()).is_err());
+    }
+    assert_eq!(
+        <usize as InputValue>::decode(json!(42.0).into()).unwrap(),
+        42
+    );
+    assert!(<usize as InputValue>::decode(json!(u64::MAX as f64).into()).is_err());
+    assert_eq!(
+        <f32 as InputValue>::decode(i64::MIN.into()).unwrap() as i64,
+        i64::MIN
+    );
+    assert_eq!(
+        <f64 as InputValue>::decode(i64::MIN.into()).unwrap() as i64,
+        i64::MIN
+    );
+    let error =
+        <Vec<f32> as InputValue>::decode(json!([42, (1_u64 << 24) + 1]).into()).unwrap_err();
+    assert_eq!(error.path, "/1");
+    for target in [
+        ValueType::Int64,
+        ValueType::Uint64,
+        ValueType::Usize,
+        ValueType::Float32,
+        ValueType::Float64,
+    ] {
+        for source in [
+            ValueType::Int64,
+            ValueType::Uint64,
+            ValueType::Usize,
+            ValueType::Float32,
+            ValueType::Float64,
+        ] {
+            assert_ne!(
+                source.compatibility_with(&target),
+                TypeCompatibility::Incompatible
+            );
+        }
+    }
 }

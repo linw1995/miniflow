@@ -35,7 +35,7 @@ pub trait NodeInputs: Sized {
     fn from_inputs(inputs: Inputs) -> Result<Self, InputDecodeError>;
 }
 
-/// Decodes one supplied JSON value without coercion or an intermediate JSON tree.
+/// Decodes one supplied JSON value with lossless numeric conversion and no intermediate JSON tree.
 ///
 /// The decoder must agree with `value_type()` and report paths relative to the
 /// supplied value. Supported implementations are bool, i64, u64, usize, f32, f64, String, ValueRef,
@@ -215,50 +215,40 @@ pub fn unknown_enum_tag<T>(tag: &str) -> Result<T, InputDecodeError> {
     unknown_enum_variant().context(InvalidValueSnafu { port: tag })
 }
 
-macro_rules! scalar_value {
-    ($ty:ty, $descriptor:ident, $method:ident) => {
+impl InputValue for bool {
+    fn value_type() -> ValueType {
+        ValueType::Boolean
+    }
+    fn decode(value: ValueRef) -> Result<Self, TypeMismatch> {
+        ValueType::Boolean.validate_shared(&value)?;
+        Ok(value.as_bool().expect("validated boolean"))
+    }
+}
+required_field!(bool);
+
+macro_rules! numeric_value {
+    ($ty:ty, $descriptor:ident, $convert:ident) => {
         impl InputValue for $ty {
             fn value_type() -> ValueType {
                 ValueType::$descriptor
             }
-
             fn decode(value: ValueRef) -> Result<Self, TypeMismatch> {
                 ValueType::$descriptor.validate_shared(&value)?;
-                Ok(value.$method().expect("validated scalar"))
+                Ok(
+                    crate::number::$convert(value.as_number().expect("validated number"))
+                        .expect("validated lossless conversion"),
+                )
             }
         }
         required_field!($ty);
     };
 }
 
-scalar_value!(bool, Boolean, as_bool);
-scalar_value!(i64, Int64, as_i64);
-scalar_value!(u64, Uint64, as_u64);
-scalar_value!(f64, Float64, as_f64);
-
-impl InputValue for usize {
-    fn value_type() -> ValueType {
-        ValueType::Usize
-    }
-
-    fn decode(value: ValueRef) -> Result<Self, TypeMismatch> {
-        ValueType::Usize.validate_shared(&value)?;
-        Ok(usize::try_from(value.as_u64().expect("validated integer")).expect("validated range"))
-    }
-}
-required_field!(usize);
-
-impl InputValue for f32 {
-    fn value_type() -> ValueType {
-        ValueType::Float32
-    }
-
-    fn decode(value: ValueRef) -> Result<Self, TypeMismatch> {
-        ValueType::Float32.validate_shared(&value)?;
-        Ok(value.as_f64().expect("validated float") as f32)
-    }
-}
-required_field!(f32);
+numeric_value!(i64, Int64, number_to_i64);
+numeric_value!(u64, Uint64, number_to_u64);
+numeric_value!(usize, Usize, number_to_usize);
+numeric_value!(f32, Float32, number_to_f32);
+numeric_value!(f64, Float64, number_to_f64);
 
 /// A supplied null or a supplied value. Use `Option<Nullable<T>>` for three-state fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -469,7 +459,7 @@ mod tests {
         for value in [json!(1.5), json!(u64::MAX), json!("1"), json!(null)] {
             assert!(decode::<i64>(Some(value)).is_err());
         }
-        for value in [json!(1), json!("1.5"), json!(null)] {
+        for value in [json!((1_u64 << 53) + 1), json!("1.5"), json!(null)] {
             assert!(decode::<f64>(Some(value)).is_err());
         }
         assert!(decode::<bool>(Some(json!(1))).is_err());

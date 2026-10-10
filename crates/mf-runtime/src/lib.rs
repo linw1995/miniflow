@@ -71,7 +71,7 @@ pub use node::{
     TypedConstructor, TypedGeneration, TypedGenerationError, TypedNodeValue, TypedPort,
     TypedTaskHandle,
 };
-pub use number::compare_json_numbers;
+pub use number::{compare_json_numbers, number_to_f64, number_to_i64};
 pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::WorkflowRunError;
 pub use stream::{

@@ -230,7 +230,7 @@ let request = RequestInputs::from_values(NodeValues::from([
 The derive delegates field decoding and diagnostics to runtime helpers. Supported owned fields are
 `bool`, `i64`, `u64`, `usize`, `f32`, `f64`, `String`, `ValueRef`, `Nullable<T>`, `Shared<T>`,
 recursive `Vec<T>` and `BTreeMap<String, T>`, and top-level
-`Option<T>`. Scalars retain strict JSON representations; integers do not become floating values.
+`Option<T>`. Numeric codecs allow implicit conversion only when the value is exactly representable in the target type.
 `Option<T>` permits omission but retains T's port descriptor: omitted `Option<String>` becomes `None`,
 explicit null is rejected, and supplied null for `Option<ValueRef>` becomes `Some` containing null.
 Collection elements cannot be optional, and nested `Option` fields are unsupported.
@@ -274,12 +274,14 @@ Nullable values also work inside lists and maps. Their descriptor is `{"nullable
 Use `Nullable::Null` for JSON null: `Nullable::Value` wrapping a null-producing value is rejected
 during encoding and typed validation, keeping dynamic and direct transfer behavior consistent.
 
-`u64`, `usize`, and `f32` use the `uint`, `usize`, and `float` descriptors. Unsigned codecs reject
-negative integers and floating representations. `usize` checks the current target's range.
-`f32` accepts finite floating JSON numbers within `[-f32::MAX, f32::MAX]`, rounding to `f32`
-precision; integers remain invalid. Float encoding rejects infinity and NaN and preserves negative zero.
-Numeric descriptors retain checked conversions where their ranges overlap. These codecs and nullable
-values are certified for typed generation.
+`u64`, `usize`, and `f32` use the `uint`, `usize`, and `float` descriptors. Numeric codecs accept integer or floating JSON numbers only when conversion preserves the stored numeric value.
+Unsigned codecs reject negative values, fractions, negative zero, and out-of-range values. `usize` checks the target's range.
+`f32` requires exact single-precision representation: `42` and `42.0` work, while `16777217` and a JSON `0.1` do not.
+`f64` accepts integers with at most 53 significant binary digits; larger powers of two can still be exact.
+Floating-to-integer bounds use exclusive upper limits to reject saturation at `i64::MAX` and `u64::MAX`.
+Float encoding rejects infinity and NaN and preserves negative zero; converting negative zero to an integer is rejected.
+Graphs retain checked numeric connections when exactness depends on the value. Different Rust representations still
+use dynamic decoding. These codecs and nullable values remain certified for matching typed generation.
 
 `Shared<T>` keeps the original immutable `ValueRef` and validates T's wire descriptor without
 constructing T. Inspect `value()` and apply node-specific size or resource limits before calling

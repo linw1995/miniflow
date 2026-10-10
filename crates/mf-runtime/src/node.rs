@@ -273,10 +273,10 @@ impl ValueType {
                 Self::Int64 | Self::Uint64 | Self::Usize | Self::Float32 | Self::Float64,
             ) => Checked,
             (Self::Usize, Self::Uint64) | (Self::Float32, Self::Float64) => Static,
-            (Self::Int64, Self::Uint64 | Self::Usize)
-            | (Self::Uint64, Self::Int64 | Self::Usize)
-            | (Self::Usize, Self::Int64)
-            | (Self::Float64, Self::Float32) => Checked,
+            (
+                Self::Int64 | Self::Uint64 | Self::Usize | Self::Float32 | Self::Float64,
+                Self::Int64 | Self::Uint64 | Self::Usize | Self::Float32 | Self::Float64,
+            ) => Checked,
             (Self::Null, Self::Nullable(_)) => Static,
             (Self::Nullable(source), Self::Nullable(target)) => source.compatibility_with(target),
             (source, Self::Nullable(target)) => source.compatibility_with(target),
@@ -343,25 +343,24 @@ impl ValueType {
             | (Self::Object, "object") => match self {
                 Self::Int64 => value
                     .number()
-                    .is_some_and(|number| !number.is_f64() && number.as_i64().is_some()),
+                    .and_then(crate::number::number_to_i64)
+                    .is_some(),
                 Self::Uint64 => value
                     .number()
-                    .is_some_and(|number| !number.is_f64() && number.as_u64().is_some()),
-                Self::Usize => value.number().is_some_and(|number| {
-                    !number.is_f64()
-                        && number
-                            .as_u64()
-                            .is_some_and(|number| usize::try_from(number).is_ok())
-                }),
-                Self::Float32 => value.number().is_some_and(|number| {
-                    number.is_f64()
-                        && number.as_f64().is_some_and(|number| {
-                            number.is_finite() && number.abs() <= f64::from(f32::MAX)
-                        })
-                }),
-                Self::Float64 => value.number().is_some_and(|number| {
-                    number.is_f64() && number.as_f64().is_some_and(f64::is_finite)
-                }),
+                    .and_then(crate::number::number_to_u64)
+                    .is_some(),
+                Self::Usize => value
+                    .number()
+                    .and_then(crate::number::number_to_usize)
+                    .is_some(),
+                Self::Float32 => value
+                    .number()
+                    .and_then(crate::number::number_to_f32)
+                    .is_some(),
+                Self::Float64 => value
+                    .number()
+                    .and_then(crate::number::number_to_f64)
+                    .is_some(),
                 _ => true,
             },
             (Self::Nullable(inner), shape) => {
@@ -1282,7 +1281,7 @@ mod tests {
             (list(Number), list(Int64), Checked),
             (map(Any), map(String), Checked),
             (String, Int64, Incompatible),
-            (Int64, Float64, Incompatible),
+            (Int64, Float64, Checked),
             (list(String), list(Int64), Incompatible),
             (map(String), map(Int64), Incompatible),
             (list(Int64), map(Int64), Incompatible),
@@ -1298,18 +1297,18 @@ mod tests {
     }
 
     #[test]
-    fn checks_numeric_representations_without_coercion() {
+    fn checks_lossless_numeric_conversions() {
         use ValueType::{Float64, Int64, Number};
 
         assert!(Int64.validate_value(&json!(i64::MIN)).is_ok());
         assert!(Int64.validate_value(&json!(i64::MAX)).is_ok());
-        assert!(Int64.validate_value(&json!(1.0)).is_err());
+        assert!(Int64.validate_value(&json!(1.0)).is_ok());
         assert_eq!(
             Int64.validate_value(&json!(u64::MAX)).unwrap_err().actual,
             "unsigned integer"
         );
         assert!(Float64.validate_value(&json!(1.5)).is_ok());
-        assert!(Float64.validate_value(&json!(1)).is_err());
+        assert!(Float64.validate_value(&json!(1)).is_ok());
         assert!(Number.validate_value(&json!(1)).is_ok());
         assert!(Number.validate_value(&json!(1.5)).is_ok());
         assert!(Number.validate_value(&json!(u64::MAX)).is_ok());

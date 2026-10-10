@@ -233,6 +233,12 @@ fn generated_owned_values_preserve_contracts_and_installation() {
             true,
         ),
         (
+            definition_for_extended(),
+            json!({"a":{"count":u64::MAX,"size":7.0,"ratio":42,"payload":[null,"shared"]}}),
+            json!({"count":u64::MAX,"size":7,"ratio":42.0,"payload":[null,"shared"]}),
+            true,
+        ),
+        (
             definition_for_defaulted(),
             json!({"a":{"text":"defaults"}}),
             json!({"result":"defaults!!!"}),

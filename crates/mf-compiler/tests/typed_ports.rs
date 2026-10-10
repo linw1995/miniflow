@@ -68,6 +68,8 @@ fn classifies_refined_and_dynamic_connections() {
     for (source_type, value, sink_type, expected) in [
         ("int64", json!(7), "number", json!(7)),
         ("any", json!(7), "int64", json!(7)),
+        ("float64", json!(7.0), "int64", json!(7.0)),
+        ("int64", json!(7), "float64", json!(7)),
         ("list_number", json!([1, 2]), "list_int64", json!([1, 2])),
         (
             "object",
@@ -82,11 +84,7 @@ fn classifies_refined_and_dynamic_connections() {
         );
     }
 
-    for (source_type, sink_type) in [
-        ("string", "int64"),
-        ("float64", "int64"),
-        ("list_string", "list_int64"),
-    ] {
+    for (source_type, sink_type) in [("string", "int64"), ("list_string", "list_int64")] {
         let definition = graph(source_type, json!("unused"), sink_type);
         let error =
             compile_definition(&definition, &NodeRegistry::from_inventory().unwrap()).unwrap_err();
@@ -106,8 +104,15 @@ fn classifies_refined_and_dynamic_connections() {
 fn generated_runner_matches_memory_for_checked_connections() {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("build");
-    for value in [json!(42), json!("wrong")] {
-        let definition = graph("any", value, "int64");
+    for (source, value, target) in [
+        ("any", json!(42), "int64"),
+        ("any", json!("wrong"), "int64"),
+        ("float64", json!(42.0), "int64"),
+        ("float64", json!(1.5), "int64"),
+        ("int64", json!(42), "float64"),
+        ("int64", json!((1_i64 << 53) + 1), "float64"),
+    ] {
+        let definition = graph(source, value, target);
         let expected = run_in_memory(&definition);
         let plan = plan_definition(&definition).unwrap();
         mf_compiler::write_dependency_project(
