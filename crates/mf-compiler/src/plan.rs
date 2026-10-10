@@ -912,6 +912,9 @@ fn rust_value_tokens(value: &mf_runtime::RustValueType) -> TokenStream {
     match value {
         Boolean => quote!(bool),
         Int64 => quote!(i64),
+        Uint64 => quote!(u64),
+        Usize => quote!(usize),
+        Float32 => quote!(f32),
         Float64 => quote!(f64),
         String => quote!(std::string::String),
         Shared => quote!(mf_runtime::ValueRef),
@@ -922,6 +925,15 @@ fn rust_value_tokens(value: &mf_runtime::RustValueType) -> TokenStream {
         Map(inner) => {
             let inner = rust_value_tokens(inner);
             quote!(std::collections::BTreeMap<std::string::String, #inner>)
+        }
+        Defaulted(inner) => rust_value_tokens(inner),
+        Nullable(inner) => {
+            let inner = rust_value_tokens(inner);
+            quote!(mf_runtime::Nullable<#inner>)
+        }
+        SharedPayload(inner) => {
+            let inner = rust_value_tokens(inner);
+            quote!(mf_runtime::Shared<#inner>)
         }
         Optional(inner) => {
             let inner = rust_value_tokens(inner);

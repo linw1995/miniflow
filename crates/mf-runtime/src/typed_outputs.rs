@@ -99,7 +99,14 @@ pub fn encode_output<T: OutputField>(
 
 /// Encodes a named-port contract as a shared JSON object.
 pub fn encode_node_value<T: crate::NodeValue>(value: T) -> Result<ValueRef, TypeMismatch> {
-    let values = value.into_values().with_context(|error| {
+    encode_object_value(|| value.into_values())
+}
+
+/// Encodes a generated object while retaining field-relative error sources.
+pub fn encode_object_value(
+    encode: impl FnOnce() -> Result<Outputs, OutputEncodeError>,
+) -> Result<ValueRef, TypeMismatch> {
+    let values = encode().with_context(|error| {
         let (expected, actual) = match error {
             OutputEncodeError::InvalidValue { source, .. } => {
                 (source.expected.clone(), source.actual)
@@ -147,8 +154,69 @@ macro_rules! scalar_value {
 
 scalar_value!(bool, Boolean);
 scalar_value!(i64, Int64);
+scalar_value!(u64, Uint64);
 scalar_value!(String, String);
 scalar_value!(ValueRef, Any);
+
+impl OutputValue for usize {
+    fn value_type() -> ValueType {
+        ValueType::Usize
+    }
+    fn encode(self) -> Result<ValueRef, TypeMismatch> {
+        Ok((self as u64).into())
+    }
+}
+
+impl OutputValue for f32 {
+    fn value_type() -> ValueType {
+        ValueType::Float32
+    }
+    fn encode(self) -> Result<ValueRef, TypeMismatch> {
+        let number =
+            serde_json::Number::from_f64(f64::from(self)).context(crate::node::ValueSnafu {
+                details: crate::TypeMismatchDetails {
+                    path: String::new(),
+                    expected: ValueType::Float32,
+                    actual: "non-finite float",
+                },
+            })?;
+        Ok(ValueRef::new(ValueKind::Number(number)))
+    }
+}
+
+impl<T: OutputValue> OutputValue for crate::Nullable<T> {
+    fn value_type() -> ValueType {
+        ValueType::Nullable(Box::new(T::value_type()))
+    }
+    fn encode(self) -> Result<ValueRef, TypeMismatch> {
+        match self {
+            Self::Null => Ok(ValueRef::null()),
+            Self::Value(value) => {
+                let encoded = value.encode()?;
+                snafu::ensure!(
+                    !encoded.is_null(),
+                    crate::node::ValueSnafu {
+                        details: crate::TypeMismatchDetails {
+                            path: String::new(),
+                            expected: <Self as OutputValue>::value_type(),
+                            actual: "null wrapped as a value",
+                        },
+                    }
+                );
+                Ok(encoded)
+            }
+        }
+    }
+}
+
+impl<T: crate::InputValue> OutputValue for crate::Shared<T> {
+    fn value_type() -> ValueType {
+        T::value_type()
+    }
+    fn encode(self) -> Result<ValueRef, TypeMismatch> {
+        Ok(self.into_value())
+    }
+}
 
 impl OutputValue for f64 {
     fn value_type() -> ValueType {
@@ -228,12 +296,18 @@ fn escape_pointer(value: &str) -> String {
 pub enum RustValueType {
     Boolean,
     Int64,
+    Uint64,
+    Usize,
+    Float32,
     Float64,
     String,
     Shared,
     List(Box<Self>),
     Map(Box<Self>),
     Optional(Box<Self>),
+    Nullable(Box<Self>),
+    SharedPayload(Box<Self>),
+    Defaulted(Box<Self>),
 }
 
 impl RustValueType {
@@ -241,12 +315,18 @@ impl RustValueType {
         match self {
             Self::Boolean => ValueType::Boolean,
             Self::Int64 => ValueType::Int64,
+            Self::Uint64 => ValueType::Uint64,
+            Self::Usize => ValueType::Usize,
+            Self::Float32 => ValueType::Float32,
             Self::Float64 => ValueType::Float64,
             Self::String => ValueType::String,
             Self::Shared => ValueType::Any,
             Self::List(inner) => ValueType::List(Box::new(inner.value_type())),
             Self::Map(inner) => ValueType::Map(Box::new(inner.value_type())),
-            Self::Optional(inner) => inner.value_type(),
+            Self::Optional(inner) | Self::SharedPayload(inner) | Self::Defaulted(inner) => {
+                inner.value_type()
+            }
+            Self::Nullable(inner) => ValueType::Nullable(Box::new(inner.value_type())),
         }
     }
 }
@@ -257,6 +337,11 @@ pub trait CertifiedCodec {}
 pub trait TypedValueCodec: crate::InputValue + OutputValue + CertifiedCodec {
     fn rust_type() -> RustValueType;
     fn validate_typed(&self) -> Result<(), TypeMismatch>;
+
+    /// Whether encoding a valid value produces JSON null.
+    fn is_null(&self) -> bool {
+        false
+    }
 }
 
 pub trait TypedField: crate::InputField + OutputField + CertifiedCodec {
@@ -291,8 +376,87 @@ macro_rules! certified_scalar {
 
 certified_scalar!(bool, Boolean);
 certified_scalar!(i64, Int64);
+certified_scalar!(u64, Uint64);
+certified_scalar!(usize, Usize);
 certified_scalar!(String, String);
-certified_scalar!(ValueRef, Shared);
+impl CertifiedCodec for ValueRef {}
+impl TypedValueCodec for ValueRef {
+    fn rust_type() -> RustValueType {
+        RustValueType::Shared
+    }
+    fn validate_typed(&self) -> Result<(), TypeMismatch> {
+        Ok(())
+    }
+    fn is_null(&self) -> bool {
+        ValueRef::is_null(self)
+    }
+}
+
+impl CertifiedCodec for f32 {}
+impl TypedValueCodec for f32 {
+    fn rust_type() -> RustValueType {
+        RustValueType::Float32
+    }
+    fn validate_typed(&self) -> Result<(), TypeMismatch> {
+        use snafu::ensure;
+        ensure!(
+            self.is_finite(),
+            crate::node::ValueSnafu {
+                details: crate::TypeMismatchDetails {
+                    path: String::new(),
+                    expected: ValueType::Float32,
+                    actual: "non-finite float",
+                },
+            }
+        );
+        Ok(())
+    }
+}
+
+impl<T: TypedValueCodec> CertifiedCodec for crate::Nullable<T> {}
+impl<T: TypedValueCodec> TypedValueCodec for crate::Nullable<T> {
+    fn rust_type() -> RustValueType {
+        RustValueType::Nullable(Box::new(T::rust_type()))
+    }
+    fn validate_typed(&self) -> Result<(), TypeMismatch> {
+        match self {
+            Self::Null => Ok(()),
+            Self::Value(value) => {
+                value.validate_typed()?;
+                snafu::ensure!(
+                    !value.is_null(),
+                    crate::node::ValueSnafu {
+                        details: crate::TypeMismatchDetails {
+                            path: String::new(),
+                            expected: <Self as OutputValue>::value_type(),
+                            actual: "null wrapped as a value",
+                        },
+                    }
+                );
+                Ok(())
+            }
+        }
+    }
+    fn is_null(&self) -> bool {
+        match self {
+            Self::Null => true,
+            Self::Value(value) => value.is_null(),
+        }
+    }
+}
+
+impl<T: TypedValueCodec> CertifiedCodec for crate::Shared<T> {}
+impl<T: TypedValueCodec> TypedValueCodec for crate::Shared<T> {
+    fn rust_type() -> RustValueType {
+        RustValueType::SharedPayload(Box::new(T::rust_type()))
+    }
+    fn validate_typed(&self) -> Result<(), TypeMismatch> {
+        <Self as OutputValue>::value_type().validate_shared(self.value())
+    }
+    fn is_null(&self) -> bool {
+        self.value().is_null()
+    }
+}
 
 impl CertifiedCodec for f64 {}
 impl TypedValueCodec for f64 {

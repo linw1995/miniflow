@@ -225,6 +225,53 @@ fn generated_owned_values_preserve_contracts_and_installation() {
             serde_json::to_value(expected).unwrap()
         );
     }
+    for (next, args, expected, has_segment) in [
+        (
+            definition_for_extended(),
+            json!({"a":{"count":u64::MAX,"size":7,"ratio":-0.0,"payload":[null,"shared"]}}),
+            json!({"count":u64::MAX,"size":7,"ratio":-0.0,"payload":[null,"shared"]}),
+            true,
+        ),
+        (
+            definition_for_defaulted(),
+            json!({"a":{"text":"defaults"}}),
+            json!({"result":"defaults!!!"}),
+            false,
+        ),
+    ] {
+        definition = next;
+        let plan = compile_definition(&definition, &registry).unwrap();
+        let report: mf_compiler::TypedPlan = serde_json::from_str(
+            &plan
+                .generate_runner_execution_plans(&registry)
+                .unwrap()
+                .typed_plan_json,
+        )
+        .unwrap();
+        if has_segment {
+            assert!(!report.segments.is_empty());
+        }
+        let reference = instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute_with_inputs(WorkflowArguments::try_from(args.clone()).unwrap())
+            .unwrap();
+        assert_eq!(serde_json::to_value(reference).unwrap(), expected);
+        fs::write(&definition_path, serde_json::to_vec(&definition).unwrap()).unwrap();
+        compile_project_with_options(&request(), &RunnerOptions { telemetry: false }).unwrap();
+        let output = Command::new(&executable)
+            .args(["--inputs", &args.to_string()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+            expected
+        );
+    }
     let installed = fs::read(&executable).unwrap();
     for flag in ["bad_constructor", "bad_names"] {
         let mut invalid = text_definition();
@@ -247,5 +294,34 @@ fn definition_for_items() -> WorkflowDefinition {
         edge.to_input = "items".into();
     }
     definition.outputs[0].port = "items".into();
+    definition
+}
+
+fn definition_for_extended() -> WorkflowDefinition {
+    let mut value = serde_json::to_value(text_definition()).unwrap();
+    for node in value["nodes"].as_array_mut().unwrap() {
+        node["kind"] = json!("fixture.typed_extended");
+    }
+    value["edges"] = json!([]);
+    value["outputs"] = json!([]);
+    for field in ["count", "size", "ratio", "payload"] {
+        for (source, target) in [("a", "b"), ("b", "c")] {
+            value["edges"].as_array_mut().unwrap().push(json!({
+                "from_node":source,"from_output":field,"to_node":target,"to_input":field
+            }));
+        }
+        value["outputs"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":field,"node":"c","port":field}));
+    }
+    serde_json::from_value(value).unwrap()
+}
+
+fn definition_for_defaulted() -> WorkflowDefinition {
+    let mut definition = text_definition();
+    for node in &mut definition.nodes {
+        node.kind = "fixture.typed_defaulted".into();
+    }
     definition
 }

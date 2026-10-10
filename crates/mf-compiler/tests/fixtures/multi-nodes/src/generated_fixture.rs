@@ -134,3 +134,92 @@ pub fn renamed(
         true,
     )
 }
+
+#[derive(NodeValue)]
+#[value(typed)]
+pub struct Extended {
+    count: u64,
+    size: usize,
+    ratio: f32,
+    payload: mf_runtime::Shared<Vec<mf_runtime::Nullable<String>>>,
+}
+
+struct ExtendedEcho;
+impl TypedTaskNode for ExtendedEcho {
+    type Input = Extended;
+    type Output = Extended;
+    fn execute(
+        &self,
+        input: Extended,
+        _: &mut mf_runtime::ExecutionContext,
+    ) -> Result<TypedNodeResult<Extended>, NodeExecutionError> {
+        Ok(input.into())
+    }
+}
+
+pub fn extended(
+    config: serde_json::Value,
+) -> Result<TypedTaskHandle<impl TypedTaskNode<Input = Extended, Output = Extended>>, NodeBuildError>
+{
+    let _: serde_json::Map<String, serde_json::Value> = mf_runtime::deserialize_config(config)?;
+    TypedTaskHandle::new(
+        ExtendedEcho,
+        mf_runtime::NodePorts::default(),
+        TypedConstructor {
+            package: "fixture-multi-nodes",
+            path: &["generated_fixture", "extended"],
+        },
+        true,
+    )
+}
+
+inventory::submit! {
+    NodeRegistration { kind: "fixture.typed_extended", factory: mf_runtime::NodeFactory::Plain(|config| Ok(extended(config)?.prepared())) }
+}
+
+fn default_suffix() -> Option<String> {
+    Some("!".into())
+}
+
+#[derive(NodeValue)]
+#[value(typed)]
+pub struct Defaulted {
+    text: String,
+    #[value(default = "default_suffix")]
+    suffix: Option<String>,
+}
+
+struct DefaultedEcho;
+impl TypedTaskNode for DefaultedEcho {
+    type Input = Defaulted;
+    type Output = Text;
+    fn execute(
+        &self,
+        input: Defaulted,
+        _: &mut mf_runtime::ExecutionContext,
+    ) -> Result<TypedNodeResult<Text>, NodeExecutionError> {
+        Ok(Text {
+            text: input.text + input.suffix.as_deref().unwrap_or_default(),
+        }
+        .into())
+    }
+}
+
+pub fn defaulted(
+    config: serde_json::Value,
+) -> Result<TypedTaskHandle<impl TypedTaskNode<Input = Defaulted, Output = Text>>, NodeBuildError> {
+    let _: serde_json::Map<String, serde_json::Value> = mf_runtime::deserialize_config(config)?;
+    TypedTaskHandle::new(
+        DefaultedEcho,
+        mf_runtime::NodePorts::default(),
+        TypedConstructor {
+            package: "fixture-multi-nodes",
+            path: &["generated_fixture", "defaulted"],
+        },
+        true,
+    )
+}
+
+inventory::submit! {
+    NodeRegistration { kind: "fixture.typed_defaulted", factory: mf_runtime::NodeFactory::Plain(|config| Ok(defaulted(config)?.prepared())) }
+}

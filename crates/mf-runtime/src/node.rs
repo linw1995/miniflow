@@ -36,12 +36,16 @@ pub enum ValueType {
     Boolean,
     Number,
     Int64,
+    Uint64,
+    Usize,
+    Float32,
     Float64,
     String,
     Array,
     Object,
     List(Box<ValueType>),
     Map(Box<ValueType>),
+    Nullable(Box<ValueType>),
 }
 
 impl serde::Serialize for ValueType {
@@ -53,17 +57,20 @@ impl serde::Serialize for ValueType {
             Self::Boolean => "bool",
             Self::Number => "number",
             Self::Int64 => "int",
+            Self::Uint64 => "uint",
+            Self::Usize => "usize",
+            Self::Float32 => "float",
             Self::Float64 => "double",
             Self::String => "string",
             Self::Array => "array",
             Self::Object => "object",
-            Self::List(inner) | Self::Map(inner) => {
+            Self::List(inner) | Self::Map(inner) | Self::Nullable(inner) => {
                 let mut map = serializer.serialize_map(Some(1))?;
                 map.serialize_entry(
-                    if matches!(self, Self::List(_)) {
-                        "list"
-                    } else {
-                        "map"
+                    match self {
+                        Self::List(_) => "list",
+                        Self::Map(_) => "map",
+                        _ => "nullable",
                     },
                     inner,
                 )?;
@@ -159,6 +166,9 @@ impl ValueType {
                     "bool" => Ok(ValueType::Boolean),
                     "number" => Ok(ValueType::Number),
                     "int" => Ok(ValueType::Int64),
+                    "uint" => Ok(ValueType::Uint64),
+                    "usize" => Ok(ValueType::Usize),
+                    "float" => Ok(ValueType::Float32),
                     "double" => Ok(ValueType::Float64),
                     "string" => Ok(ValueType::String),
                     "array" => Ok(ValueType::Array),
@@ -170,6 +180,7 @@ impl ValueType {
                     match kind.as_str() {
                         "list" => Ok(ValueType::List(Box::new(parse(inner, depth + 1)?))),
                         "map" => Ok(ValueType::Map(Box::new(parse(inner, depth + 1)?))),
+                        "nullable" => Ok(ValueType::Nullable(Box::new(parse(inner, depth + 1)?))),
                         _ => Err(format!("unsupported type constructor `{kind}`")),
                     }
                 }
@@ -181,9 +192,16 @@ impl ValueType {
 
     pub fn is_concrete(&self) -> bool {
         match self {
-            Self::Null | Self::Boolean | Self::Int64 | Self::Float64 | Self::String => true,
+            Self::Null
+            | Self::Boolean
+            | Self::Int64
+            | Self::Uint64
+            | Self::Usize
+            | Self::Float32
+            | Self::Float64
+            | Self::String => true,
             Self::List(inner) | Self::Map(inner) => inner.is_concrete(),
-            Self::Any | Self::Number | Self::Array | Self::Object => false,
+            Self::Any | Self::Number | Self::Array | Self::Object | Self::Nullable(_) => false,
         }
     }
 
@@ -244,10 +262,29 @@ impl ValueType {
         }
         match (self, input) {
             (Self::Any, _) => Checked,
-            (Self::Int64 | Self::Float64, Self::Number)
+            (
+                Self::Int64 | Self::Uint64 | Self::Usize | Self::Float32 | Self::Float64,
+                Self::Number,
+            )
             | (Self::List(_), Self::Array)
             | (Self::Map(_), Self::Object) => Static,
-            (Self::Number, Self::Int64 | Self::Float64) => Checked,
+            (
+                Self::Number,
+                Self::Int64 | Self::Uint64 | Self::Usize | Self::Float32 | Self::Float64,
+            ) => Checked,
+            (Self::Usize, Self::Uint64) | (Self::Float32, Self::Float64) => Static,
+            (Self::Int64, Self::Uint64 | Self::Usize)
+            | (Self::Uint64, Self::Int64 | Self::Usize)
+            | (Self::Usize, Self::Int64)
+            | (Self::Float64, Self::Float32) => Checked,
+            (Self::Null, Self::Nullable(_)) => Static,
+            (Self::Nullable(source), Self::Nullable(target)) => source.compatibility_with(target),
+            (source, Self::Nullable(target)) => source.compatibility_with(target),
+            (Self::Nullable(_), Self::Null) => Checked,
+            (Self::Nullable(source), target) => match source.compatibility_with(target) {
+                Incompatible => Incompatible,
+                _ => Checked,
+            },
             (Self::Array, Self::List(inner)) | (Self::Object, Self::Map(inner)) => {
                 if inner.as_ref() == &Self::Any {
                     Static
@@ -265,7 +302,7 @@ impl ValueType {
     pub fn check_depth(&self) -> Result<(), TypeDepthError> {
         let mut depth = 1;
         let mut current = self;
-        while let Self::List(inner) | Self::Map(inner) = current {
+        while let Self::List(inner) | Self::Map(inner) | Self::Nullable(inner) = current {
             depth += 1;
             ensure!(
                 depth <= Self::MAX_DEPTH,
@@ -292,18 +329,47 @@ impl ValueType {
             (Self::Any, _) => true,
             (Self::Null, "null")
             | (Self::Boolean, "boolean")
-            | (Self::Number | Self::Int64 | Self::Float64, "number")
+            | (
+                Self::Number
+                | Self::Int64
+                | Self::Uint64
+                | Self::Usize
+                | Self::Float32
+                | Self::Float64,
+                "number",
+            )
             | (Self::String, "string")
             | (Self::Array, "array")
             | (Self::Object, "object") => match self {
                 Self::Int64 => value
                     .number()
                     .is_some_and(|number| !number.is_f64() && number.as_i64().is_some()),
+                Self::Uint64 => value
+                    .number()
+                    .is_some_and(|number| !number.is_f64() && number.as_u64().is_some()),
+                Self::Usize => value.number().is_some_and(|number| {
+                    !number.is_f64()
+                        && number
+                            .as_u64()
+                            .is_some_and(|number| usize::try_from(number).is_ok())
+                }),
+                Self::Float32 => value.number().is_some_and(|number| {
+                    number.is_f64()
+                        && number.as_f64().is_some_and(|number| {
+                            number.is_finite() && number.abs() <= f64::from(f32::MAX)
+                        })
+                }),
                 Self::Float64 => value.number().is_some_and(|number| {
                     number.is_f64() && number.as_f64().is_some_and(f64::is_finite)
                 }),
                 _ => true,
             },
+            (Self::Nullable(inner), shape) => {
+                if shape != "null" {
+                    inner.validate_at(value)?;
+                }
+                true
+            }
             (Self::List(inner), "array") => {
                 for (index, item) in value.array_items().enumerate() {
                     inner.validate_at(item).map_err(|mut error| {
@@ -361,12 +427,16 @@ impl fmt::Display for ValueType {
             Self::Boolean => "boolean",
             Self::Number => "number",
             Self::Int64 => "int64",
+            Self::Uint64 => "uint64",
+            Self::Usize => "usize",
+            Self::Float32 => "float32",
             Self::Float64 => "float64",
             Self::String => "string",
             Self::Array => "array",
             Self::Object => "object",
             Self::List(inner) => return write!(formatter, "list<{inner}>"),
             Self::Map(inner) => return write!(formatter, "map<{inner}>"),
+            Self::Nullable(inner) => return write!(formatter, "nullable<{inner}>"),
         };
         formatter.write_str(name)
     }

@@ -52,7 +52,7 @@ pub use loop_node::{
     prepared_scope_source,
 };
 pub use message_domain::MessageDomains;
-pub use mf_runtime_derive::{NodeInputs, NodeOutputs, NodeValue};
+pub use mf_runtime_derive::{NodeEnum, NodeInputs, NodeOutputs, NodeValue};
 pub use mf_telemetry::event::NodeIdentity;
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
@@ -87,13 +87,14 @@ pub use stream_io::{StreamStdio, TextInput};
 pub use stream_plan::{FlowDependency, PreparedStream, StreamPlan};
 pub use subgraph::PreparedSubgraph;
 pub use typed_inputs::{
-    InputDecodeError, InputField, InputValue, NodeInputs, decode_input, decode_node_value,
-    decode_required_input, reject_unknown_inputs,
+    InputDecodeError, InputField, InputValue, NodeInputs, Nullable, Shared, decode_default_input,
+    decode_input, decode_node_value, decode_object_value, decode_required_input,
+    reject_unknown_inputs, unknown_enum_tag, unknown_enum_variant,
 };
 
 pub use typed_outputs::{
     NodeOutputs, OutputEncodeError, OutputField, OutputValue, RustValueType, TypedField,
-    TypedValueCodec, encode_node_value, encode_output, validate_typed_output,
+    TypedValueCodec, encode_node_value, encode_object_value, encode_output, validate_typed_output,
 };
 
 pub use value::{ValueKind, ValueRef};

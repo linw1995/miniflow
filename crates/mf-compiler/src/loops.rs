@@ -169,7 +169,13 @@ fn validate_loop(
         }
         let numeric = matches!(
             value_type,
-            ValueType::Any | ValueType::Number | ValueType::Int64 | ValueType::Float64
+            ValueType::Any
+                | ValueType::Number
+                | ValueType::Int64
+                | ValueType::Uint64
+                | ValueType::Usize
+                | ValueType::Float32
+                | ValueType::Float64
         );
         let order = matches!(
             condition.operator,
@@ -198,12 +204,16 @@ fn validate_loop(
         if !order {
             let compatible = match value_type {
                 ValueType::Any => true,
-                ValueType::Number | ValueType::Int64 | ValueType::Float64 => {
-                    condition.value.is_number()
-                }
+                ValueType::Number
+                | ValueType::Int64
+                | ValueType::Uint64
+                | ValueType::Usize
+                | ValueType::Float32
+                | ValueType::Float64 => condition.value.is_number(),
                 ValueType::Null => condition.value.is_null(),
                 ValueType::Boolean => condition.value.is_boolean(),
                 ValueType::String => condition.value.is_string(),
+                ValueType::Nullable(_) => value_type.validate_value(&condition.value).is_ok(),
                 ValueType::Array | ValueType::Object | ValueType::List(_) | ValueType::Map(_) => {
                     false
                 }
