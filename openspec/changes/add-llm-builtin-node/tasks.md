@@ -9,11 +9,11 @@
 
 ## 2. Add optional future execution
 
-- [ ] 2.1 Add default-disabled `async` and `tokio` runtime features with workspace-managed dependencies and a backend-neutral context API; verify default, portable, and managed feature graphs in isolated consumer fixtures.
-- [ ] 2.2 Implement the portable blocking driver and typed nested-entry failure; verify completed, pending, failing, and dropped futures and document synchronous entry from asynchronous hosts in `docs/node-development.md`.
-- [ ] 2.3 Add lazy scoped ownership for the managed backend and propagate it through context forks; verify concurrent initialization, domains, Loop, Iteration, stream task contexts, direct invocation, and scope teardown without constructing resources in factories.
-- [ ] 2.4 Connect bounded cancellation waiting and portable deadlines without detaching operations; verify repeated polling, wakeup, future drop, no late publication, and cancellation while no HTTP progress occurs.
-- [ ] 2.5 Preserve typed infrastructure sources with Snafu and document feature unification and transport reactor ownership; verify error chains, backend failure without fallback, and the distinction between portable execution and a Tokio-free graph.
+- [x] 2.1 Add default-disabled `async` and `tokio` runtime features with workspace-managed dependencies and a backend-neutral context API; verify default, portable, and managed feature graphs in isolated consumer fixtures.
+- [x] 2.2 Implement the portable blocking driver and typed nested-entry failure; verify completed, pending, failing, and dropped futures and document synchronous entry from asynchronous hosts in `docs/node-development.md`.
+- [x] 2.3 Add lazy scoped ownership for the managed backend and propagate it through context forks; verify concurrent initialization, domains, Loop, Iteration, stream task contexts, direct invocation, and scope teardown without constructing resources in factories.
+- [x] 2.4 Connect bounded cancellation waiting and portable deadlines without detaching operations; verify repeated polling, wakeup, future drop, no late publication, and cancellation while no HTTP progress occurs.
+- [x] 2.5 Preserve typed infrastructure sources with Snafu and document feature unification and transport reactor ownership; verify error chains, backend failure without fallback, and the distinction between portable execution and a Tokio-free graph.
 
 ## 3. Prepare the LLM node
 

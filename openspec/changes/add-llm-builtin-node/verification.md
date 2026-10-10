@@ -2,7 +2,7 @@
 
 ## Scope
 
-This verification establishes the published Rig 0.43.0 integration boundary and the validity of the proposed contracts. Production runtime features and the LLM node are not implemented. Their lifecycle, concurrency, cancellation, credential handling, packaging, and failure scenarios remain tracked in [tasks.md](tasks.md).
+This verification records the published Rig 0.43.0 integration boundary and completed implementation groups. Optional future execution is implemented; the LLM node and its packaging remain tracked in [tasks.md](tasks.md).
 
 ## Published source inspection
 
@@ -58,3 +58,14 @@ nix develop --command cargo tree --offline --manifest-path target/llm-feasibilit
 - Explicit file-scoped hooks for the new planning files: passed.
 
 The new planning files received explicit file-scoped hooks because `prek -a` does not include untracked files. These checks validate the plan and unchanged production baseline, not the future implementation.
+
+## Optional future execution
+
+- Default-disabled `async` and `tokio` features expose `ExecutionContext::execute_future` without Tokio types in its signature.
+- Isolated consumers under ignored `target/future-feature-probes/` confirm that default and portable normal dependency graphs omit Tokio, while the managed feature includes it.
+- Portable tests exercise terminal values, preserved operation errors, deadlines, cancellation wakeup and future disposal, skipped polling after expiry, nested entry errors, and shared cancellation across context forks.
+- Managed tests additionally exercise I/O and timers, async-host rejection, concurrent domain and body forks sharing one backend, and shutdown after the last context releases ownership.
+- Unit checks verify bounded waiter replacement and removal and typed backend-initialization failures without fallback.
+- The Darwin Nix test derivation permits local networking for I/O and provider mocks. A small loopback-only derivation verifies this setting before the full check; default build and lint derivations retain their existing sandbox policy.
+
+Focused checks use `cargo test -p mf-runtime --features async --test future_execution --lib` and the corresponding `--features tokio` command through `nix develop`. Default-feature compilation also passes. `prek -a` passes against the runtime implementation. Whole-workflow LLM coverage in Loop, Iteration, and stream domains remains in group 5.

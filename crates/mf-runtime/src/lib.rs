@@ -3,6 +3,8 @@ mod context;
 mod definition;
 mod execution_domains;
 mod flow;
+#[cfg(feature = "async")]
+mod future_execution;
 mod iteration;
 mod loop_node;
 mod message_domain;
@@ -24,6 +26,8 @@ mod worker;
 mod workflow_inputs;
 mod workflow_manifest;
 
+#[cfg(feature = "async")]
+pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
 pub use context::{
     ContextValue, ExecutionContext, ExecutionDependency, ExecutionScope, GeneratedNodeResult,
@@ -42,6 +46,8 @@ pub use flow::{
     Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowPlan, FlowRuntime,
     GeneratedDomainExecutor, NodeId, RuntimeOptions, TaskFlowNode,
 };
+#[cfg(feature = "async")]
+pub use future_execution::FutureExecutionError;
 pub use iteration::{
     ITERATION_INPUT_ID, ITERATION_INPUT_KIND, ITERATION_KIND, IterationBodyDefinition,
     IterationConfig, IterationErrorPolicy, IterationMode, IterationResultDefinition,

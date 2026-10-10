@@ -209,6 +209,8 @@ pub struct ExecutionContext {
     cancellation: crate::StreamCancellation,
     worker_handle: Option<RuntimeWorkerHandle>,
     worker_limit: NonZeroUsize,
+    #[cfg(feature = "async")]
+    future_executor: Arc<crate::future_execution::FutureExecutor>,
 }
 
 impl Default for ExecutionContext {
@@ -231,11 +233,29 @@ impl Default for ExecutionContext {
             cancellation: crate::StreamCancellation::default(),
             worker_handle: None,
             worker_limit: crate::RuntimeOptions::default().max_parallel_domains,
+            #[cfg(feature = "async")]
+            future_executor: Arc::default(),
         }
     }
 }
 
 impl ExecutionContext {
+    /// Drives an owned operation on the calling synchronous thread.
+    /// Async hosts must invoke synchronous workflow APIs on a blocking thread.
+    #[cfg(feature = "async")]
+    pub fn execute_future<F: std::future::Future>(
+        &self,
+        future: F,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<F::Output, crate::FutureExecutionError> {
+        self.future_executor.execute(
+            future,
+            &self.cancellation,
+            deadline,
+            self.worker_limit.get(),
+        )
+    }
+
     pub fn set_stdin(&mut self, input: crate::TextInput) {
         self.stdin = Some(std::sync::Arc::new(std::sync::Mutex::new(input)));
     }
@@ -276,6 +296,8 @@ impl ExecutionContext {
             startup_inputs_bound: false,
             worker_handle: self.worker_handle.clone(),
             worker_limit: self.worker_limit,
+            #[cfg(feature = "async")]
+            future_executor: self.future_executor.clone(),
         }
     }
 
@@ -415,6 +437,8 @@ impl ExecutionContext {
             cancellation: self.cancellation.clone(),
             worker_handle: self.worker_handle.clone(),
             worker_limit: self.worker_limit,
+            #[cfg(feature = "async")]
+            future_executor: self.future_executor.clone(),
         }
     }
 
@@ -507,6 +531,10 @@ impl ExecutionContext {
         child.cancellation = self.cancellation.clone();
         child.worker_handle = self.worker_handle.clone();
         child.worker_limit = self.worker_limit;
+        #[cfg(feature = "async")]
+        {
+            child.future_executor = self.future_executor.clone();
+        }
         if self.snapshots.is_some() {
             child.snapshots = self.snapshots.clone();
             child.snapshot_prefix = self.snapshot_path();

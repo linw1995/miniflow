@@ -104,6 +104,25 @@ Declare context reads in `NodeMetadata.context_references`. Each `ContextReferen
 
 ## Context-aware execution
 
+### Optional future execution
+
+Providers needing asynchronous operations enable `mf-runtime/async` and call
+`ExecutionContext::execute_future(future, deadline)`. The deadline is an optional monotonic `Instant`.
+The facility drives the owned future on the invoking synchronous thread, honoring workflow cancellation and
+deadlines before polling or returning its result. Provider errors remain the future's result; infrastructure
+errors retain typed sources in `FutureExecutionError`. Ordinary result conversion and publication still follow.
+
+The default runtime features contain no future executor. `async` uses a portable blocking executor without
+adding Tokio. The optional `tokio` feature also enables `async`, selecting a lazy managed runtime shared by
+domain, Loop, Iteration, and stream context forks. Its root or caller-owned execution context retains it until
+the scope ends. Node preparation does not start a runtime. Cargo features unify for the resolved runtime package.
+
+Future driving occupies a synchronous workflow thread while the operation is pending. Async hosts must call
+synchronous workflow APIs from a blocking thread; nested portable executor entry and managed execution inside
+Tokio return typed failures. Portable execution cannot inspect arbitrary third-party executor contexts.
+The executor is distinct from an I/O reactor: a selected HTTP transport can introduce its own runtime dependency
+or a process-wide fallback even when workflow-managed Tokio is disabled.
+
 ### Unified value structs
 
 Use `NodeValue` to declare one owned named-port contract for either task role:
