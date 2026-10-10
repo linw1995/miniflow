@@ -599,12 +599,12 @@ pub enum NodeBuildError {
 
 #[derive(Debug, Snafu)]
 pub enum NodeExecutionError {
-    #[snafu(display("could not decode typed task inputs at `{}`: {source}", source.pointer()))]
+    #[snafu(display("could not decode typed node inputs at `{}`: {source}", source.pointer()), visibility(pub(super)))]
     InputDecode {
         #[snafu(source(from(crate::InputDecodeError, Box::new)))]
         source: Box<crate::InputDecodeError>,
     },
-    #[snafu(display("could not encode typed task outputs at `{}`: {source}", source.pointer()), visibility(pub(super)))]
+    #[snafu(display("could not encode typed node outputs at `{}`: {source}", source.pointer()), visibility(pub(super)))]
     OutputEncode {
         #[snafu(source(from(crate::OutputEncodeError, Box::new)))]
         source: Box<crate::OutputEncodeError>,
@@ -1010,6 +1010,36 @@ impl NodeExecution {
 }
 
 impl PreparedNode {
+    /// Reflects both value contracts and adapts typed event execution without dispatching an event.
+    pub fn typed_event<N: crate::TypedEventNode + 'static>(
+        state: N,
+        metadata: impl Into<NodeMetadata>,
+    ) -> Result<Self, NodeBuildError> {
+        let metadata = reflected_node_metadata(
+            NodePorts::from_types::<N::Input, N::Output>(),
+            metadata.into(),
+        )?;
+        Ok(Self::from_parts(
+            NodeExecution::Event(Box::new(crate::stream::TypedEventAdapter(state))),
+            metadata,
+        ))
+    }
+
+    /// Reflects both value contracts and adapts typed producer execution without reading input.
+    pub fn typed_stream<N: crate::TypedStreamNode + 'static>(
+        producer: N,
+        metadata: impl Into<NodeMetadata>,
+    ) -> Result<Self, NodeBuildError> {
+        let metadata = reflected_node_metadata(
+            NodePorts::from_types::<N::Input, N::Output>(),
+            metadata.into(),
+        )?;
+        Ok(Self::from_parts(
+            NodeExecution::Stream(Box::new(crate::stream::TypedStreamAdapter(producer))),
+            metadata,
+        ))
+    }
+
     /// Reflects a task's dynamic contracts and preserves the other prepared metadata.
     pub fn new<N: TaskNode + NodePortContract + 'static>(
         task: N,

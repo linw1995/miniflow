@@ -1,7 +1,7 @@
 use mf_runtime::{
-    Emitter, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeFactory,
-    NodeMetadata, NodePortContract, NodeRegistration, NodeValue, PreparedNode, StdinRequirement,
-    StreamNode, TextInput, deserialize_config, encode_typed_result,
+    ExecutionContext, NodeBuildError, NodeExecutionError, NodeFactory, NodeMetadata,
+    NodeRegistration, NodeValue, PreparedNode, StdinRequirement, TextInput, TypedNodeResult,
+    TypedStreamNode, deserialize_config,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -24,18 +24,8 @@ struct ReadlineOutputs {
     line: String,
 }
 
-impl NodePortContract for Readline {
-    fn ports(&self) -> mf_runtime::NodePorts {
-        mf_runtime::NodePorts::from_types::<ReadlineInputs, ReadlineOutputs>()
-    }
-}
-
 #[derive(Debug, Snafu)]
 enum ReadlineError {
-    #[snafu(display("could not decode readline inputs: {source}"))]
-    DecodeInputs {
-        source: mf_runtime::InputDecodeError,
-    },
     #[snafu(display("could not open text file {path:?}: {source}"))]
     InputFile { path: PathBuf, source: io::Error },
     #[snafu(display("could not inspect text file {path:?}: {source}"))]
@@ -50,14 +40,16 @@ impl From<ReadlineError> for NodeExecutionError {
     }
 }
 
-impl StreamNode for Readline {
+impl TypedStreamNode for Readline {
+    type Input = ReadlineInputs;
+    type Output = ReadlineOutputs;
+
     fn execute(
         &mut self,
-        inputs: Inputs,
+        inputs: Self::Input,
         context: &mut ExecutionContext,
-        emitter: &mut Emitter<'_>,
+        emit: &mut dyn FnMut(TypedNodeResult<Self::Output>) -> Result<(), NodeExecutionError>,
     ) -> Result<(), NodeExecutionError> {
-        let inputs = ReadlineInputs::from_values(inputs).context(DecodeInputsSnafu)?;
         if let Some(path) = inputs.path {
             let path = path.as_str();
             let mut options = OpenOptions::new();
@@ -75,11 +67,11 @@ impl StreamNode for Readline {
             let mut input = TextInput::new(file);
             let cancellation = context.cancellation();
             while let Some(line) = input.next_line(&cancellation)? {
-                emitter.send(encode_typed_result(ReadlineOutputs { line }.into())?)?;
+                emit(ReadlineOutputs { line }.into())?;
             }
         } else {
             while let Some(line) = context.stdin_line()? {
-                emitter.send(encode_typed_result(ReadlineOutputs { line }.into())?)?;
+                emit(ReadlineOutputs { line }.into())?;
             }
         }
         Ok(())
@@ -88,7 +80,7 @@ impl StreamNode for Readline {
 
 fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     let _: Config = deserialize_config(config)?;
-    PreparedNode::stream(
+    PreparedNode::typed_stream(
         Readline,
         NodeMetadata {
             stdin: Some(StdinRequirement::UnlessInput("path".into())),

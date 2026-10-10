@@ -96,7 +96,7 @@ impl IterationNode {
     }
 
     pub fn ports(&self) -> NodePorts {
-        NodePorts::from_types::<IterationInputs, IterationOutputs>()
+        NodePorts::from_types::<<Self as TypedTaskNode>::Input, <Self as TypedTaskNode>::Output>()
     }
 
     fn result_derivation(&self) -> OutputDerivation {

@@ -1,7 +1,8 @@
 use mf_runtime::{
     Emitter, EventContext, EventEffects, EventNode, ExecutionContext, Inputs, NodeBuildError,
     NodeEvent, NodeExecutionError, NodeMetadata, NodePortContract, NodePorts, NodeResult,
-    NodeValue, OutputDerivation, PreparedNode, StdinRequirement, StreamNode, TaskNode, ValueType,
+    NodeValue, OutputDerivation, PreparedNode, StdinRequirement, StreamNode, TaskNode,
+    TypedEventNode, TypedNodeResult, TypedStreamNode, ValueType,
 };
 use std::collections::BTreeMap;
 
@@ -57,6 +58,33 @@ impl NodePortContract for NeverRun {
     }
 }
 
+impl TypedEventNode for NeverRun {
+    type Input = Request;
+    type Output = Response;
+
+    fn on_event(
+        &mut self,
+        _: NodeEvent<Request>,
+        _: &EventContext<'_>,
+    ) -> Result<EventEffects<Response>, NodeExecutionError> {
+        panic!("typed preparation must not dispatch events")
+    }
+}
+
+impl TypedStreamNode for NeverRun {
+    type Input = Request;
+    type Output = Response;
+
+    fn execute(
+        &mut self,
+        _: Request,
+        _: &mut ExecutionContext,
+        _: &mut dyn FnMut(TypedNodeResult<Response>) -> Result<(), NodeExecutionError>,
+    ) -> Result<(), NodeExecutionError> {
+        panic!("typed preparation must not run producers")
+    }
+}
+
 #[test]
 fn every_execution_kind_reflects_both_contracts_and_preserves_other_metadata() {
     let metadata = NodeMetadata {
@@ -75,6 +103,8 @@ fn every_execution_kind_reflects_both_contracts_and_preserves_other_metadata() {
         PreparedNode::new(NeverRun, metadata.clone()),
         PreparedNode::event(NeverRun, metadata.clone()),
         PreparedNode::stream(NeverRun, metadata.clone()),
+        PreparedNode::typed_event(NeverRun, metadata.clone()),
+        PreparedNode::typed_stream(NeverRun, metadata.clone()),
     ] {
         let prepared = prepared.unwrap();
         assert_eq!(prepared.metadata.ports, expected);
@@ -88,10 +118,12 @@ fn every_execution_kind_reflects_both_contracts_and_preserves_other_metadata() {
 
 #[test]
 fn reflection_rejects_even_identical_factory_port_declarations() {
-    let constructors: [fn(NodeMetadata) -> Result<PreparedNode, NodeBuildError>; 3] = [
+    let constructors: [fn(NodeMetadata) -> Result<PreparedNode, NodeBuildError>; 5] = [
         |metadata| PreparedNode::new(NeverRun, metadata),
         |metadata| PreparedNode::event(NeverRun, metadata),
         |metadata| PreparedNode::stream(NeverRun, metadata),
+        |metadata| PreparedNode::typed_event(NeverRun, metadata),
+        |metadata| PreparedNode::typed_stream(NeverRun, metadata),
     ];
     let ports = NodePorts {
         inputs: Request::ports(),
