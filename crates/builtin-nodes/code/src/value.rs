@@ -82,13 +82,10 @@ fn json_to_cel_at(
     match (value_type, value.kind()) {
         (ValueType::Null, ValueKind::Null) => Ok(CelValue::Null),
         (ValueType::Boolean, ValueKind::Bool(value)) => Ok(CelValue::Bool(*value)),
-        (ValueType::Int64, ValueKind::Number(value)) => value
-            .as_i64()
+        (ValueType::Int64, ValueKind::Number(value)) => mf_runtime::number_to_i64(value)
             .map(CelValue::Int)
             .ok_or_else(|| format!("path `{path}`: expected int64")),
-        (ValueType::Float64, ValueKind::Number(value)) if value.is_f64() => value
-            .as_f64()
-            .filter(|number| number.is_finite())
+        (ValueType::Float64, ValueKind::Number(value)) => mf_runtime::number_to_f64(value)
             .map(CelValue::Double)
             .ok_or_else(|| format!("path `{path}`: expected finite float64")),
         (ValueType::String, ValueKind::String(value)) => Ok(CelValue::String(Arc::clone(value))),
@@ -197,6 +194,32 @@ fn cel_to_json_at(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn numeric_inputs_convert_only_when_lossless() {
+        for (descriptor, input, expected) in [
+            (ValueType::Int64, json!(42.0), json!(42)),
+            (ValueType::Float64, json!(42), json!(42.0)),
+        ] {
+            let native =
+                json_to_cel(&input.into(), &descriptor, &mut Budget::default(), "", 1).unwrap();
+            assert_eq!(
+                cel_to_json(&native, &descriptor, &mut Budget::default(), "", 1).unwrap(),
+                expected
+            );
+        }
+        for (descriptor, input) in [
+            (ValueType::Int64, json!(1.5)),
+            (ValueType::Int64, json!(-0.0)),
+            (ValueType::Int64, json!(i64::MAX as f64)),
+            (ValueType::Float64, json!((1_u64 << 53) + 1)),
+            (ValueType::Float64, json!(u64::MAX)),
+        ] {
+            assert!(
+                json_to_cel(&input.into(), &descriptor, &mut Budget::default(), "", 1).is_err()
+            );
+        }
+    }
 
     #[test]
     fn round_trips_nested_json_through_typed_cel_values() {

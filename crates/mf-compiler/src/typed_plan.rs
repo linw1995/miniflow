@@ -157,6 +157,9 @@ pub fn plan_typed_segments(flow: &Flow, standard_runner: bool, oneshot: bool) ->
                 if field.port.required {
                     return Some(MultiplePredecessors);
                 }
+                if matches!(field.rust_type, RustValueType::Defaulted(_)) {
+                    return Some(OptionalBinding);
+                }
                 continue;
             };
             if edge.from_node.index() != source {

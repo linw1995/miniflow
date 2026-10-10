@@ -35,10 +35,10 @@ pub trait NodeInputs: Sized {
     fn from_inputs(inputs: Inputs) -> Result<Self, InputDecodeError>;
 }
 
-/// Decodes one supplied JSON value without coercion or an intermediate JSON tree.
+/// Decodes one supplied JSON value with lossless numeric conversion and no intermediate JSON tree.
 ///
 /// The decoder must agree with `value_type()` and report paths relative to the
-/// supplied value. Supported implementations are bool, i64, f64, String, ValueRef,
+/// supplied value. Supported implementations are bool, i64, u64, usize, f32, f64, String, ValueRef,
 /// Vec of supported values, string-keyed BTreeMap of supported values, and
 /// objects deriving [`crate::NodeValue`].
 /// `Option` is intentionally only an [`InputField`], not an element value codec.
@@ -114,6 +114,21 @@ pub fn decode_input<T: InputField>(inputs: &mut Inputs, port: &str) -> Result<T,
     T::decode_field(port, inputs.remove(port))
 }
 
+/// Uses a field default only when the binding is absent; supplied values stay strict.
+pub fn decode_default_input<T: InputField>(
+    inputs: &mut Inputs,
+    port: &str,
+    default: impl FnOnce() -> T,
+) -> Result<T, InputDecodeError> {
+    T::value_type()
+        .check_depth()
+        .context(InvalidTypeSnafu { port })?;
+    match inputs.remove(port) {
+        Some(value) => T::decode_field(port, Some(value)),
+        None => Ok(default()),
+    }
+}
+
 /// Rejects any bindings left after the declared input fields have been consumed.
 pub fn reject_unknown_inputs(inputs: Inputs) -> Result<(), InputDecodeError> {
     if let Some((port, _)) = inputs.into_iter().next() {
@@ -149,6 +164,14 @@ macro_rules! required_field {
 
 /// Decodes a named-port contract from a shared JSON object.
 pub fn decode_node_value<T: crate::NodeValue>(value: ValueRef) -> Result<T, TypeMismatch> {
+    decode_object_value(value, T::from_values)
+}
+
+/// Decodes an object with a generated strict field decoder, retaining error sources.
+pub fn decode_object_value<T>(
+    value: ValueRef,
+    decode: impl FnOnce(Inputs) -> Result<T, InputDecodeError>,
+) -> Result<T, TypeMismatch> {
     ValueType::Object.validate_shared(&value)?;
     let values = value
         .as_object()
@@ -156,7 +179,7 @@ pub fn decode_node_value<T: crate::NodeValue>(value: ValueRef) -> Result<T, Type
         .iter()
         .map(|(key, value)| (key.to_string(), value.clone()))
         .collect();
-    T::from_values(values).with_context(|error| {
+    decode(values).with_context(|error| {
         let (expected, actual) = match error {
             InputDecodeError::InvalidValue { source, .. } => {
                 (source.expected.clone(), source.actual)
@@ -175,25 +198,134 @@ pub fn decode_node_value<T: crate::NodeValue>(value: ValueRef) -> Result<T, Type
     })
 }
 
-macro_rules! scalar_value {
-    ($ty:ty, $descriptor:ident, $method:ident) => {
+/// Reports a wire name outside a generated enum's closed variant set.
+pub fn unknown_enum_variant<T>() -> Result<T, TypeMismatch> {
+    crate::node::ValueSnafu {
+        details: crate::TypeMismatchDetails {
+            path: String::new(),
+            expected: ValueType::String,
+            actual: "unknown enum variant",
+        },
+    }
+    .fail()
+}
+
+/// Attaches the tag's field context to an unknown enum variant.
+pub fn unknown_enum_tag<T>(tag: &str) -> Result<T, InputDecodeError> {
+    unknown_enum_variant().context(InvalidValueSnafu { port: tag })
+}
+
+impl InputValue for bool {
+    fn value_type() -> ValueType {
+        ValueType::Boolean
+    }
+    fn decode(value: ValueRef) -> Result<Self, TypeMismatch> {
+        ValueType::Boolean.validate_shared(&value)?;
+        Ok(value.as_bool().expect("validated boolean"))
+    }
+}
+required_field!(bool);
+
+macro_rules! numeric_value {
+    ($ty:ty, $descriptor:ident, $convert:ident) => {
         impl InputValue for $ty {
             fn value_type() -> ValueType {
                 ValueType::$descriptor
             }
-
             fn decode(value: ValueRef) -> Result<Self, TypeMismatch> {
                 ValueType::$descriptor.validate_shared(&value)?;
-                Ok(value.$method().expect("validated scalar"))
+                Ok(
+                    crate::number::$convert(value.as_number().expect("validated number"))
+                        .expect("validated lossless conversion"),
+                )
             }
         }
         required_field!($ty);
     };
 }
 
-scalar_value!(bool, Boolean, as_bool);
-scalar_value!(i64, Int64, as_i64);
-scalar_value!(f64, Float64, as_f64);
+numeric_value!(i64, Int64, number_to_i64);
+numeric_value!(u64, Uint64, number_to_u64);
+numeric_value!(usize, Usize, number_to_usize);
+numeric_value!(f32, Float32, number_to_f32);
+numeric_value!(f64, Float64, number_to_f64);
+
+/// A supplied null or a supplied value. Use `Option<Nullable<T>>` for three-state fields.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Nullable<T> {
+    Null,
+    Value(T),
+}
+
+impl<T: InputValue> InputValue for Nullable<T> {
+    fn value_type() -> ValueType {
+        ValueType::Nullable(Box::new(T::value_type()))
+    }
+
+    fn decode(value: ValueRef) -> Result<Self, TypeMismatch> {
+        if value.is_null() {
+            Ok(Self::Null)
+        } else {
+            T::decode(value).map(Self::Value)
+        }
+    }
+}
+required_field!(Nullable<T>, T);
+
+/// A typed view of a shared JSON payload that defers owned decoding.
+///
+/// Construction validates the wire descriptor without constructing `T`. Broad
+/// object/enum descriptors do not replace their strict codecs: `decode()` can
+/// still reject a payload. Inspect `value()` and apply a budget before decoding.
+#[derive(Debug)]
+pub struct Shared<T> {
+    value: ValueRef,
+    marker: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> Clone for Shared<T> {
+    fn clone(&self) -> Self {
+        Self {
+            value: self.value.clone(),
+            marker: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T> Shared<T> {
+    pub fn value(&self) -> &ValueRef {
+        &self.value
+    }
+
+    pub fn into_value(self) -> ValueRef {
+        self.value
+    }
+}
+
+impl<T: InputValue> Shared<T> {
+    pub fn new(value: ValueRef) -> Result<Self, TypeMismatch> {
+        T::value_type().validate_shared(&value)?;
+        Ok(Self {
+            value,
+            marker: std::marker::PhantomData,
+        })
+    }
+
+    pub fn decode(&self) -> Result<T, TypeMismatch> {
+        T::decode(self.value.clone())
+    }
+}
+
+impl<T: InputValue> InputValue for Shared<T> {
+    fn value_type() -> ValueType {
+        T::value_type()
+    }
+
+    fn decode(value: ValueRef) -> Result<Self, TypeMismatch> {
+        Self::new(value)
+    }
+}
+required_field!(Shared<T>, T);
 
 impl InputValue for String {
     fn value_type() -> ValueType {
@@ -327,7 +459,7 @@ mod tests {
         for value in [json!(1.5), json!(u64::MAX), json!("1"), json!(null)] {
             assert!(decode::<i64>(Some(value)).is_err());
         }
-        for value in [json!(1), json!("1.5"), json!(null)] {
+        for value in [json!((1_u64 << 53) + 1), json!("1.5"), json!(null)] {
             assert!(decode::<f64>(Some(value)).is_err());
         }
         assert!(decode::<bool>(Some(json!(1))).is_err());

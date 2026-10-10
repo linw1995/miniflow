@@ -85,7 +85,7 @@ descriptor is unavailable. Known JSON values remain available as separate eviden
 compile-time mismatch on a typed target. The [constant](../crates/builtin-nodes/core/src/constant.rs) and
 [identity](../crates/builtin-nodes/core/src/identity.rs) nodes demonstrate both derivation forms.
 
-Port types include the broad JSON categories `Any`, `Null`, `Boolean`, `Number`, `String`, `Array`, and `Object`, plus `Int64`, `Float64`, and recursive `List(T)` and `Map(T)`. `Map(T)` describes an object with string keys and values of type `T`. Use `PortSpec::new` for static names and `PortSpec::owned` for generated names when constructing metadata:
+Port types include the broad JSON categories `Any`, `Null`, `Boolean`, `Number`, `String`, `Array`, and `Object`, plus `Int64`, `Uint64`, `Usize`, `Float32`, `Float64`, and recursive `List(T)`, `Map(T)`, and `Nullable(T)`. `Map(T)` describes an object with string keys and values of type `T`. Use `PortSpec::new` for static names and `PortSpec::owned` for generated names when constructing metadata:
 
 ```rust
 let items = ValueType::List(Box::new(ValueType::Int64));
@@ -228,8 +228,9 @@ let request = RequestInputs::from_values(NodeValues::from([
 ```
 
 The derive delegates field decoding and diagnostics to runtime helpers. Supported owned fields are
-`bool`, `i64`, `f64`, `String`, `ValueRef`, recursive `Vec<T>` and `BTreeMap<String, T>`, and top-level
-`Option<T>`. Scalars retain strict JSON representations; integers do not become floating values.
+`bool`, `i64`, `u64`, `usize`, `f32`, `f64`, `String`, `ValueRef`, `Nullable<T>`, `Shared<T>`,
+recursive `Vec<T>` and `BTreeMap<String, T>`, and top-level
+`Option<T>`. Numeric codecs allow implicit conversion only when the value is exactly representable in the target type.
 `Option<T>` permits omission but retains T's port descriptor: omitted `Option<String>` becomes `None`,
 explicit null is rejected, and supplied null for `Option<ValueRef>` becomes `Some` containing null.
 Collection elements cannot be optional, and nested `Option` fields are unsupported.
@@ -237,7 +238,7 @@ Collection elements cannot be optional, and nested `Option` fields are unsupport
 Named-field structs support generics and type aliases. Tuple/unit structs, enums, and borrowed fields are
 unsupported. Field names define port names; raw identifiers omit their `r#` prefix. Use
 `#[value(rename = "port-name")]` for exact names, including punctuation. Empty and duplicate names fail
-compilation. Value attributes are independent of Serde attributes and do not implement defaults or flattening.
+compilation. Value attributes are independent of Serde attributes. Flattening is unsupported.
 
 The derive is re-exported by `mf-runtime`; providers do not need a separate macro dependency. A renamed
 runtime dependency requires `#[value(runtime = "::runtime_alias")]` on the struct. Use
@@ -247,6 +248,108 @@ runtime dependency requires `#[value(runtime = "::runtime_alias")]` on the struc
 decoders must agree on accepted names, requiredness, and value types. Errors retain typed mismatches;
 `InputDecodeError::pointer()` adds the escaped port name to its nested path. Shared `ValueRef` payloads
 remain shared during decoding, including collection descendants; owned strings and typed containers may allocate.
+
+### Defaults, nullable values, and deferred payloads
+
+Use `#[value(default)]` to call the field type's `Default` implementation, or
+`#[value(default = "default_limit")]` to call a zero-argument function. Defaults apply only
+when the binding is absent. Supplied nulls and invalid values still pass through the strict
+field codec. Defaulted ports are optional; a `NodeValue` contract shares that optional declaration
+in both directions, and encoding still emits the field's actual value. `NodeInputs` accepts the
+same attributes as `#[input(default)]`; `NodeOutputs` has no decoding defaults.
+Defaulted fields keep dynamic conversion at typed segment boundaries, including when unconnected,
+so generated execution cannot bypass their default functions.
+
+`Nullable<T>` is either `Nullable::Null` or `Nullable::Value(T)`. A direct `Nullable<T>` field
+is required. Use `Option<Nullable<T>>` to distinguish all three states:
+
+| Rust field value | JSON binding |
+| --- | --- |
+| `None` | Missing |
+| `Some(Nullable::Null)` | Explicit `null` |
+| `Some(Nullable::Value(value))` | Supplied value |
+
+Nullable values also work inside lists and maps. Their descriptor is `{"nullable": <T descriptor>}`;
+`Option<T>` continues to describe omission independently of nullability.
+Use `Nullable::Null` for JSON null: `Nullable::Value` wrapping a null-producing value is rejected
+during encoding and typed validation, keeping dynamic and direct transfer behavior consistent.
+
+`u64`, `usize`, and `f32` use the `uint`, `usize`, and `float` descriptors. Numeric codecs accept integer or floating JSON numbers only when conversion preserves the stored numeric value.
+Unsigned codecs reject negative values, fractions, negative zero, and out-of-range values. `usize` checks the target's range.
+`f32` requires exact single-precision representation: `42` and `42.0` work, while `16777217` and a JSON `0.1` do not.
+`f64` accepts integers with at most 53 significant binary digits; larger powers of two can still be exact.
+Floating-to-integer bounds use exclusive upper limits to reject saturation at `i64::MAX` and `u64::MAX`.
+Float encoding rejects infinity and NaN and preserves negative zero; converting negative zero to an integer is rejected.
+Graphs retain checked numeric connections when exactness depends on the value. Different Rust representations still
+use dynamic decoding. These codecs and nullable values remain certified for matching typed generation.
+
+`Shared<T>` keeps the original immutable `ValueRef` and validates T's wire descriptor without
+constructing T. Inspect `value()` and apply node-specific size or resource limits before calling
+`decode()`. `into_value()` and output encoding retain the same payload identity. Construction and
+encoding do not call T's decoder. Broad object and enum descriptors validate shape only; their strict
+field/variant checks happen during the explicit `decode()` call and can still fail. A shared payload
+is certified for typed generation only when T has a runtime-certified codec.
+
+```rust
+use mf_runtime::{NodeValue, Nullable, Shared};
+
+fn default_limit() -> usize { 100 }
+
+#[derive(NodeValue)]
+struct Request {
+    #[value(default = "default_limit")]
+    limit: usize,
+    label: Option<Nullable<String>>,
+    rows: Shared<Vec<String>>,
+}
+
+fn process(request: Request) -> Result<Vec<String>, mf_runtime::TypeMismatch> {
+    if request.rows.value().as_array().unwrap().len() > request.limit {
+        return Ok(Vec::new());
+    }
+    request.rows.decode()
+}
+```
+
+### Enum value codecs
+
+Derive `NodeEnum` for closed string enums and internally tagged enums used as fields or collection
+elements. `NodeEnum` implements `InputValue`, `InputField`, and `OutputValue`; put the enum inside a
+named `NodeValue`, `NodeInputs`, or `NodeOutputs` struct to declare node ports.
+
+```rust
+use mf_runtime::{NodeEnum, Nullable};
+
+#[derive(NodeEnum)]
+enum Mode {
+    #[value(rename = "fast")]
+    Fast,
+    #[value(rename = "safe")]
+    Safe,
+}
+
+#[derive(NodeEnum)]
+#[value(tag = "kind")]
+enum Command {
+    #[value(rename = "stop")]
+    Stop,
+    #[value(rename = "run")]
+    Run {
+        mode: Mode,
+        #[value(default)]
+        retries: usize,
+        label: Option<Nullable<String>>,
+    },
+}
+```
+
+`Mode::Fast` encodes as `"fast"`; `Command::Stop` as `{"kind":"stop"}`. Named variant fields
+appear beside the tag. Without `rename`, the wire name is the Rust variant or field name.
+Unknown variants, missing/invalid tags, unknown fields, and invalid payloads fail with JSON Pointer
+paths and typed sources. String enums use the broad `String` descriptor; tagged enums use `Object`.
+Tuple variants, untagged/adjacently tagged representations, empty or duplicate names, and tag/field
+name collisions are rejected at compile time. Use `#[value(runtime = "::runtime_alias")]` for
+renamed dependencies. Enum codecs retain dynamic execution.
 
 ### Struct-defined outputs
 
@@ -277,7 +380,7 @@ let outputs = ResponseOutputs {
 Output fields support the same owned scalar and recursive collection types as inputs. Required fields
 always produce a value. `Option<T>` declares an optional port: `None` omits the output, while
 `Some(ValueRef::null())` produces JSON null. Omission does not mark an output as skipped; branch nodes
-must declare explicit skips in the task result. Non-finite `f64` values fail encoding, including inside
+must declare explicit skips in the task result. Non-finite `f32` and `f64` values fail encoding, including inside
 collections, rather than becoming null. Finite floating values retain their representation, including negative zero.
 
 The derive supports named-field structs, generics, type aliases, raw identifiers, and

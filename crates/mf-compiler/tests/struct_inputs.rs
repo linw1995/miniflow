@@ -124,7 +124,7 @@ fn struct_inputs_define_startup_contracts_and_validate_before_business_dispatch(
     let flow = instantiate_compiled(&compiled, &registry).unwrap();
     for (port, value, pointer) in [
         ("count", json!("wrong"), "/typed.~1~0/count"),
-        ("ratio", json!(1), "/typed.~1~0/ratio"),
+        ("ratio", json!((1_u64 << 53) + 1), "/typed.~1~0/ratio"),
         ("label", json!(null), "/typed.~1~0/label"),
         (
             "rows./~",
@@ -165,6 +165,15 @@ fn struct_inputs_define_startup_contracts_and_validate_before_business_dispatch(
         .unwrap();
     assert_eq!(outputs["result"]["raw_present"], json!(true));
     assert_eq!(outputs["result"]["label"], json!("provided"));
+
+    let mut exact = arguments();
+    exact["typed./~"]["count"] = json!(7.0);
+    exact["typed./~"]["ratio"] = json!(1);
+    let output = flow
+        .execute_with_inputs(WorkflowArguments::try_from(exact).unwrap())
+        .unwrap();
+    assert_eq!(output["result"]["count"], json!(7));
+    assert_eq!(output["result"]["ratio"], json!(1.0));
 }
 
 #[test]

@@ -87,7 +87,7 @@ after a validation failure.
 ### Requirement: Evaluate typed CEL expressions through JSON ports
 
 At execution, the shared runtime SHALL recursively validate each received JSON input against its declared Code port type
-before invoking the node. The Code backend SHALL evaluate every declared output expression using the same input bindings
+before invoking the node. Numeric input conversion SHALL use the shared lossless rules. The Code backend SHALL evaluate every declared output expression using the same input bindings
 and recursively convert each CEL result to JSON without coercion. The shared runtime SHALL publish outputs only after
 all evaluations and output type checks succeed. Collection values MUST have homogeneous elements or values according to
 their declarations, and map keys MUST be strings. The node MUST enforce documented expression-length, JSON-size,
@@ -129,6 +129,16 @@ NOT evaluate expressions.
 
 - **WHEN** an upstream branch explicitly skips the Code node
 - **THEN** no expression is evaluated and the existing skipped-output state propagates
+
+#### Scenario: Convert exact numeric inputs
+
+- **WHEN** an int input receives 42.0 or a double input receives integer 42
+- **THEN** CEL receives the exact native value and emits the declared numeric representation
+
+#### Scenario: Reject lossy numeric inputs
+
+- **WHEN** an int input receives a fraction, negative zero, or an overflowing float, or a double input receives a nonrepresentable integer
+- **THEN** execution fails before evaluating any expression
 
 ### Requirement: Keep compiled workflows self-contained
 

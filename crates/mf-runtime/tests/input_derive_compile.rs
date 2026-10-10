@@ -67,7 +67,7 @@ fn struct_derives_compile_with_aliases_and_report_invalid_declarations() {
                 "duplicate input rename",
             ),
             (
-                "struct Inputs { #[input(default)] value: i64 }",
+                "struct Inputs { #[input(unknown)] value: i64 }",
                 "expected `rename",
             ),
         ] {
@@ -79,6 +79,14 @@ fn struct_derives_compile_with_aliases_and_report_invalid_declarations() {
                 "{declaration}: expected {diagnostic}, got {stderr}"
             );
         }
+        let default_source = format!("{prefix}struct Inputs<T> {{ #[input(default)] value: T }}");
+        let output = check(root.path(), &default_source, outputs);
+        assert_eq!(
+            output.status.success(),
+            !outputs,
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         for (attribute, diagnostic) in [
             (
                 "#[input(runtime = \"::runtime_alias\", runtime = \"crate\")]",
@@ -140,6 +148,57 @@ fn struct_derives_compile_with_aliases_and_report_invalid_declarations() {
         assert!(
             !output.status.success() && stderr.contains(diagnostic),
             "{stderr}"
+        );
+    }
+    let enum_prefix = "use runtime_alias::NodeEnum;\n#[derive(NodeEnum)]\n#[value(runtime = \"::runtime_alias\")]\n";
+    for declaration in [
+        "enum Mode { #[value(rename = \"fast\")] Fast, Safe }",
+        "#[value(tag = \"kind\")] enum Payload<T> { Empty, Item { data: T, #[value(default)] limit: usize } }",
+    ] {
+        let output = check(root.path(), &format!("{enum_prefix}{declaration}"), false);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    for (declaration, diagnostic) in [
+        ("struct Mode {}", "NodeEnum requires an enum"),
+        ("enum Mode {}", "at least one variant"),
+        (
+            "enum Mode { Item(String) }",
+            "string NodeEnum requires unit variants",
+        ),
+        (
+            "#[value(tag = \"kind\")] enum Mode { Item(String) }",
+            "unit or named-field variants",
+        ),
+        (
+            "#[value(tag = \"\")] enum Mode { Item }",
+            "tag must not be empty",
+        ),
+        (
+            "enum Mode { #[value(rename = \"x\")] A, #[value(rename = \"x\")] B }",
+            "duplicate enum variant",
+        ),
+        (
+            "#[value(tag = \"kind\")] enum Mode { Item { kind: String } }",
+            "conflict with enum tag",
+        ),
+        (
+            "#[value(tag = \"kind\")] enum Mode<'a> { Item { data: &'a str } }",
+            "owned value fields",
+        ),
+        (
+            "#[value(tag = \"kind\")] enum Mode { Item { #[value(default, default)] data: String } }",
+            "duplicate field default",
+        ),
+    ] {
+        let output = check(root.path(), &format!("{enum_prefix}{declaration}"), false);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !output.status.success() && stderr.contains(diagnostic),
+            "{declaration}: {stderr}"
         );
     }
 }

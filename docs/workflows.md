@@ -96,8 +96,10 @@ evaluating it. Output port types are inferred from the checked expression. Unkno
 explicit `dyn(...)` calls, and result types outside the JSON port contract fail before executable installation. CEL
 compilation produces a checked AST for in-process evaluation; it does not generate native machine code.
 
-At execution, Code converts each declared JSON input to its CEL type without coercion. `int` accepts signed 64-bit
-JSON integers, `double` accepts finite JSON floating-point numbers, and `null` requires a present null value. Lists
+At execution, Code converts each declared JSON input to its CEL type using the runtime's lossless numeric rules.
+`int` accepts signed 64-bit values, including exactly integral floating inputs; `double` accepts finite floating values
+and integers exactly representable in `f64`. Fractions, range overflow, precision loss, and negative-zero-to-integer
+conversion fail instead of silently rounding. `null` requires a present null value. Lists
 and maps are recursive and homogeneous; map keys are strings. Each output expression uses the same input bindings,
 and outputs cannot refer to one another. CEL evaluation errors and values that cannot be represented as the inferred
 JSON type fail the node. Errors identify the Code input or output and a JSON Pointer path for nested values. The
@@ -167,7 +169,9 @@ including when initializing a nested Loop.
 }
 ```
 
-The surrounding graph binds the initial `count` input and may bind the final `count` output. Variable types use the shared port descriptor grammar: `any`, `null`, `bool`, `number`, `int`, `double`, `string`, `array`, `object`, and nested `{"list": T}` or `{"map": T}`. `builtin.code` continues to accept only its concrete subset. Initial values, assignments, and final outputs are checked against each variable's declared type; a broad source is checked at runtime when necessary.
+The surrounding graph binds the initial `count` input and may bind the final `count` output.
+Variable types use the shared port descriptor grammar: `any`, `null`, `bool`, `number`, `int`, `uint`, `usize`, `float`, `double`, `string`, `array`, `object`, and nested `{"list": T}`, `{"map": T}`, or `{"nullable": T}`.
+`builtin.code` continues to accept only its concrete subset. Initial values, assignments, and final outputs are checked against each variable's declared type; a broad source is checked at runtime when necessary.
 
 `workflow.loop_assign` takes one required `value` input and produces a `done` control output. A
 reached assignment overwrites its target variable; a skipped assignment leaves it unchanged. A later

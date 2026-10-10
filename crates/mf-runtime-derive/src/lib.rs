@@ -42,6 +42,69 @@ pub fn derive_node_value(input: TokenStream) -> TokenStream {
     }
 }
 
+/// Derives bidirectional string or internally tagged enum value codecs.
+///
+/// Unit variants encode as strings. `#[value(tag = "kind")]` encodes unit or
+/// named-field variants as objects. Rename variants/fields with `#[value(rename = "wire-name")]`.
+#[proc_macro_derive(NodeEnum, attributes(value))]
+pub fn derive_node_enum(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match expand_enum(input) {
+        Ok(output) => output.into(),
+        Err(error) => error.into_compile_error().into(),
+    }
+}
+
+enum FieldDefault {
+    Trait,
+    Function(Path),
+}
+
+fn field_attributes(
+    attrs: &[syn::Attribute],
+    attribute: &str,
+    allow_default: bool,
+) -> syn::Result<(Option<LitStr>, Option<FieldDefault>)> {
+    let mut renamed = None;
+    let mut default = None;
+    for attr in attrs {
+        if attr.path().is_ident(attribute) {
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("rename") {
+                    if renamed.is_some() {
+                        return Err(meta.error(format!("duplicate {attribute} rename")));
+                    }
+                    renamed = Some(meta.value()?.parse::<LitStr>()?);
+                } else if allow_default && meta.path.is_ident("default") {
+                    if default.is_some() {
+                        return Err(meta.error("duplicate field default"));
+                    }
+                    default = Some(if meta.input.peek(syn::Token![=]) {
+                        let path: LitStr = meta.value()?.parse()?;
+                        FieldDefault::Function(path.parse()?)
+                    } else {
+                        FieldDefault::Trait
+                    });
+                } else {
+                    return Err(meta.error(format!(
+                        "expected `rename = \"port-name\"`{} on an {attribute} field",
+                        if allow_default { " or `default`" } else { "" }
+                    )));
+                }
+                Ok(())
+            })?;
+        }
+    }
+    Ok((renamed, default))
+}
+
+fn default_tokens(default: &FieldDefault, ty: &syn::Type) -> proc_macro2::TokenStream {
+    match default {
+        FieldDefault::Trait => quote!(<#ty as ::std::default::Default>::default),
+        FieldDefault::Function(path) => quote!(#path),
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Direction {
     Input,
@@ -122,23 +185,11 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
     let mut typed_checks = Vec::new();
     for field in fields.named {
         let ident = field.ident.expect("named field");
-        let mut renamed = None;
-        for attr in &field.attrs {
-            if attr.path().is_ident(attribute) {
-                attr.parse_nested_meta(|meta| {
-                    if !meta.path.is_ident("rename") {
-                        return Err(meta.error(format!(
-                            "expected `rename = \"port-name\"` on an {attribute} field"
-                        )));
-                    }
-                    if renamed.is_some() {
-                        return Err(meta.error(format!("duplicate {attribute} rename")));
-                    }
-                    renamed = Some(meta.value()?.parse::<LitStr>()?);
-                    Ok(())
-                })?;
-            }
-        }
+        let (renamed, default) = field_attributes(
+            &field.attrs,
+            attribute,
+            !matches!(direction, Direction::Output),
+        )?;
         let port = renamed.unwrap_or_else(|| LitStr::new(&ident.unraw().to_string(), ident.span()));
         if port.value().is_empty() {
             return Err(syn::Error::new(
@@ -157,10 +208,6 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
         field_types.push(ty.clone());
         field_names.push(ident.clone());
         if typed {
-            typed_ports.push(quote!(#runtime::TypedPort {
-                port: <#ty as #runtime::InputField>::port(#port),
-                rust_type: <#ty as #runtime::TypedField>::rust_type(),
-            }));
             typed_checks.push(
                 quote!(if #runtime::validate_typed_output(&self.#ident, #port)? {
                     __mf_present.push(#port);
@@ -196,8 +243,34 @@ fn expand(input: DeriveInput, direction: Direction) -> syn::Result<proc_macro2::
                 .predicates
                 .push(parse_quote!(#ty: #runtime::TypedField));
         }
-        ports.push(quote!(<#ty as #field_trait>::port(#port)));
-        decoded.push(quote!(#ident: #runtime::decode_input::<#ty>(&mut __mf_inputs, #port)?));
+        let port_spec = if default.is_some() {
+            quote!(#runtime::PortSpec::new(#port, <#ty as #field_trait>::value_type(), false))
+        } else {
+            quote!(<#ty as #field_trait>::port(#port))
+        };
+        ports.push(port_spec.clone());
+        if typed {
+            let rust_type = quote!(<#ty as #runtime::TypedField>::rust_type());
+            let rust_type = if default.is_some() {
+                quote!(#runtime::RustValueType::Defaulted(::std::boxed::Box::new(#rust_type)))
+            } else {
+                rust_type
+            };
+            typed_ports
+                .push(quote!(#runtime::TypedPort { port: #port_spec, rust_type: #rust_type }));
+        }
+        if let Some(default) = default {
+            if matches!(default, FieldDefault::Trait) {
+                generics
+                    .make_where_clause()
+                    .predicates
+                    .push(parse_quote!(#ty: ::std::default::Default));
+            }
+            let default = default_tokens(&default, &ty);
+            decoded.push(quote!(#ident: #runtime::decode_default_input::<#ty>(&mut __mf_inputs, #port, #default)?));
+        } else {
+            decoded.push(quote!(#ident: #runtime::decode_input::<#ty>(&mut __mf_inputs, #port)?));
+        }
         encoded
             .push(quote!(#runtime::encode_output::<#ty>(&mut __mf_outputs, #port, self.#ident)?;));
     }
@@ -331,4 +404,198 @@ impl<'ast> Visit<'ast> for BorrowedField {
             ),
         ));
     }
+}
+
+fn expand_enum(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let name = input.ident;
+    let Data::Enum(data) = input.data else {
+        return Err(syn::Error::new(name.span(), "NodeEnum requires an enum"));
+    };
+    if data.variants.is_empty() {
+        return Err(syn::Error::new(
+            name.span(),
+            "NodeEnum requires at least one variant",
+        ));
+    }
+    let mut runtime = None;
+    let mut tag = None;
+    for attr in &input.attrs {
+        if attr.path().is_ident("value") {
+            attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("runtime") {
+                    if runtime.is_some() {
+                        return Err(meta.error("duplicate runtime path"));
+                    }
+                    let path: LitStr = meta.value()?.parse()?;
+                    runtime = Some(path.parse::<Path>()?);
+                } else if meta.path.is_ident("tag") {
+                    if tag.is_some() {
+                        return Err(meta.error("duplicate enum tag"));
+                    }
+                    let value: LitStr = meta.value()?.parse()?;
+                    if value.value().is_empty() {
+                        return Err(meta.error("enum tag must not be empty"));
+                    }
+                    tag = Some(value);
+                } else {
+                    return Err(meta.error("expected `runtime` or `tag` on a NodeEnum enum"));
+                }
+                Ok(())
+            })?;
+        }
+    }
+    let runtime: Path = runtime.unwrap_or_else(|| parse_quote!(::mf_runtime));
+    let mut generics = input.generics;
+    let mut wire_names = BTreeSet::new();
+    let mut decoded = Vec::new();
+    let mut encoded = Vec::new();
+    for variant in data.variants {
+        let ident = variant.ident;
+        let (rename, _) = field_attributes(&variant.attrs, "value", false)?;
+        let wire = rename.unwrap_or_else(|| LitStr::new(&ident.unraw().to_string(), ident.span()));
+        if wire.value().is_empty() {
+            return Err(syn::Error::new(
+                wire.span(),
+                "enum variant name must not be empty",
+            ));
+        }
+        if !wire_names.insert(wire.value()) {
+            return Err(syn::Error::new(wire.span(), "duplicate enum variant name"));
+        }
+        if let Some(tag) = &tag {
+            let mut names = BTreeSet::from([tag.value()]);
+            let mut field_names = Vec::new();
+            let mut field_decoders = Vec::new();
+            let mut field_encoders = Vec::new();
+            let unit = matches!(variant.fields, Fields::Unit);
+            match variant.fields {
+                Fields::Unit => {}
+                Fields::Named(fields) => {
+                    for field in fields.named {
+                        let ident = field.ident.expect("named field");
+                        let (rename, default) = field_attributes(&field.attrs, "value", true)?;
+                        let port = rename.unwrap_or_else(|| {
+                            LitStr::new(&ident.unraw().to_string(), ident.span())
+                        });
+                        if port.value().is_empty() {
+                            return Err(syn::Error::new(
+                                port.span(),
+                                "value port name must not be empty",
+                            ));
+                        }
+                        if !names.insert(port.value()) {
+                            return Err(syn::Error::new(
+                                port.span(),
+                                "duplicate field name or conflict with enum tag",
+                            ));
+                        }
+                        let ty = field.ty;
+                        let mut borrowed = BorrowedField {
+                            error: None,
+                            derive_name: "NodeEnum",
+                            attribute: "value",
+                        };
+                        borrowed.visit_type(&ty);
+                        if let Some(error) = borrowed.error {
+                            return Err(error);
+                        }
+                        generics
+                            .make_where_clause()
+                            .predicates
+                            .push(parse_quote!(#ty: #runtime::InputField + #runtime::OutputField));
+                        let decode = if let Some(default) = default {
+                            if matches!(default, FieldDefault::Trait) {
+                                generics
+                                    .make_where_clause()
+                                    .predicates
+                                    .push(parse_quote!(#ty: ::std::default::Default));
+                            }
+                            let default = default_tokens(&default, &ty);
+                            quote!(#runtime::decode_default_input::<#ty>(&mut __mf_inputs, #port, #default)?)
+                        } else {
+                            quote!(#runtime::decode_input::<#ty>(&mut __mf_inputs, #port)?)
+                        };
+                        field_decoders.push(quote!(#ident: #decode));
+                        field_encoders.push(quote!(#runtime::encode_output::<#ty>(&mut __mf_outputs, #port, #ident)?;));
+                        field_names.push(ident);
+                    }
+                }
+                Fields::Unnamed(fields) => {
+                    return Err(syn::Error::new(
+                        fields.span(),
+                        "tagged NodeEnum requires unit or named-field variants",
+                    ));
+                }
+            }
+            let construction = if unit {
+                quote!(Self::#ident)
+            } else {
+                quote!(Self::#ident { #(#field_decoders),* })
+            };
+            let pattern = if unit {
+                quote!(Self::#ident)
+            } else {
+                quote!(Self::#ident { #(#field_names),* })
+            };
+            decoded.push(quote!(#wire => {
+                let __mf_result = #construction;
+                #runtime::reject_unknown_inputs(__mf_inputs)?;
+                Ok(__mf_result)
+            }));
+            encoded.push(quote!(#pattern => {
+                let mut __mf_outputs = #runtime::Outputs::new();
+                __mf_outputs.insert(#tag.into(), #runtime::ValueRef::from(#wire));
+                #(#field_encoders)*
+                Ok(__mf_outputs)
+            }));
+        } else {
+            if !matches!(variant.fields, Fields::Unit) {
+                return Err(syn::Error::new(
+                    variant.fields.span(),
+                    "string NodeEnum requires unit variants; use `#[value(tag = \"kind\")]` for payloads",
+                ));
+            }
+            decoded.push(quote!(#wire => Ok(Self::#ident)));
+            encoded.push(quote!(Self::#ident => Ok(#runtime::ValueRef::from(#wire))));
+        }
+    }
+    let descriptor = if tag.is_some() {
+        quote!(#runtime::ValueType::Object)
+    } else {
+        quote!(#runtime::ValueType::String)
+    };
+    let decode = if let Some(tag) = &tag {
+        quote!(#runtime::decode_object_value(value, |mut __mf_inputs| {
+            let __mf_tag: ::std::string::String = #runtime::decode_input(&mut __mf_inputs, #tag)?;
+            match __mf_tag.as_str() { #(#decoded),*, _ => #runtime::unknown_enum_tag(#tag) }
+        }))
+    } else {
+        quote! {
+            let __mf_variant = <::std::string::String as #runtime::InputValue>::decode(value)?;
+            match __mf_variant.as_str() { #(#decoded),*, _ => #runtime::unknown_enum_variant() }
+        }
+    };
+    let encode = if tag.is_some() {
+        quote!(#runtime::encode_object_value(|| match self { #(#encoded),* }))
+    } else {
+        quote!(match self { #(#encoded),* })
+    };
+    let (impl_generics, type_generics, where_clause) = generics.split_for_impl();
+    Ok(quote! {
+        impl #impl_generics #runtime::InputValue for #name #type_generics #where_clause {
+            fn value_type() -> #runtime::ValueType { #descriptor }
+            fn decode(value: #runtime::ValueRef) -> ::std::result::Result<Self, #runtime::TypeMismatch> { #decode }
+        }
+        impl #impl_generics #runtime::InputField for #name #type_generics #where_clause {
+            const REQUIRED: bool = true;
+            fn value_type() -> #runtime::ValueType { #descriptor }
+            fn decode_field(port: &str, value: ::std::option::Option<#runtime::ValueRef>) -> ::std::result::Result<Self, #runtime::InputDecodeError> {
+                #runtime::decode_required_input(port, value)
+            }
+        }
+        impl #impl_generics #runtime::OutputValue for #name #type_generics #where_clause {
+            fn value_type() -> #runtime::ValueType { #descriptor }
+            fn encode(self) -> ::std::result::Result<#runtime::ValueRef, #runtime::TypeMismatch> { #encode }
+        }
+    })
 }

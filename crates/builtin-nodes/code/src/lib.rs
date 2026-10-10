@@ -82,25 +82,23 @@ fn execution_error(message: impl Into<String>) -> NodeExecutionError {
     .build()
 }
 
-fn parse_type(value: &Value) -> Result<ValueType, String> {
+fn parse_type(value: &Value) -> Result<(ValueType, CelType), String> {
     let value_type = ValueType::parse_descriptor(value)?;
-    if !value_type.is_concrete() {
-        return Err("type must be a concrete scalar, list, or map descriptor".into());
-    }
-    Ok(value_type)
+    let native_type = cel_type(&value_type)?;
+    Ok((value_type, native_type))
 }
 
-fn cel_type(value_type: &ValueType) -> CelType {
-    match value_type {
+fn cel_type(value_type: &ValueType) -> Result<CelType, String> {
+    Ok(match value_type {
         ValueType::Null => CelType::Null,
         ValueType::Boolean => CelType::Bool,
         ValueType::Int64 => CelType::Int,
         ValueType::Float64 => CelType::Double,
         ValueType::String => CelType::String,
-        ValueType::List(inner) => CelType::list(cel_type(inner)),
-        ValueType::Map(inner) => CelType::map(CelType::String, cel_type(inner)),
-        _ => unreachable!("configuration parsing accepts only concrete CEL types"),
-    }
+        ValueType::List(inner) => CelType::list(cel_type(inner)?),
+        ValueType::Map(inner) => CelType::map(CelType::String, cel_type(inner)?),
+        _ => return Err("type must be a concrete CEL scalar, list, or map descriptor".into()),
+    })
 }
 
 fn result_type(cel_type: &CelType) -> Result<ValueType, String> {
@@ -281,9 +279,9 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
         if !valid_identifier(name) {
             return Err(invalid(format!("invalid input name `{name}`")));
         }
-        let value_type =
+        let (value_type, native_type) =
             parse_type(descriptor).map_err(|error| invalid(format!("input `{name}`: {error}")))?;
-        env = env.with_variable(name, cel_type(&value_type));
+        env = env.with_variable(name, native_type);
         inputs.insert(name.clone(), value_type);
     }
     let code = config
@@ -439,6 +437,13 @@ mod tests {
     fn reports_invalid_descriptors_and_names() {
         for (descriptor, expected) in [
             (json!({"set": "int"}), "unsupported type constructor"),
+            (json!("uint"), "type must be a concrete"),
+            (json!("usize"), "type must be a concrete"),
+            (json!({"list": "float"}), "type must be a concrete"),
+            (
+                json!({"map": {"nullable": "string"}}),
+                "type must be a concrete",
+            ),
             (json!(["int"]), "type must be"),
             (json!({"list": "int", "map": "int"}), "type must be"),
         ] {

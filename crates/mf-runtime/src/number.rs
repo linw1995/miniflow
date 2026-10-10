@@ -1,6 +1,73 @@
 use serde_json::Number;
 use std::cmp::Ordering;
 
+fn integer_fits_float(magnitude: u64, precision: u32) -> bool {
+    u64::BITS - magnitude.leading_zeros() <= precision + magnitude.trailing_zeros()
+}
+
+fn integral_in_range(value: f64, range: std::ops::Range<f64>) -> bool {
+    value.is_finite()
+        && value.fract() == 0.0
+        && range.contains(&value)
+        && value.to_bits() != (-0.0_f64).to_bits()
+}
+
+/// Converts to i64 only when the number is integral and its value and sign are preserved.
+pub fn number_to_i64(number: &Number) -> Option<i64> {
+    if let Some(value) = number.as_i64() {
+        return Some(value);
+    }
+    let value = number.as_f64().filter(|_| number.is_f64())?;
+    integral_in_range(
+        value,
+        -9_223_372_036_854_775_808.0..9_223_372_036_854_775_808.0,
+    )
+    .then_some(value as i64)
+}
+
+/// Converts to u64 without fractional loss, saturation, or loss of negative zero.
+pub fn number_to_u64(number: &Number) -> Option<u64> {
+    if let Some(value) = number.as_u64() {
+        return Some(value);
+    }
+    let value = number.as_f64().filter(|_| number.is_f64())?;
+    integral_in_range(value, 0.0..18_446_744_073_709_551_616.0).then_some(value as u64)
+}
+
+pub fn number_to_usize(number: &Number) -> Option<usize> {
+    usize::try_from(number_to_u64(number)?).ok()
+}
+
+/// Converts to f64 only when integer significand bits are preserved.
+pub fn number_to_f64(number: &Number) -> Option<f64> {
+    if number.is_f64() {
+        return number.as_f64().filter(|value| value.is_finite());
+    }
+    let magnitude = number
+        .as_i64()
+        .map(i64::unsigned_abs)
+        .or_else(|| number.as_u64())?;
+    integer_fits_float(magnitude, f64::MANTISSA_DIGITS)
+        .then(|| number.as_f64())
+        .flatten()
+}
+
+pub fn number_to_f32(number: &Number) -> Option<f32> {
+    if number.is_f64() {
+        let value = number.as_f64()?;
+        let narrowed = value as f32;
+        return (narrowed.is_finite() && f64::from(narrowed).to_bits() == value.to_bits())
+            .then_some(narrowed);
+    }
+    let magnitude = number
+        .as_i64()
+        .map(i64::unsigned_abs)
+        .or_else(|| number.as_u64())?;
+    integer_fits_float(magnitude, f32::MANTISSA_DIGITS)
+        .then(|| number.as_f64().map(|value| value as f32))
+        .flatten()
+}
+
 struct Decimal {
     negative: bool,
     digits: Vec<u8>,
@@ -9,7 +76,15 @@ struct Decimal {
 
 impl Decimal {
     fn from_number(number: &Number) -> Self {
-        let text = number.to_string();
+        let text = if number.is_f64() {
+            // Shortest float formatting can spell an exact large integer differently.
+            number_to_i64(number)
+                .map(|value| value.to_string())
+                .or_else(|| number_to_u64(number).map(|value| value.to_string()))
+                .unwrap_or_else(|| number.to_string())
+        } else {
+            number.to_string()
+        };
         let negative = text.starts_with('-');
         let unsigned = text.trim_start_matches('-');
         let (coefficient, exponent) = unsigned
@@ -82,6 +157,26 @@ mod tests {
                 Ordering::Less,
             ),
             ("1", "1.0", Ordering::Equal),
+            (
+                "9223372036854775808",
+                "9.223372036854776e18",
+                Ordering::Equal,
+            ),
+            (
+                "9223372036854775809",
+                "9.223372036854776e18",
+                Ordering::Greater,
+            ),
+            (
+                "-9223372036854775808",
+                "-9.223372036854776e18",
+                Ordering::Equal,
+            ),
+            (
+                "18446744073709549568",
+                "1.844674407370955e19",
+                Ordering::Equal,
+            ),
             ("-0.0", "0", Ordering::Equal),
             ("0", "1e-300", Ordering::Less),
             ("-1e-300", "0", Ordering::Less),
