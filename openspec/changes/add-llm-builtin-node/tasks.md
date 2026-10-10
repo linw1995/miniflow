@@ -25,12 +25,12 @@
 
 ## 4. Execute terminal generation
 
-- [ ] 4.1 Register a complete typed task factory and implement explicit unary Chat Completions calls with execution-time credential lookup, reusable transport, and per-invocation state; verify discovery only when linked, credential-free preparation, startup interfaces, API prefixes, authorization, model, history order, system placement, generation parameters, and no endpoint environment overrides.
-- [ ] 4.2 Convert complete text, updated history, optional usage, and finish reasons atomically; verify append-once history, ordered text blocks, absent and sparse counters, signed count overflow, unknown finish reasons, token truncation, tool-call rejection, and empty output.
-- [ ] 4.3 Enforce the invocation deadline, workflow cancellation, and postdecode output limit; verify stalled headers and bodies, cancellation drop, initialization deadline expiry, and no publication after failure.
-- [ ] 4.4 Disable redirects and request retries and preserve typed provider failures with safe diagnostic display; verify missing or empty credentials, one request on rate limits and server errors, no redirect target access, malformed replies, and diagnostic redaction.
-- [ ] 4.5 Exercise repeated and parallel invocations with a local mock and document resource and output-limit boundaries; verify separate explicit transcripts, fresh conversations when history is omitted, existing concurrency limits, runtime and client reuse, and no node-owned conversation state.
-- [ ] 4.6 Validate nonempty prompts and explicit histories before network I/O; verify omitted and empty history, null or malformed entries, unsupported roles, empty content, indexed diagnostics, unchanged caller input, and no implicit history trimming.
+- [x] 4.1 Register a complete typed task factory and implement explicit unary Chat Completions calls with execution-time credential lookup, reusable transport, and per-invocation state; verify discovery only when linked, credential-free preparation, startup interfaces, API prefixes, authorization, model, history order, system placement, generation parameters, and no endpoint environment overrides.
+- [x] 4.2 Convert complete text, updated history, optional usage, and finish reasons atomically; verify append-once history, ordered text blocks, absent and sparse counters, signed count overflow, unknown finish reasons, token truncation, tool-call rejection, and empty output.
+- [x] 4.3 Enforce the invocation deadline, workflow cancellation, and postdecode output limit; verify stalled headers and bodies, cancellation drop, initialization deadline expiry, and no publication after failure.
+- [x] 4.4 Disable redirects and request retries and preserve typed provider failures with safe diagnostic display; verify missing or empty credentials, one request on rate limits and server errors, no redirect target access, malformed replies, and diagnostic redaction.
+- [x] 4.5 Exercise repeated and parallel invocations with a local mock and document resource and output-limit boundaries; verify separate explicit transcripts, fresh conversations when history is omitted, existing concurrency limits, runtime and client reuse, and no node-owned conversation state.
+- [x] 4.6 Validate nonempty prompts and explicit histories before network I/O; verify omitted and empty history, null or malformed entries, unsupported roles, empty content, indexed diagnostics, unchanged caller input, and no implicit history trimming.
 
 ## 5. Integrate compiled runners and packaging
 

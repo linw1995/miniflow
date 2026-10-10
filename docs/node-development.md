@@ -111,6 +111,8 @@ Providers needing asynchronous operations enable `mf-runtime/async` and call
 The facility drives the owned future on the invoking synchronous thread, honoring workflow cancellation and
 deadlines before polling or returning its result. Provider errors remain the future's result; infrastructure
 errors retain typed sources in `FutureExecutionError`. Ordinary result conversion and publication still follow.
+Providers can call `ExecutionContext::check_future_limits(deadline)` between synchronous setup and conversion phases
+without initializing a backend.
 
 The default runtime features contain no future executor. `async` uses a portable blocking executor without
 adding Tokio. The optional `tokio` feature also enables `async`, selecting a lazy managed runtime shared by

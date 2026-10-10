@@ -240,6 +240,15 @@ impl Default for ExecutionContext {
 }
 
 impl ExecutionContext {
+    /// Checks an operation's limits between synchronous setup or conversion phases.
+    #[cfg(feature = "async")]
+    pub fn check_future_limits(
+        &self,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<(), crate::FutureExecutionError> {
+        crate::future_execution::check_limits(&self.cancellation, deadline)
+    }
+
     /// Drives an owned operation on the calling synchronous thread.
     /// Async hosts must invoke synchronous workflow APIs on a blocking thread.
     #[cfg(feature = "async")]

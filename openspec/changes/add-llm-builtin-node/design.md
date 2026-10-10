@@ -99,6 +99,10 @@ Reuse the existing cancellation handle and a bounded waiter registration strateg
 
 Use `rig-core = =0.43.0` with default features disabled and explicitly enable `reqwest` and `rustls` in `mfn-llm`. Select a compatible configured `rig-reqwest` client for endpoint, redirect, and timeout policy. Keep dependency versions and default-feature policy in the workspace. No agent runtime, websocket transport, embeddings, or vector-store integration is needed.
 
+Use a per-invocation HTTP metadata adapter for partial Chat usage: Rig 0.43.0 requires three counts when wire usage is present. Capture the reported optional counters separately and omit only partial usage from the body Rig decodes. Complete usage retains Rig's ordinary decoding path. Do not insert zeroes for missing counts or implement another completion protocol.
+
+Disable idle pooling in the reusable client because a prepared node can survive successive managed reactor scopes.
+
 The package follows ordinary dependency selection and inventory retention. Update release-support scripts, package fixture enumeration, plugin documentation, and license auditing alongside the new crate. Generated build and runtime preparation must reflect identical ports despite different credential environments. A workflow binary still needs network access and credentials at execution; it does not need Cargo or source files.
 
 ## Risks and tradeoffs

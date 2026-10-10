@@ -46,6 +46,7 @@ opentelemetry_sdk = { version = "0.33.0", default-features = false }
 prost = "0.14.4"
 
 # Async execution and HTTP transport.
+bytes = "1.12.1"
 futures = { version = "0.3.34", default-features = false }
 futures-timer = "3.0.4"
 http-body-util = "0.1.5"

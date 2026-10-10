@@ -2,7 +2,7 @@
 
 ## Scope
 
-This verification records the published Rig 0.43.0 integration boundary and completed implementation groups. Optional future execution and the LLM configuration and value contracts are implemented; executable factory registration, provider calls, and packaging remain tracked in [tasks.md](tasks.md).
+This verification records the published Rig 0.43.0 integration boundary and completed implementation groups. Optional future execution and terminal LLM conversations are implemented; compiled-workflow integration and packaging remain tracked in [tasks.md](tasks.md).
 
 ## Published source inspection
 
@@ -75,3 +75,15 @@ Focused checks use `cargo test -p mf-runtime --features async --test future_exec
 `mfn-llm` pins Rig 0.43.0 and explicitly selects native HTTP and rustls transport features. Five focused tests verify static defaults, valid custom configuration, malformed or unknown settings, nested history diagnostics, reflected requiredness and types, optional output omission, credential-free validation, and typed URL sources. Both default and managed-feature builds compile.
 
 Configuration and contracts land before executable factory registration. This preserves buildable intermediate commits without exposing a placeholder executor. The current prompt and message text are nonempty so successful output history can be passed to the next invocation unchanged. No live model endpoint or real credential is used in this group.
+
+## Terminal LLM conversations
+
+The executable `builtin.llm` factory prepares its typed contracts without acquiring credentials, clients, or runtimes. The reusable client disables redirects, retries, and idle pooling; credentials and per-invocation transcripts are resolved during execution. Shared limit checkpoints protect synchronous setup and conversion around the awaited call.
+
+Eight unit tests and twelve behavior tests pass with both default portable execution and the optional managed backend. The ignored subprocess entry point is invoked by the behavior tests to isolate credential environments.
+
+Coverage includes explicit two-turn history, fresh contexts with one prepared node, concurrent calls, missing and empty credentials, invalid histories, absent and partial metadata, unknown reasons, token truncation, signed-count overflow, and UTF-8 output limits. It also checks malformed and unsupported replies, redirects, one request on provider failures, header/body deadlines, cancellation, and safe Display/Debug formatting with retained typed sources.
+
+The HTTP fixture uses loopback servers and synthetic keys. Accepted sockets explicitly return to blocking mode on Darwin. Subprocesses bypass proxies for loopback so system proxy settings do not change the asserted provider response. Rig's strict wire usage parser is adapted only for partial counters; complete metadata retains ordinary SDK decoding.
+
+The full native Nix check for the runtime foundation passes all 497 tests after enabling test-only Darwin local networking. Final integration checks must run again after group 5.

@@ -108,7 +108,7 @@ impl FutureExecutor {
     }
 }
 
-fn check_limits(
+pub fn check_limits(
     cancellation: &StreamCancellation,
     deadline: Option<Instant>,
 ) -> Result<(), FutureExecutionError> {

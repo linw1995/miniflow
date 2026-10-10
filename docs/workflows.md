@@ -67,6 +67,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
 | `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |
+| `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `prompt`; optional `system` and `history` | Required `text` and updated `history`; optional `usage` and `finish_reason` |
 
 The built-in Loop is registered as `workflow.loop`. Its settings belong in the node's top-level `loop`
 field; omit `config` or leave it empty. See [Structured Loop](#structured-loop) for its body and control kinds.
@@ -128,7 +129,7 @@ when compiling outside the checkout.
 
 ### LLM configuration and conversation values
 
-The opt-in `mfn-llm` package defines fixed conversation contracts for terminal text generation:
+The opt-in `mfn-llm` package registers `builtin.llm`, an ordinary task producing one terminal result:
 
 | Direction | Port | Type | Required |
 | --- | --- | --- | --- |
@@ -170,6 +171,30 @@ or contacting the endpoint. Value structs use the runtime's nested object codecs
 diagnostics. Optional output metadata is omitted when absent rather than encoded as JSON null. The package's optional
 `tokio` feature forwards the workflow-managed backend; its native HTTP transport still depends on Tokio with that
 feature disabled.
+
+Preparation and manifest inspection do not read the credential environment variable or contact the provider.
+Execution reads the variable for each invocation, so credential rotation does not require recompiling a workflow.
+Requests use Chat Completions at the configured prefix's `/chat/completions` route; `OPENAI_BASE_URL` does not override
+that configured endpoint. The node reuses a configured HTTP client, disables redirects and automatic retries, and
+disables idle connection pooling so prepared nodes can outlive earlier workflow-managed reactors.
+
+Request messages are optional system instructions, the supplied history in order, and the current user prompt.
+On success, returned history preserves the supplied records and appends the current user prompt and complete assistant
+text once each. System instructions are excluded and must be supplied again for each turn. The node does not retain
+conversation state, automatically trim history, or execute tool calls. Unsupported history roles and response content
+fail rather than being silently rewritten. A nonempty reply truncated at its token limit retains the `length` reason.
+
+`usage` contains available `input_tokens`, `output_tokens`, and `total_tokens` counters; unreported counts do not become
+zero. Compatible services reporting partial wire usage are adapted without changing Rig's message protocol. Unknown
+finish reasons retain their provider value. Select optional metadata as optional workflow outputs when a provider may
+omit it. Credential and provider errors retain typed sources while diagnostic display omits credential values and
+arbitrary remote bodies.
+
+The deadline covers setup and waiting for a terminal reply, and limit checks also run before returning converted data.
+Cancellation or failure returns no outputs or updated history. Synchronous setup and conversion cannot be forcibly
+preempted. The reply-byte limit is checked after unary buffering and decoding and does not bound transport memory or
+the full transcript. Workflow concurrency limits bound invocations; waiting on the model still occupies a synchronous
+workflow thread. Async hosts use a blocking thread for synchronous workflow entry points.
 
 ## Structured Loop
 
