@@ -34,7 +34,10 @@ fn source_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildE
         inputs: vec![],
         outputs: vec![PortSpec::new("value", ValueType::Number, true)],
     });
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 fn sink_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
@@ -43,7 +46,10 @@ fn sink_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildErr
         inputs: vec![PortSpec::new("value", ValueType::Number, true)],
         outputs: vec![PortSpec::new("received", ValueType::Number, true)],
     });
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 inventory::submit! {

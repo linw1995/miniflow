@@ -51,15 +51,15 @@ impl EventNode for Collector {
 }
 
 fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
-    Ok(PreparedNode::event(
-        Collector {
+    Ok(PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Event(Box::new(Collector {
             values: Vec::new(),
             max_items: config["max_items"]
                 .as_u64()
                 .map_or(usize::MAX, |n| n as usize),
             wait: Duration::from_millis(config["max_wait_ms"].as_u64().unwrap_or(100)),
             _not_sync: Cell::new(()),
-        },
+        })),
         NodePorts {
             inputs: vec![PortSpec::new("item", ValueType::Any, true)],
             outputs: vec![PortSpec::new("items", ValueType::Array, true)],

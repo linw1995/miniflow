@@ -1330,12 +1330,12 @@ mod tests {
         }
         FlowNode::new(
             name,
-            crate::PreparedNode::new(
-                TestNode {
+            crate::PreparedNode::from_parts(
+                mf_runtime::NodeExecution::Task(Box::new(TestNode {
                     name,
                     action,
                     trace: Arc::clone(trace),
-                },
+                })),
                 ports,
             ),
         )
@@ -1357,8 +1357,8 @@ mod tests {
                 let source = |id, port| {
                     FlowNode::new(
                         id,
-                        crate::PreparedNode::new(
-                            EmptyNode,
+                        crate::PreparedNode::from_parts(
+                            mf_runtime::NodeExecution::Task(Box::new(EmptyNode)),
                             crate::NodePorts {
                                 inputs: Vec::new(),
                                 outputs: vec![crate::PortSpec::new(
@@ -1398,8 +1398,8 @@ mod tests {
             let source = |id| {
                 FlowNode::new(
                     id,
-                    crate::PreparedNode::new(
-                        EmptyNode,
+                    crate::PreparedNode::from_parts(
+                        mf_runtime::NodeExecution::Task(Box::new(EmptyNode)),
                         crate::NodePorts {
                             inputs: Vec::new(),
                             outputs: vec![crate::PortSpec::new(
@@ -1632,11 +1632,11 @@ mod tests {
         let node = |id, value| {
             FlowNode::new(
                 id,
-                crate::PreparedNode::new(
-                    RendezvousNode {
+                crate::PreparedNode::from_parts(
+                    mf_runtime::NodeExecution::Task(Box::new(RendezvousNode {
                         value,
                         gate: Arc::clone(&gate),
-                    },
+                    })),
                     crate::NodePorts {
                         inputs: Vec::new(),
                         outputs: vec![crate::PortSpec::new(
@@ -1676,11 +1676,11 @@ mod tests {
             let node = |id: &str| {
                 FlowNode::new(
                     id,
-                    crate::PreparedNode::new(
-                        NestedWorkNode {
+                    crate::PreparedNode::from_parts(
+                        mf_runtime::NodeExecution::Task(Box::new(NestedWorkNode {
                             active: Arc::clone(&active),
                             peak: Arc::clone(&peak),
-                        },
+                        })),
                         crate::NodePorts::default(),
                     ),
                 )
@@ -1740,7 +1740,10 @@ mod tests {
         let error = build_flow(
             vec![FlowNode::new(
                 "known",
-                crate::PreparedNode::new(EmptyNode, crate::NodePorts::default()),
+                crate::PreparedNode::from_parts(
+                    mf_runtime::NodeExecution::Task(Box::new(EmptyNode)),
+                    crate::NodePorts::default(),
+                ),
             )],
             Vec::new(),
             order(&["missing"]),
@@ -1766,11 +1769,17 @@ mod tests {
             vec![
                 FlowNode::new(
                     "source",
-                    crate::PreparedNode::new(EmptyNode, crate::NodePorts::default()),
+                    crate::PreparedNode::from_parts(
+                        mf_runtime::NodeExecution::Task(Box::new(EmptyNode)),
+                        crate::NodePorts::default(),
+                    ),
                 ),
                 FlowNode::new(
                     "sink",
-                    crate::PreparedNode::new(EmptyNode, crate::NodePorts::default()),
+                    crate::PreparedNode::from_parts(
+                        mf_runtime::NodeExecution::Task(Box::new(EmptyNode)),
+                        crate::NodePorts::default(),
+                    ),
                 ),
             ],
             vec![edge("source", "value", "sink", "input")],
@@ -1791,7 +1800,10 @@ mod tests {
         let connection_error = build_flow(
             vec![FlowNode::new(
                 "known",
-                crate::PreparedNode::new(EmptyNode, crate::NodePorts::default()),
+                crate::PreparedNode::from_parts(
+                    mf_runtime::NodeExecution::Task(Box::new(EmptyNode)),
+                    crate::NodePorts::default(),
+                ),
             )],
             vec![edge("missing", "value", "known", "input")],
             order(&["known"]),
@@ -1808,7 +1820,10 @@ mod tests {
         let output_error = build_flow(
             vec![FlowNode::new(
                 "known",
-                crate::PreparedNode::new(EmptyNode, crate::NodePorts::default()),
+                crate::PreparedNode::from_parts(
+                    mf_runtime::NodeExecution::Task(Box::new(EmptyNode)),
+                    crate::NodePorts::default(),
+                ),
             )],
             Vec::new(),
             order(&["known"]),

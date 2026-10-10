@@ -46,9 +46,15 @@ fn prepare(config: Value) -> Result<PreparedNode, NodeBuildError> {
         })
     };
     Ok(if config["stream"].as_bool().unwrap_or(false) {
-        PreparedNode::stream(NeverRun, metadata)
+        PreparedNode::from_parts(
+            mf_runtime::NodeExecution::Stream(Box::new(NeverRun)),
+            metadata,
+        )
     } else {
-        PreparedNode::new(NeverRun, metadata)
+        PreparedNode::from_parts(
+            mf_runtime::NodeExecution::Task(Box::new(NeverRun)),
+            metadata,
+        )
     })
 }
 

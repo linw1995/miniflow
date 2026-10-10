@@ -73,7 +73,8 @@ mod tests {
             let registration = registry.get(CONSTANT_KIND).unwrap();
             let node = registration.instantiate(json!({"value": value})).unwrap();
             let ports = &node.metadata.ports;
-            assert_eq!(ports.outputs[0].value_type, expected);
+            assert_eq!(ports.outputs[0].value_type, ValueType::Any);
+            assert_eq!(ValueType::infer_json(&value), expected);
             assert_eq!(
                 node.metadata.output_derivations,
                 vec![OutputDerivation::literal("value", value)]

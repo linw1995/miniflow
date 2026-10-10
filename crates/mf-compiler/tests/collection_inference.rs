@@ -42,9 +42,15 @@ fn node(
             outputs: vec![PortSpec::new("value", output, true)],
         })
     };
-    FlowNode::new(id, mf_runtime::PreparedNode::new(evidence, metadata))
-        .into_task()
-        .unwrap()
+    FlowNode::new(
+        id,
+        mf_runtime::PreparedNode::from_parts(
+            mf_runtime::NodeExecution::Task(Box::new(evidence)),
+            metadata,
+        ),
+    )
+    .into_task()
+    .unwrap()
 }
 
 fn dependency(source_node: &str) -> ExecutionDependency<'_> {
@@ -157,6 +163,25 @@ fn collection_metadata_rejects_invalid_ports_types_and_excessive_depth() {
             OutputDerivation::collect_input("value", "input"),
         ),
         (
+            ValueType::Any,
+            ValueType::String,
+            OutputDerivation::known_type("value", ValueType::Int64),
+        ),
+        (
+            ValueType::Any,
+            ValueType::Any,
+            OutputDerivation::known_type("missing", ValueType::Int64),
+        ),
+        (
+            ValueType::Any,
+            ValueType::Any,
+            OutputDerivation::known_type(
+                "value",
+                (0..ValueType::MAX_DEPTH)
+                    .fold(ValueType::Int64, |ty, _| ValueType::List(Box::new(ty))),
+            ),
+        ),
+        (
             (1..ValueType::MAX_DEPTH).fold(ValueType::Int64, |ty, _| ValueType::List(Box::new(ty))),
             ValueType::Array,
             OutputDerivation::collect_input("value", "input"),
@@ -177,4 +202,30 @@ fn collection_metadata_rejects_invalid_ports_types_and_excessive_depth() {
             .to_string();
         assert!(error.contains("collect"), "{error}");
     }
+}
+
+#[test]
+fn known_type_evidence_narrows_reflected_ports_and_keeps_runtime_validation() {
+    let mut source = node(
+        "source",
+        None,
+        ValueType::Any,
+        Evidence {
+            value: Some("invalid".into()),
+            derivation: Some(OutputDerivation::known_type("value", ValueType::Int64)),
+        },
+    );
+    TypeInferenceState::default()
+        .resolve_node(&mut source, &[])
+        .unwrap();
+    assert_eq!(
+        source.metadata.ports.outputs[0].value_type,
+        ValueType::Int64
+    );
+    let error =
+        execute_node_in_context(&source, &[], &mut ExecutionContext::default()).unwrap_err();
+    assert!(matches!(
+        error,
+        mf_runtime::WorkflowRunError::OutputType { .. }
+    ));
 }

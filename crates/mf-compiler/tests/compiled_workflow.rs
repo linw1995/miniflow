@@ -49,7 +49,10 @@ fn constant_factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuild
         inputs: vec![],
         outputs: vec![PortSpec::new("value", ValueType::Number, true)],
     });
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 fn increment_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
@@ -58,7 +61,10 @@ fn increment_factory(_config: Value) -> Result<mf_runtime::PreparedNode, NodeBui
         inputs: vec![PortSpec::new("input", ValueType::Number, true)],
         outputs: vec![PortSpec::new("value", ValueType::Number, true)],
     });
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 inventory::submit! {

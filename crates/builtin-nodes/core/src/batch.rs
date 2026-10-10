@@ -1,15 +1,12 @@
 use mf_runtime::{
-    BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeBuildError,
-    NodeEvent, NodeExecutionError, NodeRegistration, NodeValue, OutputDerivation, TimerUpdate,
-    ValueRef, ValueType, deserialize_config, encode_typed_result,
+    BatchInfo, EventContext, EventEffects, EventEmission, FlushReason, NodeBuildError, NodeEvent,
+    NodeExecutionError, NodeRegistration, NodeValue, OutputDerivation, TimerUpdate, TypedEventNode,
+    ValueRef, deserialize_config,
 };
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
-use snafu::{OptionExt, ResultExt, Snafu};
-use std::{
-    error::Error,
-    time::{Duration, Instant},
-};
+use snafu::OptionExt;
+use std::time::{Duration, Instant};
 
 pub const KIND: &str = "builtin.batch";
 
@@ -21,18 +18,6 @@ struct BatchInputs {
 #[derive(NodeValue)]
 struct BatchOutputs {
     items: Vec<ValueRef>,
-}
-
-#[derive(Debug, Snafu)]
-#[snafu(display("could not decode batch inputs: {source}"))]
-struct BatchInputError {
-    source: mf_runtime::InputDecodeError,
-}
-
-impl From<BatchInputError> for NodeExecutionError {
-    fn from(source: BatchInputError) -> Self {
-        Box::<dyn Error + Send + Sync>::from(source).into()
-    }
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -71,18 +56,13 @@ fn max_wait_ms<'de, D: Deserializer<'de>>(deserializer: D) -> Result<u64, D::Err
 
 fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let config = deserialize_config(config)?;
-    let mut outputs = BatchOutputs::ports();
-    outputs[0].value_type = ValueType::Array;
-    Ok(mf_runtime::PreparedNode::event(
+    mf_runtime::PreparedNode::typed_event(
         BatchState::new(config),
         mf_runtime::NodeMetadata {
             output_derivations: vec![OutputDerivation::collect_input("items", "item")],
-            ..mf_runtime::NodeMetadata::new(mf_runtime::NodePorts {
-                inputs: BatchInputs::ports(),
-                outputs,
-            })
+            ..Default::default()
         },
-    ))
+    )
 }
 
 inventory::submit! { NodeRegistration {
@@ -109,38 +89,35 @@ impl BatchState {
         self.deadline.is_some_and(|deadline| deadline <= now)
     }
 
-    fn seal(
-        &mut self,
-        reason: FlushReason,
-        emissions: &mut Vec<EventEmission>,
-    ) -> Result<(), NodeExecutionError> {
+    fn seal(&mut self, reason: FlushReason, emissions: &mut Vec<EventEmission<BatchOutputs>>) {
         if self.items.is_empty() {
-            return Ok(());
+            return;
         }
         let item_count = self.items.len();
         let items = std::mem::take(&mut self.items);
         self.deadline = None;
         emissions.push(EventEmission {
-            result: encode_typed_result(BatchOutputs { items }.into())?,
+            result: BatchOutputs { items }.into(),
             batch: Some(BatchInfo { item_count, reason }),
         });
-        Ok(())
     }
 }
 
-impl EventNode for BatchState {
+impl TypedEventNode for BatchState {
+    type Input = BatchInputs;
+    type Output = BatchOutputs;
+
     fn on_event(
         &mut self,
-        event: NodeEvent,
+        event: NodeEvent<Self::Input>,
         context: &EventContext<'_>,
-    ) -> Result<EventEffects, NodeExecutionError> {
+    ) -> Result<EventEffects<Self::Output>, NodeExecutionError> {
         let mut emissions = Vec::new();
         match event {
             NodeEvent::Input(inputs) => {
-                let BatchInputs { item } =
-                    BatchInputs::from_values(inputs).context(BatchInputSnafu)?;
+                let BatchInputs { item } = inputs;
                 if self.due(context.now) {
-                    self.seal(FlushReason::TimeoutExceed, &mut emissions)?;
+                    self.seal(FlushReason::TimeoutExceed, &mut emissions);
                 }
                 if self.items.is_empty() {
                     let at = context
@@ -153,12 +130,12 @@ impl EventNode for BatchState {
                 }
                 self.items.push(item);
                 if self.items.len() >= self.config.max_items {
-                    self.seal(FlushReason::SizeExceed, &mut emissions)?;
+                    self.seal(FlushReason::SizeExceed, &mut emissions);
                 }
             }
             NodeEvent::Timer => {
                 if self.due(context.now) {
-                    self.seal(FlushReason::TimeoutExceed, &mut emissions)?;
+                    self.seal(FlushReason::TimeoutExceed, &mut emissions);
                 }
             }
             NodeEvent::UpstreamClosed => {
@@ -167,7 +144,7 @@ impl EventNode for BatchState {
                 } else {
                     FlushReason::UpstreamClosed
                 };
-                self.seal(reason, &mut emissions)?;
+                self.seal(reason, &mut emissions);
             }
         }
         Ok(EventEffects {
@@ -186,7 +163,7 @@ impl EventNode for BatchState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mf_runtime::Inputs;
+    use mf_runtime::{Inputs, execute_typed_event};
     use serde_json::json;
 
     fn batch(max_items: usize) -> BatchState {
@@ -199,15 +176,15 @@ mod tests {
         NodeEvent::Input(Inputs::from([("item".into(), value.into())]))
     }
     fn event(batch: &mut BatchState, event: NodeEvent, milliseconds: u64) -> EventEffects {
-        batch
-            .on_event(
-                event,
-                &EventContext {
-                    now: Duration::from_millis(milliseconds),
-                    input: None,
-                },
-            )
-            .unwrap()
+        execute_typed_event(
+            batch,
+            event,
+            &EventContext {
+                now: Duration::from_millis(milliseconds),
+                input: None,
+            },
+        )
+        .unwrap()
     }
     fn values(effects: &EventEffects) -> Vec<ValueRef> {
         effects
@@ -220,10 +197,7 @@ mod tests {
     #[test]
     fn configuration_requires_positive_representable_limits() {
         let prepared = factory(json!({"max_items":1, "max_wait_ms":1})).unwrap();
-        assert_eq!(
-            prepared.metadata.ports.outputs[0].value_type,
-            ValueType::Array
-        );
+        assert_eq!(prepared.metadata.ports.outputs, BatchOutputs::ports());
         for field in ["max_items", "max_wait_ms"] {
             for invalid in [json!(0), json!(-1), json!(1.5), json!("1"), Value::Null] {
                 let mut config = json!({"max_items":3, "max_wait_ms":100});
@@ -277,21 +251,19 @@ mod tests {
         let first = event(&mut state, input(json!(1)), 10);
         assert_eq!(first.timer, TimerUpdate::Set(Duration::from_millis(110)));
         assert_eq!(event(&mut state, input(json!(2)), 100).timer, first.timer);
-        let error = state
-            .on_event(
-                NodeEvent::Input(Inputs::new()),
-                &EventContext {
-                    now: Duration::from_millis(110),
-                    input: None,
-                },
-            )
-            .unwrap_err();
-        let source = error
-            .source()
-            .unwrap()
-            .downcast_ref::<BatchInputError>()
-            .unwrap();
-        assert_eq!(source.source.pointer(), "/item");
+        let error = execute_typed_event(
+            &mut state,
+            NodeEvent::Input(Inputs::new()),
+            &EventContext {
+                now: Duration::from_millis(110),
+                input: None,
+            },
+        )
+        .unwrap_err();
+        let NodeExecutionError::InputDecode { source } = error else {
+            panic!("expected runtime input decoding failure");
+        };
+        assert_eq!(source.pointer(), "/item");
         assert_eq!(state.items.len(), 2);
         assert_eq!(state.deadline, Some(Duration::from_millis(110)));
         let early = event(&mut state, NodeEvent::Timer, 109);
@@ -393,15 +365,15 @@ mod tests {
     fn deadline_overflow_fails_before_accepting_the_item() {
         let mut state = batch(2);
         assert!(
-            state
-                .on_event(
-                    input(json!(1)),
-                    &EventContext {
-                        now: Duration::MAX,
-                        input: None
-                    }
-                )
-                .is_err()
+            execute_typed_event(
+                &mut state,
+                input(json!(1)),
+                &EventContext {
+                    now: Duration::MAX,
+                    input: None
+                }
+            )
+            .is_err()
         );
         assert!(state.items.is_empty());
     }

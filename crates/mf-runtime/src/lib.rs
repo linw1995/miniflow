@@ -60,8 +60,8 @@ pub use node::{
     ContextReference, ExecutionFailedSnafu as NodeExecutionFailedSnafu,
     FactoryFailedSnafu as NodeFactoryFailedSnafu, Inputs,
     InvalidSubgraphSnafu as NodeInvalidSubgraphSnafu, NodeBuildError, NodeExecution,
-    NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration, NodeValue,
-    NodeValues, OutputDerivation, OutputDerivationError, Outputs,
+    NodeExecutionError, NodeFactory, NodeMetadata, NodePortContract, NodePorts, NodeRegistration,
+    NodeValue, NodeValues, OutputDerivation, OutputDerivationError, Outputs,
     PluginFailedSnafu as NodePluginFailedSnafu, PortSpec, PreparedNode, TaskNode,
     TypeCompatibility, TypeDepthError, TypeMismatch, TypeMismatchDetails, TypedTaskNode, ValueType,
     deserialize_config, encode_typed_result, execute_typed_task, output_id, port_names_match,
@@ -76,7 +76,8 @@ pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::WorkflowRunError;
 pub use stream::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
-    StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate,
+    StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate, TypedEventNode,
+    TypedStreamNode, execute_typed_event,
 };
 pub use stream_instance::{
     Emitter, MessageId, MonotonicClock, StreamClock, StreamDelivery, StreamError, StreamInstance,

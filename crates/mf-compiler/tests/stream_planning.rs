@@ -23,8 +23,7 @@ inventory::submit! {
     NodeRegistration {
         kind: "test.collect",
         factory: mf_runtime::NodeFactory::Plain(|_| {
-            Ok(mf_runtime::PreparedNode::event(
-                Collector,
+            Ok(mf_runtime::PreparedNode::from_parts(mf_runtime::NodeExecution::Event(Box::new(Collector)),
                 mf_runtime::NodePorts {
                         inputs: vec![PortSpec::new("item", ValueType::Any, true)],
                         outputs: vec![PortSpec::new("items", ValueType::Array, true)],
@@ -48,8 +47,7 @@ inventory::submit! {
     NodeRegistration {
         kind: "test.join",
         factory: mf_runtime::NodeFactory::Plain(|_| {
-            Ok(mf_runtime::PreparedNode::new(
-                Join,
+            Ok(mf_runtime::PreparedNode::from_parts(mf_runtime::NodeExecution::Task(Box::new(Join)),
                 mf_runtime::NodePorts {
                         inputs: vec![
                             PortSpec::new("left", ValueType::Any, true),

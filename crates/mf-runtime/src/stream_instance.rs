@@ -1711,8 +1711,8 @@ mod tests {
             vec![
                 crate::FlowNode::new(
                     "start",
-                    crate::PreparedNode::new(
-                        Start,
+                    crate::PreparedNode::from_parts(
+                        crate::NodeExecution::Task(Box::new(Start)),
                         crate::NodePorts {
                             inputs: Vec::new(),
                             outputs: vec![crate::PortSpec::new(
@@ -1725,7 +1725,10 @@ mod tests {
                 ),
                 crate::FlowNode::new(
                     "timer",
-                    crate::PreparedNode::event(Timer, crate::NodeMetadata::default()),
+                    crate::PreparedNode::from_parts(
+                        crate::NodeExecution::Event(Box::new(Timer)),
+                        crate::NodeMetadata::default(),
+                    ),
                 ),
             ],
             vec![

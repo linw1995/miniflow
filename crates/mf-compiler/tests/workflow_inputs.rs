@@ -41,8 +41,8 @@ fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
         mf_runtime::deserialize_config(config["inputs"].clone())?;
     let stdin =
         mf_runtime::deserialize_config(config.get("stdin").cloned().unwrap_or(Value::Null))?;
-    Ok(PreparedNode::new(
-        Echo,
+    Ok(PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(Echo)),
         NodeMetadata {
             stdin,
             ..NodeMetadata::new(NodePorts {
@@ -71,7 +71,7 @@ impl mf_runtime::StreamNode for Source {
 }
 inventory::submit! { NodeRegistration { kind: "test.startup_source", factory: NodeFactory::Plain(|config| {
     let prepared = factory(config)?;
-    Ok(PreparedNode::stream(Source, prepared.metadata))
+    Ok(PreparedNode::from_parts(mf_runtime::NodeExecution::Stream(Box::new(Source)), prepared.metadata))
 }) } }
 
 fn definition(nodes: Value) -> WorkflowDefinition {
@@ -268,8 +268,13 @@ fn describes_dynamic_source_inputs_and_exclusive_resources_without_execution() {
 #[test]
 fn source_contracts_use_ports_and_node_ids_without_special_input_names() {
     let prepared = factory(json!({"inputs":{"path":{"type":"string", "required":true}}})).unwrap();
-    let source =
-        mf_runtime::FlowNode::new("%input", PreparedNode::stream(Source, prepared.metadata));
+    let source = mf_runtime::FlowNode::new(
+        "%input",
+        PreparedNode::from_parts(
+            mf_runtime::NodeExecution::Stream(Box::new(Source)),
+            prepared.metadata,
+        ),
+    );
     let schema = mf_compiler::workflow_input_schema([(&source, true)], |_, _| false).unwrap();
     schema
         .validate(&WorkflowArguments::try_from(json!({"%input":{"path":"/missing/file"}})).unwrap())

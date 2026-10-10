@@ -51,7 +51,10 @@ fn omit_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
         inputs: vec![PortSpec::new("index", ValueType::Int64, true)],
         outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
     });
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 fn wrong_type_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
@@ -60,7 +63,10 @@ fn wrong_type_factory(_: Value) -> Result<mf_runtime::PreparedNode, NodeBuildErr
         inputs: vec![],
         outputs: vec![PortSpec::new("value", ValueType::Any, true)],
     });
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 inventory::submit! { NodeRegistration { kind: "test.omit_on_second", factory: mf_runtime::NodeFactory::Plain(omit_factory) } }

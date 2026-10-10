@@ -53,7 +53,7 @@ inventory::submit! {
         kind: "fixture.read_lines",
         factory: NodeFactory::Plain(|config| {
             let node: ReadLines = mf_runtime::deserialize_config(config)?;
-            Ok(PreparedNode::stream(node, NodePorts {
+            Ok(PreparedNode::from_parts(mf_runtime::NodeExecution::Stream(Box::new(node)), NodePorts {
                 inputs: vec![PortSpec::new("path", ValueType::String, true)],
                 outputs: vec![PortSpec::new("line", ValueType::String, true)],
             }))

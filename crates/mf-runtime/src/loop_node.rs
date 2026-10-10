@@ -1,8 +1,8 @@
 use crate::{
-    ExecutionContext, FlowNode, Inputs, LoopVariableDefinition, NodeExecutionError, NodePorts,
-    NodeResult, Outputs, PortSpec, TaskNode, ValueType,
+    ExecutionContext, FlowNode, Inputs, LoopVariableDefinition, NodeExecutionError, NodeMetadata,
+    NodePortContract, NodePorts, NodeResult, NodeValue, PortSpec, TaskNode, TypedNodeResult,
+    TypedTaskNode, ValueType, encode_typed_result,
 };
-use serde_json::Value;
 use std::collections::BTreeMap;
 
 fn structural_error(message: impl Into<String>) -> NodeExecutionError {
@@ -34,7 +34,30 @@ pub fn loop_variable_types(
     Ok(types)
 }
 
-struct ScopeSourceNode;
+struct ScopeSourceNode {
+    types: BTreeMap<String, ValueType>,
+}
+
+#[derive(NodeValue)]
+#[value(runtime = "crate")]
+struct ScopeIndex {
+    index: i64,
+}
+
+impl NodePortContract for ScopeSourceNode {
+    fn ports(&self) -> NodePorts {
+        let mut outputs: Vec<_> = self
+            .types
+            .iter()
+            .map(|(name, value_type)| PortSpec::owned(name, value_type.clone(), true))
+            .collect();
+        outputs.extend(ScopeIndex::ports());
+        NodePorts {
+            inputs: Vec::new(),
+            outputs,
+        }
+    }
+}
 
 impl TaskNode for ScopeSourceNode {
     fn execute(
@@ -51,20 +74,36 @@ pub fn prepared_loop_source_types(types: &BTreeMap<String, ValueType>) -> FlowNo
 }
 
 pub fn prepared_scope_source(id: &str, types: &BTreeMap<String, ValueType>) -> FlowNode {
-    let mut outputs: Vec<_> = types
-        .iter()
-        .map(|(name, value_type)| PortSpec::owned(name, value_type.clone(), true))
-        .collect();
-    outputs.push(PortSpec::owned("index", ValueType::Int64, true));
-    let ports = NodePorts {
-        inputs: Vec::new(),
-        outputs,
-    };
-    FlowNode::new(id, crate::PreparedNode::new(ScopeSourceNode, ports))
+    FlowNode::new(
+        id,
+        crate::PreparedNode::new(
+            ScopeSourceNode {
+                types: types.clone(),
+            },
+            NodeMetadata::default(),
+        )
+        .expect("scope source metadata has no port declarations"),
+    )
 }
 
 struct LoopAssignNode {
     variable: String,
+    value_type: ValueType,
+}
+
+#[derive(NodeValue)]
+#[value(runtime = "crate")]
+struct AssignmentOutputs {
+    done: bool,
+}
+
+impl NodePortContract for LoopAssignNode {
+    fn ports(&self) -> NodePorts {
+        NodePorts {
+            inputs: vec![PortSpec::new("value", self.value_type.clone(), true)],
+            outputs: AssignmentOutputs::ports(),
+        }
+    }
 }
 
 impl TaskNode for LoopAssignNode {
@@ -77,42 +116,48 @@ impl TaskNode for LoopAssignNode {
             .remove("value")
             .ok_or_else(|| structural_error("missing assignment value"))?;
         ctx.stage_scope_write(&self.variable, value)?;
-        Ok(Outputs::from([("done".into(), Value::Bool(true).into())]).into())
+        encode_typed_result(AssignmentOutputs { done: true }.into())
     }
 }
 
 pub fn prepared_loop_assign(id: &str, variable: &str, value_type: ValueType) -> FlowNode {
-    let ports = NodePorts {
-        inputs: vec![PortSpec::owned("value", value_type, true)],
-        outputs: vec![PortSpec::owned("done", ValueType::Boolean, true)],
-    };
     FlowNode::new(
         id,
         crate::PreparedNode::new(
             LoopAssignNode {
                 variable: variable.to_owned(),
+                value_type,
             },
-            ports,
-        ),
+            NodeMetadata::default(),
+        )
+        .expect("assignment metadata has no port declarations"),
     )
 }
 
 struct ExitLoopNode;
 
-impl TaskNode for ExitLoopNode {
+#[derive(NodeValue)]
+#[value(runtime = "crate")]
+struct EmptyValues {}
+
+impl TypedTaskNode for ExitLoopNode {
+    type Input = EmptyValues;
+    type Output = EmptyValues;
+
     fn execute(
         &self,
-        _: Inputs,
+        _: EmptyValues,
         ctx: &mut ExecutionContext,
-    ) -> Result<NodeResult, NodeExecutionError> {
+    ) -> Result<TypedNodeResult<EmptyValues>, NodeExecutionError> {
         ctx.request_scope_exit()?;
-        Ok(Outputs::new().into())
+        Ok(EmptyValues {}.into())
     }
 }
 
 pub fn prepared_loop_exit(id: &str) -> FlowNode {
     FlowNode::new(
         id,
-        crate::PreparedNode::new(ExitLoopNode, NodePorts::default()),
+        crate::PreparedNode::typed_task(ExitLoopNode, NodeMetadata::default())
+            .expect("loop exit metadata has no port declarations"),
     )
 }

@@ -2,12 +2,13 @@ use mf_compiler::{
     NodeRegistry, WorkflowDefinition, compile_definition, instantiate_compiled, instantiate_stream,
 };
 use mf_runtime::{
-    ContextReference, ContextValue, Emitter, ExecutionContext, Inputs, NodeBuildError,
-    NodeExecutionError, NodeFactory, NodeInputs, NodeMetadata, NodeOutputs, NodePorts,
-    NodeRegistration, NodeResult, Outputs, PortSpec, PreparedNode, StreamNode, TaskNode,
-    TypedNodeResult, TypedTaskNode, ValueType,
+    ContextReference, ContextValue, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError,
+    NodeFactory, NodeInputs, NodeMetadata, NodeOutputs, NodePorts, NodeRegistration, NodeResult,
+    Outputs, PortSpec, PreparedNode, StreamOptions, TaskNode, TypedNodeResult, TypedStreamNode,
+    TypedTaskNode, ValueType, WorkflowArguments,
 };
 use serde_json::{Value, json};
+use std::cell::Cell;
 
 #[derive(NodeInputs)]
 struct AddInputs {
@@ -62,15 +63,43 @@ impl TaskNode for Source {
         Ok(Outputs::from([("item".into(), 3.into())]).into())
     }
 }
-impl StreamNode for Source {
+#[derive(NodeInputs)]
+struct ProducerInputs {
+    start: Option<i64>,
+}
+
+#[derive(NodeOutputs)]
+struct ProducerOutputs {
+    item: i64,
+    #[output(rename = "metric./~")]
+    metric: f64,
+}
+
+struct TypedSource {
+    invalid: bool,
+    emitted: Cell<usize>,
+}
+
+impl TypedStreamNode for TypedSource {
+    type Input = ProducerInputs;
+    type Output = ProducerOutputs;
+
     fn execute(
         &mut self,
-        _: Inputs,
+        input: ProducerInputs,
         _: &mut ExecutionContext,
-        emitter: &mut Emitter<'_>,
+        emit: &mut dyn FnMut(TypedNodeResult<ProducerOutputs>) -> Result<(), NodeExecutionError>,
     ) -> Result<(), NodeExecutionError> {
-        for item in 1..=3 {
-            emitter.send(Outputs::from([("item".into(), item.into())]).into())?;
+        let start = input.start.unwrap_or(1);
+        for item in start..start + 3 {
+            emit(
+                ProducerOutputs {
+                    item,
+                    metric: if self.invalid { f64::NAN } else { 1.0 },
+                }
+                .into(),
+            )?;
+            self.emitted.set(self.emitted.get() + 1);
         }
         Ok(())
     }
@@ -81,11 +110,20 @@ fn source(config: Value) -> Result<PreparedNode, NodeBuildError> {
         inputs: vec![],
         outputs: vec![PortSpec::new("item", ValueType::Int64, true)],
     };
-    Ok(if config["stream"] == true {
-        PreparedNode::stream(Source, ports)
+    if config["stream"] == true {
+        PreparedNode::typed_stream(
+            TypedSource {
+                invalid: config["invalid"] == true,
+                emitted: Cell::new(0),
+            },
+            NodeMetadata::default(),
+        )
     } else {
-        PreparedNode::new(Source, ports)
-    })
+        Ok(PreparedNode::from_parts(
+            mf_runtime::NodeExecution::Task(Box::new(Source)),
+            ports,
+        ))
+    }
 }
 
 inventory::submit! { NodeRegistration { kind: "test.typed_add", factory: NodeFactory::Plain(add) } }
@@ -113,9 +151,12 @@ fn typed_tasks_use_the_same_adapter_and_context_in_task_and_stream_domains() {
         if streaming {
             let instance = instantiate_stream(&compiled, &registry)
                 .unwrap()
-                .start()
+                .start_with_options(StreamOptions {
+                    arguments: WorkflowArguments::from_json(br#"{"source":{"start":10}}"#).unwrap(),
+                    ..Default::default()
+                })
                 .unwrap();
-            for expected in 2..=4 {
+            for expected in 11..=13 {
                 assert_eq!(
                     instance.recv().unwrap().unwrap().outputs["result"],
                     json!(expected)
@@ -131,8 +172,8 @@ fn typed_tasks_use_the_same_adapter_and_context_in_task_and_stream_domains() {
 }
 
 fn string_sink(_: Value) -> Result<PreparedNode, NodeBuildError> {
-    Ok(PreparedNode::new(
-        Source,
+    Ok(PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(Source)),
         NodePorts {
             inputs: vec![PortSpec::new("value", ValueType::String, true)],
             outputs: vec![PortSpec::new("item", ValueType::Int64, true)],
@@ -163,4 +204,33 @@ fn derived_outputs_reject_disjoint_consumers_before_execution() {
         matches!(error, mf_compiler::WorkflowCompileError::IncompatiblePortTypes { output_type, input_type, .. }
         if *output_type == ValueType::Int64 && *input_type == ValueType::String)
     );
+}
+
+#[test]
+fn typed_producer_rejects_invalid_unobserved_outputs_before_publication() {
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-10-03", "dependencies":{}, "execution":{"mode":"stream"},
+        "nodes":[{"id":"source", "kind":"test.typed_task_source", "config":{"stream":true, "invalid":true}}],
+        "outputs":[{"name":"result", "node":"source", "port":"item"}]
+    })).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let compiled = compile_definition(&definition, &registry).unwrap();
+    let instance = instantiate_stream(&compiled, &registry)
+        .unwrap()
+        .start()
+        .unwrap();
+    let error = instance.recv().unwrap_err();
+    let mf_runtime::StreamError::Producer {
+        definition_id,
+        source,
+    } = error
+    else {
+        panic!("expected an attributed producer failure");
+    };
+    assert_eq!(definition_id.as_str(), "source");
+    let NodeExecutionError::OutputEncode { source } = source.as_ref() else {
+        panic!("expected a typed encoding cause");
+    };
+    assert_eq!(source.pointer(), "/metric.~1~0");
+    assert!(instance.join().is_err());
 }

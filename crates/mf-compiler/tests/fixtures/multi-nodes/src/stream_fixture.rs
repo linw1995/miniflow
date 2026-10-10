@@ -42,8 +42,8 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
         source: Box::new(source),
     })?;
     println!("factory diagnostic");
-    Ok(mf_runtime::PreparedNode::new(
-        Echo(config),
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(Echo(config))),
         mf_runtime::NodePorts {
             inputs: vec![PortSpec::new("input", ValueType::Any, true)],
             outputs: vec![PortSpec::new("value", ValueType::Any, true)],

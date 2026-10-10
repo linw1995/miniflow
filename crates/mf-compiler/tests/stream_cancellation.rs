@@ -131,10 +131,10 @@ inventory::submit! {
     NodeRegistration {
         kind: "test.dependency_feed",
         factory: NodeFactory::Plain(|config| {
-            Ok(PreparedNode::new(DependencyFeed {
+            Ok(PreparedNode::from_parts(mf_runtime::NodeExecution::Task(Box::new(DependencyFeed {
                 skip: config["skip"].as_bool().unwrap(),
                 value: config["value"].as_bool().unwrap_or(false),
-            }, NodePorts {
+            })), NodePorts {
                 inputs: vec![],
                 outputs: vec![PortSpec::new("value", ValueType::Int64, false)],
             }))
@@ -164,7 +164,7 @@ inventory::submit! {
     NodeRegistration {
         kind: "test.span_producer",
         factory: NodeFactory::Plain(|_| {
-            Ok(PreparedNode::stream(SpanProducer, NodePorts {
+            Ok(PreparedNode::from_parts(mf_runtime::NodeExecution::Stream(Box::new(SpanProducer)), NodePorts {
                 inputs: vec![],
                 outputs: vec![PortSpec::new("item", ValueType::Int64, true)],
             }))
@@ -234,10 +234,10 @@ inventory::submit! {
     NodeRegistration {
         kind: "test.cancel_event",
         factory: NodeFactory::Plain(|config| {
-            Ok(PreparedNode::event(CancelEvent {
+            Ok(PreparedNode::from_parts(mf_runtime::NodeExecution::Event(Box::new(CancelEvent {
                 mode: config["mode"].as_str().unwrap().into(),
                 cancellation: None,
-            }, NodePorts {
+            })), NodePorts {
                 inputs: vec![PortSpec::new("item", ValueType::Any, true)],
                 outputs: vec![PortSpec::new("item", ValueType::Int64, true)],
             }))

@@ -103,12 +103,11 @@ inventory::submit! {
     NodeRegistration {
         kind: "test.capacity_sink",
         factory: mf_runtime::NodeFactory::Plain(|config| {
-            Ok(mf_runtime::PreparedNode::new(
-                Sink {
+            Ok(mf_runtime::PreparedNode::from_parts(mf_runtime::NodeExecution::Task(Box::new(Sink {
                     probe: Arc::clone(&probes().lock().unwrap()[config["key"].as_str().unwrap()]),
                     block: config["block"].as_bool().unwrap_or(false),
                     fail_at: config["fail_at"].as_i64(),
-                },
+                })),
                 mf_runtime::NodePorts {
                         inputs: vec![PortSpec::new("input", ValueType::Any, true)],
                         outputs: vec![PortSpec::new("value", ValueType::Any, true)],

@@ -54,9 +54,15 @@ fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
         })
     };
     Ok(if config["stream"].as_bool().unwrap_or(false) {
-        PreparedNode::stream(Contract, metadata)
+        PreparedNode::from_parts(
+            mf_runtime::NodeExecution::Stream(Box::new(Contract)),
+            metadata,
+        )
     } else {
-        PreparedNode::new(Contract, metadata)
+        PreparedNode::from_parts(
+            mf_runtime::NodeExecution::Task(Box::new(Contract)),
+            metadata,
+        )
     })
 }
 

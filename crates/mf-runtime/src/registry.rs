@@ -97,7 +97,10 @@ mod tests {
             inputs: vec![],
             outputs: vec![],
         });
-        Ok(crate::PreparedNode::new(node, metadata))
+        Ok(crate::PreparedNode::from_parts(
+            crate::NodeExecution::Task(Box::new(node)),
+            metadata,
+        ))
     }
 
     fn second_factory(_config: Value) -> Result<crate::PreparedNode, NodeBuildError> {
@@ -106,7 +109,10 @@ mod tests {
             inputs: vec![],
             outputs: vec![crate::PortSpec::new("value", ValueType::Any, false)],
         });
-        Ok(crate::PreparedNode::new(node, metadata))
+        Ok(crate::PreparedNode::from_parts(
+            crate::NodeExecution::Task(Box::new(node)),
+            metadata,
+        ))
     }
 
     static FIRST: NodeRegistration = NodeRegistration {

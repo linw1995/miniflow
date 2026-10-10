@@ -14,7 +14,7 @@ The factory returns a `PreparedNode` containing the executor and its `NodeMetada
 [constant](../crates/builtin-nodes/core/src/constant.rs) and
 [identity](../crates/builtin-nodes/core/src/identity.rs) for working registrations.
 
-Configured input declarations and stdin conditions must depend on the fixed configuration and selected provider,
+Reflected input contracts and stdin conditions must depend on the fixed configuration and selected provider,
 not environment variables or process state. The generated build freezes them in the executable manifest, and
 normal execution compares them with runtime preparation before dispatching nodes or reading sources.
 Host and target implementations must expose the same configured interface even if executor initialization differs.
@@ -56,11 +56,19 @@ See the [contribution guide](../CONTRIBUTING.md) for local checks and [dependenc
 
 ## Instance metadata
 
-Factories supply input and output `NodePorts` in `NodeMetadata.ports`, using `PortSpec::owned` for
-dynamic names. Names must be nonempty and unique within each direction. Metadata depends on
-configuration and prepared-body output types, and is available before task execution.
+Ports reflect the node's actual input and output contracts before execution. Fixed interfaces use
+`TypedTaskNode`, `TypedEventNode`, and `TypedStreamNode`, whose execution methods consume or produce their
+associated `Input` and `Output` types. `PreparedNode::typed_task`, `typed_event`, and `typed_stream` reflect both
+contracts automatically and own boundary conversion. Fixed builtin factories do not supply port declarations or
+implement `NodePortContract`. Dynamic task, event, and stream interfaces implement `NodePortContract::ports`,
+reflecting their validated execution contracts. `PreparedNode::new`, `event`, and `stream` obtain ports from that contract and return
+`Result<PreparedNode, NodeBuildError>`. All these constructors reject factory-supplied input or output declarations,
+including identical declarations. Other metadata remains factory-supplied.
 
-The [Code node](../crates/builtin-nodes/code/src/lib.rs) uses this interface to expose ports from its declared inputs and checked CEL expressions.
+Dynamic reflection uses validated executor contracts rather than an independent configuration port list.
+The [Code node](../crates/builtin-nodes/code/src/lib.rs) reflects its input conversion types and checked output
+programs; IfElse reflects its executable branches, and Loop reflects its validated variable contract.
+Use `PortSpec::owned` for dynamic names. Names must be nonempty and unique within each direction.
 
 Factories can populate `NodeMetadata.output_derivations` for fixed or forwarded outputs. Use
 `OutputDerivation::literal("value", value)` for a configured JSON value, or
@@ -331,32 +339,33 @@ even matching hand-written ports return `NodeBuildError::ConflictingInputDeclara
 `ConflictingOutputDeclarations`. Register the factory with the existing `NodeFactory::Plain` or
 `NodeFactory::Subgraph` contract.
 
-By default output ports come from `Self::Output::ports()`. Override `TypedTaskNode::output_ports(&self)`
-when fixed configuration or a prepared body refines output types. Refinements must preserve all names
-and requiredness and narrow the struct's field descriptors; preparation rejects other changes with
-`NodeBuildError::InvalidOutputRefinement`. The provider must produce values satisfying the refinement.
-The compiler and runtime apply their normal port checks to these instance-specific types.
+Input and output declarations always come from their value contracts. `TypedTaskNode::output_ports`
+has been removed. Keep type evidence separate in `NodeMetadata.output_derivations`: use literal or forwarding
+evidence where available, or `OutputDerivation::known_type` for a type proven by a prepared body. Known types
+must narrow a declared output type and cannot add or rename ports or change requiredness. The compiler resolves
+these facts after reflection, and runtime publication validates values against the resolved types.
 
 Typed tasks run through the same dependency resolution, skip rules, input checks, output publication,
 and context boundaries as dynamic tasks, including in stream task domains. Input conversion failures
 retain `InputDecodeError` through `NodeExecutionError::InputDecode`; output conversion failures retain
 `OutputEncodeError` through `NodeExecutionError::OutputEncode`. Encoding completes before any outputs
-are published. Provider business errors keep their existing plugin error chain. Typed event and stream
-producer interfaces are not provided.
+are published. Provider business errors keep their existing plugin error chain. Typed event and stream providers
+receive decoded inputs and return or emit only their associated output types. Runtime adapters own their boundary
+conversion and use the same source-bearing input/output errors.
 
 `execute_typed_task` exposes the same conversion and invocation for providers retaining a dynamic
 `TaskNode` entry point. It does not schedule work or publish outputs. Iteration uses this function to
 preserve direct dynamic callers while its factory uses typed preparation. `mfn_core::IterationInputs`
 contains the shared `items` payload and `IterationOutputs` contains collected `results`. Callers can qualify
-`TaskNode::execute` for map inputs/results or `TypedTaskNode::execute` for structs. Its output refinement
-still depends on its body and error policy.
+`TaskNode::execute` for map inputs/results or `TypedTaskNode::execute` for structs. Its reflected output declaration
+remains stable; separate type evidence depends on its body and error policy.
 
 To migrate an existing typed task, derive `NodeValue` on its input and output structs, set their associated types, return
 `TypedNodeResult<Self::Output>`, and remove factory-supplied output ports. Keep existing derivations and
 other metadata. The [identity provider](../crates/builtin-nodes/core/src/identity.rs) demonstrates shared-value
 forwarding; [Iteration](../crates/builtin-nodes/core/src/iteration.rs) demonstrates body-dependent output refinement.
 Providers such as `builtin.code` whose port names depend on configuration continue to use `TaskNode`,
-dynamic metadata, and `PreparedNode::new`.
+`NodePortContract`, and `PreparedNode::new` with empty-port metadata.
 
 ### Dynamic task execution
 
@@ -401,8 +410,11 @@ carries multiple JSON types; a specific declaration must match every produced va
 
 ## Prepared execution nodes
 
-`PreparedNode::new(task, metadata)` accepts `NodeMetadata` or plain `NodePorts` when no derivations or
-references are needed. `FlowNode::new(id, prepared)` binds the definition identity. Compiler preparation
+`PreparedNode::new(task, metadata)` reflects `NodePortContract` and accepts metadata with empty ports.
+Use `PreparedNode::typed_task`, `typed_event`, or `typed_stream` for struct-defined execution contracts. Low-level `from_parts(execution, metadata)`
+assembles an existing `NodeExecution` and metadata without reflection. It supports prepared assembly and validation
+fixtures; provider factories use the reflecting constructors. `FlowNode::new(id, prepared)` binds the definition
+identity. Compiler preparation
 resolves the metadata before execution. Both in-memory execution and generated runners build a prepared `Flow`
 and run it through `FlowRuntime`. The compiler partitions a DAG into synchronous domains before execution: tasks in one
 domain run serially, while independent ready domains can run concurrently up to
@@ -416,8 +428,8 @@ help execute queued pool jobs on their existing thread, so nested Iteration work
 
 Identity, Constant, and Iteration use `NodeValue` bags with `TypedTaskNode`. Constant retains its
 configured literal output refinement, and Iteration retains its body-dependent result refinement.
-Batch and Readline use `NodeValue` conversion at their event and stream boundaries: Batch preserves
-its broad `Array` output declaration, and Readline preserves its optional non-null string path and
+Batch and Readline use `NodeValue` conversion at their event and stream boundaries: Batch reflects
+`List(Any)` before collection inference, and Readline preserves its optional non-null string path and
 conditional stdin ownership.
 
 Identity advertises certified generation through the exported `prepare_identity` constructor.
@@ -449,7 +461,8 @@ Lifecycle events are emitted by the runtime independently of plugin diagnostic l
 
 `PreparedNode::new(task, metadata)` selects `NodeExecution::Task`.
 `PreparedNode::event(state, metadata)` selects `NodeExecution::Event`. Event providers implement
-`EventNode` directly; they do not implement `TaskNode` or create a second state object later.
+`EventNode` and `NodePortContract` for dynamic contracts. Fixed providers implement `TypedEventNode` and prepare
+with `PreparedNode::typed_event`; they do not implement `ports()`, `EventNode`, or a task adapter themselves.
 
 Use `prepared.execution.as_task_node()` to borrow a task executor or
 `prepared.execution.into_task_node()` to take ownership of it. Both return `None` for event and stream execution.
@@ -460,6 +473,14 @@ emissions with a `TimerUpdate`. `EventContext.now` is monotonic elapsed time.
 Event state requires `Send`; mutable access is exclusive and
 `Sync` is not required.
 
+`TypedEventNode::on_event` receives `NodeEvent<Self::Input>` and returns `EventEffects<Self::Output>`.
+`NodeEvent<I = Inputs>`, `EventEmission<O = Outputs>`, and `EventEffects<O = Outputs>` retain their existing dynamic
+defaults. Runtime decoding applies only to input events; timers and upstream close do not require invocation fields.
+All emissions are encoded before an event callback returns effects to the scheduler. Batch metadata, skips, loop
+summaries, and timer updates are preserved. `EventEffects<O>::default()` does not require `O: Default`.
+`buffered_items` is forwarded to the same provider state. `execute_typed_event` supports direct state invocation with
+dynamic events using the same conversion boundary.
+
 Oneshot preparation accepts task nodes and rejects event or stream nodes with their definition IDs. Direct callers
 of the low-level task helper convert a prepared `FlowNode` with `into_task()` first. Normal `mf_compiler::build_flow` callers and
 generated oneshot runners pass a task Flow to `FlowRuntime`; streaming preparation keeps the same Flow graph and
@@ -468,7 +489,7 @@ uses the runtime's stream lifecycle and message-domain scheduler.
 ## Startup input and resource declarations
 
 Top-level initial nodes in schema `2026-10-03` expose their prepared input ports as workflow parameters.
-Factories derive ports from configuration and do not need invocation values. Required flags and type
+Preparation reflects input/output contracts and does not need invocation values. Required flags and type
 descriptors retain their ordinary port meaning. `WorkflowArguments::from_json` rejects duplicate keys and
 limits JSON arguments to 1 MiB; `WorkflowInputSchema` validates the complete object before dispatch.
 
@@ -482,8 +503,16 @@ preparation does not acquire business inputs. Launchers use `WorkflowInputSchema
 ## Incremental stream producers
 
 `PreparedNode::stream(producer, metadata)` selects `NodeExecution::Stream`. Implement `StreamNode`
-when one input needs to produce many outputs incrementally, such as reading lines from a file.
+when one input needs to produce many outputs incrementally, such as reading lines from a file. Dynamic
+producers also implement `NodePortContract`. Fixed producers implement `TypedStreamNode` and prepare through
+`PreparedNode::typed_stream`, which reflects its execution-associated types automatically.
 The instance owns the producer, which requires `Send` and exclusive mutable access, without `Sync`.
+
+A typed producer receives `Self::Input` and a borrowed callback accepting `TypedNodeResult<Self::Output>`.
+Call `emit(Output { ... }.into())?` for each result. The runtime decodes inputs before invoking business logic and
+encodes every field before forwarding an emission through the existing bounded `Emitter`. This includes fields
+with no downstream observers. The callback retains ordinary backpressure and error propagation; it cannot outlive
+its invocation. A valid earlier emission may precede a later failure, preserving incremental semantics.
 
 ```rust
 impl StreamNode for Expand {
@@ -505,7 +534,7 @@ Each `Emitter::send` validates one `NodeResult` and waits until the node's pendi
 Success transfers the result to the runtime; downstream processing can finish later. The queue limit
 is `execution.limits.max_pending_messages`, defaulting to 64. A producer can emit more total results
 than this limit. The emitter is borrowed for one invocation and cannot be cloned or retained afterward.
-Factories declare ports and validate configuration; file access and other business operations belong
+Factories validate configuration and reflect input/output contracts; file access and other business operations belong
 in `execute`. The [external line-producer fixture](../crates/mf-compiler/tests/fixtures/multi-nodes/src/line_producer.rs)
 shows file reading with this contract.
 

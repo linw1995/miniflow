@@ -46,7 +46,10 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
         context_references: node.context_references(),
         ..mf_runtime::NodeMetadata::new(node.ports())
     };
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 inventory::submit! { NodeRegistration { kind: "test.dynamic", factory: mf_runtime::NodeFactory::Plain(factory) } }
 fn definition(value: Value) -> WorkflowDefinition {

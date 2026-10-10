@@ -40,8 +40,8 @@ impl TaskNode for FailWithIo {
 }
 
 fn fail_factory(_: Value) -> Result<PreparedNode, NodeBuildError> {
-    Ok(PreparedNode::new(
-        FailWithIo,
+    Ok(PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(FailWithIo)),
         NodePorts {
             inputs: Vec::new(),
             outputs: vec![PortSpec::new("result", ValueType::Any, true)],
@@ -223,8 +223,8 @@ fn inference_node(
 ) -> FlowNode {
     FlowNode::new(
         id,
-        PreparedNode::new(
-            FailWithIo,
+        PreparedNode::from_parts(
+            mf_runtime::NodeExecution::Task(Box::new(FailWithIo)),
             NodeMetadata {
                 output_derivations: derivations,
                 ..NodeMetadata::new(NodePorts {

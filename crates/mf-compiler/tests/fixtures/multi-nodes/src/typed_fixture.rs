@@ -24,7 +24,10 @@ fn integer_source(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildEr
         inputs: vec![],
         outputs: vec![PortSpec::new("value", ValueType::Int64, true)],
     });
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 inventory::submit! {
@@ -106,7 +109,10 @@ impl TypedSource {
 fn typed_source(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = TypedSource(deserialize_config(config)?);
     let metadata = mf_runtime::NodeMetadata::new(node.ports());
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 inventory::submit! {
@@ -156,7 +162,10 @@ impl TypedEcho {
 fn typed_echo(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     let node = TypedEcho(deserialize_config(config)?);
     let metadata = mf_runtime::NodeMetadata::new(node.ports());
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 inventory::submit! {
@@ -190,7 +199,10 @@ fn dishonest_forward(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuil
             outputs: vec![PortSpec::new("value", ValueType::Any, true)],
         })
     };
-    Ok(mf_runtime::PreparedNode::new(node, metadata))
+    Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(node)),
+        metadata,
+    ))
 }
 
 inventory::submit! {
