@@ -11,7 +11,8 @@ Give all workflow nodes one shared language for precise JSON port types and enfo
 Port descriptors SHALL retain `Any`, `Null`, `Boolean`, `Number`, `String`, `Array`, and `Object` and add `Int64`,
 `Float64`, `List(T)`, and `Map(T)` for recursively described element or value type `T`. `Map(T)` SHALL describe a JSON
 object with string keys and values of type `T`; `List(T)` SHALL describe a JSON array whose elements have type `T`.
-`Int64` SHALL require a signed 64-bit JSON integer, and `Float64` SHALL require a finite floating JSON number. Legacy
+`Int64` SHALL require a number exactly representable as a signed 64-bit integer, and `Float64` SHALL require a finite
+number exactly representable as a double. Legacy
 `Number`, `Array`, and `Object` SHALL remain broad categories. Plugins SHALL be able to expose different refined types
 for different node instances.
 
@@ -37,8 +38,7 @@ structural position requires the runtime to check the actual value before the ta
 disjoint concrete types and incompatible collection shapes before installation, even though an unknown output
 could happen to produce an empty collection satisfying both descriptors. `Any` SHALL remain a dynamic boundary
 when no exact value is known, not proof of a concrete type. Recursive list and map compatibility SHALL follow
-the same rules for element or value types. Overlapping numeric ranges SHALL retain runtime checks when narrowing is unproven. No integer/floating representation,
-string, or collection coercion SHALL occur; explicitly selected single-precision codecs SHALL round within their finite range.
+the same rules for element or value types. Overlapping numeric ranges SHALL retain runtime checks when narrowing is unproven. Implicit numeric conversion SHALL preserve value, precision, and signed zero. String or collection coercion SHALL NOT occur.
 
 #### Scenario: Connect a refined value to a broad input
 
@@ -57,7 +57,7 @@ string, or collection coercion SHALL occur; explicitly selected single-precision
 
 #### Scenario: Reject a disjoint connection
 
-- **WHEN** a `String` output feeds an `Int64` input, a `Float64` output feeds an `Int64` input, or an unknown `List(String)` output feeds a `List(Int64)` input
+- **WHEN** a `String` output feeds an `Int64` input, or an unknown `List(String)` output feeds a `List(Int64)` input
 - **THEN** compilation rejects the edge with both endpoints and their types
 
 #### Scenario: Reject a known heterogeneous mismatch
@@ -276,7 +276,7 @@ The input derive SHALL support named-field structs, including empty structs and 
 
 ### Requirement: Decode typed inputs without changing JSON semantics
 
-Typed input decoding SHALL reject missing required fields, unknown fields, and values outside the declared descriptor without coercion or defaults. Missing optional fields SHALL decode as None; supplied values SHALL decode as Some of the decoded inner value. Explicit null SHALL remain supplied data subject to the inner descriptor. Recursive validation SHALL honor existing type depth limits.
+Typed input decoding SHALL reject missing required fields, unknown fields, and values outside the declared descriptor without lossy conversion or implicit defaults. Missing optional fields SHALL decode as None; supplied values SHALL decode as Some of the decoded inner value. Explicit null SHALL remain supplied data subject to the inner descriptor. Recursive validation SHALL honor existing type depth limits.
 
 #### Scenario: Preserve optional omission
 
@@ -305,8 +305,8 @@ Typed input decoding SHALL reject missing required fields, unknown fields, and v
 
 #### Scenario: Preserve strict numeric representations
 
-- **WHEN** a floating-point field receives an integer JSON number or an integer field receives a floating JSON number
-- **THEN** decoding rejects the value under the existing Float64 or Int64 contract without coercion
+- **WHEN** a numeric field receives an integer or floating value exactly representable in its target type
+- **THEN** decoding preserves the numeric value through an implicit conversion, rejecting any precision or range loss
 
 #### Scenario: Bound recursive declarations
 
@@ -448,8 +448,7 @@ distinct data types or duplicate declarations. Existing directional contracts SH
 
 Unified value conversion SHALL retain existing strict scalar and recursive collection representations, optional-port
 omission, null data, unknown-field rejection, shared payload identity, and descriptor depth limits. Failures SHALL
-preserve their conversion direction, port, typed source chain, and escaped nested pointer. Unifying declarations MUST
-NOT introduce implicit coercion or implicit defaults. Explicit field defaults SHALL apply only to absent bindings.
+preserve their conversion direction, port, typed source chain, and escaped nested pointer. Numeric conversions SHALL be exact; nonnumeric coercion and implicit defaults MUST NOT occur. Explicit field defaults SHALL apply only to absent bindings.
 
 #### Scenario: Keep omission distinct from null
 
@@ -670,8 +669,8 @@ and certified validation MUST reject an inner value encoding as null so direct a
 ### Requirement: Check unsigned and single-precision numeric codecs
 
 Unsigned 64-bit, target-sized unsigned, and single-precision fields SHALL expose uint, usize, and float descriptors.
-Unsigned decoding MUST reject negative integers, floats, and out-of-range values. Single-precision decoding SHALL accept
-finite floating numbers within its finite range and round to that precision. Encoding and certification MUST reject
+Numeric decoding SHALL accept integer or floating values only when exactly representable in the target type. It MUST
+reject fractions for integer targets, overflow, precision loss, and negative-zero-to-integer conversions. Encoding and certification MUST reject
 non-finite floats, preserve integer values, and retain negative zero. Recursive errors SHALL retain their pointers.
 
 #### Scenario: Preserve numeric limits
@@ -681,7 +680,7 @@ non-finite floats, preserve integer values, and retain negative zero. Recursive 
 
 #### Scenario: Reject incompatible representations and ranges
 
-- **WHEN** an unsigned field receives a negative or floating number, or a single-precision field receives an integer or excessive magnitude
+- **WHEN** an unsigned field receives a negative or fractional number, or a single-precision field receives a nonrepresentable value
 - **THEN** decoding fails with the declared numeric descriptor and failing path
 
 #### Scenario: Reject non-finite output values
@@ -710,3 +709,35 @@ Only runtime-certified inner codecs SHALL qualify a shared view for certified di
 
 - **WHEN** a shape-valid shared object violates its declared field or enum contract
 - **THEN** explicit decoding fails with the strict nested codec's typed cause and pointer
+
+### Requirement: Validate exact numeric boundaries without saturation
+
+Numeric codecs and descriptors SHALL agree on exact representability. Integer-to-float conversion SHALL preserve all
+significant binary bits, including exact large powers of two. Float-to-integer conversion SHALL require finite integral
+values within the target's half-open range and reject negative zero. Narrowing to single precision SHALL preserve the
+stored floating bits through a round trip. Descriptor checks SHALL enforce the same conditions before node invocation.
+
+#### Scenario: Accept exact cross-representation input
+
+- **WHEN** a float field receives integer 42 or an integer field receives floating 42.0
+- **THEN** decoding succeeds and preserves the numeric value
+
+#### Scenario: Reject precision loss while accepting large exact values
+
+- **WHEN** single or double precision receives an integer above its precision limit
+- **THEN** exact powers of two remain valid while values with too many significant bits fail
+
+#### Scenario: Reject casts that would saturate
+
+- **WHEN** an unsigned maximum integer is converted to a float or a floating value equals an integer target's exclusive upper bound
+- **THEN** decoding rejects the value instead of accepting a saturated round-trip result
+
+#### Scenario: Preserve negative zero
+
+- **WHEN** a negative floating zero is decoded into a floating or integer target
+- **THEN** floating decoding preserves its sign and integer decoding rejects the sign-losing conversion
+
+#### Scenario: Preserve generated numeric normalization
+
+- **WHEN** a generated typed chain receives exact integer-to-float or integral-float-to-integer inputs
+- **THEN** it returns the same normalized values and typed failures as in-memory execution
