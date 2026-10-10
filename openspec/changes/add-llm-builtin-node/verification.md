@@ -2,7 +2,7 @@
 
 ## Scope
 
-This verification records the published Rig 0.43.0 integration boundary and completed implementation groups. Optional future execution is implemented; the LLM node and its packaging remain tracked in [tasks.md](tasks.md).
+This verification records the published Rig 0.43.0 integration boundary and completed implementation groups. Optional future execution and the LLM configuration and value contracts are implemented; executable factory registration, provider calls, and packaging remain tracked in [tasks.md](tasks.md).
 
 ## Published source inspection
 
@@ -69,3 +69,9 @@ The new planning files received explicit file-scoped hooks because `prek -a` doe
 - The Darwin Nix test derivation permits local networking for I/O and provider mocks. A small loopback-only derivation verifies this setting before the full check; default build and lint derivations retain their existing sandbox policy.
 
 Focused checks use `cargo test -p mf-runtime --features async --test future_execution --lib` and the corresponding `--features tokio` command through `nix develop`. Default-feature compilation also passes. `prek -a` passes against the runtime implementation. Whole-workflow LLM coverage in Loop, Iteration, and stream domains remains in group 5.
+
+## LLM configuration and conversation contracts
+
+`mfn-llm` pins Rig 0.43.0 and explicitly selects native HTTP and rustls transport features. Five focused tests verify static defaults, valid custom configuration, malformed or unknown settings, nested history diagnostics, reflected requiredness and types, optional output omission, credential-free validation, and typed URL sources. Both default and managed-feature builds compile.
+
+Configuration and contracts land before executable factory registration. This preserves buildable intermediate commits without exposing a placeholder executor. The current prompt and message text are nonempty so successful output history can be passed to the next invocation unchanged. No live model endpoint or real credential is used in this group.

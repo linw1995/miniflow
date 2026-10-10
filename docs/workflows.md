@@ -126,6 +126,51 @@ with the [repository development commands](compiling.md#repository-development).
 and `{"doubled":[2,4]}` respectively. Replace the examples' local package paths with published package versions
 when compiling outside the checkout.
 
+### LLM configuration and conversation values
+
+The opt-in `mfn-llm` package defines fixed conversation contracts for terminal text generation:
+
+| Direction | Port | Type | Required |
+| --- | --- | --- | --- |
+| Input | `prompt` | `string` | Yes |
+| Input | `system` | `string` | No |
+| Input | `history` | `List(Object)` | No |
+| Output | `text` | `string` | Yes |
+| Output | `history` | `List(Object)` | Yes |
+| Output | `usage` | `Map(Int64)` | No |
+| Output | `finish_reason` | `string` | No |
+
+Each history object has exactly two required string fields, `role` and `content`. Conversation roles are `user`
+and `assistant`, with nonempty text. The current `prompt` is also nonempty. System instructions use the separate
+`system` input. Missing or empty history starts a new conversation; a successful turn appends its user prompt and
+assistant text to the supplied history. The workflow owns transcript persistence and trimming.
+
+Static configuration has this shape:
+
+```json
+{
+  "model": "example-model",
+  "base_url": "https://api.openai.com/v1",
+  "api_key_env": "MODEL_API_KEY",
+  "temperature": 0.2,
+  "max_tokens": 256,
+  "timeout_ms": 60000,
+  "max_output_bytes": 1048576
+}
+```
+
+`model` is required and nonblank. Defaults are the OpenAI API prefix, `OPENAI_API_KEY`, a 60000 millisecond deadline,
+and a 1 MiB generated-text limit. Optional `temperature` must be finite and between 0 and 2; optional `max_tokens`
+must be positive. Supplied numeric fields cannot be null. Deadlines and text limits must be positive integers.
+`base_url` is an HTTP or HTTPS API prefix without embedded credentials, query, or fragment. Configuration rejects
+unknown fields, including `stream`, direct credentials, and provider-specific request overrides.
+
+`mfn_llm::validate_config` checks these settings without looking up credentials, creating clients or runtimes,
+or contacting the endpoint. Value structs use the runtime's nested object codecs, so malformed history has indexed
+diagnostics. Optional output metadata is omitted when absent rather than encoded as JSON null. The package's optional
+`tokio` feature forwards the workflow-managed backend; its native HTTP transport still depends on Tokio with that
+feature disabled.
+
 ## Structured Loop
 
 The [Loop example](../examples/loop.json) returns `{"count":3}`. It declares `mfn-core` for both its

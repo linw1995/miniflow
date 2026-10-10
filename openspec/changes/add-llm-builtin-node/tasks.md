@@ -17,20 +17,20 @@
 
 ## 3. Prepare the LLM node
 
-- [ ] 3.1 Add `mfn-llm`, exact Rig 0.43.0 dependencies, explicit transport and TLS features, optional managed-backend forwarding, and inventory registration; verify discovery only when linked and supported-target compilation.
-- [ ] 3.2 Implement strict static configuration validation with documented defaults; verify unknown fields, streaming and direct credentials, invalid URLs and parameter ranges, unsupported numeric conversions, and blank identifiers.
-- [ ] 3.3 Derive the fixed input and output contracts and nested `ChatMessage` using `NodeValue`; verify `List(Object)` reflection, nested missing or unknown fields, scalar type errors, startup inputs, optional-port omission, and unchanged contracts across environments.
-- [ ] 3.4 Move credential lookup and client initialization into execution and use safe source-bearing node errors; verify preparation and manifest inspection with credentials unset, no initialized executor or network request, and safe diagnostic display.
-- [ ] 3.5 Document the configuration, dependency selection, credential reference, and fixed contracts in `docs/workflows.md`; verify that all sample definitions parse using the current workflow schema.
+- [x] 3.1 Add `mfn-llm`, exact Rig 0.43.0 dependencies, explicit transport and TLS features, and optional managed-backend forwarding; verify native compilation and release-target dependency configuration. Register the executable factory in group 4.
+- [x] 3.2 Implement strict static configuration validation with documented defaults; verify unknown fields, streaming and direct credentials, invalid URLs and parameter ranges, unsupported numeric conversions, and blank identifiers.
+- [x] 3.3 Derive the fixed input and output contracts and nested `ChatMessage` using `NodeValue`; verify `List(Object)` reflection, nested missing or unknown fields, scalar type errors, optional-port omission, and input round trips. Verify prepared startup interfaces with the executable factory in group 4.
+- [x] 3.4 Keep configuration validation independent of credentials, clients, and execution resources and retain typed construction sources; verify static defaults, credential-free validation, and source chains. Add execution-time resource lookup and safe provider errors in group 4.
+- [x] 3.5 Document the configuration, dependency selection, credential reference, and fixed contracts in `docs/workflows.md`; verify that all sample definitions parse using the current workflow schema.
 
 ## 4. Execute terminal generation
 
-- [ ] 4.1 Implement explicit unary Chat Completions calls with reusable client transport and per-invocation request state; verify custom API prefixes, authorization, model, ordered history and role conversion, system placement, one current prompt, generation parameters, and no implicit endpoint overrides.
+- [ ] 4.1 Register a complete typed task factory and implement explicit unary Chat Completions calls with execution-time credential lookup, reusable transport, and per-invocation state; verify discovery only when linked, credential-free preparation, startup interfaces, API prefixes, authorization, model, history order, system placement, generation parameters, and no endpoint environment overrides.
 - [ ] 4.2 Convert complete text, updated history, optional usage, and finish reasons atomically; verify append-once history, ordered text blocks, absent and sparse counters, signed count overflow, unknown finish reasons, token truncation, tool-call rejection, and empty output.
 - [ ] 4.3 Enforce the invocation deadline, workflow cancellation, and postdecode output limit; verify stalled headers and bodies, cancellation drop, initialization deadline expiry, and no publication after failure.
-- [ ] 4.4 Disable redirects and request retries and preserve typed provider failures; verify one request on rate limits and server errors, no redirect target access, malformed replies, and diagnostic redaction.
+- [ ] 4.4 Disable redirects and request retries and preserve typed provider failures with safe diagnostic display; verify missing or empty credentials, one request on rate limits and server errors, no redirect target access, malformed replies, and diagnostic redaction.
 - [ ] 4.5 Exercise repeated and parallel invocations with a local mock and document resource and output-limit boundaries; verify separate explicit transcripts, fresh conversations when history is omitted, existing concurrency limits, runtime and client reuse, and no node-owned conversation state.
-- [ ] 4.6 Validate explicit histories before network I/O; verify omitted and empty history, null or malformed entries, unsupported roles, empty content, indexed diagnostics, unchanged caller input, and no implicit history trimming.
+- [ ] 4.6 Validate nonempty prompts and explicit histories before network I/O; verify omitted and empty history, null or malformed entries, unsupported roles, empty content, indexed diagnostics, unchanged caller input, and no implicit history trimming.
 
 ## 5. Integrate compiled runners and packaging
 

@@ -71,7 +71,7 @@ The fixed contracts participate in startup arguments and graph validation normal
 
 The reflected collection descriptor is `List(Object)`, while nested codecs and business validation enforce the message shape and role values. Do not introduce enum codecs or a new runtime message type for this provider contract.
 
-Missing `history` or an empty list starts a new conversation. Treat supplied history as already completed messages in chronological order; do not require strict role alternation or assume a turn count. The current `prompt` is a separate new user message and must not already be appended by the caller. The node performs no implicit prompt templating.
+Missing `history` or an empty list starts a new conversation. Treat supplied history as already completed messages in chronological order; do not require strict role alternation or assume a turn count. The current `prompt` is a separate nonempty user message and must not already be appended by the caller. This ensures returned history can satisfy the next invocation's message contract. The node performs no implicit prompt templating.
 
 Build each request in the order `system`, supplied history, current user prompt. Use Rig's `CompletionRequest::new(prompt).messages(converted_history)`, then add the optional preamble; `.messages` inserts history before the current prompt. Historical user and assistant entries map to their corresponding Rig message variants.
 
@@ -112,5 +112,7 @@ The package follows ordinary dependency selection and inventory retention. Updat
 - Upstream minor versions change APIs: pin the validated version and keep provider conversion isolated in `mfn-llm`.
 
 ## Migration plan
+
+Group 3 introduces validated configuration and value contracts. Group 4 registers the complete executable factory together with its real provider operation, so intermediate commits do not expose a node backed by placeholder execution.
 
 Add the optional runtime facility first, preserving default builds. Add the opt-in node package and terminal-only examples, then packaged runner and release acceptance. Existing flows need no edits. Adopting flows declare `mfn-llm` and supply credentials only when executed. Removing the package declaration and LLM nodes restores the original dependency graph. No persisted workflow data or schema migration is required.

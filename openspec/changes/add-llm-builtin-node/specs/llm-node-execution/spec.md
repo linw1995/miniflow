@@ -50,7 +50,7 @@ Node preparation and workflow build validation MUST NOT read credentials, initia
 
 ### Requirement: Send one text generation request
 
-Each invocation SHALL accept required string `prompt`, optional string `system`, and optional message-list `history`, and send one nonstreaming Chat Completions request. Request order SHALL be system instructions, supplied history, and the current prompt. The node MUST NOT execute tools, retain node-owned conversation state, follow redirects, or automatically retry requests.
+Each invocation SHALL accept required nonempty string `prompt`, optional string `system`, and optional message-list `history`, and send one nonstreaming Chat Completions request. Request order SHALL be system instructions, supplied history, and the current prompt. The node MUST NOT execute tools, retain node-owned conversation state, follow redirects, or automatically retry requests.
 
 #### Scenario: Use an explicit compatible endpoint
 
@@ -63,6 +63,11 @@ Each invocation SHALL accept required string `prompt`, optional string `system`,
 - **WHEN** an invocation supplies completed user and assistant messages as history and a new prompt
 - **THEN** the request preserves those messages in order before appending the current prompt once
 - **AND** supplied system instructions appear first without being duplicated in history
+
+#### Scenario: Reject an empty current prompt
+
+- **WHEN** an invocation supplies an empty prompt
+- **THEN** validation fails before network I/O instead of returning history that the next invocation cannot consume
 
 #### Scenario: Receive a retryable or redirect response
 
