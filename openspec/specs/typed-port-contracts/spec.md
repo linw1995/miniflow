@@ -37,7 +37,8 @@ structural position requires the runtime to check the actual value before the ta
 disjoint concrete types and incompatible collection shapes before installation, even though an unknown output
 could happen to produce an empty collection satisfying both descriptors. `Any` SHALL remain a dynamic boundary
 when no exact value is known, not proof of a concrete type. Recursive list and map compatibility SHALL follow
-the same rules for element or value types. No numeric, string, or collection coercion SHALL occur.
+the same rules for element or value types. Overlapping numeric ranges SHALL retain runtime checks when narrowing is unproven. No integer/floating representation,
+string, or collection coercion SHALL occur; explicitly selected single-precision codecs SHALL round within their finite range.
 
 #### Scenario: Connect a refined value to a broad input
 
@@ -222,7 +223,7 @@ Runtime input and output port validation failures returned as `WorkflowRunError`
 
 ### Requirement: Derive typed input declarations from owned fields
 
-Struct-defined inputs SHALL map bool, i64, f64, String, and ValueRef to Boolean, Int64, Float64, String, and Any ports. Vec and string-keyed BTreeMap fields SHALL recursively describe lists and maps. Ordinary fields SHALL be required; a top-level Option field SHALL retain its inner descriptor and be non-required. Declaration and decoding semantics SHALL agree, including through type aliases.
+Struct-defined inputs SHALL map bool, i64, f64, String, and ValueRef to Boolean, Int64, Float64, String, and Any ports. Vec and string-keyed BTreeMap fields SHALL recursively describe lists and maps. Ordinary fields without explicit defaults SHALL be required; a top-level Option field SHALL retain its inner descriptor and be non-required. Declaration and decoding semantics SHALL agree, including through type aliases.
 
 #### Scenario: Describe a typed collection
 
@@ -347,7 +348,7 @@ Runtime-owned input decoding failures SHALL expose the affected port and preserv
 
 ### Requirement: Derive typed output declarations from owned fields
 
-Struct-defined outputs SHALL map bool, i64, f64, String, and shared JSON values to Boolean, Int64, Float64, String, and Any ports. Lists and string-keyed maps SHALL recursively describe their values. Ordinary fields SHALL be required; top-level optional fields SHALL retain the inner descriptor and be non-required. Type aliases SHALL preserve these semantics.
+Struct-defined outputs SHALL map bool, i64, f64, String, and shared JSON values to Boolean, Int64, Float64, String, and Any ports. Lists and string-keyed maps SHALL recursively describe their values. Ordinary fields without explicit unified-contract defaults SHALL be required; top-level optional fields SHALL retain the inner descriptor and be non-required. Type aliases SHALL preserve these semantics.
 
 #### Scenario: Declare recursive output values
 
@@ -448,7 +449,7 @@ distinct data types or duplicate declarations. Existing directional contracts SH
 Unified value conversion SHALL retain existing strict scalar and recursive collection representations, optional-port
 omission, null data, unknown-field rejection, shared payload identity, and descriptor depth limits. Failures SHALL
 preserve their conversion direction, port, typed source chain, and escaped nested pointer. Unifying declarations MUST
-NOT introduce coercion or defaults.
+NOT introduce implicit coercion or implicit defaults. Explicit field defaults SHALL apply only to absent bindings.
 
 #### Scenario: Keep omission distinct from null
 
@@ -463,7 +464,7 @@ NOT introduce coercion or defaults.
 #### Scenario: Reject unknown or missing input fields
 
 - **WHEN** decoding receives an unknown port or omits a required field
-- **THEN** it fails with the corresponding port error instead of ignoring the value or creating a default
+- **THEN** it fails with the corresponding port error instead of ignoring the value or creating an undeclared default
 
 ### Requirement: Prove direct typed transfer equivalence
 
@@ -598,3 +599,114 @@ Nested scalar mismatches SHALL retain expected and actual types.
 
 - **WHEN** a nested object's optional field has an over-depth descriptor while absent
 - **THEN** both conversion directions fail with the typed depth source and the nested field pointer
+
+### Requirement: Derive closed enum value codecs
+
+Providers SHALL be able to derive string enum values and internally tagged object enum values for fields and collection
+members. Variant and field renames SHALL be exact and independent of serialization attributes. Unknown variants,
+invalid tags, malformed payload fields, unsupported variant shapes, and ambiguous names MUST fail conversion or
+compilation. Conversion failures SHALL preserve typed causes and escaped pointers. Enum codecs SHALL remain outside
+certified direct transfer.
+
+#### Scenario: Round-trip enum payloads
+
+- **WHEN** a value bag contains renamed string variants and tagged unit or named payload variants in a list
+- **THEN** both directions retain wire names, declared payload fields, and omission semantics
+
+#### Scenario: Reject invalid enum declarations
+
+- **WHEN** an enum declares tuple payloads, empty or duplicate wire names, or a payload field colliding with its tag
+- **THEN** derivation fails with a compile-time diagnostic
+
+#### Scenario: Preserve enum failure provenance
+
+- **WHEN** a tagged value has an unknown or missing tag, unknown payload field, or invalid numeric descendant
+- **THEN** conversion fails with the relevant escaped field pointer and typed directional cause
+
+### Requirement: Apply explicit field defaults only to absence
+
+Input and unified value derives SHALL support explicit Default or zero-argument factory defaults. Only absent bindings
+SHALL invoke the default. Supplied values MUST retain strict decoding, including null checks. Defaulted ports SHALL be
+optional; unified contracts SHALL use that declaration in both roles and encode their actual field values. Direct
+transfer MUST preserve default behavior rather than substituting an absent optional value.
+
+#### Scenario: Decode an absent defaulted field
+
+- **WHEN** a defaulted numeric or generic field has no binding
+- **THEN** decoding calls its declared default and succeeds without making the port required
+
+#### Scenario: Preserve supplied invalid data
+
+- **WHEN** a defaulted unsigned field receives explicit null or an invalid representation
+- **THEN** decoding fails instead of replacing the supplied value with the default
+
+#### Scenario: Preserve an optional factory value in generated execution
+
+- **WHEN** an unconnected optional field declares a factory returning a present value
+- **THEN** generated and dynamic execution both observe that value instead of absence
+
+### Requirement: Distinguish nullable values from omitted fields
+
+Nullable value codecs SHALL accept explicit null or a valid inner value, including collection members. Optional
+nullable fields SHALL distinguish absence, supplied null, and supplied values in both directions. The nullable
+constructor SHALL participate in descriptor parsing, validation, compatibility, and the shared nesting bound. Encoding
+and certified validation MUST reject an inner value encoding as null so direct and dynamic transfer remain equivalent.
+
+#### Scenario: Round-trip three presence states
+
+- **WHEN** an optional nullable field is omitted, null, or a supplied string
+- **THEN** conversion preserves respectively absence, explicit null, or the supplied string
+
+#### Scenario: Validate nullable collection members
+
+- **WHEN** a list contains explicit null and valid unsigned values under a nullable element descriptor
+- **THEN** both conversion directions retain those members and reject invalid non-null values
+
+#### Scenario: Reject ambiguous null representations
+
+- **WHEN** a nullable value variant wraps a raw null, nullable null, or shared null payload
+- **THEN** dynamic encoding and certified validation both reject it with the same failing field path
+
+### Requirement: Check unsigned and single-precision numeric codecs
+
+Unsigned 64-bit, target-sized unsigned, and single-precision fields SHALL expose uint, usize, and float descriptors.
+Unsigned decoding MUST reject negative integers, floats, and out-of-range values. Single-precision decoding SHALL accept
+finite floating numbers within its finite range and round to that precision. Encoding and certification MUST reject
+non-finite floats, preserve integer values, and retain negative zero. Recursive errors SHALL retain their pointers.
+
+#### Scenario: Preserve numeric limits
+
+- **WHEN** values contain unsigned limits, target-sized limits, finite single-precision limits, or negative zero
+- **THEN** their codecs retain the integer value or single-precision bits through a round trip
+
+#### Scenario: Reject incompatible representations and ranges
+
+- **WHEN** an unsigned field receives a negative or floating number, or a single-precision field receives an integer or excessive magnitude
+- **THEN** decoding fails with the declared numeric descriptor and failing path
+
+#### Scenario: Reject non-finite output values
+
+- **WHEN** a single-precision field or collection member contains infinity or NaN
+- **THEN** encoding and certified validation fail rather than replacing the number with null
+
+### Requirement: Defer owned decoding of shared typed payloads
+
+A shared typed view SHALL retain its original immutable payload and expose it for inspection before owned decoding.
+Construction SHALL validate the wire descriptor without invoking the owned decoder; encoding and cloning SHALL preserve
+payload identity. Broad object and enum descriptors SHALL defer strict field or variant checks to explicit decoding.
+Only runtime-certified inner codecs SHALL qualify a shared view for certified direct transfer.
+
+#### Scenario: Check a budget before owned decoding
+
+- **WHEN** a node receives a shared typed list and inspects its length before decoding
+- **THEN** no owned element decoder has run, and an explicit decode invokes it afterward
+
+#### Scenario: Forward a shared typed payload
+
+- **WHEN** a shared view is cloned or emitted as an output
+- **THEN** its immutable payload identity remains the same without calling the owned decoder
+
+#### Scenario: Reject an invalid deferred object
+
+- **WHEN** a shape-valid shared object violates its declared field or enum contract
+- **THEN** explicit decoding fails with the strict nested codec's typed cause and pointer

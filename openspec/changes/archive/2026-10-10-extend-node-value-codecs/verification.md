@@ -11,3 +11,12 @@
 
 The final AGENTS.md review found no blocking issues. Detailed experiment records remain local under ignored
 target/ablation/node-value-codecs/ and are excluded from commits. Linux checks were not executed on this native host.
+
+The reviewed implementation was committed as `4fb930b` before archival.
+
+## Archive validation
+
+The archive synchronized five added and four modified requirements. All nineteen main specifications pass ordinary
+validation. Strict main-spec findings match the pre-change baseline exactly, with no new warnings or errors. This
+change passes the completed-task audit; the unrelated historical unify-flow-runtime archive retains its existing
+unfinished tasks.
