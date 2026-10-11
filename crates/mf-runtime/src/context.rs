@@ -315,6 +315,59 @@ impl ExecutionContext {
         self.startup_nodes.clear();
     }
 
+    pub(super) fn initialize_target(
+        &mut self,
+        target: &crate::NodeTarget,
+        inputs: crate::WorkflowArguments,
+        context: crate::WorkflowArguments,
+    ) -> Result<(), WorkflowRunError> {
+        snafu::ensure!(
+            self.scopes.is_empty(),
+            ContextSnafu {
+                definition_id: target.id.as_str(),
+                message: "isolated execution requires a top-level context",
+            }
+        );
+        target.validate_context(&context)?;
+        self.set_workflow_arguments(inputs);
+        self.bind_workflow_inputs(&target.inputs)?;
+        if target
+            .inputs
+            .stdin_owner(&self.workflow_arguments)?
+            .is_none()
+        {
+            self.stdin = None;
+        }
+        self.outputs = context
+            .0
+            .into_iter()
+            .map(|(id, value)| (id, Some(value)))
+            .collect();
+        self.typed_outputs.clear();
+        self.remaining_steps = StepBudget::new(crate::MAX_SCHEDULED_STEPS);
+        self.current_position = None;
+        self.pending_loop_write = None;
+        self.scope_exit_cutoff = Arc::new(AtomicUsize::new(usize::MAX));
+        Ok(())
+    }
+
+    pub(super) fn target_outputs<N>(
+        &mut self,
+        node: &FlowNode<N>,
+    ) -> Result<Outputs, WorkflowRunError> {
+        let mut outputs = Outputs::new();
+        for port in &node.metadata.ports.outputs {
+            let id = node.definition_id.as_str();
+            if !port.required && !self.outputs.contains_key(&output_id(id, &port.name)) {
+                continue;
+            }
+            if let Some(value) = self.select_output(&port.name, id, &port.name, !port.required)? {
+                outputs.insert(port.name.to_string(), value);
+            }
+        }
+        Ok(outputs)
+    }
+
     pub fn bind_workflow_inputs(
         &mut self,
         schema: &crate::WorkflowInputSchema,
@@ -694,6 +747,7 @@ impl ExecutionContext {
                 (Some(definition_id.to_string()), FailurePhase::Execution)
             }
             WorkflowRunError::WorkflowInputs { .. } => (None, FailurePhase::Dependency),
+            WorkflowRunError::NodeTarget { .. } => (None, FailurePhase::Dependency),
             WorkflowRunError::WorkerPool { .. } => (None, FailurePhase::Execution),
         };
         observation.select_failure(node, phase, error.to_string());

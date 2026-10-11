@@ -30,18 +30,18 @@
 
 ## 3. Execute prepared tasks in isolation
 
-- [ ] 3.1 Add a prepared isolated task entry point using restricted input/context initialization and the
+- [x] 3.1 Add a prepared isolated task entry point using restricted input/context initialization and the
   shared invocation/publication lifecycle; verify repeated calls retain independent state and typed error
   chains without registry lookup or runtime graph construction.
-- [ ] 3.2 Bypass external data/control dependencies, successors, and typed segment neighbors; verify fixture
+- [x] 3.2 Bypass external data/control dependencies, successors, and typed segment neighbors; verify fixture
   invocation counters show only the target executes in both finite and prepared-stream hosts.
-- [ ] 3.3 Preserve Loop and Iteration body execution and resource ownership; verify Loop pass/exit behavior,
+- [x] 3.3 Preserve Loop and Iteration body execution and resource ownership; verify Loop pass/exit behavior,
   parallel Iteration result ordering, worker bounds, and existing error policy under selected execution.
-- [ ] 3.4 Validate and route only selected stdin resources; verify conditional input bypass and unavailable
+- [x] 3.4 Validate and route only selected stdin resources; verify conditional input bypass and unavailable
   required stdin while unrelated sources remain unread.
-- [ ] 3.5 Collect all validated produced target ports independently of workflow selections; verify zero
+- [x] 3.5 Collect all validated produced target ports independently of workflow selections; verify zero
   outputs, output aliases, skipped/null distinctions, and invalid publication failure behavior.
-- [ ] 3.6 Document the prepared target API and composite/body visibility boundaries in the existing runtime
+- [x] 3.6 Document the prepared target API and composite/body visibility boundaries in the existing runtime
   documentation; verify examples agree with retained isolation and composite regressions.
 
 ## 4. Describe and observe selected finite operations

@@ -52,8 +52,55 @@ pub enum NodeTargetError {
 }
 
 pub struct PreparedTaskTarget<'a> {
-    pub(super) contract: &'a NodeTarget,
-    pub(super) node: FlowNode<&'a dyn TaskNode>,
+    contract: &'a NodeTarget,
+    node: FlowNode<&'a dyn TaskNode>,
+}
+
+impl crate::FlowRuntime {
+    pub fn execute_target(
+        &self,
+        target: &PreparedTaskTarget<'_>,
+        inputs: crate::WorkflowArguments,
+        context: crate::WorkflowArguments,
+    ) -> Result<crate::FlowOutputs, crate::WorkflowRunError> {
+        self.execute_target_with_observation(target, inputs, context, None)
+    }
+
+    pub fn execute_target_with_observation(
+        &self,
+        target: &PreparedTaskTarget<'_>,
+        inputs: crate::WorkflowArguments,
+        context: crate::WorkflowArguments,
+        observation: Option<crate::RunObservation>,
+    ) -> Result<crate::FlowOutputs, crate::WorkflowRunError> {
+        crate::ExecutionContext::run(observation, |state| {
+            self.execute_target_in_context(target, state, inputs, context)
+        })
+    }
+
+    pub fn execute_target_in_context(
+        &self,
+        target: &PreparedTaskTarget<'_>,
+        state: &mut crate::ExecutionContext,
+        inputs: crate::WorkflowArguments,
+        context: crate::WorkflowArguments,
+    ) -> Result<crate::FlowOutputs, crate::WorkflowRunError> {
+        state.configure_worker_limit(self.options().max_parallel_domains);
+        let result = (|| {
+            state.initialize_target(target.contract, inputs, context)?;
+            crate::context::execute_ordered_task_in_context(
+                &target.node,
+                target.node.node,
+                [],
+                state,
+            )?;
+            state.target_outputs(&target.node)
+        })();
+        if let Err(error) = &result {
+            state.select_observation_failure(error);
+        }
+        result
+    }
 }
 
 impl PreparedTaskTarget<'_> {

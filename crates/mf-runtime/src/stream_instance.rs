@@ -493,6 +493,7 @@ fn workflow_error_node(error: &crate::WorkflowRunError) -> String {
         | crate::WorkflowRunError::Context { definition_id, .. }
         | crate::WorkflowRunError::NodeExecution { definition_id, .. } => definition_id.to_string(),
         crate::WorkflowRunError::WorkflowInputs { .. }
+        | crate::WorkflowRunError::NodeTarget { .. }
         | crate::WorkflowRunError::WorkerPool { .. } => "<workflow>".to_owned(),
     }
 }

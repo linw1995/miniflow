@@ -5,6 +5,8 @@ use snafu::Snafu;
 #[derive(Debug, Snafu)]
 pub enum WorkflowRunError {
     #[snafu(transparent)]
+    NodeTarget { source: crate::NodeTargetError },
+    #[snafu(transparent)]
     WorkflowInputs { source: crate::WorkflowInputError },
     #[snafu(transparent)]
     WorkerPool { source: crate::WorkerPoolError },
