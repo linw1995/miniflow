@@ -98,6 +98,55 @@ fn moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts() 
             serde_json::from_slice::<Value>(&output.stdout).unwrap(),
             expected
         );
+        assert!(output.stderr.is_empty());
+        for (flag, through_cli) in [("-v", false), ("-vv", true), ("-vvv", false)] {
+            let mut command = if through_cli {
+                let mut command = Command::new(env!("CARGO_BIN_EXE_mf"));
+                command.arg("run").arg(&standalone);
+                command
+            } else {
+                Command::new(&standalone)
+            };
+            let verbose = command
+                .args([flag, "--inputs", &arguments.to_string()])
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            let stderr = String::from_utf8_lossy(&verbose.stderr);
+            assert!(verbose.status.success(), "{stderr}");
+            assert_eq!(verbose.stdout, output.stdout);
+            if flag == "-vvv" {
+                let records: Vec<mf_telemetry::wire::WireRecord> = stderr
+                    .lines()
+                    .map(|line| {
+                        serde_json::from_str(line.strip_prefix("[verbose] ").unwrap()).unwrap()
+                    })
+                    .collect();
+                assert_eq!(records.first().unwrap().event_name, "mf.workflow.started");
+                assert_eq!(records.last().unwrap().event_name, "mf.workflow.finished");
+                assert!(
+                    records
+                        .iter()
+                        .any(|record| record.event_name == "mf.node.started")
+                );
+                assert!(records.iter().all(|record| record.trace_context.is_none()));
+                if scenario == "nested" {
+                    assert!(
+                        records
+                            .iter()
+                            .any(|record| record.event_name == "mf.loop.pass.started")
+                    );
+                }
+            } else {
+                assert!(stderr.contains("workflow started"), "{stderr}");
+                assert!(stderr.contains("workflow succeeded"), "{stderr}");
+                assert!(stderr.contains("node "), "{stderr}");
+                assert_eq!(stderr.contains(" | event: "), flag == "-vv");
+                if scenario == "nested" {
+                    assert!(stderr.contains("loop pass started"), "{stderr}");
+                }
+            }
+        }
         let invalid = Command::new(&standalone)
             .args(["--inputs", "{\"unknown\":{}}"])
             .env("PATH", "")

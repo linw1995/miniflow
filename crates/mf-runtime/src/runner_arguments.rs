@@ -14,7 +14,7 @@ pub enum RunnerArgumentError {
     #[snafu(transparent)]
     Target { source: crate::NodeTargetError },
     #[snafu(display(
-        "{message}; usage: workflow [--node ID] [--NODE.PORT VALUE ...] [--inputs JSON|--inputs-file PATH] [--context JSON|--context-file PATH]"
+        "{message}; usage: workflow [-v|-vv|-vvv|--verbose] [--node ID] [--NODE.PORT VALUE ...] [--inputs JSON|--inputs-file PATH] [--context JSON|--context-file PATH]"
     ))]
     Invalid { message: String },
     #[snafu(display("could not read workflow arguments from {path:?}: {source}"))]
@@ -30,6 +30,7 @@ pub enum RunnerArgumentError {
 
 #[derive(Clone, Debug, Default)]
 pub struct RunnerInvocation {
+    pub verbose: u8,
     pub node: Option<String>,
     pub inputs: WorkflowArguments,
     pub context: WorkflowArguments,
@@ -107,8 +108,9 @@ impl RunnerInvocation {
             }
             .fail();
         }
-        let inputs =
-            WorkflowArguments::parse(forwarded, target.map_or(workflow, |target| &target.inputs))?;
+        let options =
+            RunnerArguments::parse(forwarded, target.map_or(workflow, |target| &target.inputs))?;
+        let inputs = options.inputs;
         let context = match context {
             None => WorkflowArguments::default(),
             Some((false, json)) => WorkflowArguments::from_json(
@@ -130,6 +132,7 @@ impl RunnerInvocation {
             WorkflowArguments::check_size(encoded.len())?;
         }
         Ok(Self {
+            verbose: options.verbose,
             node,
             inputs,
             context,
@@ -160,6 +163,22 @@ fn read_context_file(path: &Path) -> Result<Vec<u8>, RunnerArgumentError> {
     })
 }
 
+#[derive(Debug)]
+pub struct RunnerArguments {
+    /// Local diagnostic detail, capped at three.
+    pub verbose: u8,
+    pub inputs: WorkflowArguments,
+}
+
+impl RunnerArguments {
+    pub fn parse(
+        arguments: impl IntoIterator<Item = OsString>,
+        schema: &WorkflowInputSchema,
+    ) -> Result<Self, RunnerArgumentError> {
+        WorkflowArguments::parse_options(arguments, schema, true)
+    }
+}
+
 impl WorkflowArguments {
     pub fn from_file(path: &Path) -> Result<Self, RunnerArgumentError> {
         let read = || -> io::Result<Vec<u8>> {
@@ -179,6 +198,14 @@ impl WorkflowArguments {
         arguments: impl IntoIterator<Item = OsString>,
         schema: &WorkflowInputSchema,
     ) -> Result<Self, RunnerArgumentError> {
+        Ok(Self::parse_options(arguments, schema, false)?.inputs)
+    }
+
+    fn parse_options(
+        arguments: impl IntoIterator<Item = OsString>,
+        schema: &WorkflowInputSchema,
+        allow_verbose: bool,
+    ) -> Result<RunnerArguments, RunnerArgumentError> {
         let invalid = |message: &str| {
             InvalidSnafu {
                 message: message.to_owned(),
@@ -186,6 +213,7 @@ impl WorkflowArguments {
             .build()
         };
         let mut arguments = arguments.into_iter();
+        let mut verbose = 0_u8;
         let mut inputs = None;
         let mut values = Self::default();
         let mut size = 0;
@@ -193,6 +221,19 @@ impl WorkflowArguments {
             size += argument.len();
             Self::check_size(size)?;
             match argument.to_str() {
+                Some(flag)
+                    if allow_verbose
+                        && (flag == "--verbose"
+                            || (flag.starts_with("-v")
+                                && flag[1..].bytes().all(|byte| byte == b'v'))) =>
+                {
+                    let count = if flag == "--verbose" {
+                        1
+                    } else {
+                        flag.len() - 1
+                    };
+                    verbose = (usize::from(verbose) + count).min(3) as u8;
+                }
                 Some("--inputs" | "--inputs-file") => {
                     if inputs.is_some() {
                         return Err(invalid(
@@ -265,6 +306,9 @@ impl WorkflowArguments {
         schema.validate(&values)?;
         let encoded = serde_json::to_vec(&values).context(crate::WorkflowInputJsonSnafu)?;
         Self::check_size(encoded.len())?;
-        Ok(values)
+        Ok(RunnerArguments {
+            verbose,
+            inputs: values,
+        })
     }
 }

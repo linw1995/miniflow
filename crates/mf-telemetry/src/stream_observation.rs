@@ -252,7 +252,7 @@ impl StreamObservation {
         };
         if let Ok(wire) = record.to_wire(time.as_nanos().min(u64::MAX as u128) as u64, trace) {
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                (self.0.backend.emit)(&wire)
+                self.0.backend.emit_lifecycle(&wire)
             }));
         }
     }
@@ -263,6 +263,9 @@ impl StreamObservation {
             return;
         }
         counters.closed = true;
+        self.0
+            .backend
+            .finish_diagnostics(&self.0.description.workflow_id, self.0.run_id);
         let outcome = if failure.is_some() {
             StreamOutcome::Failed
         } else {
@@ -318,6 +321,8 @@ impl StreamObservation {
 impl Drop for StreamInner {
     fn drop(&mut self) {
         if !self.counters.get_mut().unwrap().closed {
+            self.backend
+                .finish_diagnostics(&self.description.workflow_id, self.run_id);
             self.context
                 .span()
                 .set_status(Status::error("stream observation abandoned"));
@@ -551,6 +556,7 @@ mod tests {
     fn observation(records: Arc<AtomicUsize>) -> StreamObservation {
         let observer = Observer(Arc::new(Backend {
             tracer: opentelemetry::global::tracer("stream-test"),
+            diagnostics: None,
             emit: Box::new(move |_| {
                 records.fetch_add(1, Ordering::SeqCst);
                 Ok(())

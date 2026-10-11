@@ -137,7 +137,7 @@ fn compiles_a_runner_without_telemetry_and_preserves_execution() {
             .contains("recompile the runner without --no-telemetry")
     );
     let result = compile_command(&definition, &output)
-        .args(["--no-telemetry", "--locked"])
+        .args(["--no-telemetry", "--locked", "--verbose"])
         .output()
         .unwrap();
     assert!(
@@ -145,6 +145,9 @@ fn compiles_a_runner_without_telemetry_and_preserves_execution() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+    let diagnostics = String::from_utf8_lossy(&result.stderr);
+    assert!(diagnostics.contains("[verbose] compiling"), "{diagnostics}");
+    assert!(diagnostics.contains("[verbose] installed"), "{diagnostics}");
 }
 
 fn assert_rejected_definition(mut value: serde_json::Value, diagnostics: &[&str]) {

@@ -68,6 +68,38 @@ fn finite_runner_isolates_noisy_plugins_and_survives_without_build_inputs() {
         assert!(String::from_utf8_lossy(&output.stderr).contains("factory diagnostic"));
         assert_eq!(result(output), json!({"value":42}));
         assert!(!trace.exists());
+        for flag in ["-v", "-vv", "-vvv"] {
+            let output = run(&binary, &[flag, "--node=copy.part", "--copy.part.input=42"]);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if flag == "-vvv" {
+                let records: Vec<Value> = stderr
+                    .lines()
+                    .filter_map(|line| line.strip_prefix("[verbose] "))
+                    .map(|line| serde_json::from_str(line).unwrap())
+                    .collect();
+                assert_eq!(
+                    records.first().unwrap()["event_name"],
+                    "mf.workflow.started"
+                );
+                assert_eq!(records.first().unwrap()["body"]["node_count"], 1);
+                assert_eq!(
+                    records.last().unwrap()["event_name"],
+                    "mf.workflow.finished"
+                );
+                assert_eq!(
+                    records
+                        .iter()
+                        .filter(|record| record["event_name"] == "mf.node.started")
+                        .count(),
+                    1
+                );
+            } else {
+                assert!(stderr.contains("workflow started (nodes: 1"));
+                assert!(stderr.contains("node \"copy.part\""));
+            }
+            assert_eq!(result(output), json!({"value":42}));
+            assert!(!trace.exists());
+        }
         let input = root.path().join("inputs.json");
         fs::write(&input, "{\"copy.part.input\":43}").unwrap();
         assert_eq!(
@@ -147,6 +179,15 @@ fn streaming_binary_selects_finite_typed_tasks_and_rejects_producers_and_events(
             result(run(&binary, &["--node=copy", "--copy.input=\"selected\""])),
             json!({"value":"selected"})
         );
+        let verbose = run(
+            &binary,
+            &["--node=copy", "--copy.input=\"selected\"", "-vv"],
+        );
+        let stderr = String::from_utf8_lossy(&verbose.stderr);
+        assert!(stderr.contains("workflow started (nodes: 1"));
+        assert!(stderr.contains("node \"copy\""));
+        assert!(!stderr.contains("node \"read\"") && !stderr.contains("node \"batch\""));
+        assert_eq!(result(verbose), json!({"value":"selected"}));
         for id in ["read", "batch", "%loop", "copy.body"] {
             let output = run(&binary, &["--node", id]);
             assert!(!output.status.success());

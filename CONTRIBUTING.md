@@ -46,6 +46,10 @@ checkout changes. When setting this variable locally, give concurrent nextest ru
 
 Nix checks and CI coverage use the `ci` nextest profile. It shares the prewarmed Cargo target across additional generated-runner tests while serializing access to their executable. The default local profile retains more test parallelism. To reproduce CI scheduling locally, run `nix develop --command cargo nextest run --profile ci --workspace --all-features`.
 
+CI's Linux `check` job reports formatting and workflow validation separately from package builds and Clippy.
+Package builds and Clippy share one Nix invocation so they can run in parallel and reuse dependencies.
+The `coverage` job runs the complete Linux test suite; main-only macOS checks run all flake checks.
+
 After a PR's CI run completes, the independent `CI timing monitor` workflow updates a single bot comment
 with job and step durations. Its baseline is the median of the latest five successful CI pushes to the
 PR's base branch completed before that run started. Only matching jobs contribute to the wall time,

@@ -39,6 +39,15 @@ All focused commands ran in the pinned `nix develop` toolchain and passed:
   failure: `2026-10-05-unify-flow-runtime` has 17 incomplete tasks. Its task file is identical to the version
   before this change's archival and remains outside this implementation's scope.
 
+## Integration with current main
+
+- Integrated `0e793e9` from main, retaining its verbose execution and CI timing changes.
+- Selected invocations use the existing verbosity parser and local stderr observer. Regression cases cover
+  flag-like string values, accumulated levels, finite operation counts, and selected Tasks in both finite
+  and streaming binaries, with and without the telemetry SDK.
+- Focused parser, generated-project, standalone-runner, and real OTLP suites passed all 19 tests in the
+  pinned toolchain. `prek -a` and ordinary validation of all 22 main specifications also passed.
+
 ## Delivery scope
 
 The implemented phase supports top-level Tasks in finite and streaming flows and complete Loop/Iteration

@@ -122,7 +122,11 @@ impl TelemetryProviders {
     }
 
     pub fn observer(&self) -> Observer {
-        Observer::new(&self.traces, &self.logs)
+        self.observer_with_verbosity(0)
+    }
+
+    pub fn observer_with_verbosity(&self, verbose: u8) -> Observer {
+        Observer::new_with_verbosity(&self.traces, &self.logs, verbose)
     }
 
     /// Ends both pipelines within separate finite deadlines after a handled run.

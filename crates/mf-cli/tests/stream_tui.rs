@@ -260,7 +260,11 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
     fs::write(&inputs_file, &parameters).unwrap();
     let (status, output, screen) = run_tui(
         &source,
-        &["--inputs-file".into(), inputs_file.clone().into_os_string()],
+        &[
+            "-vvv".into(),
+            "--inputs-file".into(),
+            inputs_file.clone().into_os_string(),
+        ],
         false,
         true,
     );

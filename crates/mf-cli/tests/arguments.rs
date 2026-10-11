@@ -48,7 +48,6 @@ fn invalid_arguments_report_diagnostics_on_stderr() {
         &["compile", "flow.json", "--output", "flow", "--unknown"],
         &["compile", "flow.json", "--output", "flow", "extra"],
         &["run"],
-        &["run", "flow"],
         &["run", "--tui"],
         &["run", "flow", "--tui", "--tui"],
         &["run", "flow", "--tui", "extra"],
@@ -64,4 +63,86 @@ fn invalid_arguments_report_diagnostics_on_stderr() {
             "{args:?}: {output:?}"
         );
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn direct_run_preserves_stdin_arguments_output_and_exit_status() {
+    use std::{fs, io::Write, os::unix::fs::PermissionsExt, process::Stdio};
+
+    let root = tempfile::tempdir().unwrap();
+    let runner = root.path().join("runner with spaces");
+    fs::write(&runner, "#!/bin/sh\nIFS= read -r line\nprintf '%s\\n' \"$line\" \"$@\"\nprintf 'runner diagnostic\\n' >&2\nexit 37\n").unwrap();
+    fs::set_permissions(&runner, fs::Permissions::from_mode(0o700)).unwrap();
+    for (flags, expected) in [
+        (
+            vec!["--read.path", "file with spaces"],
+            "--read.path\nfile with spaces\n",
+        ),
+        (vec!["-v", "--inputs", "{}"], "--verbose\n--inputs\n{}\n"),
+        (
+            vec!["-vv", "--read.path", "-vvv"],
+            "--verbose\n--verbose\n--read.path\n-vvv\n",
+        ),
+        (
+            vec!["-vvvv", "--inputs", "{}"],
+            "--verbose\n--verbose\n--verbose\n--inputs\n{}\n",
+        ),
+        (
+            vec!["--verbose", "--inputs-file", "parameters with spaces.json"],
+            "--verbose\n--inputs-file\nparameters with spaces.json\n",
+        ),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_mf"))
+            .arg("run")
+            .arg(&runner)
+            .args(flags)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(b"piped input\n")
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert_eq!(output.status.code(), Some(37));
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("piped input\n{expected}")
+        );
+        assert_eq!(output.stderr, b"runner diagnostic\n");
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_mf"))
+        .args(["-v", "run"])
+        .arg(&runner)
+        .arg("-vv")
+        .stdin(Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(37));
+    assert_eq!(output.stdout, b"\n--verbose\n--verbose\n--verbose\n");
+    fs::write(&runner, "#!/bin/sh\nkill -TERM $$\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mf"))
+        .arg("run")
+        .arg(&runner)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(143));
+}
+
+#[test]
+fn direct_run_reports_launch_failure() {
+    let root = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_mf"))
+        .arg("run")
+        .arg(root.path().join("missing-runner"))
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("could not run workflow"));
 }

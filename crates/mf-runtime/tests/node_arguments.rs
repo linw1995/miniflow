@@ -56,13 +56,41 @@ fn selection_preserves_values_types_presence_and_normal_arguments() {
         let value = parse(&args, &target).unwrap();
         assert_eq!(value.inputs.0.len(), 1);
     }
+    for (args, expected, text) in [
+        (
+            vec!["--verbose", "--node=copy.part", "--copy.part.text", "-vv"],
+            1,
+            "-vv",
+        ),
+        (
+            vec!["--node=copy.part", "-vv", "--copy.part.text=--verbose"],
+            2,
+            "--verbose",
+        ),
+        (
+            vec![
+                "--node=copy.part",
+                "--copy.part.text",
+                "-v",
+                "-vvv",
+                "--verbose",
+            ],
+            3,
+            "-v",
+        ),
+    ] {
+        let value = parse(&args, &target).unwrap();
+        assert_eq!(value.verbose, expected);
+        assert_eq!(value.inputs.0["copy.part.text"], json!(text));
+    }
     let normal = RunnerInvocation::parse(
-        ["--copy.part.text", "hello"].map(Into::into),
+        ["--copy.part.text", "hello", "-vv"].map(Into::into),
         &target.inputs,
         &[],
     )
     .unwrap();
     assert!(normal.node.is_none());
+    assert_eq!(normal.verbose, 2);
     assert_eq!(normal.inputs.0["copy.part.text"], json!("hello"));
 }
 
