@@ -15,7 +15,10 @@ use mf_telemetry::{
     identity::{RunId, WorkflowId},
 };
 use mf_tui::{
-    graph::{GraphLayout, GraphView},
+    graph::{
+        EdgeKind, GraphLayout, GraphView,
+        routing::{CrossingPattern, crossing_cells},
+    },
     state::SessionState,
 };
 use ratatui::{
@@ -42,6 +45,10 @@ impl Drop for TerminalGuard {
 }
 
 fn main() -> PreviewResult<()> {
+    if std::env::args().any(|arg| arg == "--crossings") {
+        preview_crossings();
+        return Ok(());
+    }
     if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         return Err("graph preview requires interactive stdin and stderr".into());
     }
@@ -322,4 +329,66 @@ fn scheduled_events(
             },
         ),
     ]
+}
+
+fn preview_crossings() {
+    let colored = std::env::args().any(|arg| arg == "--color");
+    for pattern in [CrossingPattern::Bridge, CrossingPattern::Underpass] {
+        for horizontal in [EdgeKind::Data, EdgeKind::Control] {
+            for vertical in [EdgeKind::Data, EdgeKind::Control] {
+                for upper_horizontal in [true, false] {
+                    println!(
+                        "{pattern:?}: H={horizontal:?}, V={vertical:?}, upper={}",
+                        if upper_horizontal {
+                            "horizontal"
+                        } else {
+                            "vertical"
+                        }
+                    );
+                    let mut cells = [[(" ", false); 9]; 9];
+                    let h = if horizontal == EdgeKind::Data {
+                        "═"
+                    } else {
+                        "─"
+                    };
+                    let v = if vertical == EdgeKind::Data {
+                        "║"
+                    } else {
+                        "│"
+                    };
+                    cells[4].fill((h, upper_horizontal));
+                    for row in &mut cells {
+                        row[4] = (v, !upper_horizontal);
+                    }
+                    let radius = if pattern == CrossingPattern::Bridge {
+                        2
+                    } else {
+                        1
+                    };
+                    for row in cells.iter_mut().take(5 + radius).skip(4 - radius) {
+                        for cell in row.iter_mut().take(5 + radius).skip(4 - radius) {
+                            *cell = (" ", false);
+                        }
+                    }
+                    for cell in crossing_cells(horizontal, vertical, upper_horizontal, pattern) {
+                        cells[(4 + cell.dy) as usize][(4 + cell.dx) as usize] =
+                            (cell.symbol, cell.upper);
+                    }
+                    for row in cells {
+                        for (symbol, upper) in row {
+                            if colored {
+                                print!(
+                                    "\x1b[{}m{symbol}\x1b[0m",
+                                    if upper { "32;1" } else { "90" }
+                                );
+                            } else {
+                                print!("{symbol}");
+                            }
+                        }
+                        println!();
+                    }
+                }
+            }
+        }
+    }
 }

@@ -385,3 +385,30 @@ fn known_sequence_gap_marks_last_seen_running_state_as_uncertain() {
         .render(closed.area, &mut closed);
     assert!(buffer_text(&closed).contains("last running"));
 }
+
+#[test]
+fn stored_routes_preserve_connection_and_observation_identity() {
+    let graph = description();
+    let layout = GraphLayout::new(&graph).unwrap();
+    assert_eq!(layout.routes().len(), layout.edges().len());
+    for (edge, route) in layout.edges().iter().zip(layout.routes()) {
+        assert_eq!(edge.key.source, layout.nodes()[edge.from].id);
+        assert_eq!(edge.key.destination, layout.nodes()[edge.to].id);
+        assert_eq!(edge.key.output, edge.from_output);
+        assert_eq!(edge.key.input, edge.to_input);
+        let source = layout.nodes()[edge.from].rect;
+        let target = layout.nodes()[edge.to].rect;
+        assert_eq!(route.points.first().unwrap().x, source.x + source.width);
+        assert_eq!(route.points.last().unwrap().x, target.x - 1);
+        assert!(route.segments().all(|segment| segment.start.x == segment.end.x || segment.start.y == segment.end.y));
+    }
+    assert!(layout.crossings().is_empty());
+    assert_eq!(
+        layout
+            .nodes()
+            .iter()
+            .map(|node| &node.id)
+            .collect::<Vec<_>>(),
+        graph.execution_order.iter().collect::<Vec<_>>()
+    );
+}

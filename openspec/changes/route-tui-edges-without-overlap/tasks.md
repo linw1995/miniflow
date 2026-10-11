@@ -1,8 +1,8 @@
 ## 1. Establish crossing presentation and route ownership
 
-- [ ] 1.1 Extend the graph preview with bridge and capped-underpass prototypes; compare both crossing orientations, all data/control pairs, and monochrome/status styles, then record the chosen glyph pattern, cell widths, footprint, clearance, and visual evidence in `design.md` and local `target/` artifacts.
-- [ ] 1.2 Add stable edge keys and stored polylines, labels, crossing ownership, and unresolved reasons within existing graph module boundaries; verify endpoint identity, distinct parallel edges, and unchanged observation-index mapping with focused graph tests.
-- [ ] 1.3 Add interval-based conflict classification for obstacles, collinear overlap, contacts, bends, perpendicular crossings, and marker footprints; verify each category with small geometric fixtures, including reverse segment direction and inclusive endpoints.
+- [x] 1.1 Extend the graph preview with bridge and capped-underpass prototypes; compare both crossing orientations, all data/control pairs, and monochrome/status styles, then record the chosen glyph pattern, cell widths, footprint, clearance, and visual evidence in `design.md` and local `target/` artifacts.
+- [x] 1.2 Add stable edge keys and stored polylines, labels, crossing ownership, and unresolved reasons within existing graph module boundaries; verify endpoint identity, distinct parallel edges, and unchanged observation-index mapping with focused graph tests.
+- [x] 1.3 Add interval-based conflict classification for obstacles, collinear overlap, contacts, bends, perpendicular crossings, and marker footprints; verify each category with small geometric fixtures, including reverse segment direction and inclusive endpoints.
 
 ## 2. Allocate attachments and routing channels
 

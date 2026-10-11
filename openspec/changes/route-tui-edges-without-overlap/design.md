@@ -64,6 +64,12 @@ The marker footprint participates in route planning; rendering cannot enlarge it
 
 This prototype step is part of implementation and does not require another approval round. No claim is made that a single Unicode character can encode both edge kinds and both crossing orientations.
 
+#### Selected marker
+
+Use the capped underpass in a 3-by-3 footprint. The upper stroke remains continuous. A lower vertical control edge ends at `┴`/`┬`; a lower vertical data edge uses `╧`/`╤`. A lower horizontal control edge uses `┤`/`├`; a lower horizontal data edge uses `╢`/`╟`. Every marker glyph occupies one terminal cell. Require three cells of straight-segment clearance from bends and endpoints, and disjoint marker footprints.
+
+The preview matrix covers both orientations and all four edge-kind combinations. The compact caps preserve the lower edge's line kind and show deliberate interruption in monochrome; the bridge requires a larger footprint and displaces the upper path. The initial selection was visually inspected with Menlo. Local evidence lives in `target/edge-routing/crossings.txt`, `crossings.ansi`, and `crossings.png`; preview commands use `graph_preview -- --crossings [--color]`.
+
 ### 6. Make resource exhaustion explicit and separate from workflow failure
 
 Introduce named limits for sparse graph vertices/arcs, cumulative search expansions per scope, retry rounds, retained conflict records, and checked canvas extents. Enforce both per-search and scope-wide limits, including preprocessing and marker enumeration. Derive initial defaults from the large-fixture measurements and document them before completing delivery. Use deterministic operation counts rather than wall-clock cutoffs for reproducible geometry.

@@ -1,4 +1,8 @@
-//! Fixed terminal projection of a described workflow graph.
+//! Stable terminal projection of a described workflow graph.
+
+pub mod routing;
+
+use routing::{Crossing, EdgeKey, EdgeRoute, Point};
 
 use crate::{
     duration::format_duration_ns,
@@ -53,7 +57,7 @@ pub struct GraphNode {
     pub rect: GraphRect,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EdgeKind {
     Data,
     Control,
@@ -61,6 +65,7 @@ pub enum EdgeKind {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GraphEdge {
+    pub key: EdgeKey,
     pub from: usize,
     pub to: usize,
     pub from_output: String,
@@ -73,6 +78,8 @@ pub struct GraphEdge {
 pub struct GraphLayout {
     nodes: Vec<GraphNode>,
     edges: Vec<GraphEdge>,
+    routes: Vec<EdgeRoute>,
+    crossings: Vec<Crossing>,
     width: u32,
     height: u32,
 }
@@ -139,6 +146,13 @@ impl GraphLayout {
             let to = positions[edge.to_node.as_str()];
             topology.insert((from as u32, to as u32));
             edges.push(GraphEdge {
+                key: EdgeKey {
+                    source: nodes[from].id.clone(),
+                    destination: nodes[to].id.clone(),
+                    output: edge.from_output.clone(),
+                    input: Some(edge.to_input.clone()),
+                    kind: EdgeKind::Data,
+                },
                 from,
                 to,
                 from_output: edge.from_output.clone(),
@@ -153,6 +167,13 @@ impl GraphLayout {
             let to = positions[edge.to_node.as_str()];
             topology.insert((from as u32, to as u32));
             edges.push(GraphEdge {
+                key: EdgeKey {
+                    source: nodes[from].id.clone(),
+                    destination: nodes[to].id.clone(),
+                    output: edge.from_output.clone(),
+                    input: None,
+                    kind: EdgeKind::Control,
+                },
                 from,
                 to,
                 from_output: edge.from_output.clone(),
@@ -249,7 +270,25 @@ impl GraphLayout {
             .map(|node| node.rect.y + NODE_HEIGHT + MARGIN)
             .max()
             .unwrap_or(MARGIN * 2);
+        let routes = edges
+            .iter()
+            .map(|edge| {
+                let source = nodes[edge.from].rect;
+                let target = nodes[edge.to].rect;
+                let from = Point::new(source.x + source.width, source.y + edge.from_row);
+                let to = Point::new(target.x.saturating_sub(1), target.y + edge.to_row);
+                let middle = from.x + to.x.saturating_sub(from.x) / 2;
+                EdgeRoute::from_points([
+                    from,
+                    Point::new(middle, from.y),
+                    Point::new(middle, to.y),
+                    to,
+                ])
+            })
+            .collect();
         Ok(Self {
+            routes,
+            crossings: Vec::new(),
             nodes,
             edges,
             width: right + MARGIN,
@@ -263,6 +302,14 @@ impl GraphLayout {
 
     pub fn edges(&self) -> &[GraphEdge] {
         &self.edges
+    }
+
+    pub fn routes(&self) -> &[EdgeRoute] {
+        &self.routes
+    }
+
+    pub fn crossings(&self) -> &[Crossing] {
+        &self.crossings
     }
 
     pub fn size(&self) -> (u32, u32) {
