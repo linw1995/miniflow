@@ -123,7 +123,7 @@ fn startup_loop_observation_needs_no_synthetic_message_or_source() {
         &NodeRegistry::from_inventory().unwrap(),
         StreamOptions {
             observation: Some(observation),
-            arguments: mf_runtime::WorkflowArguments::try_from(json!({"repeat":{"x":7}})).unwrap(),
+            arguments: mf_runtime::WorkflowArguments::try_from(json!({"repeat.x":7})).unwrap(),
             ..Default::default()
         },
     )

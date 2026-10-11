@@ -24,7 +24,7 @@ pub fn sample_manifest() -> WorkflowManifest {
             loop_bodies: vec![],
         },
         interface: WorkflowInterface {
-            version: WorkflowInterfaceVersion::V2026_10_03,
+            version: WorkflowInterfaceVersion::V2026_10_11,
             workflow_id,
             schema: WorkflowInputSchema::default(),
         },

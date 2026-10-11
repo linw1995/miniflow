@@ -157,7 +157,7 @@ fn llm_workflows_match_memory_and_standalone_runners() {
                 &fs::read_to_string(workspace.join("examples/llm-terminal.json")).unwrap(),
             )
             .unwrap(),
-            json!({"chat": {"prompt": "Hello", "system": "Answer briefly", "history": [{"role": "user", "content": "prior"}, {"role": "assistant", "content": "earlier reply"}]}}),
+            json!({"chat.prompt":"Hello", "chat.system":"Answer briefly", "chat.history":[{"role": "user", "content": "prior"}, {"role": "assistant", "content": "earlier reply"}]}),
             1,
         ),
         (
@@ -165,12 +165,12 @@ fn llm_workflows_match_memory_and_standalone_runners() {
                 &fs::read_to_string(workspace.join("examples/llm-loop.json")).unwrap(),
             )
             .unwrap(),
-            json!({"repeat": {"prompt": "Hello", "history": [], "text": ""}}),
+            json!({"repeat.prompt":"Hello", "repeat.history":[], "repeat.text":""}),
             2,
         ),
         (
             json!({"version": "2026-10-03", "nodes": [{"id": "iteration", "kind": "builtin.iteration", "config": {"mode": "parallel", "on_error": "terminate", "body": {"nodes": [{"id": "chat", "kind": "builtin.llm"}], "edges": [{"from_node": "%iteration", "from_output": "item", "to_node": "chat", "to_input": "prompt"}], "result": {"node": "chat", "port": "text"}}}}], "outputs": [{"name": "results", "node": "iteration", "port": "results"}]}),
-            json!({"iteration": {"items": ["one", "two"]}}),
+            json!({"iteration.items":["one", "two"]}),
             2,
         ),
     ];
@@ -233,7 +233,7 @@ fn llm_stream_tasks_and_skips_preserve_existing_execution_contracts() {
         "outputs": [{"name": "text", "node": "chat", "port": "text"}, {"name": "history", "node": "chat", "port": "history"}]
     });
     configure(&mut value, &server);
-    let inputs = json!({"read": {"path": input}});
+    let inputs = json!({"read.path":input});
     let executable = compile(&value, root.path());
     assert!(server.requests().is_empty());
     let expected = run_memory(&value, &inputs);

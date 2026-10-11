@@ -78,7 +78,10 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let arguments = mf_runtime::WorkflowArguments::parse(std::env::args_os().skip(1))?;
+    let manifest = workflow_manifest()?;
+    let arguments = mf_runtime::WorkflowArguments::parse(
+        std::env::args_os().skip(1), &manifest.interface.schema,
+    )?;
     #[cfg(feature = "streaming")]
     { execute_stream(arguments) }
     #[cfg(not(feature = "streaming"))]

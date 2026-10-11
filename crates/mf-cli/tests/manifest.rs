@@ -29,14 +29,14 @@ fn moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts() 
             "task" => (
                 json!({"version":"2026-10-03", "nodes":[{"id":"identity", "kind":"builtin.identity"}],
                 "outputs":[{"name":"result", "node":"identity", "port":"value"}]}),
-                json!({"identity":{"input":27}}),
+                json!({"identity.input":27}),
                 json!({"result":27}),
             ),
             "stream" => (
                 json!({"version":"2026-10-03", "execution":{"mode":"stream"},
                 "nodes":[{"id":"read", "kind":"builtin.readline"}],
                 "outputs":[{"name":"result", "node":"read", "port":"line"}]}),
-                json!({"read":{"path":data}}),
+                json!({"read.path":data}),
                 json!({"result":"hello"}),
             ),
             _ => (

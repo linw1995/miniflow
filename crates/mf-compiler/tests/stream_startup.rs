@@ -92,7 +92,7 @@ fn autonomous_source_uses_startup_arguments_and_drains_beyond_capacity() {
     );
     let instance = prepared
         .start_with_options(StreamOptions {
-            arguments: WorkflowArguments::try_from(json!({"%input":{"start":10}})).unwrap(),
+            arguments: WorkflowArguments::try_from(json!({"%input.start":10})).unwrap(),
             ..Default::default()
         })
         .unwrap();
@@ -128,7 +128,7 @@ fn independent_startup_producers_progress_directly_and_after_tasks() {
             edges.push(json!({"from_node":"zz", "from_output":"value", "to_node":"zzz", "to_input":"start"}));
             WorkflowArguments::default()
         } else {
-            WorkflowArguments::try_from(json!({"a":{"start":1}, "zzz":{"start":2}})).unwrap()
+            WorkflowArguments::try_from(json!({"a.start":1, "zzz.start":2})).unwrap()
         };
         let prepared = prepare(
             json!({"execution":{"mode":"stream", "limits":{"max_pending_messages":3,"workers":1}},
@@ -156,7 +156,7 @@ fn task_only_and_empty_streams_complete_without_a_sender() {
         let has_task = !value["nodes"].as_array().unwrap().is_empty();
         let prepared = prepare(value);
         let arguments = if has_task {
-            WorkflowArguments::try_from(json!({"copy":{"input":42}})).unwrap()
+            WorkflowArguments::try_from(json!({"copy.input":42})).unwrap()
         } else {
             WorkflowArguments::default()
         };
@@ -187,7 +187,7 @@ fn source_return_waits_for_final_output_acknowledgement() {
     );
     let instance = prepared
         .start_with_options(StreamOptions {
-            arguments: WorkflowArguments::try_from(json!({"read":{"start":1}})).unwrap(),
+            arguments: WorkflowArguments::try_from(json!({"read.start":1})).unwrap(),
             ..Default::default()
         })
         .unwrap();

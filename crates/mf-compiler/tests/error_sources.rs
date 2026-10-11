@@ -128,8 +128,7 @@ fn readline_conversion_preserves_the_stream_input_failure_phase() {
     let prepared = instantiate_stream(&plan, &registry).unwrap();
     let instance = prepared
         .start_with_options(mf_runtime::StreamOptions {
-            arguments: mf_runtime::WorkflowArguments::try_from(json!({"read": {"path": path}}))
-                .unwrap(),
+            arguments: mf_runtime::WorkflowArguments::try_from(json!({"read.path":path})).unwrap(),
             ..Default::default()
         })
         .unwrap();

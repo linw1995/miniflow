@@ -345,9 +345,10 @@ older streaming descriptions require recompilation. A fresh run ID and loopback 
 execution child receives these session settings; inherited `OTEL_EXPORTER_OTLP_*` settings, including remote
 endpoints and headers, are removed from the child environment. The parent environment is unchanged.
 
-Pass startup arguments with `--inputs '<JSON>'` or `--inputs-file <PATH>`. These options are mutually
-exclusive and accept at most 1 MiB. The CLI reads a parameter file once, validates the nested node/port
-map, and forwards a canonical copy through a private temporary file kept alive for the child.
+Pass startup arguments directly as `--node.port VALUE` after the TUI options. The JSON transports
+`--inputs '<JSON>'` and `--inputs-file <PATH>` accept flat qualified keys and cannot be combined with
+named parameters. Inputs accept at most 1 MiB. The CLI validates parameters and forwards a canonical
+copy through a private temporary file kept alive for the child.
 
 TUI children receive null stdin so terminal input remains available for controls. Preflight rejects workflows
 with an active stdin requirement. Supply a source file path through workflow parameters for TUI observation;
@@ -355,7 +356,7 @@ use the standalone executable for stdin ingestion. Resource metadata determines 
 registered node kinds.
 
 ```sh
-mf run ./read-workflow --tui --inputs '{"read":{"path":"/data/events.txt"}}'
+mf run ./read-workflow --tui --read.path /data/events.txt
 printf '1\n2\n' | ./stream-batch
 ```
 

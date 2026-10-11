@@ -1,4 +1,4 @@
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use mf_compiler::{
     CompileRequest, PipelineError, RunnerOptions, SupportPackages, compile_project_with_options,
 };
@@ -27,12 +27,15 @@ enum Command {
         /// Observe workflow execution in the terminal UI.
         #[arg(long, required = true)]
         tui: bool,
-        /// Workflow startup arguments keyed by initial node and input port.
+        /// Workflow startup arguments keyed by qualified node.port names.
         #[arg(long, value_name = "JSON", conflicts_with = "inputs_file")]
         inputs: Option<String>,
         /// Read workflow startup arguments from a JSON file (up to 1 MiB).
         #[arg(long, value_name = "PATH")]
         inputs_file: Option<PathBuf>,
+        /// Workflow parameters, such as --read.path /data/events.txt.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true, conflicts_with_all = ["inputs", "inputs_file"])]
+        arguments: Vec<std::ffi::OsString>,
     },
 }
 
@@ -67,7 +70,22 @@ struct CompileOptions {
 }
 
 fn main() -> ExitCode {
-    match run(Cli::parse()) {
+    let cli = Cli::parse();
+    if let Command::Run { arguments, .. } = &cli.command
+        && arguments.first().is_some_and(|argument| {
+            !argument
+                .to_str()
+                .is_some_and(|argument| argument.starts_with("--"))
+        })
+    {
+        Cli::command()
+            .error(
+                clap::error::ErrorKind::UnknownArgument,
+                "workflow parameters must start with --node.port",
+            )
+            .exit();
+    }
+    match run(cli) {
         Ok(code) => ExitCode::from(code),
         Err(error) => {
             let _ = writeln!(io::stderr().lock(), "{error}");
@@ -86,6 +104,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             executable,
             inputs,
             inputs_file,
+            arguments,
             ..
         } => {
             #[cfg(unix)]
@@ -95,12 +114,13 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     &mf_tui::run::RunOptions {
                         inputs,
                         inputs_file,
+                        arguments,
                     },
                 )?)
             }
             #[cfg(not(unix))]
             {
-                let _ = (executable, inputs, inputs_file);
+                let _ = (executable, inputs, inputs_file, arguments);
                 UnsupportedTuiSnafu.fail()
             }
         }
@@ -221,6 +241,37 @@ mod tests {
             assert_eq!(executable, PathBuf::from("./flow"));
             assert!(tui);
         }
+    }
+
+    #[test]
+    fn passes_named_workflow_parameters_after_tui_options() {
+        for separator in [false, true] {
+            let mut flags = vec!["mf", "run", "./flow", "--tui"];
+            if separator {
+                flags.push("--");
+            }
+            flags.extend(["--read.path", "data.txt", "--repeat.count=-2"]);
+            let Command::Run { arguments, .. } = Cli::try_parse_from(flags).unwrap().command else {
+                panic!("expected run command");
+            };
+            assert_eq!(
+                arguments,
+                ["--read.path", "data.txt", "--repeat.count=-2"].map(std::ffi::OsString::from)
+            );
+        }
+        assert!(
+            Cli::try_parse_from([
+                "mf",
+                "run",
+                "./flow",
+                "--tui",
+                "--inputs",
+                "{}",
+                "--read.path",
+                "data.txt"
+            ])
+            .is_err()
+        );
     }
 
     #[test]

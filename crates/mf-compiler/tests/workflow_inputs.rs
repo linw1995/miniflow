@@ -104,18 +104,18 @@ fn validates_all_roots_before_execution_and_preserves_optional_and_nested_values
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     let before = EXECUTIONS.load(Ordering::SeqCst);
     for (value, diagnostic) in [
-        (json!({"a":{"data":[]}}), "/b.~1~0/x.~1~0"),
+        (json!({"a.data":[]}), "/b.~1~0.x.~1~0"),
         (
-            json!({"a":{"data":[{"count":"wrong"}]}, "b./~":{"x./~":null}}),
-            "/a/data/0/count",
+            json!({"a.data":[{"count":"wrong"}], "b./~.x./~":null}),
+            "/a.data/0/count",
         ),
         (
-            json!({"a":{"data":[], "optional":null}, "b./~":{"x./~":null}}),
-            "/a/optional",
+            json!({"a.data":[], "a.optional":null, "b./~.x./~":null}),
+            "/a.optional",
         ),
         (
-            json!({"a":{"data":[], "typo":1}, "b./~":{"x./~":null}}),
-            "/a/typo",
+            json!({"a.data":[], "a.typo":1, "b./~.x./~":null}),
+            "/a.typo",
         ),
         (json!({"unknown":{}}), "/unknown"),
     ] {
@@ -126,10 +126,9 @@ fn validates_all_roots_before_execution_and_preserves_optional_and_nested_values
         assert_eq!(EXECUTIONS.load(Ordering::SeqCst), before);
     }
     for count in [1, 2] {
-        let arguments = WorkflowArguments::try_from(
-            json!({"a":{"data":[{"count":count}]}, "b./~":{"x./~":null}}),
-        )
-        .unwrap();
+        let arguments =
+            WorkflowArguments::try_from(json!({"a.data":[{"count":count}], "b./~.x./~":null}))
+                .unwrap();
         let outputs = flow.execute_with_inputs(arguments).unwrap();
         assert_eq!(outputs["a"], json!({"data":[{"count":count}]}));
         assert_eq!(outputs["b"], json!({"x./~":null}));
@@ -150,15 +149,15 @@ fn rejects_duplicate_keys_invalid_shapes_and_excessive_json_before_binding() {
                 .contains("duplicate object key")
         );
     }
-    for value in [json!(null), json!([]), json!({"a":null}), json!({"a":[]} )] {
+    for value in [json!(null), json!([]), json!(42), json!("input")] {
         assert!(WorkflowArguments::try_from(value).is_err());
     }
     assert!(
         WorkflowArguments::from_json(&vec![b' '; mf_runtime::MAX_WORKFLOW_INPUT_BYTES + 1])
             .is_err()
     );
-    let values = WorkflowArguments::from_json(br#"{"a":{"x":18446744073709551615}}"#).unwrap();
-    assert_eq!(values.0["a"]["x"], json!(u64::MAX));
+    let values = WorkflowArguments::from_json(br#"{"a.x":18446744073709551615}"#).unwrap();
+    assert_eq!(values.0["a.x"], json!(u64::MAX));
 }
 
 #[test]
@@ -225,13 +224,85 @@ fn preserves_noninitial_and_body_required_inputs_and_legacy_validation() {
     let plan = compile_definition(&nested, &registry).unwrap();
     let output = instantiate_compiled(&plan, &registry)
         .unwrap()
-        .execute_with_inputs(WorkflowArguments::try_from(json!({"repeat":{"x":7}})).unwrap())
+        .execute_with_inputs(WorkflowArguments::try_from(json!({"repeat.x":7})).unwrap())
         .unwrap();
     assert_eq!(output["value"], json!(7));
 }
 
 fn definition_from_json(value: Value) -> WorkflowDefinition {
     WorkflowDefinition::from_json(&value.to_string()).unwrap()
+}
+
+#[test]
+fn qualified_arguments_bind_only_declared_ports_and_reject_name_collisions() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut definition = definition(json!([
+        {"id":"a", "kind":"builtin.identity"},
+        {"id":"a.b", "kind":"builtin.identity"}
+    ]));
+    definition.outputs = serde_json::from_value(json!([
+        {"name":"first", "node":"a", "port":"value"},
+        {"name":"second", "node":"a.b", "port":"value"}
+    ]))
+    .unwrap();
+    let flow = instantiate_compiled(
+        &compile_definition(&definition, &registry).unwrap(),
+        &registry,
+    )
+    .unwrap();
+    let outputs = flow
+        .execute_with_inputs(
+            WorkflowArguments::try_from(json!({"a.input":1, "a.b.input":"text"})).unwrap(),
+        )
+        .unwrap();
+    assert_eq!(outputs["first"], json!(1));
+    assert_eq!(outputs["second"], json!("text"));
+    assert!(
+        flow.execute_with_inputs(
+            WorkflowArguments::try_from(json!({"a":{"input":1}, "a.b":{"input":"text"}})).unwrap()
+        )
+        .is_err()
+    );
+
+    let initial = mf_runtime::FlowNode::new(
+        "a",
+        factory(json!({
+            "inputs":{"b.input":{"type":"any", "required":true}}
+        }))
+        .unwrap(),
+    );
+    let noninitial = mf_runtime::FlowNode::new(
+        "a.b",
+        factory(json!({
+            "inputs":{"input":{"type":"any", "required":false}}
+        }))
+        .unwrap(),
+    );
+    let schema =
+        mf_compiler::workflow_input_schema([(&initial, true), (&noninitial, false)], |_, _| false)
+            .unwrap();
+    let mut context = ExecutionContext::default();
+    context.set_workflow_arguments(WorkflowArguments::try_from(json!({"a.b.input":42})).unwrap());
+    context.bind_workflow_inputs(&schema).unwrap();
+    assert_eq!(
+        context.event_inputs(&initial, &[]).unwrap().unwrap()["b.input"],
+        json!(42)
+    );
+    assert!(
+        context
+            .event_inputs(&noninitial, &[])
+            .unwrap()
+            .unwrap()
+            .is_empty()
+    );
+
+    definition.nodes[0].kind = "test.startup_echo".into();
+    definition.nodes[0].config = json!({"inputs":{"b.input":{"type":"any", "required":true}}});
+    let error = compile_definition(&definition, &registry).unwrap_err();
+    assert!(
+        error.to_string().contains("ambiguous workflow input name"),
+        "{error}"
+    );
 }
 
 #[test]
@@ -277,7 +348,7 @@ fn source_contracts_use_ports_and_node_ids_without_special_input_names() {
     );
     let schema = mf_compiler::workflow_input_schema([(&source, true)], |_, _| false).unwrap();
     schema
-        .validate(&WorkflowArguments::try_from(json!({"%input":{"path":"/missing/file"}})).unwrap())
+        .validate(&WorkflowArguments::try_from(json!({"%input.path":"/missing/file"})).unwrap())
         .unwrap();
     assert_eq!(
         schema.inputs["%input"]["path"].value_type,
@@ -332,7 +403,7 @@ fn main() {
         "{}",
         String::from_utf8_lossy(&build.stderr)
     );
-    for value in [json!({"copy":{"input":{"items":[1,2]}}}), json!({})] {
+    for value in [json!({"copy.input":{"items":[1,2]}}), json!({})] {
         let actual = Command::new(common::runner_executable(&project, "release"))
             .arg(value.to_string())
             .output()

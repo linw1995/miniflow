@@ -119,9 +119,7 @@ pub fn prepare_control(node: &str, options: &mut StreamOptions) -> Controller {
     options
         .arguments
         .0
-        .entry(node.into())
-        .or_default()
-        .insert("control".into(), key.into());
+        .insert(mf_runtime::output_id(node, "control"), key.into());
     Controller(control)
 }
 

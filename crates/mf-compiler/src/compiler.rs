@@ -1077,7 +1077,7 @@ pub fn describe_interface(
 ) -> Result<mf_runtime::WorkflowInterface, WorkflowCompileError> {
     let graph = describe_compiled(plan)?;
     let interface = mf_runtime::WorkflowInterface {
-        version: mf_runtime::WorkflowInterfaceVersion::V2026_10_03,
+        version: mf_runtime::WorkflowInterfaceVersion::V2026_10_11,
         workflow_id: graph.workflow_id.clone(),
         schema: describe_workflow_inputs(plan, registry)?,
     };

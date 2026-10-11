@@ -15,7 +15,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prepared = instantiate_stream(&plan, &registry)?;
     let arguments = std::env::args()
         .nth(1)
-        .map(|path| WorkflowArguments::try_from(json!({"read":{"path":path}})))
+        .map(|path| WorkflowArguments::try_from(json!({"read.path":path})))
         .transpose()?
         .unwrap_or_default();
     let stdin = if prepared

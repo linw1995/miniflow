@@ -246,8 +246,8 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
 
     for invalid in [
         "{}",
-        r#"{"read":{"path":42}}"#,
-        r#"{"read":{"path":"x","path":"y"}}"#,
+        r#"{"read.path":42}"#,
+        r#"{"read.path":"x","read.path":"y"}"#,
     ] {
         let (status, output, screen) =
             run_tui(&source, &["--inputs".into(), invalid.into()], false, false);
@@ -255,7 +255,7 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
         assert!(output.is_empty());
         assert!(!screen.contains("Workflow: "));
     }
-    let parameters = json!({"read":{"path":data}}).to_string();
+    let parameters = json!({"read.path":data}).to_string();
     let inputs_file = root.join("parameters.json");
     fs::write(&inputs_file, &parameters).unwrap();
     let (status, output, screen) = run_tui(
@@ -286,7 +286,7 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
     fs::write(&data, b"one\n\xff\n").unwrap();
     let (status, _, screen) = run_tui(
         &source,
-        &["--inputs".into(), parameters.clone().into()],
+        &["--read.path".into(), data.clone().into_os_string()],
         false,
         false,
     );

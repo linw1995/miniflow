@@ -73,7 +73,7 @@ fn generated_owned_values_preserve_contracts_and_installation() {
     let mut definition = text_definition();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
-    let args = json!({"a":{"text":"owned payload"}});
+    let args = json!({"a.text":"owned payload"});
     let expected = instantiate_compiled(&plan, &registry)
         .unwrap()
         .execute_with_inputs(WorkflowArguments::try_from(args.clone()).unwrap())
@@ -157,7 +157,7 @@ fn generated_owned_values_preserve_contracts_and_installation() {
     definition = definition_for_items();
     fs::write(&definition_path, serde_json::to_vec(&definition).unwrap()).unwrap();
     compile_project_with_options(&request(), &RunnerOptions { telemetry: true }).unwrap();
-    let items = json!({"a":{"items":[1,-2,i64::MAX]}});
+    let items = json!({"a.items":[1,-2,i64::MAX]});
     let output = Command::new(&executable)
         .args(["--inputs", &items.to_string()])
         .output()
@@ -188,7 +188,7 @@ fn generated_owned_values_preserve_contracts_and_installation() {
             })).unwrap());
                 json!({})
             } else {
-                json!({"a":{"input":shared}})
+                json!({"a.input":shared})
             };
         let plan = compile_definition(&definition, &registry).unwrap();
         let report: mf_compiler::TypedPlan = serde_json::from_str(
@@ -228,19 +228,19 @@ fn generated_owned_values_preserve_contracts_and_installation() {
     for (next, args, expected, has_segment) in [
         (
             definition_for_extended(),
-            json!({"a":{"count":u64::MAX,"size":7,"ratio":-0.0,"payload":[null,"shared"]}}),
+            json!({"a.count":u64::MAX, "a.size":7, "a.ratio":-0.0, "a.payload":[null,"shared"]}),
             json!({"count":u64::MAX,"size":7,"ratio":-0.0,"payload":[null,"shared"]}),
             true,
         ),
         (
             definition_for_extended(),
-            json!({"a":{"count":u64::MAX,"size":7.0,"ratio":42,"payload":[null,"shared"]}}),
+            json!({"a.count":u64::MAX, "a.size":7.0, "a.ratio":42, "a.payload":[null,"shared"]}),
             json!({"count":u64::MAX,"size":7,"ratio":42.0,"payload":[null,"shared"]}),
             true,
         ),
         (
             definition_for_defaulted(),
-            json!({"a":{"text":"defaults"}}),
+            json!({"a.text":"defaults"}),
             json!({"result":"defaults!!!"}),
             false,
         ),
