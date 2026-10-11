@@ -28,9 +28,21 @@ All focused commands ran in the pinned `nix develop` toolchain and passed:
 - `nix flake check -L` passed on `aarch64-darwin`. Its release CI test profile completed with 582 passing tests and two existing skipped tests on
   `aarch64-darwin`. Build, formatting, Clippy, and workflow checks also passed their validation phases.
 
+## Archive validation
+
+- `openspec archive execute-single-node-in-compiled-runner --yes --json` synchronized the main specs and
+  archived this change as `2026-10-12-execute-single-node-in-compiled-runner`.
+- All 22 main specifications passed ordinary validation. `single-node-execution` and
+  `workflow-runtime-execution` passed strict validation. Comparing full strict findings with the recorded
+  pre-archive baseline found no new warnings or errors.
+- This archive passed validation with all 27 tasks completed. Full archive validation reported one existing
+  failure: `2026-10-05-unify-flow-runtime` has 17 incomplete tasks. Its task file is identical to the version
+  before this change's archival and remains outside this implementation's scope.
+
 ## Delivery scope
 
 The implemented phase supports top-level Tasks in finite and streaming flows and complete Loop/Iteration
 operations. Producer, Event, body-local/control, and TUI selection remain follow-ups. Whole-plan factory
-preparation remains an explicit limitation. The implemented phase is ready for archival after the post-implementation review and repository checks.
-Archival closes this phase without claiming universal arbitrary-node completion for Issue #125.
+preparation remains an explicit limitation. The implemented phase was archived after the post-implementation review, ablation experiments, and
+repository checks. Archival closes this phase without claiming universal arbitrary-node completion for
+Issue #125.
