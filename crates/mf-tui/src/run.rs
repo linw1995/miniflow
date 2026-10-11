@@ -60,6 +60,10 @@ pub enum RunError {
     TerminalRequired,
     #[snafu(transparent)]
     Inputs { source: WorkflowInputError },
+    #[snafu(transparent)]
+    Arguments {
+        source: mf_runtime::RunnerArgumentError,
+    },
     #[snafu(display("{message}"))]
     Options { message: String },
     #[snafu(display("could not read workflow input file {path:?}: {source}"))]
@@ -90,6 +94,7 @@ pub enum RunError {
 pub struct RunOptions {
     pub inputs: Option<String>,
     pub inputs_file: Option<PathBuf>,
+    pub arguments: Vec<std::ffi::OsString>,
 }
 
 struct PreparedLaunch {
@@ -127,7 +132,16 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
     if options.inputs.is_some() && options.inputs_file.is_some() {
         return option_error("--inputs and --inputs-file are mutually exclusive");
     }
-    let arguments = if let Some(json) = &options.inputs {
+    let manifest = read_manifest(path).context(ManifestSnafu)?;
+    if !options.arguments.is_empty() && (options.inputs.is_some() || options.inputs_file.is_some())
+    {
+        return option_error(
+            "named workflow inputs cannot be combined with --inputs or --inputs-file",
+        );
+    }
+    let arguments = if !options.arguments.is_empty() {
+        WorkflowArguments::parse(options.arguments.clone(), &manifest.interface.schema)?
+    } else if let Some(json) = &options.inputs {
         WorkflowArguments::from_json(json.as_bytes())?
     } else if let Some(path) = &options.inputs_file {
         let mut bytes = Vec::new();
@@ -139,7 +153,6 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
     } else {
         WorkflowArguments::default()
     };
-    let manifest = read_manifest(path).context(ManifestSnafu)?;
     let description = manifest.description;
     let interface = manifest.interface;
     ensure!(
@@ -1199,7 +1212,7 @@ mod tests {
         if let Some(resource) = resource {
             stdin.insert("source/id".into(), serde_json::json!(resource));
         }
-        let interface = serde_json::json!({"version":"2026-10-03", "workflow_id":graph["workflow_id"],
+        let interface = serde_json::json!({"version":"2026-10-11", "workflow_id":graph["workflow_id"],
             "schema":{"inputs":{"source/id":{"path":{"type":"string", "required":true}}}, "stdin":stdin}});
         let manifest = mf_runtime::WorkflowManifest {
             version: mf_runtime::WorkflowManifestVersion::V2026_10_07,
@@ -1217,7 +1230,7 @@ mod tests {
 
     fn valid_options() -> RunOptions {
         RunOptions {
-            inputs: Some(r#"{"source/id":{"path":"data.txt"}}"#.into()),
+            inputs: Some(r#"{"source/id.path":"data.txt"}"#.into()),
             ..Default::default()
         }
     }
@@ -1253,9 +1266,9 @@ mod tests {
         let runner = source_runner(root.path(), None);
         for input in [
             "{}",
-            r#"{"source/id":{"path":42}}"#,
-            r#"{"source/id":{"path":"a","path":"b"}}"#,
-            r#"{"source/id":{"path":"a","extra":null}}"#,
+            r#"{"source/id.path":42}"#,
+            r#"{"source/id.path":"a","source/id.path":"b"}"#,
+            r#"{"source/id.path":"a","source/id.extra":null}"#,
         ] {
             assert!(
                 prepare_launch(
@@ -1272,6 +1285,9 @@ mod tests {
         options.inputs_file = Some(path);
         assert!(prepare_launch(&runner, &options).is_err());
         options.inputs_file = None;
+        options.arguments = vec!["--source/id.path=data.txt".into()];
+        assert!(prepare_launch(&runner, &options).is_err());
+        options.arguments.clear();
         options.inputs = Some(" ".repeat(MAX_WORKFLOW_INPUT_BYTES + 1));
         assert!(matches!(
             prepare_launch(&runner, &options),

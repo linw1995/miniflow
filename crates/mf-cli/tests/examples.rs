@@ -137,9 +137,9 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             .stderr(Stdio::piped());
         if server.is_some() {
             let inputs = if name == "llm-loop.json" {
-                json!({"repeat": {"prompt": "Hello", "history": [], "text": ""}})
+                json!({"repeat.prompt":"Hello", "repeat.history":[], "repeat.text":""})
             } else {
-                json!({"chat": {"prompt": "Hello"}})
+                json!({"chat.prompt":"Hello"})
             };
             command
                 .args(["--inputs", &inputs.to_string()])

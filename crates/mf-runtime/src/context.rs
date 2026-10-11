@@ -204,7 +204,7 @@ pub struct ExecutionContext {
     snapshots: Option<crate::SnapshotRecorder>,
     snapshot_prefix: Vec<LoopPathEntry>,
     workflow_arguments: crate::WorkflowArguments,
-    startup_inputs_bound: bool,
+    startup_nodes: BTreeSet<String>,
     stdin: Option<std::sync::Arc<std::sync::Mutex<crate::TextInput>>>,
     cancellation: crate::StreamCancellation,
     worker_handle: Option<RuntimeWorkerHandle>,
@@ -228,7 +228,7 @@ impl Default for ExecutionContext {
             snapshots: None,
             snapshot_prefix: Vec::new(),
             workflow_arguments: crate::WorkflowArguments::default(),
-            startup_inputs_bound: false,
+            startup_nodes: BTreeSet::new(),
             stdin: None,
             cancellation: crate::StreamCancellation::default(),
             worker_handle: None,
@@ -302,7 +302,7 @@ impl ExecutionContext {
             snapshots: None,
             snapshot_prefix: Vec::new(),
             workflow_arguments: crate::WorkflowArguments::default(),
-            startup_inputs_bound: false,
+            startup_nodes: BTreeSet::new(),
             worker_handle: self.worker_handle.clone(),
             worker_limit: self.worker_limit,
             #[cfg(feature = "async")]
@@ -312,29 +312,36 @@ impl ExecutionContext {
 
     pub fn set_workflow_arguments(&mut self, arguments: crate::WorkflowArguments) {
         self.workflow_arguments = arguments;
-        self.startup_inputs_bound = false;
+        self.startup_nodes.clear();
     }
 
     pub fn bind_workflow_inputs(
         &mut self,
         schema: &crate::WorkflowInputSchema,
     ) -> Result<(), WorkflowRunError> {
-        self.startup_inputs_bound = false;
+        self.startup_nodes.clear();
         schema.validate(&self.workflow_arguments)?;
         schema.validate_stdin(&self.workflow_arguments, self.stdin.is_some())?;
-        self.startup_inputs_bound = true;
+        self.startup_nodes = schema.inputs.keys().cloned().collect();
         Ok(())
     }
 
-    fn initial_inputs(&self, node: &str) -> Inputs {
-        if !self.startup_inputs_bound || !self.scopes.is_empty() {
+    fn initial_inputs<N>(&self, node: &FlowNode<N>) -> Inputs {
+        let id = node.definition_id.as_str();
+        if !self.scopes.is_empty() || !self.startup_nodes.contains(id) {
             return Inputs::new();
         }
-        self.workflow_arguments
-            .0
-            .get(node)
-            .cloned()
-            .unwrap_or_default()
+        node.metadata
+            .ports
+            .inputs
+            .iter()
+            .filter_map(|port| {
+                self.workflow_arguments
+                    .0
+                    .get(&output_id(id, &port.name))
+                    .map(|value| (port.name.to_string(), value.clone()))
+            })
+            .collect()
     }
 
     pub(super) fn set_frame_observation(&mut self, observation: RunObservation) {
@@ -441,7 +448,7 @@ impl ExecutionContext {
             snapshots: self.snapshots.clone(),
             snapshot_prefix: self.snapshot_prefix.clone(),
             workflow_arguments: self.workflow_arguments.clone(),
-            startup_inputs_bound: self.startup_inputs_bound,
+            startup_nodes: self.startup_nodes.clone(),
             stdin: self.stdin.clone(),
             cancellation: self.cancellation.clone(),
             worker_handle: self.worker_handle.clone(),
@@ -485,7 +492,7 @@ impl ExecutionContext {
     ) -> Result<Option<Inputs>, WorkflowRunError> {
         let id = node.definition_id.as_str();
         self.reserve_step(id)?;
-        let mut inputs = self.initial_inputs(id);
+        let mut inputs = self.initial_inputs(node);
         let mut skipped = false;
         for dependency in dependencies {
             let value = self
@@ -1119,7 +1126,7 @@ fn execute_ordered_call_in_context<'a, N>(
         Some(StepObservation::Body(step)) => Some(step.enter()),
         _ => None,
     };
-    let mut inputs = ctx.initial_inputs(id);
+    let mut inputs = ctx.initial_inputs(node);
     let mut skipped = false;
     let mut causes = BTreeSet::new();
     for dependency in dependencies {

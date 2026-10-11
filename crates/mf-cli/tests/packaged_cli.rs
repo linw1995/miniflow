@@ -62,7 +62,7 @@ fn packaged_cli_acceptance() {
     assert!(llm_server.requests().is_empty());
     fs::remove_file(&llm_definition).unwrap();
     fs::remove_dir_all(fixture.root().join("llm-build")).unwrap();
-    let llm_inputs = json!({"chat": {"prompt": "Hello", "history": [{"role": "user", "content": "prior"}, {"role": "assistant", "content": "earlier reply"}]}});
+    let llm_inputs = json!({"chat.prompt":"Hello", "chat.history":[{"role": "user", "content": "prior"}, {"role": "assistant", "content": "earlier reply"}]});
     let llm_result = checked(
         Command::new(&llm_executable)
             .current_dir(&project)

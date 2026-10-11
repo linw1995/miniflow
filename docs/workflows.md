@@ -205,9 +205,9 @@ An OpenAI-compatible endpoint can be selected with `base_url`. Compilation does 
 
 ```bash
 mf compile examples/llm-terminal.json --output ./chat
-./chat --inputs '{"chat":{"prompt":"Hello","system":"Answer briefly"}}'
+./chat --chat.prompt Hello --chat.system 'Answer briefly'
 mf compile examples/llm-loop.json --output ./conversation
-./conversation --inputs '{"repeat":{"prompt":"Continue the conversation","history":[],"text":""}}'
+./conversation --repeat.prompt 'Continue the conversation' --repeat.history '[]' --repeat.text ''
 ```
 
 Persist the returned history and pass it as `chat.history` with a new prompt to continue a terminal conversation.
@@ -447,16 +447,32 @@ has no incoming data or control edges. Its configured input types and required f
 the workflow does not repeat those declarations. A node behind a control edge still needs its required
 data connections. Loop and Iteration body inputs stay local to their enclosing scope.
 
-Supply a JSON object keyed by exact node ID and then input port. Names containing dots remain whole keys:
+The startup interface version `2026-10-11` uses flat qualified arguments. Recompile runners with an older
+interface before launching them through the updated CLI. The workflow definition schema remains `2026-10-03`.
+
+Pass parameters directly as `--node.port VALUE` or `--node.port=VALUE`:
+
+```sh
+./workflow --read.path /data/events.jsonl --copy.input '{"count":42}'
+```
+
+String ports accept plain text. Numeric, boolean, null, array, and object ports accept JSON values;
+nullable string ports also accept `null`. Use `=` when a string starts with `--`. Repeated parameters,
+unknown names, and missing values are rejected. Qualified names are matched as complete keys, including
+dots within node IDs or port names. Ambiguous qualified names fail during workflow preparation.
+
+The in-memory API, `--inputs`, and `--inputs-file` use a flat JSON object with the same qualified names.
+Named parameters cannot be combined with either JSON transport option. Named transport and the canonical
+JSON forwarded to the runner must each fit within 1 MiB:
 
 ```json
 {
-  "read": { "path": "/data/events.jsonl" },
-  "copy": { "input": { "count": 42 } }
+  "read.path": "/data/events.jsonl",
+  "copy.input": { "count": 42 }
 }
 ```
 
-All startup arguments are checked before any node executes. Unknown nodes/ports, missing required values,
+All startup arguments are checked before any node executes. Unknown parameters, missing required values,
 duplicate JSON keys, and type mismatches fail with input context. Optional omissions stay absent; explicit
 null is checked against the port type. Parameter values do not specialize the compiled graph or persist
 between invocations. `describe_workflow_inputs` inspects configured requirements without executing nodes;

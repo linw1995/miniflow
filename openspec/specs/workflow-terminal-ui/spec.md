@@ -21,7 +21,7 @@ The system SHALL provide terminal presentation through a separate `mf-tui` crate
 Executables lacking a manifest section SHALL be rejected with a recompilation diagnostic. Corrupt or unsupported
 manifest data MUST prevent launch without command fallback.
 
-The CLI SHALL validate supplied startup arguments, resource availability, and observation compatibility before launch,
+The CLI SHALL accept named workflow parameters after its TUI options and reject unexpected positional arguments before entering terminal mode. It SHALL validate supplied startup arguments, resource availability, and observation compatibility before launch,
 establish a loopback OTLP/HTTP receiver, and then launch the actual executable with the same arguments and session-specific
 observation configuration. It MUST NOT reimplement workflow execution. The receiver SHALL accept protobuf logs and traces
 at `/v1/logs` and `/v1/traces` and associate observations with the expected workflow and run. Configuration changes MUST be
@@ -80,6 +80,11 @@ missing observations MUST NOT trigger workflow restart.
 
 - **WHEN** a manifest declares stdin ownership unless a particular optional input is supplied
 - **THEN** preflight evaluates that condition against the validated arguments and rejects active stdin requirements before launching the child
+
+#### Scenario: Observe a source with direct parameters
+
+- **WHEN** the user invokes `mf run workflow --tui --read.path data.txt`
+- **THEN** preflight parses the declared string parameter, checks resource ownership, and forwards the canonical flat arguments through private transport
 
 ### Requirement: Present graph structure and execution state
 

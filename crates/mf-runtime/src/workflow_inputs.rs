@@ -1,15 +1,15 @@
 use crate::{Inputs, ValueType};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use serde_json::Value;
-use snafu::{ResultExt, Snafu};
+use snafu::{ResultExt, Snafu, ensure};
 use std::{collections::BTreeMap, fmt};
 
 pub const MAX_WORKFLOW_INPUT_BYTES: usize = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkflowInterfaceVersion {
-    #[serde(rename = "2026-10-03")]
-    V2026_10_03,
+    #[serde(rename = "2026-10-11")]
+    V2026_10_11,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,10 +73,18 @@ impl WorkflowInterface {
             ));
         }
         let mut stdin = None;
+        let mut names = std::collections::BTreeSet::new();
         for (node, ports) in &self.schema.inputs {
             for (name, input) in ports {
                 if name.is_empty() {
                     return Err(invalid(pointer("", node), "empty input port name"));
+                }
+                let qualified = crate::output_id(node, name);
+                if !names.insert(qualified.clone()) {
+                    return Err(invalid(
+                        pointer("", &qualified),
+                        "ambiguous workflow input name",
+                    ));
                 }
                 input.value_type.check_depth().context(TypeDepthSnafu {
                     path: pointer(&pointer("", node), name),
@@ -130,7 +138,7 @@ pub struct WorkflowInputSchema {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 #[serde(transparent)]
-pub struct WorkflowArguments(pub BTreeMap<String, Inputs>);
+pub struct WorkflowArguments(pub Inputs);
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowInputError {
@@ -170,13 +178,18 @@ pub(super) fn pointer(parent: &str, key: &str) -> String {
 }
 
 impl WorkflowArguments {
-    pub fn from_json(bytes: &[u8]) -> Result<Self, WorkflowInputError> {
-        if bytes.len() > MAX_WORKFLOW_INPUT_BYTES {
-            return TooLargeSnafu {
+    pub(super) fn check_size(size: usize) -> Result<(), WorkflowInputError> {
+        ensure!(
+            size <= MAX_WORKFLOW_INPUT_BYTES,
+            TooLargeSnafu {
                 limit: MAX_WORKFLOW_INPUT_BYTES,
             }
-            .fail();
-        }
+        );
+        Ok(())
+    }
+
+    pub fn from_json(bytes: &[u8]) -> Result<Self, WorkflowInputError> {
+        Self::check_size(bytes.len())?;
         let value: UniqueValue = serde_json::from_slice(bytes).context(JsonSnafu)?;
         Self::try_from(value.0)
     }
@@ -186,67 +199,52 @@ impl TryFrom<Value> for WorkflowArguments {
     type Error = WorkflowInputError;
 
     fn try_from(value: Value) -> Result<Self, Self::Error> {
-        let Value::Object(nodes) = value else {
+        let Value::Object(values) = value else {
             return Err(invalid(
                 String::new(),
-                "expected an object keyed by initial node ID",
+                "expected an object keyed by workflow input name",
             ));
         };
-        let mut values = BTreeMap::new();
-        for (node, value) in nodes {
-            let Value::Object(ports) = value else {
-                return Err(invalid(
-                    pointer("", &node),
-                    "expected an object keyed by input port",
-                ));
-            };
-            values.insert(
-                node,
-                ports
-                    .into_iter()
-                    .map(|(key, value)| (key, value.into()))
-                    .collect(),
-            );
-        }
+        let values = values
+            .into_iter()
+            .map(|(name, value)| (name, value.into()))
+            .collect();
         Ok(Self(values))
     }
 }
 
 impl WorkflowInputSchema {
     pub fn validate(&self, arguments: &WorkflowArguments) -> Result<(), WorkflowInputError> {
-        for (node, values) in &arguments.0 {
-            let node_path = pointer("", node);
-            let ports = self
-                .inputs
-                .get(node)
-                .ok_or_else(|| invalid(node_path.clone(), "unknown initial node"))?;
-            for (port, value) in values {
-                let path = pointer(&node_path, port);
-                let input = ports
-                    .get(port)
-                    .ok_or_else(|| invalid(path.clone(), "unknown input port"))?;
-                input
-                    .value_type
-                    .validate_shared(value)
-                    .context(TypeMismatchSnafu { path })?;
-            }
+        for (name, value) in &arguments.0 {
+            let path = pointer("", name);
+            let input = self
+                .parameter(name)
+                .ok_or_else(|| invalid(path.clone(), "unknown workflow input"))?;
+            input
+                .value_type
+                .validate_shared(value)
+                .context(TypeMismatchSnafu { path })?;
         }
         for (node, ports) in &self.inputs {
             for (port, input) in ports {
-                if input.required
-                    && !arguments
-                        .0
-                        .get(node)
-                        .is_some_and(|values| values.contains_key(port))
-                {
+                let name = crate::output_id(node, port);
+                if input.required && !arguments.0.contains_key(name.as_str()) {
                     return Err(invalid(
-                        pointer(&pointer("", node), port),
+                        pointer("", &name),
                         "required input was not provided",
                     ));
                 }
             }
         }
         Ok(())
+    }
+
+    pub fn parameter(&self, name: &str) -> Option<&WorkflowInput> {
+        self.inputs.iter().find_map(|(node, ports)| {
+            ports
+                .iter()
+                .find_map(|(port, input)| (crate::output_id(node, port) == name).then_some(input))
+        })
     }
 
     pub fn stdin_owner<'a>(
@@ -259,8 +257,7 @@ impl WorkflowInputSchema {
                 StdinRequirement::Always => true,
                 StdinRequirement::UnlessInput(input) => !arguments
                     .0
-                    .get(node)
-                    .is_some_and(|values| values.contains_key(input)),
+                    .contains_key(crate::output_id(node, input).as_str()),
             };
             if required && let Some(previous) = owner.replace(node.as_str()) {
                 return Err(invalid(

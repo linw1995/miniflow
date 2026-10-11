@@ -40,12 +40,12 @@ fn readline_uses_initial_or_upstream_paths_and_stdin_as_text() {
         let mut edges = json!([]);
         let mut options = StreamOptions::default();
         match mode {
-            "initial" => options.arguments = arguments(json!({"read":{"path":path}})),
+            "initial" => options.arguments = arguments(json!({"read.path":path})),
             #[cfg(unix)]
             "symlink" => {
                 let link = root.path().join("lines.link");
                 std::os::unix::fs::symlink(&path, &link).unwrap();
-                options.arguments = arguments(json!({"read":{"path":link}}));
+                options.arguments = arguments(json!({"read.path":link}));
             }
             "upstream" => {
                 nodes
@@ -91,11 +91,11 @@ fn readline_validates_conditional_ownership_and_reports_read_failures() {
     );
     let schema = prepared.plan().input_schema();
     assert!(schema.stdin_owner(&WorkflowArguments::default()).is_err());
-    let files = arguments(json!({"read":{"path":path}, "other":{"path":path}}));
+    let files = arguments(json!({"read.path":path, "other.path":path}));
     assert_eq!(schema.stdin_owner(&files).unwrap(), None);
     assert_eq!(
         schema
-            .stdin_owner(&arguments(json!({"other":{"path":path}})))
+            .stdin_owner(&arguments(json!({"other.path":path})))
             .unwrap(),
         Some("read")
     );
@@ -111,8 +111,8 @@ fn readline_validates_conditional_ownership_and_reports_read_failures() {
     let single = || prepare(json!([{"id":"read", "kind":"builtin.readline"}]), json!([]));
     for values in [
         json!({}),
-        json!({"read":{"path":null}}),
-        json!({"read":{"path":42}}),
+        json!({"read.path":null}),
+        json!({"read.path":42}),
     ] {
         assert!(
             single()
@@ -140,7 +140,7 @@ fn readline_validates_conditional_ownership_and_reports_read_failures() {
         }
         let instance = single()
             .start_with_options(StreamOptions {
-                arguments: arguments(json!({"read":{"path":path}})),
+                arguments: arguments(json!({"read.path":path})),
                 ..Default::default()
             })
             .unwrap();
@@ -166,7 +166,7 @@ fn readline_rejects_fifos_without_waiting_for_a_writer() {
         let path = PathBuf::from(path);
         let instance = prepare(json!([{"id":"read", "kind":"builtin.readline"}]), json!([]))
             .start_with_options(StreamOptions {
-                arguments: arguments(json!({"read":{"path":path}})),
+                arguments: arguments(json!({"read.path":path})),
                 ..Default::default()
             })
             .unwrap();

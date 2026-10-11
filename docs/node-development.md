@@ -620,6 +620,7 @@ uses the runtime's stream lifecycle and message-domain scheduler.
 ## Startup input and resource declarations
 
 Top-level initial nodes in schema `2026-10-03` expose their prepared input ports as workflow parameters.
+Invocation values use flat `node.port` keys; standalone runners accept `--node.port VALUE`.
 Preparation reflects input/output contracts and does not need invocation values. Required flags and type
 descriptors retain their ordinary port meaning. `WorkflowArguments::from_json` rejects duplicate keys and
 limits JSON arguments to 1 MiB; `WorkflowInputSchema` validates the complete object before dispatch.

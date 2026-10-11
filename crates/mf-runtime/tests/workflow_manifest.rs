@@ -33,7 +33,7 @@ fn sample() -> WorkflowManifest {
             loop_bodies: vec![],
         },
         interface: WorkflowInterface {
-            version: WorkflowInterfaceVersion::V2026_10_03,
+            version: WorkflowInterfaceVersion::V2026_10_11,
             workflow_id,
             schema: WorkflowInputSchema {
                 inputs: [(
@@ -127,6 +127,7 @@ fn rejects_invalid_versions_and_duplicate_members_with_json_sources() {
     let payload = serde_json::to_string(&sample()).unwrap();
     for invalid in [
         payload.replace("2026-10-07", "2099-01-01"),
+        payload.replace("2026-10-11", "2026-10-03"),
         payload.replacen("{", "{\"version\":\"2026-10-07\",", 1),
         payload.replace("\"required\":false", "\"required\":false,\"required\":true"),
         format!("{payload}{{}}"),

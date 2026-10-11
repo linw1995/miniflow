@@ -42,7 +42,7 @@ fn generated_task_and_stream_runners_reject_runtime_contract_changes_before_disp
         let runner = root.path().join("runner");
         let marker = root.path().join("executed");
         for mode in ["type", "required", "remove", "add", "stdin", "condition"] {
-            let flags = ["--inputs", "{\"source./~\":{\"path./~\":\"ignored\"}}"];
+            let flags = ["--inputs", "{\"source./~.path./~\":\"ignored\"}"];
             let output = Command::new(&runner)
                 .args(flags)
                 .env("MF_FIXTURE_INTERFACE_CHANGE", mode)

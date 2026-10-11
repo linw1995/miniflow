@@ -32,20 +32,30 @@ user-authored input declaration.
 
 ### Requirement: Preserve exact parameter identity
 
-Startup values and interface declarations SHALL use a nested map keyed first by the exact node ID and then by
-the exact port name. Same-named ports on different initial nodes MUST remain distinct. Nodes without
-parameters SHALL expose an empty input declaration and SHALL accept omission of their value object.
+Startup values SHALL use a flat object keyed by the complete qualified name `node.port`. Interface
+declarations SHALL preserve exact node and port identities. Same-named ports on different initial nodes MUST
+remain distinct. Nodes without parameters SHALL retain an empty declaration and require no invocation value.
+Preparation and manifest validation MUST reject declarations with colliding qualified names.
 
 #### Scenario: Keep two path arguments separate
 
 - **WHEN** initial nodes `read` and `write` both declare `path`
-- **THEN** the caller supplies independent values under `read.path` and `write.path` as nested object members
+- **THEN** the caller supplies independent values under flat keys `read.path` and `write.path`
 
 #### Scenario: Preserve punctuation in names
 
 - **WHEN** a node ID or port name contains dots, slashes, or tildes
-- **THEN** binding uses the complete JSON member name without splitting it and diagnostics escape the
-  corresponding JSON Pointer path
+- **THEN** lookup matches the complete qualified name and diagnostics escape its JSON Pointer path
+
+#### Scenario: Reject a qualified name collision
+
+- **WHEN** initial node `a` declares `b.input` and initial node `a.b` declares `input`
+- **THEN** preparation or manifest validation rejects the ambiguous name `a.b.input`
+
+#### Scenario: Reject a nested argument document
+
+- **WHEN** the caller supplies `{"read":{"path":"data.txt"}}` instead of `{"read.path":"data.txt"}`
+- **THEN** validation rejects the unknown parameter `read` before execution
 
 ### Requirement: Keep noninitial and nested inputs explicit
 
@@ -69,8 +79,8 @@ dependencies.
 ### Requirement: Validate all startup values before execution
 
 Every invocation SHALL validate its complete startup argument object before executing any node or consuming
-any source data. It MUST reject duplicate keys, unknown node or port names, invalid object shapes, missing
-required values, and type violations. Errors SHALL identify the affected node, port, and nested path without
+any source data. It MUST reject duplicate keys, unknown qualified parameter names, invalid root object shapes, missing
+required values, and type violations. Errors SHALL identify the affected qualified parameter and nested path without
 coercion.
 
 #### Scenario: Reject one invalid argument across multiple roots
@@ -80,7 +90,7 @@ coercion.
 
 #### Scenario: Reject ambiguous JSON arguments
 
-- **WHEN** an argument document repeats a node or port key
+- **WHEN** an argument document repeats a qualified parameter key or a key within its value
 - **THEN** validation rejects it rather than keeping either occurrence
 
 #### Scenario: Reject a nested type mismatch
@@ -122,7 +132,7 @@ Single-run and stream entry points SHALL use the same parameter validation and b
 
 ### Requirement: Inspect an interface without running the workflow
 
-The system SHALL expose a versioned startup interface containing workflow identity, complete parameter declarations,
+The system SHALL expose startup interface version `2026-10-11` containing workflow identity, complete parameter declarations,
 and runtime resource requirements. For compiled runners, direct manifest inspection SHALL return the
 embedded build-time interface without constructing providers. Inspection MUST exclude argument values and node
 configuration and MUST NOT execute nodes, consume source input, start timers, or emit execution events.
@@ -142,6 +152,11 @@ Invalid or incomplete metadata SHALL prevent launch.
 
 - **WHEN** a new runner's factory would require an unavailable runtime resource to initialize an executor
 - **THEN** inspection still returns the embedded interface without initializing that executor, while execution retains its ordinary construction failure behavior
+
+#### Scenario: Reject the previous nested-argument interface
+
+- **WHEN** a launcher inspects a runner exposing an older startup interface version
+- **THEN** manifest preflight rejects it before execution and directs the user to recompile the workflow
 
 ### Requirement: Reject generated startup interface drift
 

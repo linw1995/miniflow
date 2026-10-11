@@ -961,12 +961,17 @@ pub fn workflow_input_schema<'a, N: 'a>(
 ) -> Result<crate::WorkflowInputSchema, WorkflowInputError> {
     let mut schema = crate::WorkflowInputSchema::default();
     let mut stdin_owner = None;
+    let mut names = BTreeSet::new();
     for (node, initial) in nodes {
         let id = node.definition_id.as_str();
         if initial {
             let mut ports = BTreeMap::new();
             for port in &node.metadata.ports.inputs {
-                let path = input_pointer(&input_pointer("", id), &port.name);
+                let name = output_id(id, &port.name);
+                let path = input_pointer("", &name);
+                if !names.insert(name) {
+                    return Err(input_schema_error(path, "ambiguous workflow input name"));
+                }
                 port.value_type
                     .check_depth()
                     .context(mf_runtime::WorkflowInputTypeDepthSnafu { path: path.clone() })?;

@@ -159,12 +159,13 @@ with a line number. It does not interpret text as JSON. EOF closes only that sou
 Autonomous sources run with null stdin. For an initial file-reading node exposing `path`, pass startup values:
 
 ```sh
-./read-workflow --inputs '{"read":{"path":"/data/lines.txt"}}'
+./read-workflow --read.path /data/lines.txt
 ./read-workflow --inputs-file ./parameters.json
 ```
 
-Input options are mutually exclusive. Values are nested by exact node ID and port; all required values and
-types are validated before node execution. JSON argument transport is limited to 1 MiB and rejects duplicate
+Named inputs use `--node.port VALUE` or `--node.port=VALUE`. Strings accept plain text; other types accept
+JSON values. JSON transport options cannot be combined with named inputs. Parameter files use flat qualified
+keys, such as `{"read.path":"/data/lines.txt"}`. All required values and types are validated before node execution. JSON argument transport is limited to 1 MiB and rejects duplicate
 keys. Parameter files are ordinary JSON documents. The embedded manifest exposes the configured parameter schema
 and input resource requirements with the workflow identity. Inspection reads executable metadata without preparing
 providers, reading source data, or initializing telemetry.

@@ -45,18 +45,20 @@ fn standalone_sources_describe_parameters_and_run_without_stdin_or_build_inputs(
     for arguments in [
         vec![],
         vec!["--inputs", "{}"],
-        vec!["--inputs", "{\"read\":{\"path\":42}}"],
+        vec!["--inputs", "{\"read.path\":42}"],
     ] {
         assert!(!run(&arguments).status.success());
     }
     let lines: Vec<_> = (0..200).map(|line| format!("line {line}")).collect();
     fs::write(&data, lines.join("\n")).unwrap();
-    let values = json!({"read":{"path":data}}).to_string();
+    let values = json!({"read.path":data}).to_string();
     let input_file = root.path().join("parameters.json");
     fs::write(&input_file, &values).unwrap();
     fs::remove_file(&definition).unwrap();
     fs::remove_dir_all(&build).unwrap();
     for arguments in [
+        vec!["--read.path", data.to_str().unwrap()],
+        vec![&format!("--read.path={}", data.display())],
         vec!["--inputs", values.as_str()],
         vec!["--inputs-file", input_file.to_str().unwrap()],
     ] {

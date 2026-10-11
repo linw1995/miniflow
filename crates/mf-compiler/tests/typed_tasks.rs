@@ -152,7 +152,7 @@ fn typed_tasks_use_the_same_adapter_and_context_in_task_and_stream_domains() {
             let instance = instantiate_stream(&compiled, &registry)
                 .unwrap()
                 .start_with_options(StreamOptions {
-                    arguments: WorkflowArguments::from_json(br#"{"source":{"start":10}}"#).unwrap(),
+                    arguments: WorkflowArguments::from_json(br#"{"source.start":10}"#).unwrap(),
                     ..Default::default()
                 })
                 .unwrap();

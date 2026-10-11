@@ -857,7 +857,7 @@ impl CompiledWorkflow {
             syn::parse2(quote! { #(#layouts)* }).context(GeneratedSyntaxSnafu)?;
         let description = crate::describe_compiled(self)?;
         let interface = mf_runtime::WorkflowInterface {
-            version: mf_runtime::WorkflowInterfaceVersion::V2026_10_03,
+            version: mf_runtime::WorkflowInterfaceVersion::V2026_10_11,
             workflow_id: description.workflow_id.clone(),
             schema,
         };

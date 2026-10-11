@@ -20,10 +20,10 @@ fn definition(config: Value) -> WorkflowDefinition {
 }
 
 fn arguments() -> Value {
-    json!({"typed./~":{
-        "count":7, "ratio":1.5, "active":true,
-        "rows./~":[{"count":1},{"count":2}]
-    }})
+    json!({
+        "typed./~.count":7, "typed./~.ratio":1.5, "typed./~.active":true,
+        "typed./~.rows./~":[{"count":1},{"count":2}]
+    })
 }
 
 type FourLevels = Vec<Vec<Vec<Vec<mf_runtime::ValueRef>>>>;
@@ -123,18 +123,18 @@ fn struct_inputs_define_startup_contracts_and_validate_before_business_dispatch(
     assert!(!marker.exists());
     let flow = instantiate_compiled(&compiled, &registry).unwrap();
     for (port, value, pointer) in [
-        ("count", json!("wrong"), "/typed.~1~0/count"),
-        ("ratio", json!((1_u64 << 53) + 1), "/typed.~1~0/ratio"),
-        ("label", json!(null), "/typed.~1~0/label"),
+        ("count", json!("wrong"), "/typed.~1~0.count"),
+        ("ratio", json!((1_u64 << 53) + 1), "/typed.~1~0.ratio"),
+        ("label", json!(null), "/typed.~1~0.label"),
         (
             "rows./~",
             json!([{"count":1},{"count":"wrong"}]),
-            "/typed.~1~0/rows.~1~0/1/count",
+            "/typed.~1~0.rows.~1~0/1/count",
         ),
-        ("unknown", json!(true), "/typed.~1~0/unknown"),
+        ("unknown", json!(true), "/typed.~1~0.unknown"),
     ] {
         let mut invalid = arguments();
-        invalid["typed./~"][port] = value;
+        invalid[format!("typed./~.{port}")] = value;
         let error = flow
             .execute_with_inputs(WorkflowArguments::try_from(invalid).unwrap())
             .unwrap_err();
@@ -142,7 +142,7 @@ fn struct_inputs_define_startup_contracts_and_validate_before_business_dispatch(
         assert!(!marker.exists());
     }
     let mut missing = arguments();
-    missing["typed./~"].as_object_mut().unwrap().remove("count");
+    missing.as_object_mut().unwrap().remove("typed./~.count");
     assert!(
         flow.execute_with_inputs(WorkflowArguments::try_from(missing).unwrap())
             .is_err()
@@ -158,8 +158,8 @@ fn struct_inputs_define_startup_contracts_and_validate_before_business_dispatch(
     );
     assert_eq!(std::fs::read(&marker).unwrap(), b"executed");
     let mut supplied = arguments();
-    supplied["typed./~"]["raw"] = json!(null);
-    supplied["typed./~"]["label"] = json!("provided");
+    supplied["typed./~.raw"] = json!(null);
+    supplied["typed./~.label"] = json!("provided");
     let outputs = flow
         .execute_with_inputs(WorkflowArguments::try_from(supplied).unwrap())
         .unwrap();
@@ -167,8 +167,8 @@ fn struct_inputs_define_startup_contracts_and_validate_before_business_dispatch(
     assert_eq!(outputs["result"]["label"], json!("provided"));
 
     let mut exact = arguments();
-    exact["typed./~"]["count"] = json!(7.0);
-    exact["typed./~"]["ratio"] = json!(1);
+    exact["typed./~.count"] = json!(7.0);
+    exact["typed./~.ratio"] = json!(1);
     let output = flow
         .execute_with_inputs(WorkflowArguments::try_from(exact).unwrap())
         .unwrap();
@@ -268,13 +268,13 @@ fn generated_struct_inputs_match_memory_and_freeze_the_interface() {
         );
         assert!(!marker.exists());
         let mut invalid = arguments();
-        invalid["typed./~"]["rows./~"] = json!([{"count":1},{"count":"wrong"}]);
+        invalid["typed./~.rows./~"] = json!([{"count":1},{"count":"wrong"}]);
         let output = run(&["--inputs", &invalid.to_string()], None);
         assert!(!output.status.success());
-        assert!(String::from_utf8_lossy(&output.stderr).contains("/typed.~1~0/rows.~1~0/1/count"));
+        assert!(String::from_utf8_lossy(&output.stderr).contains("/typed.~1~0.rows.~1~0/1/count"));
         assert!(!marker.exists());
         let mut non_finite = arguments();
-        non_finite["typed./~"]["ratio"] = json!(-1.0);
+        non_finite["typed./~.ratio"] = json!(-1.0);
         let output = run(&["--inputs", &non_finite.to_string()], None);
         assert!(!output.status.success());
         let diagnostic = String::from_utf8_lossy(&output.stderr);
@@ -287,7 +287,7 @@ fn generated_struct_inputs_match_memory_and_freeze_the_interface() {
         for raw in [None, Some(json!(null)), Some(json!({"nested":[1,true]}))] {
             let mut args = arguments();
             if let Some(raw) = raw {
-                args["typed./~"]["raw"] = raw;
+                args["typed./~.raw"] = raw;
             }
             let expected = if streaming {
                 let instance = mf_compiler::instantiate_stream(&compiled, &registry)
