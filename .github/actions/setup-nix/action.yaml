@@ -15,3 +15,4 @@ runs:
         # Nix validates store paths, so older sources and toolchains are safe seeds.
         restore-prefixes-first-match: nix-store-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-name || github.job }}-
         gc-max-store-size-linux: 8G
+        gc-max-store-size-macos: 8G
