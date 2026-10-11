@@ -15,15 +15,26 @@ With Cargo, a compatible Rust toolchain, CMake, a C compiler, and the declared n
 ```sh
 mf compile flow.json --output ./flow
 ./flow
+mf run ./flow --verbose
 mf run ./flow --tui
 mf compile flow.json --output ./flow --locked
 ```
 
 The output directory must exist. A successful first build creates `flow.lock`. See [workflow definitions](workflows.md) for dependency sources, features, and lock behavior. Native libraries required by plugins must be installed separately.
 
+`mf run ./flow` inherits stdin, stdout, and stderr and returns the runner's exit status. It requires no terminal.
+Use `-v` or `--verbose` with either `mf run ./flow` or `./flow` to print execution details on stderr:
+workflow and node lifecycle events, outcomes, timing, Loop passes, and streaming invocation metadata.
+Results remain on stdout. Diagnostics contain execution metadata rather than input/output values.
+Place CLI options before named workflow parameters, for example `mf run ./flow -v --read.path data.txt`.
+With `--tui`, verbose runner diagnostics appear in the TUI's captured stderr history.
+`mf compile flow.json --output ./flow --verbose` also reports compilation options, elapsed time, and the retained project.
+Recompile existing executables to add the runner's verbose option.
+
 Use `mf compile flow.json --output ./flow --no-telemetry` for a smaller runner when live observation is unnecessary.
 It retains workflow execution and the embedded manifest, and omits the runner's OTLP SDK and HTTP client.
-This runner does not emit the lifecycle events used by `mf run --tui`. Omit `--no-telemetry` to keep observation support.
+Verbose stderr diagnostics still work without a collector or OTLP support. This runner does not export the lifecycle
+events used by `mf run --tui`. Omit `--no-telemetry` to keep live TUI observation support.
 Generated runners disable `mf-compiler`'s `codegen` feature; the compiler CLI enables that feature by default.
 
 The CLI checks graph structure in every scope and generates fixed node orchestration, including structured repeated execution for Loop bodies, then compiles one runner

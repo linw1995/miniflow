@@ -393,3 +393,14 @@ On supported Linux and macOS executable formats, TUI preflight SHALL inspect reg
 
 - **WHEN** the supplied file is not a supported executable container
 - **THEN** inspection reports an actionable compatibility error without treating the file as a legacy runner
+
+### Requirement: Capture verbose runner diagnostics in terminal execution
+
+`mf run <executable> --tui --verbose` SHALL enable the runner's local diagnostics and capture them through the existing
+bounded stderr history. Terminal presentation SHALL retain its existing stdout delivery, observation receiver,
+interruption, and cleanup behavior.
+
+#### Scenario: Inspect verbose terminal execution
+
+- **WHEN** a user runs a compatible workflow with both `--tui` and `--verbose`
+- **THEN** the child receives the verbose option and its diagnostic stderr is available in captured output history

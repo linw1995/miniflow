@@ -92,6 +92,7 @@ pub enum RunError {
 
 #[derive(Clone, Debug, Default)]
 pub struct RunOptions {
+    pub verbose: bool,
     pub inputs: Option<String>,
     pub inputs_file: Option<PathBuf>,
     pub arguments: Vec<std::ffi::OsString>,
@@ -232,6 +233,9 @@ pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        if options.verbose {
+            command.arg("--verbose");
+        }
         if let Some(arguments) = &arguments {
             command.arg("--inputs-file").arg(arguments.path());
         }

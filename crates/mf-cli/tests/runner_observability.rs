@@ -554,6 +554,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
 
     let (endpoint, worker) = collector();
     let observed = command(&runner)
+        .arg("--verbose")
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
         .env("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
         .env("MF_RUN_ID", "12345678-1234-4234-9234-123456789abc")
@@ -565,6 +566,12 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
         String::from_utf8_lossy(&observed.stderr)
     );
     assert_eq!(observed.stdout, plain.stdout);
+    let diagnostics = String::from_utf8_lossy(&observed.stderr);
+    assert!(diagnostics.contains("mf.workflow.started"), "{diagnostics}");
+    assert!(
+        diagnostics.contains("mf.workflow.finished"),
+        "{diagnostics}"
+    );
     let requests = worker.finish();
     check_otel(&requests, 3, 4, description.workflow_id.as_str());
     for (_, body) in requests.iter().filter(|(path, _)| path == "/v1/logs") {
@@ -705,11 +712,21 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     let failing_description = read_manifest(&failing_runner).unwrap().description;
     let (endpoint, worker) = collector();
     let failed = command(&failing_runner)
+        .arg("--verbose")
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
         .output()
         .unwrap();
     assert!(!failed.status.success());
     assert!(String::from_utf8_lossy(&failed.stderr).contains("execution sentinel"));
+    let diagnostics = String::from_utf8_lossy(&failed.stderr);
+    assert!(
+        diagnostics.contains("mf.workflow.finished"),
+        "{diagnostics}"
+    );
+    assert!(
+        diagnostics.contains(r#""mf.outcome":"failed""#),
+        "{diagnostics}"
+    );
     let requests = worker.finish();
     check_otel(&requests, 3, 4, failing_description.workflow_id.as_str());
 

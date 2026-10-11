@@ -1,6 +1,32 @@
 use mf_runtime::{WorkflowArguments, WorkflowInputSchema};
 use serde_json::json;
 
+#[test]
+fn runner_verbosity_preserves_workflow_values_and_transport_validation() {
+    for (flags, expected) in [
+        (vec!["-v", "--read.part.path", "-v"], "-v"),
+        (vec!["--read.part.path=--verbose", "-v"], "--verbose"),
+        (
+            vec!["--verbose", "--inputs", r#"{"read.part.path":"x"}"#],
+            "x",
+        ),
+    ] {
+        let options =
+            mf_runtime::RunnerArguments::parse(flags.iter().map(Into::into), &schema()).unwrap();
+        assert!(options.verbose);
+        assert_eq!(options.inputs.0["read.part.path"], json!(expected));
+    }
+    for flags in [
+        vec!["-v", "--verbose", "--read.part.path=x"],
+        vec!["--verbose=true", "--read.part.path=x"],
+        vec!["--verbose", "--inputs", "{}", "--read.part.path=x"],
+    ] {
+        assert!(
+            mf_runtime::RunnerArguments::parse(flags.iter().map(Into::into), &schema()).is_err()
+        );
+    }
+}
+
 fn schema() -> WorkflowInputSchema {
     serde_json::from_value(json!({
         "inputs": {
