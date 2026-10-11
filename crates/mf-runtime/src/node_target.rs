@@ -4,7 +4,7 @@ use crate::{
 };
 use mf_telemetry::{description::WorkflowDescription, identity::WorkflowId};
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, Snafu, ensure};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +29,18 @@ pub struct NodeTarget {
 
 #[derive(Debug, Snafu)]
 pub enum NodeTargetError {
+    #[snafu(display("node target `{id}` context `{key}`: {reason}"))]
+    ContextKey {
+        id: String,
+        key: String,
+        reason: &'static str,
+    },
+    #[snafu(display("node target `{id}` context `{key}`: {source}"))]
+    ContextType {
+        id: String,
+        key: String,
+        source: crate::TypeMismatch,
+    },
     #[snafu(display("unknown top-level node target `{id}`"))]
     Unknown { id: String },
     #[snafu(display(
@@ -70,6 +82,34 @@ pub fn target_ports(ports: &[crate::PortSpec]) -> BTreeMap<String, WorkflowInput
 }
 
 impl NodeTarget {
+    pub fn validate_context(
+        &self,
+        arguments: &crate::WorkflowArguments,
+    ) -> Result<(), NodeTargetError> {
+        for (key, value) in &arguments.0 {
+            let input = self.context.get(key).context(ContextKeySnafu {
+                id: &self.id,
+                key,
+                reason: "undeclared external reference",
+            })?;
+            input
+                .value_type
+                .validate_shared(value)
+                .context(ContextTypeSnafu { id: &self.id, key })?;
+        }
+        for key in self.context.keys() {
+            ensure!(
+                arguments.0.contains_key(key),
+                ContextKeySnafu {
+                    id: &self.id,
+                    key,
+                    reason: "required external reference was not supplied",
+                }
+            );
+        }
+        Ok(())
+    }
+
     pub fn find<'a>(targets: &'a [Self], id: &str) -> Result<&'a Self, NodeTargetError> {
         let target = targets
             .iter()

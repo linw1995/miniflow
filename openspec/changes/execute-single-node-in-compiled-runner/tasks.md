@@ -14,18 +14,18 @@
 
 ## 2. Parse and validate isolated invocation values
 
-- [ ] 2.1 Add shared selector-aware invocation parsing while preserving ordinary workflow argument APIs;
+- [x] 2.1 Add shared selector-aware invocation parsing while preserving ordinary workflow argument APIs;
   verify separated/inline selectors, repeated or missing targets, dotted identities, and string values
   resembling controls using parser regressions.
-- [ ] 2.2 Reuse qualified named and JSON input transports against the selected contract; verify unknown
+- [x] 2.2 Reuse qualified named and JSON input transports against the selected contract; verify unknown
   ports, unrelated root parameters, required values, optional omission, null, duplicate keys, and transport
   conflicts fail or bind as specified.
-- [ ] 2.3 Add exclusive context JSON/file transport with exact reference lookup and typed validation; verify
+- [x] 2.3 Add exclusive context JSON/file transport with exact reference lookup and typed validation; verify
   valid router context, missing or undeclared references, null/type errors, duplicate keys, relative paths,
   read failures, and nonregular files including a FIFO without a writer.
-- [ ] 2.4 Enforce individual and combined canonical 1 MiB limits with bounded file reads; verify boundary,
+- [x] 2.4 Enforce individual and combined canonical 1 MiB limits with bounded file reads; verify boundary,
   oversize, and escaping-expansion cases fail before target execution.
-- [ ] 2.5 Document selector, input, context, and presence semantics in `docs/compiling.md`; verify the examples
+- [x] 2.5 Document selector, input, context, and presence semantics in `docs/compiling.md`; verify the examples
   use the same flags, flat identities, and limits accepted by parser coverage.
 
 ## 3. Execute prepared tasks in isolation

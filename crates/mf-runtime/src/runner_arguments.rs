@@ -1,7 +1,7 @@
 use crate::{
     MAX_WORKFLOW_INPUT_BYTES, ValueType, WorkflowArguments, WorkflowInputError, WorkflowInputSchema,
 };
-use snafu::{ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu};
 use std::{
     ffi::OsString,
     fs::File,
@@ -11,8 +11,10 @@ use std::{
 
 #[derive(Debug, Snafu)]
 pub enum RunnerArgumentError {
+    #[snafu(transparent)]
+    Target { source: crate::NodeTargetError },
     #[snafu(display(
-        "{message}; usage: workflow [--NODE.PORT VALUE ...] [--inputs JSON|--inputs-file PATH]"
+        "{message}; usage: workflow [--node ID] [--NODE.PORT VALUE ...] [--inputs JSON|--inputs-file PATH] [--context JSON|--context-file PATH]"
     ))]
     Invalid { message: String },
     #[snafu(display("could not read workflow arguments from {path:?}: {source}"))]
@@ -24,6 +26,138 @@ pub enum RunnerArgumentError {
     },
     #[snafu(transparent)]
     Arguments { source: WorkflowInputError },
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RunnerInvocation {
+    pub node: Option<String>,
+    pub inputs: WorkflowArguments,
+    pub context: WorkflowArguments,
+}
+
+impl RunnerInvocation {
+    pub fn parse(
+        arguments: impl IntoIterator<Item = OsString>,
+        workflow: &WorkflowInputSchema,
+        targets: &[crate::NodeTarget],
+    ) -> Result<Self, RunnerArgumentError> {
+        let mut arguments = arguments.into_iter().peekable();
+        let mut forwarded = Vec::new();
+        let mut node = None;
+        let mut context = None;
+        while let Some(argument) = arguments.next() {
+            let flag = argument
+                .to_str()
+                .and_then(|value| value.split_once('='))
+                .map_or((argument.to_str(), None), |(flag, value)| {
+                    (Some(flag), Some(value))
+                });
+            if matches!(flag.0, Some("--node" | "--context" | "--context-file")) {
+                let value = match flag.1 {
+                    Some(value) => OsString::from(value),
+                    None => arguments
+                        .next()
+                        .filter(|value| !value.to_string_lossy().starts_with("--"))
+                        .context(InvalidSnafu {
+                            message: "missing runner control value",
+                        })?,
+                };
+                match flag.0 {
+                    Some("--node") => {
+                        if node.is_some() {
+                            return InvalidSnafu {
+                                message: "--node can be supplied only once",
+                            }
+                            .fail();
+                        }
+                        let value = value.to_str().filter(|value| !value.is_empty()).context(
+                            InvalidSnafu {
+                                message: "--node requires a nonempty UTF-8 target ID",
+                            },
+                        )?;
+                        node = Some(value.to_owned());
+                    }
+                    _ => {
+                        if context.is_some() {
+                            return InvalidSnafu { message: "--context and --context-file are exclusive and can be supplied only once" }.fail();
+                        }
+                        context = Some((flag.0 == Some("--context-file"), value));
+                    }
+                }
+            } else {
+                let takes_value = flag.1.is_none() && argument.to_string_lossy().starts_with("--");
+                let json_transport = matches!(flag.0, Some("--inputs" | "--inputs-file"));
+                forwarded.push(argument);
+                if takes_value
+                    && let Some(value) = arguments.next_if(|value| {
+                        json_transport || !value.to_string_lossy().starts_with("--")
+                    })
+                {
+                    forwarded.push(value);
+                }
+            }
+        }
+        let target = node
+            .as_deref()
+            .map(|id| crate::NodeTarget::find(targets, id))
+            .transpose()?;
+        if target.is_none() && context.is_some() {
+            return InvalidSnafu {
+                message: "context transport requires --node",
+            }
+            .fail();
+        }
+        let inputs =
+            WorkflowArguments::parse(forwarded, target.map_or(workflow, |target| &target.inputs))?;
+        let context = match context {
+            None => WorkflowArguments::default(),
+            Some((false, json)) => WorkflowArguments::from_json(
+                json.to_str()
+                    .context(InvalidSnafu {
+                        message: "--context requires UTF-8 JSON",
+                    })?
+                    .as_bytes(),
+            )?,
+            Some((true, path)) => {
+                WorkflowArguments::from_json(&read_context_file(Path::new(&path))?)?
+            }
+        };
+        if let Some(target) = target {
+            target.validate_context(&context)?;
+            let encoded =
+                serde_json::to_vec(&serde_json::json!({"inputs": inputs, "context": context}))
+                    .context(crate::WorkflowInputJsonSnafu)?;
+            WorkflowArguments::check_size(encoded.len())?;
+        }
+        Ok(Self {
+            node,
+            inputs,
+            context,
+        })
+    }
+}
+
+fn read_context_file(path: &Path) -> Result<Vec<u8>, RunnerArgumentError> {
+    let read = || -> io::Result<Vec<u8>> {
+        let mut options = File::options();
+        options.read(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.custom_flags(libc::O_NONBLOCK);
+        }
+        let file = options.open(path)?;
+        if !file.metadata()?.is_file() {
+            return Err(io::Error::other("expected a regular context file"));
+        }
+        let mut bytes = Vec::new();
+        file.take(MAX_WORKFLOW_INPUT_BYTES as u64 + 1)
+            .read_to_end(&mut bytes)?;
+        Ok(bytes)
+    };
+    read().context(ReadSnafu {
+        path: path.to_owned(),
+    })
 }
 
 impl WorkflowArguments {

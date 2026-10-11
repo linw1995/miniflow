@@ -204,3 +204,25 @@ initialization and prevent selection from running; preparation does not call bus
 source data. Producers and Event executors are recorded for accurate unsupported-target diagnostics and
 cannot be bound as isolated tasks. The standalone selection interface is added by the runner dispatch
 phase of this change.
+
+The isolated runner invocation contract uses the selected task's qualified inputs:
+
+```sh
+./flow --node transform --transform.amount 21
+./flow --node=transform --inputs '{"transform.amount":"21"}'
+./flow --node transform --inputs-file inputs.json
+./flow --node route --context-file context.json
+```
+
+`--node` identifies one exact top-level Task. Named values follow ordinary string/JSON rules; use inline
+syntax for a string starting with `--`. Named inputs cannot mix with JSON input transport. Required inputs
+of other roots are neither required nor accepted, and optional omissions remain absent. The selected
+contract is independent of definition-schema startup promotion.
+
+Context documents are flat objects keyed by the target's declared external reference IDs, such as
+`{"source.value":{"count":42}}`. Supply either `--context JSON` or `--context-file PATH`, only with selection.
+Every declared reference must be supplied; unrelated keys and duplicate keys are rejected. Values are
+checked against the original graph's referenced output types. Null is a value, not a skipped-output marker.
+Context files resolve from the invocation directory, must be regular files, and are read once with a
+bounded reader. Each port/context transport and their combined canonical JSON payload must fit within
+1 MiB. Context values do not execute their producers or change the target's compiled types.

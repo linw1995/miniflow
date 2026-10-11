@@ -120,7 +120,7 @@ pub use workflow_inputs::{
     WorkflowInputError, WorkflowInputSchema,
 };
 
-pub use runner_arguments::RunnerArgumentError;
+pub use runner_arguments::{RunnerArgumentError, RunnerInvocation};
 
 pub use workflow_inputs::{
     JsonSnafu as WorkflowInputJsonSnafu, TooLargeSnafu as WorkflowInputTooLargeSnafu,
