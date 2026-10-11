@@ -13,10 +13,10 @@
 
 ## 3. Route exceptions within explicit budgets
 
-- [ ] 3.1 Build component-local sparse search geometry and direction-aware orthogonal A*; verify obstacle detours, bend-aware choice, legal crossings, and rejection of third-edge, corner, arrow, and label collisions.
-- [ ] 3.2 Add deterministic bounded local rip-up-and-reroute with best-result retention and validated outer detours; verify congested fixtures improve or report unresolved routes without accepting unsafe geometry.
-- [ ] 3.3 Enforce named per-search and scope-wide limits for preprocessing, search expansions, conflict state, retry rounds, and canvas arithmetic; verify injected low limits terminate predictably and retain all unresolved edge identities and typed reasons.
-- [ ] 3.4 Measure chains, wide forks/joins, parallel edges, dense cross-layer fixtures, and a sparse 10,000-node graph; select and document default budgets in `design.md` and `docs/observability.md`, keeping time/memory/work-count reports under ignored `target/`.
+- [x] 3.1 Build component-local sparse search geometry and direction-aware orthogonal A*; verify obstacle detours, bend-aware choice, legal crossings, and rejection of third-edge, corner, arrow, and label collisions.
+- [x] 3.2 Add deterministic bounded local rip-up-and-reroute with best-result retention and validated outer detours; verify congested fixtures improve or report unresolved routes without accepting unsafe geometry.
+- [x] 3.3 Enforce named per-search and scope-wide limits for preprocessing, search expansions, conflict state, retry rounds, and canvas arithmetic; verify injected low limits terminate predictably and retain all unresolved edge identities and typed reasons.
+- [x] 3.4 Measure chains, wide forks/joins, parallel edges, dense cross-layer fixtures, and a sparse 10,000-node graph; select and document default budgets in `design.md` and `docs/observability.md`, keeping time/memory/work-count reports under ignored `target/`.
 
 ## 4. Compose and expose routed graphs
 

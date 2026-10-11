@@ -321,6 +321,13 @@ temporary files or file polling.
 
 `mf-tui::graph::GraphLayout` uses `rust-sugiyama` to assign layers and sibling order from the complete described graph, including isolated nodes. Data and control edges both contribute to the topology; parallel node pairs are deduplicated only for layout. A fixed-size terminal projection keeps node boxes in place as observations arrive.
 
+Routing work is bounded per described scope: 250,000 geometry items; 4,096 sparse search vertices and
+16,384 implicit arcs per search; 8,192 expansions per search and 65,536 per scope; 2,000,000 conflict
+checks; 16,384 retained crossings; 128 points per route; two local retry rounds; and a 2,000,000-cell
+route coordinate limit. These limits govern optional route planning, independently of the existing
+10,000-node description admission limit. Routing counters and deterministic fixtures are available
+through `benchmark_routes`; performance reports remain local under `target/edge-routing/`.
+
 `GraphView` draws data and control edges with distinct line symbols, clips to a caller-owned viewport, and renders node status and elapsed time from a state snapshot. Confirmed produced or skipped output ports change the associated edge style; possible lifecycle loss remains visibly uncertain.
 
 The initial routing is a midpoint orthogonal path between boxes. It does not search around intervening boxes, so crowded graphs can have line crossings or obscured segments. Layout is calculated once per described scope; the CLI terminal loop owns scope navigation, panning, status banners, diagnostics, and terminal cleanup.

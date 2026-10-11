@@ -576,3 +576,114 @@ fn crowded_inputs_have_distinct_rows_and_disjoint_boxes() {
             .all(|route| route.unresolved.is_none())
     );
 }
+
+#[test]
+fn routing_budgets_retain_all_connections_without_unsafe_paths() {
+    use mf_tui::graph::routing::{RoutingLimits, UnresolvedReason};
+    let graph = fan_graph(9);
+    for (limits, reason) in [
+        (
+            RoutingLimits {
+                max_geometry_items: 0,
+                ..RoutingLimits::default()
+            },
+            UnresolvedReason::GeometryLimit,
+        ),
+        (
+            RoutingLimits {
+                max_conflict_checks: 0,
+                ..RoutingLimits::default()
+            },
+            UnresolvedReason::ConflictLimit,
+        ),
+        (
+            RoutingLimits {
+                max_extent: 0,
+                ..RoutingLimits::default()
+            },
+            UnresolvedReason::GeometryLimit,
+        ),
+    ] {
+        let layout = GraphLayout::with_routing_limits(&graph, limits).unwrap();
+        assert_eq!(layout.edges().len(), graph.data_edges.len());
+        assert!(
+            layout
+                .routes()
+                .iter()
+                .all(|route| route.points.is_empty() && route.unresolved == Some(reason))
+        );
+        assert!(layout.routing_stats().conflict_checks <= limits.max_conflict_checks);
+        assert!(layout.routing_stats().geometry_items <= limits.max_geometry_items);
+        assert_completed_geometry_is_safe(&layout);
+    }
+}
+
+#[test]
+fn sparse_ten_thousand_node_chain_uses_linear_conflict_work() {
+    let mut graph = fan_graph(9_999);
+    graph.data_edges = (1..graph.execution_order.len())
+        .map(|index| DataEdge {
+            from_node: graph.execution_order[index - 1].clone(),
+            from_output: "value".into(),
+            to_node: graph.execution_order[index].clone(),
+            to_input: "input".into(),
+        })
+        .collect();
+    let layout = GraphLayout::new(&graph).unwrap();
+    assert_eq!(layout.nodes().len(), 10_000);
+    assert!(
+        layout
+            .routes()
+            .iter()
+            .all(|route| route.unresolved.is_none())
+    );
+    assert!(layout.routing_stats().conflict_checks < 10 * layout.edges().len());
+    assert_eq!(layout.routing_stats().search_expansions, 0);
+}
+
+#[test]
+fn local_rerouting_never_replaces_a_better_valid_arrangement() {
+    use mf_tui::graph::routing::RoutingLimits;
+    let mut graph = fan_graph(8);
+    graph.data_edges.clear();
+    for from in 0..6 {
+        let first = if from < 3 { 3 } else { 6 };
+        for to in first..9 {
+            graph.data_edges.push(DataEdge {
+                from_node: graph.execution_order[from].clone(),
+                from_output: "value".into(),
+                to_node: graph.execution_order[to].clone(),
+                to_input: format!("input-{from}"),
+            });
+        }
+    }
+    let limits = RoutingLimits {
+        max_crossings: 10,
+        max_search_vertices: 0,
+        ..RoutingLimits::default()
+    };
+    let initial = GraphLayout::with_routing_limits(
+        &graph,
+        RoutingLimits {
+            retry_rounds: 0,
+            ..limits
+        },
+    )
+    .unwrap();
+    let improved = GraphLayout::with_routing_limits(&graph, limits).unwrap();
+    assert!(
+        improved
+            .routes()
+            .iter()
+            .filter(|route| route.unresolved.is_some())
+            .count()
+            <= initial
+                .routes()
+                .iter()
+                .filter(|route| route.unresolved.is_some())
+                .count()
+    );
+    assert!(improved.routing_stats().retry_rounds > 0);
+    assert!(improved.routing_stats().retry_rounds <= limits.retry_rounds);
+    assert_completed_geometry_is_safe(&improved);
+}

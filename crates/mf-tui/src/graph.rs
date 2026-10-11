@@ -29,8 +29,9 @@ const NODE_WIDTH: u32 = 24;
 const NODE_HEIGHT: u32 = 6;
 const COLUMN_GAP: u32 = 10;
 const ROW_GAP: u32 = routing::ATTACHMENT_SPACING;
-const COMPONENT_GAP: u32 = 3;
+const COMPONENT_GAP: u32 = 12;
 const MARGIN: u32 = 2;
+const LAYOUT_STACK_BYTES: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Snafu)]
 pub enum GraphError {
@@ -40,6 +41,8 @@ pub enum GraphError {
     TooManyNodes { limit: usize },
     #[snafu(display("Loop body is absent from the workflow description"))]
     MissingLoopBody,
+    #[snafu(display("could not start the graph layout worker: {source}"))]
+    LayoutWorker { source: std::io::Error },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -80,6 +83,7 @@ pub struct GraphLayout {
     edges: Vec<GraphEdge>,
     routes: Vec<EdgeRoute>,
     crossings: Vec<Crossing>,
+    routing_stats: routing::RoutingStats,
     width: u32,
     height: u32,
 }
@@ -106,6 +110,13 @@ impl GraphLayout {
     }
 
     pub fn new(description: &WorkflowDescription) -> Result<Self, GraphError> {
+        Self::with_routing_limits(description, routing::RoutingLimits::default())
+    }
+
+    pub fn with_routing_limits(
+        description: &WorkflowDescription,
+        limits: routing::RoutingLimits,
+    ) -> Result<Self, GraphError> {
         description.validate().context(DescriptionSnafu)?;
         if description.nodes.len() > MAX_SESSION_NODES {
             return Err(GraphError::TooManyNodes {
@@ -203,16 +214,30 @@ impl GraphLayout {
             })
             .collect();
         let topology: Vec<_> = topology.into_iter().collect();
-        let mut components = from_vertices_and_edges(
-            &vertices,
-            &topology,
-            &Config {
-                vertex_spacing: 2.0,
-                transpose: false,
-                dummy_vertices: false,
-                ..Config::default()
-            },
-        );
+        let config = Config {
+            vertex_spacing: 2.0,
+            transpose: false,
+            dummy_vertices: false,
+            ..Config::default()
+        };
+        let compute = || from_vertices_and_edges(&vertices, &topology, &config);
+        // Sugiyama recurses through the DAG; large inputs need a caller-independent stack budget.
+        let mut components = if nodes.len() >= 512 {
+            std::thread::scope(|scope| {
+                let worker = std::thread::Builder::new()
+                    .name("graph-layout".into())
+                    .stack_size(LAYOUT_STACK_BYTES)
+                    .spawn_scoped(scope, compute)
+                    .context(LayoutWorkerSnafu)?;
+                Ok::<_, GraphError>(
+                    worker
+                        .join()
+                        .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                )
+            })?
+        } else {
+            compute()
+        };
         components.sort_by_key(|(vertices, _, _)| {
             vertices
                 .iter()
@@ -302,12 +327,25 @@ impl GraphLayout {
                 edges[edge].to_row = 4 + row as u32 * routing::ATTACHMENT_SPACING;
             }
         }
-        let mut routes =
-            routing::channel_routes(&mut nodes, &edges, &node_components, &mut component_bottoms);
-        let crossings = routing::validate_routes(&nodes, &edges, &mut routes);
+        let estimate = nodes
+            .len()
+            .saturating_mul(4)
+            .saturating_add(edges.len().saturating_mul(10));
+        let mut routes = if estimate <= limits.max_geometry_items {
+            routing::channel_routes(&mut nodes, &edges, &node_components, &mut component_bottoms)
+        } else {
+            vec![EdgeRoute::default(); edges.len()]
+        };
+        let (crossings, routing_stats) =
+            routing::route_all(&nodes, &edges, &mut routes, &node_components, limits);
         let right = nodes
             .iter()
             .map(|node| node.rect.x + node.rect.width)
+            .chain(
+                routes
+                    .iter()
+                    .flat_map(|route| route.points.iter().map(|point| point.x)),
+            )
             .max()
             .unwrap_or(MARGIN);
         let height = nodes
@@ -323,6 +361,7 @@ impl GraphLayout {
         Ok(Self {
             routes,
             crossings,
+            routing_stats,
             nodes,
             edges,
             width: right + MARGIN,
@@ -344,6 +383,10 @@ impl GraphLayout {
 
     pub fn crossings(&self) -> &[Crossing] {
         &self.crossings
+    }
+
+    pub fn routing_stats(&self) -> routing::RoutingStats {
+        self.routing_stats
     }
 
     pub fn size(&self) -> (u32, u32) {

@@ -16,7 +16,12 @@ Layout is already created once for the root and each Loop body. Observation admi
 
 ### 1. Preserve layering and make terminal projection routing-aware
 
-Retain the existing Sugiyama topology input, including deduplication of parallel node pairs only for node placement. Keep observation indices tied to execution order. Derive stable edge keys from source/destination IDs, source output, target input, and kind; use them for routing order and tie-breaking without reordering observation records.
+For graphs with at least 512 nodes, execute the recursive Sugiyama projection on a joined worker with a fixed 64 MiB
+stack. This avoids overflowing a caller thread with a small stack at the existing 10,000-node admission limit; worker
+startup errors retain their typed I/O source. Retain the existing Sugiyama topology input, including deduplication of
+parallel node pairs only for node placement. Keep observation indices tied to execution order. Derive stable edge keys
+from source/destination IDs, source output, target input, and kind; use them for routing order and tie-breaking without
+reordering observation records.
 
 Allocate a separate attachment row per incident edge, including edges from the same output. Sort attachments by the
 opposite endpoint's layer and sibling position, with stable keys for ties. Increase node height to cover the larger
@@ -58,7 +63,11 @@ Alternative: Lee-style full-grid search consumes work proportional to canvas are
 
 Extend the owning graph representation with edge polylines, maximal axis-aligned segments, label rectangles, crossing records, unresolved-edge reasons, and canvas bounds. Keep current module paths and accessors unless implementation needs a specific API extension. Do not introduce facade modules or narrow existing visibility just to hide routing types.
 
-Classify conflicts geometrically: node/label intrusion, collinear overlap, endpoint contact, bend collision, valid perpendicular crossing, and marker-footprint collision. Shared outputs are not an implicit junction exception. Use row/column interval indexes and spatial sweeps for candidate conflicts, with explicit limits on pathological intersection counts. Avoid all-pairs edge comparison and canvas-sized storage.
+Classify conflicts geometrically: node/label intrusion, collinear overlap, endpoint contact, bend collision, valid
+perpendicular crossing, and marker-footprint collision. Shared outputs are not an implicit junction exception. Use
+augmented AVL interval trees within row/column indexes, including vertical ranges for node/label/arrow rectangles, and
+spatial sweeps for candidate conflicts, with explicit limits on pathological intersection counts. Avoid all-pairs edge
+comparison and canvas-sized storage.
 
 Build crossing layers from a stable total order: data above control, then canonical edge key within the same kind. This also avoids cyclic edge-wide layer assignments. Execution state changes style only. Each crossing stores both edge identities, their orientations, and the complete marker footprint.
 
@@ -82,7 +91,12 @@ The preview matrix covers both orientations and all four edge-kind combinations.
 
 ### 6. Make resource exhaustion explicit and separate from workflow failure
 
-Introduce named limits for sparse graph vertices/arcs, cumulative search expansions per scope, retry rounds, retained conflict records, and checked canvas extents. Enforce both per-search and scope-wide limits, including preprocessing and marker enumeration. Derive initial defaults from the large-fixture measurements and document them before completing delivery. Use deterministic operation counts rather than wall-clock cutoffs for reproducible geometry.
+Introduce named limits for sparse graph vertices/arcs, cumulative search expansions per scope, retry rounds, retained
+conflict records, and checked canvas extents. Enforce both per-search and scope-wide limits, including preprocessing and
+marker enumeration. Defaults use 250,000 geometry items, 4,096 search vertices, 16,384 implicit arcs, 8,192 expansions
+per search, 65,536 expansions per scope, 2,000,000 conflict checks, 16,384 retained crossings, 128 points per route, two
+retry rounds, and a 2,000,000-cell route extent. Use deterministic operation counts rather than wall-clock cutoffs for
+reproducible geometry.
 
 Try a validated outer detour within the remaining canvas/work budget before marking an edge unresolved. Retain every unresolved edge and its typed reason. Display a routing warning separately from telemetry completeness, and expose endpoint/port/kind details when inspecting an incident node. Do not render a false complete path or change workflow outcome.
 
@@ -108,3 +122,11 @@ Implement the marker prototype and route model first, then routing-aware project
 - [ELK Layered](https://eclipse.dev/elk/reference/algorithms/org-eclipse-elk-layered.html): layered orthogonal routing with ports, multi-edges, and edge/channel spacing controls.
 - [PathFinder](https://janders.eecg.utoronto.ca/1387_2015/readings/pathfinder.pdf): current and historical congestion costs for iterative routing, retained as a possible later enhancement.
 - [yFiles crossing styles](https://docs.yworks.com/yfiles-html/dguide/bridges-customizations/): bridge/gap styles and independent crossing-layer policies; terminal patterns require their own visual verification.
+
+## Routing Measurements
+
+Release fixtures on the local macOS host measured a 10,000-node chain with 9,999 edges in 30.1 ms, 29,997 conflict checks, no search, no unresolved edges, and approximately 30.2 MB maximum resident memory. The earlier row-only index exhausted two million conflict checks on that same fixture; interval-tree pruning removes that accidental quadratic work. A regression checks the work count rather than machine-dependent elapsed time.
+
+The 256-node fork/join fixtures took approximately 1.3 ms with no unresolved edges. A 128-edge parallel data/control fixture took 0.34 ms. The 30-node, 300-edge dense cross-layer fixture took 13.2 ms and retained eight explicitly unresolved edges after two retries, demonstrating that the limits bound effort without claiming complete routing. Its 16,374 crossings approached the retained-crossing limit. These are fixture measurements, not a guarantee for arbitrary dense graphs.
+
+Raw timing, maximum-resident-memory, and counter reports remain local in `target/edge-routing/measurements.csv` and per-fixture `.time` files. Reproduce with `nix develop --command cargo run --release -p mf-tui --example benchmark_routes -- <mode> <size>`, where modes are `chain`, `fan`, `join`, `parallel`, and `dense`.
