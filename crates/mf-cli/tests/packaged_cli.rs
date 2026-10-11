@@ -1,3 +1,4 @@
+use mfn_llm::test_support as llm_support;
 mod support;
 use serde_json::{Value, json};
 use std::{fs, path::Path, process::Command};
@@ -41,6 +42,41 @@ fn packaged_cli_acceptance() {
     let fixture = PackagedCli::setup();
     let project = fixture.root().join("user-project");
     fs::create_dir(&project).unwrap();
+    let llm_server = llm_support::Server::start(vec![llm_support::Reply::text("packaged reply")]);
+    let llm_flow = json!({
+        "version": "2026-10-03",
+        "dependencies": {"llm": {"package": "mfn-llm", "version": format!("={}", env!("CARGO_PKG_VERSION"))}},
+        "nodes": [{"id": "chat", "kind": "builtin.llm", "config": {"model": "example-model", "base_url": llm_server.base_url, "api_key_env": "MINIFLOW_PACKAGED_LLM_KEY"}}],
+        "outputs": [{"name": "text", "node": "chat", "port": "text"}, {"name": "history", "node": "chat", "port": "history"}]
+    });
+    let llm_definition = project.join("llm.json");
+    let llm_executable = project.join("llm");
+    fs::write(&llm_definition, llm_flow.to_string()).unwrap();
+    fixture.compile(
+        &llm_definition,
+        &llm_executable,
+        &fixture.root().join("llm-build"),
+        false,
+        false,
+    );
+    assert!(llm_server.requests().is_empty());
+    fs::remove_file(&llm_definition).unwrap();
+    fs::remove_dir_all(fixture.root().join("llm-build")).unwrap();
+    let llm_inputs = json!({"chat": {"prompt": "Hello", "history": [{"role": "user", "content": "prior"}, {"role": "assistant", "content": "earlier reply"}]}});
+    let llm_result = checked(
+        Command::new(&llm_executable)
+            .current_dir(&project)
+            .env_clear()
+            .env("PATH", "")
+            .env("MINIFLOW_PACKAGED_LLM_KEY", "synthetic-key")
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost")
+            .args(["--inputs", &llm_inputs.to_string()]),
+    );
+    let llm_result: Value = serde_json::from_slice(&llm_result.stdout).unwrap();
+    assert_eq!(llm_result["text"], "packaged reply");
+    assert_eq!(llm_result["history"].as_array().unwrap().len(), 4);
+    assert_eq!(llm_server.requests().len(), 1);
     let mut flow = json!({
         "version":"2026-09-26",
         "dependencies":{

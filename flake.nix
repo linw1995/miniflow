@@ -117,6 +117,9 @@
             nativeBuildInputs = [ pkgs.cmake pkgs.git pkgs.jq pkgs.python3 ];
           } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isLinux {
             SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+          } // pkgs.lib.optionalAttrs pkgs.stdenv.hostPlatform.isDarwin {
+            # Runtime and provider integration tests use loopback servers.
+            __darwinAllowLocalNetworking = true;
           });
           workflows = pkgs.runCommand "check-workflows" {
             nativeBuildInputs = [ pkgs.actionlint ];

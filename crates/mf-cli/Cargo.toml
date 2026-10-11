@@ -23,6 +23,7 @@ clap = { workspace = true, features = ["derive"] }
 snafu.workspace = true
 
 [dev-dependencies]
+mfn-llm = { workspace = true, features = ["test-support"] }
 # Package fixtures and artifact verification.
 flate2.workspace = true
 serde_json.workspace = true

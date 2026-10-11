@@ -101,6 +101,10 @@ produce `{"doubled":42}` and `{"doubled":[2,4]}` respectively. The Loop example 
 for its Loop declaration and initial constant, and `mfn-code` for its body transformation; it produces
 `{"count":3}`. A portable Flow should declare available registry or Git packages instead.
 
+The terminal and multi-turn LLM examples declare `mfn-llm` and require a configured model and execution-time
+credentials; their build validation performs no provider request. See
+[terminal conversations](workflows.md#llm-configuration-and-conversation-values).
+
 ## Build failures
 
 Diagnostics identify the failed stage: input parsing, graph validation, dependency resolution, runtime compatibility, compilation, lock persistence, or installation. Cargo diagnostics remain visible. Failures after project creation report its retained location for inspection, including `Cargo.toml`, `workflow-plan.json`, generated source, and build artifacts.

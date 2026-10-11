@@ -68,6 +68,7 @@ def main():
         ("mf-telemetry", "crates/mf-telemetry"),
         ("mfn-core", "crates/builtin-nodes/core"),
         ("mfn-code", "crates/builtin-nodes/code"),
+        ("mfn-llm", "crates/builtin-nodes/llm"),
     ]:
         features = ', features = ["otlp", "snapshot"]' if name == "mf-telemetry" else ""
         manifest += (
@@ -80,6 +81,7 @@ def main():
         ("mf-compiler", "crates/mf-compiler"),
         ("mfn-core", "crates/builtin-nodes/core"),
         ("mfn-code", "crates/builtin-nodes/code"),
+        ("mfn-llm", "crates/builtin-nodes/llm"),
     ]:
         features = ', features = ["codegen"]' if name == "mf-compiler" else ""
         manifest += (

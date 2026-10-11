@@ -20,6 +20,7 @@ mf-telemetry = { path = "crates/mf-telemetry", version = "0.1.0", default-featur
 mf-tui = { path = "crates/mf-tui", version = "0.1.0" }
 mfn-code = { path = "crates/builtin-nodes/code", version = "0.1.0" }
 mfn-core = { path = "crates/builtin-nodes/core", version = "0.1.0" }
+mfn-llm = { path = "crates/builtin-nodes/llm", version = "0.1.0" }
 
 # Serialization and error reporting.
 serde = "1.0.229"
@@ -45,11 +46,17 @@ opentelemetry_sdk = { version = "0.33.0", default-features = false }
 prost = "0.14.4"
 
 # Async execution and HTTP transport.
+bytes = "1.12.1"
+futures = { version = "0.3.34", default-features = false }
+futures-timer = "3.0.4"
 http-body-util = "0.1.5"
 hyper = { version = "1.11.1", default-features = false }
 hyper-util = { version = "0.1.21", default-features = false }
 reqwest = { version = "0.13.5", default-features = false }
+rig-core = { version = "=0.43.0", default-features = false }
+rig-reqwest = { version = "=0.43.0", default-features = false }
 tokio = { version = "1.53.1", default-features = false }
+url = "2.5.8"
 
 # Command parsing, terminal rendering, and graph layout.
 clap = "4.6.7"

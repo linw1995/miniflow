@@ -1,0 +1,17 @@
+{
+  "version": "2026-10-03",
+  "dependencies": {
+    "llm": { "package": "mfn-llm", "path": "../crates/builtin-nodes/llm" }
+  },
+  "nodes": [
+    {
+      "id": "chat",
+      "kind": "builtin.llm",
+      "config": { "model": "your-model", "api_key_env": "MODEL_API_KEY" }
+    }
+  ],
+  "outputs": [
+    { "name": "text", "node": "chat", "port": "text" },
+    { "name": "history", "node": "chat", "port": "history" }
+  ]
+}

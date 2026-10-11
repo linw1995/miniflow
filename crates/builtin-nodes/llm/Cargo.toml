@@ -1,0 +1,29 @@
+[package]
+name = "mfn-llm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Terminal text conversations for miniflow"
+
+[features]
+default = []
+tokio = ["mf-runtime/tokio"]
+test-support = []
+
+[dependencies]
+# Node contracts and optional future driving.
+inventory.workspace = true
+mf-runtime = { workspace = true, features = ["async"] }
+
+# Provider protocol and configured native HTTP transport.
+bytes.workspace = true
+rig-core = { workspace = true, features = ["reqwest", "rustls"] }
+rig-reqwest = { workspace = true, features = ["rustls"] }
+reqwest = { workspace = true, features = ["rustls"] }
+
+# Configuration, structured messages, and typed diagnostics.
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+snafu.workspace = true
+url.workspace = true

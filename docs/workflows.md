@@ -67,6 +67,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
 | `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
 | `mfn-code` | `builtin.code` | Required `language`, `inputs`, and `code` | Required ports named and typed by `inputs` | Required ports named by `code`, with inferred types |
+| `mfn-llm` | [`builtin.llm`](#llm-configuration-and-conversation-values) | Model, endpoint, credential reference, generation parameters, deadline, and reply limit | Required `prompt`; optional `system` and `history` | Required `text` and updated `history`; optional `usage` and `finish_reason` |
 
 The built-in Loop is registered as `workflow.loop`. Its settings belong in the node's top-level `loop`
 field; omit `config` or leave it empty. See [Structured Loop](#structured-loop) for its body and control kinds.
@@ -127,6 +128,90 @@ Run the complete [scalar example](../examples/cel-scalar.json) or [typed-list ex
 with the [repository development commands](compiling.md#repository-development). They produce `{"doubled":42}`
 and `{"doubled":[2,4]}` respectively. Replace the examples' local package paths with published package versions
 when compiling outside the checkout.
+
+### LLM configuration and conversation values
+
+The opt-in `mfn-llm` package registers `builtin.llm`, an ordinary task producing one terminal result:
+
+| Direction | Port | Type | Required |
+| --- | --- | --- | --- |
+| Input | `prompt` | `string` | Yes |
+| Input | `system` | `string` | No |
+| Input | `history` | `List(Object)` | No |
+| Output | `text` | `string` | Yes |
+| Output | `history` | `List(Object)` | Yes |
+| Output | `usage` | `Map(Int64)` | No |
+| Output | `finish_reason` | `string` | No |
+
+Each history object has exactly two required string fields, `role` and `content`. Conversation roles are `user`
+and `assistant`, with nonempty text. The current `prompt` is also nonempty. System instructions use the separate
+`system` input. Missing or empty history starts a new conversation; a successful turn appends its user prompt and
+assistant text to the supplied history. The workflow owns transcript persistence and trimming.
+
+Static configuration has this shape:
+
+```json
+{
+  "model": "example-model",
+  "base_url": "https://api.openai.com/v1",
+  "api_key_env": "MODEL_API_KEY",
+  "temperature": 0.2,
+  "max_tokens": 256,
+  "timeout_ms": 60000,
+  "max_output_bytes": 1048576
+}
+```
+
+`model` is required and nonblank. Defaults are the OpenAI API prefix, `OPENAI_API_KEY`, a 60000 millisecond deadline,
+and a 1 MiB generated-text limit. Optional `temperature` must be finite and between 0 and 2; optional `max_tokens`
+must be positive. Supplied numeric fields cannot be null. Deadlines and text limits must be positive integers.
+`base_url` is an HTTP or HTTPS API prefix without embedded credentials, query, or fragment. Configuration rejects
+unknown fields, including `stream`, direct credentials, and provider-specific request overrides.
+
+`mfn_llm::validate_config` checks these settings without looking up credentials, creating clients or runtimes,
+or contacting the endpoint. Value structs use the runtime's nested object codecs, so malformed history has indexed
+diagnostics. Optional output metadata is omitted when absent rather than encoded as JSON null. The package's optional
+`tokio` feature forwards the workflow-managed backend; its native HTTP transport still depends on Tokio with that
+feature disabled.
+
+Preparation and manifest inspection do not read the credential environment variable or contact the provider.
+Execution reads the variable for each invocation, so credential rotation does not require recompiling a workflow.
+Requests use Chat Completions at the configured prefix's `/chat/completions` route; `OPENAI_BASE_URL` does not override
+that configured endpoint. The node reuses a configured HTTP client, disables redirects and automatic retries, and
+disables idle connection pooling so prepared nodes can outlive earlier workflow-managed reactors.
+
+Request messages are optional system instructions, the supplied history in order, and the current user prompt.
+On success, returned history preserves the supplied records and appends the current user prompt and complete assistant
+text once each. System instructions are excluded and must be supplied again for each turn. The node does not retain
+conversation state, automatically trim history, or execute tool calls. Unsupported history roles and response content
+fail rather than being silently rewritten. A nonempty reply truncated at its token limit retains the `length` reason.
+
+`usage` contains available `input_tokens`, `output_tokens`, and `total_tokens` counters; unreported counts do not become
+zero. Compatible services reporting partial wire usage are adapted without changing Rig's message protocol. Unknown
+finish reasons retain their provider value. Select optional metadata as optional workflow outputs when a provider may
+omit it. Credential and provider errors retain typed sources while diagnostic display omits credential values and
+arbitrary remote bodies.
+
+The deadline covers setup and waiting for a terminal reply, and limit checks also run before returning converted data.
+Cancellation or failure returns no outputs or updated history. Synchronous setup and conversion cannot be forcibly
+preempted. The reply-byte limit is checked after unary buffering and decoding and does not bound transport memory or
+the full transcript. Workflow concurrency limits bound invocations; waiting on the model still occupies a synchronous
+workflow thread. Async hosts use a blocking thread for synchronous workflow entry points.
+
+The [terminal example](../examples/llm-terminal.json) accepts startup prompt, system, and history inputs.
+The [Loop example](../examples/llm-loop.json) passes updated history through a Loop variable for two turns.
+Choose an available model in each example's configuration and set `MODEL_API_KEY` in the execution environment.
+An OpenAI-compatible endpoint can be selected with `base_url`. Compilation does not need the key:
+
+```bash
+mf compile examples/llm-terminal.json --output ./chat
+./chat --inputs '{"chat":{"prompt":"Hello","system":"Answer briefly"}}'
+mf compile examples/llm-loop.json --output ./conversation
+./conversation --inputs '{"repeat":{"prompt":"Continue the conversation","history":[],"text":""}}'
+```
+
+Persist the returned history and pass it as `chat.history` with a new prompt to continue a terminal conversation.
+The Loop example repeats the supplied prompt twice while preserving the earlier reply in the second request.
 
 ## Structured Loop
 

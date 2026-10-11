@@ -6,6 +6,11 @@ license.workspace = true
 repository.workspace = true
 description = "Runtime contracts and execution support for miniflow"
 
+[features]
+default = []
+async = ["dep:futures", "dep:futures-timer"]
+tokio = ["async", "dep:tokio"]
+
 [dependencies]
 # Workflow observation contracts.
 mf-telemetry.workspace = true
@@ -20,6 +25,11 @@ mf-runtime-derive.workspace = true
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json.workspace = true
 snafu.workspace = true
+
+# Future driving is independent of the optional native reactor.
+futures = { workspace = true, features = ["std", "executor"], optional = true }
+futures-timer = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time"], optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # Streaming standard I/O redirection and polling.

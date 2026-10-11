@@ -1,0 +1,42 @@
+{
+  "version": "2026-10-03",
+  "dependencies": {
+    "core": { "package": "mfn-core", "path": "../crates/builtin-nodes/core" },
+    "llm": { "package": "mfn-llm", "path": "../crates/builtin-nodes/llm" }
+  },
+  "nodes": [
+    {
+      "id": "repeat",
+      "kind": "workflow.loop",
+      "loop": {
+        "max_iterations": 2,
+        "variables": [
+          { "name": "prompt", "type": "string" },
+          { "name": "history", "type": { "list": "object" } },
+          { "name": "text", "type": "string" }
+        ],
+        "body": {
+          "nodes": [
+            {
+              "id": "chat",
+              "kind": "builtin.llm",
+              "config": { "model": "your-model", "api_key_env": "MODEL_API_KEY" }
+            },
+            { "id": "remember", "kind": "workflow.loop_assign", "config": { "variable": "history" } },
+            { "id": "answer", "kind": "workflow.loop_assign", "config": { "variable": "text" } }
+          ],
+          "edges": [
+            { "from_node": "%loop", "from_output": "prompt", "to_node": "chat", "to_input": "prompt" },
+            { "from_node": "%loop", "from_output": "history", "to_node": "chat", "to_input": "history" },
+            { "from_node": "chat", "from_output": "history", "to_node": "remember", "to_input": "value" },
+            { "from_node": "chat", "from_output": "text", "to_node": "answer", "to_input": "value" }
+          ]
+        }
+      }
+    }
+  ],
+  "outputs": [
+    { "name": "text", "node": "repeat", "port": "text" },
+    { "name": "history", "node": "repeat", "port": "history" }
+  ]
+}

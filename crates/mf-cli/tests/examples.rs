@@ -1,5 +1,6 @@
 #![cfg(feature = "development-support")]
 
+use mfn_llm::test_support as llm_support;
 use serde_json::{Value, json};
 use std::{fs, path::Path};
 
@@ -11,7 +12,7 @@ fn workspace() -> &'static Path {
         .unwrap()
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 8] {
+fn examples() -> [(&'static str, Option<&'static str>, Value); 10] {
     [
         ("cel-list.json", None, json!({"doubled": [2, 4]})),
         ("cel-scalar.json", None, json!({"doubled": 42})),
@@ -20,6 +21,16 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 8] {
         ("if-else.json", None, json!({"accepted": {"amount": 150}})),
         ("iteration.json", None, json!({"results": [2, 5, 8]})),
         ("loop.json", None, json!({"count": 3})),
+        (
+            "llm-terminal.json",
+            None,
+            json!({"text": "reply", "history": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "reply"}]}),
+        ),
+        (
+            "llm-loop.json",
+            None,
+            json!({"text": "reply", "history": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "reply"}, {"role": "user", "content": "Hello"}, {"role": "assistant", "content": "reply"}]}),
+        ),
         ("stream-batch.json", Some("1\n"), json!({"batch": [1]})),
     ]
 }
@@ -66,7 +77,24 @@ fn documented_examples_compile_and_produce_expected_outputs() {
 
     for (name, input, expected) in examples() {
         let definition = definitions.join(name);
-        fs::copy(workspace().join("examples").join(name), &definition).unwrap();
+        let server = name
+            .starts_with("llm-")
+            .then(|| llm_support::Server::start(vec![llm_support::Reply::text("reply"); 2]));
+        if let Some(server) = &server {
+            let mut value: Value =
+                serde_json::from_slice(&fs::read(workspace().join("examples").join(name)).unwrap())
+                    .unwrap();
+            let config = if name == "llm-loop.json" {
+                &mut value["nodes"][0]["loop"]["body"]["nodes"][0]["config"]
+            } else {
+                &mut value["nodes"][0]["config"]
+            };
+            config["base_url"] = server.base_url.clone().into();
+            config["model"] = "example-model".into();
+            fs::write(&definition, value.to_string()).unwrap();
+        } else {
+            fs::copy(workspace().join("examples").join(name), &definition).unwrap();
+        }
         let stem = Path::new(name).file_stem().unwrap();
         let executable = runtime.join(stem);
         let build = temporary.path().join("build").join(stem);
@@ -75,6 +103,7 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             .env("MF_DEV_SUPPORT_ROOT", workspace().join("crates"))
             .env("CARGO_NET_OFFLINE", "true")
             .env("CARGO_TERM_COLOR", "never")
+            .env_remove("MODEL_API_KEY")
             .arg("compile")
             .arg(&definition)
             .arg("--output")
@@ -99,14 +128,26 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             "{name}: compilation emitted warnings:\n{stderr}",
         );
 
-        let mut child = Command::new(&executable)
+        let mut command = Command::new(&executable);
+        command
             .current_dir(&runtime)
             .env("PATH", "")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::piped());
+        if server.is_some() {
+            let inputs = if name == "llm-loop.json" {
+                json!({"repeat": {"prompt": "Hello", "history": [], "text": ""}})
+            } else {
+                json!({"chat": {"prompt": "Hello"}})
+            };
+            command
+                .args(["--inputs", &inputs.to_string()])
+                .env("MODEL_API_KEY", "synthetic-key")
+                .env("NO_PROXY", "127.0.0.1,localhost")
+                .env("no_proxy", "127.0.0.1,localhost");
+        }
+        let mut child = command.spawn().unwrap();
         if let Some(input) = input {
             child
                 .stdin
