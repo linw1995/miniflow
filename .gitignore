@@ -1,4 +1,5 @@
 /result
 /target
+__pycache__/
 /examples/*.lock
 /examples/*.guard
