@@ -55,6 +55,7 @@ fn generate() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::write(output.join("flow-plans.rs"), artifacts.rust_source)?;
     std::fs::write(output.join("workflow-manifest.bin"), artifacts.manifest_bytes)?;
     std::fs::write(output.join("typed-fast-paths.json"), artifacts.typed_plan_json)?;
+    std::fs::write(output.join("node-targets.json"), artifacts.node_targets_json)?;
     Ok(())
 }
 "#;

@@ -190,3 +190,17 @@ Parse text explicitly downstream when typed values are needed. Application-speci
 StreamNode implementations. Initial producers receive their requirements through workflow parameters.
 The old input mechanism and its dedicated validation rules are removed; fields and graph endpoints follow
 the normal schema and graph rules.
+
+## Isolated task preparation
+
+The generated build emits `node-targets.json` alongside execution layouts, using the same validated
+provider preparation. Each target retains its compiled index, resolved port types, external context
+references, stdin conditions, and a finite operation description. `NodeTarget::bind_flow` and
+`NodeTarget::bind_stream` bind a top-level task to that frozen contract and reject contract drift before
+business execution. Inference still follows the original graph, including forwarding output types.
+
+Isolated task support reuses whole-plan preparation. An unrelated provider factory can still fail during
+initialization and prevent selection from running; preparation does not call business methods or consume
+source data. Producers and Event executors are recorded for accurate unsupported-target diagnostics and
+cannot be bound as isolated tasks. The standalone selection interface is added by the runner dispatch
+phase of this change.

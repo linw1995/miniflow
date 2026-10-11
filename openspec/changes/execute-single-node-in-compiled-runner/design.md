@@ -40,7 +40,8 @@ prefix; invoking one middle node with the full description would misreport the v
 
 ### 1. Emit target records during the existing validated build preparation
 
-Add deterministic top-level target records to the generated Rust plan artifacts. Each record contains the
+Add deterministic top-level target records to the generated plan artifacts, serialized in build-generated
+`node-targets.json` and embedded into the runner. Each record contains the
 exact definition ID, compiled node index, execution category, resolved input/output contracts, declared
 external context requirements, stdin condition, and the finite selected-operation description. Reference
 types are resolved using the original graph's complete output identities, never by splitting dotted keys.

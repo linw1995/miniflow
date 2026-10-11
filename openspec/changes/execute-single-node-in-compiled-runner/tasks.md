@@ -2,14 +2,14 @@
 
 ## 1. Compile and prepare isolated target contracts
 
-- [ ] 1.1 Emit deterministic top-level target records from the existing validated provider preparation,
+- [x] 1.1 Emit deterministic top-level target records from the existing validated provider preparation,
   including compiled index, category, resolved ports, reference types, resources, and operation description;
   verify generated records match prepared metadata without additional factory calls.
-- [ ] 1.2 Bind selected targets from finite Flows and prepared streams while retaining original inference;
+- [x] 1.2 Bind selected targets from finite Flows and prepared streams while retaining original inference;
   verify a middle forwarding task rejects values that violate its original refined contract.
-- [ ] 1.3 Reject prepared target drift for executor category, ports, required flags, references, and stdin;
+- [x] 1.3 Reject prepared target drift for executor category, ports, required flags, references, and stdin;
   verify fixture providers report affected node/port/resource context before business execution.
-- [ ] 1.4 Document whole-plan factory preparation and its failure limitation in `docs/compiling.md`; verify
+- [x] 1.4 Document whole-plan factory preparation and its failure limitation in `docs/compiling.md`; verify
   the documented behavior matches a fixture whose unrelated factory fails without executing any node.
 
 ## 2. Parse and validate isolated invocation values

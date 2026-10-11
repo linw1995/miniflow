@@ -35,10 +35,15 @@ pub struct GeneratedExecutionArtifacts {
     pub rust_source: String,
     pub manifest_bytes: Vec<u8>,
     pub typed_plan_json: String,
+    pub node_targets_json: String,
 }
 
 #[derive(Debug, Snafu)]
 pub enum PlanError {
+    #[snafu(transparent)]
+    TargetInputs {
+        source: mf_runtime::WorkflowInputError,
+    },
     #[snafu(display("invalid typed constructor for node `{definition_id}`: {source}"))]
     TypedConstructor {
         definition_id: DefinitionId,
@@ -93,6 +98,59 @@ pub enum PlanError {
 }
 
 impl CompiledWorkflow {
+    /// Describe isolated targets using metadata already prepared in execution order.
+    pub fn node_targets(
+        &self,
+        nodes: &[mf_runtime::FlowNode],
+    ) -> Result<Vec<mf_runtime::NodeTarget>, PlanError> {
+        let original = crate::describe_compiled(self)?;
+        let output_types: BTreeMap<_, _> = nodes
+            .iter()
+            .flat_map(|node| {
+                node.metadata.ports.outputs.iter().map(move |port| {
+                    (
+                        mf_runtime::output_id(node.definition_id.as_str(), &port.name),
+                        port.value_type.clone(),
+                    )
+                })
+            })
+            .collect();
+        nodes.iter().enumerate().map(|(index, node)| {
+            let id = node.definition_id.to_string();
+            ensure!(self.execution_order.get(index) == Some(&node.definition_id), InvalidExecutionOrderSnafu);
+            let kind = match node.node.as_ref() {
+                Some(mf_runtime::NodeExecution::Task(_)) => mf_runtime::NodeTargetKind::Task,
+                Some(mf_runtime::NodeExecution::Event(_)) => mf_runtime::NodeTargetKind::Event,
+                Some(mf_runtime::NodeExecution::Stream(_)) => mf_runtime::NodeTargetKind::Stream,
+                None => return UnknownNodeSnafu { definition_id: node.definition_id.clone() }.fail(),
+            };
+            let inputs = crate::workflow_input_schema(std::iter::once((node, true)), |_, _| false)?;
+            let mut description = original.clone();
+            description.version = mf_telemetry::description::WorkflowDescriptionVersion::CURRENT;
+            description.execution = None;
+            description.nodes.retain(|node| node.id == id);
+            description.data_edges.clear();
+            description.control_edges.clear();
+            description.execution_order = vec![id.clone()];
+            description.loop_bodies.retain(|body| body.path.first() == Some(&id));
+            description.workflow_id = mf_telemetry::identity::WorkflowId::from_definition(
+                &serde_json::json!({"isolation_format": 1, "workflow_id": original.workflow_id, "target": id}),
+                &description.execution_order,
+            ).context(crate::compiler::ContractSnafu)?;
+            description.validate().context(crate::compiler::ContractSnafu)?;
+            let context = node.metadata.context_references.iter().map(|reference| (
+                reference.output.clone(), mf_runtime::WorkflowInput {
+                    value_type: output_types[&reference.output].clone(), required: true,
+                },
+            )).collect();
+            Ok(mf_runtime::NodeTarget {
+                id, index, kind, inputs, outputs: mf_runtime::target_ports(&node.metadata.ports.outputs),
+                references: node.metadata.context_references.clone(), context,
+                original_workflow_id: original.workflow_id.clone(), description,
+            })
+        }).collect()
+    }
+
     pub fn start_stream_observation(
         &self,
         observer: &mf_telemetry::observation::Observer,
@@ -771,6 +829,8 @@ impl CompiledWorkflow {
         if order != self.execution_order {
             return InvalidExecutionOrderSnafu.fail();
         }
+        let node_targets_json =
+            serde_json::to_string(&self.node_targets(&nodes)?).context(SerializeSnafu)?;
         let flow = crate::FlowBuilder::prepare(
             nodes,
             self.definition.edges.clone(),
@@ -870,6 +930,7 @@ impl CompiledWorkflow {
             rust_source: prettyplease::unparse(&syntax),
             manifest_bytes: manifest.to_bytes()?,
             typed_plan_json: serde_json::to_string_pretty(&typed_plan).context(SerializeSnafu)?,
+            node_targets_json,
         })
     }
 }
