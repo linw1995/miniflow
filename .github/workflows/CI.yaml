@@ -86,6 +86,8 @@ jobs:
         with:
           name: coverage
           path: target/coverage/result/
+          # Successful reruns otherwise conflict with this run's existing report.
+          overwrite: true
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
