@@ -2,7 +2,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use mf_compiler::{
     CompileRequest, PipelineError, RunnerOptions, SupportPackages, compile_project_with_options,
 };
-use snafu::Snafu;
+use snafu::{ResultExt, Snafu};
 #[cfg(feature = "development-support")]
 use std::env;
 use std::io::{self, Write};
@@ -12,20 +12,37 @@ use std::process::ExitCode;
 #[derive(Debug, Parser)]
 #[command(name = "mf", version, about)]
 struct Cli {
+    /// Increase execution detail: -v summaries, -vv metadata, -vvv full records.
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
     #[command(subcommand)]
     command: Command,
+}
+
+impl Cli {
+    fn verbosity(&self) -> u8 {
+        // Global Count arguments overwrite parent counts when repeated in a subcommand.
+        let local = match &self.command {
+            Command::Compile(options) => options.verbose,
+            Command::Run { verbose, .. } => *verbose,
+        };
+        self.verbose.saturating_add(local).min(3)
+    }
 }
 
 #[derive(Debug, Subcommand)]
 enum Command {
     /// Compile a workflow definition into a native executable.
     Compile(CompileOptions),
-    /// Run a workflow executable with the terminal UI.
+    /// Run a workflow executable.
     Run {
+        /// Increase execution detail: -v summaries, -vv metadata, -vvv full records.
+        #[arg(short, long, action = clap::ArgAction::Count)]
+        verbose: u8,
         /// Path to the workflow executable.
         executable: PathBuf,
         /// Observe workflow execution in the terminal UI.
-        #[arg(long, required = true)]
+        #[arg(long)]
         tui: bool,
         /// Workflow startup arguments keyed by qualified node.port names.
         #[arg(long, value_name = "JSON", conflicts_with = "inputs_file")]
@@ -41,6 +58,8 @@ enum Command {
 
 #[derive(Debug, Snafu)]
 enum CliError {
+    #[snafu(display("could not run workflow {path:?}: {source}"))]
+    Execute { path: PathBuf, source: io::Error },
     #[snafu(transparent)]
     Build { source: PipelineError },
     #[cfg(unix)]
@@ -53,6 +72,9 @@ enum CliError {
 
 #[derive(Debug, Args)]
 struct CompileOptions {
+    /// Increase diagnostic verbosity.
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
     /// Path to the workflow definition.
     definition: PathBuf,
     /// Destination for the compiled executable.
@@ -95,23 +117,52 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<u8, CliError> {
+    let verbose = cli.verbosity();
     match cli.command {
         Command::Compile(options) => {
-            compile(options)?;
+            compile(options, verbose > 0)?;
             Ok(0)
         }
         Command::Run {
             executable,
+            tui,
             inputs,
             inputs_file,
             arguments,
             ..
         } => {
+            if !tui {
+                let mut command = std::process::Command::new(&executable);
+                for _ in 0..verbose {
+                    command.arg("--verbose");
+                }
+                if let Some(inputs) = inputs {
+                    command.arg("--inputs").arg(inputs);
+                }
+                if let Some(path) = inputs_file {
+                    command.arg("--inputs-file").arg(path);
+                }
+                let status = command
+                    .args(arguments)
+                    .status()
+                    .context(ExecuteSnafu { path: executable })?;
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    return Ok(status
+                        .code()
+                        .unwrap_or_else(|| 128 + status.signal().unwrap_or(0))
+                        as u8);
+                }
+                #[cfg(not(unix))]
+                return Ok(status.code().unwrap_or(1) as u8);
+            }
             #[cfg(unix)]
             {
                 Ok(mf_tui::run::run_executable_with_options(
                     &executable,
                     &mf_tui::run::RunOptions {
+                        verbose,
                         inputs,
                         inputs_file,
                         arguments,
@@ -127,9 +178,16 @@ fn run(cli: Cli) -> Result<u8, CliError> {
     }
 }
 
-fn compile(options: CompileOptions) -> Result<(), CliError> {
+fn compile(options: CompileOptions, verbose: bool) -> Result<(), CliError> {
     let support = support_packages();
-    compile_project_with_options(
+    let started = std::time::Instant::now();
+    if verbose {
+        eprintln!(
+            "[verbose] compiling {:?} to {:?} (locked={}, telemetry={}, support={support:?})",
+            options.definition, options.output, options.locked, options.telemetry
+        );
+    }
+    let project = compile_project_with_options(
         &CompileRequest {
             definition: &options.definition,
             output: &options.output,
@@ -141,6 +199,13 @@ fn compile(options: CompileOptions) -> Result<(), CliError> {
             telemetry: options.telemetry,
         },
     )?;
+    if verbose {
+        eprintln!(
+            "[verbose] installed {:?} in {:.3}s; build project at {project:?}",
+            options.output,
+            started.elapsed().as_secs_f64()
+        );
+    }
     Ok(())
 }
 
@@ -159,6 +224,46 @@ fn support_packages() -> SupportPackages {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_verbose_for_compile_and_direct_run() {
+        for args in [
+            vec!["mf", "-v", "compile", "flow.json", "--output", "flow"],
+            vec!["mf", "run", "./flow", "-v", "--read.path", "data.txt"],
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            assert_eq!(cli.verbosity(), 1);
+            if let Command::Run { tui, .. } = cli.command {
+                assert!(!tui);
+            }
+        }
+    }
+
+    #[test]
+    fn verbosity_clusters_preserve_option_like_workflow_values() {
+        for (flags, expected) in [
+            (vec!["-vv"], 2),
+            (vec!["-v", "--verbose"], 2),
+            (vec!["-vvv"], 3),
+            (vec!["-vvvv"], 4),
+        ] {
+            let cli = Cli::try_parse_from(
+                ["mf", "run", "flow"]
+                    .into_iter()
+                    .chain(flags)
+                    .chain(["--read.path", "-vvv"]),
+            )
+            .unwrap();
+            assert_eq!(cli.verbosity(), expected.min(3));
+            let Command::Run { arguments, .. } = cli.command else {
+                panic!("expected run command");
+            };
+            assert_eq!(
+                arguments,
+                ["--read.path", "-vvv"].map(std::ffi::OsString::from)
+            );
+        }
+    }
 
     #[test]
     fn parses_compile_defaults() {

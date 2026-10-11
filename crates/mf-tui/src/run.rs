@@ -93,6 +93,8 @@ pub enum RunError {
 
 #[derive(Clone, Debug, Default)]
 pub struct RunOptions {
+    /// Local diagnostic detail, capped at three.
+    pub verbose: u8,
     pub inputs: Option<String>,
     pub inputs_file: Option<PathBuf>,
     pub arguments: Vec<std::ffi::OsString>,
@@ -233,6 +235,9 @@ pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        for _ in 0..options.verbose.min(3) {
+            command.arg("--verbose");
+        }
         if let Some(arguments) = &arguments {
             command.arg("--inputs-file").arg(arguments.path());
         }

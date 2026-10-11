@@ -420,3 +420,133 @@ Snapshot transport and OTLP provider setup, flush, shutdown, and delivery failur
 
 - **WHEN** snapshot delivery fails and the owner subsequently flushes, emits, or finishes
 - **THEN** the returned error retains the cached typed SDK failure rather than its formatted summary
+
+### Requirement: Emit local verbose lifecycle diagnostics
+
+Generated runners and `mf run` SHALL accept `-v` and `--verbose` to print existing lifecycle metadata on stderr.
+Diagnostics SHALL preserve result stdout and workflow outcomes without automatically dumping node configuration or
+input/output records. They SHALL include node identities, run correlation, outcomes, timing, Loop paths, and streaming
+invocation metadata.
+
+#### Scenario: Observe finite and streaming execution
+
+- **WHEN** a task, Loop, or streaming workflow executes verbosely
+- **THEN** its existing lifecycle boundaries are printed without changing the selected result protocol
+
+### Requirement: Keep local diagnostics independent of export
+
+Local diagnostics SHALL work without exporter configuration and with `--no-telemetry`, using no global provider
+installation or export connection. Configured OTLP export SHALL coexist with local diagnostics and retain its existing
+buffering and shutdown behavior.
+
+#### Scenario: Diagnose a standalone workflow without a collector
+
+- **WHEN** a standalone runner executes with `-v` and no OTLP endpoint
+- **THEN** lifecycle metadata appears on stderr while result stdout and workflow exit behavior remain intact
+
+#### Scenario: Diagnose a telemetry-disabled runner
+
+- **WHEN** a runner compiled with `--no-telemetry` executes with `--verbose`
+- **THEN** it prints local lifecycle metadata without requiring the OTLP SDK or opening an export connection
+
+#### Scenario: Combine local diagnostics with export
+
+- **WHEN** a verbose runner has a configured OTLP endpoint and completes successfully or with a handled failure
+- **THEN** local diagnostics coexist with correlated export and preserve the workflow outcome
+
+### Requirement: Parse verbosity at runner option boundaries
+
+Runner argument parsing SHALL preserve consumed option-like string values, schema validation, and transport-conflict
+rules. `-v`, clusters such as `-vv`, and repeated `--verbose` SHALL accumulate with execution detail capped at three.
+CLI counts SHALL accumulate before and after subcommands. CLI options SHALL precede trailing workflow parameters.
+
+#### Scenario: Keep an option-like input value
+
+- **WHEN** `--node.port -vvv` supplies a string value to a declared workflow input
+- **THEN** that consumed value remains `-vvv` without increasing verbosity
+
+#### Scenario: Accumulate verbosity
+
+- **WHEN** flags are clustered, repeated, or placed on both sides of a CLI subcommand
+- **THEN** their counts are added and any total above three selects level three
+
+#### Scenario: Reject ambiguous option use
+
+- **WHEN** malformed verbosity flags are supplied or named workflow parameters are mixed with JSON transport
+- **THEN** parsing fails before node execution
+
+### Requirement: Render readable local lifecycle summaries
+
+At level one, local diagnostics SHALL retain readable progress, outcomes, timing, and port/failure context without
+repeated routing fields. Readable Loop paths SHALL use one-based pass numbers and stream identifiers SHALL retain
+unsigned precision. Summary lines SHALL show the run ID at workflow start. Level two SHALL add available event
+name/sequence, workflow identity, node position, and node kind metadata.
+
+#### Scenario: Scan successful execution
+
+- **WHEN** a workflow executes with `-v`
+- **THEN** its existing readable progress and completion summaries remain intact
+
+#### Scenario: Locate a specific execution boundary
+
+- **WHEN** a workflow executes with `-vv`
+- **THEN** readable summaries identify the corresponding lifecycle event and available node/workflow metadata
+
+#### Scenario: Correlate local output with export
+
+- **WHEN** readable diagnostics and OTLP export are both enabled
+- **THEN** the summary start line identifies the same run without repeating that ID on every readable event line
+
+### Requirement: Keep local diagnostic events on separate lines
+
+Identifiers and failure messages SHALL escape control characters. The local writer SHALL preserve one complete line
+per lifecycle event even when execution is concurrent. This presentation SHALL consume the same validated records
+used by OTLP and MUST NOT instrument node execution separately or require export SDK support.
+
+#### Scenario: Display an error containing a newline
+
+- **WHEN** a failed node's identifier or error message contains a newline
+- **THEN** the newline is escaped within its diagnostic line and cannot become another apparent event
+
+### Requirement: Remind users about long-running nodes
+
+Verbose execution SHALL print a local reminder every 60 seconds while a node invocation remains active, identifying
+the node, elapsed running time, and available Loop or stream context. Reminders SHALL use existing lifecycle records,
+work without OTLP SDK support, and MUST NOT create synthetic exported events. Quiet execution SHALL start no worker.
+
+#### Scenario: Observe a long-running node without telemetry
+
+- **WHEN** a telemetry-disabled runner executes verbosely and a node remains active beyond 60 seconds
+- **THEN** stderr reports that it is still running and repeats at 60-second intervals until completion
+
+### Requirement: Stop reminders for completed or abandoned invocations
+
+Active entries SHALL remain isolated across runs, Loop passes, and stream invocations. Completion, failure, skip,
+workflow termination, or observation-scope cleanup SHALL stop the corresponding reminders.
+
+#### Scenario: Complete one of several active invocations
+
+- **WHEN** one invocation completes while another invocation of the same node is still running
+- **THEN** reminders stop for the completed invocation and continue only for the active invocation
+
+#### Scenario: Release an abandoned run
+
+- **WHEN** an observation scope is released before workflow completion
+- **THEN** its active nodes are removed and no further reminders are written for that run
+
+### Requirement: Display complete lifecycle records at the highest verbosity
+
+Level three SHALL print the complete existing `WireRecord` as compact JSON on stderr, including its attributes, body,
+time, and available trace context. It SHALL use the same record passed to OTel logging without changing export or
+result stdout. All positive levels SHALL work without the OTLP SDK and retain readable 60-second node reminders.
+Compilation SHALL enable its existing build summary at any positive level.
+
+#### Scenario: Inspect a telemetry-disabled runner
+
+- **WHEN** a runner compiled with `--no-telemetry` executes with `-vvv`
+- **THEN** lifecycle JSON retains all available fields, result stdout remains intact, and active-node reminders continue
+
+#### Scenario: Correlate the complete record with export
+
+- **WHEN** a level-three runner has configured OTLP export
+- **THEN** local records preserve the exported workflow/run identity and available trace correlation

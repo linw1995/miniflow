@@ -79,21 +79,21 @@ fn main() -> std::process::ExitCode {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let manifest = workflow_manifest()?;
-    let arguments = mf_runtime::WorkflowArguments::parse(
+    let options = mf_runtime::RunnerArguments::parse(
         std::env::args_os().skip(1), &manifest.interface.schema,
     )?;
     #[cfg(feature = "streaming")]
-    { execute_stream(arguments) }
+    { execute_stream(options.inputs, options.verbose) }
     #[cfg(not(feature = "streaming"))]
     {
-        let outputs = execute(arguments)?;
+        let outputs = execute(options.inputs, options.verbose)?;
         println!("{}", serde_json::to_string(&outputs)?);
         Ok(())
     }
 }
 
 #[cfg(feature = "streaming")]
-fn execute_stream(arguments: mf_runtime::WorkflowArguments) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Result<(), Box<dyn std::error::Error>> {
     if capture_requested() { return Err("snapshot capture is unsupported for streaming instances".into()); }
     let mut stdio = mf_runtime::StreamStdio::claim()?;
     #[cfg(feature = "telemetry")]
@@ -102,18 +102,20 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments) -> Result<(), Box<dy
         Err(error) => { eprintln!("telemetry export unavailable: {error}"); None }
     };
     #[cfg(feature = "telemetry")]
-    let observation = providers.as_ref().and_then(|providers| {
+    let observer = providers.as_ref().map(|providers| providers.observer_with_verbosity(verbose));
+    #[cfg(not(feature = "telemetry"))]
+    let observer = None;
+    let observer = observer.or_else(|| (verbose > 0).then(|| mf_telemetry::observation::Observer::stderr(verbose)));
+    let observation = observer.and_then(|observer| {
         let setup = (|| -> Result<_, Box<dyn std::error::Error>> {
             let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
-            Ok(plan.start_stream_observation(&providers.observer(), run_id())?)
+            Ok(plan.start_stream_observation(&observer, run_id())?)
         })();
         match setup {
             Ok(observation) => Some(observation),
             Err(error) => { eprintln!("telemetry observation unavailable: {error}"); None }
         }
     });
-    #[cfg(not(feature = "telemetry"))]
-    let observation: Option<mf_runtime::StreamObservation> = None;
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let _context = observation.as_ref().map(mf_runtime::StreamObservation::enter);
         let registry = mf_runtime::NodeRegistry::from_inventory()?;
@@ -136,7 +138,6 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments) -> Result<(), Box<dy
     result
 }
 
-#[cfg(feature = "telemetry")]
 fn run_id() -> mf_telemetry::identity::RunId {
     match std::env::var("MF_RUN_ID") {
         Ok(value) => match mf_telemetry::identity::RunId::try_from(value) {
@@ -158,39 +159,54 @@ fn capture_requested() -> bool {
     std::env::var(mf_telemetry::SNAPSHOT_CAPTURE_ENV).is_ok_and(|value| value == "1")
 }
 
-#[cfg(all(not(feature = "telemetry"), not(feature = "streaming")))]
-fn execute(arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
-    if capture_requested() {
-        eprintln!("data history unavailable: recompile the runner without --no-telemetry");
-    }
-    execute_workflow(None, None, arguments)
-}
-
-#[cfg(all(feature = "telemetry", not(feature = "streaming")))]
-fn execute(arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+#[cfg(not(feature = "streaming"))]
+fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+    #[cfg(feature = "telemetry")]
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
         Err(error) => { eprintln!("telemetry export unavailable: {error}"); None }
     };
-    let result = (|| {
-        let Some(providers) = providers.as_ref() else {
-            if capture_requested() { eprintln!("data history unavailable: configure an OTLP logs endpoint"); }
+    #[cfg(feature = "telemetry")]
+    let observer = providers.as_ref().map(|providers| providers.observer_with_verbosity(verbose));
+    #[cfg(not(feature = "telemetry"))]
+    let observer = None;
+    let observer = observer.or_else(|| (verbose > 0).then(|| mf_telemetry::observation::Observer::stderr(verbose)));
+    let result = (|| -> Result<_, Box<dyn std::error::Error>> {
+        let Some(observer) = observer else {
+            if capture_requested() {
+                #[cfg(feature = "telemetry")]
+                eprintln!("data history unavailable: configure an OTLP logs endpoint");
+                #[cfg(not(feature = "telemetry"))]
+                eprintln!("data history unavailable: recompile the runner without --no-telemetry");
+            }
             return execute_workflow(None, None, arguments);
         };
         let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
         let run_id = run_id();
-        let observation = match plan.start_observation(&providers.observer(), run_id) {
+        let observation = match plan.start_observation(&observer, run_id) {
             Ok(observation) => Some(observation),
             Err(error) => { eprintln!("telemetry observation unavailable: {error}"); None }
         };
+        #[cfg(feature = "telemetry")]
         let snapshots = if capture_requested() {
-            match snapshot_recorder(&plan, run_id) {
-                Ok(recorder) => Some(recorder),
-                Err(error) => { eprintln!("data history unavailable: {error}"); None }
+            if providers.is_some() {
+                match snapshot_recorder(&plan, run_id) {
+                    Ok(recorder) => Some(recorder),
+                    Err(error) => { eprintln!("data history unavailable: {error}"); None }
+                }
+            } else {
+                eprintln!("data history unavailable: configure an OTLP logs endpoint");
+                None
             }
         } else { None };
+        #[cfg(not(feature = "telemetry"))]
+        let snapshots = {
+            if capture_requested() { eprintln!("data history unavailable: recompile the runner without --no-telemetry"); }
+            None
+        };
         execute_workflow(observation, snapshots, arguments)
     })();
+    #[cfg(feature = "telemetry")]
     if let Some(providers) = providers {
         for diagnostic in providers.shutdown() { eprintln!("telemetry export incomplete: {diagnostic}"); }
     }

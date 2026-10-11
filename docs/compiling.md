@@ -15,15 +15,40 @@ With Cargo, a compatible Rust toolchain, CMake, a C compiler, and the declared n
 ```sh
 mf compile flow.json --output ./flow
 ./flow
+mf run ./flow --verbose
 mf run ./flow --tui
 mf compile flow.json --output ./flow --locked
 ```
 
 The output directory must exist. A successful first build creates `flow.lock`. See [workflow definitions](workflows.md) for dependency sources, features, and lock behavior. Native libraries required by plugins must be installed separately.
 
+`mf run ./flow` inherits stdin, stdout, and stderr and returns the runner's exit status. It requires no terminal.
+Use `-v` or `--verbose` with either `mf run ./flow` or `./flow` to print execution details on stderr:
+
+| Option | Execution diagnostics |
+| --- | --- |
+| `-v` | Readable workflow/node progress, outcomes, timings, Loop passes, and stream context. |
+| `-vv` | Summaries plus event name/sequence, workflow ID, and available node position/kind. |
+| `-vvv` | Complete existing lifecycle `WireRecord` as compact JSON, including available trace context. |
+
+Clustered flags and repeated `-v`/`--verbose` accumulate, with totals above three selecting the highest level.
+`mf -v run ./flow -vv` selects level three. A consumed input value such as `--read.path -vv` remains a string value.
+Readable summaries use elapsed and node-duration milliseconds, one-based Loop passes, full unsigned stream IDs,
+and escaped identifiers/errors. The run ID appears at workflow start; full JSON retains the original record fields.
+Results remain on stdout and diagnostics contain execution metadata rather than input/output values.
+While a node is running, every positive level prints a readable `still running` reminder every 60 seconds. Higher
+levels identify its original start event. Completion, failure, and observation cleanup stop its reminders.
+These reminders also work with `--no-telemetry` and do not add OTLP lifecycle events.
+Place CLI options before named workflow parameters, for example `mf run ./flow -v --read.path data.txt`.
+With `--tui`, verbose runner diagnostics appear in the TUI's captured stderr history.
+`mf compile flow.json --output ./flow --verbose` reports compilation options, elapsed time, and the retained project;
+any positive verbosity enables that compilation summary.
+Recompile existing executables to add the runner's verbose option.
+
 Use `mf compile flow.json --output ./flow --no-telemetry` for a smaller runner when live observation is unnecessary.
 It retains workflow execution and the embedded manifest, and omits the runner's OTLP SDK and HTTP client.
-This runner does not emit the lifecycle events used by `mf run --tui`. Omit `--no-telemetry` to keep observation support.
+Verbose stderr diagnostics still work without a collector or OTLP support. This runner does not export the lifecycle
+events used by `mf run --tui`. Omit `--no-telemetry` to keep live TUI observation support.
 Generated runners disable `mf-compiler`'s `codegen` feature; the compiler CLI enables that feature by default.
 
 The CLI checks graph structure in every scope and generates fixed node orchestration, including structured repeated execution for Loop bodies, then compiles one runner

@@ -12,7 +12,7 @@ use std::{
 #[derive(Debug, Snafu)]
 pub enum RunnerArgumentError {
     #[snafu(display(
-        "{message}; usage: workflow [--NODE.PORT VALUE ...] [--inputs JSON|--inputs-file PATH]"
+        "{message}; usage: workflow [-v|-vv|-vvv|--verbose] [--NODE.PORT VALUE ...] [--inputs JSON|--inputs-file PATH]"
     ))]
     Invalid { message: String },
     #[snafu(display("could not read workflow arguments from {path:?}: {source}"))]
@@ -24,6 +24,22 @@ pub enum RunnerArgumentError {
     },
     #[snafu(transparent)]
     Arguments { source: WorkflowInputError },
+}
+
+#[derive(Debug)]
+pub struct RunnerArguments {
+    /// Local diagnostic detail, capped at three.
+    pub verbose: u8,
+    pub inputs: WorkflowArguments,
+}
+
+impl RunnerArguments {
+    pub fn parse(
+        arguments: impl IntoIterator<Item = OsString>,
+        schema: &WorkflowInputSchema,
+    ) -> Result<Self, RunnerArgumentError> {
+        WorkflowArguments::parse_options(arguments, schema, true)
+    }
 }
 
 impl WorkflowArguments {
@@ -45,6 +61,14 @@ impl WorkflowArguments {
         arguments: impl IntoIterator<Item = OsString>,
         schema: &WorkflowInputSchema,
     ) -> Result<Self, RunnerArgumentError> {
+        Ok(Self::parse_options(arguments, schema, false)?.inputs)
+    }
+
+    fn parse_options(
+        arguments: impl IntoIterator<Item = OsString>,
+        schema: &WorkflowInputSchema,
+        allow_verbose: bool,
+    ) -> Result<RunnerArguments, RunnerArgumentError> {
         let invalid = |message: &str| {
             InvalidSnafu {
                 message: message.to_owned(),
@@ -52,6 +76,7 @@ impl WorkflowArguments {
             .build()
         };
         let mut arguments = arguments.into_iter();
+        let mut verbose = 0_u8;
         let mut inputs = None;
         let mut values = Self::default();
         let mut size = 0;
@@ -59,6 +84,19 @@ impl WorkflowArguments {
             size += argument.len();
             Self::check_size(size)?;
             match argument.to_str() {
+                Some(flag)
+                    if allow_verbose
+                        && (flag == "--verbose"
+                            || (flag.starts_with("-v")
+                                && flag[1..].bytes().all(|byte| byte == b'v'))) =>
+                {
+                    let count = if flag == "--verbose" {
+                        1
+                    } else {
+                        flag.len() - 1
+                    };
+                    verbose = (usize::from(verbose) + count).min(3) as u8;
+                }
                 Some("--inputs" | "--inputs-file") => {
                     if inputs.is_some() {
                         return Err(invalid(
@@ -131,6 +169,9 @@ impl WorkflowArguments {
         schema.validate(&values)?;
         let encoded = serde_json::to_vec(&values).context(crate::WorkflowInputJsonSnafu)?;
         Self::check_size(encoded.len())?;
-        Ok(values)
+        Ok(RunnerArguments {
+            verbose,
+            inputs: values,
+        })
     }
 }
