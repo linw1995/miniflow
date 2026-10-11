@@ -12,11 +12,22 @@ use std::process::ExitCode;
 #[derive(Debug, Parser)]
 #[command(name = "mf", version, about)]
 struct Cli {
-    /// Print detailed diagnostics to stderr.
-    #[arg(short, long, global = true)]
-    verbose: bool,
+    /// Increase execution detail: -v summaries, -vv metadata, -vvv full records.
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
     #[command(subcommand)]
     command: Command,
+}
+
+impl Cli {
+    fn verbosity(&self) -> u8 {
+        // Global Count arguments overwrite parent counts when repeated in a subcommand.
+        let local = match &self.command {
+            Command::Compile(options) => options.verbose,
+            Command::Run { verbose, .. } => *verbose,
+        };
+        self.verbose.saturating_add(local).min(3)
+    }
 }
 
 #[derive(Debug, Subcommand)]
@@ -25,6 +36,9 @@ enum Command {
     Compile(CompileOptions),
     /// Run a workflow executable.
     Run {
+        /// Increase execution detail: -v summaries, -vv metadata, -vvv full records.
+        #[arg(short, long, action = clap::ArgAction::Count)]
+        verbose: u8,
         /// Path to the workflow executable.
         executable: PathBuf,
         /// Observe workflow execution in the terminal UI.
@@ -58,6 +72,9 @@ enum CliError {
 
 #[derive(Debug, Args)]
 struct CompileOptions {
+    /// Increase diagnostic verbosity.
+    #[arg(short, long, action = clap::ArgAction::Count)]
+    verbose: u8,
     /// Path to the workflow definition.
     definition: PathBuf,
     /// Destination for the compiled executable.
@@ -100,9 +117,10 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Result<u8, CliError> {
+    let verbose = cli.verbosity();
     match cli.command {
         Command::Compile(options) => {
-            compile(options, cli.verbose)?;
+            compile(options, verbose > 0)?;
             Ok(0)
         }
         Command::Run {
@@ -115,7 +133,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
         } => {
             if !tui {
                 let mut command = std::process::Command::new(&executable);
-                if cli.verbose {
+                for _ in 0..verbose {
                     command.arg("--verbose");
                 }
                 if let Some(inputs) = inputs {
@@ -144,7 +162,7 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                 Ok(mf_tui::run::run_executable_with_options(
                     &executable,
                     &mf_tui::run::RunOptions {
-                        verbose: cli.verbose,
+                        verbose,
                         inputs,
                         inputs_file,
                         arguments,
@@ -214,10 +232,36 @@ mod tests {
             vec!["mf", "run", "./flow", "-v", "--read.path", "data.txt"],
         ] {
             let cli = Cli::try_parse_from(args).unwrap();
-            assert!(cli.verbose);
+            assert_eq!(cli.verbosity(), 1);
             if let Command::Run { tui, .. } = cli.command {
                 assert!(!tui);
             }
+        }
+    }
+
+    #[test]
+    fn verbosity_clusters_preserve_option_like_workflow_values() {
+        for (flags, expected) in [
+            (vec!["-vv"], 2),
+            (vec!["-v", "--verbose"], 2),
+            (vec!["-vvv"], 3),
+            (vec!["-vvvv"], 4),
+        ] {
+            let cli = Cli::try_parse_from(
+                ["mf", "run", "flow"]
+                    .into_iter()
+                    .chain(flags)
+                    .chain(["--read.path", "-vvv"]),
+            )
+            .unwrap();
+            assert_eq!(cli.verbosity(), expected.min(3));
+            let Command::Run { arguments, .. } = cli.command else {
+                panic!("expected run command");
+            };
+            assert_eq!(
+                arguments,
+                ["--read.path", "-vvv"].map(std::ffi::OsString::from)
+            );
         }
     }
 

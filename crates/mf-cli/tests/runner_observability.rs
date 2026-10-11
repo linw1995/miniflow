@@ -554,7 +554,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
 
     let (endpoint, worker) = collector();
     let observed = command(&runner)
-        .arg("--verbose")
+        .arg("-vvv")
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
         .env("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc")
         .env("MF_RUN_ID", "12345678-1234-4234-9234-123456789abc")
@@ -567,8 +567,15 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     );
     assert_eq!(observed.stdout, plain.stdout);
     let diagnostics = String::from_utf8_lossy(&observed.stderr);
-    assert!(diagnostics.contains("workflow started"), "{diagnostics}");
-    assert!(diagnostics.contains("workflow succeeded"), "{diagnostics}");
+    let records: Vec<mf_telemetry::wire::WireRecord> = diagnostics
+        .lines()
+        .filter_map(|line| line.strip_prefix("[verbose] "))
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert!(records.len() >= 4);
+    assert_eq!(records.first().unwrap().event_name, "mf.workflow.started");
+    assert_eq!(records.last().unwrap().event_name, "mf.workflow.finished");
+    assert!(records.iter().all(|record| record.trace_context.is_some()));
     let requests = worker.finish();
     check_otel(&requests, 3, 4, description.workflow_id.as_str());
     for (_, body) in requests.iter().filter(|(path, _)| path == "/v1/logs") {
@@ -709,7 +716,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     let failing_description = read_manifest(&failing_runner).unwrap().description;
     let (endpoint, worker) = collector();
     let failed = command(&failing_runner)
-        .arg("--verbose")
+        .arg("-vv")
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
         .output()
         .unwrap();

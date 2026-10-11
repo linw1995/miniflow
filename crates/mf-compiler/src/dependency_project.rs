@@ -93,7 +93,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[cfg(feature = "streaming")]
-fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Result<(), Box<dyn std::error::Error>> {
     if capture_requested() { return Err("snapshot capture is unsupported for streaming instances".into()); }
     let mut stdio = mf_runtime::StreamStdio::claim()?;
     #[cfg(feature = "telemetry")]
@@ -105,7 +105,7 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: bool) -> Re
     let observer = providers.as_ref().map(|providers| providers.observer_with_verbosity(verbose));
     #[cfg(not(feature = "telemetry"))]
     let observer = None;
-    let observer = observer.or_else(|| verbose.then(mf_telemetry::observation::Observer::stderr));
+    let observer = observer.or_else(|| (verbose > 0).then(|| mf_telemetry::observation::Observer::stderr(verbose)));
     let observation = observer.and_then(|observer| {
         let setup = (|| -> Result<_, Box<dyn std::error::Error>> {
             let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
@@ -160,7 +160,7 @@ fn capture_requested() -> bool {
 }
 
 #[cfg(not(feature = "streaming"))]
-fn execute(arguments: mf_runtime::WorkflowArguments, verbose: bool) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     #[cfg(feature = "telemetry")]
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
@@ -170,7 +170,7 @@ fn execute(arguments: mf_runtime::WorkflowArguments, verbose: bool) -> Result<mf
     let observer = providers.as_ref().map(|providers| providers.observer_with_verbosity(verbose));
     #[cfg(not(feature = "telemetry"))]
     let observer = None;
-    let observer = observer.or_else(|| verbose.then(mf_telemetry::observation::Observer::stderr));
+    let observer = observer.or_else(|| (verbose > 0).then(|| mf_telemetry::observation::Observer::stderr(verbose)));
     let result = (|| -> Result<_, Box<dyn std::error::Error>> {
         let Some(observer) = observer else {
             if capture_requested() {

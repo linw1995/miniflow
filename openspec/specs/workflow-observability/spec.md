@@ -456,37 +456,46 @@ buffering and shutdown behavior.
 
 ### Requirement: Parse verbosity at runner option boundaries
 
-Runner argument parsing SHALL preserve consumed option-like string values and retain existing schema validation and
-transport-conflict rules. Repeated verbose options SHALL be rejected. CLI options SHALL precede trailing named
-workflow parameters.
+Runner argument parsing SHALL preserve consumed option-like string values, schema validation, and transport-conflict
+rules. `-v`, clusters such as `-vv`, and repeated `--verbose` SHALL accumulate with execution detail capped at three.
+CLI counts SHALL accumulate before and after subcommands. CLI options SHALL precede trailing workflow parameters.
 
 #### Scenario: Keep an option-like input value
 
-- **WHEN** `--node.port -v` supplies a string value to a declared workflow input
-- **THEN** that consumed value remains `-v` rather than becoming a verbose option
+- **WHEN** `--node.port -vvv` supplies a string value to a declared workflow input
+- **THEN** that consumed value remains `-vvv` without increasing verbosity
+
+#### Scenario: Accumulate verbosity
+
+- **WHEN** flags are clustered, repeated, or placed on both sides of a CLI subcommand
+- **THEN** their counts are added and any total above three selects level three
 
 #### Scenario: Reject ambiguous option use
 
-- **WHEN** verbose options repeat or named parameters are mixed with JSON transport
-- **THEN** argument parsing fails before node execution
+- **WHEN** malformed verbosity flags are supplied or named workflow parameters are mixed with JSON transport
+- **THEN** parsing fails before node execution
 
 ### Requirement: Render readable local lifecycle summaries
 
-Local verbose diagnostics SHALL render readable event descriptions with elapsed time, node outcomes, available node
-durations, and relevant port or failure context. Loop paths SHALL show one-based pass numbers and stream identifiers
-SHALL preserve their full unsigned values. The run ID SHALL appear at workflow start. Repeated workflow hashes,
-schema versions, and routing attributes SHALL be omitted from local lines.
+At level one, local diagnostics SHALL retain readable progress, outcomes, timing, and port/failure context without
+repeated routing fields. Readable Loop paths SHALL use one-based pass numbers and stream identifiers SHALL retain
+unsigned precision. Summary lines SHALL show the run ID at workflow start. Level two SHALL add available event
+name/sequence, workflow identity, node position, and node kind metadata.
 
 #### Scenario: Scan successful execution
 
-- **WHEN** a user executes a workflow verbosely
-- **THEN** stderr shows workflow and node progress with readable timing and completion summaries instead of attribute
-  and body JSON dumps
+- **WHEN** a workflow executes with `-v`
+- **THEN** its existing readable progress and completion summaries remain intact
+
+#### Scenario: Locate a specific execution boundary
+
+- **WHEN** a workflow executes with `-vv`
+- **THEN** readable summaries identify the corresponding lifecycle event and available node/workflow metadata
 
 #### Scenario: Correlate local output with export
 
-- **WHEN** a workflow has both local diagnostics and OTLP export
-- **THEN** its start line identifies the same run as the exported records without repeating that ID on every event
+- **WHEN** readable diagnostics and OTLP export are both enabled
+- **THEN** the summary start line identifies the same run without repeating that ID on every readable event line
 
 ### Requirement: Keep local diagnostic events on separate lines
 
@@ -524,3 +533,20 @@ workflow termination, or observation-scope cleanup SHALL stop the corresponding 
 
 - **WHEN** an observation scope is released before workflow completion
 - **THEN** its active nodes are removed and no further reminders are written for that run
+
+### Requirement: Display complete lifecycle records at the highest verbosity
+
+Level three SHALL print the complete existing `WireRecord` as compact JSON on stderr, including its attributes, body,
+time, and available trace context. It SHALL use the same record passed to OTel logging without changing export or
+result stdout. All positive levels SHALL work without the OTLP SDK and retain readable 60-second node reminders.
+Compilation SHALL enable its existing build summary at any positive level.
+
+#### Scenario: Inspect a telemetry-disabled runner
+
+- **WHEN** a runner compiled with `--no-telemetry` executes with `-vvv`
+- **THEN** lifecycle JSON retains all available fields, result stdout remains intact, and active-node reminders continue
+
+#### Scenario: Correlate the complete record with export
+
+- **WHEN** a level-three runner has configured OTLP export
+- **THEN** local records preserve the exported workflow/run identity and available trace correlation

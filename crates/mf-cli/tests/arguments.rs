@@ -81,6 +81,14 @@ fn direct_run_preserves_stdin_arguments_output_and_exit_status() {
         ),
         (vec!["-v", "--inputs", "{}"], "--verbose\n--inputs\n{}\n"),
         (
+            vec!["-vv", "--read.path", "-vvv"],
+            "--verbose\n--verbose\n--read.path\n-vvv\n",
+        ),
+        (
+            vec!["-vvvv", "--inputs", "{}"],
+            "--verbose\n--verbose\n--verbose\n--inputs\n{}\n",
+        ),
+        (
             vec!["--verbose", "--inputs-file", "parameters with spaces.json"],
             "--verbose\n--inputs-file\nparameters with spaces.json\n",
         ),
@@ -108,6 +116,15 @@ fn direct_run_preserves_stdin_arguments_output_and_exit_status() {
         );
         assert_eq!(output.stderr, b"runner diagnostic\n");
     }
+    let output = Command::new(env!("CARGO_BIN_EXE_mf"))
+        .args(["-v", "run"])
+        .arg(&runner)
+        .arg("-vv")
+        .stdin(Stdio::piped())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(37));
+    assert_eq!(output.stdout, b"\n--verbose\n--verbose\n--verbose\n");
     fs::write(&runner, "#!/bin/sh\nkill -TERM $$\n").unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_mf"))
         .arg("run")

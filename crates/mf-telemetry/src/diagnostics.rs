@@ -102,15 +102,16 @@ struct Shared {
 pub struct Diagnostics {
     shared: Arc<Shared>,
     interval: Duration,
+    verbosity: u8,
 }
 
 impl Diagnostics {
-    pub fn new(interval: Duration) -> Self {
+    pub fn new(interval: Duration, verbosity: u8) -> Self {
         let shared = Arc::new(Shared::default());
         let worker = Arc::clone(&shared);
         if let Err(error) = thread::Builder::new()
             .name("mf-verbose".into())
-            .spawn(move || reminders(&worker, interval))
+            .spawn(move || reminders(&worker, interval, verbosity))
         {
             shared.state.lock().unwrap().closed = true;
             let _ = writeln!(
@@ -118,7 +119,11 @@ impl Diagnostics {
                 "periodic verbose updates unavailable: {error}"
             );
         }
-        Self { shared, interval }
+        Self {
+            shared,
+            interval,
+            verbosity,
+        }
     }
 
     pub fn emit(&self, wire: &WireRecord) {
@@ -130,7 +135,7 @@ impl Diagnostics {
             self.shared.wake.notify_one();
         }
         let mut line = Vec::new();
-        if write_diagnostic(&mut line, wire).is_ok() {
+        if write_diagnostic(&mut line, wire, self.verbosity).is_ok() {
             let _ = std::io::stderr().lock().write_all(&line);
         }
     }
@@ -150,7 +155,7 @@ impl Drop for Diagnostics {
     }
 }
 
-fn reminders(shared: &Shared, interval: Duration) {
+fn reminders(shared: &Shared, interval: Duration, verbosity: u8) {
     loop {
         let mut state = shared.state.lock().unwrap();
         loop {
@@ -182,7 +187,7 @@ fn reminders(shared: &Shared, interval: Duration) {
         drop(state);
         for node in due {
             let mut line = Vec::new();
-            if write_running(&mut line, &node, now).is_ok() {
+            if write_running(&mut line, &node, now, verbosity).is_ok() {
                 let _ = output.write_all(&line);
             }
         }
@@ -203,7 +208,12 @@ fn number(value: &serde_json::Value) -> u64 {
         .unwrap_or(0)
 }
 
-fn write_running(writer: &mut impl Write, node: &RunningNode, now: Instant) -> std::io::Result<()> {
+fn write_running(
+    writer: &mut impl Write,
+    node: &RunningNode,
+    now: Instant,
+    verbosity: u8,
+) -> std::io::Result<()> {
     let elapsed = now.saturating_duration_since(node.started);
     write!(
         writer,
@@ -215,9 +225,23 @@ fn write_running(writer: &mut impl Write, node: &RunningNode, now: Instant) -> s
         elapsed.as_secs_f64()
     )?;
     write_context(writer, &node.wire.body)?;
+    if verbosity >= 2 {
+        write_details(writer, &node.wire, "start event")?;
+    }
     writeln!(writer)
 }
-fn write_diagnostic(writer: &mut impl Write, wire: &WireRecord) -> std::io::Result<()> {
+fn write_diagnostic(
+    writer: &mut impl Write,
+    wire: &WireRecord,
+    verbosity: u8,
+) -> std::io::Result<()> {
+    if verbosity >= 3 {
+        return writeln!(
+            writer,
+            "[verbose] {}",
+            serde_json::to_string(wire).expect("lifecycle records serialize to JSON")
+        );
+    }
     let body = &wire.body;
     write!(
         writer,
@@ -323,7 +347,32 @@ fn write_diagnostic(writer: &mut impl Write, wire: &WireRecord) -> std::io::Resu
             failure["message"].as_str().unwrap_or("unknown")
         )?;
     }
+    if verbosity >= 2 {
+        write_details(writer, wire, "event")?;
+    }
     writeln!(writer)
+}
+
+fn write_details(writer: &mut impl Write, wire: &WireRecord, label: &str) -> std::io::Result<()> {
+    write!(
+        writer,
+        " | {label}: {} #{} | workflow: {}",
+        wire.event_name.escape_debug(),
+        number(&wire.attributes["mf.event.sequence"]),
+        attribute(wire, "mf.workflow.id").escape_debug()
+    )?;
+    if let Some(position) = wire.body.get("position") {
+        write!(writer, " | position: {}", number(position))?;
+    }
+    if wire.event_name != "mf.node.started"
+        && let Some(kind) = wire
+            .attributes
+            .get("mf.node.kind")
+            .and_then(serde_json::Value::as_str)
+    {
+        write!(writer, " | kind: {}", kind.escape_debug())?;
+    }
+    Ok(())
 }
 
 fn write_context(writer: &mut impl Write, body: &serde_json::Value) -> std::io::Result<()> {
@@ -406,7 +455,7 @@ mod tests {
         let first = state.due(now + interval, interval);
         assert_eq!(first.len(), 1);
         let mut bytes = Vec::new();
-        write_running(&mut bytes, &first[0], now + interval).unwrap();
+        write_running(&mut bytes, &first[0], now + interval, 1).unwrap();
         assert!(
             String::from_utf8(bytes)
                 .unwrap()
@@ -445,7 +494,7 @@ mod tests {
         assert_eq!(due.len(), 2);
         let mut bytes = Vec::new();
         for node in due {
-            write_running(&mut bytes, &node, now + interval).unwrap();
+            write_running(&mut bytes, &node, now + interval, 1).unwrap();
         }
         let output = String::from_utf8(bytes).unwrap();
         assert!(output.contains("invocation 2 (message)"));
@@ -455,7 +504,7 @@ mod tests {
             attribute(&first, "mf.run.id"),
         );
         assert!(state.due(now + interval * 2, interval).is_empty());
-        let observer = super::super::Observer::stderr();
+        let observer = super::super::Observer::stderr(1);
         let shared = Arc::clone(&observer.0.diagnostics.as_ref().unwrap().shared);
         for finish_without_terminal_record in [false, true] {
             let mut run = observer
@@ -497,6 +546,44 @@ mod tests {
     }
 
     #[test]
+    fn verbosity_adds_readable_metadata_and_round_trips_full_records() {
+        let mut wire = fixture(include_str!("../tests/fixtures/node-succeeded.json"));
+        wire.attributes["mf.node.id"] = json!("read\nnode");
+        wire.trace_context = Some(crate::wire::TraceContext {
+            trace_id: "1".repeat(32),
+            span_id: "2".repeat(16),
+            trace_flags: 1,
+        });
+        let mut bytes = Vec::new();
+        write_diagnostic(&mut bytes, &wire, 2).unwrap();
+        let detailed = String::from_utf8(bytes).unwrap();
+        assert_eq!(detailed.lines().count(), 1);
+        assert!(detailed.contains("node \"read\\nnode\" succeeded"));
+        assert!(detailed.contains("event: mf.node.finished #3"));
+        assert!(detailed.contains("position: 0"));
+        assert!(detailed.contains("kind: fixture.source"));
+        assert!(detailed.contains(attribute(&wire, "mf.workflow.id")));
+        let mut bytes = Vec::new();
+        write_diagnostic(&mut bytes, &wire, 3).unwrap();
+        let full = String::from_utf8(bytes).unwrap();
+        assert_eq!(full.lines().count(), 1);
+        let decoded: WireRecord =
+            serde_json::from_str(full.trim().strip_prefix("[verbose] ").unwrap()).unwrap();
+        assert_eq!(decoded, wire);
+        let now = Instant::now();
+        let node = RunningNode {
+            wire: fixture(include_str!("../tests/fixtures/node-started.json")),
+            started: now,
+            next_reminder: now + Duration::from_secs(60),
+        };
+        let mut bytes = Vec::new();
+        write_running(&mut bytes, &node, now + Duration::from_secs(60), 3).unwrap();
+        let reminder = String::from_utf8(bytes).unwrap();
+        assert!(reminder.contains("still running for 60.000s"));
+        assert!(reminder.contains("start event: mf.node.started #2"));
+    }
+
+    #[test]
     fn diagnostics_are_compact_and_keep_control_characters_on_one_line() {
         let mut succeeded = fixture(include_str!("../tests/fixtures/node-succeeded.json"));
         succeeded.body["elapsed_ns"] = json!(2_000_000);
@@ -505,8 +592,8 @@ mod tests {
         failed.attributes["mf.node.id"] = json!("read\nnode");
         failed.body["failure"]["message"] = json!("missing\nkey");
         let mut bytes = Vec::new();
-        write_diagnostic(&mut bytes, &succeeded).unwrap();
-        write_diagnostic(&mut bytes, &failed).unwrap();
+        write_diagnostic(&mut bytes, &succeeded, 1).unwrap();
+        write_diagnostic(&mut bytes, &failed, 1).unwrap();
         let output = String::from_utf8(bytes).unwrap();
         assert!(output.contains(
             "+2.000ms node \"load.order\" succeeded in 0.129ms | outputs: \"value.part\""
@@ -528,7 +615,7 @@ mod tests {
         wire.body["stream"] = json!({"invocation":u64::MAX.to_string(), "trigger":"message", "message":{"domain":2,"sequence":"9"}, "parent":"1"});
         wire.body["emission_count"] = json!(3);
         let mut bytes = Vec::new();
-        write_diagnostic(&mut bytes, &wire).unwrap();
+        write_diagnostic(&mut bytes, &wire, 1).unwrap();
         let output = String::from_utf8(bytes).unwrap();
         assert!(output.contains(r##"loop: "outer"#2/"inner"#1"##));
         assert!(

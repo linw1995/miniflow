@@ -6,6 +6,8 @@ fn runner_verbosity_preserves_workflow_values_and_transport_validation() {
     for (flags, expected) in [
         (vec!["-v", "--read.part.path", "-v"], "-v"),
         (vec!["--read.part.path=--verbose", "-v"], "--verbose"),
+        (vec!["-v", "--read.part.path", "-vv"], "-vv"),
+        (vec!["--read.part.path", "-vvv", "-v"], "-vvv"),
         (
             vec!["--verbose", "--inputs", r#"{"read.part.path":"x"}"#],
             "x",
@@ -13,16 +15,40 @@ fn runner_verbosity_preserves_workflow_values_and_transport_validation() {
     ] {
         let options =
             mf_runtime::RunnerArguments::parse(flags.iter().map(Into::into), &schema()).unwrap();
-        assert!(options.verbose);
+        assert_eq!(options.verbose, 1);
         assert_eq!(options.inputs.0["read.part.path"], json!(expected));
     }
     for flags in [
-        vec!["-v", "--verbose", "--read.part.path=x"],
         vec!["--verbose=true", "--read.part.path=x"],
         vec!["--verbose", "--inputs", "{}", "--read.part.path=x"],
     ] {
         assert!(
             mf_runtime::RunnerArguments::parse(flags.iter().map(Into::into), &schema()).is_err()
+        );
+    }
+}
+
+#[test]
+fn runner_verbosity_accumulates_clusters_and_caps_at_full_records() {
+    for (flags, expected) in [
+        (vec![], 0),
+        (vec!["-vv"], 2),
+        (vec!["-v", "--verbose"], 2),
+        (vec!["-vvv"], 3),
+        (vec!["--verbose", "--verbose", "--verbose"], 3),
+        (vec!["-vvvv", "-vv"], 3),
+    ] {
+        let options = mf_runtime::RunnerArguments::parse(
+            flags.into_iter().map(Into::into),
+            &WorkflowInputSchema::default(),
+        )
+        .unwrap();
+        assert_eq!(options.verbose, expected);
+    }
+    for flag in ["-vX", "-vv=2", "-", "--vv"] {
+        assert!(
+            mf_runtime::RunnerArguments::parse([flag.into()], &WorkflowInputSchema::default())
+                .is_err()
         );
     }
 }

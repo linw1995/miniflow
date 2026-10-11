@@ -24,17 +24,25 @@ The output directory must exist. A successful first build creates `flow.lock`. S
 
 `mf run ./flow` inherits stdin, stdout, and stderr and returns the runner's exit status. It requires no terminal.
 Use `-v` or `--verbose` with either `mf run ./flow` or `./flow` to print execution details on stderr:
-workflow and node lifecycle events, outcomes, timing, Loop passes, and streaming invocation metadata.
-Each line shows elapsed milliseconds followed by a readable workflow or node status. Completion lines include
-node duration, produced/skipped ports, or error context. Loop pass numbers are one-based; streaming lines retain
-invocation and message identities. The run ID appears once at workflow start. Results remain on stdout; diagnostics
-contain execution metadata rather than input/output values.
-While a node is running, verbose mode prints a `still running` reminder every 60 seconds with its elapsed running
-time and available Loop or streaming invocation context. Completion or failure stops that invocation's reminders.
-These reminders also work with `--no-telemetry` and are local stderr output; they do not add OTLP lifecycle events.
+
+| Option | Execution diagnostics |
+| --- | --- |
+| `-v` | Readable workflow/node progress, outcomes, timings, Loop passes, and stream context. |
+| `-vv` | Summaries plus event name/sequence, workflow ID, and available node position/kind. |
+| `-vvv` | Complete existing lifecycle `WireRecord` as compact JSON, including available trace context. |
+
+Clustered flags and repeated `-v`/`--verbose` accumulate, with totals above three selecting the highest level.
+`mf -v run ./flow -vv` selects level three. A consumed input value such as `--read.path -vv` remains a string value.
+Readable summaries use elapsed and node-duration milliseconds, one-based Loop passes, full unsigned stream IDs,
+and escaped identifiers/errors. The run ID appears at workflow start; full JSON retains the original record fields.
+Results remain on stdout and diagnostics contain execution metadata rather than input/output values.
+While a node is running, every positive level prints a readable `still running` reminder every 60 seconds. Higher
+levels identify its original start event. Completion, failure, and observation cleanup stop its reminders.
+These reminders also work with `--no-telemetry` and do not add OTLP lifecycle events.
 Place CLI options before named workflow parameters, for example `mf run ./flow -v --read.path data.txt`.
 With `--tui`, verbose runner diagnostics appear in the TUI's captured stderr history.
-`mf compile flow.json --output ./flow --verbose` also reports compilation options, elapsed time, and the retained project.
+`mf compile flow.json --output ./flow --verbose` reports compilation options, elapsed time, and the retained project;
+any positive verbosity enables that compilation summary.
 Recompile existing executables to add the runner's verbose option.
 
 Use `mf compile flow.json --output ./flow --no-telemetry` for a smaller runner when live observation is unnecessary.

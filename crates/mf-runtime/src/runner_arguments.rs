@@ -1,7 +1,7 @@
 use crate::{
     MAX_WORKFLOW_INPUT_BYTES, ValueType, WorkflowArguments, WorkflowInputError, WorkflowInputSchema,
 };
-use snafu::{ResultExt, Snafu, ensure};
+use snafu::{ResultExt, Snafu};
 use std::{
     ffi::OsString,
     fs::File,
@@ -12,7 +12,7 @@ use std::{
 #[derive(Debug, Snafu)]
 pub enum RunnerArgumentError {
     #[snafu(display(
-        "{message}; usage: workflow [-v|--verbose] [--NODE.PORT VALUE ...] [--inputs JSON|--inputs-file PATH]"
+        "{message}; usage: workflow [-v|-vv|-vvv|--verbose] [--NODE.PORT VALUE ...] [--inputs JSON|--inputs-file PATH]"
     ))]
     Invalid { message: String },
     #[snafu(display("could not read workflow arguments from {path:?}: {source}"))]
@@ -28,7 +28,8 @@ pub enum RunnerArgumentError {
 
 #[derive(Debug)]
 pub struct RunnerArguments {
-    pub verbose: bool,
+    /// Local diagnostic detail, capped at three.
+    pub verbose: u8,
     pub inputs: WorkflowArguments,
 }
 
@@ -75,7 +76,7 @@ impl WorkflowArguments {
             .build()
         };
         let mut arguments = arguments.into_iter();
-        let mut verbose = false;
+        let mut verbose = 0_u8;
         let mut inputs = None;
         let mut values = Self::default();
         let mut size = 0;
@@ -83,14 +84,18 @@ impl WorkflowArguments {
             size += argument.len();
             Self::check_size(size)?;
             match argument.to_str() {
-                Some("-v" | "--verbose") if allow_verbose => {
-                    ensure!(
-                        !verbose,
-                        InvalidSnafu {
-                            message: "--verbose can be supplied only once".to_owned()
-                        }
-                    );
-                    verbose = true;
+                Some(flag)
+                    if allow_verbose
+                        && (flag == "--verbose"
+                            || (flag.starts_with("-v")
+                                && flag[1..].bytes().all(|byte| byte == b'v'))) =>
+                {
+                    let count = if flag == "--verbose" {
+                        1
+                    } else {
+                        flag.len() - 1
+                    };
+                    verbose = (usize::from(verbose) + count).min(3) as u8;
                 }
                 Some("--inputs" | "--inputs-file") => {
                     if inputs.is_some() {

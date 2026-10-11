@@ -81,11 +81,11 @@ impl Observer {
         L: LoggerProvider,
         L::Logger: Send + Sync + 'static,
     {
-        Self::new_with_verbosity(traces, logs, false)
+        Self::new_with_verbosity(traces, logs, 0)
     }
 
     /// Enables local lifecycle diagnostics independently of OTel export.
-    pub fn new_with_verbosity<T, L>(traces: &T, logs: &L, verbose: bool) -> Self
+    pub fn new_with_verbosity<T, L>(traces: &T, logs: &L, verbose: u8) -> Self
     where
         T: TracerProvider,
         T::Tracer: Send + Sync + 'static,
@@ -97,7 +97,8 @@ impl Observer {
         let nested_logger = logs.logger("mf.iteration");
         Self(Arc::new(Backend {
             tracer: BoxedTracer::new(Box::new(traces.tracer(INSTRUMENTATION_SCOPE))),
-            diagnostics: verbose.then(|| Diagnostics::new(Duration::from_secs(60))),
+            diagnostics: (verbose > 0)
+                .then(|| Diagnostics::new(Duration::from_secs(60), verbose.min(3))),
             emit: Box::new(move |wire| {
                 let mut record = logger.create_log_record();
                 wire.write_to(&mut record)?;
@@ -145,11 +146,11 @@ impl Observer {
     }
 
     /// Creates a local observer without SDK providers or export connections.
-    pub fn stderr() -> Self {
+    pub fn stderr(verbose: u8) -> Self {
         Self::new_with_verbosity(
             &opentelemetry::trace::noop::NoopTracerProvider::new(),
             &opentelemetry::logs::NoopLoggerProvider::new(),
-            true,
+            verbose,
         )
     }
 

@@ -122,10 +122,10 @@ impl TelemetryProviders {
     }
 
     pub fn observer(&self) -> Observer {
-        self.observer_with_verbosity(false)
+        self.observer_with_verbosity(0)
     }
 
-    pub fn observer_with_verbosity(&self, verbose: bool) -> Observer {
+    pub fn observer_with_verbosity(&self, verbose: u8) -> Observer {
         Observer::new_with_verbosity(&self.traces, &self.logs, verbose)
     }
 
