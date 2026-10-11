@@ -141,6 +141,29 @@ fn build(project: &Path, flow_lock: &Path, definition: &WorkflowDefinition) -> P
     ))
 }
 
+fn selected_record(
+    project: &Path,
+    workflow: &mf_telemetry::identity::WorkflowId,
+    id: &str,
+) -> mf_runtime::NodeTarget {
+    let target = std::env::var_os("MF_TEST_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| project.join("target"));
+    for entry in fs::read_dir(target.join("release/build")).unwrap() {
+        let path = entry.unwrap().path().join("out/node-targets.json");
+        if let Ok(bytes) = fs::read(path) {
+            let records: Vec<mf_runtime::NodeTarget> = serde_json::from_slice(&bytes).unwrap();
+            if let Some(record) = records
+                .into_iter()
+                .find(|record| record.id == id && record.original_workflow_id == *workflow)
+            {
+                return record;
+            }
+        }
+    }
+    panic!("selected target record was not emitted");
+}
+
 fn command(executable: &Path) -> Command {
     let mut command = Command::new(executable);
     for name in [
@@ -552,6 +575,45 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     );
     assert_eq!(last_json(&plain.stdout), json!({"answer":14}));
 
+    let selected = selected_record(&project, &description.workflow_id, "b");
+    let selected_run = mf_telemetry::identity::RunId::new();
+    let mut selected_receiver =
+        LoopbackReceiver::bind(selected.description.clone(), selected_run).unwrap();
+    let selected_output = command(&runner)
+        .args(["--node=b", "--b.input=99"])
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", selected_receiver.endpoint())
+        .env("MF_RUN_ID", selected_run.to_string())
+        .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1")
+        .output()
+        .unwrap();
+    assert!(
+        selected_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selected_output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&selected_output.stdout).unwrap(),
+        json!({"result.alpha":14})
+    );
+    let selected_state = selected_receiver.finish();
+    assert_eq!(
+        selected_state.lifecycle.completeness,
+        Completeness::Complete
+    );
+    assert_eq!(selected_state.nodes.len(), 1);
+    assert_eq!(selected_state.nodes[0].status, NodeStatus::Succeeded);
+    let selected_history = selected_receiver.history_snapshot(None, 10);
+    assert_eq!(selected_history.status, "Complete");
+    assert_eq!(selected_history.history_len, 2);
+    let selected_snapshot = &selected_history.entries.last().unwrap().snapshot;
+    assert_eq!(
+        selected_snapshot.node(&[], "b").unwrap().inputs["input"],
+        json!(99)
+    );
+    assert!(
+        selected_snapshot.node(&[], "a").is_none() && selected_snapshot.node(&[], "c").is_none()
+    );
+
     let (endpoint, worker) = collector();
     let observed = command(&runner)
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint)
@@ -888,6 +950,45 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         );
         output
     };
+    let description = read_manifest(&runner).unwrap().description;
+    let selected = selected_record(
+        &root.path().join("build"),
+        &description.workflow_id,
+        "consume",
+    );
+    let selected_run = mf_telemetry::identity::RunId::new();
+    let mut selected_receiver =
+        LoopbackReceiver::bind(selected.description.clone(), selected_run).unwrap();
+    let selected_output = command(&runner)
+        .args(["--node=consume", "--consume.input=[10,20]"])
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", selected_receiver.endpoint())
+        .env("MF_RUN_ID", selected_run.to_string())
+        .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(
+        selected_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&selected_output.stderr)
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&selected_output.stdout).unwrap(),
+        json!({"value":[10,20]})
+    );
+    let selected_state = selected_receiver.finish();
+    assert_eq!(
+        selected_state.lifecycle.completeness,
+        Completeness::Complete
+    );
+    assert_eq!(selected_state.nodes.len(), 1);
+    assert_eq!(selected_state.nodes[0].status, NodeStatus::Succeeded);
+    assert_eq!(
+        selected_receiver.history_snapshot(None, 10).status,
+        "Complete"
+    );
+    assert_eq!(selected_receiver.history_len(), 2);
+
     let plain = execute(None, None);
     let (endpoint, collector) = collector();
     let observed = execute(Some(&endpoint), Some(&collector));

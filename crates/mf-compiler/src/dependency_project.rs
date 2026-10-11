@@ -80,9 +80,17 @@ fn main() -> std::process::ExitCode {
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let manifest = workflow_manifest()?;
-    let arguments = mf_runtime::WorkflowArguments::parse(
-        std::env::args_os().skip(1), &manifest.interface.schema,
+    let targets: Vec<mf_runtime::NodeTarget> = serde_json::from_str(
+        include_str!(concat!(env!("OUT_DIR"), "/node-targets.json")),
     )?;
+    let invocation = mf_runtime::RunnerInvocation::parse(
+        std::env::args_os().skip(1), &manifest.interface.schema, &targets,
+    )?;
+    if let Some(id) = invocation.node.as_deref() {
+        let target = mf_runtime::NodeTarget::find(&targets, id)?;
+        return execute_selected(target, invocation.inputs, invocation.context);
+    }
+    let arguments = invocation.inputs;
     #[cfg(feature = "streaming")]
     { execute_stream(arguments) }
     #[cfg(not(feature = "streaming"))]
@@ -91,6 +99,78 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", serde_json::to_string(&outputs)?);
         Ok(())
     }
+}
+
+fn execute_selected(
+    target: &mf_runtime::NodeTarget,
+    inputs: mf_runtime::WorkflowArguments,
+    context: mf_runtime::WorkflowArguments,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut stdio = mf_runtime::StreamStdio::claim()?;
+    #[cfg(feature = "telemetry")]
+    let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
+        Ok(providers) => providers,
+        Err(error) => { eprintln!("telemetry export unavailable: {error}"); None }
+    };
+    #[cfg(feature = "telemetry")]
+    let run_id = run_id();
+    #[cfg(feature = "telemetry")]
+    let observation = providers.as_ref().and_then(|providers| {
+        match target.start_observation(&providers.observer(), run_id) {
+            Ok(observation) => Some(observation),
+            Err(error) => { eprintln!("telemetry observation unavailable: {error}"); None }
+        }
+    });
+    #[cfg(not(feature = "telemetry"))]
+    let observation = None;
+    #[cfg(feature = "telemetry")]
+    let snapshots = if capture_requested() {
+        match snapshot_recorder_for_id(target.description.workflow_id.clone(), run_id) {
+            Ok(recorder) => Some(recorder),
+            Err(error) => { eprintln!("data history unavailable: {error}"); None }
+        }
+    } else { None };
+    #[cfg(not(feature = "telemetry"))]
+    let snapshots: Option<mf_runtime::SnapshotRecorder> = {
+        if capture_requested() { eprintln!("data history unavailable: recompile the runner without --no-telemetry"); }
+        None
+    };
+    let result = mf_runtime::ExecutionContext::run(observation, |state| -> Result<(), Box<dyn std::error::Error>> {
+        if target.inputs.stdin_owner(&inputs)?.is_some() {
+            if let Some(input) = stdio.take_input() { state.set_stdin(input); }
+        }
+        if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.clone()); }
+        let registry = mf_runtime::NodeRegistry::from_inventory()?;
+        #[cfg(feature = "streaming")]
+        let outputs = {
+            let prepared = workflow::prepare_stream(&registry).inspect_err(|error| {
+                if let Some(observation) = state.observation_mut() { observation.preparation_failed_unattributed(error.to_string()); }
+            })?;
+            workflow_manifest()?.validate_prepared_schema(prepared.plan().input_schema())?;
+            let task = target.bind_stream(&prepared)?;
+            mf_runtime::FlowRuntime::default().execute_target_in_context(&task, state, inputs, context)?
+        };
+        #[cfg(not(feature = "streaming"))]
+        let outputs = {
+            let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
+            workflow_manifest()?.validate_prepared_schema(flow.input_schema())?;
+            let task = target.bind_flow(&flow)?;
+            mf_runtime::FlowRuntime::default().execute_target_in_context(&task, state, inputs, context)?
+        };
+        stdio.write_json(&outputs).inspect_err(|error| {
+            if let Some(observation) = state.observation_mut() { observation.output_selection_failed(error.to_string()); }
+        })?;
+        Ok(())
+    });
+    if let Some(snapshots) = snapshots {
+        snapshots.finish();
+        if let Some(error) = snapshots.diagnostic() { eprintln!("data history incomplete: {error}"); }
+    }
+    #[cfg(feature = "telemetry")]
+    if let Some(providers) = providers {
+        for diagnostic in providers.shutdown() { eprintln!("telemetry export incomplete: {diagnostic}"); }
+    }
+    result
 }
 
 #[cfg(feature = "streaming")]
@@ -201,7 +281,12 @@ fn execute(arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowO
 #[cfg(all(feature = "telemetry", not(feature = "streaming")))]
 fn snapshot_recorder(plan: &mf_compiler::CompiledWorkflow, run_id: mf_telemetry::identity::RunId) -> Result<mf_runtime::SnapshotRecorder, Box<dyn std::error::Error>> {
     let description = mf_compiler::describe_compiled(plan)?;
-    let mut exporter = mf_telemetry::otlp::SnapshotExporter::from_env(description.workflow_id, run_id)?;
+    snapshot_recorder_for_id(description.workflow_id, run_id)
+}
+
+#[cfg(feature = "telemetry")]
+fn snapshot_recorder_for_id(workflow_id: mf_telemetry::identity::WorkflowId, run_id: mf_telemetry::identity::RunId) -> Result<mf_runtime::SnapshotRecorder, Box<dyn std::error::Error>> {
+    let mut exporter = mf_telemetry::otlp::SnapshotExporter::from_env(workflow_id, run_id)?;
     Ok(mf_runtime::SnapshotRecorder::with_sink(move |record| {
         exporter.emit(serde_json::to_value(record)?)?;
         if matches!(record, mf_runtime::SnapshotRecord::End) { exporter.finish()?; }

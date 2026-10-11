@@ -191,7 +191,7 @@ StreamNode implementations. Initial producers receive their requirements through
 The old input mechanism and its dedicated validation rules are removed; fields and graph endpoints follow
 the normal schema and graph rules.
 
-## Isolated task preparation
+## Execute an isolated task
 
 The generated build emits `node-targets.json` alongside execution layouts, using the same validated
 provider preparation. Each target retains its compiled index, resolved port types, external context
@@ -202,8 +202,7 @@ business execution. Inference still follows the original graph, including forwar
 Isolated task support reuses whole-plan preparation. An unrelated provider factory can still fail during
 initialization and prevent selection from running; preparation does not call business methods or consume
 source data. Producers and Event executors are recorded for accurate unsupported-target diagnostics and
-cannot be bound as isolated tasks. The standalone selection interface is added by the runner dispatch
-phase of this change.
+cannot be bound as isolated tasks. Recompile existing executables to obtain `--node` support.
 
 The isolated runner invocation contract uses the selected task's qualified inputs:
 
@@ -226,3 +225,23 @@ checked against the original graph's referenced output types. Null is a value, n
 Context files resolve from the invocation directory, must be regular files, and are read once with a
 bounded reader. Each port/context transport and their combined canonical JSON payload must fit within
 1 MiB. Context values do not execute their producers or change the target's compiled types.
+
+A selected invocation returns one JSON object keyed by all produced output port names, independently of
+workflow output aliases. Explicitly skipped ports are omitted and null values remain present. Provider
+construction and execution diagnostics are routed to stderr; stdout contains only the finite result.
+Failure returns a nonzero status without a successful result object. This finite behavior also applies
+when the selected Task belongs to a stream flow: other producers, Event callbacks, and timers do not start.
+
+For the repository CEL example:
+
+```sh
+mf compile examples/cel-scalar.json --output ./flow
+./flow --node transform --transform.amount 30
+```
+
+The selected result is `{"doubled":60}`. A selected Loop or Iteration runs its complete prepared body,
+including its usual limits, exit behavior, worker bounds, and error policy. Producer and Event selection,
+body-local nodes, synthetic scope controls, and `mf run --tui --node` are not supported in this phase.
+Direct manifest inspection continues to describe whole-flow startup and observation; target selection does
+not expand the manifest interface. See [isolated observations](observability.md#isolated-task-observations)
+for selected-operation identity, counts, and opt-in snapshots.

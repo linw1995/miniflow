@@ -52,7 +52,7 @@
 - [x] 4.2 Apply selected descriptions before preparation and retain failure phases/counts; verify a middle
   task reports one top-level visit, unrelated preparation failure emits no node start, and Loop/Iteration
   details preserve their existing meanings.
-- [ ] 4.3 Use the selected finite identity for opt-in snapshots and bounded exporters, including a Task in a
+- [x] 4.3 Use the selected finite identity for opt-in snapshots and bounded exporters, including a Task in a
   streaming binary; verify capture success, unavailable export diagnostics, and unchanged business results
   and exit status, with whole-stream capture still rejected.
 - [x] 4.4 Document selected identity, original-flow correlation, counts, and snapshot eligibility in
@@ -60,18 +60,18 @@
 
 ## 5. Wire standalone runner dispatch and acceptance coverage
 
-- [ ] 5.1 Dispatch `--node` through finite isolated execution in both binary feature modes without starting
+- [x] 5.1 Dispatch `--node` through finite isolated execution in both binary feature modes without starting
   producers or timers; verify end-to-end selected Task runs from finite and streaming definitions, including
   a newly compiled older schema, and unknown/unsupported target diagnostics before business execution.
-- [ ] 5.2 Reserve finite result stdout before provider construction and route selected resources; verify a
+- [x] 5.2 Reserve finite result stdout before provider construction and route selected resources; verify a
   noisy factory/task produces only result JSON on stdout, diagnostics on stderr, and no unrelated source
   reads or selected results after execution/publication failure.
-- [ ] 5.3 Keep generated entry points demand-driven and whole-flow manifests unchanged; verify standard and
+- [x] 5.3 Keep generated entry points demand-driven and whole-flow manifests unchanged; verify standard and
   custom artifact generation, warning-free finite/stream builds, existing normal execution, and manifest
   inspection with and without telemetry.
-- [ ] 5.4 Add portable runner acceptance cases that remove build inputs; verify isolated execution works
+- [x] 5.4 Add portable runner acceptance cases that remove build inputs; verify isolated execution works
   after moving binaries without the definition, lock, generated project, plugin sources, or toolchain.
-- [ ] 5.5 Complete runner examples and support-boundary documentation, including producer/Event/nested/TUI
+- [x] 5.5 Complete runner examples and support-boundary documentation, including producer/Event/nested/TUI
   exclusions; execute documented commands and confirm the Task phase is not presented as universal #125
   completion.
 
