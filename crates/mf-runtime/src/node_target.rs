@@ -29,6 +29,8 @@ pub struct NodeTarget {
 
 #[derive(Debug, Snafu)]
 pub enum NodeTargetError {
+    #[snafu(transparent)]
+    Observation { source: mf_telemetry::ContractError },
     #[snafu(display("node target `{id}` context `{key}`: {reason}"))]
     ContextKey {
         id: String,
@@ -86,8 +88,14 @@ impl crate::FlowRuntime {
         context: crate::WorkflowArguments,
     ) -> Result<crate::FlowOutputs, crate::WorkflowRunError> {
         state.configure_worker_limit(self.options().max_parallel_domains);
+        state
+            .initialize_target(target.contract, inputs, context)
+            .inspect_err(|error| {
+                if let Some(observation) = state.observation_mut() {
+                    observation.preparation_failed_unattributed(error.to_string());
+                }
+            })?;
         let result = (|| {
-            state.initialize_target(target.contract, inputs, context)?;
             crate::context::execute_ordered_task_in_context(
                 &target.node,
                 target.node.node,
@@ -129,6 +137,29 @@ pub fn target_ports(ports: &[crate::PortSpec]) -> BTreeMap<String, WorkflowInput
 }
 
 impl NodeTarget {
+    pub fn start_observation(
+        &self,
+        observer: &mf_telemetry::observation::Observer,
+        run_id: mf_telemetry::identity::RunId,
+    ) -> Result<crate::RunObservation, NodeTargetError> {
+        use opentelemetry::trace::TraceContextExt;
+        self.require_task()?;
+        let observation = observer.start_with_description(self.description.clone(), run_id)?;
+        {
+            let _context = observation.enter();
+            let context = opentelemetry::Context::current();
+            context.span().set_attribute(opentelemetry::KeyValue::new(
+                "mf.workflow.original_id",
+                self.original_workflow_id.to_string(),
+            ));
+            context.span().set_attribute(opentelemetry::KeyValue::new(
+                "mf.node.target_id",
+                self.id.clone(),
+            ));
+        }
+        Ok(observation)
+    }
+
     pub fn validate_context(
         &self,
         arguments: &crate::WorkflowArguments,

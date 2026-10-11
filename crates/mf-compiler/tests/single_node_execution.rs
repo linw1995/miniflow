@@ -517,3 +517,246 @@ fn isolated_results_preserve_null_skips_empty_maps_and_transactional_publication
         }
     }
 }
+
+#[path = "fixtures/observation_capture.rs"]
+mod capture;
+
+#[test]
+fn isolated_identity_counts_spans_and_snapshots_follow_the_selected_task() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for stream in [false, true] {
+        let plan = plan(chain(stream), &registry);
+        let records = targets(&plan, &registry);
+        let record = NodeTarget::find(&records, "target").unwrap();
+        assert_ne!(record.description.workflow_id, record.original_workflow_id);
+        assert_ne!(
+            record.description.workflow_id,
+            records
+                .iter()
+                .find(|target| target.id == "after")
+                .unwrap()
+                .description
+                .workflow_id
+        );
+        assert!(!record.description.is_streaming());
+        assert_eq!(record.description.execution_order, ["target"]);
+        assert!(
+            record.description.data_edges.is_empty() && record.description.control_edges.is_empty()
+        );
+        let harness = capture::Harness::new(true);
+        for value in [21, 43] {
+            let observation = record
+                .start_observation(&harness.observer(), mf_telemetry::identity::RunId::new())
+                .unwrap();
+            let snapshots = mf_runtime::SnapshotRecorder::memory();
+            let result: Result<_, Box<dyn std::error::Error>> =
+                mf_runtime::ExecutionContext::run(Some(observation), |state| {
+                    state.set_snapshot_recorder(snapshots.clone());
+                    let input = args(json!({"target.input":value}));
+                    if stream {
+                        let prepared = mf_compiler::instantiate_stream(&plan, &registry)?;
+                        let target = record.bind_stream(&prepared)?;
+                        Ok(FlowRuntime::default().execute_target_in_context(
+                            &target,
+                            state,
+                            input,
+                            WorkflowArguments::default(),
+                        )?)
+                    } else {
+                        let flow = instantiate_compiled(&plan, &registry)?;
+                        let target = record.bind_flow(&flow)?;
+                        Ok(FlowRuntime::default().execute_target_in_context(
+                            &target,
+                            state,
+                            input,
+                            WorkflowArguments::default(),
+                        )?)
+                    }
+                });
+            assert_eq!(json!(result.unwrap()), json!({"value":value}));
+            snapshots.finish();
+            let snapshot = snapshots.current();
+            assert_eq!(
+                snapshot.node(&[], "target").unwrap().outputs,
+                json!({"value":value})
+            );
+            assert!(snapshot.node(&[], "before").is_none());
+            assert!(
+                snapshots
+                    .history()
+                    .iter()
+                    .all(|entry| entry.node.as_ref() == "target")
+            );
+        }
+        let events = harness.records();
+        assert_eq!(events.len(), 8);
+        for event in &events {
+            event.decode().unwrap();
+            assert_eq!(
+                event.attributes["mf.workflow.id"],
+                json!(record.description.workflow_id)
+            );
+        }
+        for event in events
+            .iter()
+            .filter(|event| event.event_name == "mf.workflow.finished")
+        {
+            assert_eq!(event.body["visited_node_count"], 1);
+            assert_eq!(event.body["top_level_visited_count"], 1);
+        }
+        let finished = harness.spans.get_finished_spans().unwrap();
+        for span in finished.iter().filter(|span| span.name == "mf.workflow") {
+            assert!(
+                span.attributes
+                    .iter()
+                    .any(
+                        |attribute| attribute.key.as_str() == "mf.workflow.original_id"
+                            && attribute.value.as_str() == record.original_workflow_id.as_str()
+                    )
+            );
+            assert!(
+                span.attributes
+                    .iter()
+                    .any(|attribute| attribute.key.as_str() == "mf.node.target_id"
+                        && attribute.value.as_str() == "target")
+            );
+        }
+    }
+}
+
+#[test]
+fn isolated_input_and_preparation_failures_emit_no_target_start() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = plan(chain(false), &registry);
+    let records = targets(&plan, &registry);
+    let record = NodeTarget::find(&records, "target").unwrap();
+    for preparation in [false, true] {
+        let harness = capture::Harness::new(true);
+        let observation = record
+            .start_observation(&harness.observer(), mf_telemetry::identity::RunId::new())
+            .unwrap();
+        let result: Result<(), Box<dyn std::error::Error>> =
+            mf_runtime::ExecutionContext::run(Some(observation), |state| {
+                if preparation {
+                    state.preparation_failed("before", &"unrelated factory unavailable");
+                    return Err(std::io::Error::other("unrelated factory unavailable").into());
+                }
+                let flow = instantiate_compiled(&plan, &registry)?;
+                let target = record.bind_flow(&flow)?;
+                FlowRuntime::default().execute_target_in_context(
+                    &target,
+                    state,
+                    WorkflowArguments::default(),
+                    WorkflowArguments::default(),
+                )?;
+                Ok(())
+            });
+        assert!(result.is_err());
+        let events = harness.records();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[1].body["visited_node_count"], 0);
+        assert_eq!(events[1].attributes["mf.failure.phase"], "preparation");
+        for event in events {
+            event.decode().unwrap();
+        }
+    }
+}
+
+#[test]
+fn selected_loop_observation_counts_real_body_steps_without_neighbors() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = plan(
+        serde_json::from_str(include_str!("../../../examples/loop.json")).unwrap(),
+        &registry,
+    );
+    let records = targets(&plan, &registry);
+    let record = NodeTarget::find(&records, "repeat").unwrap();
+    let harness = capture::Harness::new(true);
+    let observation = record
+        .start_observation(&harness.observer(), mf_telemetry::identity::RunId::new())
+        .unwrap();
+    let flow = instantiate_compiled(&plan, &registry).unwrap();
+    let target = record.bind_flow(&flow).unwrap();
+    FlowRuntime::default()
+        .execute_target_with_observation(
+            &target,
+            args(json!({"repeat.count":0})),
+            WorkflowArguments::default(),
+            Some(observation),
+        )
+        .unwrap();
+    let events = harness.records();
+    let terminal = events.last().unwrap();
+    assert_eq!(terminal.body["top_level_visited_count"], 1);
+    assert!(terminal.body["visited_node_count"].as_i64().unwrap() > 1);
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| event.event_name == "mf.loop.pass.started")
+            .count(),
+        3
+    );
+    assert!(!events.iter().any(|event| event.body["node_id"] == "seed"));
+    for event in events {
+        event.decode().unwrap();
+    }
+}
+
+#[test]
+fn selected_metadata_excludes_values_and_snapshot_sink_failures_preserve_results() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = plan(
+        json!({"version":"2026-10-03", "dependencies":{}, "nodes":[
+        {"id":"source", "kind":"builtin.constant", "config":{"value":"private-build-value"}}, {"id":"copy", "kind":"builtin.identity"}
+    ], "edges":[{"from_node":"source", "from_output":"value", "to_node":"copy", "to_input":"input"}]}),
+        &registry,
+    );
+    let artifacts = plan.generate_execution_plans(&registry).unwrap();
+    assert!(!artifacts.node_targets_json.contains("private-build-value"));
+    let records: Vec<NodeTarget> = serde_json::from_str(&artifacts.node_targets_json).unwrap();
+    let record = NodeTarget::find(&records, "copy").unwrap();
+    let harness = capture::Harness::new(true);
+    let observation = record
+        .start_observation(&harness.observer(), mf_telemetry::identity::RunId::new())
+        .unwrap();
+    let snapshots = mf_runtime::SnapshotRecorder::with_sink(|record| {
+        if matches!(record, mf_runtime::SnapshotRecord::Node { .. }) {
+            Err(std::io::Error::other("snapshot sink unavailable").into())
+        } else {
+            Ok(())
+        }
+    })
+    .unwrap();
+    let flow = instantiate_compiled(&plan, &registry).unwrap();
+    let target = record.bind_flow(&flow).unwrap();
+    let result = mf_runtime::ExecutionContext::run(Some(observation), |state| {
+        state.set_snapshot_recorder(snapshots.clone());
+        FlowRuntime::default().execute_target_in_context(
+            &target,
+            state,
+            args(json!({"copy.input":"private-invocation-value"})),
+            WorkflowArguments::default(),
+        )
+    })
+    .unwrap();
+    assert_eq!(json!(result), json!({"value":"private-invocation-value"}));
+    snapshots.finish();
+    use std::error::Error;
+    assert!(
+        snapshots
+            .diagnostic()
+            .unwrap()
+            .source()
+            .unwrap()
+            .is::<std::io::Error>()
+    );
+    assert!(
+        !serde_json::to_string(&harness.records())
+            .unwrap()
+            .contains("private-invocation-value")
+    );
+    assert_eq!(
+        harness.records().last().unwrap().attributes["mf.outcome"],
+        "succeeded"
+    );
+}

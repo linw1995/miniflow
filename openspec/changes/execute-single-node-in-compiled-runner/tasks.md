@@ -46,16 +46,16 @@
 
 ## 4. Describe and observe selected finite operations
 
-- [ ] 4.1 Build finite selected descriptions and deterministic operation identities with original-flow
+- [x] 4.1 Build finite selected descriptions and deterministic operation identities with original-flow
   correlation; verify equal targets with different values share identity while other targets and whole-flow
   runs differ, and metadata excludes configuration and business values.
-- [ ] 4.2 Apply selected descriptions before preparation and retain failure phases/counts; verify a middle
+- [x] 4.2 Apply selected descriptions before preparation and retain failure phases/counts; verify a middle
   task reports one top-level visit, unrelated preparation failure emits no node start, and Loop/Iteration
   details preserve their existing meanings.
 - [ ] 4.3 Use the selected finite identity for opt-in snapshots and bounded exporters, including a Task in a
   streaming binary; verify capture success, unavailable export diagnostics, and unchanged business results
   and exit status, with whole-stream capture still rejected.
-- [ ] 4.4 Document selected identity, original-flow correlation, counts, and snapshot eligibility in
+- [x] 4.4 Document selected identity, original-flow correlation, counts, and snapshot eligibility in
   `docs/observability.md`; verify examples align with captured lifecycle records.
 
 ## 5. Wire standalone runner dispatch and acceptance coverage
