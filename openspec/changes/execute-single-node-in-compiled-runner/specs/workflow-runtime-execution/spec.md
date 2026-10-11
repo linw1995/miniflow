@@ -4,12 +4,7 @@
 
 ### Requirement: Execute only complete validated plans
 
-FlowRuntime SHALL only accept prepared executable Flows, prepared stream plans, or validated prepared Task
-targets selected from those plans. Construction SHALL validate executor kinds, dependencies, graph ordering,
-workflow output selections, execution-domain partitioning, and message ownership before returning a plan.
-Target preparation SHALL retain the original resolved contracts and validate isolated bindings without
-weakening the source graph's validation. Execution entry points MUST NOT instantiate nodes, validate graph
-structure, or construct domain plans.
+FlowRuntime SHALL accept only prepared Flows, stream plans, or Task targets from those plans. Preparation MUST validate executor kinds, dependencies, graph order, selected outputs, domain partitions, and message ownership before returning plans. Targets MUST retain original resolved contracts and validate isolated bindings without weakening graph validation. Execution MUST NOT instantiate nodes, validate graph structure, or construct domain plans.
 
 #### Scenario: Build a generated oneshot workflow
 
@@ -38,12 +33,7 @@ structure, or construct domain plans.
 
 ### Requirement: Execute compiled graph layouts in generated runners
 
-Generated runners SHALL bind initialized executors to immutable compiled dependency, node-index, output,
-execution-domain, and message-ownership data. Launch MUST NOT rebuild the graph, resolve graph edge names
-into indices, partition execution domains, or derive message ownership. Isolated selection SHALL resolve
-an exact target ID through a build-emitted target record containing its compiled index, without deriving
-a new graph. In-memory construction and generated execution SHALL share plan records and the same runtime
-scheduling implementation; isolated Task invocation SHALL share the per-node lifecycle.
+Generated runners SHALL bind executors to immutable compiled dependency, node-index, output, execution-domain, and message-ownership records. Launch MUST NOT rebuild graphs, resolve edge names into indices, repartition domains, or derive ownership. Isolated selection SHALL map exact IDs to compiled indices without constructing a graph. In-memory and generated execution SHALL share plan records and runtime scheduling; isolated Tasks SHALL share the per-node lifecycle.
 
 #### Scenario: Launch a generated fork and join
 
@@ -83,3 +73,8 @@ and preserve the underlying typed error causes where present.
 
 - **WHEN** the prepared target changes a declared external reference or stdin condition
 - **THEN** selection fails before reading input resources or invoking business logic
+
+#### Scenario: Reword a diagnostic reference label
+
+- **WHEN** a target's prepared references retain their IDs and types but change diagnostic labels
+- **THEN** binding accepts the unchanged reference contract without treating label wording as interface drift

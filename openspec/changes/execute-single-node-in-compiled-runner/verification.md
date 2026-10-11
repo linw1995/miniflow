@@ -22,15 +22,15 @@ All focused commands ran in the pinned `nix develop` toolchain and passed:
 - `nix develop --command prek -a` passed all repository hooks, including Clippy, Cargo check, rust-analyzer,
   Markdown/YAML checks, workflow lint, and the dependency license audit.
 - `openspec validate execute-single-node-in-compiled-runner --strict --no-interactive` passed.
-- `nix develop --command bash scripts/run-cov.sh --no-fail-fast` completed with 583 passing tests and two
+- `nix develop --command bash scripts/run-cov.sh --no-fail-fast` completed with 582 passing tests and two
   existing skipped tests. Reports are local under `target/coverage/result/`, including `lcov.info`, HTML,
-  Cobertura, and Markdown. Target execution line coverage is 86.8%; runner argument parsing is 90.5%.
-- `nix flake check -L` passed on `aarch64-darwin`. Its release CI test profile completed with 583 passing tests and two existing skipped tests on
+  Cobertura, and Markdown. Target execution line coverage is 88.5%; runner argument parsing is 90.5%.
+- `nix flake check -L` passed on `aarch64-darwin`. Its release CI test profile completed with 582 passing tests and two existing skipped tests on
   `aarch64-darwin`. Build, formatting, Clippy, and workflow checks also passed their validation phases.
 
 ## Delivery scope
 
 The implemented phase supports top-level Tasks in finite and streaming flows and complete Loop/Iteration
 operations. Producer, Event, body-local/control, and TUI selection remain follow-ups. Whole-plan factory
-preparation remains an explicit limitation. The OpenSpec change stays active; it is not archived or treated
-as universal arbitrary-node completion for Issue #125.
+preparation remains an explicit limitation. The implemented phase is ready for archival after the post-implementation review and repository checks.
+Archival closes this phase without claiming universal arbitrary-node completion for Issue #125.

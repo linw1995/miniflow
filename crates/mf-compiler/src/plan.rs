@@ -158,12 +158,12 @@ impl CompiledWorkflow {
                 let value_type = output_types.get(&reference.output).context(UnknownTargetReferenceSnafu {
                     definition_id: node.definition_id.clone(), output: &reference.output,
                 })?;
-                Ok((reference.output.clone(), mf_runtime::WorkflowInput { value_type: value_type.clone(), required: true }))
+                Ok((reference.output.clone(), value_type.clone()))
             }).collect::<Result<_, PlanError>>()?;
             Ok(mf_runtime::NodeTarget {
                 id, index, kind, inputs, outputs: mf_runtime::target_ports(&node.metadata.ports.outputs),
                 worker_limit: self.definition.execution.as_ref().and_then(|execution| std::num::NonZeroUsize::new(execution.limits.workers)),
-                references: node.metadata.context_references.clone(), context,
+                context,
                 original_workflow_id: original.workflow_id.clone(), description,
             })
         }).collect()

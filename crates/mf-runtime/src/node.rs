@@ -624,7 +624,7 @@ impl NodePorts {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
 pub struct ContextReference {
     pub output: String,
     pub label: String,

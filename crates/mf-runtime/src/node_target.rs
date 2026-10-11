@@ -1,6 +1,6 @@
 use crate::{
-    ContextReference, Flow, FlowNode, NodeMetadata, PreparedStream, TaskNode, WorkflowInput,
-    WorkflowInputSchema, output_id,
+    Flow, FlowNode, NodeMetadata, PreparedStream, TaskNode, WorkflowInput, WorkflowInputSchema,
+    output_id,
 };
 use mf_telemetry::{description::WorkflowDescription, identity::WorkflowId};
 use serde::{Deserialize, Serialize};
@@ -23,8 +23,7 @@ pub struct NodeTarget {
     pub worker_limit: Option<std::num::NonZeroUsize>,
     pub inputs: WorkflowInputSchema,
     pub outputs: BTreeMap<String, WorkflowInput>,
-    pub references: Vec<ContextReference>,
-    pub context: BTreeMap<String, WorkflowInput>,
+    pub context: BTreeMap<String, crate::ValueType>,
     pub original_workflow_id: WorkflowId,
     pub description: WorkflowDescription,
 }
@@ -121,10 +120,6 @@ impl PreparedTaskTarget<'_> {
     pub fn contract(&self) -> &NodeTarget {
         self.contract
     }
-
-    pub fn metadata(&self) -> &NodeMetadata {
-        &self.node.metadata
-    }
 }
 
 pub fn target_ports(ports: &[crate::PortSpec]) -> BTreeMap<String, WorkflowInput> {
@@ -177,7 +172,6 @@ impl NodeTarget {
                 reason: "undeclared external reference",
             })?;
             input
-                .value_type
                 .validate_shared(value)
                 .context(ContextTypeSnafu { id: &self.id, key })?;
         }
@@ -203,7 +197,7 @@ impl NodeTarget {
         Ok(target)
     }
 
-    pub fn require_task(&self) -> Result<(), NodeTargetError> {
+    fn require_task(&self) -> Result<(), NodeTargetError> {
         ensure!(
             self.kind == NodeTargetKind::Task,
             UnsupportedSnafu {
@@ -243,8 +237,15 @@ impl NodeTarget {
                 );
             }
         }
+        let references: std::collections::BTreeSet<_> = metadata
+            .context_references
+            .iter()
+            .map(|reference| reference.output.as_str())
+            .collect();
         ensure!(
-            self.references == metadata.context_references,
+            references
+                .into_iter()
+                .eq(self.context.keys().map(String::as_str)),
             drift("context references")
         );
         ensure!(
@@ -278,7 +279,7 @@ impl NodeTarget {
             .collect();
         for (key, reference) in &self.context {
             ensure!(
-                outputs.get(key) == Some(&&reference.value_type),
+                outputs.get(key) == Some(&reference),
                 DriftSnafu {
                     id: &self.id,
                     component: format!("referenced output `{key}` type"),

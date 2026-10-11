@@ -2,7 +2,7 @@
 extern crate mfn_core as _;
 
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_compiled};
-use mf_runtime::{FlowNode, Inputs, NodeMetadata, NodeTarget, NodeTargetKind, Outputs};
+use mf_runtime::{Inputs, NodeMetadata, NodeTarget, Outputs};
 use serde_json::{Value, json};
 use snafu::ResultExt;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -77,7 +77,7 @@ fn target_records_reuse_preparation_and_bind_original_contracts() {
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     assert_eq!(copy.bind_flow(&flow).unwrap().contract(), copy);
     assert_eq!(
-        NodeTarget::find(&targets, "route").unwrap().context["source.value"].value_type,
+        NodeTarget::find(&targets, "route").unwrap().context["source.value"],
         mf_runtime::ValueType::Int64
     );
 
@@ -113,6 +113,38 @@ fn target_records_reuse_preparation_and_bind_original_contracts() {
         assert!(error.to_string().contains("copy") && error.to_string().contains("drift"));
     }
 
+    let route = NodeTarget::find(&targets, "route").unwrap();
+    let mut altered_reference = route.clone();
+    altered_reference
+        .context
+        .insert("source.value".into(), mf_runtime::ValueType::String);
+    assert!(
+        altered_reference
+            .bind_flow(&flow)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("referenced output")
+    );
+    let nodes = flow
+        .nodes()
+        .iter()
+        .map(|node| {
+            let mut metadata = node.metadata.clone();
+            for reference in &mut metadata.context_references {
+                reference.label = "reworded diagnostic".into();
+            }
+            mf_runtime::TaskFlowNode {
+                definition_id: node.definition_id.clone(),
+                metadata,
+                node: Box::new(Probe),
+            }
+        })
+        .collect();
+    let reworded =
+        mf_runtime::Flow::from_plan(nodes, flow.plan().clone(), flow.input_schema().clone());
+    assert!(route.bind_flow(&reworded).is_ok());
+
     let mut unavailable = plan.clone();
     unavailable
         .definition
@@ -129,83 +161,6 @@ fn target_records_reuse_preparation_and_bind_original_contracts() {
             .contains("unavailable unrelated resource")
     );
     assert_eq!(EXECUTIONS.load(Ordering::SeqCst), 0);
-}
-
-struct Producer;
-impl mf_runtime::StreamNode for Producer {
-    fn execute(
-        &mut self,
-        _: Inputs,
-        _: &mut mf_runtime::ExecutionContext,
-        _: &mut mf_runtime::Emitter<'_>,
-    ) -> Result<(), mf_runtime::NodeExecutionError> {
-        panic!("target preparation must not start a producer")
-    }
-}
-fn producer(_: Value) -> Result<mf_runtime::PreparedNode, mf_runtime::NodeBuildError> {
-    Ok(mf_runtime::PreparedNode::from_parts(
-        mf_runtime::NodeExecution::Stream(Box::new(Producer)),
-        NodeMetadata::new(mf_runtime::NodePorts {
-            inputs: vec![],
-            outputs: vec![mf_runtime::PortSpec::new(
-                "value",
-                mf_runtime::ValueType::Int64,
-                true,
-            )],
-        }),
-    ))
-}
-inventory::submit! { mf_runtime::NodeRegistration { kind: "test.target_producer", factory: mf_runtime::NodeFactory::Plain(producer) } }
-
-#[test]
-fn stream_records_bind_tasks_and_reject_producers_without_starting_them() {
-    let definition = serde_json::from_value(json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
-        "nodes":[{"id":"source", "kind":"test.target_producer"}, {"id":"copy", "kind":"builtin.identity"}],
-        "edges":[{"from_node":"source", "from_output":"value", "to_node":"copy", "to_input":"input"}]
-    })).unwrap();
-    let registry = NodeRegistry::from_inventory().unwrap();
-    let plan = compile_definition(&definition, &registry).unwrap();
-    let nodes = mf_compiler::resolve_nodes(&plan.definition, &registry).unwrap();
-    let mut nodes: Vec<FlowNode> = nodes;
-    // Resolved output metadata is retained by the same construction used during compilation.
-    let mut inference = mf_compiler::TypeInferenceState::default();
-    inference.resolve_node(&mut nodes[0], &[]).unwrap();
-    inference
-        .resolve_node(
-            &mut nodes[1],
-            &[mf_runtime::ExecutionDependency {
-                input: Some("input"),
-                source_node: "source",
-                source_output: "value",
-            }],
-        )
-        .unwrap();
-    let targets = plan.node_targets(&nodes).unwrap();
-    let stream = mf_compiler::instantiate_stream(&plan, &registry).unwrap();
-    let target = NodeTarget::find(&targets, "copy").unwrap();
-    assert_eq!(
-        target.bind_stream(&stream).unwrap().contract().outputs["value"].value_type,
-        mf_runtime::ValueType::Int64
-    );
-    assert_eq!(targets[0].kind, NodeTargetKind::Stream);
-    let mut changed = targets[0].clone();
-    changed.kind = NodeTargetKind::Task;
-    assert!(
-        changed
-            .bind_stream(&stream)
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("executor category")
-    );
-    assert!(
-        NodeTarget::find(&targets, "source")
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("only top-level Tasks")
-    );
-    assert!(NodeTarget::find(&targets, "missing").is_err());
 }
 
 #[test]

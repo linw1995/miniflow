@@ -791,3 +791,7 @@ Body-local nodes and synthetic scope controls cannot be selected as top-level op
 A selected Task from a stream flow retains its original `execution.limits.workers` ceiling.
 Runtime options may reduce that ceiling, and finite-flow callers retain their ordinary configurable
 worker limit. The compiled target record carries the stream ceiling and rejects resource-contract drift.
+
+Isolated context contracts compare complete reference IDs and resolved types. Provider diagnostic
+labels remain available in metadata but rewording them does not cause binding drift. Every declared
+external reference remains required.

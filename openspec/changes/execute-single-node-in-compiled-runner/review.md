@@ -45,6 +45,24 @@
 - The existing generated-project test referenced the previous parser entry point. Its assertion now names
   the selector-aware shared parser while retaining alias, dependency-feature, and single-binary checks.
 
+## Post-implementation review refinements
+
+- The frozen context contract now contains each exact reference ID and its resolved type once. It no
+  longer repeats provider reference records or carries an unused required flag; every declared reference
+  remains required. Diagnostic label wording does not change the binding contract.
+- Removed the unused prepared-target metadata getter and kept the task-capability check local to its
+  owning module. Existing shared public planning and execution APIs retain their module boundaries.
+- Removed a duplicate stream preparation fixture and its manual inference setup. Its distinct capability
+  and lookup checks remain in the stream execution regression. Programmatic context rejection, reference
+  type drift, and preexisting stdin isolation now have stronger behavioral assertions.
+- Positive simplification experiments and guard-removal counterexamples were executed with the pinned
+  toolchain. Detailed evidence remains local under Git-ignored `target/ablation/issue125/`.
+- Rechecked Snafu typed source chains, visibility, commit style, report locations, and pinned validation
+  commands against AGENTS.md. No remote repository action or new dependency was introduced.
+- Delta requirement descriptions were made concise while retaining all scenarios and behavior. Baseline
+  main-spec length warnings were recorded before synchronization to distinguish existing findings from
+  new specification regressions.
+
 ## Retained delivery limits
 
 Whole-plan factory initialization remains part of selection and can fail in an unrelated provider.

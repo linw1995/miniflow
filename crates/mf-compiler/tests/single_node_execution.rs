@@ -142,6 +142,22 @@ fn streaming_selection_invokes_no_source_or_neighbor() {
     let plan = plan(chain(true), &registry);
     let records = targets(&plan, &registry);
     let stream = mf_compiler::instantiate_stream(&plan, &registry).unwrap();
+    assert!(NodeTarget::find(&records, "before").is_err());
+    assert!(NodeTarget::find(&records, "missing").is_err());
+    let mut producer = records
+        .iter()
+        .find(|record| record.id == "before")
+        .unwrap()
+        .clone();
+    producer.kind = mf_runtime::NodeTargetKind::Task;
+    assert!(
+        producer
+            .bind_stream(&stream)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("executor category")
+    );
     let target = NodeTarget::find(&records, "target")
         .unwrap()
         .bind_stream(&stream)
@@ -190,15 +206,16 @@ fn routers_read_only_explicit_context_and_omit_skipped_outputs() {
             expected
         );
     }
-    assert!(
-        FlowRuntime::default()
-            .execute_target(
+    for context in [json!({}), json!({"source.value":"invalid"})] {
+        assert!(matches!(
+            FlowRuntime::default().execute_target(
                 &target,
                 WorkflowArguments::default(),
-                WorkflowArguments::default()
-            )
-            .is_err()
-    );
+                args(context)
+            ),
+            Err(mf_runtime::WorkflowRunError::NodeTarget { .. })
+        ));
+    }
 }
 
 #[test]
@@ -420,6 +437,20 @@ fn selected_resource_validation_uses_only_target_requirements() {
                 .unwrap()
         ),
         json!({"value":"stdin value"})
+    );
+    state.set_stdin(mf_runtime::TextInput::new(tempfile::tempfile().unwrap()));
+    assert_eq!(
+        json!(
+            runtime
+                .execute_target_in_context(
+                    &target,
+                    &mut state,
+                    args(json!({"read.text":"override"})),
+                    WorkflowArguments::default()
+                )
+                .unwrap()
+        ),
+        json!({"value":"override"})
     );
 }
 

@@ -5,7 +5,7 @@ use std::ffi::OsString;
 fn target() -> NodeTarget {
     let id = mf_telemetry::identity::WorkflowId::from_definition(&json!({}), &[]).unwrap();
     serde_json::from_value(json!({
-        "id":"copy.part", "index":0, "kind":"Task", "outputs":{}, "references":[], "context":{},
+        "id":"copy.part", "index":0, "kind":"Task", "outputs":{}, "context":{},
         "original_workflow_id":id,
         "description":{"version":"2026-09-29", "workflow_id":id, "nodes":[{"id":"copy.part", "kind":"test.task"}], "data_edges":[], "control_edges":[], "execution_order":["copy.part"]},
         "inputs":{"inputs":{"copy.part":{
@@ -129,13 +129,9 @@ fn rejects_invalid_targets_inputs_and_context_controls() {
 fn validates_context_values_and_preserves_typed_error_sources() {
     use std::error::Error;
     let mut target = target();
-    target.context.insert(
-        "source.part.value".into(),
-        mf_runtime::WorkflowInput {
-            value_type: mf_runtime::ValueType::Int64,
-            required: true,
-        },
-    );
+    target
+        .context
+        .insert("source.part.value".into(), mf_runtime::ValueType::Int64);
     let base = ["--node", "copy.part", "--copy.part.text=x"];
     for context in [
         "{}",
@@ -145,8 +141,7 @@ fn validates_context_values_and_preserves_typed_error_sources() {
         "{\"source.part.value\":1,\"source.part.value\":2}",
     ] {
         let args = [base.as_slice(), &["--context", context]].concat();
-        let error = parse(&args, &target).unwrap_err();
-        assert!(!error.to_string().is_empty());
+        assert!(parse(&args, &target).is_err(), "{context}");
     }
     let value = parse(
         &[
@@ -261,13 +256,9 @@ fn context_files_are_bounded_regular_and_read_once() {
 #[test]
 fn combined_canonical_payload_has_a_checked_boundary() {
     let mut target = target();
-    target.context.insert(
-        "source.value".into(),
-        mf_runtime::WorkflowInput {
-            value_type: mf_runtime::ValueType::String,
-            required: true,
-        },
-    );
+    target
+        .context
+        .insert("source.value".into(), mf_runtime::ValueType::String);
     let empty_size =
         serde_json::to_vec(&json!({"inputs":{"copy.part.text":""}, "context":{"source.value":""}}))
             .unwrap()

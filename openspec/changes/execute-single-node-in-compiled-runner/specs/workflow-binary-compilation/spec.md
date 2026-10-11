@@ -4,12 +4,7 @@
 
 ### Requirement: Generate standard runner entry points on demand
 
-Standard task and streaming runners SHALL generate only preparation and execution entry points actually
-used by their supported whole-flow and isolated Task dispatch paths. Streaming runners MUST NOT generate
-unused whole-flow task convenience helpers solely to support isolated Task selection. The general-purpose
-generator SHALL retain its existing convenience entry points. Both paths MUST share validation and
-execution semantics. Compilation MUST preserve Cargo diagnostics without suppressing unused-function
-warnings.
+Standard runners SHALL generate only preparation and execution entry points used by whole-flow and isolated Task dispatch. Streaming runners MUST NOT add unused whole-flow task helpers for selection. The general-purpose generator SHALL retain existing convenience entry points. All paths SHALL share validation and execution semantics. Compilation MUST retain Cargo diagnostics without suppressing unused-function warnings.
 
 #### Scenario: Compile documented task workflows
 
