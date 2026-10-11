@@ -18,7 +18,12 @@ Layout is already created once for the root and each Loop body. Observation admi
 
 Retain the existing Sugiyama topology input, including deduplication of parallel node pairs only for node placement. Keep observation indices tied to execution order. Derive stable edge keys from source/destination IDs, source output, target input, and kind; use them for routing order and tie-breaking without reordering observation records.
 
-Allocate a separate attachment row per incident edge, including edges from the same output. Sort attachments by the opposite endpoint's layer and sibling position, with stable keys for ties. Increase node height to cover the larger input/output attachment count while keeping title and detail space. Use actual node heights when stacking and centering layers; remove fixed-height assumptions from projection and node rendering.
+Allocate a separate attachment row per incident edge, including edges from the same output. Sort attachments by the
+opposite endpoint's layer and sibling position, with stable keys for ties. Increase node height to cover the larger
+input/output attachment count while keeping title and detail space. Use six-row attachment spacing with output/input
+offsets of one/four and quantize per-component vertical placement to that spacing, so unrelated horizontal access runs
+cannot occupy the same row. Use actual node heights when stacking and centering layers; remove fixed-height assumptions
+from projection and node rendering.
 
 Represent long-edge passage through intermediate layers using routing-only waypoints and reserved slots. These are not workflow nodes and never acquire observation state. Allocate their space before routing so long edges do not cross node boxes. Recompute horizontal positions after channel capacities are known, then freeze geometry for the scope.
 
@@ -26,7 +31,12 @@ Alternative: enlarging boxes after placement preserves existing coordinates but 
 
 ### 2. Use channel routing and ordering as the primary algorithm
 
-Model each layer gap as a channel. Collect vertical segment intervals and allocate integer-column tracks with a sorted sweep. Overlapping closed intervals cannot share a track; include corner and marker clearance in interval conflicts. Track order also considers source/target attachment ordering to avoid unnecessary crossings. Unconstrained interval reuse alone is insufficient because horizontal access segments can still cross neighboring tracks.
+Model each layer gap as a channel. Collect vertical segment intervals and allocate integer-column tracks with a sorted
+sweep. Overlapping closed intervals cannot share a track; include corner and marker clearance in interval conflicts.
+Track order considers source/target attachment ordering and route direction to avoid unnecessary crossings. Tracks are
+reused between disjoint interval regions; within each connected conflict region, ordered tracks avoid the bend-adjacent
+crossings caused by unconstrained interval coloring. Unconstrained interval reuse alone is insufficient because
+horizontal access segments can still cross neighboring tracks.
 
 Preserve each pair's relative order through shared route regions before separating them. Treat nudging as integer track assignment with obstacle boundaries and minimum separation constraints, not independent rounding of continuous coordinates. Solve horizontal and vertical separation with a final geometric validation pass, since changing one direction can affect the other. Expand channels or reserved passage rows when constraints cannot fit.
 

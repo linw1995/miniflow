@@ -6,10 +6,10 @@
 
 ## 2. Allocate attachments and routing channels
 
-- [ ] 2.1 Replace modulo-four attachments with deterministic distinct rows and routing-aware node heights; verify more than four incoming/outgoing edges, mixed edge kinds, node disjointness, and title/detail rendering in dynamically sized boxes.
-- [ ] 2.2 Preserve layer/sibling ordering while reserving intermediate passage slots for long edges and updating canvas bounds; verify skipped layers, isolated components, empty graphs, and root/Loop layouts without treating waypoints as observed nodes.
-- [ ] 2.3 Implement interval track allocation, shared-region ordering, integer separation, and channel expansion; verify overlapping/disjoint intervals, horizontal access conflicts, and constrained port orders without collinear overlap or spurious junctions.
-- [ ] 2.4 Reserve control labels, arrowheads, and crossing footprints using terminal display widths; verify opaque names, wide characters, truncation, corner proximity, neighboring markers, and bounds after expansion.
+- [x] 2.1 Replace modulo-four attachments with deterministic distinct rows and routing-aware node heights; verify more than four incoming/outgoing edges, mixed edge kinds, node disjointness, and title/detail rendering in dynamically sized boxes.
+- [x] 2.2 Preserve layer/sibling ordering while reserving intermediate passage slots for long edges and updating canvas bounds; verify skipped layers, isolated components, empty graphs, and root/Loop layouts without treating waypoints as observed nodes.
+- [x] 2.3 Implement interval track allocation, shared-region ordering, integer separation, and channel expansion; verify overlapping/disjoint intervals, horizontal access conflicts, and constrained port orders without collinear overlap or spurious junctions.
+- [x] 2.4 Reserve control labels, arrowheads, and crossing footprints using terminal display widths; verify opaque names, wide characters, truncation, corner proximity, neighboring markers, and bounds after expansion.
 
 ## 3. Route exceptions within explicit budgets
 

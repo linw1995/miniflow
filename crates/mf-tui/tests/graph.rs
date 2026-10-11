@@ -412,3 +412,167 @@ fn stored_routes_preserve_connection_and_observation_identity() {
         graph.execution_order.iter().collect::<Vec<_>>()
     );
 }
+
+fn fan_graph(count: usize) -> WorkflowDescription {
+    let mut graph = description();
+    let names: Vec<_> = std::iter::once("source".to_owned())
+        .chain((0..count).map(|index| format!("sink-{index:04}")))
+        .collect();
+    graph.nodes = names
+        .iter()
+        .map(|id| NodeDescription {
+            id: id.clone(),
+            kind: "fixture.node".into(),
+        })
+        .collect();
+    graph.execution_order = names;
+    graph.control_edges.clear();
+    graph.data_edges = (0..count)
+        .map(|index| DataEdge {
+            from_node: "source".into(),
+            from_output: "value".into(),
+            to_node: format!("sink-{index:04}"),
+            to_input: "input".into(),
+        })
+        .collect();
+    graph
+}
+
+fn assert_completed_geometry_is_safe(layout: &GraphLayout) {
+    use mf_tui::graph::routing::Intersection;
+    for (index, route) in layout.routes().iter().enumerate() {
+        if route.unresolved.is_some() {
+            assert!(route.points.is_empty());
+            continue;
+        }
+        for segment in route.segments() {
+            for node in layout.nodes() {
+                assert!(
+                    !segment.intersects_rect(node.rect),
+                    "edge {index} intersects {}",
+                    node.id
+                );
+            }
+            for (other_index, other) in layout.routes().iter().enumerate().skip(index + 1) {
+                for other_segment in other.segments() {
+                    match segment.intersection(other_segment) {
+                        None => {}
+                        Some(Intersection::Crossing(point)) => {
+                            assert!(layout.crossings().iter().any(|crossing| crossing.point
+                                == point
+                                && [crossing.horizontal, crossing.vertical].contains(&index)
+                                && [crossing.horizontal, crossing.vertical].contains(&other_index)))
+                        }
+                        collision => panic!("edges {index}/{other_index} collide: {collision:?}"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn crowded_attachments_expand_nodes_and_channels_without_reusing_rows() {
+    let graph = fan_graph(9);
+    let layout = GraphLayout::new(&graph).unwrap();
+    let rows: std::collections::BTreeSet<_> =
+        layout.edges().iter().map(|edge| edge.from_row).collect();
+    assert_eq!(rows.len(), 9);
+    assert!(layout.nodes()[0].rect.height > 6);
+    assert!(
+        layout.nodes()[1].rect.x - (layout.nodes()[0].rect.x + layout.nodes()[0].rect.width) > 10
+    );
+    assert_completed_geometry_is_safe(&layout);
+    assert!(
+        layout
+            .routes()
+            .iter()
+            .all(|route| route.unresolved.is_none())
+    );
+}
+
+#[test]
+fn long_edges_use_passages_and_keep_isolated_components_disjoint() {
+    let mut graph = fan_graph(3);
+    graph.data_edges.push(DataEdge {
+        from_node: "sink-0000".into(),
+        from_output: "value".into(),
+        to_node: "sink-0001".into(),
+        to_input: "extra".into(),
+    });
+    graph.data_edges.push(DataEdge {
+        from_node: "sink-0001".into(),
+        from_output: "value".into(),
+        to_node: "sink-0002".into(),
+        to_input: "extra".into(),
+    });
+    graph.nodes.push(NodeDescription {
+        id: "orphan".into(),
+        kind: "fixture.orphan".into(),
+    });
+    graph.execution_order.push("orphan".into());
+    let layout = GraphLayout::new(&graph).unwrap();
+    assert_completed_geometry_is_safe(&layout);
+    for route in layout.routes() {
+        for point in &route.points {
+            assert!(point.x < layout.size().0 && point.y < layout.size().1);
+        }
+    }
+    assert!(layout.routes().iter().any(|route| route.points.len() > 4));
+}
+
+#[test]
+fn control_labels_are_sanitized_truncated_and_reserved_in_cell_units() {
+    let mut graph = fan_graph(1);
+    graph.control_edges.push(ControlEdge {
+        from_node: "source".into(),
+        from_output: "wide-🦀-combining-e\u{301}-tail\nextra".into(),
+        to_node: "sink-0000".into(),
+    });
+    let layout = GraphLayout::new(&graph).unwrap();
+    let label = layout
+        .routes()
+        .iter()
+        .find_map(|route| route.label.as_ref())
+        .unwrap();
+    assert!(!label.text.contains('\n'));
+    assert!(label.rect.width <= 12);
+    assert_eq!(
+        label.rect.width as usize,
+        ratatui::text::Span::raw(&label.text).width()
+    );
+    assert_completed_geometry_is_safe(&layout);
+}
+
+#[test]
+fn crowded_inputs_have_distinct_rows_and_disjoint_boxes() {
+    let mut graph = fan_graph(9);
+    graph.execution_order.rotate_left(1);
+    graph.data_edges = (0..9)
+        .map(|index| DataEdge {
+            from_node: format!("sink-{index:04}"),
+            from_output: "value".into(),
+            to_node: "source".into(),
+            to_input: format!("input-{index}"),
+        })
+        .collect();
+    let layout = GraphLayout::new(&graph).unwrap();
+    let rows: std::collections::BTreeSet<_> =
+        layout.edges().iter().map(|edge| edge.to_row).collect();
+    assert_eq!(rows.len(), 9);
+    assert!(layout.nodes().last().unwrap().rect.height > 6);
+    for (index, node) in layout.nodes().iter().enumerate() {
+        for other in layout.nodes().iter().skip(index + 1) {
+            assert!(!mf_tui::graph::routing::rects_intersect(
+                node.rect, other.rect
+            ));
+        }
+    }
+    assert_completed_geometry_is_safe(&layout);
+    assert!(
+        layout
+            .routes()
+            .iter()
+            .all(|route| route.unresolved.is_none())
+    );
+}

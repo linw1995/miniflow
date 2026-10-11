@@ -2,7 +2,7 @@
 
 pub mod routing;
 
-use routing::{Crossing, EdgeKey, EdgeRoute, Point};
+use routing::{Crossing, EdgeKey, EdgeRoute};
 
 use crate::{
     duration::format_duration_ns,
@@ -28,7 +28,7 @@ use std::{
 const NODE_WIDTH: u32 = 24;
 const NODE_HEIGHT: u32 = 6;
 const COLUMN_GAP: u32 = 10;
-const ROW_GAP: u32 = 2;
+const ROW_GAP: u32 = routing::ATTACHMENT_SPACING;
 const COMPONENT_GAP: u32 = 3;
 const MARGIN: u32 = 2;
 
@@ -183,17 +183,24 @@ impl GraphLayout {
                 to_row: 0,
             });
         }
-        let mut outgoing = vec![0u32; nodes.len()];
-        let mut incoming = vec![0u32; nodes.len()];
-        for edge in &mut edges {
-            edge.from_row = 1 + outgoing[edge.from] % (NODE_HEIGHT - 2);
-            edge.to_row = 1 + incoming[edge.to] % (NODE_HEIGHT - 2);
-            outgoing[edge.from] += 1;
-            incoming[edge.to] += 1;
+        let mut outgoing = vec![Vec::new(); nodes.len()];
+        let mut incoming = vec![Vec::new(); nodes.len()];
+        for (index, edge) in edges.iter().enumerate() {
+            outgoing[edge.from].push(index);
+            incoming[edge.to].push(index);
+        }
+        for (index, node) in nodes.iter_mut().enumerate() {
+            let count = outgoing[index].len().max(incoming[index].len()) as u32;
+            node.rect.height = NODE_HEIGHT.max(count * routing::ATTACHMENT_SPACING);
         }
 
         let vertices: Vec<_> = (0..nodes.len())
-            .map(|index| (index as u32, (NODE_HEIGHT as f64, NODE_WIDTH as f64)))
+            .map(|index| {
+                (
+                    index as u32,
+                    (nodes[index].rect.height as f64, NODE_WIDTH as f64),
+                )
+            })
             .collect();
         let topology: Vec<_> = topology.into_iter().collect();
         let mut components = from_vertices_and_edges(
@@ -202,6 +209,7 @@ impl GraphLayout {
             &Config {
                 vertex_spacing: 2.0,
                 transpose: false,
+                dummy_vertices: false,
                 ..Config::default()
             },
         );
@@ -214,8 +222,9 @@ impl GraphLayout {
         });
 
         let mut placed = vec![false; nodes.len()];
+        let mut node_components = vec![0; nodes.len()];
+        let mut component_bottoms = Vec::new();
         let mut component_top = MARGIN;
-        let mut right = MARGIN;
         for (vertices, _, _) in components {
             let mut vertices = vertices;
             vertices.sort_by(|left, right| {
@@ -237,58 +246,83 @@ impl GraphLayout {
                     .expect("layer was added")
                     .push((id, sibling));
             }
-            let rows = layers.iter().map(Vec::len).max().unwrap_or(0) as u32;
+            let component_height = layers
+                .iter()
+                .map(|layer| {
+                    layer
+                        .iter()
+                        .map(|(id, _)| nodes[*id].rect.height + ROW_GAP)
+                        .sum::<u32>()
+                })
+                .max()
+                .unwrap_or(0);
             for (column, layer) in layers.iter_mut().enumerate() {
                 layer.sort_by(|left, right| {
                     left.1
                         .total_cmp(&right.1)
                         .then_with(|| left.0.cmp(&right.0))
                 });
-                let centering = (rows - layer.len() as u32) * (NODE_HEIGHT + ROW_GAP) / 2;
-                for (row, (id, _)) in layer.iter().enumerate() {
+                let layer_height = layer
+                    .iter()
+                    .map(|(id, _)| nodes[*id].rect.height + ROW_GAP)
+                    .sum::<u32>();
+                let centering = (component_height - layer_height)
+                    / (2 * routing::ATTACHMENT_SPACING)
+                    * routing::ATTACHMENT_SPACING;
+                let mut row_y = component_top + centering;
+                for (id, _) in layer.iter() {
                     if let Some(node) = nodes.get_mut(*id) {
                         node.rect.x = MARGIN + column as u32 * (NODE_WIDTH + COLUMN_GAP);
-                        node.rect.y =
-                            component_top + centering + row as u32 * (NODE_HEIGHT + ROW_GAP);
-                        right = right.max(node.rect.x + NODE_WIDTH);
+                        node.rect.y = row_y;
+                        row_y += node.rect.height + ROW_GAP;
+                        node_components[*id] = component_bottoms.len();
                         placed[*id] = true;
                     }
                 }
             }
-            component_top += rows * (NODE_HEIGHT + ROW_GAP) + COMPONENT_GAP;
+            component_bottoms.push(component_top + component_height);
+            component_top += component_height + COMPONENT_GAP;
         }
         for (index, node) in nodes.iter_mut().enumerate() {
             if !placed[index] {
                 node.rect.x = MARGIN;
                 node.rect.y = component_top;
-                component_top += NODE_HEIGHT + ROW_GAP;
-                right = right.max(node.rect.x + NODE_WIDTH);
+                node_components[index] = component_bottoms.len();
+                component_bottoms.push(component_top + node.rect.height + ROW_GAP);
+                component_top += node.rect.height + ROW_GAP;
             }
         }
+        for (index, attachments) in outgoing.iter_mut().enumerate() {
+            attachments.sort_by_key(|&edge| (nodes[edges[edge].to].rect.y, &edges[edge].key));
+            for (row, &edge) in attachments.iter().enumerate() {
+                edges[edge].from_row = 1 + row as u32 * routing::ATTACHMENT_SPACING;
+            }
+            incoming[index].sort_by_key(|&edge| (nodes[edges[edge].from].rect.y, &edges[edge].key));
+            for (row, &edge) in incoming[index].iter().enumerate() {
+                edges[edge].to_row = 4 + row as u32 * routing::ATTACHMENT_SPACING;
+            }
+        }
+        let mut routes =
+            routing::channel_routes(&mut nodes, &edges, &node_components, &mut component_bottoms);
+        let crossings = routing::validate_routes(&nodes, &edges, &mut routes);
+        let right = nodes
+            .iter()
+            .map(|node| node.rect.x + node.rect.width)
+            .max()
+            .unwrap_or(MARGIN);
         let height = nodes
             .iter()
-            .map(|node| node.rect.y + NODE_HEIGHT + MARGIN)
+            .map(|node| node.rect.y + node.rect.height + MARGIN)
+            .chain(
+                routes
+                    .iter()
+                    .flat_map(|route| route.points.iter().map(|point| point.y + MARGIN)),
+            )
             .max()
             .unwrap_or(MARGIN * 2);
-        let routes = edges
-            .iter()
-            .map(|edge| {
-                let source = nodes[edge.from].rect;
-                let target = nodes[edge.to].rect;
-                let from = Point::new(source.x + source.width, source.y + edge.from_row);
-                let to = Point::new(target.x.saturating_sub(1), target.y + edge.to_row);
-                let middle = from.x + to.x.saturating_sub(from.x) / 2;
-                EdgeRoute::from_points([
-                    from,
-                    Point::new(middle, from.y),
-                    Point::new(middle, to.y),
-                    to,
-                ])
-            })
-            .collect();
         Ok(Self {
             routes,
-            crossings: Vec::new(),
+            crossings,
             nodes,
             edges,
             width: right + MARGIN,
