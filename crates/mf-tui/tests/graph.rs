@@ -385,3 +385,515 @@ fn known_sequence_gap_marks_last_seen_running_state_as_uncertain() {
         .render(closed.area, &mut closed);
     assert!(buffer_text(&closed).contains("last running"));
 }
+
+#[test]
+fn stored_routes_preserve_connection_and_observation_identity() {
+    let graph = description();
+    let layout = GraphLayout::new(&graph).unwrap();
+    assert_eq!(layout.routes().len(), layout.edges().len());
+    for (edge, route) in layout.edges().iter().zip(layout.routes()) {
+        assert_eq!(edge.key.source, layout.nodes()[edge.from].id);
+        assert_eq!(edge.key.destination, layout.nodes()[edge.to].id);
+        assert_eq!(edge.key.output, edge.from_output);
+        assert_eq!(edge.key.input, edge.to_input);
+        let source = layout.nodes()[edge.from].rect;
+        let target = layout.nodes()[edge.to].rect;
+        assert_eq!(route.points.first().unwrap().x, source.x + source.width);
+        assert_eq!(route.points.last().unwrap().x, target.x - 1);
+        assert!(route.segments().all(|segment| segment.start.x == segment.end.x || segment.start.y == segment.end.y));
+    }
+    assert!(layout.crossings().is_empty());
+    assert_eq!(
+        layout
+            .nodes()
+            .iter()
+            .map(|node| &node.id)
+            .collect::<Vec<_>>(),
+        graph.execution_order.iter().collect::<Vec<_>>()
+    );
+}
+
+fn fan_graph(count: usize) -> WorkflowDescription {
+    let mut graph = description();
+    let names: Vec<_> = std::iter::once("source".to_owned())
+        .chain((0..count).map(|index| format!("sink-{index:04}")))
+        .collect();
+    graph.nodes = names
+        .iter()
+        .map(|id| NodeDescription {
+            id: id.clone(),
+            kind: "fixture.node".into(),
+        })
+        .collect();
+    graph.execution_order = names;
+    graph.control_edges.clear();
+    graph.data_edges = (0..count)
+        .map(|index| DataEdge {
+            from_node: "source".into(),
+            from_output: "value".into(),
+            to_node: format!("sink-{index:04}"),
+            to_input: "input".into(),
+        })
+        .collect();
+    graph
+}
+
+fn assert_completed_geometry_is_safe(layout: &GraphLayout) {
+    use mf_tui::graph::routing::Intersection;
+    for (index, route) in layout.routes().iter().enumerate() {
+        if route.unresolved.is_some() {
+            assert!(route.points.is_empty());
+            continue;
+        }
+        for segment in route.segments() {
+            for node in layout.nodes() {
+                assert!(
+                    !segment.intersects_rect(node.rect),
+                    "edge {index} intersects {}",
+                    node.id
+                );
+            }
+            for (other_index, other) in layout.routes().iter().enumerate().skip(index + 1) {
+                for other_segment in other.segments() {
+                    match segment.intersection(other_segment) {
+                        None => {}
+                        Some(Intersection::Crossing(point)) => {
+                            assert!(layout.crossings().iter().any(|crossing| crossing.point
+                                == point
+                                && [crossing.horizontal, crossing.vertical].contains(&index)
+                                && [crossing.horizontal, crossing.vertical].contains(&other_index)))
+                        }
+                        collision => panic!("edges {index}/{other_index} collide: {collision:?}"),
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn crowded_attachments_expand_nodes_and_channels_without_reusing_rows() {
+    let graph = fan_graph(9);
+    let layout = GraphLayout::new(&graph).unwrap();
+    let rows: std::collections::BTreeSet<_> =
+        layout.edges().iter().map(|edge| edge.from_row).collect();
+    assert_eq!(rows.len(), 9);
+    assert!(layout.nodes()[0].rect.height > 6);
+    assert!(
+        layout.nodes()[1].rect.x - (layout.nodes()[0].rect.x + layout.nodes()[0].rect.width) > 10
+    );
+    assert_completed_geometry_is_safe(&layout);
+    assert!(
+        layout
+            .routes()
+            .iter()
+            .all(|route| route.unresolved.is_none())
+    );
+}
+
+#[test]
+fn long_edges_use_passages_and_keep_isolated_components_disjoint() {
+    let mut graph = fan_graph(3);
+    graph.data_edges.push(DataEdge {
+        from_node: "sink-0000".into(),
+        from_output: "value".into(),
+        to_node: "sink-0001".into(),
+        to_input: "extra".into(),
+    });
+    graph.data_edges.push(DataEdge {
+        from_node: "sink-0001".into(),
+        from_output: "value".into(),
+        to_node: "sink-0002".into(),
+        to_input: "extra".into(),
+    });
+    graph.nodes.push(NodeDescription {
+        id: "orphan".into(),
+        kind: "fixture.orphan".into(),
+    });
+    graph.execution_order.push("orphan".into());
+    let layout = GraphLayout::new(&graph).unwrap();
+    assert_completed_geometry_is_safe(&layout);
+    for route in layout.routes() {
+        for point in &route.points {
+            assert!(point.x < layout.size().0 && point.y < layout.size().1);
+        }
+    }
+    assert!(layout.routes().iter().any(|route| route.points.len() > 4));
+}
+
+#[test]
+fn control_labels_are_sanitized_truncated_and_reserved_in_cell_units() {
+    let mut graph = fan_graph(1);
+    graph.control_edges.push(ControlEdge {
+        from_node: "source".into(),
+        from_output: "wide-🦀-combining-e\u{301}-tail\nextra".into(),
+        to_node: "sink-0000".into(),
+    });
+    let layout = GraphLayout::new(&graph).unwrap();
+    let label = layout
+        .routes()
+        .iter()
+        .find_map(|route| route.label.as_ref())
+        .unwrap();
+    assert!(!label.text.contains('\n'));
+    assert!(label.rect.width <= 12);
+    assert_eq!(
+        label.rect.width as usize,
+        ratatui::text::Span::raw(&label.text).width()
+    );
+    assert_completed_geometry_is_safe(&layout);
+}
+
+#[test]
+fn crowded_inputs_have_distinct_rows_and_disjoint_boxes() {
+    let mut graph = fan_graph(9);
+    graph.execution_order.rotate_left(1);
+    graph.data_edges = (0..9)
+        .map(|index| DataEdge {
+            from_node: format!("sink-{index:04}"),
+            from_output: "value".into(),
+            to_node: "source".into(),
+            to_input: format!("input-{index}"),
+        })
+        .collect();
+    let layout = GraphLayout::new(&graph).unwrap();
+    let rows: std::collections::BTreeSet<_> =
+        layout.edges().iter().map(|edge| edge.to_row).collect();
+    assert_eq!(rows.len(), 9);
+    assert!(layout.nodes().last().unwrap().rect.height > 6);
+    for (index, node) in layout.nodes().iter().enumerate() {
+        for other in layout.nodes().iter().skip(index + 1) {
+            assert!(!mf_tui::graph::routing::rects_intersect(
+                node.rect, other.rect
+            ));
+        }
+    }
+    assert_completed_geometry_is_safe(&layout);
+    assert!(
+        layout
+            .routes()
+            .iter()
+            .all(|route| route.unresolved.is_none())
+    );
+}
+
+#[test]
+fn routing_budgets_retain_all_connections_without_unsafe_paths() {
+    use mf_tui::graph::routing::{RoutingLimits, UnresolvedReason};
+    let graph = fan_graph(9);
+    for (limits, reason) in [
+        (
+            RoutingLimits {
+                max_geometry_items: 0,
+                ..RoutingLimits::default()
+            },
+            UnresolvedReason::GeometryLimit,
+        ),
+        (
+            RoutingLimits {
+                max_conflict_checks: 0,
+                ..RoutingLimits::default()
+            },
+            UnresolvedReason::ConflictLimit,
+        ),
+        (
+            RoutingLimits {
+                max_extent: 0,
+                ..RoutingLimits::default()
+            },
+            UnresolvedReason::GeometryLimit,
+        ),
+    ] {
+        let layout = GraphLayout::with_routing_limits(&graph, limits).unwrap();
+        assert_eq!(layout.edges().len(), graph.data_edges.len());
+        assert!(
+            layout
+                .routes()
+                .iter()
+                .all(|route| route.points.is_empty() && route.unresolved == Some(reason))
+        );
+        assert!(layout.routing_stats().conflict_checks <= limits.max_conflict_checks);
+        assert!(layout.routing_stats().geometry_items <= limits.max_geometry_items);
+        assert_completed_geometry_is_safe(&layout);
+    }
+}
+
+#[test]
+fn sparse_ten_thousand_node_chain_uses_linear_conflict_work() {
+    let mut graph = fan_graph(9_999);
+    graph.data_edges = (1..graph.execution_order.len())
+        .map(|index| DataEdge {
+            from_node: graph.execution_order[index - 1].clone(),
+            from_output: "value".into(),
+            to_node: graph.execution_order[index].clone(),
+            to_input: "input".into(),
+        })
+        .collect();
+    let layout = GraphLayout::new(&graph).unwrap();
+    assert_eq!(layout.nodes().len(), 10_000);
+    assert!(
+        layout
+            .routes()
+            .iter()
+            .all(|route| route.unresolved.is_none())
+    );
+    assert!(layout.routing_stats().conflict_checks < 10 * layout.edges().len());
+    assert_eq!(layout.routing_stats().search_expansions, 0);
+}
+
+#[test]
+fn local_rerouting_never_replaces_a_better_valid_arrangement() {
+    use mf_tui::graph::routing::RoutingLimits;
+    let mut graph = fan_graph(8);
+    graph.data_edges.clear();
+    for from in 0..6 {
+        let first = if from < 3 { 3 } else { 6 };
+        for to in first..9 {
+            graph.data_edges.push(DataEdge {
+                from_node: graph.execution_order[from].clone(),
+                from_output: "value".into(),
+                to_node: graph.execution_order[to].clone(),
+                to_input: format!("input-{from}"),
+            });
+        }
+    }
+    let limits = RoutingLimits {
+        max_crossings: 10,
+        max_search_vertices: 0,
+        ..RoutingLimits::default()
+    };
+    let initial = GraphLayout::with_routing_limits(
+        &graph,
+        RoutingLimits {
+            retry_rounds: 0,
+            ..limits
+        },
+    )
+    .unwrap();
+    let improved = GraphLayout::with_routing_limits(&graph, limits).unwrap();
+    assert!(
+        improved
+            .routes()
+            .iter()
+            .filter(|route| route.unresolved.is_some())
+            .count()
+            <= initial
+                .routes()
+                .iter()
+                .filter(|route| route.unresolved.is_some())
+                .count()
+    );
+    assert!(improved.routing_stats().retry_rounds > 0);
+    assert!(improved.routing_stats().retry_rounds <= limits.retry_rounds);
+    assert_completed_geometry_is_safe(&improved);
+}
+
+#[test]
+fn clipped_tall_nodes_and_wide_labels_match_the_full_canvas() {
+    let mut graph = fan_graph(9);
+    graph.control_edges.push(ControlEdge {
+        from_node: "source".into(),
+        from_output: "wide-🦀-e\u{301}".into(),
+        to_node: "sink-0000".into(),
+    });
+    let layout = GraphLayout::new(&graph).unwrap();
+    let mut full = Buffer::empty(Rect::new(
+        0,
+        0,
+        layout.size().0 as u16,
+        layout.size().1 as u16,
+    ));
+    GraphView::new(&layout).render(full.area, &mut full);
+    let source = layout.nodes()[0].rect;
+    let label = layout
+        .routes()
+        .iter()
+        .find_map(|route| route.label.as_ref())
+        .unwrap();
+    for offset in [
+        (source.x + 2, source.y),
+        (source.x + 1, source.y + 1),
+        (label.rect.x + 5, label.rect.y),
+        (label.rect.x + 6, label.rect.y),
+        (source.x + 20, source.y + source.height - 2),
+    ] {
+        let mut clipped = Buffer::empty(Rect::new(5, 3, 8, 4));
+        GraphView::new(&layout)
+            .offset(offset.0, offset.1)
+            .render(clipped.area, &mut clipped);
+        for y in 0..4 {
+            for x in 0..8 {
+                let expected = full.cell(Position::new(offset.0 as u16 + x, offset.1 as u16 + y));
+                if let Some(expected) = expected {
+                    assert_eq!(clipped.cell(Position::new(5 + x, 3 + y)).unwrap(), expected);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn unresolved_connections_keep_inspectable_kind_ports_and_reason() {
+    use mf_tui::graph::routing::RoutingLimits;
+    let mut graph = fan_graph(1);
+    graph.control_edges.push(ControlEdge {
+        from_node: "source".into(),
+        from_output: "gate".into(),
+        to_node: "sink-0000".into(),
+    });
+    let layout = GraphLayout::with_routing_limits(
+        &graph,
+        RoutingLimits {
+            max_conflict_checks: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(layout.unresolved_count(), 2);
+    let details = layout.routing_details(0);
+    assert!(details.contains("Data: source.value -> sink-0000.input"));
+    assert!(details.contains("Control: source.gate -> sink-0000"));
+    assert!(details.contains("routing conflict budget exhausted"));
+    assert_eq!(details, layout.routing_details(1));
+}
+
+fn crowded_graph() -> WorkflowDescription {
+    let mut graph = fan_graph(5);
+    graph.data_edges.clear();
+    for from in 0..4 {
+        for to in if from < 2 { 2..6 } else { 4..6 } {
+            graph.data_edges.push(DataEdge {
+                from_node: graph.execution_order[from].clone(),
+                from_output: "value".into(),
+                to_node: graph.execution_order[to].clone(),
+                to_input: format!("input-{from}"),
+            });
+        }
+    }
+    for from in 0..2 {
+        for to in 4..6 {
+            graph.control_edges.push(ControlEdge {
+                from_node: graph.execution_order[from].clone(),
+                from_output: "gate".into(),
+                to_node: graph.execution_order[to].clone(),
+            });
+        }
+    }
+    graph
+}
+
+#[test]
+fn input_permutations_keep_geometry_crossing_layers_and_rendered_styles() {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut graph = crowded_graph();
+    let baseline = GraphLayout::new(&graph).unwrap();
+    assert!(!baseline.crossings().is_empty());
+    assert_eq!(baseline.unresolved_count(), 0);
+    let signature = |layout: &GraphLayout| {
+        let routes = layout
+            .edges()
+            .iter()
+            .zip(layout.routes())
+            .map(|(edge, route)| (edge.key.clone(), route.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let crossings = layout
+            .crossings()
+            .iter()
+            .map(|crossing| {
+                (
+                    crossing.point,
+                    layout.edges()[crossing.horizontal].key.clone(),
+                    layout.edges()[crossing.vertical].key.clone(),
+                    layout.edges()[crossing.upper].key.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        (layout.nodes().to_vec(), routes, crossings)
+    };
+    let expected = signature(&baseline);
+    let mut observations: Vec<_> = baseline
+        .nodes()
+        .iter()
+        .map(|node| NodeObservation::pending(&node.id, &node.kind))
+        .collect();
+    for (index, node) in observations.iter_mut().enumerate() {
+        if index % 2 == 0 {
+            node.status = NodeStatus::Succeeded;
+            node.produced_ports.push("value".into());
+            node.skipped_ports.push("gate".into());
+        } else {
+            node.status = NodeStatus::Unknown;
+        }
+    }
+    let area = Rect::new(0, 0, baseline.size().0 as u16, baseline.size().1 as u16);
+    let mut reference = Buffer::empty(area);
+    GraphView::new(&baseline)
+        .nodes(&observations)
+        .render(area, &mut reference);
+    for index in 0..8 {
+        graph.data_edges.rotate_left(1);
+        graph.control_edges.rotate_right(1);
+        if index % 2 == 0 {
+            graph.data_edges.reverse();
+        }
+        let layout = GraphLayout::new(&graph).unwrap();
+        assert_eq!(signature(&layout), expected);
+        let mut rendered = Buffer::empty(area);
+        GraphView::new(&layout)
+            .nodes(&observations)
+            .render(area, &mut rendered);
+        assert_eq!(rendered, reference);
+    }
+}
+
+#[test]
+fn root_and_loop_body_share_routing_geometry() {
+    let body_graph = crowded_graph();
+    let root = GraphLayout::new(&body_graph).unwrap();
+    let mut description = body_graph.clone();
+    description.version = WorkflowDescriptionVersion::V2026_09_29;
+    description.nodes = vec![NodeDescription {
+        id: "repeat".into(),
+        kind: "workflow.loop".into(),
+    }];
+    description.execution_order = vec!["repeat".into()];
+    description.data_edges.clear();
+    description.control_edges.clear();
+    description.loop_bodies = vec![LoopBodyDescription {
+        path: vec!["repeat".into()],
+        nodes: body_graph.nodes,
+        data_edges: body_graph.data_edges,
+        control_edges: body_graph.control_edges,
+        execution_order: body_graph.execution_order,
+    }];
+    let body = GraphLayout::from_loop_body(&description, &["repeat".into()]).unwrap();
+    assert_eq!(body.nodes(), root.nodes());
+    assert_eq!(body.routes(), root.routes());
+    assert_eq!(body.crossings(), root.crossings());
+}
+
+#[test]
+fn a_wide_label_fragment_cannot_overwrite_the_next_pane() {
+    let mut graph = fan_graph(1);
+    graph.control_edges.push(ControlEdge {
+        from_node: "source".into(),
+        from_output: "🦀".into(),
+        to_node: "sink-0000".into(),
+    });
+    let layout = GraphLayout::new(&graph).unwrap();
+    let label = layout
+        .routes()
+        .iter()
+        .find_map(|route| route.label.as_ref())
+        .unwrap();
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 2));
+    buffer
+        .cell_mut(Position::new(1, 0))
+        .unwrap()
+        .set_symbol("#");
+    GraphView::new(&layout)
+        .offset(label.rect.x, label.rect.y)
+        .render(Rect::new(0, 0, 1, 1), &mut buffer);
+    assert_eq!(buffer.cell(Position::new(0, 0)).unwrap().symbol(), " ");
+    assert_eq!(buffer.cell(Position::new(1, 0)).unwrap().symbol(), "#");
+}

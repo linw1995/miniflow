@@ -12,4 +12,7 @@ runs:
     - uses: nix-community/cache-nix-action@v7
       with:
         primary-key: nix-store-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-name || github.job }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '.pre-commit-config.yaml', '.markdownlint.yaml', 'src/**', 'crates/**', 'scripts/**', '.github/**/*.yaml') }}
+        # Nix validates store paths, so older sources and toolchains are safe seeds.
+        restore-prefixes-first-match: nix-store-${{ runner.os }}-${{ runner.arch }}-${{ inputs.cache-key-name || github.job }}-
         gc-max-store-size-linux: 8G
+        gc-max-store-size-macos: 8G

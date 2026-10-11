@@ -19,14 +19,17 @@ def main():
         )
     )
     # A different run must not replace an executable another test is validating.
+    cache_directory = os.environ.get("MF_TEST_BUILD_CACHE_DIR")
     directory = (
-        Path(metadata["target_directory"])
+        Path(cache_directory)
+        if cache_directory
+        else Path(metadata["target_directory"])
         / "nextest-build-cache"
         / os.environ["NEXTEST_RUN_ID"]
     )
     project = directory / "warmup"
     target = directory / "target"
-    (project / "src").mkdir(parents=True)
+    (project / "src").mkdir(parents=True, exist_ok=True)
     vendor = directory / "vendor"
     source_config = directory / "source.toml"
     subprocess.run(
@@ -92,6 +95,15 @@ def main():
     (project / "Cargo.toml").write_text(manifest)
     (project / "src/main.rs").write_text("fn main() {}\n")
     env = dict(os.environ, CARGO_TARGET_DIR=str(target))
+    if cache_directory:
+        # Checkout mtimes can precede restored artifacts. Keep dependencies, never old workspace code.
+        for profile in ["release", "dev"]:
+            subprocess.run(
+                [cargo, "clean", "--workspace", "--profile", profile],
+                cwd=workspace,
+                env=env,
+                check=True,
+            )
     # Preserve wrappers, flags, and coverage instrumentation used by the tests.
     for profile in ["release", "dev"]:
         subprocess.run(

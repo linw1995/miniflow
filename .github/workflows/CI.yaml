@@ -33,9 +33,10 @@ jobs:
             --skip cargo-check \
             --skip actionlint \
             --skip third-party-notices
+      - name: Check timing monitor
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
 
   check:
-    needs: lint
     strategy:
       fail-fast: false
       matrix:
@@ -57,7 +58,6 @@ jobs:
         run: nix flake check -L
 
   coverage:
-    needs: lint
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -70,18 +70,24 @@ jobs:
           path: |
             target/coverage/build/debug
             target/coverage/build/.mf-coverage-identity
+            target/coverage/build/nextest-build-cache/ci
           key: coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
           restore-keys: |
             coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
+            coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-
       - name: Run native coverage
         env:
           NEXTEST_PROFILE: ci
+          # Each hosted job has an isolated filesystem; retain stable vendor paths across runs.
+          MF_TEST_BUILD_CACHE_DIR: ${{ github.workspace }}/target/coverage/build/nextest-build-cache/ci
         run: nix develop --command bash scripts/run-cov.sh
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: target/coverage/result/
+          # Successful reruns otherwise conflict with this run's existing report.
+          overwrite: true
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:

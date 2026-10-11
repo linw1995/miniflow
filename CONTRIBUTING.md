@@ -39,7 +39,21 @@ Warmup preserves Cargo wrappers, compiler flags, and coverage instrumentation.
 Each run gets its own directory under the Cargo target's `nextest-build-cache/`, so concurrent runs cannot overwrite
 each other's runners. These build artifacts remain until removed or cleaned with `cargo clean`.
 
+Coverage CI sets `MF_TEST_BUILD_CACHE_DIR` to a stable, cached directory within its isolated runner.
+This retains vendored source paths and both runner dependency profiles between runs. Setup refreshes
+the vendor graph and cleans workspace packages before rebuilding, so restored artifacts cannot hide
+checkout changes. When setting this variable locally, give concurrent nextest runs separate directories.
+
 Nix checks and CI coverage use the `ci` nextest profile. It shares the prewarmed Cargo target across additional generated-runner tests while serializing access to their executable. The default local profile retains more test parallelism. To reproduce CI scheduling locally, run `nix develop --command cargo nextest run --profile ci --workspace --all-features`.
+
+After a PR's CI run completes, the independent `CI timing monitor` workflow updates a single bot comment
+with job and step durations. Its baseline is the median of the latest five successful CI pushes to the
+PR's base branch completed before that run started. Only matching jobs contribute to the wall time,
+including queueing and dependencies; main-only macOS checks are excluded from PR comparisons.
+Failed runs show their status without claiming a wall-time improvement. The monitor also writes the
+report to its job summary, handles fork PRs, and ignores superseded heads and older attempts.
+It executes only default-branch code and reads timings from GitHub's API. A new `workflow_run` workflow
+starts receiving events after it is merged into the default branch.
 
 To run only these integration tests:
 
