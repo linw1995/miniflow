@@ -31,6 +31,10 @@ mod stream_observation;
 pub use stream_observation::{StreamCallback, StreamObservation};
 use stream_observation::{StreamFrame, StreamInvocation};
 
+#[path = "diagnostics.rs"]
+mod diagnostics;
+use diagnostics::Diagnostics;
+
 type EmitLog = dyn Fn(&WireRecord) -> Result<(), ContractError> + Send + Sync;
 type EmitNestedLog = dyn Fn(NestedLog) + Send + Sync;
 type FailureState = Option<(Option<String>, Failure)>;
@@ -43,8 +47,25 @@ struct NestedLog {
 
 struct Backend {
     tracer: BoxedTracer,
+    diagnostics: Option<Diagnostics>,
     emit: Box<EmitLog>,
     emit_nested: Box<EmitNestedLog>,
+}
+
+impl Backend {
+    fn emit_lifecycle(&self, wire: &WireRecord) -> Result<(), ContractError> {
+        if let Some(diagnostics) = &self.diagnostics {
+            diagnostics.emit(wire);
+        }
+        (self.emit)(wire)
+    }
+
+    fn finish_diagnostics(&self, workflow_id: &WorkflowId, run_id: RunId) {
+        // Exhausted lifecycle counters can prevent terminal record delivery.
+        if let Some(diagnostics) = &self.diagnostics {
+            diagnostics.finish_run(workflow_id.as_str(), &run_id.to_string());
+        }
+    }
 }
 
 /// Holds instruments obtained from providers owned and shut down by the caller.
@@ -76,18 +97,8 @@ impl Observer {
         let nested_logger = logs.logger("mf.iteration");
         Self(Arc::new(Backend {
             tracer: BoxedTracer::new(Box::new(traces.tracer(INSTRUMENTATION_SCOPE))),
+            diagnostics: verbose.then(|| Diagnostics::new(Duration::from_secs(60))),
             emit: Box::new(move |wire| {
-                if verbose {
-                    use std::io::Write;
-                    let _ = writeln!(
-                        std::io::stderr().lock(),
-                        "[verbose] {} {} {}",
-                        wire.event_name,
-                        serde_json::to_string(&wire.attributes)
-                            .expect("lifecycle attributes serialize to JSON"),
-                        wire.body
-                    );
-                }
                 let mut record = logger.create_log_record();
                 wire.write_to(&mut record)?;
                 // Lifecycle delivery is independent of diagnostic filtering and trace sampling.
@@ -638,7 +649,10 @@ impl RunObservation {
                 .span()
                 .set_attribute(KeyValue::new("mf.outcome", "succeeded"));
         }
-        if let Ok(sequence) = self.sequence.lock().unwrap().finish() {
+        let sequence = self.sequence.lock().unwrap().finish();
+        self.backend
+            .finish_diagnostics(&self.workflow_id, self.run_id);
+        if let Ok(sequence) = sequence {
             let (failure_node_id, failure) = match failure {
                 Some((id, failure)) => (id, Some(failure)),
                 None => (None, None),
@@ -710,7 +724,7 @@ impl RunObservation {
         if let Ok(record) =
             WireRecord::from_event_with_version(&event, schema_version, timestamp, trace_context)
         {
-            let _ = (self.backend.emit)(&record);
+            let _ = self.backend.emit_lifecycle(&record);
         }
     }
 }
@@ -721,6 +735,8 @@ impl Drop for RunObservation {
             return;
         }
         if self.owner && !self.closed.load(Ordering::Acquire) {
+            self.backend
+                .finish_diagnostics(&self.workflow_id, self.run_id);
             // An abandoned scope has no trustworthy terminal event, including during unwinding.
             self.context
                 .span()

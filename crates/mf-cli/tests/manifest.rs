@@ -115,11 +115,11 @@ fn moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts() 
             let stderr = String::from_utf8_lossy(&verbose.stderr);
             assert!(verbose.status.success(), "{stderr}");
             assert_eq!(verbose.stdout, output.stdout);
-            assert!(stderr.contains("mf.workflow.started"), "{stderr}");
-            assert!(stderr.contains("mf.workflow.finished"), "{stderr}");
-            assert!(stderr.contains("mf.node."), "{stderr}");
+            assert!(stderr.contains("workflow started"), "{stderr}");
+            assert!(stderr.contains("workflow succeeded"), "{stderr}");
+            assert!(stderr.contains("node "), "{stderr}");
             if scenario == "nested" {
-                assert!(stderr.contains("mf.loop.pass.started"), "{stderr}");
+                assert!(stderr.contains("loop pass started"), "{stderr}");
             }
         }
         let invalid = Command::new(&standalone)

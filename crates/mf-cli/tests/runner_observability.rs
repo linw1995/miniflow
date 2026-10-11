@@ -567,11 +567,8 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     );
     assert_eq!(observed.stdout, plain.stdout);
     let diagnostics = String::from_utf8_lossy(&observed.stderr);
-    assert!(diagnostics.contains("mf.workflow.started"), "{diagnostics}");
-    assert!(
-        diagnostics.contains("mf.workflow.finished"),
-        "{diagnostics}"
-    );
+    assert!(diagnostics.contains("workflow started"), "{diagnostics}");
+    assert!(diagnostics.contains("workflow succeeded"), "{diagnostics}");
     let requests = worker.finish();
     check_otel(&requests, 3, 4, description.workflow_id.as_str());
     for (_, body) in requests.iter().filter(|(path, _)| path == "/v1/logs") {
@@ -719,14 +716,8 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     assert!(!failed.status.success());
     assert!(String::from_utf8_lossy(&failed.stderr).contains("execution sentinel"));
     let diagnostics = String::from_utf8_lossy(&failed.stderr);
-    assert!(
-        diagnostics.contains("mf.workflow.finished"),
-        "{diagnostics}"
-    );
-    assert!(
-        diagnostics.contains(r#""mf.outcome":"failed""#),
-        "{diagnostics}"
-    );
+    assert!(diagnostics.contains("workflow failed"), "{diagnostics}");
+    assert!(diagnostics.contains("error (execution)"), "{diagnostics}");
     let requests = worker.finish();
     check_otel(&requests, 3, 4, failing_description.workflow_id.as_str());
 

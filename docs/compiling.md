@@ -25,7 +25,13 @@ The output directory must exist. A successful first build creates `flow.lock`. S
 `mf run ./flow` inherits stdin, stdout, and stderr and returns the runner's exit status. It requires no terminal.
 Use `-v` or `--verbose` with either `mf run ./flow` or `./flow` to print execution details on stderr:
 workflow and node lifecycle events, outcomes, timing, Loop passes, and streaming invocation metadata.
-Results remain on stdout. Diagnostics contain execution metadata rather than input/output values.
+Each line shows elapsed milliseconds followed by a readable workflow or node status. Completion lines include
+node duration, produced/skipped ports, or error context. Loop pass numbers are one-based; streaming lines retain
+invocation and message identities. The run ID appears once at workflow start. Results remain on stdout; diagnostics
+contain execution metadata rather than input/output values.
+While a node is running, verbose mode prints a `still running` reminder every 60 seconds with its elapsed running
+time and available Loop or streaming invocation context. Completion or failure stops that invocation's reminders.
+These reminders also work with `--no-telemetry` and are local stderr output; they do not add OTLP lifecycle events.
 Place CLI options before named workflow parameters, for example `mf run ./flow -v --read.path data.txt`.
 With `--tui`, verbose runner diagnostics appear in the TUI's captured stderr history.
 `mf compile flow.json --output ./flow --verbose` also reports compilation options, elapsed time, and the retained project.
