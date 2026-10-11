@@ -34,7 +34,7 @@
 
 ## 5. Integrate compiled runners and packaging
 
-- [ ] 5.1 Add terminal-generation and explicit multi-turn examples with compiled-runner acceptance using a local mock; verify credential-free compilation, later environment lookup, startup history, history feedback through Loop state, one terminal result per turn, and execution outside the checkout without Cargo or source files.
-- [ ] 5.2 Verify dynamic and generated task execution inside ordinary flows, Loop, Iteration, and existing stream task domains; verify matching metadata, skip behavior, atomic outputs, and shared future support without builtin-kind compiler branches.
-- [ ] 5.3 Update release-support scripts, package fixture enumeration, node development and release documentation, and license notices; verify package coverage and the dependency license audit.
-- [ ] 5.4 Run `nix develop --command prek install`, `nix develop --command prek -a`, `nix flake check -L`, and `openspec validate add-llm-builtin-node --strict`; verify all required checks and map specification scenarios to focused tests before implementation review.
+- [x] 5.1 Add terminal-generation and explicit multi-turn examples with compiled-runner acceptance using a local mock; verify credential-free compilation, later environment lookup, startup history, history feedback through Loop state, one terminal result per turn, and execution outside the checkout without Cargo or source files.
+- [x] 5.2 Verify dynamic and generated task execution inside ordinary flows, Loop, Iteration, and existing stream task domains; verify matching metadata, skip behavior, atomic outputs, and shared future support without builtin-kind compiler branches.
+- [x] 5.3 Update release-support scripts, package fixture enumeration, node development and release documentation, and license notices; verify package coverage and the dependency license audit.
+- [x] 5.4 Run `nix develop --command prek install`, `nix develop --command prek -a`, `nix flake check -L`, and `openspec validate add-llm-builtin-node --strict`; verify all required checks and map specification scenarios to focused tests before implementation review.

@@ -9,6 +9,7 @@ description = "Terminal text conversations for miniflow"
 [features]
 default = []
 tokio = ["mf-runtime/tokio"]
+test-support = []
 
 [dependencies]
 # Node contracts and optional future driving.

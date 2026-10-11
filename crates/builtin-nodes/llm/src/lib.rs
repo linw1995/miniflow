@@ -1,3 +1,6 @@
+#[cfg(feature = "test-support")]
+#[path = "../tests/support/mod.rs"]
+pub mod test_support;
 mod transport;
 
 use mf_runtime::{
@@ -166,11 +169,6 @@ fn parse_config(value: Value) -> Result<Config, NodeBuildError> {
         }
     );
     Ok(config)
-}
-
-/// Checks configuration without acquiring credentials, clients, or execution resources.
-pub fn validate_config(value: Value) -> Result<(), NodeBuildError> {
-    parse_config(value).map(|_| ())
 }
 
 #[derive(Snafu)]
@@ -485,21 +483,11 @@ mod tests {
                 .as_object_mut()
                 .unwrap()
                 .extend(patch.as_object().unwrap().clone());
-            assert!(validate_config(config).is_err(), "{patch}");
+            assert!(parse_config(config).is_err(), "{patch}");
         }
-        assert!(validate_config(json!({})).is_err());
-    }
-
-    #[test]
-    fn validation_needs_no_credentials_or_network_and_retains_url_sources() {
-        validate_config(json!({
-            "model": "example-model",
-            "base_url": "http://127.0.0.1:9/v1",
-            "api_key_env": "MINIFLOW_LLM_UNAVAILABLE_CREDENTIAL"
-        }))
-        .unwrap();
-        let error = validate_config(json!({"model": "example-model", "base_url": "/relative"}))
-            .unwrap_err();
+        assert!(parse_config(json!({})).is_err());
+        let error =
+            parse_config(json!({"model": "example-model", "base_url": "/relative"})).unwrap_err();
         let source = error
             .source()
             .unwrap()

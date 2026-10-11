@@ -8,6 +8,11 @@ The optional [`mfn-code`](../crates/builtin-nodes/code/) package registers `buil
 instance-specific typed inputs, and output types inferred by the CEL checker. A Flow must select the package
 explicitly; `mfn-core` does not register this kind. See the [CEL examples](workflows.md#built-in-nodes).
 
+The optional [`mfn-llm`](../crates/builtin-nodes/llm/) package registers `builtin.llm` with fixed typed prompt,
+system, history, and terminal output contracts. Select it explicitly to add its HTTP transport dependencies.
+Its factory validates configuration without credentials or I/O; execution uses optional shared future driving.
+See [terminal conversations](workflows.md#llm-configuration-and-conversation-values).
+
 A task provider depends on `mf-runtime`, implements `TaskNode::execute`, and registers a factory through
 `inventory::submit!`. `NodeRegistration` declares a unique `kind` and its construction requirements.
 The factory returns a `PreparedNode` containing the executor and its `NodeMetadata`. See
@@ -122,6 +127,8 @@ the scope ends. Node preparation does not start a runtime. Cargo features unify 
 Future driving occupies a synchronous workflow thread while the operation is pending. Async hosts must call
 synchronous workflow APIs from a blocking thread; nested portable executor entry and managed execution inside
 Tokio return typed failures. Portable execution cannot inspect arbitrary third-party executor contexts.
+The managed backend conservatively rejects any entered Tokio handle, including its `spawn_blocking` threads.
+Use an independent OS thread, such as `std::thread::spawn`, for managed synchronous execution from a Tokio host.
 The executor is distinct from an I/O reactor: a selected HTTP transport can introduce its own runtime dependency
 or a process-wide fallback even when workflow-managed Tokio is disabled.
 

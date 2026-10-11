@@ -73,6 +73,7 @@ fn checks_owners_and_resolves_exact_workspace_versions() {
         "mf-compiler",
         "mfn-core",
         "mfn-code",
+        "mfn-llm",
     ] {
         assert!(owners.lines().any(|line| line == name), "{name}");
         let expected = if name == "mf-telemetry" {

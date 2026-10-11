@@ -196,6 +196,21 @@ preempted. The reply-byte limit is checked after unary buffering and decoding an
 the full transcript. Workflow concurrency limits bound invocations; waiting on the model still occupies a synchronous
 workflow thread. Async hosts use a blocking thread for synchronous workflow entry points.
 
+The [terminal example](../examples/llm-terminal.json) accepts startup prompt, system, and history inputs.
+The [Loop example](../examples/llm-loop.json) passes updated history through a Loop variable for two turns.
+Choose an available model in each example's configuration and set `MODEL_API_KEY` in the execution environment.
+An OpenAI-compatible endpoint can be selected with `base_url`. Compilation does not need the key:
+
+```bash
+mf compile examples/llm-terminal.json --output ./chat
+./chat --inputs '{"chat":{"prompt":"Hello","system":"Answer briefly"}}'
+mf compile examples/llm-loop.json --output ./conversation
+./conversation --inputs '{"repeat":{"prompt":"Continue the conversation","history":[],"text":""}}'
+```
+
+Persist the returned history and pass it as `chat.history` with a new prompt to continue a terminal conversation.
+The Loop example repeats the supplied prompt twice while preserving the earlier reply in the second request.
+
 ## Structured Loop
 
 The [Loop example](../examples/loop.json) returns `{"count":3}`. It declares `mfn-core` for both its

@@ -93,13 +93,17 @@ Convert and validate the entire response and updated transcript before returning
 
 Start the invocation deadline before credential and transport initialization; check elapsed time before polling the model call and race the pending call against the remaining deadline. Initialization is synchronous and is not forcibly preempted, but an expired deadline must prevent a subsequent request or result publication. On workflow cancellation or deadline expiry, drop the owned future and return a typed failure. No final result is published after cancellation.
 
-Reuse the existing cancellation handle and a bounded waiter registration strategy; repeated polls must not accumulate unbounded wakers. The portable deadline mechanism must work without a current Tokio context. Preserve the model call's typed error source through Snafu context selectors. Disable HTTP redirect following and automatic request retries in the configured client; do not add node-level retries. Local future cancellation does not guarantee that a remote service stops work already accepted.
+Reuse the existing cancellation handle and a bounded waiter registration strategy; repeated polls must not accumulate unbounded wakers. The portable deadline mechanism must work without a current Tokio context. Preserve the model call's typed error source through Snafu context selectors.
+
+Disable HTTP redirect following and automatic request retries in the configured client; do not add node-level retries. Local future cancellation does not guarantee that a remote service stops work already accepted.
 
 ### Dependency policy and integration
 
 Use `rig-core = =0.43.0` with default features disabled and explicitly enable `reqwest` and `rustls` in `mfn-llm`. Select a compatible configured `rig-reqwest` client for endpoint, redirect, and timeout policy. Keep dependency versions and default-feature policy in the workspace. No agent runtime, websocket transport, embeddings, or vector-store integration is needed.
 
-Use a per-invocation HTTP metadata adapter for partial Chat usage: Rig 0.43.0 requires three counts when wire usage is present. Capture the reported optional counters separately and omit only partial usage from the body Rig decodes. Complete usage retains Rig's ordinary decoding path. Do not insert zeroes for missing counts or implement another completion protocol.
+Use a per-invocation HTTP metadata adapter for partial Chat usage: Rig 0.43.0 requires three counts when wire usage is present. Capture the reported optional counters separately and omit only partial usage from the body Rig decodes. Complete usage retains Rig's ordinary decoding path.
+
+Do not insert zeroes for missing counts or implement another completion protocol.
 
 Disable idle pooling in the reusable client because a prepared node can survive successive managed reactor scopes.
 

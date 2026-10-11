@@ -13,12 +13,13 @@ use std::{
 };
 use tempfile::TempDir;
 
-const SUPPORT_PACKAGES: [(&str, &str); 6] = [
+const SUPPORT_PACKAGES: [(&str, &str); 7] = [
     ("mf-telemetry", "crates/mf-telemetry"),
     ("mf-runtime-derive", "crates/mf-runtime-derive"),
     ("mf-runtime", "crates/mf-runtime"),
     ("mfn-core", "crates/builtin-nodes/core"),
     ("mfn-code", "crates/builtin-nodes/code"),
+    ("mfn-llm", "crates/builtin-nodes/llm"),
     ("mf-compiler", "crates/mf-compiler"),
 ];
 
@@ -204,8 +205,24 @@ impl PackagedCli {
         fs::create_dir_all(cli.parent().unwrap()).unwrap();
         fs::copy(target.join("release").join(cli.file_name().unwrap()), &cli).unwrap();
 
-        let fixture_manifest =
-            workspace.join("crates/mf-compiler/tests/fixtures/multi-nodes/Cargo.toml");
+        let fixture_original = workspace.join("crates/mf-compiler/tests/fixtures/multi-nodes");
+        let fixture_project = root.join("fixture-package");
+        fs::create_dir(&fixture_project).unwrap();
+        copy_directory(&fixture_original.join("src"), &fixture_project.join("src"));
+        let fixture_manifest = fixture_project.join("Cargo.toml");
+        let fixture_text = fs::read_to_string(fixture_original.join("Cargo.toml"))
+            .unwrap()
+            .replace(
+                "mf-runtime = { path = \"../../../../mf-runtime\", version = \"0.1.0\" }",
+                &format!("mf-runtime = {{ version = \"={version}\" }}"),
+            );
+        fs::write(&fixture_manifest, fixture_text).unwrap();
+        // A standalone fixture lock may contain versions absent from the exact vendor graph.
+        fs::copy(
+            workspace.join("Cargo.lock"),
+            fixture_project.join("Cargo.lock"),
+        )
+        .unwrap();
         let metadata: Value = serde_json::from_slice(
             &checked(
                 cargo()
@@ -217,7 +234,9 @@ impl PackagedCli {
                         "1",
                         "--manifest-path",
                     ])
-                    .arg(&fixture_manifest),
+                    .arg(&fixture_manifest)
+                    .arg("--config")
+                    .arg(&config),
             )
             .stdout,
         )
