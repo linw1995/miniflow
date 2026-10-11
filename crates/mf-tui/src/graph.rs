@@ -389,6 +389,52 @@ impl GraphLayout {
         self.routing_stats
     }
 
+    pub fn unresolved_count(&self) -> usize {
+        self.routes
+            .iter()
+            .filter(|route| route.unresolved.is_some())
+            .count()
+    }
+
+    pub fn routing_details(&self, node: usize) -> String {
+        let mut entries: Vec<_> = self
+            .edges
+            .iter()
+            .zip(&self.routes)
+            .filter(|(edge, route)| {
+                (edge.from == node || edge.to == node) && route.unresolved.is_some()
+            })
+            .collect();
+        entries.sort_by_key(|(edge, _)| &edge.key);
+        if entries.is_empty() {
+            return String::new();
+        }
+        let mut text = String::from("Unresolved connections:\n");
+        for (edge, route) in entries {
+            let source = format!(
+                "{}.{}",
+                display_line(&edge.key.source),
+                display_line(&edge.from_output)
+            );
+            let target = edge.to_input.as_ref().map_or_else(
+                || display_line(&edge.key.destination),
+                |input| {
+                    format!(
+                        "{}.{}",
+                        display_line(&edge.key.destination),
+                        display_line(input)
+                    )
+                },
+            );
+            text.push_str(&format!(
+                "{:?}: {source} -> {target}\n{}\n",
+                edge.kind,
+                route.unresolved.expect("unresolved reason exists")
+            ));
+        }
+        text
+    }
+
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
@@ -443,56 +489,120 @@ impl<'a> GraphView<'a> {
         }
         let position = Position::new(area.x + local_x as u16, area.y + local_y as u16);
         if let Some(cell) = buffer.cell_mut(position) {
+            cell.reset();
             cell.set_symbol(symbol).set_style(style);
         }
     }
 
-    fn draw_edge(&self, area: Rect, buffer: &mut Buffer, edge: &GraphEdge) {
-        let source = self.layout.nodes[edge.from].rect;
-        let target = self.layout.nodes[edge.to].rect;
-        let from_x = source.x + source.width;
-        let to_x = target.x.saturating_sub(1);
-        if from_x > to_x {
+    fn draw_edge(&self, area: Rect, buffer: &mut Buffer, index: usize) {
+        let edge = &self.layout.edges[index];
+        let route = &self.layout.routes[index];
+        if route.unresolved.is_some() {
             return;
         }
-        let from_y = source.y + edge.from_row;
-        let to_y = target.y + edge.to_row;
-        let middle = from_x + (to_x - from_x) / 2;
-        let (horizontal, vertical, down_start, down_end, up_start, up_end) = match edge.kind {
-            EdgeKind::Data => ("═", "║", "╗", "╚", "╝", "╔"),
-            EdgeKind::Control => ("─", "│", "┐", "└", "┘", "┌"),
-        };
         let style = self.edge_style(edge);
-        self.horizontal(area, buffer, from_x..=middle, from_y, horizontal, style);
-        if from_y != to_y {
-            self.vertical(area, buffer, middle, from_y..=to_y, vertical, style);
+        let symbols = routing::line_symbols(edge.kind);
+        for segment in route.segments() {
+            let low = segment.low();
+            let high = segment.high();
+            match segment.axis() {
+                routing::Axis::Horizontal => {
+                    self.horizontal(area, buffer, low.x..=high.x, low.y, symbols[0], style)
+                }
+                routing::Axis::Vertical => {
+                    self.vertical(area, buffer, low.x, low.y..=high.y, symbols[1], style)
+                }
+            }
         }
-        self.horizontal(area, buffer, middle..=to_x, to_y, horizontal, style);
-        if from_y < to_y {
-            self.put(area, buffer, middle, from_y, down_start, style);
-            self.put(area, buffer, middle, to_y, down_end, style);
-        } else if from_y > to_y {
-            self.put(area, buffer, middle, from_y, up_start, style);
-            self.put(area, buffer, middle, to_y, up_end, style);
+        for points in route.points.windows(3) {
+            let point = points[1];
+            let left = points[0].x < point.x || points[2].x < point.x;
+            let right = points[0].x > point.x || points[2].x > point.x;
+            let up = points[0].y < point.y || points[2].y < point.y;
+            let down = points[0].y > point.y || points[2].y > point.y;
+            let symbol = match (left, right, up, down) {
+                (false, true, false, true) => symbols[2],
+                (true, false, false, true) => symbols[3],
+                (false, true, true, false) => symbols[4],
+                (true, false, true, false) => symbols[5],
+                _ => continue,
+            };
+            self.put(area, buffer, point.x, point.y, symbol, style);
         }
-        self.put(area, buffer, to_x, to_y, "▶", style);
-        if edge.kind == EdgeKind::Control {
-            let label_x = from_x + 1;
-            let available = middle.saturating_sub(label_x);
-            if let (Some(local_x), Some(local_y)) = (
-                label_x.checked_sub(self.offset.0),
-                from_y.checked_sub(self.offset.1),
-            ) && local_x < u32::from(area.width)
-                && local_y < u32::from(area.height)
-            {
-                let visible = available.min(u32::from(area.width) - local_x);
-                buffer.set_stringn(
-                    area.x + local_x as u16,
-                    area.y + local_y as u16,
-                    display_line(&edge.from_output),
-                    visible as usize,
-                    style,
-                );
+        if let Some(to) = route.points.last() {
+            self.put(area, buffer, to.x, to.y, "▶", style);
+        }
+        if let Some(label) = &route.label {
+            self.text(area, buffer, label.rect, &label.text, style);
+        }
+    }
+
+    fn draw_crossing(&self, area: Rect, buffer: &mut Buffer, crossing: &Crossing) {
+        let rect = crossing.footprint();
+        for y in rect.y..rect.y + rect.height {
+            for x in rect.x..rect.x + rect.width {
+                self.put(area, buffer, x, y, " ", Style::default());
+            }
+        }
+        let horizontal = &self.layout.edges[crossing.horizontal];
+        let vertical = &self.layout.edges[crossing.vertical];
+        let upper_horizontal = crossing.upper == crossing.horizontal;
+        for cell in routing::crossing_cells(
+            horizontal.kind,
+            vertical.kind,
+            upper_horizontal,
+            routing::CrossingPattern::Underpass,
+        ) {
+            let edge = if cell.upper == upper_horizontal {
+                horizontal
+            } else {
+                vertical
+            };
+            self.put(
+                area,
+                buffer,
+                crossing
+                    .point
+                    .x
+                    .checked_add_signed(cell.dx)
+                    .expect("reserved marker bounds"),
+                crossing
+                    .point
+                    .y
+                    .checked_add_signed(cell.dy)
+                    .expect("reserved marker bounds"),
+                cell.symbol,
+                self.edge_style(edge),
+            );
+        }
+    }
+
+    fn text(&self, area: Rect, buffer: &mut Buffer, rect: GraphRect, text: &str, style: Style) {
+        if rect.y < self.offset.1
+            || rect.y >= self.offset.1.saturating_add(u32::from(area.height))
+            || rect.x >= self.offset.0.saturating_add(u32::from(area.width))
+            || rect.x.saturating_add(rect.width) <= self.offset.0
+        {
+            return;
+        }
+        let width = rect.width.min(u32::from(u16::MAX)) as u16;
+        let mut line = Buffer::empty(Rect::new(0, 0, width, 1));
+        line.set_stringn(0, 0, text, width as usize, style);
+        for x in 0..u32::from(width) {
+            let Some(local_x) = (rect.x + x).checked_sub(self.offset.0) else {
+                continue;
+            };
+            if local_x >= u32::from(area.width) {
+                continue;
+            }
+            if let Some(cell) = buffer.cell_mut(Position::new(
+                area.x + local_x as u16,
+                area.y + (rect.y - self.offset.1) as u16,
+            )) {
+                *cell = line
+                    .cell(Position::new(x as u16, 0))
+                    .expect("text cell exists")
+                    .clone();
             }
         }
     }
@@ -596,14 +706,38 @@ impl<'a> GraphView<'a> {
             .and_then(|nodes| nodes.get(index).filter(|item| item.id == node.id));
         let status = observed.map_or(NodeStatus::Pending, |item| item.status);
         let style = node_style(status);
-        for x in rect.x + 1..rect.x + rect.width - 1 {
-            self.put(area, buffer, x, rect.y, "─", style);
-            self.put(area, buffer, x, rect.y + rect.height - 1, "─", style);
-        }
-        for y in rect.y + 1..rect.y + rect.height - 1 {
-            self.put(area, buffer, rect.x, y, "│", style);
-            self.put(area, buffer, rect.x + rect.width - 1, y, "│", style);
-        }
+        self.horizontal(
+            area,
+            buffer,
+            rect.x + 1..=rect.x + rect.width - 2,
+            rect.y,
+            "─",
+            style,
+        );
+        self.horizontal(
+            area,
+            buffer,
+            rect.x + 1..=rect.x + rect.width - 2,
+            rect.y + rect.height - 1,
+            "─",
+            style,
+        );
+        self.vertical(
+            area,
+            buffer,
+            rect.x,
+            rect.y + 1..=rect.y + rect.height - 2,
+            "│",
+            style,
+        );
+        self.vertical(
+            area,
+            buffer,
+            rect.x + rect.width - 1,
+            rect.y + 1..=rect.y + rect.height - 2,
+            "│",
+            style,
+        );
         for (x, y, symbol) in [
             (rect.x, rect.y, "┌"),
             (rect.x + rect.width - 1, rect.y, "┐"),
@@ -613,28 +747,24 @@ impl<'a> GraphView<'a> {
             self.put(area, buffer, x, y, symbol, style);
         }
 
-        let Some(local_x) = rect.x.checked_sub(self.offset.0) else {
-            return;
-        };
-        let Some(local_y) = rect.y.checked_sub(self.offset.1) else {
-            return;
-        };
-        if local_x + rect.width > u32::from(area.width)
-            || local_y + rect.height > u32::from(area.height)
-        {
-            return;
-        }
         let marker = status_marker(status, observed, self.elapsed_ns);
         let title = format!("{marker} {}", display_line(&node.id));
         let detail = display_line(&node_detail(node, observed, self.elapsed_ns));
-        let x = area.x + local_x as u16 + 1;
-        let y = area.y + local_y as u16 + 1;
-        buffer.set_stringn(x, y, title, (NODE_WIDTH - 2) as usize, style);
-        buffer.set_stringn(
-            x,
-            y + 1,
-            detail,
-            (NODE_WIDTH - 2) as usize,
+        let title_rect = GraphRect {
+            x: rect.x + 1,
+            y: rect.y + 1,
+            width: rect.width - 2,
+            height: 1,
+        };
+        self.text(area, buffer, title_rect, &title, style);
+        self.text(
+            area,
+            buffer,
+            GraphRect {
+                y: title_rect.y + 1,
+                ..title_rect
+            },
+            &detail,
             Style::default().fg(Color::Gray),
         );
     }
@@ -642,8 +772,11 @@ impl<'a> GraphView<'a> {
 
 impl Widget for GraphView<'_> {
     fn render(self, area: Rect, buffer: &mut Buffer) {
-        for edge in &self.layout.edges {
-            self.draw_edge(area, buffer, edge);
+        for index in 0..self.layout.edges.len() {
+            self.draw_edge(area, buffer, index);
+        }
+        for crossing in &self.layout.crossings {
+            self.draw_crossing(area, buffer, crossing);
         }
         for (index, node) in self.layout.nodes.iter().enumerate() {
             self.draw_node(area, buffer, index, node);
@@ -725,4 +858,138 @@ fn display_line(value: &str) -> String {
         .chars()
         .map(|ch| if ch.is_control() { ' ' } else { ch })
         .collect()
+}
+
+#[cfg(test)]
+mod rendering_tests {
+    use super::*;
+    use routing::{CrossingPattern, Point, RoutingStats, crossing_cells};
+
+    fn crossing_layout(
+        horizontal: EdgeKind,
+        vertical: EdgeKind,
+        upper_horizontal: bool,
+    ) -> GraphLayout {
+        let nodes: Vec<_> = ["horizontal", "vertical"]
+            .into_iter()
+            .enumerate()
+            .map(|(index, id)| GraphNode {
+                id: id.into(),
+                kind: "fixture.node".into(),
+                rect: GraphRect {
+                    x: 100 + index as u32 * 40,
+                    y: 100,
+                    width: 24,
+                    height: 6,
+                },
+            })
+            .collect();
+        let edges = [horizontal, vertical]
+            .into_iter()
+            .enumerate()
+            .map(|(index, kind)| GraphEdge {
+                key: EdgeKey {
+                    source: nodes[index].id.clone(),
+                    destination: nodes[index].id.clone(),
+                    output: "value".into(),
+                    input: Some("input".into()),
+                    kind,
+                },
+                from: index,
+                to: index,
+                from_output: "value".into(),
+                to_input: Some("input".into()),
+                kind,
+                from_row: 1,
+                to_row: 4,
+            })
+            .collect();
+        GraphLayout {
+            nodes,
+            edges,
+            routes: vec![
+                EdgeRoute::from_points([Point::new(2, 10), Point::new(18, 10)]),
+                EdgeRoute::from_points([
+                    Point::new(2, 2),
+                    Point::new(10, 2),
+                    Point::new(10, 18),
+                    Point::new(18, 18),
+                ]),
+            ],
+            crossings: vec![Crossing {
+                point: Point::new(10, 10),
+                horizontal: 0,
+                vertical: 1,
+                upper: usize::from(!upper_horizontal),
+            }],
+            routing_stats: RoutingStats::default(),
+            width: 22,
+            height: 22,
+        }
+    }
+
+    #[test]
+    fn crossings_preserve_each_strokes_kind_color_and_modifier() {
+        for horizontal in [EdgeKind::Data, EdgeKind::Control] {
+            for vertical in [EdgeKind::Data, EdgeKind::Control] {
+                for upper_horizontal in [true, false] {
+                    let layout = crossing_layout(horizontal, vertical, upper_horizontal);
+                    let upper = layout.crossings[0].upper;
+                    let mut observations: Vec<_> = layout
+                        .nodes
+                        .iter()
+                        .map(|node| NodeObservation::pending(&node.id, &node.kind))
+                        .collect();
+                    observations[upper].produced_ports.push("value".into());
+                    observations[1 - upper].possibly_missing_events = true;
+                    let mut buffer = Buffer::empty(Rect::new(0, 0, 22, 22));
+                    GraphView::new(&layout)
+                        .nodes(&observations)
+                        .render(buffer.area, &mut buffer);
+                    for cell in crossing_cells(
+                        horizontal,
+                        vertical,
+                        upper_horizontal,
+                        CrossingPattern::Underpass,
+                    ) {
+                        let rendered = buffer
+                            .cell(Position::new((10 + cell.dx) as u16, (10 + cell.dy) as u16))
+                            .unwrap();
+                        assert_eq!(rendered.symbol(), cell.symbol);
+                        assert_eq!(
+                            rendered.fg,
+                            if cell.upper {
+                                Color::Green
+                            } else {
+                                Color::Magenta
+                            }
+                        );
+                        assert_eq!(rendered.modifier.contains(Modifier::BOLD), cell.upper);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn partially_visible_crossings_match_full_canvas_symbols_and_styles() {
+        let layout = crossing_layout(EdgeKind::Data, EdgeKind::Control, false);
+        let mut full = Buffer::empty(Rect::new(0, 0, 22, 22));
+        GraphView::new(&layout).render(full.area, &mut full);
+        for offset in [(9, 9), (10, 10), (11, 9), (8, 11), (0, 0)] {
+            let mut clipped = Buffer::empty(Rect::new(3, 5, 4, 5));
+            GraphView::new(&layout)
+                .offset(offset.0, offset.1)
+                .render(clipped.area, &mut clipped);
+            for y in 0..5 {
+                for x in 0..4 {
+                    assert_eq!(
+                        clipped.cell(Position::new(3 + x, 5 + y)).unwrap(),
+                        full.cell(Position::new(offset.0 as u16 + x, offset.1 as u16 + y))
+                            .unwrap()
+                    );
+                }
+            }
+        }
+    }
 }

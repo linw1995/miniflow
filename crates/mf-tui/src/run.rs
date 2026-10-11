@@ -25,6 +25,7 @@ use ratatui::{
     Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
+    style::{Color, Style},
     widgets::{Block, Borders, Paragraph, Wrap},
 };
 use signal_hook::{SigId, consts::SIGINT, flag, low_level::unregister};
@@ -598,6 +599,7 @@ struct ViewState {
     offset: (u32, u32),
     selected: usize,
     pass_offset: usize,
+    details_offset: usize,
 }
 
 impl ViewState {
@@ -640,6 +642,8 @@ impl ViewState {
             return;
         }
         match key {
+            KeyCode::PageDown => self.details_offset = self.details_offset.saturating_add(10),
+            KeyCode::PageUp => self.details_offset = self.details_offset.saturating_sub(10),
             KeyCode::Char('l') => {
                 if let Some(node) = self.layout(root, bodies).nodes().get(self.selected)
                     && node.kind == "workflow.loop"
@@ -651,6 +655,7 @@ impl ViewState {
                         self.offset = (0, 0);
                         self.selected = 0;
                         self.pass_offset = 0;
+                        self.details_offset = 0;
                     }
                 }
             }
@@ -660,6 +665,7 @@ impl ViewState {
                     self.offset = (0, 0);
                     self.selected = 0;
                     self.pass_offset = 0;
+                    self.details_offset = 0;
                 }
             }
             KeyCode::Char('[') => {
@@ -678,7 +684,11 @@ impl ViewState {
             KeyCode::Char(']') => self.pass_offset = self.pass_offset.saturating_sub(1),
             _ => {
                 let nodes = self.layout(root, bodies).nodes().len();
+                let previous = self.selected;
                 navigate(key, &mut self.offset, &mut self.selected, nodes);
+                if previous != self.selected {
+                    self.details_offset = 0;
+                }
             }
         }
     }
@@ -962,6 +972,11 @@ fn draw(
             elapsed.as_secs_f64()
         )), header);
         let [graph, details] = Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)]).areas(body);
+        let graph = if layout.unresolved_count() > 0 {
+            let [warning, graph] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(graph);
+            frame.render_widget(Paragraph::new(routing_warning(layout)).style(Style::default().fg(Color::Yellow)), warning);
+            graph
+        } else { graph };
         let mut graph_view = GraphView::new(layout)
             .offset(view_state.offset.0, view_state.offset.1)
             .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64);
@@ -976,18 +991,77 @@ fn draw(
         } else {
             snapshot.nodes.get(view_state.selected)
         };
-        frame.render_widget(Paragraph::new(details_text(selected_node, pass, snapshot, capture))
-            .block(Block::default().title("Details").borders(Borders::ALL))
-            .wrap(Wrap { trim: false }), details);
+        let details_body = format!("{}\n{}", details_text(selected_node, pass, snapshot, capture), layout.routing_details(view_state.selected));
+        let (window, offset) = details_window(&details_body, usize::from(details.width.saturating_sub(2)), usize::from(details.height.saturating_sub(2)), view_state.details_offset);
+        view_state.details_offset = offset;
+        frame.render_widget(Paragraph::new(window)
+            .block(Block::default().title("Details").borders(Borders::ALL)), details);
         let lifecycle = &snapshot.lifecycle;
         let controls = if status.is_some() { "q/Enter close" } else { "Ctrl-C interrupt" };
         frame.render_widget(Paragraph::new(format!(
-            "Observation: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nv data history | Arrows pan | Tab/j/k select | l enter Loop | h back | [/] pass | {controls}",
+            "Observation: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nv data history | PgUp/PgDn details | Arrows pan | Tab/j/k select | l enter Loop | h back | [/] pass | {controls}",
             lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
             lifecycle.observation_errors + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
         )), footer);
     }).context(TerminalSnafu)?;
     Ok(())
+}
+
+fn details_window(text: &str, width: usize, height: usize, offset: usize) -> (String, usize) {
+    if width == 0 || height == 0 {
+        return (String::new(), 0);
+    }
+    let mut tail = std::collections::VecDeque::new();
+    let mut window = Vec::new();
+    let mut rows = 0;
+    let mut emit = |line: String| {
+        if rows >= offset && window.len() < height {
+            window.push(line.clone());
+        }
+        if tail.len() == height {
+            tail.pop_front();
+        }
+        tail.push_back(line);
+        rows += 1;
+    };
+    for source in text.split('\n') {
+        let span = ratatui::text::Span::raw(source);
+        let mut line = String::new();
+        let mut used = 0;
+        for grapheme in span.styled_graphemes(Style::default()) {
+            let cells = ratatui::text::Span::raw(grapheme.symbol).width();
+            if cells == 0 {
+                continue;
+            }
+            if used + cells > width && !line.is_empty() {
+                emit(std::mem::take(&mut line));
+                used = 0;
+            }
+            if cells > width {
+                line.push('?');
+                used += 1;
+            } else {
+                line.push_str(grapheme.symbol);
+                used += cells;
+            }
+        }
+        emit(line);
+    }
+    let clamped = offset.min(rows.saturating_sub(height));
+    if clamped != offset {
+        (tail.into_iter().collect::<Vec<_>>().join("\n"), clamped)
+    } else {
+        (window.join("\n"), offset)
+    }
+}
+
+fn routing_warning(layout: &GraphLayout) -> String {
+    let count = layout.unresolved_count();
+    if count == 0 {
+        String::new()
+    } else {
+        format!("Connections: {count} unresolved (see Details)")
+    }
 }
 
 fn details_text(
@@ -1233,6 +1307,79 @@ mod tests {
             inputs: Some(r#"{"source/id.path":"data.txt"}"#.into()),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn details_window_wraps_cell_width_and_reaches_rows_beyond_u16() {
+        let text = (0..70_000)
+            .map(|index| format!("connection-{index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (window, offset) = details_window(&text, 40, 4, 69_999);
+        assert_eq!(offset, 69_996);
+        assert!(window.contains("connection-69999"));
+        let (window, offset) = details_window("wide-🦀-end", 6, 3, 0);
+        assert_eq!(offset, 0);
+        for line in window.lines() {
+            assert!(ratatui::text::Span::raw(line).width() <= 6);
+        }
+        assert!(window.contains('🦀'));
+        assert_eq!(details_window("text", 0, 4, 10), (String::new(), 0));
+    }
+
+    #[test]
+    fn routing_warnings_are_independent_of_observation_integrity() {
+        let mut description = crate::test_support::sample_manifest().description;
+        description.nodes = ["source", "target"]
+            .into_iter()
+            .map(|id| NodeDescription {
+                id: id.into(),
+                kind: "fixture.node".into(),
+            })
+            .collect();
+        description.execution_order = vec!["source".into(), "target".into()];
+        description
+            .data_edges
+            .push(mf_telemetry::description::DataEdge {
+                from_node: "source".into(),
+                from_output: "value".into(),
+                to_node: "target".into(),
+                to_input: "input".into(),
+            });
+        let session = crate::state::SessionState::new(description.clone(), RunId::new()).unwrap();
+        let before = session.snapshot().lifecycle.completeness;
+        let layout = GraphLayout::with_routing_limits(
+            &description,
+            crate::graph::routing::RoutingLimits {
+                max_conflict_checks: 0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(routing_warning(&layout).contains("Connections: 1 unresolved"));
+        assert!(
+            layout
+                .routing_details(0)
+                .contains("source.value -> target.input")
+        );
+        assert_eq!(session.snapshot().lifecycle.completeness, before);
+        let mut view = ViewState::default();
+        view.handle_key(
+            KeyCode::PageDown,
+            &session.snapshot(),
+            &layout,
+            &BTreeMap::new(),
+            0,
+        );
+        assert_eq!(view.details_offset, 10);
+        view.handle_key(
+            KeyCode::Tab,
+            &session.snapshot(),
+            &layout,
+            &BTreeMap::new(),
+            0,
+        );
+        assert_eq!(view.details_offset, 0);
     }
 
     #[test]

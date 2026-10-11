@@ -20,10 +20,10 @@
 
 ## 4. Compose and expose routed graphs
 
-- [ ] 4.1 Render stored paths and explicit crossing records with stable layer priority and per-edge styles; verify both upper/lower orientations, mixed line kinds, monochrome readability, and produced/skipped/uncertain styles against the selected prototypes.
-- [ ] 4.2 Clip composed geometry to the viewport without rerouting; verify cell symbols and styles match full-canvas crops across marker/bend/node boundaries, nonzero render origins, narrow viewports, panning, and resizing.
-- [ ] 4.3 Show unresolved-routing warnings separately from observation integrity and expose endpoint/port/kind/reason details for incident nodes; verify low-budget fixtures retain inspectable connections and do not change workflow results or lifecycle completeness.
-- [ ] 4.4 Replace the midpoint-routing limitation in `docs/observability.md` with the new routing behavior, crossing legend, geometry expansion, limits, and unresolved inspection; verify documented preview and navigation behavior against the implementation.
+- [x] 4.1 Render stored paths and explicit crossing records with stable layer priority and per-edge styles; verify both upper/lower orientations, mixed line kinds, monochrome readability, and produced/skipped/uncertain styles against the selected prototypes.
+- [x] 4.2 Clip composed geometry to the viewport without rerouting; verify cell symbols and styles match full-canvas crops across marker/bend/node boundaries, nonzero render origins, narrow viewports, panning, and resizing.
+- [x] 4.3 Show unresolved-routing warnings separately from observation integrity and expose endpoint/port/kind/reason details for incident nodes; verify low-budget fixtures retain inspectable connections and do not change workflow results or lifecycle completeness.
+- [x] 4.4 Replace the midpoint-routing limitation in `docs/observability.md` with the new routing behavior, crossing legend, geometry expansion, limits, and unresolved inspection; verify documented preview and navigation behavior against the implementation.
 
 ## 5. Validate scope and execution integration
 

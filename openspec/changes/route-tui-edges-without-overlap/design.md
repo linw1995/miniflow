@@ -98,7 +98,12 @@ per search, 65,536 expansions per scope, 2,000,000 conflict checks, 16,384 retai
 retry rounds, and a 2,000,000-cell route extent. Use deterministic operation counts rather than wall-clock cutoffs for
 reproducible geometry.
 
-Try a validated outer detour within the remaining canvas/work budget before marking an edge unresolved. Retain every unresolved edge and its typed reason. Display a routing warning separately from telemetry completeness, and expose endpoint/port/kind details when inspecting an incident node. Do not render a false complete path or change workflow outcome.
+Try a validated outer detour within the remaining canvas/work budget before marking an edge unresolved. Retain every
+unresolved edge and its typed reason. Display a routing warning separately from telemetry completeness, and expose
+endpoint/port/kind details when inspecting an incident node. Place the warning on its own row in the graph pane so it
+remains visible in narrow terminals. Detail scrolling uses a bounded cell-width window and a machine-sized offset rather
+than a 16-bit paragraph offset, retaining access to large incident-edge lists. Do not render a false complete path or
+change workflow outcome.
 
 Preserve a usable node layout when optional routing work is exhausted. Follow existing Snafu conventions for fallible layout operations and preserve typed sources.
 
@@ -125,8 +130,14 @@ Implement the marker prototype and route model first, then routing-aware project
 
 ## Routing Measurements
 
-Release fixtures on the local macOS host measured a 10,000-node chain with 9,999 edges in 30.1 ms, 29,997 conflict checks, no search, no unresolved edges, and approximately 30.2 MB maximum resident memory. The earlier row-only index exhausted two million conflict checks on that same fixture; interval-tree pruning removes that accidental quadratic work. A regression checks the work count rather than machine-dependent elapsed time.
+Release fixtures on the local macOS host measured a 10,000-node chain with 9,999 edges in 33.1 ms, 29,997 conflict checks, no search, no unresolved edges, and approximately 27.0 MB maximum resident memory. The earlier row-only index exhausted two million conflict checks on that same fixture; interval-tree pruning removes that accidental quadratic work. A regression checks the work count rather than machine-dependent elapsed time.
 
-The 256-node fork/join fixtures took approximately 1.3 ms with no unresolved edges. A 128-edge parallel data/control fixture took 0.34 ms. The 30-node, 300-edge dense cross-layer fixture took 13.2 ms and retained eight explicitly unresolved edges after two retries, demonstrating that the limits bound effort without claiming complete routing. Its 16,374 crossings approached the retained-crossing limit. These are fixture measurements, not a guarantee for arbitrary dense graphs.
+The 256-node fork/join fixtures took approximately 1.3 ms with no unresolved edges. A 128-edge parallel data/control fixture took 0.39 ms. The 30-node, 300-edge dense cross-layer fixture took 13.9 ms and retained eight explicitly unresolved edges after two retries, demonstrating that the limits bound effort without claiming complete routing. Its 16,374 crossings approached the retained-crossing limit. These are fixture measurements, not a guarantee for arbitrary dense graphs.
 
 Raw timing, maximum-resident-memory, and counter reports remain local in `target/edge-routing/measurements.csv` and per-fixture `.time` files. Reproduce with `nix develop --command cargo run --release -p mf-tui --example benchmark_routes -- <mode> <size>`, where modes are `chain`, `fan`, `join`, `parallel`, and `dense`.
+
+## Renderer Evidence
+
+Sparse and mixed crowded previews were exported through `graph_preview -- --dump [--crowded] [--body]` and inspected as Menlo renderings. The crowded fixture has 16 connections and 54 explicit crossings with no unresolved edges; its root and Loop-body text exports match exactly. Local evidence is `target/edge-routing/root.txt`, `root.png`, `crowded-root.txt`, `crowded-root.png`, and `crowded-body.txt`.
+
+Renderer regressions compare full-canvas cells, including style and modifiers, against cropped markers, tall-node text, and Unicode labels at nonzero buffer origins. Separate tests verify that crossing strokes keep their own observation styles, unresolved routing remains independent of lifecycle completeness, and details remain reachable beyond 65,535 rendered rows.

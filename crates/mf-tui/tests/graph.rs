@@ -687,3 +687,72 @@ fn local_rerouting_never_replaces_a_better_valid_arrangement() {
     assert!(improved.routing_stats().retry_rounds <= limits.retry_rounds);
     assert_completed_geometry_is_safe(&improved);
 }
+
+#[test]
+fn clipped_tall_nodes_and_wide_labels_match_the_full_canvas() {
+    let mut graph = fan_graph(9);
+    graph.control_edges.push(ControlEdge {
+        from_node: "source".into(),
+        from_output: "wide-🦀-e\u{301}".into(),
+        to_node: "sink-0000".into(),
+    });
+    let layout = GraphLayout::new(&graph).unwrap();
+    let mut full = Buffer::empty(Rect::new(
+        0,
+        0,
+        layout.size().0 as u16,
+        layout.size().1 as u16,
+    ));
+    GraphView::new(&layout).render(full.area, &mut full);
+    let source = layout.nodes()[0].rect;
+    let label = layout
+        .routes()
+        .iter()
+        .find_map(|route| route.label.as_ref())
+        .unwrap();
+    for offset in [
+        (source.x + 2, source.y),
+        (source.x + 1, source.y + 1),
+        (label.rect.x + 5, label.rect.y),
+        (label.rect.x + 6, label.rect.y),
+        (source.x + 20, source.y + source.height - 2),
+    ] {
+        let mut clipped = Buffer::empty(Rect::new(5, 3, 8, 4));
+        GraphView::new(&layout)
+            .offset(offset.0, offset.1)
+            .render(clipped.area, &mut clipped);
+        for y in 0..4 {
+            for x in 0..8 {
+                let expected = full.cell(Position::new(offset.0 as u16 + x, offset.1 as u16 + y));
+                if let Some(expected) = expected {
+                    assert_eq!(clipped.cell(Position::new(5 + x, 3 + y)).unwrap(), expected);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn unresolved_connections_keep_inspectable_kind_ports_and_reason() {
+    use mf_tui::graph::routing::RoutingLimits;
+    let mut graph = fan_graph(1);
+    graph.control_edges.push(ControlEdge {
+        from_node: "source".into(),
+        from_output: "gate".into(),
+        to_node: "sink-0000".into(),
+    });
+    let layout = GraphLayout::with_routing_limits(
+        &graph,
+        RoutingLimits {
+            max_conflict_checks: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(layout.unresolved_count(), 2);
+    let details = layout.routing_details(0);
+    assert!(details.contains("Data: source.value -> sink-0000.input"));
+    assert!(details.contains("Control: source.gate -> sink-0000"));
+    assert!(details.contains("routing conflict budget exhausted"));
+    assert_eq!(details, layout.routing_details(1));
+}
