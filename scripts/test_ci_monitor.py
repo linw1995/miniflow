@@ -104,13 +104,17 @@ class TimingTests(unittest.TestCase):
         report = monitor.render_report(current, {"lint": job("lint", conclusion="failure")}, [], "main")
         self.assertIn("incomplete or unsuccessful", report)
         self.assertIn("No successful baseline", report)
-        self.assertIn("| lint (failure) | 1m 00s | N/A | N/A |", report)
+        self.assertIn("| <code>lint</code> (<code>failure</code>) | 1m 00s | N/A | N/A |", report)
 
     def test_untrusted_labels_cannot_break_the_table(self):
         name = "unsafe|<img>\n`label`"
         current = run(created="2026-10-11T00:00:00Z")
         report = monitor.render_report(current, {name: job(name)}, [], "main")
         self.assertIn("unsafe&#124;&lt;img&gt; &#96;label&#96;", report)
+
+    def test_mentions_and_markdown_links_remain_literal_metadata(self):
+        self.assertEqual(monitor.label("@someone [link](https://example.com)"),
+                         "<code>@someone [link](https://example.com)</code>")
 
 
 class CommentTests(unittest.TestCase):

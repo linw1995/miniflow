@@ -94,7 +94,9 @@ def delta(current, baseline):
 
 
 def label(value):
-    return html.escape(str(value)).replace("|", "&#124;").replace("\n", " ").replace("`", "&#96;")
+    value = html.escape(str(value)).replace("|", "&#124;").replace("\n", " ").replace("\r", " ").replace("`", "&#96;")
+    # Job names come from PR workflows; literal text must not become links or mentions.
+    return f"<code>{value}</code>"
 
 
 def baseline_runs(api, run, branch, current_jobs):
