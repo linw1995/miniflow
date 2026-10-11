@@ -319,11 +319,39 @@ temporary files or file polling.
 
 ## Graph presentation
 
-`mf-tui::graph::GraphLayout` uses `rust-sugiyama` to assign layers and sibling order from the complete described graph, including isolated nodes. Data and control edges both contribute to the topology; parallel node pairs are deduplicated only for layout. A fixed-size terminal projection keeps node boxes in place as observations arrive.
+`mf-tui::graph::GraphLayout` uses `rust-sugiyama` to assign layers and sibling order from the complete described graph, including isolated nodes. Data and control edges both contribute to the topology; parallel node pairs are deduplicated only for layout. A static terminal projection allocates distinct input/output rows and expands boxes or column gaps to fit their routes. Node boxes and routes stay in place as observations arrive.
+
+Routing work is bounded per described scope: 250,000 geometry items; 4,096 sparse search vertices and
+16,384 implicit arcs per search; 8,192 expansions per search and 65,536 per scope; 2,000,000 conflict
+checks; 16,384 retained crossings; 128 points per route; two local retry rounds; and a 2,000,000-cell
+route coordinate limit. These limits govern optional route planning, independently of the existing
+10,000-node description admission limit. Routing counters and deterministic fixtures are available
+through `benchmark_routes`; performance reports remain local under `target/edge-routing/`.
 
 `GraphView` draws data and control edges with distinct line symbols, clips to a caller-owned viewport, and renders node status and elapsed time from a state snapshot. Confirmed produced or skipped output ports change the associated edge style; possible lifecycle loss remains visibly uncertain.
 
-The initial routing is a midpoint orthogonal path between boxes. It does not search around intervening boxes, so crowded graphs can have line crossings or obscured segments. Layout is calculated once per described scope; the CLI terminal loop owns scope navigation, panning, status banners, diagnostics, and terminal cleanup.
+Edges use ordered integer channel tracks and reserved passages for connections spanning multiple layers.
+Obstacle-aware search and bounded local retries handle blocked routes. Completed routes avoid boxes,
+labels, arrows, and shared collinear segments. Remaining perpendicular crossings have an explicit
+upper/lower marker: the upper edge stays continuous and the lower edge ends at two caps. Single and
+double strokes continue to distinguish control and data edges, including their lower caps.
+
+| Upper edge | Lower control caps | Lower data caps |
+| --- | --- | --- |
+| Horizontal | `┴` / `┬` | `╨` / `╥` |
+| Vertical | `┤` / `├` | `╡` / `╞` |
+
+Data edges pass above control edges; equal kinds use stable connection identities. Crossing layers
+and glyphs do not change when observation colors change. Crossings indicate independent connections,
+not junctions. Each marker has a three-by-three footprint reserved before rendering. Panning and
+resizing clip the same planned geometry, including partially visible node text and Unicode labels. A wide text glyph that cannot fit completely at the viewport boundary is blanked so it cannot overwrite an adjacent pane.
+
+If display limits prevent a safe route, the graph shows a separate unresolved-connections warning.
+Select an incident node with Tab/j/k to inspect its endpoint IDs, port names, edge kind, and reason in
+Details; PgUp/PgDn scroll those details. The connection remains in the graph metadata even though its
+unsafe path is not drawn. This warning does not change workflow results or telemetry completeness.
+Layout is calculated once per described scope, including Loop bodies; the CLI terminal loop owns
+scope navigation, panning, status banners, diagnostics, and terminal cleanup.
 
 ## Local TUI execution
 
@@ -393,6 +421,11 @@ inactive branch:
 ```bash
 nix develop --command cargo run -p mf-tui --example graph_preview
 ```
+
+Export static routing fixtures with `graph_preview -- --dump`, adding `--crowded` for mixed dense
+connections or `--body` for the same fixture inside a Loop body. Inspect crossing orientations and line kinds with
+`graph_preview -- --crossings`, adding `--color` for a status-color sample. These export modes run
+without an interactive terminal.
 
 Arrow keys pan the graph, `f` returns to the origin, and `q` or Esc closes the preview. The preview uses fixture events and does not launch a compiled runner.
 

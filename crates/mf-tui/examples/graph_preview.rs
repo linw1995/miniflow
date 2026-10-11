@@ -15,7 +15,7 @@ use mf_telemetry::{
     identity::{RunId, WorkflowId},
 };
 use mf_tui::{
-    graph::{GraphLayout, GraphView},
+    graph::{EdgeKind, GraphLayout, GraphView, routing::crossing_cells},
     state::SessionState,
 };
 use ratatui::{
@@ -42,6 +42,14 @@ impl Drop for TerminalGuard {
 }
 
 fn main() -> PreviewResult<()> {
+    if std::env::args().any(|arg| arg == "--crossings") {
+        preview_crossings();
+        return Ok(());
+    }
+    if std::env::args().any(|arg| arg == "--dump") {
+        dump_graph()?;
+        return Ok(());
+    }
     if !io::stdin().is_terminal() || !io::stderr().is_terminal() {
         return Err("graph preview requires interactive stdin and stderr".into());
     }
@@ -322,4 +330,141 @@ fn scheduled_events(
             },
         ),
     ]
+}
+
+fn preview_crossings() {
+    let colored = std::env::args().any(|arg| arg == "--color");
+    for horizontal in [EdgeKind::Data, EdgeKind::Control] {
+        for vertical in [EdgeKind::Data, EdgeKind::Control] {
+            for upper_horizontal in [true, false] {
+                println!(
+                    "Underpass: H={horizontal:?}, V={vertical:?}, upper={}",
+                    if upper_horizontal {
+                        "horizontal"
+                    } else {
+                        "vertical"
+                    }
+                );
+                let mut cells = [[(" ", false); 9]; 9];
+                let h = if horizontal == EdgeKind::Data {
+                    "═"
+                } else {
+                    "─"
+                };
+                let v = if vertical == EdgeKind::Data {
+                    "║"
+                } else {
+                    "│"
+                };
+                cells[4].fill((h, upper_horizontal));
+                for row in &mut cells {
+                    row[4] = (v, !upper_horizontal);
+                }
+                for row in cells.iter_mut().take(6).skip(3) {
+                    for cell in row.iter_mut().take(6).skip(3) {
+                        *cell = (" ", false);
+                    }
+                }
+                for cell in crossing_cells(horizontal, vertical, upper_horizontal) {
+                    cells[(4 + cell.dy) as usize][(4 + cell.dx) as usize] =
+                        (cell.symbol, cell.upper);
+                }
+                for row in cells {
+                    for (symbol, upper) in row {
+                        if colored {
+                            print!("\x1b[{}m{symbol}\x1b[0m", if upper { "32;1" } else { "90" });
+                        } else {
+                            print!("{symbol}");
+                        }
+                    }
+                    println!();
+                }
+            }
+        }
+    }
+}
+
+fn dump_graph() -> PreviewResult<()> {
+    use ratatui::{
+        buffer::Buffer,
+        layout::{Position, Rect},
+        widgets::Widget,
+    };
+    let mut fixture = description();
+    if std::env::args().any(|arg| arg == "--crowded") {
+        let names = [
+            "source-a", "source-b", "middle-a", "middle-b", "sink-a", "sink-b",
+        ];
+        fixture.nodes = names
+            .iter()
+            .map(|id| NodeDescription {
+                id: (*id).into(),
+                kind: "preview.node".into(),
+            })
+            .collect();
+        fixture.execution_order = names.iter().map(|id| (*id).into()).collect();
+        fixture.data_edges.clear();
+        fixture.control_edges.clear();
+        for from in 0..4 {
+            for to in if from < 2 { 2..6 } else { 4..6 } {
+                fixture.data_edges.push(DataEdge {
+                    from_node: names[from].into(),
+                    from_output: "value".into(),
+                    to_node: names[to].into(),
+                    to_input: format!("input-{from}"),
+                });
+            }
+        }
+        for from in 0..2 {
+            for to in 4..6 {
+                fixture.control_edges.push(ControlEdge {
+                    from_node: names[from].into(),
+                    from_output: "gate".into(),
+                    to_node: names[to].into(),
+                });
+            }
+        }
+    }
+    let layout = if std::env::args().any(|arg| arg == "--body") {
+        let body = mf_telemetry::description::LoopBodyDescription {
+            path: vec!["repeat".into()],
+            nodes: fixture.nodes.clone(),
+            data_edges: fixture.data_edges.clone(),
+            control_edges: fixture.control_edges.clone(),
+            execution_order: fixture.execution_order.clone(),
+        };
+        fixture.version = WorkflowDescriptionVersion::V2026_09_29;
+        fixture.nodes = vec![NodeDescription {
+            id: "repeat".into(),
+            kind: "workflow.loop".into(),
+        }];
+        fixture.execution_order = vec!["repeat".into()];
+        fixture.data_edges.clear();
+        fixture.control_edges.clear();
+        fixture.loop_bodies = vec![body];
+        GraphLayout::from_loop_body(&fixture, &["repeat".into()])?
+    } else {
+        GraphLayout::new(&fixture)?
+    };
+    let mut buffer = Buffer::empty(Rect::new(
+        0,
+        0,
+        layout.size().0.min(160) as u16,
+        layout.size().1.min(90) as u16,
+    ));
+    GraphView::new(&layout).render(buffer.area, &mut buffer);
+    println!(
+        "Graph preview: {} edges, {} crossings, {} unresolved, canvas {:?}",
+        layout.edges().len(),
+        layout.crossings().len(),
+        layout.unresolved_count(),
+        layout.size()
+    );
+    for y in 0..buffer.area.height {
+        let row = (0..buffer.area.width)
+            .map(|x| buffer.cell(Position::new(x, y)).unwrap().symbol())
+            .collect::<String>();
+        println!("{}", row.trim_end());
+    }
+    Ok(())
 }
