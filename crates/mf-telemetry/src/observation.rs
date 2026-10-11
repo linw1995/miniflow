@@ -363,7 +363,7 @@ impl RunObservation {
         self.visited
             .fetch_max(step.position.get() + 1, Ordering::AcqRel);
         self.visited_steps
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 count.checked_add(1)
             })
             .ok()?;
@@ -393,7 +393,7 @@ impl RunObservation {
             position,
         );
         self.visited_steps
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 count.checked_add(1)
             })
             .ok()?;
