@@ -102,6 +102,10 @@ including limits, worker ownership, ordered writes, exits, and error policy. Ext
 promoted into bodies that ordinarily cannot read it. Nested-body IDs and synthetic scope controls cannot
 be selected independently.
 
+A selected Task from a stream flow retains its original `execution.limits.workers` ceiling.
+Runtime options may reduce that ceiling, and finite-flow callers retain their ordinary configurable
+worker limit. The compiled target record carries the stream ceiling and rejects resource-contract drift.
+
 ### 4. Return port results with finite execution transport
 
 Collect all produced target outputs by their exact port names after normal publication validation. Omit

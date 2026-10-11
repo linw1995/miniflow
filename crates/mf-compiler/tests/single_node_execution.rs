@@ -233,14 +233,16 @@ fn selected_loops_keep_pass_and_stop_rules() {
     }
 }
 
-struct Item;
+struct Item {
+    expected_workers: usize,
+}
 impl mf_runtime::TaskNode for Item {
     fn execute(
         &self,
         inputs: Inputs,
         ctx: &mut mf_runtime::ExecutionContext,
     ) -> Result<mf_runtime::NodeResult, mf_runtime::NodeExecutionError> {
-        assert_eq!(ctx.worker_limit().get(), 2);
+        assert_eq!(ctx.worker_limit().get(), self.expected_workers);
         if inputs["item"].as_i64() == Some(0) {
             return mf_runtime::NodeExecutionFailedSnafu {
                 message: "zero is rejected",
@@ -254,9 +256,11 @@ impl mf_runtime::TaskNode for Item {
         .into())
     }
 }
-fn item(_: Value) -> Result<mf_runtime::PreparedNode, mf_runtime::NodeBuildError> {
+fn item(config: Value) -> Result<mf_runtime::PreparedNode, mf_runtime::NodeBuildError> {
     Ok(mf_runtime::PreparedNode::from_parts(
-        mf_runtime::NodeExecution::Task(Box::new(Item)),
+        mf_runtime::NodeExecution::Task(Box::new(Item {
+            expected_workers: config["workers"].as_u64().unwrap_or(2) as usize,
+        })),
         NodeMetadata::new(mf_runtime::NodePorts {
             inputs: vec![
                 mf_runtime::PortSpec::new("item", mf_runtime::ValueType::Int64, true),
@@ -758,5 +762,51 @@ fn selected_metadata_excludes_values_and_snapshot_sink_failures_preserve_results
     assert_eq!(
         harness.records().last().unwrap().attributes["mf.outcome"],
         "succeeded"
+    );
+}
+
+#[test]
+fn selected_stream_iteration_keeps_the_original_worker_ceiling() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = plan(
+        json!({"version":"2026-10-03", "execution":{"mode":"stream", "limits":{"workers":1}}, "dependencies":{},
+            "nodes":[{"id":"source", "kind":"builtin.constant", "config":{"value":[1,2,3]}},
+            {"id":"iteration", "kind":"builtin.iteration", "config":{"mode":"parallel", "body":{
+                "nodes":[{"id":"map", "kind":"test.isolation_item", "config":{"workers":1}}],
+                "edges":[{"from_node":"%iteration", "from_output":"item", "to_node":"map", "to_input":"item"}, {"from_node":"%iteration", "from_output":"index", "to_node":"map", "to_input":"index"}],
+                "result":{"node":"map", "port":"value"}
+            }}}], "edges":[{"from_node":"source", "from_output":"value", "to_node":"iteration", "to_input":"items"}]
+        }),
+        &registry,
+    );
+    let records = targets(&plan, &registry);
+    let record = NodeTarget::find(&records, "iteration").unwrap();
+    assert_eq!(record.worker_limit.unwrap().get(), 1);
+    let stream = mf_compiler::instantiate_stream(&plan, &registry).unwrap();
+    let target = record.bind_stream(&stream).unwrap();
+    let runtime = FlowRuntime::new(mf_runtime::RuntimeOptions {
+        max_parallel_domains: std::num::NonZeroUsize::new(2).unwrap(),
+    });
+    assert_eq!(
+        json!(
+            runtime
+                .execute_target(
+                    &target,
+                    args(json!({"iteration.items":[3,2,1]})),
+                    WorkflowArguments::default()
+                )
+                .unwrap()
+        ),
+        json!({"results":[6,5,4]})
+    );
+    let mut changed = record.clone();
+    changed.worker_limit = std::num::NonZeroUsize::new(2);
+    assert!(
+        changed
+            .bind_stream(&stream)
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("stream worker limit")
     );
 }

@@ -19,6 +19,8 @@ pub struct NodeTarget {
     pub id: String,
     pub index: usize,
     pub kind: NodeTargetKind,
+    #[serde(default)]
+    pub worker_limit: Option<std::num::NonZeroUsize>,
     pub inputs: WorkflowInputSchema,
     pub outputs: BTreeMap<String, WorkflowInput>,
     pub references: Vec<ContextReference>,
@@ -87,7 +89,11 @@ impl crate::FlowRuntime {
         inputs: crate::WorkflowArguments,
         context: crate::WorkflowArguments,
     ) -> Result<crate::FlowOutputs, crate::WorkflowRunError> {
-        state.configure_worker_limit(self.options().max_parallel_domains);
+        let limit = target
+            .contract
+            .worker_limit
+            .unwrap_or(self.options().max_parallel_domains);
+        state.configure_worker_limit(self.options().max_parallel_domains.min(limit));
         state
             .initialize_target(target.contract, inputs, context)
             .inspect_err(|error| {
@@ -310,6 +316,14 @@ impl NodeTarget {
         &'a self,
         stream: &'a PreparedStream,
     ) -> Result<PreparedTaskTarget<'a>, NodeTargetError> {
+        ensure!(
+            self.worker_limit.map(std::num::NonZeroUsize::get)
+                == Some(stream.plan().execution().limits.workers),
+            DriftSnafu {
+                id: &self.id,
+                component: "stream worker limit"
+            }
+        );
         let nodes = stream.plan().nodes();
         let node = nodes.get(self.index).context(DriftSnafu {
             id: &self.id,

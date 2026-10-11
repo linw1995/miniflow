@@ -40,6 +40,11 @@ pub struct GeneratedExecutionArtifacts {
 
 #[derive(Debug, Snafu)]
 pub enum PlanError {
+    #[snafu(display("node target `{definition_id}` references unknown context output `{output}`"))]
+    UnknownTargetReference {
+        definition_id: DefinitionId,
+        output: String,
+    },
     #[snafu(transparent)]
     TargetInputs {
         source: mf_runtime::WorkflowInputError,
@@ -103,7 +108,18 @@ impl CompiledWorkflow {
         &self,
         nodes: &[mf_runtime::FlowNode],
     ) -> Result<Vec<mf_runtime::NodeTarget>, PlanError> {
+        crate::validate_execution(&self.definition).map_err(crate::WorkflowBuildError::from)?;
+        ensure!(
+            nodes.len() == self.execution_order.len(),
+            InvalidExecutionOrderSnafu
+        );
         let original = crate::describe_compiled(self)?;
+        let mut bodies = BTreeMap::<&str, Vec<_>>::new();
+        for body in &original.loop_bodies {
+            if let Some(root) = body.path.first() {
+                bodies.entry(root.as_str()).or_default().push(body.clone());
+            }
+        }
         let output_types: BTreeMap<_, _> = nodes
             .iter()
             .flat_map(|node| {
@@ -125,26 +141,28 @@ impl CompiledWorkflow {
                 None => return UnknownNodeSnafu { definition_id: node.definition_id.clone() }.fail(),
             };
             let inputs = crate::workflow_input_schema(std::iter::once((node, true)), |_, _| false)?;
-            let mut description = original.clone();
-            description.version = mf_telemetry::description::WorkflowDescriptionVersion::CURRENT;
-            description.execution = None;
-            description.nodes.retain(|node| node.id == id);
-            description.data_edges.clear();
-            description.control_edges.clear();
-            description.execution_order = vec![id.clone()];
-            description.loop_bodies.retain(|body| body.path.first() == Some(&id));
+            let mut description = mf_telemetry::description::WorkflowDescription {
+                version: mf_telemetry::description::WorkflowDescriptionVersion::CURRENT,
+                workflow_id: original.workflow_id.clone(), execution: None,
+                nodes: vec![original.nodes[index].clone()],
+                data_edges: Vec::new(), control_edges: Vec::new(),
+                execution_order: vec![id.clone()],
+                loop_bodies: bodies.get(id.as_str()).cloned().unwrap_or_default(),
+            };
             description.workflow_id = mf_telemetry::identity::WorkflowId::from_definition(
                 &serde_json::json!({"isolation_format": 1, "workflow_id": original.workflow_id, "target": id}),
                 &description.execution_order,
             ).context(crate::compiler::ContractSnafu)?;
             description.validate().context(crate::compiler::ContractSnafu)?;
-            let context = node.metadata.context_references.iter().map(|reference| (
-                reference.output.clone(), mf_runtime::WorkflowInput {
-                    value_type: output_types[&reference.output].clone(), required: true,
-                },
-            )).collect();
+            let context = node.metadata.context_references.iter().map(|reference| {
+                let value_type = output_types.get(&reference.output).context(UnknownTargetReferenceSnafu {
+                    definition_id: node.definition_id.clone(), output: &reference.output,
+                })?;
+                Ok((reference.output.clone(), mf_runtime::WorkflowInput { value_type: value_type.clone(), required: true }))
+            }).collect::<Result<_, PlanError>>()?;
             Ok(mf_runtime::NodeTarget {
                 id, index, kind, inputs, outputs: mf_runtime::target_ports(&node.metadata.ports.outputs),
+                worker_limit: self.definition.execution.as_ref().and_then(|execution| std::num::NonZeroUsize::new(execution.limits.workers)),
                 references: node.metadata.context_references.clone(), context,
                 original_workflow_id: original.workflow_id.clone(), description,
             })

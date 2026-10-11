@@ -787,3 +787,7 @@ are omitted, explicit null remains present, and zero-output tasks return an empt
 A selected Loop or Iteration runs its complete prepared body with existing scope rules, limits, ordered
 results, and error policy. External context injection does not grant additional nested-body visibility.
 Body-local nodes and synthetic scope controls cannot be selected as top-level operations.
+
+A selected Task from a stream flow retains its original `execution.limits.workers` ceiling.
+Runtime options may reduce that ceiling, and finite-flow callers retain their ordinary configurable
+worker limit. The compiled target record carries the stream ceiling and rejects resource-contract drift.

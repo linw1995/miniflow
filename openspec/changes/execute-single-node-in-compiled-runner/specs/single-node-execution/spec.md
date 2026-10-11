@@ -189,6 +189,11 @@ semantics. Context visibility inside the body MUST remain governed by the origin
 - **WHEN** a top-level parallel Iteration is selected with a supplied collection
 - **THEN** it preserves ordered results, configured error policy, and bounded shared workers
 
+#### Scenario: Preserve a stream worker ceiling
+
+- **WHEN** a parallel Iteration is selected from a stream flow whose worker limit is one
+- **THEN** its body retains that ceiling even when caller runtime options allow more workers
+
 ### Requirement: Route only selected input resources
 
 Selected execution SHALL evaluate the target's prepared stdin requirement against its supplied inputs.

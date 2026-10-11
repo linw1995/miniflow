@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 use snafu::ResultExt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+static PREPARATION_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 static CONSTRUCTIONS: AtomicUsize = AtomicUsize::new(0);
 static EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
 struct Probe;
@@ -49,6 +50,7 @@ fn definition() -> WorkflowDefinition {
 
 #[test]
 fn target_records_reuse_preparation_and_bind_original_contracts() {
+    let _guard = PREPARATION_LOCK.lock().unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition(), &registry).unwrap();
     CONSTRUCTIONS.store(0, Ordering::SeqCst);
@@ -204,4 +206,26 @@ fn stream_records_bind_tasks_and_reject_producers_without_starting_them() {
             .contains("only top-level Tasks")
     );
     assert!(NodeTarget::find(&targets, "missing").is_err());
+}
+
+#[test]
+fn public_target_preparation_rejects_incomplete_or_unresolved_metadata() {
+    let _guard = PREPARATION_LOCK.lock().unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition(), &registry).unwrap();
+    let mut nodes = mf_compiler::resolve_nodes(&plan.definition, &registry).unwrap();
+    assert!(matches!(
+        plan.node_targets(&nodes[..1]),
+        Err(mf_compiler::PlanError::InvalidExecutionOrder)
+    ));
+    let route = nodes
+        .iter_mut()
+        .find(|node| node.definition_id.as_str() == "route")
+        .unwrap();
+    route.metadata.context_references =
+        vec![mf_runtime::ContextReference::new("absent.value", "unknown")];
+    assert!(matches!(
+        plan.node_targets(&nodes),
+        Err(mf_compiler::PlanError::UnknownTargetReference { .. })
+    ));
 }

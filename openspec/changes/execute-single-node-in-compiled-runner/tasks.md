@@ -77,11 +77,11 @@
 
 ## 6. Review and repository validation
 
-- [ ] 6.1 Review implementation against all delta scenarios, existing module/public API boundaries, and
+- [x] 6.1 Review implementation against all delta scenarios, existing module/public API boundaries, and
   Snafu source-chain rules; record material findings and resolve them before final validation.
-- [ ] 6.2 Run focused runtime/parser/compiler/runner regressions in `nix develop`; verify isolation,
+- [x] 6.2 Run focused runtime/parser/compiler/runner regressions in `nix develop`; verify isolation,
   preparation drift, context references, composite execution, telemetry, and ordinary execution all pass.
-- [ ] 6.3 Run `nix develop --command prek install`, `nix develop --command prek -a`, strict OpenSpec
+- [x] 6.3 Run `nix develop --command prek install`, `nix develop --command prek -a`, strict OpenSpec
   validation, and `nix flake check -L`; verify required checks pass. When coverage is relevant, run
   `nix develop --command bash scripts/run-cov.sh` and inspect reports under `target/coverage/result/`.
 
