@@ -63,7 +63,7 @@ impl StepBudget {
     fn reserve(&self, id: &str) -> Result<(), WorkflowRunError> {
         match self
             .0
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
                 remaining.checked_sub(1)
             }) {
             Ok(_) => Ok(()),
