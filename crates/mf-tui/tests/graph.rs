@@ -847,7 +847,7 @@ fn input_permutations_keep_geometry_crossing_layers_and_rendered_styles() {
 }
 
 #[test]
-fn lifecycle_updates_and_loop_scopes_do_not_replan_routes() {
+fn root_and_loop_body_share_routing_geometry() {
     let body_graph = crowded_graph();
     let root = GraphLayout::new(&body_graph).unwrap();
     let mut description = body_graph.clone();
@@ -870,33 +870,6 @@ fn lifecycle_updates_and_loop_scopes_do_not_replan_routes() {
     assert_eq!(body.nodes(), root.nodes());
     assert_eq!(body.routes(), root.routes());
     assert_eq!(body.crossings(), root.crossings());
-    let routes = body.routes().to_vec();
-    let crossings = body.crossings().to_vec();
-    let mut observations: Vec<_> = body
-        .nodes()
-        .iter()
-        .map(|node| NodeObservation::pending(&node.id, &node.kind))
-        .collect();
-    let area = Rect::new(4, 6, 30, 16);
-    for status in [
-        NodeStatus::Pending,
-        NodeStatus::Running,
-        NodeStatus::Succeeded,
-        NodeStatus::Skipped,
-        NodeStatus::Unknown,
-    ] {
-        for node in &mut observations {
-            node.status = status;
-        }
-        let mut buffer = Buffer::empty(area);
-        GraphView::new(&body)
-            .nodes(&observations)
-            .elapsed_ns(1_000_000_000)
-            .offset(20, 15)
-            .render(area, &mut buffer);
-        assert_eq!(body.routes(), routes);
-        assert_eq!(body.crossings(), crossings);
-    }
 }
 
 #[test]

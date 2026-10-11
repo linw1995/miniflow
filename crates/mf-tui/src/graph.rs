@@ -539,6 +539,13 @@ impl<'a> GraphView<'a> {
 
     fn draw_crossing(&self, area: Rect, buffer: &mut Buffer, crossing: &Crossing) {
         let rect = crossing.footprint();
+        if rect.x >= self.offset.0.saturating_add(u32::from(area.width))
+            || rect.x + rect.width <= self.offset.0
+            || rect.y >= self.offset.1.saturating_add(u32::from(area.height))
+            || rect.y + rect.height <= self.offset.1
+        {
+            return;
+        }
         for y in rect.y..rect.y + rect.height {
             for x in rect.x..rect.x + rect.width {
                 self.put(area, buffer, x, y, " ", Style::default());
@@ -547,12 +554,7 @@ impl<'a> GraphView<'a> {
         let horizontal = &self.layout.edges[crossing.horizontal];
         let vertical = &self.layout.edges[crossing.vertical];
         let upper_horizontal = crossing.upper == crossing.horizontal;
-        for cell in routing::crossing_cells(
-            horizontal.kind,
-            vertical.kind,
-            upper_horizontal,
-            routing::CrossingPattern::Underpass,
-        ) {
+        for cell in routing::crossing_cells(horizontal.kind, vertical.kind, upper_horizontal) {
             let edge = if cell.upper == upper_horizontal {
                 horizontal
             } else {
@@ -868,7 +870,7 @@ fn display_line(value: &str) -> String {
 #[cfg(test)]
 mod rendering_tests {
     use super::*;
-    use routing::{CrossingPattern, Point, RoutingStats, crossing_cells};
+    use routing::{Point, RoutingStats, crossing_cells};
 
     fn crossing_layout(
         horizontal: EdgeKind,
@@ -951,12 +953,7 @@ mod rendering_tests {
                     GraphView::new(&layout)
                         .nodes(&observations)
                         .render(buffer.area, &mut buffer);
-                    for cell in crossing_cells(
-                        horizontal,
-                        vertical,
-                        upper_horizontal,
-                        CrossingPattern::Underpass,
-                    ) {
+                    for cell in crossing_cells(horizontal, vertical, upper_horizontal) {
                         let rendered = buffer
                             .cell(Position::new((10 + cell.dx) as u16, (10 + cell.dy) as u16))
                             .unwrap();

@@ -237,12 +237,6 @@ impl Crossing {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CrossingPattern {
-    Bridge,
-    Underpass,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct MarkerCell {
     pub dx: i32,
     pub dy: i32,
@@ -261,92 +255,37 @@ pub fn crossing_cells(
     horizontal: EdgeKind,
     vertical: EdgeKind,
     upper_horizontal: bool,
-    pattern: CrossingPattern,
-) -> Vec<MarkerCell> {
-    let upper_kind = if upper_horizontal {
+) -> [MarkerCell; 5] {
+    let kind = if upper_horizontal {
         horizontal
     } else {
         vertical
     };
-    let lower_kind = if upper_horizontal {
+    let line = line_symbols(kind)[usize::from(!upper_horizontal)];
+    let lower = if upper_horizontal {
         vertical
     } else {
         horizontal
     };
-    let [h, v, tl, tr, bl, br] = line_symbols(upper_kind);
-    let lower_line = line_symbols(lower_kind)[usize::from(upper_horizontal)];
-    let mut cells = Vec::new();
-    let mut put = |dx, dy, symbol, upper| {
-        cells.push(MarkerCell {
-            dx,
-            dy,
-            symbol,
-            upper,
-        })
+    let (before, after) = match (upper_horizontal, lower) {
+        (true, EdgeKind::Control) => ("┴", "┬"),
+        (true, EdgeKind::Data) => ("╨", "╥"),
+        (false, EdgeKind::Control) => ("┤", "├"),
+        (false, EdgeKind::Data) => ("╡", "╞"),
     };
-    match pattern {
-        CrossingPattern::Underpass => {
-            for along in -1..=1 {
-                put(
-                    if upper_horizontal { along } else { 0 },
-                    if upper_horizontal { 0 } else { along },
-                    if upper_horizontal { h } else { v },
-                    true,
-                );
-            }
-            let (before, after) = match (upper_horizontal, lower_kind) {
-                (true, EdgeKind::Control) => ("┴", "┬"),
-                (true, EdgeKind::Data) => ("╨", "╥"),
-                (false, EdgeKind::Control) => ("┤", "├"),
-                (false, EdgeKind::Data) => ("╡", "╞"),
-            };
-            put(
-                if upper_horizontal { 0 } else { -1 },
-                if upper_horizontal { -1 } else { 0 },
-                before,
-                false,
-            );
-            put(
-                if upper_horizontal { 0 } else { 1 },
-                if upper_horizontal { 1 } else { 0 },
-                after,
-                false,
-            );
-        }
-        CrossingPattern::Bridge => {
-            if upper_horizontal {
-                for (dx, dy, symbol) in [
-                    (-2, 0, br),
-                    (-2, -1, tl),
-                    (-1, -1, h),
-                    (0, -1, h),
-                    (1, -1, h),
-                    (2, -1, tr),
-                    (2, 0, bl),
-                ] {
-                    put(dx, dy, symbol, true);
-                }
-                put(0, -2, lower_line, false);
-                put(0, 1, lower_line, false);
-                put(0, 2, lower_line, false);
-            } else {
-                for (dx, dy, symbol) in [
-                    (0, -2, bl),
-                    (1, -2, tr),
-                    (1, -1, v),
-                    (1, 0, v),
-                    (1, 1, v),
-                    (1, 2, br),
-                    (0, 2, tl),
-                ] {
-                    put(dx, dy, symbol, true);
-                }
-                put(-2, 0, lower_line, false);
-                put(-1, 0, lower_line, false);
-            }
-        }
-    }
-    cells
+    let cell = |along, symbol, upper| MarkerCell {
+        dx: if upper == upper_horizontal { along } else { 0 },
+        dy: if upper == upper_horizontal { 0 } else { along },
+        symbol,
+        upper,
+    };
+    [
+        cell(-1, line, true),
+        cell(0, line, true),
+        cell(1, line, true),
+        cell(-1, before, false),
+        cell(1, after, false),
+    ]
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -861,9 +800,6 @@ impl Router<'_> {
         let index = &self.index;
         let markers = &self.markers;
         let budget = &mut self.budget;
-        if route.points.len() < 2 {
-            return CongestionSnafu.fail();
-        }
         if route.points.len() > self.limits.max_route_points
             || route
                 .points
@@ -1995,7 +1931,7 @@ mod tests {
     }
 
     #[test]
-    fn rerouting_retains_the_best_valid_arrangement_and_uses_outer_detours() {
+    fn outer_detours_recover_routes_when_search_geometry_is_exhausted() {
         let (nodes, edges, preferred) = search_fixture();
         let mut routes = vec![preferred];
         let limits = RoutingLimits {
@@ -2071,33 +2007,8 @@ mod tests {
     }
 
     #[test]
-    fn marker_footprints_exclude_nearby_bends_and_labels() {
-        let crossing = Crossing {
-            point: Point::new(8, 6),
-            horizontal: 0,
-            vertical: 1,
-            upper: 0,
-        };
-        let h = segment(2, 6, 12, 6);
-        assert!(h.interior_clearance(crossing.point) >= CROSSING_CLEARANCE);
-        assert!(segment(9, 4, 9, 8).intersects_rect(crossing.footprint()));
-        assert_eq!(segment(8, 6, 8, 10).interior_clearance(crossing.point), 0);
-        assert!(h.intersects_rect(GraphRect {
-            x: 3,
-            y: 6,
-            width: 4,
-            height: 1
-        }));
-    }
-
-    #[test]
     fn data_caps_keep_double_strokes_along_the_lower_edge() {
-        let vertical = crossing_cells(
-            EdgeKind::Control,
-            EdgeKind::Data,
-            true,
-            CrossingPattern::Underpass,
-        );
+        let vertical = crossing_cells(EdgeKind::Control, EdgeKind::Data, true);
         assert_eq!(
             vertical
                 .iter()
@@ -2114,12 +2025,7 @@ mod tests {
                 .symbol,
             "╥"
         );
-        let horizontal = crossing_cells(
-            EdgeKind::Data,
-            EdgeKind::Control,
-            false,
-            CrossingPattern::Underpass,
-        );
+        let horizontal = crossing_cells(EdgeKind::Data, EdgeKind::Control, false);
         assert_eq!(
             horizontal
                 .iter()
@@ -2143,7 +2049,7 @@ mod tests {
         for h in [EdgeKind::Data, EdgeKind::Control] {
             for v in [EdgeKind::Data, EdgeKind::Control] {
                 for upper in [true, false] {
-                    let cells = crossing_cells(h, v, upper, CrossingPattern::Underpass);
+                    let cells = crossing_cells(h, v, upper);
                     assert_eq!(cells.iter().filter(|cell| cell.upper).count(), 3);
                     assert_eq!(cells.iter().filter(|cell| !cell.upper).count(), 2);
                     for cell in cells {

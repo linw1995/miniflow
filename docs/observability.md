@@ -423,7 +423,7 @@ nix develop --command cargo run -p mf-tui --example graph_preview
 ```
 
 Export static routing fixtures with `graph_preview -- --dump`, adding `--crowded` for mixed dense
-connections or `--body` for the same fixture inside a Loop body. Compare crossing patterns with
+connections or `--body` for the same fixture inside a Loop body. Inspect crossing orientations and line kinds with
 `graph_preview -- --crossings`, adding `--color` for a status-color sample. These export modes run
 without an interactive terminal.
 

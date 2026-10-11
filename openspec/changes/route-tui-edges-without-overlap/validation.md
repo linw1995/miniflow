@@ -14,7 +14,7 @@
 | Reorder connection descriptions | Eight data/control permutations in `input_permutations_keep_geometry_crossing_layers_and_rendered_styles` compare canonical geometry and complete rendered buffers. |
 | Exhaust a routing budget | `routing_budgets_retain_all_connections_without_unsafe_paths`; `search_and_conflict_limits_stop_before_exceeding_counters`; the dense benchmark retains explicitly unresolved connections. |
 | Inspect an unresolved connection | `unresolved_connections_keep_inspectable_kind_ports_and_reason`; `routing_warnings_are_independent_of_observation_integrity`; `details_window_wraps_cell_width_and_reaches_rows_beyond_u16`. |
-| Inspect multiple passes of a body | `lifecycle_updates_and_loop_scopes_do_not_replan_routes`; `loop_views_preserve_navigation_and_compacted_stream_totals` switches passes and stream owners while comparing cached routes. |
+| Inspect multiple passes of a body | `root_and_loop_body_share_routing_geometry`; `loop_views_preserve_navigation_and_compacted_stream_totals` switches passes and stream owners while comparing cached routes. |
 
 ## Local Artifacts
 
