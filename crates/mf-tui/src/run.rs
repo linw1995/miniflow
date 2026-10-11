@@ -1551,13 +1551,24 @@ mod tests {
             execution: None,
             loop_bodies: vec![LoopBodyDescription {
                 path: vec!["repeat".into()],
-                nodes: vec![NodeDescription {
-                    id: "%loop".into(),
-                    kind: "%loop".into(),
+                nodes: vec![
+                    NodeDescription {
+                        id: "%loop".into(),
+                        kind: "%loop".into(),
+                    },
+                    NodeDescription {
+                        id: "child".into(),
+                        kind: "fixture.node".into(),
+                    },
+                ],
+                data_edges: vec![mf_telemetry::description::DataEdge {
+                    from_node: "%loop".into(),
+                    from_output: "value".into(),
+                    to_node: "child".into(),
+                    to_input: "input".into(),
                 }],
-                data_edges: vec![],
                 control_edges: vec![],
-                execution_order: vec!["%loop".into()],
+                execution_order: vec!["%loop".into(), "child".into()],
             }],
         };
         let root = GraphLayout::new(&description).unwrap();
@@ -1565,6 +1576,9 @@ mod tests {
             vec!["repeat".into()],
             GraphLayout::from_loop_body(&description, &["repeat".into()]).unwrap(),
         )]);
+        let before_nodes = bodies[&vec!["repeat".to_owned()]].nodes().to_vec();
+        let before_routes = bodies[&vec!["repeat".to_owned()]].routes().to_vec();
+        let before_crossings = bodies[&vec!["repeat".to_owned()]].crossings().to_vec();
         let run_id = RunId::new();
         let mut session = crate::state::SessionState::new(description.clone(), run_id).unwrap();
         let count = |value| Count::try_from(value).unwrap();
@@ -1572,7 +1586,7 @@ mod tests {
             (
                 1,
                 LifecycleKind::WorkflowStarted {
-                    node_count: count(2),
+                    node_count: count(3),
                     elapsed_ns: Count::ZERO,
                 },
             ),
@@ -1606,7 +1620,10 @@ mod tests {
                 })
                 .unwrap();
         }
-        let snapshot = session.snapshot();
+        let mut snapshot = session.snapshot();
+        for (index, pass) in snapshot.loop_passes.iter_mut().enumerate() {
+            pass.stream_invocation = Some(index as u64 + 10);
+        }
         let mut view = ViewState::default();
         view.handle_key(KeyCode::Char('l'), &snapshot, &root, &bodies, 0);
         assert_eq!(view.path, ["repeat"]);
@@ -1614,11 +1631,16 @@ mod tests {
         assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 1);
         view.handle_key(KeyCode::Char('['), &snapshot, &root, &bodies, 0);
         assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 0);
+        assert_eq!(view.pass(&snapshot).unwrap().stream_invocation, Some(10));
+        assert_eq!(view.layout(&root, &bodies).nodes(), before_nodes);
+        assert_eq!(view.layout(&root, &bodies).routes(), before_routes);
+        assert_eq!(view.layout(&root, &bodies).crossings(), before_crossings);
         view.handle_key(KeyCode::Char(']'), &snapshot, &root, &bodies, 0);
         assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 1);
+        assert_eq!(view.pass(&snapshot).unwrap().stream_invocation, Some(11));
+        assert_eq!(view.layout(&root, &bodies).routes(), before_routes);
         view.handle_key(KeyCode::Char('h'), &snapshot, &root, &bodies, 0);
         assert!(view.path.is_empty());
-        let mut snapshot = snapshot;
         snapshot.stream = Some(crate::state::StreamSnapshot {
             hidden_invocations: 1000,
             ..Default::default()

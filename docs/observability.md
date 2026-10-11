@@ -338,13 +338,13 @@ double strokes continue to distinguish control and data edges, including their l
 
 | Upper edge | Lower control caps | Lower data caps |
 | --- | --- | --- |
-| Horizontal | `┴` / `┬` | `╧` / `╤` |
-| Vertical | `┤` / `├` | `╢` / `╟` |
+| Horizontal | `┴` / `┬` | `╨` / `╥` |
+| Vertical | `┤` / `├` | `╡` / `╞` |
 
 Data edges pass above control edges; equal kinds use stable connection identities. Crossing layers
 and glyphs do not change when observation colors change. Crossings indicate independent connections,
 not junctions. Each marker has a three-by-three footprint reserved before rendering. Panning and
-resizing clip the same planned geometry, including partially visible node text and Unicode labels.
+resizing clip the same planned geometry, including partially visible node text and Unicode labels. A wide text glyph that cannot fit completely at the viewport boundary is blanked so it cannot overwrite an adjacent pane.
 
 If display limits prevent a safe route, the graph shows a separate unresolved-connections warning.
 Select an incident node with Tab/j/k to inspect its endpoint IDs, port names, edge kind, and reason in

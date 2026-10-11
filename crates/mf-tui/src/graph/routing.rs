@@ -296,9 +296,9 @@ pub fn crossing_cells(
             }
             let (before, after) = match (upper_horizontal, lower_kind) {
                 (true, EdgeKind::Control) => ("┴", "┬"),
-                (true, EdgeKind::Data) => ("╧", "╤"),
+                (true, EdgeKind::Data) => ("╨", "╥"),
                 (false, EdgeKind::Control) => ("┤", "├"),
-                (false, EdgeKind::Data) => ("╢", "╟"),
+                (false, EdgeKind::Data) => ("╡", "╞"),
             };
             put(
                 if upper_horizontal { 0 } else { -1 },
@@ -846,6 +846,16 @@ impl Router<'_> {
         {
             return CongestionSnafu.fail();
         }
+        if route.points.len() < 2 {
+            return CongestionSnafu.fail();
+        }
+        let from = route.points[0];
+        let after = route.points[1];
+        let to = route.points[route.points.len() - 1];
+        let before = route.points[route.points.len() - 2];
+        if after.y != from.y || after.x <= from.x || before.y != to.y || before.x >= to.x {
+            return CongestionSnafu.fail();
+        }
         let edges = self.edges;
         let obstacles = &self.obstacles;
         let index = &self.index;
@@ -865,6 +875,12 @@ impl Router<'_> {
         let mut crossings: Vec<Crossing> = Vec::new();
         let segments: Vec<_> = route.segments().collect();
         for (position, segment) in segments.iter().copied().enumerate() {
+            if segments
+                .get(position + 1)
+                .is_some_and(|next| next.axis() == segment.axis())
+            {
+                return CongestionSnafu.fail();
+            }
             for &(owner, rect) in obstacles.candidates(segment) {
                 budget.check()?;
                 if owner != Some(edge) && segment.intersects_rect(rect) {
@@ -1741,6 +1757,35 @@ mod tests {
     }
 
     #[test]
+    fn completed_routes_leave_and_enter_ports_horizontally() {
+        let (mut nodes, edges, preferred) = search_fixture();
+        nodes.truncate(2);
+        let mut router = Router::new(
+            &nodes,
+            &edges,
+            std::slice::from_ref(&preferred),
+            RoutingLimits::default(),
+        );
+        let vertical_departure =
+            EdgeRoute::from_points([Point::new(26, 11), Point::new(26, 14), Point::new(81, 14)]);
+        let vertical_arrival = EdgeRoute::from_points([
+            Point::new(26, 11),
+            Point::new(70, 11),
+            Point::new(70, 18),
+            Point::new(81, 18),
+            Point::new(81, 14),
+        ]);
+        assert_eq!(
+            router.validate(0, &vertical_departure),
+            Err(UnresolvedReason::Congestion)
+        );
+        assert_eq!(
+            router.validate(0, &vertical_arrival),
+            Err(UnresolvedReason::Congestion)
+        );
+    }
+
+    #[test]
     fn directional_search_finds_an_obstacle_detour_with_few_bends() {
         let (nodes, edges, preferred) = search_fixture();
         let mut router = Router::new(
@@ -2043,6 +2088,54 @@ mod tests {
             width: 4,
             height: 1
         }));
+    }
+
+    #[test]
+    fn data_caps_keep_double_strokes_along_the_lower_edge() {
+        let vertical = crossing_cells(
+            EdgeKind::Control,
+            EdgeKind::Data,
+            true,
+            CrossingPattern::Underpass,
+        );
+        assert_eq!(
+            vertical
+                .iter()
+                .find(|cell| !cell.upper && cell.dy == -1)
+                .unwrap()
+                .symbol,
+            "╨"
+        );
+        assert_eq!(
+            vertical
+                .iter()
+                .find(|cell| !cell.upper && cell.dy == 1)
+                .unwrap()
+                .symbol,
+            "╥"
+        );
+        let horizontal = crossing_cells(
+            EdgeKind::Data,
+            EdgeKind::Control,
+            false,
+            CrossingPattern::Underpass,
+        );
+        assert_eq!(
+            horizontal
+                .iter()
+                .find(|cell| !cell.upper && cell.dx == -1)
+                .unwrap()
+                .symbol,
+            "╡"
+        );
+        assert_eq!(
+            horizontal
+                .iter()
+                .find(|cell| !cell.upper && cell.dx == 1)
+                .unwrap()
+                .symbol,
+            "╞"
+        );
     }
 
     #[test]

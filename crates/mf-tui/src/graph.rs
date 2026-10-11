@@ -599,10 +599,15 @@ impl<'a> GraphView<'a> {
                 area.x + local_x as u16,
                 area.y + (rect.y - self.offset.1) as u16,
             )) {
-                *cell = line
+                let source = line
                     .cell(Position::new(x as u16, 0))
-                    .expect("text cell exists")
-                    .clone();
+                    .expect("text cell exists");
+                *cell = source.clone();
+                if ratatui::text::Span::raw(source.symbol()).width() as u32
+                    > u32::from(area.width) - local_x
+                {
+                    cell.set_symbol(" ");
+                }
             }
         }
     }

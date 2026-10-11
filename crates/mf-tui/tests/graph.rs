@@ -756,3 +756,171 @@ fn unresolved_connections_keep_inspectable_kind_ports_and_reason() {
     assert!(details.contains("routing conflict budget exhausted"));
     assert_eq!(details, layout.routing_details(1));
 }
+
+fn crowded_graph() -> WorkflowDescription {
+    let mut graph = fan_graph(5);
+    graph.data_edges.clear();
+    for from in 0..4 {
+        for to in if from < 2 { 2..6 } else { 4..6 } {
+            graph.data_edges.push(DataEdge {
+                from_node: graph.execution_order[from].clone(),
+                from_output: "value".into(),
+                to_node: graph.execution_order[to].clone(),
+                to_input: format!("input-{from}"),
+            });
+        }
+    }
+    for from in 0..2 {
+        for to in 4..6 {
+            graph.control_edges.push(ControlEdge {
+                from_node: graph.execution_order[from].clone(),
+                from_output: "gate".into(),
+                to_node: graph.execution_order[to].clone(),
+            });
+        }
+    }
+    graph
+}
+
+#[test]
+fn input_permutations_keep_geometry_crossing_layers_and_rendered_styles() {
+    use std::collections::{BTreeMap, BTreeSet};
+    let mut graph = crowded_graph();
+    let baseline = GraphLayout::new(&graph).unwrap();
+    assert!(!baseline.crossings().is_empty());
+    assert_eq!(baseline.unresolved_count(), 0);
+    let signature = |layout: &GraphLayout| {
+        let routes = layout
+            .edges()
+            .iter()
+            .zip(layout.routes())
+            .map(|(edge, route)| (edge.key.clone(), route.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let crossings = layout
+            .crossings()
+            .iter()
+            .map(|crossing| {
+                (
+                    crossing.point,
+                    layout.edges()[crossing.horizontal].key.clone(),
+                    layout.edges()[crossing.vertical].key.clone(),
+                    layout.edges()[crossing.upper].key.clone(),
+                )
+            })
+            .collect::<BTreeSet<_>>();
+        (layout.nodes().to_vec(), routes, crossings)
+    };
+    let expected = signature(&baseline);
+    let mut observations: Vec<_> = baseline
+        .nodes()
+        .iter()
+        .map(|node| NodeObservation::pending(&node.id, &node.kind))
+        .collect();
+    for (index, node) in observations.iter_mut().enumerate() {
+        if index % 2 == 0 {
+            node.status = NodeStatus::Succeeded;
+            node.produced_ports.push("value".into());
+            node.skipped_ports.push("gate".into());
+        } else {
+            node.status = NodeStatus::Unknown;
+        }
+    }
+    let area = Rect::new(0, 0, baseline.size().0 as u16, baseline.size().1 as u16);
+    let mut reference = Buffer::empty(area);
+    GraphView::new(&baseline)
+        .nodes(&observations)
+        .render(area, &mut reference);
+    for index in 0..8 {
+        graph.data_edges.rotate_left(1);
+        graph.control_edges.rotate_right(1);
+        if index % 2 == 0 {
+            graph.data_edges.reverse();
+        }
+        let layout = GraphLayout::new(&graph).unwrap();
+        assert_eq!(signature(&layout), expected);
+        let mut rendered = Buffer::empty(area);
+        GraphView::new(&layout)
+            .nodes(&observations)
+            .render(area, &mut rendered);
+        assert_eq!(rendered, reference);
+    }
+}
+
+#[test]
+fn lifecycle_updates_and_loop_scopes_do_not_replan_routes() {
+    let body_graph = crowded_graph();
+    let root = GraphLayout::new(&body_graph).unwrap();
+    let mut description = body_graph.clone();
+    description.version = WorkflowDescriptionVersion::V2026_09_29;
+    description.nodes = vec![NodeDescription {
+        id: "repeat".into(),
+        kind: "workflow.loop".into(),
+    }];
+    description.execution_order = vec!["repeat".into()];
+    description.data_edges.clear();
+    description.control_edges.clear();
+    description.loop_bodies = vec![LoopBodyDescription {
+        path: vec!["repeat".into()],
+        nodes: body_graph.nodes,
+        data_edges: body_graph.data_edges,
+        control_edges: body_graph.control_edges,
+        execution_order: body_graph.execution_order,
+    }];
+    let body = GraphLayout::from_loop_body(&description, &["repeat".into()]).unwrap();
+    assert_eq!(body.nodes(), root.nodes());
+    assert_eq!(body.routes(), root.routes());
+    assert_eq!(body.crossings(), root.crossings());
+    let routes = body.routes().to_vec();
+    let crossings = body.crossings().to_vec();
+    let mut observations: Vec<_> = body
+        .nodes()
+        .iter()
+        .map(|node| NodeObservation::pending(&node.id, &node.kind))
+        .collect();
+    let area = Rect::new(4, 6, 30, 16);
+    for status in [
+        NodeStatus::Pending,
+        NodeStatus::Running,
+        NodeStatus::Succeeded,
+        NodeStatus::Skipped,
+        NodeStatus::Unknown,
+    ] {
+        for node in &mut observations {
+            node.status = status;
+        }
+        let mut buffer = Buffer::empty(area);
+        GraphView::new(&body)
+            .nodes(&observations)
+            .elapsed_ns(1_000_000_000)
+            .offset(20, 15)
+            .render(area, &mut buffer);
+        assert_eq!(body.routes(), routes);
+        assert_eq!(body.crossings(), crossings);
+    }
+}
+
+#[test]
+fn a_wide_label_fragment_cannot_overwrite_the_next_pane() {
+    let mut graph = fan_graph(1);
+    graph.control_edges.push(ControlEdge {
+        from_node: "source".into(),
+        from_output: "🦀".into(),
+        to_node: "sink-0000".into(),
+    });
+    let layout = GraphLayout::new(&graph).unwrap();
+    let label = layout
+        .routes()
+        .iter()
+        .find_map(|route| route.label.as_ref())
+        .unwrap();
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 4, 2));
+    buffer
+        .cell_mut(Position::new(1, 0))
+        .unwrap()
+        .set_symbol("#");
+    GraphView::new(&layout)
+        .offset(label.rect.x, label.rect.y)
+        .render(Rect::new(0, 0, 1, 1), &mut buffer);
+    assert_eq!(buffer.cell(Position::new(0, 0)).unwrap().symbol(), " ");
+    assert_eq!(buffer.cell(Position::new(1, 0)).unwrap().symbol(), "#");
+}

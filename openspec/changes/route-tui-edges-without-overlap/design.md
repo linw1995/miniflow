@@ -85,7 +85,7 @@ This prototype step is part of implementation and does not require another appro
 
 #### Selected marker
 
-Use the capped underpass in a 3-by-3 footprint. The upper stroke remains continuous. A lower vertical control edge ends at `┴`/`┬`; a lower vertical data edge uses `╧`/`╤`. A lower horizontal control edge uses `┤`/`├`; a lower horizontal data edge uses `╢`/`╟`. Every marker glyph occupies one terminal cell. Require three cells of straight-segment clearance from bends and endpoints, and disjoint marker footprints.
+Use the capped underpass in a 3-by-3 footprint. The upper stroke remains continuous. A lower vertical control edge ends at `┴`/`┬`; a lower vertical data edge uses `╨`/`╥`. A lower horizontal control edge uses `┤`/`├`; a lower horizontal data edge uses `╡`/`╞`. Every marker glyph occupies one terminal cell. Require three cells of straight-segment clearance from bends and endpoints, and disjoint marker footprints.
 
 The preview matrix covers both orientations and all four edge-kind combinations. The compact caps preserve the lower edge's line kind and show deliberate interruption in monochrome; the bridge requires a larger footprint and displaces the upper path. The initial selection was visually inspected with Menlo. Local evidence lives in `target/edge-routing/crossings.txt`, `crossings.ansi`, and `crossings.png`; preview commands use `graph_preview -- --crossings [--color]`.
 
@@ -126,6 +126,7 @@ Implement the marker prototype and route model first, then routing-aware project
 - [libavoid routing parameters and options](https://www.adaptagrams.org/documentation/namespaceAvoid.html): obstacle clearance, nudging, and rerouting controls. The documented crossing/shared-path penalties include experimental options; they are not a non-overlap guarantee.
 - [ELK Layered](https://eclipse.dev/elk/reference/algorithms/org-eclipse-elk-layered.html): layered orthogonal routing with ports, multi-edges, and edge/channel spacing controls.
 - [PathFinder](https://janders.eecg.utoronto.ca/1387_2015/readings/pathfinder.pdf): current and historical congestion costs for iterative routing, retained as a possible later enhancement.
+- [Unicode Box Drawing chart](https://www.unicode.org/charts/PDF/U2500.pdf): cap glyphs must preserve double strokes along the lower edge, with a single transverse end bar.
 - [yFiles crossing styles](https://docs.yworks.com/yfiles-html/dguide/bridges-customizations/): bridge/gap styles and independent crossing-layer policies; terminal patterns require their own visual verification.
 
 ## Routing Measurements

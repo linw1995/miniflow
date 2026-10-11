@@ -27,7 +27,7 @@
 
 ## 5. Validate scope and execution integration
 
-- [ ] 5.1 Exercise data/control edge-array permutations, lifecycle updates, Loop pass selection, and stream invocation selection; verify equivalent descriptions and unchanged scopes retain node geometry, paths, and crossing layers while observation styles update.
-- [ ] 5.2 Run focused graph tests and existing CLI TUI integration tests through `nix develop`; visually inspect representative sparse and crowded root/body graphs and keep screenshots or text captures under `target/`.
+- [x] 5.1 Exercise data/control edge-array permutations, lifecycle updates, Loop pass selection, and stream invocation selection; verify equivalent descriptions and unchanged scopes retain node geometry, paths, and crossing layers while observation styles update.
+- [x] 5.2 Run focused graph tests and existing CLI TUI integration tests through `nix develop`; visually inspect representative sparse and crowded root/body graphs and keep screenshots or text captures under `target/`.
 - [ ] 5.3 Run `nix develop --command prek install`, `nix develop --command prek -a`, and `nix flake check -L`; resolve failures and record the integrated validation results.
-- [ ] 5.4 Run `openspec validate route-tui-edges-without-overlap --strict`; map every delta scenario to implementation or visual evidence before marking tasks complete.
+- [x] 5.4 Run `openspec validate route-tui-edges-without-overlap --strict`; map every delta scenario to implementation or visual evidence before marking tasks complete.
