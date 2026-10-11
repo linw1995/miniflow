@@ -31,4 +31,17 @@
 - `nix flake check -L`
 - `openspec validate route-tui-edges-without-overlap --strict`
 
-The implementation passes 42 library tests, 20 graph integration tests, nine existing CLI TUI tests, all repository hooks, and strict OpenSpec validation. The scoped coverage workflow passes 96 TUI tests and writes `lcov.info` under `target/coverage/result/`. The complete Nix workspace check remains in progress; its final result will be recorded before archive and PR publication.
+The implementation passes 41 library tests, 20 graph integration tests, nine existing CLI TUI tests, all repository hooks, and strict OpenSpec validation. The scoped coverage workflow passes 95 TUI tests and writes `lcov.info` under `target/coverage/result/`. The complete Nix workspace test suite passes 560 tests with two existing skipped tests. The complete `nix flake check -L` succeeds on aarch64-darwin, including package build, formatting, Clippy, workspace tests, and workflow validation.
+
+## Ablation and Final Review
+
+The selected crossing renderer now uses a five-cell array and skips offscreen marker footprints.
+Removed the unused crossing-style enum, bridge prototype, duplicate point-count validation, primitive
+footprint test, and immutable-render assertions. All 90 structured and seeded fixture variants preserve
+routing results and work counters. Search, local retries, interval pruning, and validated outer detours
+remain supported by quality or performance evidence. Local reports and temporary sources remain under
+ignored `target/edge-routing/ablation/`.
+
+The repository-instruction audit and final review confirm existing module boundaries, typed Snafu sources, deterministic route ownership, safe completed geometry, and separate unresolved-routing diagnostics. The PR uses the repository template with AI Disclosure.
+
+The delta passed strict validation before archive. Post-archive canonical validation passes without strict mode. Full strict canonical validation retains the same pre-existing long-requirement warnings as `origin/main` across all 21 specs; the six added routing requirements introduce no warnings.
