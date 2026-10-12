@@ -515,6 +515,7 @@ fn row_stride(node: &GraphNode, attachment_spacing: u32) -> u32 {
 pub struct GraphView<'a> {
     layout: &'a GraphLayout,
     nodes: Option<&'a [NodeObservation]>,
+    selected: Option<usize>,
     offset: (u32, u32),
     elapsed_ns: u64,
 }
@@ -524,6 +525,7 @@ impl<'a> GraphView<'a> {
         Self {
             layout,
             nodes: None,
+            selected: None,
             offset: (0, 0),
             elapsed_ns: 0,
         }
@@ -536,6 +538,11 @@ impl<'a> GraphView<'a> {
 
     pub fn nodes(mut self, nodes: &'a [NodeObservation]) -> Self {
         self.nodes = Some(nodes);
+        self
+    }
+
+    pub fn selected(mut self, selected: usize) -> Self {
+        self.selected = Some(selected);
         self
     }
 
@@ -835,7 +842,12 @@ impl<'a> GraphView<'a> {
             width: rect.width - 2,
             height: 1,
         };
-        self.text(area, buffer, title_rect, &title, style);
+        let title_style = if self.selected == Some(index) {
+            style.add_modifier(Modifier::REVERSED)
+        } else {
+            style
+        };
+        self.text(area, buffer, title_rect, &title, title_style);
         self.text(
             area,
             buffer,
