@@ -1,7 +1,9 @@
+from contextlib import closing
 import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import subprocess
 import tempfile
 import unittest
@@ -92,7 +94,15 @@ setup = "integration-env"
             execute("cargo", "generate-lockfile", "--offline")
             execute("git", "init", "-q")
             commit("test(ci): seed coverage fixture")
-            execute("bash", "scripts/run-cov.sh", "--collect-affected")
+            execute("bash", "scripts/run-cov.sh", "--refresh-affected")
+            self.assertEqual(report()["collection"]["mode"], "full")
+
+            def beta_regions():
+                with closing(sqlite3.connect(root / "target/affected/coverage.db")) as db:
+                    return db.execute("SELECT * FROM test_regions WHERE test_name = 'beta::tests::value_matches' ORDER BY source_file, line_start").fetchall()
+
+            untouched_regions = beta_regions()
+            self.assertTrue(untouched_regions)
 
             alpha = root / "src/alpha.rs"
             alpha.write_text(alpha.read_text().replace("    1", "    1 + 0"))
@@ -104,18 +114,66 @@ setup = "integration-env"
             lcov = root / "target/coverage/result/lcov.info"
             self.assertGreater(lcov.stat().st_size, 0)
 
+            execute("bash", "scripts/run-cov.sh", "--refresh-affected")
+            self.assertEqual(report()["collection"]["mode"], "incremental")
+            self.assertEqual(beta_regions(), untouched_regions)
+            with closing(sqlite3.connect(root / "target/affected/coverage.db")) as db:
+                self.assertEqual(db.execute("SELECT COUNT(DISTINCT collect_sha) FROM test_regions").fetchone()[0], 2)
+            execute("bash", "scripts/run-cov.sh", "--affected")
+            # Input rules also inspect the older anchors retained for untouched tests.
+            self.assertEqual(report()["selection"]["summary"]["selected"], 1)
             execute("bash", "scripts/run-cov.sh", "--collect-affected")
+            untouched_regions = beta_regions()
+            execute("bash", "scripts/run-cov.sh", "--refresh-affected")
+            self.assertEqual(report()["cache"]["status"], "hit-exact")
+            self.assertEqual(report()["collection"]["mode"], "incremental")
             execute("bash", "scripts/run-cov.sh", "--affected")
             self.assertEqual(report()["selection"]["summary"]["selected"], 0)
             self.assertFalse(lcov.exists())
+
+            (root / "README.md").write_text("Documentation only.\n")
+            commit("docs(docs): describe coverage fixture")
+            execute("bash", "scripts/run-cov.sh", "--refresh-affected")
+            self.assertEqual(report()["collection"]["mode"], "incremental")
+            self.assertEqual(report()["selection"]["summary"]["selected"], 0)
+            self.assertEqual(beta_regions(), untouched_regions)
 
             (root / "fixture.json").write_text("{}\n")
             commit("test(ci): change external input")
             execute("bash", "scripts/run-cov.sh", "--affected")
             self.assertEqual(report()["cache"]["status"], "forced-all")
             self.assertGreater(lcov.stat().st_size, 0)
+            execute("bash", "scripts/run-cov.sh", "--refresh-affected")
+            self.assertEqual(report()["collection"]["mode"], "full")
+            with closing(sqlite3.connect(root / "target/affected/coverage.db")) as db:
+                self.assertEqual(db.execute("SELECT COUNT(DISTINCT collect_sha) FROM test_regions").fetchone()[0], 1)
+            execute("bash", "scripts/run-cov.sh", "--collect-affected")
             execute("bash", "scripts/run-cov.sh")
             self.assertGreater(lcov.stat().st_size, 0)
+
+            database = root / "target/affected/coverage.db"
+            database.unlink()
+            execute("bash", "scripts/run-cov.sh", "--refresh-affected")
+            self.assertEqual(report()["cache"]["status"], "miss-no-coverage")
+            self.assertEqual(report()["collection"]["mode"], "full")
+
+            database.unlink()
+            execute("cargo", "affected", "collect", "--", "--workspace", "--all-features", "--profile", "ci")
+            execute("bash", "scripts/run-cov.sh", "--refresh-affected")
+            self.assertEqual(report()["cache"]["status"], "miss-fingerprint")
+            self.assertEqual(report()["collection"]["mode"], "full")
+
+            anchor = root / "target/affected/baseline.sha"
+            prior_anchor = anchor.read_text()
+            alpha.write_text(alpha.read_text().replace("    1 + 0", "    99"))
+            commit("test(ci): exercise failed collection")
+            failure = subprocess.run(
+                ["bash", "scripts/run-cov.sh", "--refresh-affected"],
+                cwd=root, env=env, capture_output=True, text=True,
+            )
+            self.assertNotEqual(failure.returncode, 0, failure.stdout + failure.stderr)
+            self.assertIn("value_matches", failure.stdout + failure.stderr)
+            self.assertEqual(anchor.read_text(), prior_anchor)
 
 
 if __name__ == "__main__":

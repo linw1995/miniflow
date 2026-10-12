@@ -7,6 +7,29 @@
 - Run `prek -a` and `nix flake check -L` before submitting changes.
 - When coverage is relevant, run `nix develop --command bash scripts/run-cov.sh`. Reports are written to `target/coverage/result/`, including `lcov.info`.
 
+### Faster local test iterations
+
+- Use affected tests for repeated Rust-source changes during development; keep the final validation requirements above.
+- Collect a local baseline from a clean commit before editing. Use the pinned toolchain and the same operating system for collection and subsequent runs; do not assume the Linux CI database is compatible with local macOS builds.
+- Reuse a persistent fixture build cache for both commands to avoid warming generated-project dependencies on every run:
+
+```bash
+nix develop
+export MF_TEST_BUILD_CACHE_DIR="$PWD/target/nextest-build-cache/local"
+bash scripts/run-cov.sh --collect-affected
+```
+
+After editing Rust sources, run in the same development shell:
+
+```bash
+bash scripts/run-cov.sh --affected
+```
+
+- The baseline lives in `target/affected/coverage.db` and `target/affected/baseline.sha`. Inspect `target/affected/report.json` to check test selection and full-suite fallbacks. Keep these generated files under the Git-ignored `target/` directory.
+- Initial collection runs the full suite once. After committing changes, use `bash scripts/run-cov.sh --refresh-affected` to update affected mappings while preserving unaffected tests' original commit anchors. Collection requires a clean working tree.
+- Missing or incompatible baselines and changes to non-Rust inputs, build scripts, proc macros, or external fixtures conservatively trigger full-suite execution. Known documentation files are exempt; fixture and unknown Markdown files are not.
+- Affected mode reduces test execution, but still compiles test binaries and generates coverage reports. Plain `cargo nextest run` and `nix flake check` do not automatically use this database. See `docs/ci.md` for selection rules and coverage behavior.
+
 ## Rust Visibility and Module Boundaries
 
 - Decide the public surface at the highest relevant module entry point, through module declarations and exports. Follow the existing module structure and paths when extending the project.

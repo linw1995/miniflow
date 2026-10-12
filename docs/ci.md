@@ -1,22 +1,36 @@
 # CI tests
 
-Pull requests and pushes to `main` run `scripts/run-cov.sh --affected`, using
+Pull requests run `scripts/run-cov.sh --affected`, using
 `cargo affected run` with the same
 workspace, target, feature, and nextest profile selection as the full suite.
 The pinned `cargo-affected` version is provided by `nix develop`.
 Formatting, package builds, Clippy, and repository hooks still run in CI.
 
-Only a successful Linux full-test collection on the default branch publishes
-the coverage database and its Git commit anchor. PRs restore that baseline
-without publishing a replacement. The checkout includes full Git history.
+Pushes to `main` run `scripts/run-cov.sh --refresh-affected` instead. Compatible
+baselines use `cargo affected collect --diff` to execute and refresh only affected
+tests, retaining unaffected rows and their original commit anchors. Missing or
+incompatible baselines and untracked build inputs require a full collection.
+Input rules can conservatively reselect tests while older anchors remain;
+nightly full collection refreshes all mappings and removes that accumulated diff.
+This executes the selected tests once; it does not repeat an aggregate coverage
+run. The `collection` field in `affected-tests` records the actual collection
+mode and reason; any selection fields describe its status preflight.
+
+Successful Linux collections on the default branch publish the coverage
+database and its Git commit anchor. PRs restore that baseline without publishing
+a replacement. The cache fingerprint includes root and `crates/` manifests,
+excluding all `target/` directories so generated-project and vendored manifests
+cannot change the key between restore and save. The checkout includes full Git history.
 Missing baselines, missing Git anchors, and changed build fingerprints fall
 back to all tests. Each run uploads `affected-tests`, a JSON selection report.
 Collection uses `scripts/run-cov.sh --collect-affected` so its ambient
 instrumentation flags match affected runs and do not invalidate the fingerprint.
 
-Coverage-based selection is approximate. Changes to non-Rust files, Rust
-fixture inputs, build scripts, and the runtime derive crate force the full
-suite. Metadata rules in
+Coverage-based selection is approximate. Changes to non-Rust inputs, Rust
+fixtures, build scripts, and the runtime derive crate force the full suite.
+Known documentation files (`AGENTS.md`, `README.md`, Markdown under `docs/`
+and `openspec/`, and OpenSpec `.openspec.yaml` files) are exempt; fixture and
+unknown Markdown files still force the full suite. Metadata rules in
 `Cargo.toml` select CLI and generated-runner integration tests when their Rust
 inputs change, because coverage from the test binary cannot observe every
 subprocess. Keep these rules current when adding subprocess test suites or
@@ -33,8 +47,9 @@ coverage. When only an incremental report is uploaded, the project status
 passes without evaluating full-project coverage, preserving its status context;
 the patch status evaluates the uploaded coverage. No tests selected means no
 coverage report is generated or uploaded.
-Incremental reports from `main` are not uploaded, keeping default-branch
-coverage history and its badge based on complete reports.
+The `main` collection job does not generate aggregate coverage reports.
+Nightly supplies complete default-branch reports, keeping coverage history
+and the badge based on full-suite coverage.
 
 Neither flag uses carryforward. Codecov carries forward a whole missing flag,
 not unexecuted tests within a newly uploaded flag. A partial report cannot
@@ -65,3 +80,12 @@ the default branch to seed the first baseline; until then, CI runs all tests.
 
 Local validation remains `nix develop --command prek -a` and
 `nix flake check -L`, which always includes the complete test suite.
+
+For faster development iterations, collect a local baseline from a clean
+commit with `scripts/run-cov.sh --collect-affected`, then use `--affected`
+after editing Rust sources. Export a persistent `MF_TEST_BUILD_CACHE_DIR`
+for both commands to reuse generated-project dependencies. After committing
+changes, `--refresh-affected` updates only affected mappings when compatible.
+Use the same pinned toolchain and host platform throughout; a Linux CI
+database does not match a local macOS fingerprint. Collection requires a
+clean working tree so stored source ranges remain aligned with their commits.

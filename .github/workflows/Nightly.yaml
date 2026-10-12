@@ -71,7 +71,8 @@ jobs:
           path: |
             target/affected/coverage.db
             target/affected/baseline.sha
-          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # Collection creates manifests under target; they must not change the restore key.
+          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '!**/target/**') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   coverage:
     name: Full coverage
