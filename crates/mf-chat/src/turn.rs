@@ -481,6 +481,15 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
             .context(DatabaseSnafu {
                 operation: "update completed session",
             })?;
+        if owner.conversation_revision == 0 && owner.title_source == "provisional" {
+            crate::title::schedule(
+                connection,
+                &owner.id,
+                &turn.id,
+                owner.title_revision,
+                &owner.profile,
+            )?;
+        }
         Ok(CompletionOutputs {
             completion: Completion {
                 invocation: input.invocation.clone(),
@@ -512,7 +521,7 @@ pub fn finalize_call(
         }
     );
     let call = load_call(connection, id)?;
-    if call.state != "running" {
+    if call.state != "running" && !(call.purpose == "title" && call.state == "pending") {
         return Ok(Changed { changed: false });
     }
     let timestamp = session::now()?;

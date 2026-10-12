@@ -59,7 +59,7 @@ Use `embed_migrations!("migrations")` and explicitly track the migration directo
 
 Use explicit domain identifiers in Rust and stable string encodings at database and node value boundaries. Add foreign keys, role/state/purpose checks, unique message sequence and turn-role constraints, and an index enforcing at most one running conversation turn per session. Index session ordering and call filters. Message order must not depend on timestamps or UUID sort order.
 
-Turn states are `running`, `succeeded`, `failed`, `cancelled`, and `interrupted`. Call states additionally include `pending` for scheduled title work. A title call can reference the first successful source turn without owning or changing that turn's state.
+Turn states are `running`, `succeeded`, `failed`, `cancelled`, and `interrupted`. Call states additionally include `pending` for scheduled title work and `skipped` for obsolete work that never invokes a provider. A title call can reference the first successful source turn without owning or changing that turn's state. Pending rows record a profile hint; actual model identity is captured at invocation.
 
 Archiving preserves all records and prevents new conversation turns; restoring permits new turns again. A request already begun may finish into an archived session. Manual rename increments the title revision and marks its source manual. Session and message listings use bounded keyset pages; complete model history remains a separate operation.
 
@@ -106,6 +106,8 @@ mf_chat.title.prepare -> mf_chat.llm -> mf_chat.title.complete
 ```
 
 After the first successful turn returns, the host schedules its pending title work within the total concurrency limit. `title.prepare` claims the pending call, checks that the title remains provisional, captures its revision and the first completed turn, and builds a separate summarization prompt. A manual rename before execution skips the pending job without invoking the model.
+
+Keep completed background results in a queue bounded by the host concurrency limit. When that queue is full, additional title requests remain pending in SQLite until the caller collects results. Callers can defer automatic dispatch while retaining durable scheduling, start a title job explicitly, or select a dedicated title profile. Foreground admission reserves priority before session reads so not-yet-started background work yields.
 
 `title.complete` validates and normalizes a nonempty single-line title, then saves call facts and conditionally applies it in one transaction. A title changed after preparation retains precedence; the response is accounted for even if its title update is skipped. A rejected application title still retains any usable LLM usage and a title-specific outcome. Title calls never append chat messages or alter the source turn's success.
 

@@ -35,11 +35,11 @@
 
 ## 5. Embedded Session Title Flow
 
-- [ ] 5.1 Schedule one pending automatic title call in the first-turn completion transaction; verify replay creates no duplicate job and pending jobs survive reopening.
-- [ ] 5.2 Add title preparation and completion nodes plus `session_title.json`; verify a separately configured local mock model summarizes the first completed turn without appending chat messages.
-- [ ] 5.3 Implement title revision checks, validation, and accounting for skipped or rejected application results; verify manual renaming wins both before invocation and during a running title call.
-- [ ] 5.4 Add pending-title scheduling, failure cleanup, and explicit title retry; verify title failure does not roll back a conversation and interrupted calls are not automatically resent.
-- [ ] 5.5 Document first-turn title timing, manual-title precedence, and retry behavior; verify saved title outcomes and call usage remain visible independently of turn status.
+- [x] 5.1 Schedule one pending automatic title call in the first-turn completion transaction; verify replay creates no duplicate job and pending jobs survive reopening.
+- [x] 5.2 Add title preparation and completion nodes plus `session_title.json`; verify a separately configured local mock model summarizes the first completed turn without appending chat messages.
+- [x] 5.3 Implement title revision checks, validation, and accounting for skipped or rejected application results; verify manual renaming wins both before invocation and during a running title call.
+- [x] 5.4 Add pending-title scheduling, failure cleanup, and explicit title retry; verify title failure does not roll back a conversation and interrupted calls are not automatically resent.
+- [x] 5.5 Document first-turn title timing, manual-title precedence, and retry behavior; verify saved title outcomes and call usage remain visible independently of turn status.
 
 ## 6. Embedded Usage Statistics Flow
 

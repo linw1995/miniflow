@@ -11,11 +11,13 @@ mod operation;
 mod schema;
 mod session;
 mod storage;
+mod title;
 mod turn;
 
 pub use error::ChatError;
-pub use host::{ChatHost, ChatJob, HostConfig, ModelProfile, UncommittedCompletion};
+pub use host::{ChatHost, ChatJob, HostConfig, ModelProfile, TitleJob, UncommittedCompletion};
 pub use models::{Message, ModelCall, Session, Turn};
 pub use session::{DEFAULT_HISTORY_BYTES, HistoryContext, MessagePage, MessageRecord, SessionPage};
 pub use storage::ChatDatabase;
+pub use title::{CallPurpose, TitleCompletion, TitleOutcome};
 pub use turn::{Completion, Invocation, ModelIdentity, Reply};

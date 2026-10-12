@@ -4,6 +4,8 @@ use std::{error::Error, io, path::PathBuf};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ChatError {
+    #[snafu(display("chat session {id:?} already has an active title request"))]
+    TitleBusy { id: String },
     #[snafu(transparent)]
     Description {
         source: mf_compiler::DescriptionError,

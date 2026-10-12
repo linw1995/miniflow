@@ -34,8 +34,17 @@ fn probe(server: &Server, scenario: &str, second_url: Option<&str>) -> Value {
         command.env("MF_CHAT_TEST_SECOND_URL", url);
     }
     let mut child = command.spawn().unwrap();
-    if matches!(scenario, "cancel" | "capacity" | "parallel" | "shutdown") {
-        server.wait_for_requests(1);
+    if matches!(
+        scenario,
+        "cancel" | "capacity" | "parallel" | "shutdown" | "title_rename" | "title_cancel"
+    ) {
+        server.wait_for_requests(
+            if scenario == "title_rename" || scenario == "title_cancel" {
+                2
+            } else {
+                1
+            },
+        );
         child
             .stdin
             .as_mut()
@@ -63,6 +72,90 @@ fn profile(name: &str, url: &str) -> ModelProfile {
     ModelProfile::new(name, json!({"model": name, "base_url": url, "api_key_env": "MF_CHAT_TEST_KEY", "timeout_ms": 3000})).unwrap()
 }
 
+#[test]
+fn reopened_host_resumes_never_started_title_work() {
+    let server = Server::start(vec![Reply::text("answer"), Reply::text("Resumed title")]);
+    assert_eq!(
+        probe(&server, "title_resume", None)["title"]["outcome"],
+        "applied"
+    );
+    assert_eq!(server.requests().len(), 2);
+}
+
+#[test]
+fn title_cancellation_does_not_cancel_the_committed_conversation() {
+    let mut title = Reply::text("late");
+    title.header_delay = Duration::from_millis(1200);
+    let server = Server::start(vec![Reply::text("answer"), title]);
+    let result = probe(&server, "title_cancel", None);
+    assert_eq!(result["title_state"], "cancelled");
+    assert_eq!(result["turn_state"], "succeeded");
+}
+
+#[test]
+fn automatic_title_uses_its_own_model_and_does_not_append_messages() {
+    let conversation = Server::start(vec![Reply::text("answer")]);
+    let summary = Server::start(vec![Reply::text("Generated title")]);
+    let result = probe(&conversation, "title_auto", Some(&summary.base_url));
+    assert_eq!(result["title"]["outcome"], "applied");
+    assert_eq!(result["profile"], "second");
+    assert_eq!(result["messages"], 2);
+    assert_eq!(conversation.requests().len(), 1);
+    let requests = summary.requests();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].body["model"], "second");
+    assert!(
+        messages(&requests[0])[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("assistant: answer")
+    );
+}
+
+#[test]
+fn manual_title_before_execution_skips_the_model_call() {
+    let server = Server::start(vec![Reply::text("answer")]);
+    let result = probe(&server, "title_before", None);
+    assert_eq!(result["title"]["outcome"], "skipped");
+    assert_eq!(result["session"]["title"], "Manual");
+    assert_eq!(server.requests().len(), 1);
+}
+
+#[test]
+fn manual_title_during_generation_preserves_model_usage() {
+    let mut summary = Reply::text("Generated");
+    summary.header_delay = Duration::from_millis(1200);
+    let server = Server::start(vec![Reply::text("answer"), summary]);
+    let result = probe(&server, "title_rename", None);
+    assert_eq!(result["title"]["outcome"], "stale");
+    assert_eq!(result["session"]["title"], "Manual");
+    assert_eq!(result["usage"], 1);
+    assert_eq!(result["messages"], 2);
+}
+
+#[test]
+fn failed_title_preserves_conversation_and_explicit_retry_uses_a_new_call() {
+    let mut failure = Reply::json(json!({"error":{"message":"synthetic title failure"}}));
+    failure.status = 500;
+    let server = Server::start(vec![
+        Reply::text("answer"),
+        failure,
+        Reply::text("Recovered title"),
+    ]);
+    let result = probe(&server, "title_failure", None);
+    assert_eq!(result["title"]["outcome"], "applied");
+    assert_eq!(result["session"]["conversation_revision"], 1);
+    assert_eq!(result["messages"], 2);
+    assert_eq!(server.requests().len(), 3);
+}
+
+#[test]
+fn uncommitted_title_can_retry_storage_without_another_model_call() {
+    let server = Server::start(vec![Reply::text("answer"), Reply::text("Generated title")]);
+    let result = probe(&server, "title_persistence", None);
+    assert_eq!(result["title"]["outcome"], "applied");
+    assert_eq!(server.requests().len(), 2);
+}
 fn synchronize() {
     let mut byte = [0];
     std::io::stdin().read_exact(&mut byte).unwrap();
@@ -76,10 +169,15 @@ fn execution_probe() {
     let scenario = std::env::var("MF_CHAT_TEST_SCENARIO").unwrap();
     let url = std::env::var("MF_CHAT_TEST_URL").unwrap();
     let mut config = HostConfig::new(profile("default", &url));
+    config.automatic_titles = false;
+    if scenario == "title_auto" {
+        config.automatic_titles = true;
+        config.title_profile = Some("second".into());
+    }
     if scenario == "capacity" {
         config.max_active = 1;
     }
-    if scenario == "parallel" {
+    if scenario == "parallel" || scenario == "title_auto" {
         config.profiles.insert(
             "second".into(),
             profile("second", &std::env::var("MF_CHAT_TEST_SECOND_URL").unwrap()),
@@ -96,6 +194,104 @@ fn execution_probe() {
         .create_session("default", system, None)
         .unwrap();
     let output = match scenario.as_str() {
+        "title_resume" => {
+            host.submit(&session.id, "first").unwrap().join().unwrap();
+            let call_id = host.database().pending_titles(10).unwrap()[0].id.clone();
+            host.close().unwrap();
+            let reopened =
+                ChatHost::open(&path, HostConfig::new(profile("default", &url))).unwrap();
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                if let Some(result) = reopened.poll_titles().pop() {
+                    let result = result.unwrap();
+                    assert_eq!(result.invocation.call_id, call_id);
+                    println!("CHAT_RESULT:{}", json!({"title":result}));
+                    break;
+                }
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            reopened.close().unwrap();
+            return;
+        }
+        "title_cancel" => {
+            let completion = host.submit(&session.id, "first").unwrap().join().unwrap();
+            let call = host.database().pending_titles(10).unwrap().pop().unwrap();
+            let job = host.start_title(&call.id).unwrap();
+            synchronize();
+            job.cancel();
+            assert!(job.join().is_err());
+            json!({"title_state":host.database().call(&call.id).unwrap().state,
+                "turn_state":host.database().turn(&completion.invocation.turn_id).unwrap().state})
+        }
+        "title_auto" => {
+            let completion = host.submit(&session.id, "first").unwrap().join().unwrap();
+            assert_eq!(
+                host.database()
+                    .turn(&completion.invocation.turn_id)
+                    .unwrap()
+                    .state,
+                "succeeded"
+            );
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            let title = loop {
+                let mut results = host.poll_titles();
+                if let Some(result) = results.pop() {
+                    break result.unwrap();
+                }
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            json!({"title":title, "profile":host.database().call(&title.invocation.call_id).unwrap().profile,
+                "messages":host.database().messages(&session.id, 10, None).unwrap().messages.len()})
+        }
+        "title_before" | "title_rename" | "title_failure" | "title_persistence" => {
+            host.submit(&session.id, "first").unwrap().join().unwrap();
+            let call = host.database().pending_titles(10).unwrap().pop().unwrap();
+            if scenario == "title_before" {
+                host.database()
+                    .rename_session(&session.id, "Manual")
+                    .unwrap();
+            }
+            let mut connection =
+                diesel::SqliteConnection::establish(path.to_str().unwrap()).unwrap();
+            if scenario == "title_persistence" {
+                connection.batch_execute("CREATE TRIGGER reject_title BEFORE UPDATE ON model_calls WHEN NEW.purpose = 'title' AND NEW.state = 'succeeded' BEGIN SELECT RAISE(ABORT, 'injected title write failure'); END;").unwrap();
+            }
+            let job = host.start_title(&call.id).unwrap();
+            if scenario == "title_rename" {
+                synchronize();
+                host.database()
+                    .rename_session(&session.id, "Manual")
+                    .unwrap();
+            }
+            let title = if scenario == "title_failure" {
+                assert!(job.join().is_err());
+                assert_eq!(
+                    host.database()
+                        .session(&session.id)
+                        .unwrap()
+                        .conversation_revision,
+                    1
+                );
+                host.retry_title(&session.id).unwrap().join().unwrap()
+            } else if scenario == "title_persistence" {
+                let error = job.join().unwrap_err();
+                let ChatError::Uncommitted { pending, .. } = error else {
+                    panic!("{error:?}");
+                };
+                assert_eq!(pending.purpose, mf_chat::CallPurpose::Title);
+                connection
+                    .batch_execute("DROP TRIGGER reject_title;")
+                    .unwrap();
+                host.retry_title_completion(*pending).unwrap()
+            } else {
+                job.join().unwrap()
+            };
+            json!({"title":title, "session":host.database().session(&session.id).unwrap(),
+                "messages":host.database().messages(&session.id, 10, None).unwrap().messages.len(),
+                "usage":host.database().call(&title.invocation.call_id).unwrap().output_tokens})
+        }
         "conversation" | "no_metadata" => {
             let first = host.submit(&session.id, "first").unwrap().join().unwrap();
             let second = host.submit(&session.id, "second").unwrap().join().unwrap();

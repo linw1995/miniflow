@@ -1,0 +1,141 @@
+use super::*;
+fn identity() -> ModelIdentity {
+    ModelIdentity {
+        profile: "default".into(),
+        model: "model".into(),
+        config_id: "config".into(),
+    }
+}
+fn reply(text: &str) -> Reply {
+    Reply {
+        text: text.into(),
+        usage: Some(std::collections::BTreeMap::from([(
+            "output_tokens".into(),
+            1,
+        )])),
+        finish_reason: None,
+    }
+}
+
+#[test]
+fn first_turn_schedules_once_and_manual_titles_win_before_or_during_generation() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
+    let owner = database.create_session("default", None, None).unwrap();
+    let turn = database
+        .begin_turn(&owner.id, "question", identity(), None, 1024)
+        .unwrap();
+    database
+        .complete_turn(turn.invocation.clone(), reply("answer"))
+        .unwrap();
+    database
+        .complete_turn(turn.invocation, reply("answer"))
+        .unwrap();
+    let calls = database.pending_titles(10).unwrap();
+    assert_eq!(calls.len(), 1);
+    let started = prepare(PrepareTitleInputs {
+        database_path: database.path().to_str().unwrap().into(),
+        call_id: calls[0].id.clone(),
+        model: identity(),
+        max_bytes: 1024,
+    })
+    .unwrap();
+    assert_eq!(started.request.as_ref().unwrap().history, None);
+    database.rename_session(&owner.id, "Manual").unwrap();
+    let result = database
+        .complete_title(
+            started.invocation.clone(),
+            started.title_revision,
+            reply("Generated"),
+        )
+        .unwrap();
+    assert_eq!(result.outcome, TitleOutcome::Stale);
+    assert_eq!(database.session(&owner.id).unwrap().title, "Manual");
+    assert_eq!(
+        database
+            .call(&started.invocation.call_id)
+            .unwrap()
+            .output_tokens,
+        Some(1)
+    );
+    assert_eq!(
+        database
+            .messages(&owner.id, 10, None)
+            .unwrap()
+            .messages
+            .len(),
+        2
+    );
+    let other = database.create_session("default", None, None).unwrap();
+    let turn = database
+        .begin_turn(&other.id, "other", identity(), None, 1024)
+        .unwrap();
+    database
+        .complete_turn(turn.invocation, reply("answer"))
+        .unwrap();
+    let call = database.pending_titles(10).unwrap().pop().unwrap();
+    database
+        .rename_session(&other.id, "Already manual")
+        .unwrap();
+    let started = prepare(PrepareTitleInputs {
+        database_path: database.path().to_str().unwrap().into(),
+        call_id: call.id.clone(),
+        model: identity(),
+        max_bytes: 1024,
+    })
+    .unwrap();
+    assert!(started.request.is_none());
+    assert_eq!(database.call(&call.id).unwrap().started_at, None);
+    assert_eq!(database.call(&call.id).unwrap().state, "skipped");
+}
+
+#[test]
+fn pending_titles_survive_restart_and_rejected_titles_keep_usage() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("chat.sqlite");
+    let database = ChatDatabase::open(&path).unwrap();
+    let owner = database.create_session("default", None, None).unwrap();
+    let turn = database
+        .begin_turn(&owner.id, "question", identity(), None, 1024)
+        .unwrap();
+    database
+        .complete_turn(turn.invocation, reply("answer"))
+        .unwrap();
+    let call = database.pending_titles(10).unwrap().pop().unwrap();
+    drop(database);
+    let database = ChatDatabase::open(&path).unwrap();
+    assert_eq!(database.pending_titles(10).unwrap()[0].id, call.id);
+    let started = prepare(PrepareTitleInputs {
+        database_path: path.to_str().unwrap().into(),
+        call_id: call.id.clone(),
+        model: identity(),
+        max_bytes: 1024,
+    })
+    .unwrap();
+    let result = database
+        .complete_title(
+            started.invocation,
+            started.title_revision,
+            reply("two\nlines"),
+        )
+        .unwrap();
+    assert_eq!(result.outcome, TitleOutcome::Rejected);
+    assert_eq!(database.call(&call.id).unwrap().output_tokens, Some(1));
+    let next = database.retry_title(&owner.id).unwrap();
+    assert_ne!(next.id, call.id);
+    let started = prepare(PrepareTitleInputs {
+        database_path: path.to_str().unwrap().into(),
+        call_id: next.id.clone(),
+        model: identity(),
+        max_bytes: 1024,
+    })
+    .unwrap();
+    database
+        .fail_call(&next.id, "failed", "title failed")
+        .unwrap();
+    assert!(started.request.is_some());
+    assert_eq!(
+        database.session(&owner.id).unwrap().conversation_revision,
+        1
+    );
+}

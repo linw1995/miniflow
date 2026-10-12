@@ -8,7 +8,7 @@ Account for model calls from conversation and title workflows and expose reprodu
 
 ### Requirement: Preserve call identity and purpose
 
-Each model-call record SHALL retain its stable call identity, session identity, actual model configuration identity, purpose, and lifecycle timestamps. Conversation calls SHALL link to their turn. Title calls SHALL be distinguishable from conversation calls. A scheduled call that has not begun MUST NOT count as an attempted model call.
+Each begun model-call record SHALL retain its stable call identity, session identity, actual model configuration identity, purpose, and lifecycle timestamps. Conversation calls SHALL link to their turn. Title calls SHALL be distinguishable from conversation calls. A scheduled call that has not begun MUST NOT count as an attempted model call.
 
 #### Scenario: Count both application call types
 

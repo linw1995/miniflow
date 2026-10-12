@@ -79,3 +79,15 @@ MF_CHAT_MODEL=your-model nix develop --command cargo run -p mf-chat --example co
 ```
 
 Set `MF_CHAT_BASE_URL` for an OpenAI-compatible endpoint. The example prints complete results with their session, turn, and call identities.
+
+## Session title summaries
+
+The first successful turn of a provisionally named session atomically creates one pending title call. The embedded `session_title` flow independently reads that completed turn, invokes the existing model adapter, and applies a concise title only while the captured title revision still matches. Generated titles are trimmed, nonempty, free of control characters, and at most 120 characters.
+
+Automatic dispatch is enabled by default. `HostConfig::title_profile` selects another configured model profile; leaving it unset uses the conversation profile. Set `automatic_titles` to false to defer dispatch while keeping pending requests durable. Use `dispatch_titles`, `start_title`, or `retry_title` for explicit execution.
+
+`poll_titles` collects completed background results and dispatch errors without blocking. Its result queue is bounded by the host concurrency limit; a full queue leaves new work pending in storage until results are collected. Foreground admissions take priority over title requests that have not started.
+
+Manual names always take precedence. A rename before title execution skips the provider call; a rename during execution rejects the stale update but still saves reported usage. Rejected title text also retains usage. Title failures and cancellation preserve the successful conversation and do not add chat messages. Explicit retry creates a new title call; subsequent conversation turns do not automatically retry a failed title.
+
+Reopening resumes never-started pending requests. Interrupted provider attempts are not resent. A title response whose write fails returns an uncommitted value with purpose `title`; use `retry_title_completion` to persist that retained response without another model request.

@@ -1,5 +1,6 @@
 use crate::{
-    ChatDatabase, ChatError, Completion, Invocation, ModelIdentity,
+    CallPurpose, ChatDatabase, ChatError, Completion, Invocation, ModelIdentity, TitleCompletion,
+    TitleOutcome,
     error::*,
     flows,
     nodes::{
@@ -17,14 +18,17 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
         mpsc::{self, Receiver, TryRecvError},
     },
     thread::{self, JoinHandle},
 };
+
+mod title;
 
 #[derive(Clone, Debug)]
 pub struct ModelProfile {
@@ -79,6 +83,8 @@ pub struct HostConfig {
     pub max_active: usize,
     pub max_history_bytes: usize,
     pub observer: Option<Observer>,
+    pub title_profile: Option<String>,
+    pub automatic_titles: bool,
 }
 
 impl HostConfig {
@@ -88,6 +94,8 @@ impl HostConfig {
             max_active: 4,
             max_history_bytes: crate::DEFAULT_HISTORY_BYTES,
             observer: None,
+            title_profile: None,
+            automatic_titles: true,
         }
     }
 }
@@ -95,6 +103,7 @@ impl HostConfig {
 struct Active {
     invocation: Invocation,
     cancellation: StreamCancellation,
+    purpose: CallPurpose,
 }
 
 #[derive(Default)]
@@ -102,32 +111,53 @@ struct Workers {
     closed: bool,
     active: BTreeMap<String, Active>,
     handles: Vec<JoinHandle<()>>,
+    background: VecDeque<TitleJob>,
+    background_reserved: usize,
 }
 
 struct Inner {
     database: ChatDatabase,
     config: HostConfig,
     workers: Mutex<Workers>,
+    foreground_admissions: AtomicUsize,
+}
+
+struct ForegroundAdmission<'a>(&'a AtomicUsize);
+
+impl<'a> ForegroundAdmission<'a> {
+    fn enter(counter: &'a AtomicUsize) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self(counter)
+    }
+}
+
+impl Drop for ForegroundAdmission<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 pub struct ChatHost {
     inner: Arc<Inner>,
 }
 
-pub struct ChatJob {
+pub struct ChatJob<T = Completion> {
     invocation: Invocation,
     cancellation: StreamCancellation,
-    receiver: Receiver<Result<Completion, ChatError>>,
-    ready: Option<Result<Completion, ChatError>>,
+    receiver: Receiver<Result<T, ChatError>>,
+    ready: Option<Result<T, ChatError>>,
 }
+
+pub type TitleJob = ChatJob<TitleCompletion>;
 
 #[derive(Clone, Debug)]
 pub struct UncommittedCompletion {
     pub database_path: PathBuf,
     pub completion: Completion,
+    pub purpose: CallPurpose,
 }
 
-impl ChatJob {
+impl<T> ChatJob<T> {
     pub fn invocation(&self) -> &Invocation {
         &self.invocation
     }
@@ -156,7 +186,7 @@ impl ChatJob {
         self.ready.is_some()
     }
 
-    pub fn join(mut self) -> Result<Completion, ChatError> {
+    pub fn join(mut self) -> Result<T, ChatError> {
         if let Some(result) = self.ready.take() {
             return result;
         }
@@ -164,7 +194,7 @@ impl ChatJob {
     }
 }
 
-impl Drop for ChatJob {
+impl<T> Drop for ChatJob<T> {
     fn drop(&mut self) {
         self.cancel();
     }
@@ -195,13 +225,24 @@ impl ChatHost {
                 }
             );
         }
-        Ok(Self {
+        let host = Self {
             inner: Arc::new(Inner {
                 database: ChatDatabase::open(path)?,
                 config,
                 workers: Mutex::new(Workers::default()),
+                foreground_admissions: AtomicUsize::new(0),
             }),
-        })
+        };
+        if let Some(key) = &host.inner.config.title_profile {
+            ensure!(
+                host.inner.config.profiles.contains_key(key),
+                ProfileMissingSnafu { name: key }
+            );
+        }
+        if host.inner.config.automatic_titles {
+            host.dispatch_titles()?;
+        }
+        Ok(host)
     }
 
     pub fn database(&self) -> &ChatDatabase {
@@ -244,6 +285,7 @@ impl ChatHost {
         prompt: &str,
         retry_of: Option<String>,
     ) -> Result<ChatJob, ChatError> {
+        let _admission = ForegroundAdmission::enter(&self.inner.foreground_admissions);
         ensure!(
             !prompt.is_empty(),
             InvalidSnafu {
@@ -279,7 +321,8 @@ impl ChatHost {
             !workers
                 .active
                 .values()
-                .any(|active| active.invocation.session_id == session_id),
+                .any(|active| active.purpose == CallPurpose::Conversation
+                    && active.invocation.session_id == session_id),
             SessionBusySnafu { id: session_id }
         );
         ensure!(
@@ -302,6 +345,7 @@ impl ChatHost {
             Active {
                 invocation: invocation.clone(),
                 cancellation: cancellation.clone(),
+                purpose: CallPurpose::Conversation,
             },
         );
         let inner = Arc::clone(&self.inner);
@@ -370,7 +414,11 @@ impl ChatHost {
                     .expect("worker state was not poisoned")
                     .active
                     .remove(&job_invocation.call_id);
+                let successful = result.is_ok();
                 let _ = sender.send(result);
+                if successful && inner.config.automatic_titles {
+                    let _ = inner.dispatch_titles();
+                }
             });
         match worker {
             Ok(worker) => workers.handles.push(worker),
@@ -392,6 +440,13 @@ impl ChatHost {
         pending: UncommittedCompletion,
     ) -> Result<Completion, ChatError> {
         ensure!(
+            pending.purpose == CallPurpose::Conversation,
+            InvalidSnafu {
+                field: "purpose",
+                reason: "use retry_title_completion for a title response",
+            }
+        );
+        ensure!(
             pending.database_path == self.database().path(),
             InvalidSnafu {
                 field: "database_path",
@@ -411,7 +466,12 @@ impl ChatHost {
             pending.completion.invocation.clone(),
             pending.completion.reply.clone(),
         ) {
-            Ok(completion) => Ok(completion),
+            Ok(completion) => {
+                if self.inner.config.automatic_titles {
+                    let _ = self.inner.dispatch_titles();
+                }
+                Ok(completion)
+            }
             Err(source) => Err(UncommittedSnafu {
                 pending: Box::new(pending),
             }
@@ -420,8 +480,14 @@ impl ChatHost {
     }
 
     pub fn abandon_completion(&self, invocation: Invocation) -> Result<bool, ChatError> {
+        let call = self.database().call(&invocation.call_id)?;
+        ensure!(
+            call.session_id == invocation.session_id
+                && call.turn_id.as_deref() == Some(invocation.turn_id.as_str()),
+            ConflictSnafu { id: &call.id }
+        );
         self.database()
-            .fail_turn(invocation, "cancelled", "uncommitted response abandoned")
+            .fail_call(&call.id, "cancelled", "uncommitted response abandoned")
     }
 
     pub fn close(self) -> Result<(), ChatError> {
@@ -530,6 +596,7 @@ impl Inner {
                             .response;
                         return Err(UncommittedSnafu {
                             pending: Box::new(UncommittedCompletion {
+                                purpose: CallPurpose::Conversation,
                                 database_path: self.database.path().to_owned(),
                                 completion: Completion { invocation, reply },
                             }),

@@ -1,4 +1,8 @@
 pub use crate::model::{ModelRequest, ModelResponse};
+pub use crate::title::{
+    CompleteTitleInputs, PendingTitleInputs, PendingTitles, PrepareTitleInputs,
+    TitleCompletionOutputs, TitleStarted,
+};
 use mf_runtime::{ExecutionContext, NodeValue, TypedNodeResult, TypedTaskNode};
 use serde::Deserialize;
 
