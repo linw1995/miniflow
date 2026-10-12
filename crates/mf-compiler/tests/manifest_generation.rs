@@ -107,5 +107,43 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
         }
         let repeated = plan.generate_execution_plans(&registry).unwrap();
         assert_eq!(artifacts, repeated);
+
+        let embedded = plan
+            .generate_embedded_artifacts("mf-embedded/example")
+            .unwrap();
+        let syntax = syn::parse_file(&embedded.rust_source).unwrap();
+        let functions: Vec<_> = syntax
+            .items
+            .iter()
+            .filter_map(|item| {
+                if let syn::Item::Fn(function) = item {
+                    Some(function.sig.ident.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(
+            functions,
+            [
+                "manifest",
+                if stream {
+                    "prepare_stream"
+                } else {
+                    "prepare_workflow"
+                }
+            ]
+        );
+        assert!(
+            embedded
+                .rust_source
+                .contains("/mf-embedded/example/flow-plans.rs")
+        );
+        assert!(
+            embedded
+                .rust_source
+                .contains("/mf-embedded/example/workflow-manifest.bin")
+        );
+        assert_eq!(embedded.plan_json, plan.to_json().unwrap());
     }
 }

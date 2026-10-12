@@ -38,6 +38,39 @@ pub struct GeneratedExecutionArtifacts {
     pub node_targets_json: String,
 }
 
+#[cfg(feature = "codegen")]
+#[derive(Clone, Copy)]
+enum ArtifactProfile<'a> {
+    Custom,
+    Runner,
+    Embedded { directory: &'a str },
+}
+
+#[cfg(feature = "codegen")]
+impl ArtifactProfile<'_> {
+    fn layouts(self) -> TokenStream {
+        let path = match self {
+            Self::Embedded { directory } => format!("/{directory}/flow-plans.rs"),
+            _ => "/flow-plans.rs".to_owned(),
+        };
+        quote! { include!(concat!(env!("OUT_DIR"), #path)); }
+    }
+
+    fn manifest(self) -> TokenStream {
+        match self {
+            Self::Embedded { directory } => {
+                let path = format!("/{directory}/workflow-manifest.bin");
+                quote! {
+                    pub fn manifest() -> Result<mf_runtime::WorkflowManifest, mf_runtime::WorkflowManifestError> {
+                        mf_runtime::WorkflowManifest::from_bytes(include_bytes!(concat!(env!("OUT_DIR"), #path)))
+                    }
+                }
+            }
+            _ => TokenStream::new(),
+        }
+    }
+}
+
 #[derive(Debug, Snafu)]
 pub enum PlanError {
     #[snafu(display("node target `{definition_id}` references unknown context output `{output}`"))]
@@ -256,23 +289,33 @@ impl CompiledWorkflow {
     /// Generate preparation and execution entry points for custom runners.
     #[cfg(feature = "codegen")]
     pub fn generate_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
-        self.generate_artifacts_with_helpers(true)
+        self.generate_artifacts_with_profile(ArtifactProfile::Custom)
     }
 
     /// Generate only the entry points used by the standalone runner.
     #[cfg(feature = "codegen")]
     pub fn generate_runner_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
-        self.generate_artifacts_with_helpers(false)
+        self.generate_artifacts_with_profile(ArtifactProfile::Runner)
+    }
+
+    /// Generate preparation and manifest access for a host-owned workflow module.
+    #[cfg(feature = "codegen")]
+    pub fn generate_embedded_artifacts(
+        &self,
+        directory: &str,
+    ) -> Result<GeneratedWorkflowArtifacts, PlanError> {
+        self.generate_artifacts_with_profile(ArtifactProfile::Embedded { directory })
     }
 
     #[cfg(feature = "codegen")]
-    fn generate_artifacts_with_helpers(
+    fn generate_artifacts_with_profile(
         &self,
-        include_helpers: bool,
+        profile: ArtifactProfile<'_>,
     ) -> Result<GeneratedWorkflowArtifacts, PlanError> {
         if self.definition.execution.is_some() {
-            return generate_stream_artifacts(self);
+            return generate_stream_artifacts(self, profile);
         }
+        let include_helpers = matches!(profile, ArtifactProfile::Custom);
         if self.execution_order.len() != self.definition.nodes.len() {
             return InvalidExecutionOrderSnafu.fail();
         }
@@ -399,13 +442,28 @@ impl CompiledWorkflow {
         } else {
             TokenStream::new()
         };
-        let preparation_body = if include_helpers {
+        let preparation_body = if !matches!(profile, ArtifactProfile::Runner) {
             quote! { use snafu::ResultExt as _; let mut observation = observation; #(#preparations)* Ok(#root_flow) }
         } else {
             quote! { mf_prepare_generated_workflow!(registry, observation) }
         };
+        let layouts = profile.layouts();
+        let manifest = profile.manifest();
+        let execution = if matches!(profile, ArtifactProfile::Embedded { .. }) {
+            TokenStream::new()
+        } else {
+            quote! {
+                pub fn run_workflow_in_context(
+                    flow: &mf_runtime::Flow,
+                    state: &mut mf_runtime::ExecutionContext,
+                ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
+                    mf_runtime::FlowRuntime::default().execute_in_context(flow, state)
+                }
+            }
+        };
         let generated = quote! {
-            include!(concat!(env!("OUT_DIR"), "/flow-plans.rs"));
+            #layouts
+            #manifest
 
             pub fn prepare_workflow(
                 registry: &mf_runtime::NodeRegistry,
@@ -416,12 +474,7 @@ impl CompiledWorkflow {
 
             #helpers
 
-            pub fn run_workflow_in_context(
-                flow: &mf_runtime::Flow,
-                state: &mut mf_runtime::ExecutionContext,
-            ) -> Result<mf_runtime::FlowOutputs, mf_runtime::WorkflowRunError> {
-                mf_runtime::FlowRuntime::default().execute_in_context(flow, state)
-            }
+            #execution
         };
         let syntax_tree: syn::File = syn::parse2(generated).context(GeneratedSyntaxSnafu)?;
         let rust_source = prettyplease::unparse(&syntax_tree);
@@ -436,6 +489,7 @@ impl CompiledWorkflow {
 #[cfg(feature = "codegen")]
 fn generate_stream_artifacts(
     plan: &CompiledWorkflow,
+    profile: ArtifactProfile<'_>,
 ) -> Result<GeneratedWorkflowArtifacts, PlanError> {
     if crate::structural_order(&plan.definition).context(StreamSnafu)? != plan.execution_order {
         return InvalidExecutionOrderSnafu.fail();
@@ -456,8 +510,11 @@ fn generate_stream_artifacts(
         &serde_json::to_string(definition.execution.as_ref().unwrap()).context(SerializeSnafu)?,
         Span::call_site(),
     );
+    let layouts = profile.layouts();
+    let manifest = profile.manifest();
     let generated = quote! {
-        include!(concat!(env!("OUT_DIR"), "/flow-plans.rs"));
+        #layouts
+        #manifest
 
         pub fn prepare_stream(registry: &mf_runtime::NodeRegistry) -> Result<mf_runtime::PreparedStream, mf_compiler::WorkflowBuildError> {
             use snafu::ResultExt as _;

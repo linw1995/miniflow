@@ -2,9 +2,9 @@
 
 ## 1. Shared Generation
 
-- [ ] Add artifact-location and entry-point parameters while preserving standalone defaults.
-- [ ] Add minimal embedding artifact generation using shared validation and custom-runner fallback rules.
-- [ ] Verify standalone output, execution, manifest inspection, and warning behavior remain compatible.
+- [x] Add artifact-location and entry-point parameters while preserving standalone defaults.
+- [x] Add minimal embedding artifact generation using shared validation and custom-runner fallback rules.
+- [x] Verify standalone output, execution, manifest inspection, and warning behavior remain compatible.
 
 ## 2. Build-Time Embedding
 
