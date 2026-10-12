@@ -1,0 +1,22 @@
+{
+  "version": "2026-10-03",
+  "dependencies": {
+    "fixture": {
+      "package": "fixture-multi-nodes",
+      "path": "unused-by-host"
+    }
+  },
+  "nodes": [
+    {
+      "id": "source",
+      "kind": "fixture.embedding_counter"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "count",
+      "node": "source",
+      "port": "value"
+    }
+  ]
+}

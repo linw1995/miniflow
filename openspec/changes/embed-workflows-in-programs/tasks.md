@@ -2,9 +2,9 @@
 
 ## 1. File Fixtures
 
-- [ ] Extract fixed host Cargo, Rust, and JSON inputs into file fixtures.
-- [ ] Keep temporary copying and path/scenario mutations in the acceptance test.
-- [ ] Include fixtures in Nix/Cargo sources, validate unchanged behavior, and commit.
+- [x] Extract fixed host Cargo, Rust, and JSON inputs into file fixtures.
+- [x] Keep temporary copying and path/scenario mutations in the acceptance test.
+- [x] Include fixtures in Nix/Cargo sources, validate unchanged behavior, and commit.
 
 ## 2. Source Generation and Host Preparation
 

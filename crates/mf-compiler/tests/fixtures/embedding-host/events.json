@@ -1,0 +1,25 @@
+{
+  "version": "2026-10-03",
+  "execution": {
+    "mode": "stream"
+  },
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "version": "0.1.0"
+    }
+  },
+  "nodes": [
+    {
+      "id": "source",
+      "kind": "builtin.readline"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "line",
+      "node": "source",
+      "port": "line"
+    }
+  ]
+}
