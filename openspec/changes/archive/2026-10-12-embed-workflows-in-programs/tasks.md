@@ -37,4 +37,4 @@
 - [x] Review module boundaries, public APIs, typed error chains, and commits against AGENTS.md.
 - [x] Run positive and negative ablations; remove unused artifacts, test-only abstraction, and duplicate coverage.
 - [x] Validate the reviewed implementation and commit the simplification.
-- [ ] Archive the completed change and reconcile its capability specifications.
+- [x] Archive the completed change and reconcile its capability specifications.
