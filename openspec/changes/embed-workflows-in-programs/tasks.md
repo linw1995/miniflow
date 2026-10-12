@@ -21,13 +21,13 @@
 
 ## 4. Acceptance and Delivery
 
-- [ ] Compile a host whose normal compiler dependency disables `codegen` and build dependency enables it.
-- [ ] Cover oneshot, streaming, Loop/Iteration, startup inputs, observation, and typed providers.
-- [ ] Preserve intermediate context outputs and the existing custom-runner typed fast-path fallback.
-- [ ] Cover multiple workflows, renamed providers/support crates, and independent prepared state.
-- [ ] Reject invalid graph/configuration/ports/providers during host builds with useful typed diagnostics.
-- [ ] Verify definition/provider changes rebuild without cleaning and incompatible contracts fail before execution.
-- [ ] Run a built host after removing its definition and generated source artifacts.
-- [ ] Document Cargo setup, dependency ownership, module APIs, rebuilds, and manifest/TUI boundaries.
-- [ ] Ensure fixture source inclusion in Nix and Cargo packaging.
-- [ ] Run pinned focused checks, `prek install`, `prek -a`, `nix flake check -L`, and strict OpenSpec validation.
+- [x] Compile a host whose normal compiler dependency disables `codegen` and build dependency enables it.
+- [x] Cover oneshot, streaming, Loop/Iteration, startup inputs, observation, and typed providers.
+- [x] Preserve intermediate context outputs and the existing custom-runner typed fast-path fallback.
+- [x] Cover multiple workflows, renamed providers/support crates, and independent prepared state.
+- [x] Reject invalid graph/configuration/ports/providers during host builds with useful typed diagnostics.
+- [x] Verify definition/provider changes rebuild without cleaning and incompatible contracts fail before execution.
+- [x] Run a built host after removing its definition and generated source artifacts.
+- [x] Document Cargo setup, dependency ownership, module APIs, rebuilds, and manifest/TUI boundaries.
+- [x] Ensure fixture source inclusion in Nix and Cargo packaging.
+- [x] Run pinned focused checks, `prek install`, `prek -a`, `nix flake check -L`, and strict OpenSpec validation.

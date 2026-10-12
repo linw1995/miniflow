@@ -72,8 +72,8 @@ The caller passes its registry explicitly; no global prepared-node cache is intr
 
 Workflow dependency descriptors retain their existing syntax but do not install packages or override
 the host Cargo manifest. The embedding contract documents that package versions, sources, and
-features are selected by the host. Alias coverage, invalid Rust crate names, unknown providers, and
-ambiguous typed constructor selection fail during the build. The host remains responsible for matching
+features are selected by the host. Missing alias bindings, invalid Rust crate names, unknown node kinds,
+and contradictory provider metadata fail during the build. The host remains responsible for matching
 normal and build provider declarations; relevant runtime contract drift is checked before execution.
 
 Generated support crate paths must also work with renamed dependencies. Keep standalone defaults,
