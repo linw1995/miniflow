@@ -82,11 +82,13 @@ use fixture_provider as _;
 use code_nodes as _;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    println!("cargo:rerun-if-changed=build.rs");
     let registry = runtime::NodeRegistry::from_inventory()?;
     compiler::embed_workflows(&[
         compiler::EmbedRequest::new("answer", "answer.json").with_provider("core", "core_nodes"),
         compiler::EmbedRequest::new("events", "events.json").with_provider("core", "core_nodes"),
         compiler::EmbedRequest::new("contract", "contract.json").with_provider("fixture", "fixture_provider"),
+        compiler::EmbedRequest::new("contract_stream", "contract-stream.json").with_provider("fixture", "fixture_provider"),
         compiler::EmbedRequest::new("typed", "typed.json").with_provider("fixture", "fixture_provider"),
         compiler::EmbedRequest::new("counter", "counter.json").with_provider("fixture", "fixture_provider"),
         compiler::EmbedRequest::new("repeat", "repeat.json").with_provider("core", "core_nodes").with_provider("code", "code_nodes"),
@@ -99,6 +101,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 compiler::embed_workflow!(pub mod answer);
 compiler::embed_workflow!(pub mod events);
 compiler::embed_workflow!(pub mod contract);
+compiler::embed_workflow!(pub mod contract_stream);
 compiler::embed_workflow!(pub mod typed);
 compiler::embed_workflow!(pub mod counter);
 compiler::embed_workflow!(pub mod repeat);
@@ -110,13 +113,21 @@ mod capture {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    if std::env::var_os("MF_EMBEDDING_OUTPUT").is_some() {
+        println!("{}", env!("OUT_DIR"));
+        return Ok(());
+    }
     let registry = runtime::NodeRegistry::from_inventory()?;
     if std::env::var_os("MF_EMBEDDING_DESCRIBE").is_some() {
         println!("{:?}", contract::manifest()?.interface.schema.inputs["source"]["path./~"].value_type);
         return Ok(());
     }
     if std::env::var_os("MF_FIXTURE_INTERFACE_CHANGE").is_some() {
-        let _ = contract::prepare_workflow(&registry, None)?;
+        if std::env::var_os("MF_EMBEDDING_STREAM_DRIFT").is_some() {
+            let _ = contract_stream::prepare_stream(&registry)?;
+        } else {
+            let _ = contract::prepare_workflow(&registry, None)?;
+        }
         panic!("incompatible startup metadata was accepted");
     }
     let runtime = runtime::FlowRuntime::default();
@@ -154,12 +165,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     assert!(records.iter().all(|record| record.attributes["mf.workflow.id"] == json::json!(manifest.description.workflow_id.to_string())));
     assert_eq!(harness.spans.get_finished_spans()?.len(), 3);
     let flow = answer::prepare_workflow(&registry, None)?;
-    let mut context = runtime::ExecutionContext::default();
-    let outputs = runtime.execute_in_context(&flow, &mut context)?;
-    assert!(context.output("source.value").is_ok());
-    assert_eq!(runtime.execute(&flow)?, outputs);
-    assert_eq!(runtime.execute(&answer::prepare_workflow(&registry, None)?)?, outputs);
-    assert_eq!(answer::manifest()?.description.nodes.len(), 2);
+    let outputs = runtime.execute(&flow)?;
     let prepared = events::prepare_stream(&registry)?;
     let options = runtime::StreamOptions {
         stdin: Some(runtime::TextInput::new(std::fs::File::open(std::env::args_os().nth(1).unwrap())?)),
@@ -194,6 +200,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     fs::write(root.join("contract.json"), json!({
         "version": "2026-10-03", "dependencies": {"fixture": {"package": "fixture-multi-nodes", "path":"unused-by-host"}},
         "nodes": [{"id":"source", "kind":"fixture.startup_contract"}],
+        "outputs": [{"name":"result", "node":"source", "port":"value"}]
+    }).to_string()).unwrap();
+    fs::write(root.join("contract-stream.json"), json!({
+        "version": "2026-10-03", "execution": {"mode": "stream"},
+        "dependencies": {"fixture": {"package": "fixture-multi-nodes", "path":"unused-by-host"}},
+        "nodes": [{"id":"source", "kind":"fixture.startup_contract", "config":{"stream":true}}],
         "outputs": [{"name":"result", "node":"source", "port":"value"}]
     }).to_string()).unwrap();
     fs::write(root.join("typed.json"), json!({
@@ -270,16 +282,19 @@ fn embedded_host_preserves_execution_and_build_contracts() {
         })
     );
     let marker = root.path().join("execution-marker");
-    for mode in ["type", "required", "remove", "add", "stdin", "condition"] {
-        let output = Command::new(&executable)
-            .env("MF_FIXTURE_INTERFACE_CHANGE", mode)
-            .env("MF_FIXTURE_EXECUTION_MARKER", &marker)
-            .output()
-            .unwrap();
-        assert!(!output.status.success(), "{mode}");
+    for stream in [false, true] {
+        let mut command = Command::new(&executable);
+        command
+            .env("MF_FIXTURE_INTERFACE_CHANGE", "type")
+            .env("MF_FIXTURE_EXECUTION_MARKER", &marker);
+        if stream {
+            command.env("MF_EMBEDDING_STREAM_DRIFT", "1");
+        }
+        let output = command.output().unwrap();
+        assert!(!output.status.success(), "stream={stream}");
         assert!(
             String::from_utf8_lossy(&output.stderr).contains("InterfaceDrift"),
-            "{mode}: {}",
+            "stream={stream}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(!marker.exists());
@@ -290,31 +305,13 @@ fn embedded_host_preserves_execution_and_build_contracts() {
     fs::write(&answer, definition.to_string()).unwrap();
     assert_build_success(root.path());
     assert_eq!(run(&executable, &input)["answer"]["answer"], 43);
-    for (mutation, expected) in [
-        ("kind", "UnknownNodeKind"),
-        ("config", "NodeConstruction"),
-        ("port", "UnknownOutputPort"),
-        ("cycle", "Cycle"),
-        ("binding", "ProviderBinding"),
-    ] {
-        let mut invalid = definition.clone();
-        match mutation {
-            "kind" => invalid["nodes"][0]["kind"] = json!("missing.kind"),
-            "config" => invalid["nodes"][0]["config"] = json!({}),
-            "port" => invalid["edges"][0]["from_output"] = json!("missing"),
-            "cycle" => invalid["edges"][0]["to_node"] = json!("source"),
-            "binding" => {
-                invalid["dependencies"] = json!({"other":{"package":"mfn-core", "version":"0.1.0"}})
-            }
-            _ => unreachable!(),
-        }
-        fs::write(&answer, invalid.to_string()).unwrap();
-        let output = build(root.path());
-        assert!(!output.status.success(), "{mutation}");
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains(expected), "{mutation}: {stderr}");
-        assert_eq!(run(&executable, &input)["answer"]["answer"], 43);
-    }
+    let mut invalid = definition.clone();
+    invalid["edges"][0]["from_output"] = json!("missing");
+    fs::write(&answer, invalid.to_string()).unwrap();
+    let output = build(root.path());
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("UnknownOutputPort"));
+    assert_eq!(run(&executable, &input)["answer"]["answer"], 43);
     fs::write(&answer, definition.to_string()).unwrap();
     let provider = root.path().join("provider/src/interface_fixture.rs");
     let source = fs::read_to_string(&provider).unwrap();
@@ -330,21 +327,6 @@ fn embedded_host_preserves_execution_and_build_contracts() {
         .unwrap();
     assert!(described.status.success());
     assert_eq!(String::from_utf8_lossy(&described.stdout).trim(), "Boolean");
-    let typed_provider = root.path().join("provider/src/generated_fixture.rs");
-    let source = fs::read_to_string(&typed_provider).unwrap();
-    fs::write(&typed_provider, source.replace("let mut prepared = text(config)?.prepared();", "let mut prepared = text(config)?.prepared(); prepared.metadata.ports.outputs[0].name = \"changed\".into();")).unwrap();
-    let output = build(root.path());
-    assert!(
-        !output.status.success(),
-        "contradictory provider metadata was accepted"
-    );
-    assert!(
-        String::from_utf8_lossy(&output.stderr).contains("TypedGeneration"),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    fs::write(&typed_provider, source).unwrap();
-    assert_build_success(root.path());
     let portable = root.path().join("portable-host");
     fs::copy(&executable, &portable).unwrap();
     for entry in fs::read_dir(root.path()).unwrap() {
@@ -358,8 +340,13 @@ fn embedded_host_preserves_execution_and_build_contracts() {
     }
     fs::remove_dir_all(root.path().join("src")).unwrap();
     fs::remove_dir_all(root.path().join("provider")).unwrap();
-    fs::remove_dir_all(root.path().join("target"))
-        .unwrap_or_else(|error| assert_eq!(error.kind(), std::io::ErrorKind::NotFound));
+    let output = Command::new(&executable)
+        .env("MF_EMBEDDING_OUTPUT", "1")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let output_directory = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+    fs::remove_dir_all(output_directory.join("mf-embedded")).unwrap();
     fs::remove_file(root.path().join("build.rs")).unwrap();
     let output = Command::new(&portable)
         .arg(&input)
@@ -381,7 +368,10 @@ fn embedded_host_preserves_execution_and_build_contracts() {
         .parent()
         .unwrap()
         .join("examples/embedded-workflows");
-    copy_tree(&source, example.path());
+    for file in ["Cargo.toml", "build.rs", "answer.json"] {
+        fs::copy(source.join(file), example.path().join(file)).unwrap();
+    }
+    copy_tree(&source.join("src"), &example.path().join("src"));
     let manifest = example.path().join("Cargo.toml");
     let content = fs::read_to_string(&manifest).unwrap().replace(
         "../../crates/",

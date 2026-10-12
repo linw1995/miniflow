@@ -31,3 +31,10 @@
 - [x] Document Cargo setup, dependency ownership, module APIs, rebuilds, and manifest/TUI boundaries.
 - [x] Ensure fixture source inclusion in Nix and Cargo packaging.
 - [x] Run pinned focused checks, `prek install`, `prek -a`, `nix flake check -L`, and strict OpenSpec validation.
+
+## 5. Review and Archival
+
+- [x] Review module boundaries, public APIs, typed error chains, and commits against AGENTS.md.
+- [x] Run positive and negative ablations; remove unused artifacts, test-only abstraction, and duplicate coverage.
+- [x] Validate the reviewed implementation and commit the simplification.
+- [ ] Archive the completed change and reconcile its capability specifications.

@@ -55,7 +55,7 @@ business operations and does not start a nested Cargo build.
 Definition paths are relative to `CARGO_MANIFEST_DIR`; absolute paths are accepted. Submit all
 workflows in one batch. Names must be ASCII Rust module identifiers, excluding keywords, raw
 identifiers, and `_`; duplicate names fail before files are replaced. Each workflow owns
-`OUT_DIR/mf-embedded/<name>/`, containing source, layouts, a manifest, and planning reports.
+`OUT_DIR/mf-embedded/<name>/`, containing module source, execution layouts, and a manifest.
 
 The helper emits `cargo:rerun-if-changed` for definitions. Provider source and feature changes use
 Cargo's ordinary build-script dependency tracking. Existing build scripts can call the helper alongside

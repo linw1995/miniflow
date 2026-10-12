@@ -96,15 +96,7 @@ pub fn embed_workflows(
     let output = env::var_os("OUT_DIR").context(CargoEnvironmentSnafu {
         variable: "OUT_DIR",
     })?;
-    embed_workflows_at(
-        requests,
-        registry,
-        Path::new(&manifest),
-        Path::new(&output),
-        |path| {
-            println!("cargo:rerun-if-changed={}", path.display());
-        },
-    )
+    embed_workflows_at(requests, registry, Path::new(&manifest), Path::new(&output))
 }
 
 fn portable_identifier(name: &str) -> bool {
@@ -176,7 +168,6 @@ fn embed_workflows_at(
     registry: &NodeRegistry,
     manifest: &Path,
     output: &Path,
-    mut track: impl FnMut(&Path),
 ) -> Result<(), EmbeddingError> {
     let mut names = BTreeSet::new();
     for request in requests {
@@ -197,7 +188,7 @@ fn embed_workflows_at(
     for request in requests {
         let name = &request.name;
         let path = manifest.join(&request.definition);
-        track(&path);
+        println!("cargo:rerun-if-changed={}", path.display());
         let source = fs::read_to_string(&path).context(ReadSnafu { name, path: &path })?;
         let definition = WorkflowDefinition::from_json(&source)
             .context(DefinitionSnafu { name, path: &path })?;
@@ -226,11 +217,6 @@ fn embed_workflows_at(
             [
                 ("flow-plans.rs", layouts.rust_source.into_bytes()),
                 ("workflow-manifest.bin", layouts.manifest_bytes),
-                ("workflow-plan.json", module.plan_json.into_bytes()),
-                (
-                    "typed-fast-paths.json",
-                    layouts.typed_plan_json.into_bytes(),
-                ),
                 ("workflow.rs", module_source.into_bytes()),
             ],
         ));
@@ -275,40 +261,6 @@ mod tests {
     }
 
     #[test]
-    fn validates_and_regenerates_isolated_artifacts_with_input_tracking() {
-        let root = tempfile::tempdir().unwrap();
-        let output = root.path().join("out");
-        let registry = NodeRegistry::from_inventory().unwrap();
-        let mut value = definition();
-        write_definition(root.path(), &value);
-        let requests = [
-            request(),
-            EmbedRequest {
-                name: "other".into(),
-                ..request()
-            },
-        ];
-        let mut tracked = Vec::new();
-        embed_workflows_at(&requests, &registry, root.path(), &output, |path| {
-            tracked.push(path.to_owned())
-        })
-        .unwrap();
-        assert_eq!(tracked, vec![root.path().join("flow.json"); 2]);
-        let first = output.join("mf-embedded/answer/workflow.rs");
-        let before = fs::read(&first).unwrap();
-        assert!(output.join("mf-embedded/other/workflow.rs").is_file());
-        value["nodes"][0]["config"]["value"] = json!(43);
-        write_definition(root.path(), &value);
-        embed_workflows_at(&requests, &registry, root.path(), &output, |_| {}).unwrap();
-        assert_ne!(before, fs::read(&first).unwrap());
-        let manifest = mf_runtime::WorkflowManifest::from_bytes(
-            &fs::read(output.join("mf-embedded/answer/workflow-manifest.bin")).unwrap(),
-        )
-        .unwrap();
-        assert_eq!(manifest.description.nodes[0].id, "source");
-    }
-
-    #[test]
     fn rejects_invalid_requests_before_replacing_existing_artifacts() {
         let root = tempfile::tempdir().unwrap();
         let registry = NodeRegistry::from_inventory().unwrap();
@@ -336,7 +288,6 @@ mod tests {
                 &registry,
                 root.path(),
                 &output,
-                |_| {},
             )
             .unwrap_err();
             assert!(
@@ -344,14 +295,8 @@ mod tests {
                 "{error}"
             );
         }
-        let error = embed_workflows_at(
-            &[request(), request()],
-            &registry,
-            root.path(),
-            &output,
-            |_| {},
-        )
-        .unwrap_err();
+        let error = embed_workflows_at(&[request(), request()], &registry, root.path(), &output)
+            .unwrap_err();
         assert!(matches!(error, EmbeddingError::DuplicateName { .. }));
         for invalid in [
             EmbedRequest::new("answer", "flow.json"),
@@ -359,8 +304,8 @@ mod tests {
             request().with_provider("extra", "core_nodes"),
             EmbedRequest::new("answer", "flow.json").with_provider("core", "core-nodes"),
         ] {
-            let error = embed_workflows_at(&[invalid], &registry, root.path(), &output, |_| {})
-                .unwrap_err();
+            let error =
+                embed_workflows_at(&[invalid], &registry, root.path(), &output).unwrap_err();
             assert!(
                 matches!(error, EmbeddingError::ProviderBinding { .. }),
                 "{error}"
@@ -384,7 +329,6 @@ mod tests {
             &registry,
             root.path(),
             &output,
-            |_| {},
         )
         .unwrap_err();
         assert!(matches!(error, EmbeddingError::Generation { .. }));
@@ -398,14 +342,12 @@ mod tests {
         let registry = NodeRegistry::from_inventory().unwrap();
         let output = root.path().join("out");
         fs::write(root.path().join("flow.json"), "{").unwrap();
-        let error =
-            embed_workflows_at(&[request()], &registry, root.path(), &output, |_| {}).unwrap_err();
+        let error = embed_workflows_at(&[request()], &registry, root.path(), &output).unwrap_err();
         assert!(error.source().unwrap().is::<crate::DefinitionParseError>());
         let mut value = definition();
         value["nodes"][0]["config"] = json!({});
         write_definition(root.path(), &value);
-        let error =
-            embed_workflows_at(&[request()], &registry, root.path(), &output, |_| {}).unwrap_err();
+        let error = embed_workflows_at(&[request()], &registry, root.path(), &output).unwrap_err();
         let mut source = error.source();
         let mut found = false;
         while let Some(error) = source {
@@ -430,9 +372,8 @@ mod tests {
             let link = output.path().join(relative);
             fs::create_dir_all(link.parent().unwrap()).unwrap();
             symlink(&outside, &link).unwrap();
-            let error =
-                embed_workflows_at(&[request()], &registry, root.path(), output.path(), |_| {})
-                    .unwrap_err();
+            let error = embed_workflows_at(&[request()], &registry, root.path(), output.path())
+                .unwrap_err();
             assert!(matches!(error, EmbeddingError::LinkedOutput { .. }));
         }
         assert_eq!(fs::read_dir(outside).unwrap().count(), 0);

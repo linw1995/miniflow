@@ -100,7 +100,8 @@ or parameterize standalone typed constructor aliases solely for this initial emb
 Each request owns `OUT_DIR/mf-embedded/<name>/`. The macro includes that workflow's module; all
 nested layout and byte includes resolve within the same directory. Validate the complete workflow
 before publishing its module, using existing atomic/write-if-changed helpers. No files outside the
-request's output directory are rewritten.
+request's output directory are rewritten. Emit only module source, layouts, and the manifest;
+standalone planning reports are not needed by an embedding host.
 
 The generated oneshot module returns `Flow`; its streaming counterpart returns `PreparedStream`.
 Frozen layouts are reusable, but each preparation constructs independent provider instances. Host
@@ -146,3 +147,18 @@ stdio or initialize telemetry.
 No persisted definition or manifest migration is required. Implement the generation parameters first,
 then build-time embedding, then macro inclusion and preparation contracts, and finally acceptance
 coverage and documentation.
+
+## Review Decisions
+
+The build helper emits Cargo input tracking directly. A callback existed only to inspect directives
+in a unit test and added no host capability. Real host rebuilding with another build-script directive
+provides stronger coverage of the integration contract.
+
+Keep request validation, batch publication, typed error chains, provider anchors, per-module paths,
+and prepared-schema checks. Test task and stream preparation separately while reusing the runtime's
+existing schema comparison matrix. Existing compiler tests cover graph/configuration/typed-metadata
+validation; embedding acceptance retains one invalid-port build and prior-binary preservation.
+
+Source-free acceptance removes the host's actual generated directory, including when the test suite
+uses a shared Cargo target. Copy only example inputs and source into its temporary host, excluding
+local target artifacts and locks. Detailed ablation logs and timings remain under ignored `target/`.
