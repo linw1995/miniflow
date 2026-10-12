@@ -34,8 +34,8 @@ fn host(root: &Path) {
     source.push_str("\nmod embedding_stateful;\n");
     fs::write(library, source).unwrap();
     let fixture = common::crates_dir().join("mf-compiler/tests/fixtures/embedding-host");
+    fs::copy(fixture.join("Cargo.template.toml"), root.join("Cargo.toml")).unwrap();
     for file in [
-        "Cargo.toml.in",
         "build.rs",
         "answer.json",
         "events.json",
@@ -44,11 +44,7 @@ fn host(root: &Path) {
         "typed.json",
         "counter.json",
     ] {
-        fs::copy(
-            fixture.join(file),
-            root.join(file.strip_suffix(".in").unwrap_or(file)),
-        )
-        .unwrap();
+        fs::copy(fixture.join(file), root.join(file)).unwrap();
     }
     copy_tree(&fixture.join("src"), &root.join("src"));
     fs::copy(
