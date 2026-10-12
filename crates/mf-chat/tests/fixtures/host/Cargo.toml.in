@@ -1,0 +1,12 @@
+[package]
+name = "chat-host-fixture"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+resolver = "3"
+
+[dependencies]
+mf-chat = { path = "../../.." }
+serde_json = "1.0.151"

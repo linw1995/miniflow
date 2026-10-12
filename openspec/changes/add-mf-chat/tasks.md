@@ -51,10 +51,10 @@
 
 ## 7. Packaging and Integration Validation
 
-- [ ] 7.1 Include embedded JSON, migrations, and integration fixtures in Cargo/Nix sources and update license auditing and documentation links; verify Cargo package contents and source-free execution of all three flows.
-- [ ] 7.2 Run a host acceptance scenario spanning two sessions, restart, failed-turn retry, automatic title, manual rename, and usage queries against local mock providers; verify stable identities and persistence invariants across the sequence.
-- [ ] 7.3 Review dependency direction, exports, typed error chains, task completeness, and specification coverage; verify no compiler/runtime chat dispatch or terminal UI implementation was introduced.
-- [ ] 7.4 Run `nix develop --command prek -a`, `nix flake check -L`, strict OpenSpec validation, and relevant coverage; verify all checks succeed and retain generated reports only under ignored `target/` paths.
+- [x] 7.1 Include embedded JSON, migrations, and integration fixtures in Cargo/Nix sources and update license auditing and documentation links; verify Cargo package contents and source-free execution of all three flows.
+- [x] 7.2 Run a host acceptance scenario spanning two sessions, restart, failed-turn retry, automatic title, manual rename, and usage queries against local mock providers; verify stable identities and persistence invariants across the sequence.
+- [x] 7.3 Review dependency direction, exports, typed error chains, task completeness, and specification coverage; verify no compiler/runtime chat dispatch or terminal UI implementation was introduced.
+- [x] 7.4 Run `nix develop --command prek -a`, `nix flake check -L`, strict OpenSpec validation, and relevant coverage; verify all checks succeed and retain generated reports only under ignored `target/` paths.
 
 ## Workflow follow-up
 

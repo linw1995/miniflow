@@ -40,6 +40,7 @@ impl ChatHost {
     }
 
     pub fn retry_title(&self, session_id: &str) -> Result<TitleJob, ChatError> {
+        let _admission = ForegroundAdmission::enter(&self.inner.foreground_admissions);
         let call = self.database().retry_title(session_id)?;
         self.inner.start_title(call, false)
     }

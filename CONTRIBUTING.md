@@ -115,6 +115,7 @@ The arguments select the node count and repetition count. Shared snapshots are r
 | `crates/mf-cli/` | The `mf` command and project build orchestration |
 | `crates/mf-compiler/` | Workflow validation, planning, code generation, and executable builds |
 | `crates/mf-runtime/` | Workflow definitions, node interfaces, registry, and execution support |
+| `crates/mf-chat/` | Persistent chat nodes and embedded application workflows |
 | `crates/builtin-nodes/core/` | `mfn-core` basic node implementations |
 | `crates/builtin-nodes/code/` | `mfn-code` CEL node implementation |
 

@@ -3,6 +3,16 @@ members = ["crates/mf-*", "crates/builtin-nodes/*"]
 default-members = ["crates/mf-cli"]
 resolver = "3"
 
+# Embedded chat integration runs credential-isolated host subprocesses.
+[[workspace.metadata.affected.rule]]
+globs = [
+    "crates/mf-chat/src/**/*.rs",
+    "crates/mf-runtime/src/**/*.rs",
+    "crates/mf-compiler/src/**/*.rs",
+    "crates/builtin-nodes/llm/src/**/*.rs",
+]
+filterset = "package(=mf-chat) & kind(test)"
+
 # Coverage of test binaries cannot observe CLI and generated-runner subprocesses.
 [[workspace.metadata.affected.rule]]
 globs = ["crates/mf-cli/src/**/*.rs", "crates/mf-tui/src/**/*.rs"]
