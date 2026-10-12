@@ -5,6 +5,7 @@
 - Actual Actions glob resolution confirms baseline archives exclude compilation artifacts and PR/main namespaces remain separate.
 - Full coverage initially passed all 596 tests with two skipped. After synchronizing main, native coverage and PR collection passed all 601 tests with two skipped and produced the standard reports.
 - The first PR snapshot compressed to 15.5 MiB. Initial full PR collection uploads only the patch flag; full project comparisons remain outside PR CI.
+- Codecov uploads only the aggregate LCOV file. Automatic discovery previously included internal per-test profiles among 605 uploaded files.
 - Repository hooks and aarch64-darwin flake checks passed.
 
 ## Ablation and simplification

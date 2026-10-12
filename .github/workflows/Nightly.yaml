@@ -113,6 +113,7 @@ jobs:
         uses: codecov/codecov-action@v7
         with:
           files: target/coverage/result/lcov.info
+          disable_search: true
           # A full report also seeds the comparison base for PR patch reports.
           flags: rust,rust-affected
           fail_ci_if_error: false

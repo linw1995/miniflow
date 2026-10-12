@@ -69,6 +69,9 @@ a new full baseline before selective execution becomes available again.
 
 ## Codecov reports
 
+Uploads include only the generated LCOV report, with automatic report discovery disabled.
+Per-test profiles remain internal baseline data.
+
 PR reports use the `rust-affected` flag and only report patch coverage in
 checks and comments, including initial full collection and full-suite fallbacks.
 Full reports outside PR CI use both `rust` and `rust-affected`: `rust`
