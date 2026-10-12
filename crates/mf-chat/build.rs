@@ -3,6 +3,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mf_compiler::embed_workflows(&[
         mf_compiler::EmbedRequest::new("conversation", "workflows/conversation.json"),
         mf_compiler::EmbedRequest::new("session_title", "workflows/session_title.json"),
+        mf_compiler::EmbedRequest::new("usage_statistics", "workflows/usage_statistics.json"),
     ])?;
     Ok(())
 }

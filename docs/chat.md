@@ -91,3 +91,23 @@ Automatic dispatch is enabled by default. `HostConfig::title_profile` selects an
 Manual names always take precedence. A rename before title execution skips the provider call; a rename during execution rejects the stale update but still saves reported usage. Rejected title text also retains usage. Title failures and cancellation preserve the successful conversation and do not add chat messages. Explicit retry creates a new title call; subsequent conversation turns do not automatically retry a failed title.
 
 Reopening resumes never-started pending requests. Interrupted provider attempts are not resent. A title response whose write fails returns an uncommitted value with purpose `title`; use `retry_title_completion` to persist that retained response without another model request.
+
+## Usage statistics
+
+`usage` executes the embedded `usage_statistics` flow and its `mf_chat.usage.query` node. It reads committed call facts in one SQLite snapshot and never invokes a model or changes billing records.
+
+```rust
+let statistics = host.usage(mf_chat::UsageQuery {
+    session_id: Some(session.id.clone()),
+    purpose: Some(mf_chat::CallPurpose::Conversation),
+    group_by: Some(mf_chat::UsageGrouping::Configuration),
+    limit: 50,
+    ..Default::default()
+})?;
+```
+
+Filters accept session, profile, actual model name, configuration fingerprint, purpose, and call start times in UTC Unix milliseconds. Start is inclusive and end is exclusive. Group by session, model, configuration, profile, purpose, or UTC day. Pass `next_after` to fetch the next group page; the overall summary always covers the complete filter.
+
+Each token counter exposes `known_subtotal`, `reported_calls`, and `missing_calls`. A missing observation is not zero; an explicit zero is a reported observation. No observations yield an unknown subtotal. Treat a subtotal with missing observations as partial coverage. Attempt and status counts include begun failed, cancelled, and interrupted calls, but exclude never-started title requests.
+
+SQL computes aggregate facts without loading raw call history. Integer overflow fails explicitly. Calls from title generation remain attributed to `title`, including valid replies whose title update was stale or whose application title was rejected. Monetary estimates require separate pricing data and are not provided by the core.

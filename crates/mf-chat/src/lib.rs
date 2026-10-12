@@ -13,6 +13,7 @@ mod session;
 mod storage;
 mod title;
 mod turn;
+mod usage;
 
 pub use error::ChatError;
 pub use host::{ChatHost, ChatJob, HostConfig, ModelProfile, TitleJob, UncommittedCompletion};
@@ -21,3 +22,6 @@ pub use session::{DEFAULT_HISTORY_BYTES, HistoryContext, MessagePage, MessageRec
 pub use storage::ChatDatabase;
 pub use title::{CallPurpose, TitleCompletion, TitleOutcome};
 pub use turn::{Completion, Invocation, ModelIdentity, Reply};
+pub use usage::{
+    TokenCounter, UsageGroup, UsageGrouping, UsageQuery, UsageStatistics, UsageSummary,
+};

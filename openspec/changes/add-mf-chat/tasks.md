@@ -43,11 +43,11 @@
 
 ## 6. Embedded Usage Statistics Flow
 
-- [ ] 6.1 Add typed `mf_chat.usage.query` and `usage_statistics.json`; verify queries run without provider credentials or model requests and use persisted call facts only.
-- [ ] 6.2 Implement one-snapshot overall and bounded grouped aggregates with session, configuration, purpose, and UTC interval filters; verify group pagination does not change overall totals.
-- [ ] 6.3 Implement nullable subtotals, reported/missing counts, attempted-call status counts, and checked arithmetic; verify sparse counters, explicit zero, empty results, overflow, and exclusion of unstarted title jobs.
-- [ ] 6.4 Verify title calls discarded after manual renaming and separate failed retries remain correctly attributed without duplicate accounting.
-- [ ] 6.5 Document statistics fields and unknown-consumption semantics; verify examples distinguish known subtotals from complete usage and include both conversation and title purposes.
+- [x] 6.1 Add typed `mf_chat.usage.query` and `usage_statistics.json`; verify queries run without provider credentials or model requests and use persisted call facts only.
+- [x] 6.2 Implement one-snapshot overall and bounded grouped aggregates with session, configuration, purpose, and UTC interval filters; verify group pagination does not change overall totals.
+- [x] 6.3 Implement nullable subtotals, reported/missing counts, attempted-call status counts, and checked arithmetic; verify sparse counters, explicit zero, empty results, overflow, and exclusion of unstarted title jobs.
+- [x] 6.4 Verify title calls discarded after manual renaming and separate failed retries remain correctly attributed without duplicate accounting.
+- [x] 6.5 Document statistics fields and unknown-consumption semantics; verify examples distinguish known subtotals from complete usage and include both conversation and title purposes.
 
 ## 7. Packaging and Integration Validation
 
