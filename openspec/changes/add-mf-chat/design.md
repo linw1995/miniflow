@@ -70,12 +70,14 @@ An entire history JSON blob was rejected as the primary representation because o
 The conversation definition follows this shape:
 
 ```text
-mf_chat.turn.begin -> builtin.llm -> mf_chat.turn.complete
+mf_chat.turn.begin -> mf_chat.llm -> mf_chat.turn.complete
 ```
 
 The host prepares the configured flow, allocates session-bound turn and call IDs, and supplies them with the database locator and prompt to the initial node. `turn.begin` validates the session, loads successful history in order, and checks its bound. In one short transaction it persists the user message, running turn, and running call, then releases the connection before the provider executes. It forwards the locator, identities, prompt, system, and history through ordinary data edges.
 
 The LLM receives completed history without the current user message. `turn.complete` uses the returned text and optional metadata to insert one assistant message, finalize call facts and turn state, advance the conversation revision, and update session activity atomically. It never reinserts the full returned LLM history. Typed decoding and domain validation finish before the write transaction.
+
+Use a thin `mf_chat.llm` adapter around the existing prepared LLM task. Its required object request and response ports contain optional system instructions and metadata inside their value codecs. Ordinary edges cannot consume an omitted output port, so connecting optional `builtin.llm` ports directly would fail or skip persistence. The adapter adds no provider logic, retries, or runtime special cases. SQLite messages remain authoritative; the adapter does not forward the redundant returned history.
 
 Use short immediate write transactions where read/check/write operations require a stable decision. Retry only bounded database contention around idempotent storage work. Do not retry HTTP requests, and do not hold a transaction or connection lock over model I/O. SQLite permits only one concurrent writer; see its [transaction contract](https://www.sqlite.org/lang_transaction.html).
 
@@ -100,7 +102,7 @@ Database idempotency is not exactly-once provider execution: a crash between rec
 The title definition follows this shape:
 
 ```text
-mf_chat.title.prepare -> builtin.llm -> mf_chat.title.complete
+mf_chat.title.prepare -> mf_chat.llm -> mf_chat.title.complete
 ```
 
 After the first successful turn returns, the host schedules its pending title work within the total concurrency limit. `title.prepare` claims the pending call, checks that the title remains provisional, captures its revision and the first completed turn, and builds a separate summarization prompt. A manual rename before execution skips the pending job without invoking the model.

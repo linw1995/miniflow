@@ -1,3 +1,4 @@
+pub use crate::model::{ModelRequest, ModelResponse};
 use mf_runtime::{ExecutionContext, NodeValue, TypedNodeResult, TypedTaskNode};
 use serde::Deserialize;
 

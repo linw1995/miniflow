@@ -1,0 +1,61 @@
+{
+  "version": "2026-10-03",
+  "dependencies": {
+    "chat": {
+      "package": "mf-chat",
+      "version": "0.1.0"
+    }
+  },
+  "nodes": [
+    {
+      "id": "begin",
+      "kind": "mf_chat.turn.begin",
+      "config": {}
+    },
+    {
+      "id": "model",
+      "kind": "mf_chat.llm",
+      "config": {
+        "model": "configured-by-host"
+      }
+    },
+    {
+      "id": "complete",
+      "kind": "mf_chat.turn.complete",
+      "config": {}
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "begin",
+      "from_output": "request",
+      "to_node": "model",
+      "to_input": "request"
+    },
+    {
+      "from_node": "begin",
+      "from_output": "database_path",
+      "to_node": "complete",
+      "to_input": "database_path"
+    },
+    {
+      "from_node": "begin",
+      "from_output": "invocation",
+      "to_node": "complete",
+      "to_input": "invocation"
+    },
+    {
+      "from_node": "model",
+      "from_output": "response",
+      "to_node": "complete",
+      "to_input": "response"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "completion",
+      "node": "complete",
+      "port": "completion"
+    }
+  ]
+}

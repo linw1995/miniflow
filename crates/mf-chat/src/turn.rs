@@ -113,6 +113,12 @@ pub struct TurnOutputs {
 }
 
 #[derive(Clone, Debug, NodeValue)]
+pub struct TurnRequestOutputs {
+    pub turn: Turn,
+    pub prompt: String,
+}
+
+#[derive(Clone, Debug, NodeValue)]
 pub struct CallOutputs {
     pub call: ModelCall,
 }
@@ -579,6 +585,20 @@ fn get_call(input: RecordInputs) -> Result<CallOutputs, ChatError> {
     })
 }
 
+fn get_request(input: RecordInputs) -> Result<TurnRequestOutputs, ChatError> {
+    let mut connection = storage::connect(Path::new(&input.database_path))?;
+    let turn = load_turn(&mut connection, &input.id)?;
+    let prompt = messages::table
+        .filter(messages::turn_id.eq(&turn.id))
+        .filter(messages::role.eq("user"))
+        .select(messages::content)
+        .first::<String>(&mut connection)
+        .context(DatabaseSnafu {
+            operation: "load original turn prompt",
+        })?;
+    Ok(TurnRequestOutputs { turn, prompt })
+}
+
 fn recover(input: RecoveryInputs) -> Result<RecoveryOutputs, ChatError> {
     let mut connection = storage::connect(Path::new(&input.database_path))?;
     connection.immediate_transaction(|connection| {
@@ -658,6 +678,14 @@ register_operation!(
     RecoveryInputs,
     RecoveryOutputs,
     recover
+);
+
+register_operation!(
+    "mf_chat.turn.request",
+    LoadTurnRequest,
+    RecordInputs,
+    TurnRequestOutputs,
+    get_request
 );
 
 impl ChatDatabase {

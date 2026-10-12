@@ -26,12 +26,12 @@
 
 ## 4. Embedded Conversation Flow and Host Lifecycle
 
-- [ ] 4.1 Add `conversation.json`, the embedding build helper, module inclusion, registry retention, and selected model-profile preparation; verify invalid preparation creates no running turn and needs no credentials or database access.
-- [ ] 4.2 Execute the complete conversation flow with fresh contexts and explicit identities; verify two turns against a local mock provider send ordered successful history and append each prompt exactly once.
-- [ ] 4.3 Add failure/cancellation cleanup with an independent context and typed combined errors; verify provider failure, deadline, cancellation, and cleanup failure expose the correct durable state and IDs.
-- [ ] 4.4 Return retainable uncommitted completions from validated intermediate results; verify a transient database failure can be retried through the completion task without a second provider request.
-- [ ] 4.5 Add bounded host execution, foreground capacity errors, and join-before-close behavior; verify separate sessions progress within the limit and shutdown leaves no detached local work.
-- [ ] 4.6 Document the host API, profile configuration, cancellation, and completion retry path; verify a minimal embedded host runs the documented two-turn example.
+- [x] 4.1 Add `conversation.json`, the embedding build helper, module inclusion, registry retention, and selected model-profile preparation; verify invalid preparation creates no running turn and needs no credentials or database access.
+- [x] 4.2 Execute the complete conversation flow with fresh contexts and explicit identities; verify two turns against a local mock provider send ordered successful history and append each prompt exactly once.
+- [x] 4.3 Add failure/cancellation cleanup with an independent context and typed combined errors; verify provider failure, deadline, cancellation, and cleanup failure expose the correct durable state and IDs.
+- [x] 4.4 Return retainable uncommitted completions from validated intermediate results; verify a transient database failure can be retried through the completion task without a second provider request.
+- [x] 4.5 Add bounded host execution, foreground capacity errors, and join-before-close behavior; verify separate sessions progress within the limit and shutdown leaves no detached local work.
+- [x] 4.6 Document the host API, profile configuration, cancellation, and completion retry path; verify a minimal embedded host runs the documented two-turn example.
 
 ## 5. Embedded Session Title Flow
 

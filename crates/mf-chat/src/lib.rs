@@ -1,6 +1,9 @@
 //! Persistent chat operations implemented as application-owned workflow nodes.
 
 mod error;
+pub mod flows;
+mod host;
+mod model;
 mod models;
 #[macro_use]
 pub mod nodes;
@@ -11,6 +14,7 @@ mod storage;
 mod turn;
 
 pub use error::ChatError;
+pub use host::{ChatHost, ChatJob, HostConfig, ModelProfile, UncommittedCompletion};
 pub use models::{Message, ModelCall, Session, Turn};
 pub use session::{DEFAULT_HISTORY_BYTES, HistoryContext, MessagePage, MessageRecord, SessionPage};
 pub use storage::ChatDatabase;

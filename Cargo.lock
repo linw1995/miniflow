@@ -1609,6 +1609,7 @@ dependencies = [
  "libsqlite3-sys",
  "mf-compiler",
  "mf-runtime",
+ "mf-telemetry",
  "mfn-llm",
  "serde",
  "serde_json",

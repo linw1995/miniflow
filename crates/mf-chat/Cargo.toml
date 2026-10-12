@@ -9,6 +9,7 @@ description = "Persistent multi-session chat through embedded miniflow workflows
 [dependencies]
 # Application node contracts and host-side workflow preparation.
 mf-runtime.workspace = true
+mf-telemetry.workspace = true
 mf-compiler = { workspace = true, default-features = false }
 mfn-llm.workspace = true
 inventory.workspace = true
@@ -28,3 +29,7 @@ uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+mfn-llm = { workspace = true, features = ["test-support"] }
+
+[build-dependencies]
+mf-compiler = { workspace = true, features = ["codegen"] }

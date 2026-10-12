@@ -36,7 +36,7 @@ The host SHALL apply the selected nonsecret model configuration during flow prep
 
 ### Requirement: Execute conversations through the embedded flow
 
-The conversation flow SHALL begin a durable turn, supply its ordered history and separate prompt to the ordinary LLM node, and persist the terminal response through application storage nodes. System instructions SHALL remain separate from history. Returned results SHALL identify the session, turn, and call to which they belong.
+The conversation flow SHALL begin a durable turn, supply ordered history and a separate prompt to the existing LLM implementation through an application adapter, and persist its terminal response through storage nodes. System instructions SHALL remain separate from history. Returned results SHALL identify their session, turn, and call.
 
 #### Scenario: Complete two conversation turns
 
@@ -48,6 +48,12 @@ The conversation flow SHALL begin a durable turn, supply its ordered history and
 
 - **WHEN** loaded history exceeds the host's configured finite history byte bound
 - **THEN** the request fails before provider execution without silently deleting or trimming stored messages
+
+#### Scenario: Omit optional model fields
+
+- **WHEN** system instructions or response usage and finish metadata are absent
+- **THEN** required object request and response values still route through the conversation flow
+- **AND** response persistence executes without introducing placeholder metadata
 
 ### Requirement: Keep active sessions independent
 

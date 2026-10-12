@@ -4,6 +4,43 @@ use std::{error::Error, io, path::PathBuf};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ChatError {
+    #[snafu(transparent)]
+    Description {
+        source: mf_compiler::DescriptionError,
+    },
+    #[snafu(display("chat model profile {name:?} does not exist"))]
+    ProfileMissing { name: String },
+    #[snafu(display("chat host is closed"))]
+    Closed,
+    #[snafu(display("chat host reached its {limit}-workflow capacity"))]
+    Capacity { limit: usize },
+    #[snafu(display("could not prepare the chat model: {source}"))]
+    ModelBuild {
+        #[snafu(source(from(mf_runtime::NodeBuildError, Box::new)))]
+        source: Box<mf_runtime::NodeBuildError>,
+    },
+    #[snafu(display("could not start chat worker: {source}"))]
+    WorkerSpawn { source: io::Error },
+    #[snafu(display("could not receive chat worker result: {source}"))]
+    WorkerReceive { source: std::sync::mpsc::RecvError },
+    #[snafu(display("chat worker {id:?} panicked"))]
+    WorkerPanic { id: String },
+    #[snafu(display("chat invocation {invocation:?} failed: {source}; cleanup: {cleanup:?}"))]
+    Execution {
+        invocation: crate::Invocation,
+        cleanup: Option<Box<ChatError>>,
+        source: Box<ChatError>,
+    },
+    #[snafu(display("chat response for {:?} is not committed: {source}", pending.completion.invocation))]
+    Uncommitted {
+        pending: Box<crate::UncommittedCompletion>,
+        source: Box<ChatError>,
+    },
+    #[snafu(transparent)]
+    Plan {
+        #[snafu(source(from(mf_compiler::PlanError, Box::new)))]
+        source: Box<mf_compiler::PlanError>,
+    },
     #[snafu(display("chat session {id:?} is archived"))]
     SessionArchived { id: String },
     #[snafu(display("chat session {id:?} already has a running turn"))]
@@ -91,6 +128,12 @@ pub enum ChatError {
 }
 
 impl From<ChatError> for mf_runtime::NodeExecutionError {
+    fn from(source: ChatError) -> Self {
+        Box::<dyn Error + Send + Sync>::from(source).into()
+    }
+}
+
+impl From<ChatError> for mf_runtime::NodeBuildError {
     fn from(source: ChatError) -> Self {
         Box::<dyn Error + Send + Sync>::from(source).into()
     }

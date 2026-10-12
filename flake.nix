@@ -52,6 +52,7 @@
               ./.config/nextest.toml
               ./examples
               ./crates/mf-chat/migrations
+              ./crates/mf-chat/workflows
               ./crates/mf-telemetry/tests/fixtures
               ./crates/mf-compiler/tests/fixtures/embedding-host
               ./scripts/check-release-support.sh
