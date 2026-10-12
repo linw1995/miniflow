@@ -64,6 +64,25 @@ fn finite_runner_isolates_noisy_plugins_and_survives_without_build_inputs() {
     }).to_string()).unwrap();
     for telemetry in [false, true] {
         compile(&definition, &binary, &build, telemetry);
+        for args in [vec!["--help"], vec!["--node=copy.part", "--help"]] {
+            let help = run(&binary, &args);
+            assert!(help.status.success());
+            assert!(help.stderr.is_empty(), "{:?}", help.stderr);
+            let stdout = String::from_utf8_lossy(&help.stdout);
+            assert!(stdout.contains("Usage: workflow"), "{stdout}");
+            assert!(stdout.contains("--node <ID>"), "{stdout}");
+            if args.len() > 1 {
+                assert!(stdout.contains("--copy.part.input <VALUE>"), "{stdout}");
+            }
+            assert!(!trace.exists());
+        }
+        let invalid = run(&binary, &["--unexpected"]);
+        assert_eq!(invalid.status.code(), Some(2));
+        assert!(invalid.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&invalid.stderr);
+        assert!(stderr.contains("unexpected argument"), "{stderr}");
+        assert!(!stderr.contains("factory diagnostic"));
+        assert!(!trace.exists());
         let output = run(&binary, &["--node", "copy.part", "--copy.part.input", "42"]);
         assert!(String::from_utf8_lossy(&output.stderr).contains("factory diagnostic"));
         assert_eq!(result(output), json!({"value":42}));

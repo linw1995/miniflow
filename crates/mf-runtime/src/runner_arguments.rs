@@ -1,8 +1,11 @@
 use crate::{
-    MAX_WORKFLOW_INPUT_BYTES, ValueType, WorkflowArguments, WorkflowInputError, WorkflowInputSchema,
+    MAX_WORKFLOW_INPUT_BYTES, NodeTarget, NodeTargetKind, ValueType, WorkflowArguments,
+    WorkflowInputError, WorkflowInputSchema,
 };
-use snafu::{OptionExt, ResultExt, Snafu};
+use clap::{Arg, ArgAction, ArgMatches, Command, builder::OsStringValueParser};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs::File,
     io::{self, Read},
@@ -12,10 +15,10 @@ use std::{
 #[derive(Debug, Snafu)]
 pub enum RunnerArgumentError {
     #[snafu(transparent)]
+    Cli { source: clap::Error },
+    #[snafu(transparent)]
     Target { source: crate::NodeTargetError },
-    #[snafu(display(
-        "{message}; usage: workflow [-v|-vv|-vvv|--verbose] [--node ID] [--NODE.PORT VALUE ...] [--inputs JSON|--inputs-file PATH] [--context JSON|--context-file PATH]"
-    ))]
+    #[snafu(display("{message}"))]
     Invalid { message: String },
     #[snafu(display("could not read workflow arguments from {path:?}: {source}"))]
     Read { path: PathBuf, source: io::Error },
@@ -40,89 +43,52 @@ impl RunnerInvocation {
     pub fn parse(
         arguments: impl IntoIterator<Item = OsString>,
         workflow: &WorkflowInputSchema,
-        targets: &[crate::NodeTarget],
+        targets: &[NodeTarget],
     ) -> Result<Self, RunnerArgumentError> {
-        let mut arguments = arguments.into_iter().peekable();
-        let mut forwarded = Vec::new();
-        let mut node = None;
-        let mut context = None;
-        while let Some(argument) = arguments.next() {
-            let flag = argument
-                .to_str()
-                .and_then(|value| value.split_once('='))
-                .map_or((argument.to_str(), None), |(flag, value)| {
-                    (Some(flag), Some(value))
-                });
-            if matches!(flag.0, Some("--node" | "--context" | "--context-file")) {
-                let value = match flag.1 {
-                    Some(value) => OsString::from(value),
-                    None => arguments
-                        .next()
-                        .filter(|value| !value.to_string_lossy().starts_with("--"))
-                        .context(InvalidSnafu {
-                            message: "missing runner control value",
-                        })?,
-                };
-                match flag.0 {
-                    Some("--node") => {
-                        if node.is_some() {
-                            return InvalidSnafu {
-                                message: "--node can be supplied only once",
-                            }
-                            .fail();
-                        }
-                        let value = value.to_str().filter(|value| !value.is_empty()).context(
-                            InvalidSnafu {
-                                message: "--node requires a nonempty UTF-8 target ID",
-                            },
-                        )?;
-                        node = Some(value.to_owned());
-                    }
-                    _ => {
-                        if context.is_some() {
-                            return InvalidSnafu { message: "--context and --context-file are exclusive and can be supplied only once" }.fail();
-                        }
-                        context = Some((flag.0 == Some("--context-file"), value));
-                    }
-                }
-            } else {
-                let takes_value = flag.1.is_none() && argument.to_string_lossy().starts_with("--");
-                let json_transport = matches!(flag.0, Some("--inputs" | "--inputs-file"));
-                forwarded.push(argument);
-                if takes_value
-                    && let Some(value) = arguments.next_if(|value| {
-                        json_transport || !value.to_string_lossy().starts_with("--")
-                    })
-                {
-                    forwarded.push(value);
-                }
-            }
-        }
+        // Register the union before selection so --node can follow its input arguments.
+        let schemas = std::iter::once(workflow).chain(
+            targets
+                .iter()
+                .filter(|target| target.kind == NodeTargetKind::Task)
+                .map(|target| &target.inputs),
+        );
+        let command = argument_command(schemas, true, Some(targets));
+        let matches = parse_arguments(arguments, command)?;
+        let node = matches.get_one::<String>("node").cloned();
         let target = node
             .as_deref()
-            .map(|id| crate::NodeTarget::find(targets, id))
+            .map(|id| NodeTarget::find(targets, id))
             .transpose()?;
-        if target.is_none() && context.is_some() {
-            return InvalidSnafu {
-                message: "context transport requires --node",
+        let schema = target.map_or(workflow, |target| &target.inputs);
+        if matches.get_flag("help") {
+            let mut help = argument_command([schema], true, Some(targets));
+            if let Some(target) = target {
+                help = help.about(format!("Run workflow node {}", target.id));
             }
-            .fail();
+            display_help(help)?;
         }
-        let options =
-            RunnerArguments::parse(forwarded, target.map_or(workflow, |target| &target.inputs))?;
+        let context = matches.get_one::<OsString>("context");
+        let context_file = matches.get_one::<OsString>("context-file");
+        ensure!(
+            target.is_some() || (context.is_none() && context_file.is_none()),
+            InvalidSnafu {
+                message: "context transport requires --node"
+            }
+        );
+        let options = decode_options(&matches, schema, true)?;
         let inputs = options.inputs;
-        let context = match context {
-            None => WorkflowArguments::default(),
-            Some((false, json)) => WorkflowArguments::from_json(
+        let context = if let Some(json) = context {
+            WorkflowArguments::from_json(
                 json.to_str()
                     .context(InvalidSnafu {
                         message: "--context requires UTF-8 JSON",
                     })?
                     .as_bytes(),
-            )?,
-            Some((true, path)) => {
-                WorkflowArguments::from_json(&read_context_file(Path::new(&path))?)?
-            }
+            )?
+        } else if let Some(path) = context_file {
+            WorkflowArguments::from_json(&read_context_file(Path::new(path))?)?
+        } else {
+            WorkflowArguments::default()
         };
         if let Some(target) = target {
             target.validate_context(&context)?;
@@ -206,109 +172,240 @@ impl WorkflowArguments {
         schema: &WorkflowInputSchema,
         allow_verbose: bool,
     ) -> Result<RunnerArguments, RunnerArgumentError> {
-        let invalid = |message: &str| {
-            InvalidSnafu {
-                message: message.to_owned(),
-            }
-            .build()
-        };
-        let mut arguments = arguments.into_iter();
-        let mut verbose = 0_u8;
-        let mut inputs = None;
-        let mut values = Self::default();
-        let mut size = 0;
-        while let Some(argument) = arguments.next() {
-            size += argument.len();
-            Self::check_size(size)?;
-            match argument.to_str() {
-                Some(flag)
-                    if allow_verbose
-                        && (flag == "--verbose"
-                            || (flag.starts_with("-v")
-                                && flag[1..].bytes().all(|byte| byte == b'v'))) =>
-                {
-                    let count = if flag == "--verbose" {
-                        1
-                    } else {
-                        flag.len() - 1
-                    };
-                    verbose = (usize::from(verbose) + count).min(3) as u8;
-                }
-                Some("--inputs" | "--inputs-file") => {
-                    if inputs.is_some() {
-                        return Err(invalid(
-                            "--inputs and --inputs-file can be supplied only once and are mutually exclusive",
-                        ));
-                    }
-                    let value = arguments
-                        .next()
-                        .ok_or_else(|| invalid("missing workflow argument value"))?;
-                    inputs = Some((argument == "--inputs-file", value));
-                }
-                Some(flag) if flag.starts_with("--") => {
-                    let (name, inline) = flag[2..]
-                        .split_once('=')
-                        .map_or((&flag[2..], None), |(name, value)| (name, Some(value)));
-                    let input = schema.parameter(name).ok_or_else(|| {
-                        InvalidSnafu {
-                            message: format!("unknown workflow argument `--{name}`"),
-                        }
-                        .build()
-                    })?;
-                    let value = match inline {
-                        Some(value) => OsString::from(value),
-                        None => arguments
-                            .next()
-                            .filter(|value| !value.to_string_lossy().starts_with("--"))
-                            .ok_or_else(|| invalid("missing workflow argument value"))?,
-                    };
-                    if inline.is_none() {
-                        size += value.len();
-                    }
-                    Self::check_size(size)?;
-                    let value = value
-                        .to_str()
-                        .ok_or_else(|| invalid("workflow input values must be UTF-8"))?;
-                    let value = match &input.value_type {
-                        ValueType::String => serde_json::Value::String(value.to_owned()).into(),
-                        ValueType::Nullable(inner)
-                            if **inner == ValueType::String && value != "null" =>
-                        {
-                            serde_json::Value::String(value.to_owned()).into()
-                        }
-                        _ => crate::workflow_inputs::from_unique_json::<serde_json::Value>(
-                            value.as_bytes(),
-                        )
-                        .context(JsonValueSnafu { name })?
-                        .into(),
-                    };
-                    if values.0.insert(name.into(), value).is_some() {
-                        return Err(invalid("workflow input can be supplied only once"));
-                    }
-                }
-                _ => return Err(invalid("unknown workflow argument")),
-            }
+        let command = argument_command([schema], allow_verbose, None);
+        let matches = parse_arguments(arguments, command)?;
+        if matches.get_flag("help") {
+            display_help(argument_command([schema], allow_verbose, None))?;
         }
-        if inputs.is_some() && !values.0.is_empty() {
-            return Err(invalid(
-                "named workflow inputs cannot be combined with --inputs or --inputs-file",
+        decode_options(&matches, schema, allow_verbose)
+    }
+}
+
+fn argument_command<'a>(
+    schemas: impl IntoIterator<Item = &'a WorkflowInputSchema>,
+    allow_verbose: bool,
+    targets: Option<&[NodeTarget]>,
+) -> Command {
+    let mut command = Command::new("workflow")
+        .no_binary_name(true)
+        .about("Run a compiled workflow")
+        .disable_help_flag(true)
+        .arg(
+            Arg::new("help")
+                .short('h')
+                .long("help")
+                .help("Print help for the workflow or selected node")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("inputs")
+                .long("inputs")
+                .value_name("JSON")
+                .help("Workflow inputs as JSON (up to 1 MiB)")
+                .value_parser(OsStringValueParser::new())
+                .allow_hyphen_values(true)
+                .conflicts_with("inputs-file"),
+        )
+        .arg(
+            Arg::new("inputs-file")
+                .long("inputs-file")
+                .value_name("PATH")
+                .help("Read workflow inputs from a JSON file (up to 1 MiB)")
+                .value_parser(OsStringValueParser::new())
+                .allow_hyphen_values(true),
+        );
+    if allow_verbose {
+        command = command.arg(
+            Arg::new("verbose")
+                .short('v')
+                .long("verbose")
+                .help("Increase diagnostic detail: -v summaries, -vv metadata, -vvv full records")
+                .action(ArgAction::Count),
+        );
+    }
+    if let Some(targets) = targets {
+        command = command
+            .arg(
+                Arg::new("node")
+                    .long("node")
+                    .value_name("ID")
+                    .help("Execute a single node instead of the workflow")
+                    .value_parser(clap::builder::NonEmptyStringValueParser::new()),
+            )
+            .arg(
+                Arg::new("context")
+                    .long("context")
+                    .value_name("JSON")
+                    .help("Context values as JSON for --node (up to 1 MiB)")
+                    .value_parser(OsStringValueParser::new())
+                    .conflicts_with("context-file"),
+            )
+            .arg(
+                Arg::new("context-file")
+                    .long("context-file")
+                    .value_name("PATH")
+                    .help("Read --node context from a regular JSON file (up to 1 MiB)")
+                    .value_parser(OsStringValueParser::new()),
+            );
+        let tasks: Vec<_> = targets
+            .iter()
+            .filter(|target| target.kind == NodeTargetKind::Task)
+            .map(|target| target.id.as_str())
+            .collect();
+        if !tasks.is_empty() {
+            command = command.after_help(format!(
+                "Task targets:\n  {}\n\nUse --node ID --help to inspect a node's inputs.",
+                tasks.join("\n  ")
             ));
         }
-        let values = match inputs {
-            None => values,
-            Some((true, path)) => WorkflowArguments::from_file(Path::new(&path))?,
-            Some((false, json)) => WorkflowArguments::from_json(
-                json.to_str()
-                    .ok_or_else(|| invalid("--inputs requires UTF-8 JSON"))?
-                    .as_bytes(),
-            )?,
-        };
-        schema.validate(&values)?;
-        let encoded = serde_json::to_vec(&values).context(crate::WorkflowInputJsonSnafu)?;
-        Self::check_size(encoded.len())?;
-        Ok(RunnerArguments {
-            verbose,
-            inputs: values,
-        })
     }
+    let mut parameters = BTreeMap::new();
+    for schema in schemas {
+        for (node, ports) in &schema.inputs {
+            for (port, input) in ports {
+                parameters
+                    .entry(crate::output_id(node, port))
+                    .or_insert(input);
+            }
+        }
+    }
+    for (name, input) in parameters {
+        command = command.arg(
+            Arg::new(name.clone())
+                .long(name)
+                .value_name("VALUE")
+                .help(format!(
+                    "{} ({})",
+                    input.value_type,
+                    if input.required {
+                        "required"
+                    } else {
+                        "optional"
+                    }
+                ))
+                .value_parser(OsStringValueParser::new())
+                .conflicts_with_all(["inputs", "inputs-file"]),
+        );
+    }
+    command
+}
+
+fn parse_arguments(
+    arguments: impl IntoIterator<Item = OsString>,
+    command: Command,
+) -> Result<ArgMatches, RunnerArgumentError> {
+    let value_flags: BTreeSet<_> = command
+        .get_arguments()
+        .filter(|argument| argument.get_action().takes_values())
+        .filter_map(Arg::get_long)
+        .collect();
+    let mut arguments = arguments.into_iter().peekable();
+    let mut normalized = Vec::new();
+    let mut size = 0;
+    while let Some(mut argument) = arguments.next() {
+        let flag = argument
+            .to_str()
+            .and_then(|flag| flag.strip_prefix("--"))
+            .map(|flag| {
+                flag.split_once('=')
+                    .map_or((flag, false), |(name, _)| (name, true))
+            });
+        let control = flag.is_some_and(|(name, _)| {
+            value_flags.contains(name) && matches!(name, "node" | "context" | "context-file")
+        });
+        let transport = flag.is_some_and(|(name, _)| matches!(name, "inputs" | "inputs-file"));
+        if !control {
+            // Transport payloads have their own byte limits, separate from named CLI inputs.
+            size += match flag {
+                Some((name, _)) if transport => name.len() + 2,
+                _ => argument.len(),
+            };
+            WorkflowArguments::check_size(size)?;
+        }
+        let value = if flag.is_some_and(|(name, inline)| !inline && value_flags.contains(name)) {
+            arguments.next_if(|value| transport || !value.to_string_lossy().starts_with("--"))
+        } else {
+            None
+        };
+        if let Some(value) = value {
+            if !control && !transport {
+                size += value.len();
+                WorkflowArguments::check_size(size)?;
+            }
+            // Short-option-looking values were literal data before clap; long options remain flags.
+            if !transport && value.to_string_lossy().starts_with('-') {
+                argument.push("=");
+                argument.push(value);
+                normalized.push(argument);
+            } else {
+                normalized.extend([argument, value]);
+            }
+        } else {
+            normalized.push(argument);
+        }
+    }
+    Ok(command.try_get_matches_from(normalized)?)
+}
+
+fn display_help(command: Command) -> Result<(), RunnerArgumentError> {
+    let command = command.mut_arg("help", |argument| argument.action(ArgAction::Help));
+    command.try_get_matches_from(["--help"])?;
+    Ok(())
+}
+
+fn decode_options(
+    matches: &ArgMatches,
+    schema: &WorkflowInputSchema,
+    allow_verbose: bool,
+) -> Result<RunnerArguments, RunnerArgumentError> {
+    let mut values = WorkflowArguments::default();
+    for name in matches.ids().filter(|name| {
+        !matches!(
+            name.as_str(),
+            "help" | "verbose" | "node" | "context" | "context-file" | "inputs" | "inputs-file"
+        )
+    }) {
+        let name = name.as_str();
+        let input = schema.parameter(name).with_context(|| InvalidSnafu {
+            message: format!("unknown workflow argument `--{name}`"),
+        })?;
+        let value = matches.get_one::<OsString>(name).unwrap();
+        let value = value.to_str().context(InvalidSnafu {
+            message: "workflow input values must be UTF-8",
+        })?;
+        let value = match &input.value_type {
+            ValueType::String => serde_json::Value::String(value.to_owned()).into(),
+            ValueType::Nullable(inner) if **inner == ValueType::String && value != "null" => {
+                serde_json::Value::String(value.to_owned()).into()
+            }
+            _ => crate::workflow_inputs::from_unique_json::<serde_json::Value>(value.as_bytes())
+                .context(JsonValueSnafu { name })?
+                .into(),
+        };
+        values.0.insert(name.into(), value);
+    }
+    let values = if let Some(path) = matches.get_one::<OsString>("inputs-file") {
+        WorkflowArguments::from_file(Path::new(path))?
+    } else if let Some(json) = matches.get_one::<OsString>("inputs") {
+        WorkflowArguments::from_json(
+            json.to_str()
+                .context(InvalidSnafu {
+                    message: "--inputs requires UTF-8 JSON",
+                })?
+                .as_bytes(),
+        )?
+    } else {
+        values
+    };
+    schema.validate(&values)?;
+    let encoded = serde_json::to_vec(&values).context(crate::WorkflowInputJsonSnafu)?;
+    WorkflowArguments::check_size(encoded.len())?;
+    Ok(RunnerArguments {
+        verbose: if allow_verbose {
+            matches.get_count("verbose").min(3)
+        } else {
+            0
+        },
+        inputs: values,
+    })
 }
