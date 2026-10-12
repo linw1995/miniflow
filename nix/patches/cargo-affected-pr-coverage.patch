@@ -1,0 +1,132 @@
+--- a/src/shim.rs
++++ b/src/shim.rs
+@@ -261,6 +261,24 @@
+             }
+         }
+     };
++    // Export compact counters for aggregate coverage before the shim frees raw profiles.
++    if let Some(destination) = std::env::var_os("CARGO_AFFECTED_PROFILE_EXPORT_DIR") {
++        let relative = dir.strip_prefix(&env.profraw_base).expect("profile directory is inside its base");
++        let output = Path::new(&destination).join(relative).join("coverage.proftext");
++        if let Err(error) = std::fs::create_dir_all(output.parent().unwrap())
++            .and_then(|()| std::fs::copy(&proftext_path, &output).map(|_| ()))
++            .and_then(|()| std::fs::write(output.with_file_name("identity.json"), serde_json::json!({
++                "binary_id": std::env::var("NEXTEST_BINARY_ID").unwrap(),
++                "test_name": std::env::var("NEXTEST_TEST_NAME").unwrap(),
++                "env_fingerprint": std::env::var("CARGO_AFFECTED_PROFILE_FINGERPRINT").unwrap(),
++                "collect_sha": std::env::var("CARGO_AFFECTED_PROFILE_SHA").unwrap(),
++            }).to_string()))
++        {
++            eprintln!("cargo-affected runner-shim: exporting aggregate profile: {error}");
++            std::process::exit(2);
++        }
++    }
++
+     let executed = match coverage::executed_functions(&proftext) {
+         Ok(executed) => executed,
+         Err(e) => {
+--- a/src/config.rs
++++ b/src/config.rs
+@@ -140,13 +140,15 @@
+     project: &ProjectRoot,
+     build_args: &[String],
+     changed_paths: &BTreeSet<String>,
++    rustflags: Option<&str>,
++    target_dir: Option<&Path>,
+ ) -> Result<BTreeMap<String, BTreeSet<TestId>>> {
+     let rules =
+         AffectedConfig::from_metadata(&project.metadata, &project.workspace_root)?.compile()?;
+     if rules.is_empty() {
+         return Ok(BTreeMap::new());
+     }
+-    resolve_config_hits(&project.workspace_root, build_args, &rules, changed_paths)
++    resolve_config_hits(&project.workspace_root, build_args, &rules, changed_paths, rustflags, target_dir)
+ }
+
+ /// Resolve compiled rules against the changed paths, returning a map from each
+@@ -168,6 +170,8 @@
+     build_args: &[String],
+     rules: &[CompiledRule],
+     changed_paths: &BTreeSet<String>,
++    rustflags: Option<&str>,
++    target_dir: Option<&Path>,
+ ) -> Result<BTreeMap<String, BTreeSet<TestId>>> {
+     let mut out: BTreeMap<String, BTreeSet<TestId>> = BTreeMap::new();
+     for rule in rules {
+@@ -178,7 +182,7 @@
+         if matched.is_empty() {
+             continue;
+         }
+-        let listing = nextest_list(project_root, None, None, build_args, Some(&rule.filterset))
++        let listing = nextest_list(project_root, rustflags, target_dir, build_args, Some(&rule.filterset))
+             .with_context(|| {
+                 format!(
+                     "failed to resolve {TABLE} filterset {:?} \
+--- a/src/plan.rs
++++ b/src/plan.rs
+@@ -210,7 +210,7 @@
+     let changed_ranges = selection::changed_ranges_per_sha(project_root, &reach.reachable)?;
+     let changed_paths =
+         selection::changed_paths_since(project_root, reach, &changed_ranges, changed_files)?;
+-    let config_hits = config::config_rule_hits(project, build_args, &changed_paths.all)?;
++    let config_hits = config::config_rule_hits(project, build_args, &changed_paths.all, None, None)?;
+     let selection = selection::select_with_precomputed_ranges(
+         db,
+         fingerprint_hex,
+--- a/src/collect.rs
++++ b/src/collect.rs
+@@ -240,7 +240,7 @@
+     // happens later in this function so the DB write surface stays in one
+     // place.
+     let diff_plan = if diff {
+-        match plan_diff_collect(project_root, &db, env_fingerprint, &listing)? {
++        match plan_diff_collect(&project, &db, env_fingerprint, &listing, &cargo_build_args(nextest_args), &rustflags, &build_dir)? {
+             DiffOutcome::Plan(plan) => Some(plan),
+             DiffOutcome::NothingToRecollect { listed } => {
+                 prune_and_report(&mut db, env_fingerprint, &listed)?;
+@@ -300,6 +300,8 @@
+         // a result file; it needs the staging locations, llvm-profdata, and
+         // the function maps exported above. Names are shared constants so the
+         // setter here can't drift from the reader.
++        .env("CARGO_AFFECTED_PROFILE_FINGERPRINT", env_fingerprint)
++        .env("CARGO_AFFECTED_PROFILE_SHA", &collect_sha)
+         .env(shim::ENV_PROFRAW_BASE, &profraw_dir)
+         .env(shim::ENV_RESULTS_DIR, &results_dir)
+         .env(shim::ENV_LLVM_PROFDATA, &llvm_profdata)
+@@ -757,11 +759,15 @@
+ /// write surface stays in one place. Bails out on fingerprint mismatch
+ /// (no stored coverage) or every-sha-missing (nothing reachable to query).
+ fn plan_diff_collect(
+-    project_root: &Path,
++    project: &crate::project::ProjectRoot,
+     db: &Db,
+     env_fingerprint: &str,
+     listing: &Listing,
++    build_args: &[String],
++    rustflags: &str,
++    build_dir: &Path,
+ ) -> Result<DiffOutcome> {
++    let project_root = &project.workspace_root;
+     let prior_shas = db.collect_shas(env_fingerprint)?;
+     if prior_shas.is_empty() {
+         bail!(
+@@ -795,12 +801,16 @@
+         );
+     }
+
+-    let sel = selection::select_with_reach(
+-        project_root,
++    let changed_ranges = selection::changed_ranges_per_sha(project_root, &reach.reachable)?;
++    let changed_paths = selection::changed_paths_since(project_root, &reach, &changed_ranges, &[])?;
++    let config_hits = crate::config::config_rule_hits(project, build_args, &changed_paths.all, Some(rustflags), Some(build_dir))?;
++    let sel = selection::compute(
+         db,
+         env_fingerprint,
++        &reach.reachable,
++        &changed_ranges,
+         listing,
+-        &reach,
++        &config_hits,
+         selection::DiagnosticDetail::Summary,
+     )?;
+     let selected = sel.selected();

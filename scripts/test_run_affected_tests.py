@@ -31,12 +31,32 @@ class AffectedTests(unittest.TestCase):
             "Cargo.lock", "Cargo.toml", "rust-toolchain.toml", ".cargo/config.toml",
             "crates/new-node/build.rs", "crates/mf-runtime-derive/src/lib.rs",
             "scripts/nextest-build-cache.py", ".config/nextest.toml",
+            ".github/workflows/CI.yaml",
+        ]:
+            with self.subTest(path=path):
+                self.assertTrue(affected.requires_full_suite([path], {path}))
+        for path in [
             "examples/stream.json", "crates/mf-tui/tests/snapshots/graph.snap", "new-fixture.data",
-            "crates/mf-compiler/tests/fixtures/multi-nodes/src/typed_fixture.rs",
-            "crates/mf-compiler/tests/fixtures/controlled_source.rs",
+            "examples/new-project/src/main.rs",
         ]:
             with self.subTest(path=path):
                 self.assertTrue(affected.requires_full_suite([path]))
+
+    def test_only_exact_input_rules_can_exempt_external_inputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            manifest = Path(directory) / "Cargo.toml"
+            manifest.write_text('''[workspace]
+[[workspace.metadata.affected.rule]]
+globs = ["examples/answer.json", "crates/demo/tests/fixtures/input.rs", "examples/*.json"]
+filterset = "kind(test)"
+''')
+            inputs = affected.mapped_inputs(manifest)
+            self.assertFalse(affected.requires_full_suite([
+                "examples/answer.json", "crates/demo/tests/fixtures/input.rs",
+            ], inputs))
+            for path in ["examples/new.json", "examples/*.json", "crates/demo/tests/fixtures/new.rs", "examples/answer.json/child"]:
+                with self.subTest(path=path):
+                    self.assertTrue(affected.requires_full_suite([path], inputs))
 
     def test_missing_baseline_runs_full_suite(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -59,8 +79,6 @@ class AffectedTests(unittest.TestCase):
                 self.assertEqual(git.call_args.args[0], [
                     "git", "diff", "--name-only", "--no-renames", "-z", "collect-sha", "--",
                 ])
-
-
 
 if __name__ == "__main__":
     unittest.main()

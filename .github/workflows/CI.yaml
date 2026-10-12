@@ -75,16 +75,29 @@ jobs:
       - uses: ./.github/actions/setup-nix
         with:
           cache-key-name: coverage
-      # PRs consume default-branch mappings without publishing replacements.
-      - name: Restore affected-test baseline
+      - name: Restore PR affected-test baseline
+        if: github.event_name == 'pull_request'
+        id: pr-baseline
         uses: actions/cache/restore@v6
         with:
           path: |
             target/affected/coverage.db
             target/affected/baseline.sha
-          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '!**/target/**') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+            target/affected/commits.bundle
+            target/affected/profiles
+          key: affected-pr-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mf-*/Cargo.toml', 'crates/builtin-nodes/*/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.event.pull_request.number }}-${{ github.sha }}
           restore-keys: |
-            affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '!**/target/**') }}-
+            affected-pr-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mf-*/Cargo.toml', 'crates/builtin-nodes/*/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.event.pull_request.number }}-
+      - name: Restore affected-test baseline
+        if: github.event_name != 'pull_request' || steps.pr-baseline.outputs.cache-matched-key == ''
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            target/affected/coverage.db
+            target/affected/baseline.sha
+          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mf-*/Cargo.toml', 'crates/builtin-nodes/*/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mf-*/Cargo.toml', 'crates/builtin-nodes/*/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-
       - name: Cache coverage dependencies
         uses: actions/cache@v6
         with:
@@ -109,10 +122,15 @@ jobs:
             echo "baseline=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          nix develop --command bash scripts/run-cov.sh --affected
+          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
+            nix develop --command bash scripts/run-cov.sh --refresh-affected-cov
+            echo "pr-baseline=true" >> "$GITHUB_OUTPUT"
+          else
+            nix develop --command bash scripts/run-cov.sh --affected
+          fi
           if [[ -s target/coverage/result/lcov.info ]]; then
             echo "report=true" >> "$GITHUB_OUTPUT"
-            if jq -e '.selection.summary.mode == "full-suite-no-listing"' target/affected/report.json > /dev/null; then
+            if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]] && jq -e '.selection.summary.mode == "full-suite-no-listing"' target/affected/report.json > /dev/null; then
               echo "full=true" >> "$GITHUB_OUTPUT"
               echo "flags=rust,rust-affected" >> "$GITHUB_OUTPUT"
             else
@@ -126,7 +144,17 @@ jobs:
           path: |
             target/affected/coverage.db
             target/affected/baseline.sha
-          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '!**/target/**') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mf-*/Cargo.toml', 'crates/builtin-nodes/*/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+      - name: Save PR affected-test baseline
+        if: steps.coverage.outputs.pr-baseline == 'true' && steps.pr-baseline.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            target/affected/coverage.db
+            target/affected/baseline.sha
+            target/affected/commits.bundle
+            target/affected/profiles
+          key: affected-pr-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mf-*/Cargo.toml', 'crates/builtin-nodes/*/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.event.pull_request.number }}-${{ github.sha }}
       - name: Upload test-selection report
         if: always()
         uses: actions/upload-artifact@v7
@@ -146,6 +174,7 @@ jobs:
         uses: codecov/codecov-action@v7
         with:
           files: target/coverage/result/lcov.info
+          disable_search: true
           flags: ${{ steps.coverage.outputs.flags }}
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
