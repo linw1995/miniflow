@@ -23,6 +23,20 @@ snapshots SHALL use an isolated namespace.
 - **WHEN** a change modifies a standalone fixture manifest with an explicit test-input mapping
 - **THEN** the baseline cache identity remains compatible and the rule selects the fixture's consuming tests
 
+### Requirement: Separate partial and complete coverage reporting
+
+PRs SHALL retain patch coverage from selected tests and use only the patch coverage flag, including initial full collection and full-suite fallbacks. Main mapping collection SHALL not publish aggregate partial reports as complete project coverage. Nightly SHALL retain full-platform verification and complete Codecov reports. Incremental collection MUST NOT relabel untouched mappings as freshly collected coverage.
+
+#### Scenario: A PR performs full collection
+
+- **WHEN** a PR collects all tests to initialize or replace its baseline
+- **THEN** it uploads only patch coverage and leaves complete project coverage to full coverage runs outside PR CI
+
+#### Scenario: Main performs incremental collection
+
+- **WHEN** main refreshes only affected tests
+- **THEN** it publishes mappings while complete project coverage remains the responsibility of full coverage runs
+
 ## ADDED Requirements
 
 ### Requirement: Reuse isolated successful PR baselines

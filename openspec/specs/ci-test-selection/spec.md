@@ -78,7 +78,12 @@ SHALL identify fallback inputs and collection mode.
 
 ### Requirement: Separate partial and complete coverage reporting
 
-PRs SHALL retain patch coverage from selected tests. Main mapping collection SHALL not publish aggregate partial reports as complete project coverage. Nightly SHALL retain full-platform verification and complete Codecov reports. Incremental collection MUST NOT relabel untouched mappings as freshly collected coverage.
+PRs SHALL retain patch coverage from selected tests and use only the patch coverage flag, including initial full collection and full-suite fallbacks. Main mapping collection SHALL not publish aggregate partial reports as complete project coverage. Nightly SHALL retain full-platform verification and complete Codecov reports. Incremental collection MUST NOT relabel untouched mappings as freshly collected coverage.
+
+#### Scenario: A PR performs full collection
+
+- **WHEN** a PR collects all tests to initialize or replace its baseline
+- **THEN** it uploads only patch coverage and leaves complete project coverage to full coverage runs outside PR CI
 
 #### Scenario: Main performs incremental collection
 

@@ -130,7 +130,7 @@ jobs:
           fi
           if [[ -s target/coverage/result/lcov.info ]]; then
             echo "report=true" >> "$GITHUB_OUTPUT"
-            if jq -e '.selection.summary.mode == "full-suite-no-listing" or .collection.mode == "full"' target/affected/report.json > /dev/null; then
+            if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]] && jq -e '.selection.summary.mode == "full-suite-no-listing"' target/affected/report.json > /dev/null; then
               echo "full=true" >> "$GITHUB_OUTPUT"
               echo "flags=rust,rust-affected" >> "$GITHUB_OUTPUT"
             else

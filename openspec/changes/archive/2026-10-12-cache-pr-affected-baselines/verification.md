@@ -3,7 +3,8 @@
 - All 31 script tests passed using the final pinned collector patch.
 - The real Rust fixture verifies single execution of selected tests, preserved untouched rows, cumulative coverage against rebuilt binaries, removed-test profile pruning, and recovery of an unadvertised merge commit in a fresh clone.
 - Actual Actions glob resolution confirms baseline archives exclude compilation artifacts and PR/main namespaces remain separate.
-- Full coverage passed all 596 tests with two skipped and produced the standard reports.
+- Full coverage initially passed all 596 tests with two skipped. After synchronizing main, native coverage and PR collection passed all 601 tests with two skipped and produced the standard reports.
+- The first PR snapshot compressed to 15.5 MiB. Initial full PR collection uploads only the patch flag; full project comparisons remain outside PR CI.
 - Repository hooks and aarch64-darwin flake checks passed.
 
 ## Ablation and simplification

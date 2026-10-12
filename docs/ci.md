@@ -70,10 +70,10 @@ a new full baseline before selective execution becomes available again.
 ## Codecov reports
 
 PR reports use the `rust-affected` flag and only report patch coverage in
-checks and comments. Full reports use both `rust` and `rust-affected`: `rust`
+checks and comments, including initial full collection and full-suite fallbacks.
+Full reports outside PR CI use both `rust` and `rust-affected`: `rust`
 provides project coverage, and `rust-affected` seeds the baseline for patch
-comparisons. A full-suite fallback in PR CI can therefore also report project
-coverage. When only an incremental report is uploaded, the project status
+comparisons. When a PR report is uploaded, the project status
 passes without evaluating full-project coverage, preserving its status context;
 the patch status evaluates the uploaded coverage. With no new tests selected, retained PR profiles can still supply the cumulative
 patch report; without retained profiles, no report is generated.
