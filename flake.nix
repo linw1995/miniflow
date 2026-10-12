@@ -55,6 +55,7 @@
               ./.config/nextest.toml
               ./examples
               ./crates/mf-telemetry/tests/fixtures
+              ./crates/mf-compiler/tests/fixtures/embedding-host
               ./scripts/check-release-support.sh
               ./scripts/nextest-build-cache.py
               ./scripts/nextest-cargo.sh

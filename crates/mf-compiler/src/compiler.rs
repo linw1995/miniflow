@@ -938,7 +938,7 @@ pub fn compile_definition(
     normalize_plan(definition, execution_order)
 }
 
-/// Plans graph structure without loading plugins. The generated Cargo build validates providers.
+/// Plan graph structure without loading nodes. Preparation validates linked node implementations.
 pub fn plan_definition(
     definition: &WorkflowDefinition,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
@@ -1055,6 +1055,30 @@ pub fn instantiate_compiled(
         builder
     };
     builder.into_tasks().context(FlowConstructionSnafu)
+}
+
+/// Prepare a task workflow and report attributed node preparation failures.
+pub fn instantiate_compiled_with_observation(
+    plan: &CompiledWorkflow,
+    registry: &NodeRegistry,
+    observation: Option<&mut mf_runtime::RunObservation>,
+) -> Result<Flow, WorkflowCompileError> {
+    instantiate_compiled(plan, registry).inspect_err(|error| {
+        if let Some(observation) = observation
+            && let WorkflowCompileError::NodeConstruction { definition_id, .. }
+            | WorkflowCompileError::UnknownNodeKind { definition_id, .. }
+            | WorkflowCompileError::InvalidNodeMetadata { definition_id, .. }
+            | WorkflowCompileError::TypedGeneration { definition_id, .. }
+            | WorkflowCompileError::OutputDerivation { definition_id, .. }
+            | WorkflowCompileError::PortTypeDepth { definition_id, .. }
+            | WorkflowCompileError::KnownOutputValueTypeConflict { definition_id, .. }
+            | WorkflowCompileError::InvalidIteration { definition_id, .. }
+            | WorkflowCompileError::IterationBody { definition_id, .. }
+            | WorkflowCompileError::IterationConfiguration { definition_id, .. } = error
+        {
+            observation.preparation_failed(definition_id.as_str(), error.to_string());
+        }
+    })
 }
 
 pub fn describe_workflow_inputs(
@@ -1280,21 +1304,7 @@ pub fn execute_compiled_with_inputs(
 ) -> Result<mf_runtime::FlowOutputs, WorkflowExecutionError> {
     mf_runtime::ExecutionContext::run(observation, |state| {
         state.set_workflow_arguments(arguments);
-        let flow = instantiate_compiled(plan, registry).inspect_err(|error| {
-            if let WorkflowCompileError::NodeConstruction { definition_id, .. }
-            | WorkflowCompileError::UnknownNodeKind { definition_id, .. }
-            | WorkflowCompileError::InvalidNodeMetadata { definition_id, .. }
-            | WorkflowCompileError::TypedGeneration { definition_id, .. }
-            | WorkflowCompileError::OutputDerivation { definition_id, .. }
-            | WorkflowCompileError::PortTypeDepth { definition_id, .. }
-            | WorkflowCompileError::KnownOutputValueTypeConflict { definition_id, .. }
-            | WorkflowCompileError::InvalidIteration { definition_id, .. }
-            | WorkflowCompileError::IterationBody { definition_id, .. }
-            | WorkflowCompileError::IterationConfiguration { definition_id, .. } = error
-            {
-                state.preparation_failed(definition_id.as_str(), error);
-            }
-        })?;
+        let flow = instantiate_compiled_with_observation(plan, registry, state.observation_mut())?;
         Ok(flow.execute_in_context(state)?)
     })
 }

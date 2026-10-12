@@ -1,0 +1,23 @@
+[package]
+name = "mf-embedded-host"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[workspace]
+resolver = "3"
+exclude = ["../multi-nodes"]
+
+[dependencies]
+compiler = { package = "mf-compiler", path = "../../../../mf-compiler", default-features = false }
+runtime = { package = "mf-runtime", path = "../../../../mf-runtime", default-features = false }
+core_nodes = { package = "mfn-core", path = "../../../../builtin-nodes/core", default-features = false }
+code_nodes = { package = "mfn-code", path = "../../../../builtin-nodes/code", default-features = false }
+fixture_provider = { package = "fixture-multi-nodes", path = "../multi-nodes", default-features = false }
+json = { package = "serde_json", version = "1.0.151" }
+mf-telemetry = { path = "../../../../mf-telemetry", default-features = false }
+opentelemetry = { version = "0.33.0", default-features = false, features = ["logs", "trace"] }
+opentelemetry_sdk = { version = "0.33.0", default-features = false, features = ["logs", "trace", "testing"] }
+
+[build-dependencies]
+compiler = { package = "mf-compiler", path = "../../../../mf-compiler", default-features = false, features = ["codegen"] }
