@@ -5,7 +5,7 @@ use snafu::Snafu;
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const CROSSING_RADIUS: u32 = 1;
-pub const CROSSING_CLEARANCE: u32 = 3;
+pub const CROSSING_CLEARANCE: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Point {
@@ -227,11 +227,18 @@ pub struct Crossing {
 
 impl Crossing {
     pub fn footprint(&self) -> GraphRect {
+        let upper_horizontal = self.upper == self.horizontal;
         GraphRect {
-            x: self.point.x.saturating_sub(CROSSING_RADIUS),
-            y: self.point.y.saturating_sub(CROSSING_RADIUS),
-            width: 3,
-            height: 3,
+            x: self
+                .point
+                .x
+                .saturating_sub(if upper_horizontal { 0 } else { CROSSING_RADIUS }),
+            y: self
+                .point
+                .y
+                .saturating_sub(if upper_horizontal { CROSSING_RADIUS } else { 0 }),
+            width: if upper_horizontal { 1 } else { 3 },
+            height: if upper_horizontal { 3 } else { 1 },
         }
     }
 }
@@ -255,24 +262,13 @@ pub fn crossing_cells(
     horizontal: EdgeKind,
     vertical: EdgeKind,
     upper_horizontal: bool,
-) -> [MarkerCell; 5] {
+) -> [MarkerCell; 3] {
     let kind = if upper_horizontal {
         horizontal
     } else {
         vertical
     };
     let line = line_symbols(kind)[usize::from(!upper_horizontal)];
-    let lower = if upper_horizontal {
-        vertical
-    } else {
-        horizontal
-    };
-    let (before, after) = match (upper_horizontal, lower) {
-        (true, EdgeKind::Control) => ("┴", "┬"),
-        (true, EdgeKind::Data) => ("╨", "╥"),
-        (false, EdgeKind::Control) => ("┤", "├"),
-        (false, EdgeKind::Data) => ("╡", "╞"),
-    };
     let cell = |along, symbol, upper| MarkerCell {
         dx: if upper == upper_horizontal { along } else { 0 },
         dy: if upper == upper_horizontal { 0 } else { along },
@@ -280,11 +276,9 @@ pub fn crossing_cells(
         upper,
     };
     [
-        cell(-1, line, true),
         cell(0, line, true),
-        cell(1, line, true),
-        cell(-1, before, false),
-        cell(1, after, false),
+        cell(-1, " ", false),
+        cell(1, " ", false),
     ]
 }
 
@@ -486,7 +480,7 @@ impl SegmentIndex {
     }
 }
 
-pub const ATTACHMENT_SPACING: u32 = 6;
+pub const ATTACHMENT_SPACING: u32 = 4;
 pub const TRACK_SPACING: u32 = 4;
 pub const LABEL_WIDTH: usize = 12;
 
@@ -886,18 +880,10 @@ impl Router<'_> {
                         }
                         for candidate in index.candidates(Segment {
                             start: Point::new(footprint.x, footprint.y),
-                            end: Point::new(footprint.x + 2, footprint.y),
-                        }) {
-                            budget.check()?;
-                            if candidate.edge != other.edge
-                                && candidate.segment.intersects_rect(footprint)
-                            {
-                                return CongestionSnafu.fail();
-                            }
-                        }
-                        for candidate in index.candidates(Segment {
-                            start: Point::new(footprint.x, footprint.y + 2),
-                            end: Point::new(footprint.x + 2, footprint.y + 2),
+                            end: Point::new(
+                                footprint.x + footprint.width - 1,
+                                footprint.y + footprint.height - 1,
+                            ),
                         }) {
                             budget.check()?;
                             if candidate.edge != other.edge
@@ -1110,9 +1096,23 @@ impl<'a> Router<'a> {
                     }
                     let marker = Crossing {
                         point,
-                        horizontal: edge,
-                        vertical: item.edge,
-                        upper: edge,
+                        horizontal: if segment.axis() == Axis::Horizontal {
+                            edge
+                        } else {
+                            item.edge
+                        },
+                        vertical: if segment.axis() == Axis::Vertical {
+                            edge
+                        } else {
+                            item.edge
+                        },
+                        upper: if (self.edges[edge].kind, &self.edges[edge].key)
+                            < (self.edges[item.edge].kind, &self.edges[item.edge].key)
+                        {
+                            edge
+                        } else {
+                            item.edge
+                        },
                     }
                     .footprint();
                     for &(_, rect) in self
@@ -1441,7 +1441,8 @@ pub fn route_all(
     let mut router = Router::new(nodes, edges, routes, limits);
     router.budget.stats.geometry_items = estimate;
     let mut order: Vec<_> = (0..edges.len()).collect();
-    order.sort_by_key(|&edge| &edges[edge].key);
+    // Route producers before downstream nodes so opaque IDs do not consume upstream channels first.
+    order.sort_by_key(|&edge| (edges[edge].from, &edges[edge].key));
     let mut members = BTreeMap::<usize, Vec<usize>>::new();
     for (node, &component) in components.iter().enumerate() {
         members.entry(component).or_default().push(node);
@@ -1788,6 +1789,12 @@ mod tests {
             2,
             &EdgeRoute::from_points([Point::new(58, 12), Point::new(66, 12)]),
         );
+        assert_eq!(router.validate(0, &horizontal).unwrap().len(), 1);
+        router.index.remove(&BTreeSet::from([2]));
+        router.index.insert(
+            2,
+            &EdgeRoute::from_points([Point::new(59, 8), Point::new(59, 16)]),
+        );
         assert_eq!(
             router.validate(0, &horizontal),
             Err(UnresolvedReason::Congestion)
@@ -1797,7 +1804,7 @@ mod tests {
             Some(1),
             GraphRect {
                 x: 59,
-                y: 10,
+                y: 11,
                 width: 3,
                 height: 1,
             },
@@ -2004,59 +2011,5 @@ mod tests {
         );
         index.remove(&BTreeSet::from([7]));
         assert_eq!(index.candidates(segment(5, 2, 5, 8)).count(), 0);
-    }
-
-    #[test]
-    fn data_caps_keep_double_strokes_along_the_lower_edge() {
-        let vertical = crossing_cells(EdgeKind::Control, EdgeKind::Data, true);
-        assert_eq!(
-            vertical
-                .iter()
-                .find(|cell| !cell.upper && cell.dy == -1)
-                .unwrap()
-                .symbol,
-            "╨"
-        );
-        assert_eq!(
-            vertical
-                .iter()
-                .find(|cell| !cell.upper && cell.dy == 1)
-                .unwrap()
-                .symbol,
-            "╥"
-        );
-        let horizontal = crossing_cells(EdgeKind::Data, EdgeKind::Control, false);
-        assert_eq!(
-            horizontal
-                .iter()
-                .find(|cell| !cell.upper && cell.dx == -1)
-                .unwrap()
-                .symbol,
-            "╡"
-        );
-        assert_eq!(
-            horizontal
-                .iter()
-                .find(|cell| !cell.upper && cell.dx == 1)
-                .unwrap()
-                .symbol,
-            "╞"
-        );
-    }
-
-    #[test]
-    fn underpass_cells_have_single_cell_width_and_explicit_lower_caps() {
-        for h in [EdgeKind::Data, EdgeKind::Control] {
-            for v in [EdgeKind::Data, EdgeKind::Control] {
-                for upper in [true, false] {
-                    let cells = crossing_cells(h, v, upper);
-                    assert_eq!(cells.iter().filter(|cell| cell.upper).count(), 3);
-                    assert_eq!(cells.iter().filter(|cell| !cell.upper).count(), 2);
-                    for cell in cells {
-                        assert_eq!(ratatui::text::Span::raw(cell.symbol).width(), 1);
-                    }
-                }
-            }
-        }
     }
 }

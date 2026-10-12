@@ -319,7 +319,19 @@ temporary files or file polling.
 
 ## Graph presentation
 
-`mf-tui::graph::GraphLayout` uses `rust-sugiyama` to assign layers and sibling order from the complete described graph, including isolated nodes. Data and control edges both contribute to the topology; parallel node pairs are deduplicated only for layout. A static terminal projection allocates distinct input/output rows and expands boxes or column gaps to fit their routes. Node boxes and routes stay in place as observations arrive.
+`mf-tui::graph::GraphLayout` uses `rust-sugiyama` to assign layers and sibling order from the complete described graph, including isolated nodes. Data and control edges both contribute to the topology; parallel node pairs are deduplicated only for layout. A static terminal projection allocates attachment rows and expands boxes or column gaps to fit their routes. Node boxes and routes stay in place as observations arrive.
+
+Node boxes start at four rows: two borders, a title, and a detail line. Compact attachments are spaced
+four rows apart. One-to-one connections align input and output rows; fan/join connections stagger
+their arrivals so channel crossings stay clear of turns. Boxes grow enough to keep all
+attachments inside their borders. Sibling boxes have at least a two-row gap, rounded to keep their
+port grids aligned, and disconnected components have an additional four-row gap. Producers are
+routed before downstream nodes, with stable connection identities breaking ties.
+
+If the compact layout leaves unresolved connections, planning may try six-row attachment spacing
+once using the scope's remaining geometry, conflict, search, retry, and crossing-storage budgets.
+The wider layout replaces the compact one only when it resolves more connections. Reported routing
+work includes both attempts, and the selected geometry remains fixed during observation.
 
 Routing work is bounded per described scope: 250,000 geometry items; 4,096 sparse search vertices and
 16,384 implicit arcs per search; 8,192 expansions per search and 65,536 per scope; 2,000,000 conflict
@@ -333,17 +345,13 @@ through `benchmark_routes`; performance reports remain local under `target/edge-
 Edges use ordered integer channel tracks and reserved passages for connections spanning multiple layers.
 Obstacle-aware search and bounded local retries handle blocked routes. Completed routes avoid boxes,
 labels, arrows, and shared collinear segments. Remaining perpendicular crossings have an explicit
-upper/lower marker: the upper edge stays continuous and the lower edge ends at two caps. Single and
-double strokes continue to distinguish control and data edges, including their lower caps.
-
-| Upper edge | Lower control caps | Lower data caps |
-| --- | --- | --- |
-| Horizontal | `┴` / `┬` | `╨` / `╥` |
-| Vertical | `┤` / `├` | `╡` / `╞` |
+upper/lower marker: the upper edge stays continuous and the lower edge has a blank cell on each side
+of the crossing instead of end caps. Each edge retains its single or double line outside the gap.
 
 Data edges pass above control edges; equal kinds use stable connection identities. Crossing layers
 and glyphs do not change when observation colors change. Crossings indicate independent connections,
-not junctions. Each marker has a three-by-three footprint reserved before rendering. Panning and
+not junctions. Each marker reserves only the lower edge's three-cell gap: one column by three rows
+when the upper edge is horizontal, or three columns by one row when it is vertical. Panning and
 resizing clip the same planned geometry, including partially visible node text and Unicode labels. A wide text glyph that cannot fit completely at the viewport boundary is blanked so it cannot overwrite an adjacent pane.
 
 If display limits prevent a safe route, the graph shows a separate unresolved-connections warning.

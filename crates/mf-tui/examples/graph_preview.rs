@@ -360,11 +360,6 @@ fn preview_crossings() {
                 for row in &mut cells {
                     row[4] = (v, !upper_horizontal);
                 }
-                for row in cells.iter_mut().take(6).skip(3) {
-                    for cell in row.iter_mut().take(6).skip(3) {
-                        *cell = (" ", false);
-                    }
-                }
                 for cell in crossing_cells(horizontal, vertical, upper_horizontal) {
                     cells[(4 + cell.dy) as usize][(4 + cell.dx) as usize] =
                         (cell.symbol, cell.upper);
