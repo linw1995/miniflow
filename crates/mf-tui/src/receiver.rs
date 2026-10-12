@@ -2,6 +2,7 @@
 
 use crate::snapshots::{HistorySnapshot, SnapshotCapture};
 use crate::state::{Admission, SessionState, StateError, StateSnapshot};
+use crate::traces::{TraceSnapshot, TraceSpan, TraceStore};
 use http_body_util::{BodyExt, Full};
 use hyper::{
     Request, Response, StatusCode,
@@ -72,6 +73,7 @@ enum IngestError {
 struct Context {
     state: Arc<Mutex<SessionState>>,
     snapshots: Mutex<SnapshotCapture>,
+    traces: Mutex<TraceStore>,
     workflow_id: WorkflowId,
     run_id: String,
 }
@@ -102,6 +104,7 @@ impl LoopbackReceiver {
         let context = Arc::new(Context {
             state: Arc::new(Mutex::new(state)),
             snapshots: Mutex::new(SnapshotCapture::default()),
+            traces: Mutex::new(TraceStore::default()),
             workflow_id,
             run_id: run_id.to_string(),
         });
@@ -134,6 +137,14 @@ impl LoopbackReceiver {
             .lock()
             .expect("receiver state was not poisoned")
             .snapshot_shared()
+    }
+
+    pub fn trace_snapshot(&self) -> Arc<TraceSnapshot> {
+        self.context
+            .traces
+            .lock()
+            .expect("trace store was not poisoned")
+            .snapshot()
     }
 
     pub fn history_snapshot(&self, selected: Option<usize>, rows: usize) -> HistorySnapshot {
@@ -568,7 +579,9 @@ fn receive_traces(bytes: &[u8], context: &Context) -> Result<(), IngestError> {
     }
     let mut rejected = false;
     for resource in request.resource_spans {
+        let resource_attributes = resource.resource.map(Arc::new);
         for scope in resource.scope_spans {
+            let instrumentation = scope.scope.map(Arc::new);
             for span in scope.spans {
                 let run = string_attribute(&span.attributes, "mf.run.id");
                 let workflow = string_attribute(&span.attributes, "mf.workflow.id");
@@ -582,12 +595,18 @@ fn receive_traces(bytes: &[u8], context: &Context) -> Result<(), IngestError> {
                         .record_diagnostic("ignored trace span from another session");
                     continue;
                 }
-                if span.trace_id.len() != 16 || span.span_id.len() != 8 {
+                if span.trace_id.len() != 16
+                    || span.span_id.len() != 8
+                    || span.trace_id.iter().all(|byte| *byte == 0)
+                    || span.span_id.iter().all(|byte| *byte == 0)
+                    || (!span.parent_span_id.is_empty() && span.parent_span_id.len() != 8)
+                    || span.end_time_unix_nano < span.start_time_unix_nano
+                {
                     context
                         .state
                         .lock()
                         .expect("receiver state was not poisoned")
-                        .record_local_trace_drop(1, "invalid trace or span identity");
+                        .record_local_trace_drop(1, "invalid trace span identity or timestamps");
                     rejected = true;
                 } else {
                     context
@@ -595,6 +614,22 @@ fn receive_traces(bytes: &[u8], context: &Context) -> Result<(), IngestError> {
                         .lock()
                         .expect("receiver state was not poisoned")
                         .record_trace_span();
+                    let retained = context
+                        .traces
+                        .lock()
+                        .expect("trace store was not poisoned")
+                        .admit(TraceSpan {
+                            span,
+                            resource: resource_attributes.clone(),
+                            scope: instrumentation.clone(),
+                        });
+                    if !retained {
+                        context
+                            .state
+                            .lock()
+                            .expect("receiver state was not poisoned")
+                            .record_local_trace_drop(1, "trace retention limit exceeded");
+                    }
                 }
             }
         }

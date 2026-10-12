@@ -1,8 +1,8 @@
 ## 1. Retain and organize execution spans
 
-- [ ] 1.1 Add bounded, deduplicated span retention with resource/scope metadata and immutable trace-tree snapshots.
-- [ ] 1.2 Integrate receiver admission, validation, display-drop accounting, and completed-session access.
-- [ ] 1.3 Validate ordering, identity-based selection, missing parents/cycles, retention budgets, and receiver isolation; commit this group.
+- [x] 1.1 Add bounded, deduplicated span retention with resource/scope metadata and immutable trace-tree snapshots.
+- [x] 1.2 Integrate receiver admission, validation, display-drop accounting, and completed-session access.
+- [x] 1.3 Validate ordering, identity-based selection, missing parents/cycles, retention budgets, and receiver isolation; commit this group.
 
 ## 2. Retain logs and correlate snapshot data
 

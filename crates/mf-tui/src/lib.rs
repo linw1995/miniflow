@@ -12,6 +12,7 @@ pub mod receiver;
 #[cfg(unix)]
 pub mod run;
 pub mod state;
+pub mod traces;
 
 mod snapshots;
 pub use snapshots::HistorySnapshot;
