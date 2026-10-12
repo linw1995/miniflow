@@ -3,10 +3,11 @@
 use crate::{
     duration::format_duration_ns,
     graph::{GraphError, GraphLayout, GraphView},
+    logs::LogSnapshot,
     manifest::{ManifestReadError, read_manifest},
     receiver::{LoopbackReceiver, ReceiverError},
-    snapshots::HistoryView,
     state::{LoopPassObservation, NodeObservation, StateSnapshot},
+    traces::{TraceSnapshot, TraceView, TraceViewSnapshot},
 };
 use crossterm::{
     cursor::{Hide, Show},
@@ -26,7 +27,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph},
 };
 use signal_hook::{SigId, consts::SIGINT, flag, low_level::unregister};
 use snafu::{ResultExt, Snafu, ensure};
@@ -599,7 +600,7 @@ fn set_nonblocking(fd: impl AsFd) -> io::Result<()> {
 
 #[derive(Default)]
 struct ViewState {
-    history: HistoryView,
+    traces: TraceView,
     path: Vec<String>,
     offset: (u32, u32),
     selected: usize,
@@ -641,9 +642,10 @@ impl ViewState {
         snapshot: &StateSnapshot,
         root: &GraphLayout,
         bodies: &BTreeMap<Vec<String>, GraphLayout>,
-        history_count: usize,
+        traces: &TraceSnapshot,
+        logs: &LogSnapshot,
     ) {
-        if self.history.handle_key(key, history_count) {
+        if self.traces.handle_key(key, traces, logs) {
             return;
         }
         match key {
@@ -787,8 +789,7 @@ fn supervise(
                                     return Ok((status, interrupted_at.is_some(), capture_forced));
                                 }
                                 KeyCode::Esc
-                                    if view_state.path.is_empty()
-                                        && !view_state.history.visible =>
+                                    if view_state.path.is_empty() && !view_state.traces.visible =>
                                 {
                                     return Ok((status, interrupted_at.is_some(), capture_forced));
                                 }
@@ -803,7 +804,8 @@ fn supervise(
                                         &snapshot,
                                         layout,
                                         body_layouts,
-                                        receiver.history_len(),
+                                        &receiver.trace_snapshot(),
+                                        &receiver.log_snapshot(),
                                     );
                                 }
                             }
@@ -866,7 +868,8 @@ fn supervise(
                             &snapshot,
                             layout,
                             body_layouts,
-                            receiver.history_len(),
+                            &receiver.trace_snapshot(),
+                            &receiver.log_snapshot(),
                         );
                     }
                     last_frame = Instant::now() - FRAME_INTERVAL;
@@ -912,21 +915,29 @@ fn draw(
     capture: &CaptureView,
     elapsed: Duration,
     view_state: &mut ViewState,
-    history: &LoopbackReceiver,
+    receiver: &LoopbackReceiver,
     status: Option<ExitStatus>,
 ) -> Result<(), RunError> {
-    if view_state.history.visible {
+    if view_state.traces.visible {
         terminal
             .draw(|frame| {
-                if snapshot.stream.is_some() {
-                    frame.render_widget(Paragraph::new("Data history is unavailable for streaming workflows.\nUse the graph to inspect observed invocations and workflow totals.\n\nv/Esc: graph | Ctrl-C: interrupt/close").block(Block::default().title("Streaming observation").borders(Borders::ALL)).wrap(Wrap { trim: false }), frame.area());
-                    return;
-                }
-                let snapshot = history.history_snapshot(
-                    view_state.history.selection(),
-                    usize::from(frame.area().height.saturating_sub(6)),
+                let traces = receiver.trace_snapshot();
+                let logs = receiver.log_snapshot();
+                let data = view_state.traces.correlation(&traces, &logs).map_or_else(
+                    || receiver.span_data(&[], &[]),
+                    |(trace_id, span_id)| receiver.span_data(&trace_id, &span_id),
                 );
-                view_state.history.draw(frame, &snapshot);
+                view_state.traces.draw(
+                    frame,
+                    &TraceViewSnapshot {
+                        traces: &traces,
+                        logs: &logs,
+                        data,
+                        spans: snapshot.traces,
+                        streaming: snapshot.stream.is_some(),
+                        finished: status.is_some(),
+                    },
+                );
             })
             .context(TerminalSnafu)?;
         return Ok(());
@@ -1005,7 +1016,7 @@ fn draw(
         let lifecycle = &snapshot.lifecycle;
         let controls = if status.is_some() { "q/Enter close" } else { "Ctrl-C interrupt" };
         frame.render_widget(Paragraph::new(format!(
-            "Observation: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nv data history | PgUp/PgDn details | Arrows pan | Tab/j/k select | l enter Loop | h back | [/] pass | {controls}",
+            "Observation: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nv OTEL tracing | PgUp/PgDn details | Arrows pan | Tab/j/k select | l enter Loop | h back | [/] pass | {controls}",
             lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
             lifecycle.observation_errors + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
         )), footer);
@@ -1375,7 +1386,8 @@ mod tests {
             &session.snapshot(),
             &layout,
             &BTreeMap::new(),
-            0,
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
         );
         assert_eq!(view.details_offset, 10);
         view.handle_key(
@@ -1383,7 +1395,8 @@ mod tests {
             &session.snapshot(),
             &layout,
             &BTreeMap::new(),
-            0,
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
         );
         assert_eq!(view.details_offset, 0);
     }
@@ -1631,21 +1644,49 @@ mod tests {
             pass.stream_invocation = Some(index as u64 + 10);
         }
         let mut view = ViewState::default();
-        view.handle_key(KeyCode::Char('l'), &snapshot, &root, &bodies, 0);
+        view.handle_key(
+            KeyCode::Char('l'),
+            &snapshot,
+            &root,
+            &bodies,
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
         assert_eq!(view.path, ["repeat"]);
         assert_eq!(view.layout(&root, &bodies).nodes()[0].id, "%loop");
         assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 1);
-        view.handle_key(KeyCode::Char('['), &snapshot, &root, &bodies, 0);
+        view.handle_key(
+            KeyCode::Char('['),
+            &snapshot,
+            &root,
+            &bodies,
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
         assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 0);
         assert_eq!(view.pass(&snapshot).unwrap().stream_invocation, Some(10));
         assert_eq!(view.layout(&root, &bodies).nodes(), before_nodes);
         assert_eq!(view.layout(&root, &bodies).routes(), before_routes);
         assert_eq!(view.layout(&root, &bodies).crossings(), before_crossings);
-        view.handle_key(KeyCode::Char(']'), &snapshot, &root, &bodies, 0);
+        view.handle_key(
+            KeyCode::Char(']'),
+            &snapshot,
+            &root,
+            &bodies,
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
         assert_eq!(view.pass(&snapshot).unwrap().path[0].index.get(), 1);
         assert_eq!(view.pass(&snapshot).unwrap().stream_invocation, Some(11));
         assert_eq!(view.layout(&root, &bodies).routes(), before_routes);
-        view.handle_key(KeyCode::Char('h'), &snapshot, &root, &bodies, 0);
+        view.handle_key(
+            KeyCode::Char('h'),
+            &snapshot,
+            &root,
+            &bodies,
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
         assert!(view.path.is_empty());
         snapshot.stream = Some(crate::state::StreamSnapshot {
             hidden_invocations: 1000,

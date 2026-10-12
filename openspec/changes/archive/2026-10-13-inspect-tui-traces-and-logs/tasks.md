@@ -12,7 +12,7 @@
 
 ## 3. Present traces, data, and logs together
 
-- [ ] 3.1 Replace the history page with a trace tree, Details/Data/Logs panes, and session-wide log browsing using stable selection and bounded previews.
-- [ ] 3.2 Preserve finite snapshot capture, explain streaming Data unavailability, and retain graph navigation and final-session inspection.
-- [ ] 3.3 Update documentation and terminal acceptance tests for data/log browsing, output preservation, interruption, and streaming observation.
-- [ ] 3.4 Run affected coverage tests, `prek -a`, `nix flake check -L`, and OpenSpec validation; record verification, synchronize/archive the completed change, and commit this group.
+- [x] 3.1 Replace the history page with a trace tree, Details/Data/Logs panes, and session-wide log browsing using stable selection and bounded previews.
+- [x] 3.2 Preserve finite snapshot capture, explain streaming Data unavailability, and retain graph navigation and final-session inspection.
+- [x] 3.3 Update documentation and terminal acceptance tests for data/log browsing, output preservation, interruption, and streaming observation.
+- [x] 3.4 Run affected coverage tests, `prek -a`, `nix flake check -L`, and OpenSpec validation; record verification, synchronize/archive the completed change, and commit this group.

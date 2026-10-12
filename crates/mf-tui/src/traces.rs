@@ -1,9 +1,15 @@
 //! Bounded OTLP span retention and terminal trace inspection.
 
-use crate::duration::format_duration_ns;
+use crate::{
+    SpanData,
+    duration::format_duration_ns,
+    logs::{LogObservation, LogSnapshot},
+    snapshots::span_data_preview,
+    state::TraceAvailability,
+};
 use crossterm::event::KeyCode;
 use opentelemetry_proto::tonic::{
-    common::v1::{InstrumentationScope, KeyValue},
+    common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
     resource::v1::Resource,
     trace::v1::{Span, span::SpanKind, status::StatusCode},
 };
@@ -145,12 +151,41 @@ impl TraceStore {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Pane {
+    #[default]
+    Details,
+    Data,
+    Logs,
+}
+
+#[derive(PartialEq, Eq)]
+struct PreviewKey {
+    pane: Pane,
+    correlation: Option<SpanKey>,
+    log_id: Option<usize>,
+    data_revision: usize,
+}
+
+pub struct TraceViewSnapshot<'a> {
+    pub traces: &'a TraceSnapshot,
+    pub logs: &'a LogSnapshot,
+    pub data: SpanData,
+    pub spans: TraceAvailability,
+    pub streaming: bool,
+    pub finished: bool,
+}
+
 #[derive(Default)]
 pub struct TraceView {
     pub visible: bool,
     selected: Option<SpanKey>,
     scroll: u16,
-    preview: Option<(SpanKey, String)>,
+    preview: Option<(PreviewKey, String)>,
+    pane: Pane,
+    session_logs: bool,
+    focus_logs: bool,
+    selected_log: Option<usize>,
 }
 
 impl TraceView {
@@ -166,7 +201,46 @@ impl TraceView {
             .unwrap_or(snapshot.rows.len().saturating_sub(1))
     }
 
-    pub fn handle_key(&mut self, key: KeyCode, snapshot: &TraceSnapshot) -> bool {
+    fn log_records(&self, traces: &TraceSnapshot, logs: &LogSnapshot) -> Vec<Arc<LogObservation>> {
+        if self.session_logs {
+            logs.records.clone()
+        } else {
+            traces
+                .rows
+                .get(self.position(traces))
+                .map_or_else(Vec::new, |row| {
+                    logs.related(
+                        &row.observation.span.trace_id,
+                        &row.observation.span.span_id,
+                    )
+                })
+        }
+    }
+
+    fn log_position(&self, records: &[Arc<LogObservation>]) -> usize {
+        self.selected_log
+            .and_then(|selected| records.iter().position(|record| record.id == selected))
+            .unwrap_or(records.len().saturating_sub(1))
+    }
+
+    pub fn correlation(&self, traces: &TraceSnapshot, logs: &LogSnapshot) -> Option<SpanKey> {
+        if self.session_logs {
+            let records = self.log_records(traces, logs);
+            let record = &records.get(self.log_position(&records))?.record;
+            (record.trace_id.len() == 16
+                && record.span_id.len() == 8
+                && record.trace_id.iter().any(|byte| *byte != 0)
+                && record.span_id.iter().any(|byte| *byte != 0))
+            .then(|| (record.trace_id.clone(), record.span_id.clone()))
+        } else {
+            traces
+                .rows
+                .get(self.position(traces))
+                .map(|row| row.observation.key())
+        }
+    }
+
+    pub fn handle_key(&mut self, key: KeyCode, traces: &TraceSnapshot, logs: &LogSnapshot) -> bool {
         if key == KeyCode::Char('v') {
             self.visible = !self.visible;
             return true;
@@ -174,141 +248,194 @@ impl TraceView {
         if !self.visible {
             return false;
         }
-        let current = self.position(snapshot);
-        let index = match key {
-            KeyCode::Esc => {
-                self.visible = false;
-                None
+        match key {
+            KeyCode::Esc => self.visible = false,
+            KeyCode::Tab => {
+                self.pane = match (self.session_logs, self.pane) {
+                    (_, Pane::Details) => Pane::Data,
+                    (_, Pane::Data) => Pane::Logs,
+                    (true, Pane::Logs) => Pane::Data,
+                    (false, Pane::Logs) => Pane::Details,
+                };
+                self.focus_logs = false;
             }
-            KeyCode::Up | KeyCode::Char('k') => Some(current.saturating_sub(1)),
-            KeyCode::Down | KeyCode::Char('j') => {
-                Some((current + 1).min(snapshot.rows.len().saturating_sub(1)))
+            KeyCode::Char('g') => {
+                self.session_logs = !self.session_logs;
+                self.pane = if self.session_logs {
+                    Pane::Logs
+                } else {
+                    Pane::Details
+                };
+                self.focus_logs = false;
             }
-            KeyCode::Home => Some(0),
-            KeyCode::End | KeyCode::Char('f') => {
-                self.selected = None;
-                None
+            KeyCode::Char('l') if self.pane == Pane::Logs => self.focus_logs = !self.focus_logs,
+            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
+            KeyCode::PageDown => self.scroll = self.scroll.saturating_add(10),
+            KeyCode::Up
+            | KeyCode::Char('k')
+            | KeyCode::Down
+            | KeyCode::Char('j')
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::Char('f') => {
+                let logs_active = self.session_logs || (self.pane == Pane::Logs && self.focus_logs);
+                let records = if logs_active {
+                    self.log_records(traces, logs)
+                } else {
+                    Vec::new()
+                };
+                let count = if logs_active {
+                    records.len()
+                } else {
+                    traces.rows.len()
+                };
+                let current = if logs_active {
+                    self.log_position(&records)
+                } else {
+                    self.position(traces)
+                };
+                let index = match key {
+                    KeyCode::Up | KeyCode::Char('k') => Some(current.saturating_sub(1)),
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        Some((current + 1).min(count.saturating_sub(1)))
+                    }
+                    KeyCode::Home => Some(0),
+                    _ => None,
+                };
+                if logs_active {
+                    self.selected_log =
+                        index.and_then(|index| records.get(index).map(|record| record.id));
+                } else {
+                    self.selected = index
+                        .and_then(|index| traces.rows.get(index).map(|row| row.observation.key()));
+                    self.selected_log = None;
+                }
             }
-            KeyCode::PageUp => {
-                self.scroll = self.scroll.saturating_sub(10);
-                None
-            }
-            KeyCode::PageDown => {
-                self.scroll = self.scroll.saturating_add(10);
-                None
-            }
-            _ => None,
-        };
-        if let Some(index) = index {
-            self.selected = snapshot.rows.get(index).map(|row| row.observation.key());
+            _ => {}
         }
         true
     }
 
-    pub fn draw(
-        &mut self,
-        frame: &mut Frame<'_>,
-        snapshot: &TraceSnapshot,
-        observed: u64,
-        dropped: u64,
-        finished: bool,
-    ) {
+    pub fn draw(&mut self, frame: &mut Frame<'_>, snapshot: &TraceViewSnapshot<'_>) {
         let [header, body, footer] = Layout::vertical([
             Constraint::Length(2),
             Constraint::Min(1),
             Constraint::Length(2),
         ])
         .areas(frame.area());
-        frame.render_widget(
-            Paragraph::new(format!(
-                "OTEL Tracing: {} retained | {observed} received | {dropped} drops | {}",
-                snapshot.rows.len(),
-                if finished { "Finished" } else { "Collecting" }
-            )),
-            header,
-        );
+        frame.render_widget(Paragraph::new(format!(
+            "OTEL Tracing: {} spans | {} received | {} span drops\nLogs: {} retained | {} received | {} log drops | {}",
+            snapshot.traces.rows.len(), snapshot.spans.observed_spans, snapshot.spans.local_drops,
+            snapshot.logs.records.len(), snapshot.logs.observed_records, snapshot.logs.local_drops,
+            if snapshot.finished { "Finished" } else { "Collecting" }
+        )), header);
         let [entries, details] =
             Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
                 .areas(body);
-        let selected = self.position(snapshot);
-        let rows = usize::from(entries.height.saturating_sub(2)).max(1);
-        let first = selected
-            .saturating_sub(rows / 2)
-            .min(snapshot.rows.len().saturating_sub(rows));
-        let items: Vec<_> = snapshot
-            .rows
-            .iter()
-            .skip(first)
-            .take(rows)
-            .map(|row| {
+        let selected = self.position(snapshot.traces);
+        let records = self.log_records(snapshot.traces, snapshot.logs);
+        let log_selected = self.log_position(&records);
+        if self.session_logs {
+            draw_logs(frame, entries, &records, log_selected, "Session LogRecords");
+        } else {
+            let rows = usize::from(entries.height.saturating_sub(2)).max(1);
+            let first = selected
+                .saturating_sub(rows / 2)
+                .min(snapshot.traces.rows.len().saturating_sub(rows));
+            let items: Vec<_> = snapshot.traces.rows.iter().skip(first).take(rows).map(|row| {
                 let span = &row.observation.span;
-                let node = span
-                    .attributes
-                    .iter()
-                    .find(|attribute| attribute.key == "mf.node.id")
-                    .and_then(|attribute| attribute.value.as_ref())
-                    .and_then(|value| match value.value.as_ref() {
-                        Some(
-                            opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(
-                                value,
-                            ),
-                        ) => Some(value.as_str()),
-                        _ => None,
+                let node = span.attributes.iter().find(|attribute| attribute.key == "mf.node.id")
+                    .and_then(|attribute| attribute.value.as_ref()).and_then(|value| match value.value.as_ref() {
+                        Some(opentelemetry_proto::tonic::common::v1::any_value::Value::StringValue(value)) => Some(value.as_str()), _ => None,
                     });
-                ListItem::new(format!(
-                    "{}{}{} {} {}",
-                    "  ".repeat(row.depth.min(16)),
-                    label(&span.name),
-                    node.map_or(String::new(), |node| format!(" [{}]", label(node))),
-                    row.observation.status(),
-                    format_duration_ns(
-                        span.end_time_unix_nano
-                            .saturating_sub(span.start_time_unix_nano)
+                ListItem::new(format!("{}{}{} {} {}", "  ".repeat(row.depth.min(16)), label(&span.name),
+                    node.map_or(String::new(), |node| format!(" [{}]", label(node))), row.observation.status(),
+                    format_duration_ns(span.end_time_unix_nano.saturating_sub(span.start_time_unix_nano))))
+                    .style(Style::default().fg(match row.observation.status() { "ERROR" => Color::Red, "OK" => Color::Green, _ => Color::Gray }))
+            }).collect();
+            let mut state =
+                ListState::default().with_selected((!items.is_empty()).then_some(selected - first));
+            frame.render_stateful_widget(
+                List::new(items)
+                    .block(
+                        Block::default()
+                            .title("Spans (parent / child)")
+                            .borders(Borders::ALL),
                     )
-                ))
-                .style(Style::default().fg(match row.observation.status() {
-                    "ERROR" => Color::Red,
-                    "OK" => Color::Green,
-                    _ => Color::Gray,
-                }))
-            })
-            .collect();
-        let mut list_state =
-            ListState::default().with_selected((!items.is_empty()).then_some(selected - first));
-        frame.render_stateful_widget(
-            List::new(items)
-                .block(
-                    Block::default()
-                        .title("Spans (parent / child)")
-                        .borders(Borders::ALL),
-                )
-                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
-            entries,
-            &mut list_state,
-        );
-        if let Some(row) = snapshot.rows.get(selected) {
-            let key = row.observation.key();
-            if self
-                .preview
-                .as_ref()
-                .is_none_or(|(previous, _)| *previous != key)
-            {
-                self.preview = Some((key, span_preview(&row.observation)));
+                    .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+                entries,
+                &mut state,
+            );
+        }
+        let (details, title) = if self.pane == Pane::Logs && !self.session_logs {
+            let [logs_area, details] = Layout::vertical([
+                Constraint::Length((details.height / 3).clamp(3, 8)),
+                Constraint::Min(1),
+            ])
+            .areas(details);
+            draw_logs(
+                frame,
+                logs_area,
+                &records,
+                log_selected,
+                if self.focus_logs {
+                    "LogRecords (focused)"
+                } else {
+                    "LogRecords (l: focus)"
+                },
+            );
+            (details, "Details | Data | [Logs]")
+        } else {
+            (
+                details,
+                match (self.session_logs, self.pane) {
+                    (true, Pane::Data) => "[Data] | Logs",
+                    (true, _) => "Data | [Logs]",
+                    (false, Pane::Details) => "[Details] | Data | Logs",
+                    (false, Pane::Data) => "Details | [Data] | Logs",
+                    (false, Pane::Logs) => "Details | Data | [Logs]",
+                },
+            )
+        };
+        let log_id = (self.pane == Pane::Logs || self.session_logs)
+            .then(|| records.get(log_selected).map(|record| record.id))
+            .flatten();
+        let key = PreviewKey {
+            pane: self.pane,
+            correlation: self.correlation(snapshot.traces, snapshot.logs),
+            log_id,
+            data_revision: if self.pane == Pane::Data {
+                snapshot.data.revision
+            } else {
+                0
+            },
+        };
+        if self
+            .preview
+            .as_ref()
+            .is_none_or(|(previous, _)| *previous != key)
+        {
+            let text = match self.pane {
+                Pane::Data => span_data_preview(&snapshot.data, snapshot.streaming, snapshot.finished),
+                Pane::Logs => records.get(log_selected).map_or_else(|| "No matching LogRecords were received.".into(), |record| log_preview(record)),
+                Pane::Details => snapshot.traces.rows.get(selected).map_or_else(|| {
+                    if snapshot.finished { "No trace spans were received.\nUse g to inspect session logs; spans may be unsampled or unavailable.".into() }
+                    else { "Waiting for exported spans.\nSpans appear after completion and export. Use g for live session logs.".into() }
+                }, |row| span_preview(&row.observation)),
+            };
+            if self.preview.as_ref().is_none_or(|(previous, _)| {
+                previous.pane != key.pane
+                    || previous.correlation != key.correlation
+                    || previous.log_id != key.log_id
+            }) {
                 self.scroll = 0;
             }
+            self.preview = Some((key, text));
         }
-        let empty = if finished {
-            "No trace spans were received.\nThe runner must support OTLP tracing with sampled spans."
-        } else {
-            "Waiting for exported spans.\nSpans appear after they finish and the exporter sends them."
-        };
-        let paragraph = Paragraph::new(
-            self.preview
-                .as_ref()
-                .map_or(empty, |(_, text)| text.as_str()),
-        )
-        .block(Block::default().title("Span details").borders(Borders::ALL))
-        .wrap(Wrap { trim: false });
+        let text = &self.preview.as_ref().expect("preview is initialized").1;
+        let paragraph = Paragraph::new(text.as_str())
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .wrap(Wrap { trim: false });
         self.scroll = self.scroll.min(
             paragraph
                 .line_count(details.width.saturating_sub(2))
@@ -316,8 +443,92 @@ impl TraceView {
                 .min(u16::MAX as usize) as u16,
         );
         frame.render_widget(paragraph.scroll((self.scroll, 0)), details);
-        frame.render_widget(Paragraph::new("j/k or arrows: span | Home: first | End/f: follow last\nPgUp/PgDn: scroll details | v/Esc: graph | Ctrl-C: interrupt/close"), footer);
+        frame.render_widget(Paragraph::new("Tab: pane | g: spans/session logs | l: focus related logs | j/k: select | Home/End: first/follow\nPgUp/PgDn: scroll details | v/Esc: graph | Ctrl-C: interrupt/close"), footer);
     }
+}
+
+fn draw_logs(
+    frame: &mut Frame<'_>,
+    area: ratatui::layout::Rect,
+    records: &[Arc<LogObservation>],
+    selected: usize,
+    title: &str,
+) {
+    let rows = usize::from(area.height.saturating_sub(2)).max(1);
+    let first = selected
+        .saturating_sub(rows / 2)
+        .min(records.len().saturating_sub(rows));
+    let items: Vec<_> = records
+        .iter()
+        .skip(first)
+        .take(rows)
+        .map(|observation| {
+            let record = &observation.record;
+            ListItem::new(format!(
+                "#{} {} {}",
+                observation.id + 1,
+                label(&record.severity_text),
+                label(if !record.event_name.is_empty() {
+                    &record.event_name
+                } else if let Some(any_value::Value::StringValue(body)) =
+                    record.body.as_ref().and_then(|body| body.value.as_ref())
+                {
+                    body
+                } else {
+                    "(unnamed log)"
+                })
+            ))
+        })
+        .collect();
+    let mut state =
+        ListState::default().with_selected((!items.is_empty()).then_some(selected - first));
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+        area,
+        &mut state,
+    );
+}
+
+fn log_preview(observation: &LogObservation) -> String {
+    let mut preview = Preview(String::new());
+    let record = &observation.record;
+    let result = (|| -> fmt::Result {
+        writeln!(
+            preview,
+            "LogRecord #{}\nEvent: {}\nTime (unix ns): {}\nObserved (unix ns): {}\nSeverity: {} ({})\nTrace ID: {}\nSpan ID: {}\nFlags: {}",
+            observation.id + 1,
+            record.event_name,
+            record.time_unix_nano,
+            record.observed_time_unix_nano,
+            record.severity_text,
+            record.severity_number,
+            hex(&record.trace_id),
+            hex(&record.span_id),
+            record.flags
+        )?;
+        if let Some(scope) = &observation.scope {
+            writeln!(preview, "Scope: {} {}", scope.name, scope.version)?;
+            attributes(&mut preview, "Scope attributes", &scope.attributes)?;
+        }
+        if let Some(resource) = &observation.resource {
+            attributes(&mut preview, "Resource attributes", &resource.attributes)?;
+        }
+        writeln!(preview, "\nBody:")?;
+        write_value(&mut preview, record.body.as_ref())?;
+        writeln!(preview)?;
+        attributes(&mut preview, "Log attributes", &record.attributes)?;
+        writeln!(
+            preview,
+            "\nExporter omissions: {} attributes",
+            record.dropped_attributes_count
+        )
+    })();
+    if result.is_err() {
+        preview.0.push_str("\n[Preview truncated at 64 KiB]");
+    }
+    preview.0
 }
 
 fn label(value: &str) -> String {
@@ -372,18 +583,54 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn write_value(preview: &mut Preview, value: Option<&AnyValue>) -> fmt::Result {
+    match value.and_then(|value| value.value.as_ref()) {
+        None => write!(preview, "null"),
+        Some(any_value::Value::StringValue(value)) => write!(preview, "{value:?}"),
+        Some(any_value::Value::BoolValue(value)) => write!(preview, "{value}"),
+        Some(any_value::Value::IntValue(value)) => write!(preview, "{value}"),
+        Some(any_value::Value::DoubleValue(value)) => write!(preview, "{value}"),
+        Some(any_value::Value::BytesValue(value)) => {
+            write!(preview, "bytes(")?;
+            for byte in value {
+                write!(preview, "{byte:02x}")?;
+            }
+            write!(preview, ")")
+        }
+        Some(any_value::Value::ArrayValue(value)) => {
+            write!(preview, "[")?;
+            for (index, item) in value.values.iter().enumerate() {
+                if index != 0 {
+                    write!(preview, ", ")?;
+                }
+                write_value(preview, Some(item))?;
+            }
+            write!(preview, "]")
+        }
+        Some(any_value::Value::KvlistValue(value)) => {
+            write!(preview, "{{")?;
+            for (index, item) in value.values.iter().enumerate() {
+                if index != 0 {
+                    write!(preview, ", ")?;
+                }
+                write!(preview, "{:?}: ", item.key)?;
+                write_value(preview, item.value.as_ref())?;
+            }
+            write!(preview, "}}")
+        }
+        Some(value) => write!(preview, "{value:?}"),
+    }
+}
+
 fn attributes(preview: &mut Preview, title: &str, attributes: &[KeyValue]) -> fmt::Result {
+    if attributes.is_empty() {
+        return Ok(());
+    }
     writeln!(preview, "\n{title}:")?;
     for attribute in attributes {
-        writeln!(
-            preview,
-            "  {}: {:?}",
-            attribute.key,
-            attribute
-                .value
-                .as_ref()
-                .and_then(|value| value.value.as_ref())
-        )?;
+        write!(preview, "  {}: ", attribute.key)?;
+        write_value(preview, attribute.value.as_ref())?;
+        writeln!(preview)?;
     }
     Ok(())
 }
@@ -398,7 +645,7 @@ fn span_preview(observation: &TraceSpan) -> String {
             span.name,
             hex(&span.trace_id),
             hex(&span.span_id),
-            if span.parent_span_id.is_empty() {
+            if span.parent_span_id.is_empty() || span.parent_span_id.iter().all(|byte| *byte == 0) {
                 "root".into()
             } else {
                 hex(&span.parent_span_id)
@@ -492,9 +739,9 @@ mod tests {
         let before = store.snapshot();
         assert!(Arc::ptr_eq(&before, &store.snapshot()));
         let mut view = TraceView::default();
-        view.handle_key(KeyCode::Char('v'), &before);
-        view.handle_key(KeyCode::End, &before);
-        view.handle_key(KeyCode::Down, &before);
+        view.handle_key(KeyCode::Char('v'), &before, &LogSnapshot::default());
+        view.handle_key(KeyCode::End, &before, &LogSnapshot::default());
+        view.handle_key(KeyCode::Down, &before, &LogSnapshot::default());
         let selected = view.selected.clone();
         store.admit(observation(1, 1, None, 50));
         let after = store.snapshot();
@@ -515,11 +762,11 @@ mod tests {
             selected.unwrap()
         );
         assert_eq!(before.rows.len(), 2);
-        view.handle_key(KeyCode::Home, &after);
+        view.handle_key(KeyCode::Home, &after, &LogSnapshot::default());
         assert_eq!(view.position(&after), 0);
-        view.handle_key(KeyCode::End, &after);
+        view.handle_key(KeyCode::End, &after, &LogSnapshot::default());
         assert!(view.selected.is_none());
-        view.handle_key(KeyCode::Esc, &after);
+        view.handle_key(KeyCode::Esc, &after, &LogSnapshot::default());
         assert!(!view.visible);
     }
 
@@ -615,7 +862,22 @@ mod tests {
         let mut view = TraceView::default();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         terminal
-            .draw(|frame| view.draw(frame, &store.snapshot(), 1, 3, true))
+            .draw(|frame| {
+                view.draw(
+                    frame,
+                    &TraceViewSnapshot {
+                        traces: &store.snapshot(),
+                        logs: &LogSnapshot::default(),
+                        data: SpanData::default(),
+                        spans: TraceAvailability {
+                            observed_spans: 1,
+                            local_drops: 3,
+                        },
+                        streaming: false,
+                        finished: true,
+                    },
+                )
+            })
             .unwrap();
         let text: String = terminal
             .backend()
@@ -626,9 +888,9 @@ mod tests {
             .collect();
         for expected in [
             "OTEL Tracing",
-            "3 drops",
+            "3 span drops",
             "Spans (parent / child)",
-            "Span details",
+            "[Details]",
             "ERROR",
         ] {
             assert!(text.contains(expected), "{text}");
@@ -639,7 +901,19 @@ mod tests {
         ] {
             let mut view = TraceView::default();
             terminal
-                .draw(|frame| view.draw(frame, &TraceSnapshot::default(), 0, 0, finished))
+                .draw(|frame| {
+                    view.draw(
+                        frame,
+                        &TraceViewSnapshot {
+                            traces: &TraceSnapshot::default(),
+                            logs: &LogSnapshot::default(),
+                            data: SpanData::default(),
+                            spans: TraceAvailability::default(),
+                            streaming: false,
+                            finished,
+                        },
+                    )
+                })
                 .unwrap();
             let text: String = terminal
                 .backend()
@@ -674,5 +948,262 @@ mod tests {
         assert!(text.contains("Preview truncated"));
         assert!(text.len() < PREVIEW_BYTES + 100);
         assert_eq!(item.span.name.len(), PREVIEW_BYTES * 2);
+    }
+    #[test]
+    fn panes_refresh_data_and_keep_log_selection_stable_across_reordering() {
+        use crate::logs::LogStore;
+        use mf_runtime::{NodeSnapshot, SnapshotOutcome, ValueRef};
+        use opentelemetry_proto::tonic::logs::v1::LogRecord;
+        let mut spans = TraceStore::default();
+        spans.admit(observation(1, 1, None, 0));
+        let traces = spans.snapshot();
+        let mut logs = LogStore::default();
+        for time in [100, 200] {
+            logs.admit(
+                LogRecord {
+                    time_unix_nano: time,
+                    trace_id: vec![1; 16],
+                    span_id: vec![1; 8],
+                    event_name: format!("log-{time}"),
+                    body: Some(AnyValue {
+                        value: Some(any_value::Value::StringValue("log-payload".into())),
+                    }),
+                    ..Default::default()
+                },
+                None,
+                None,
+            );
+        }
+        let data = |value, revision| SpanData {
+            node: Some(Arc::new(NodeSnapshot {
+                inputs: ValueRef::object([]),
+                outputs: ValueRef::object([("answer".into(), ValueRef::from(value))]),
+                skipped: Arc::from([]),
+                outcome: SnapshotOutcome::Succeeded,
+                error: None,
+            })),
+            status: "Complete".into(),
+            revision,
+        };
+        let mut view = TraceView::default();
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        view.handle_key(KeyCode::Char('v'), &traces, &logs.snapshot());
+        view.handle_key(KeyCode::Tab, &traces, &logs.snapshot());
+        for (value, revision) in [(42, 1), (73, 2)] {
+            terminal
+                .draw(|frame| {
+                    view.draw(
+                        frame,
+                        &TraceViewSnapshot {
+                            traces: &traces,
+                            logs: &logs.snapshot(),
+                            data: data(value, revision),
+                            spans: TraceAvailability::default(),
+                            streaming: false,
+                            finished: true,
+                        },
+                    )
+                })
+                .unwrap();
+            let text: String = terminal
+                .backend()
+                .buffer()
+                .content
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect();
+            assert!(text.contains(&value.to_string()), "{text}");
+            assert!(
+                text.contains("Inputs:") && text.contains("Outputs:"),
+                "{text}"
+            );
+        }
+        view.handle_key(KeyCode::Tab, &traces, &logs.snapshot());
+        view.handle_key(KeyCode::Char('l'), &traces, &logs.snapshot());
+        view.handle_key(KeyCode::Home, &traces, &logs.snapshot());
+        assert_eq!(view.selected_log, Some(0));
+        logs.admit(
+            LogRecord {
+                time_unix_nano: 50,
+                trace_id: vec![1; 16],
+                span_id: vec![1; 8],
+                ..Default::default()
+            },
+            None,
+            None,
+        );
+        let records = view.log_records(&traces, &logs.snapshot());
+        assert_eq!(records[view.log_position(&records)].id, 0);
+        terminal
+            .draw(|frame| {
+                view.draw(
+                    frame,
+                    &TraceViewSnapshot {
+                        traces: &traces,
+                        logs: &logs.snapshot(),
+                        data: data(73, 2),
+                        spans: TraceAvailability::default(),
+                        streaming: false,
+                        finished: true,
+                    },
+                )
+            })
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            text.contains("log-100") && text.contains("log-payload"),
+            "{text}"
+        );
+        view.handle_key(KeyCode::Char('g'), &traces, &logs.snapshot());
+        assert!(view.session_logs);
+        assert_eq!(
+            view.correlation(&traces, &logs.snapshot()),
+            Some((vec![1; 16], vec![1; 8]))
+        );
+        view.handle_key(KeyCode::Esc, &traces, &logs.snapshot());
+        assert!(!view.visible);
+    }
+
+    #[test]
+    fn session_logs_and_data_remain_available_without_exported_spans() {
+        use crate::logs::LogStore;
+        use opentelemetry_proto::tonic::logs::v1::LogRecord;
+        let traces = TraceSnapshot::default();
+        let mut logs = LogStore::default();
+        logs.admit(
+            LogRecord {
+                trace_id: vec![1; 16],
+                span_id: vec![2; 8],
+                event_name: "live-node-log".into(),
+                ..Default::default()
+            },
+            None,
+            None,
+        );
+        let mut view = TraceView::default();
+        view.handle_key(KeyCode::Char('v'), &traces, &logs.snapshot());
+        view.handle_key(KeyCode::Char('g'), &traces, &logs.snapshot());
+        assert_eq!(
+            view.correlation(&traces, &logs.snapshot()),
+            Some((vec![1; 16], vec![2; 8]))
+        );
+        let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
+        terminal
+            .draw(|frame| {
+                view.draw(
+                    frame,
+                    &TraceViewSnapshot {
+                        traces: &traces,
+                        logs: &logs.snapshot(),
+                        data: SpanData::default(),
+                        spans: TraceAvailability::default(),
+                        streaming: false,
+                        finished: false,
+                    },
+                )
+            })
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            text.contains("Session LogRecords") && text.contains("live-node-log"),
+            "{text}"
+        );
+        view.handle_key(KeyCode::Tab, &traces, &logs.snapshot());
+        terminal
+            .draw(|frame| {
+                view.draw(
+                    frame,
+                    &TraceViewSnapshot {
+                        traces: &traces,
+                        logs: &logs.snapshot(),
+                        data: SpanData::default(),
+                        spans: TraceAvailability::default(),
+                        streaming: true,
+                        finished: false,
+                    },
+                )
+            })
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(
+            text.contains("Data is unavailable for streaming workflows"),
+            "{text}"
+        );
+        let mut tiny = Terminal::new(TestBackend::new(1, 1)).unwrap();
+        tiny.draw(|frame| {
+            view.draw(
+                frame,
+                &TraceViewSnapshot {
+                    traces: &traces,
+                    logs: &logs.snapshot(),
+                    data: SpanData::default(),
+                    spans: TraceAvailability::default(),
+                    streaming: true,
+                    finished: false,
+                },
+            )
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn log_previews_are_bounded_and_format_structured_values_readably() {
+        use opentelemetry_proto::tonic::{
+            common::v1::{ArrayValue, KeyValueList},
+            logs::v1::LogRecord,
+        };
+        let mut observation = LogObservation {
+            id: 0,
+            resource: None,
+            scope: None,
+            record: LogRecord {
+                body: Some(AnyValue {
+                    value: Some(any_value::Value::KvlistValue(KeyValueList {
+                        values: vec![KeyValue {
+                            key: "values".into(),
+                            value: Some(AnyValue {
+                                value: Some(any_value::Value::ArrayValue(ArrayValue {
+                                    values: vec![
+                                        AnyValue {
+                                            value: Some(any_value::Value::IntValue(42)),
+                                        },
+                                        AnyValue {
+                                            value: Some(any_value::Value::BoolValue(true)),
+                                        },
+                                    ],
+                                })),
+                            }),
+                            ..Default::default()
+                        }],
+                    })),
+                }),
+                ..Default::default()
+            },
+        };
+        assert!(log_preview(&observation).contains("{\"values\": [42, true]}"));
+        observation.record.body = Some(AnyValue {
+            value: Some(any_value::Value::StringValue("é".repeat(PREVIEW_BYTES))),
+        });
+        let preview = log_preview(&observation);
+        assert!(preview.contains("Preview truncated"));
+        assert!(preview.len() < PREVIEW_BYTES + 100);
     }
 }

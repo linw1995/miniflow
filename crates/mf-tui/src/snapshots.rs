@@ -1,16 +1,8 @@
 //! Shared business value history received through OTLP logs.
 use crate::traces::SpanKey;
-use crossterm::event::KeyCode;
 use mf_runtime::{NodeSnapshot, SnapshotEntry, SnapshotRecord, SnapshotStore, ValueRef};
 use mf_telemetry::snapshot::Assembler;
 use opentelemetry_proto::tonic::{common::v1::any_value, logs::v1::LogRecord};
-use ratatui::{
-    Frame,
-    layout::{Constraint, Layout},
-    style::{Modifier, Style},
-    text::Line,
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
-};
 use snafu::{ResultExt, Snafu, ensure};
 use std::{
     collections::BTreeMap,
@@ -195,146 +187,31 @@ impl SnapshotCapture {
     }
 }
 
-#[derive(Default)]
-pub struct HistoryView {
-    pub visible: bool,
-    selected: Option<usize>,
-    scroll: u16,
-    preview: Option<(usize, String)>,
-}
-
-impl HistoryView {
-    pub fn handle_key(&mut self, key: KeyCode, count: usize) -> bool {
-        if key == KeyCode::Char('v') {
-            self.visible = !self.visible;
-            return true;
+pub fn span_data_preview(data: &SpanData, streaming: bool, finished: bool) -> String {
+    if streaming {
+        return "Data is unavailable for streaming workflows.\nDetails and Logs remain available."
+            .into();
+    }
+    let mut text = format!("Data capture: {}\n", data.status);
+    if let Some(node) = &data.node {
+        text.push_str(&format!("Outcome: {:?}\n", node.outcome));
+        if let Some(error) = &node.error {
+            let message: String = error.chars().take(4096).collect();
+            text.push_str(&format!("Error: {message:?}\n"));
         }
-        if !self.visible {
-            return false;
+        if !node.skipped.is_empty() {
+            text.push_str(&format!("Skipped outputs: {:?}\n", node.skipped));
         }
-        let current = self.selected.unwrap_or(count.saturating_sub(1));
-        match key {
-            KeyCode::Esc => self.visible = false,
-            KeyCode::Up | KeyCode::Char('k') => self.selected = Some(current.saturating_sub(1)),
-            KeyCode::Down | KeyCode::Char('j') => {
-                self.selected = Some((current + 1).min(count.saturating_sub(1)))
-            }
-            KeyCode::Home => self.selected = Some(0),
-            KeyCode::End | KeyCode::Char('f') => self.selected = None,
-            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
-            KeyCode::PageDown => self.scroll = self.scroll.saturating_add(10),
-            _ => {}
-        }
-        true
+        text.push_str(&format!(
+            "\nInputs:\n{}\n\nOutputs:\n{}",
+            value_preview(&node.inputs),
+            value_preview(&node.outputs)
+        ));
+    } else if finished {
+        text.push_str("No node snapshots are associated with this selection.\nSelect a node span or node-correlated log. Records without valid trace/span context cannot be matched.");
+    } else {
+        text.push_str("Waiting for matching node snapshots.\nUse g to inspect live session logs while spans are still running.");
     }
-
-    pub fn selection(&self) -> Option<usize> {
-        self.selected
-    }
-
-    pub fn draw(&mut self, frame: &mut Frame<'_>, capture: &HistorySnapshot) {
-        let selected = capture.selected;
-        let [header, body, footer] = Layout::vertical([
-            Constraint::Length(2),
-            Constraint::Min(1),
-            Constraint::Length(2),
-        ])
-        .areas(frame.area());
-        frame.render_widget(
-            Paragraph::new(format!(
-                "Data history: {} | {} changes | {} shared values",
-                capture.status, capture.history_len, capture.value_count
-            )),
-            header,
-        );
-        let [entries, values] =
-            Layout::horizontal([Constraint::Percentage(35), Constraint::Percentage(65)])
-                .areas(body);
-        let start = capture.first;
-        let items: Vec<_> = capture
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(offset, entry)| {
-                let node = entry
-                    .snapshot
-                    .node(&entry.scope, &entry.node)
-                    .expect("history entries reference an existing node");
-                ListItem::new(Line::from(format!(
-                    "{} {} {:?}",
-                    start + offset + 1,
-                    entry_label(entry),
-                    node.outcome
-                )))
-            })
-            .collect();
-        let mut list_state = ListState::default().with_selected(Some(selected - start));
-        frame.render_stateful_widget(
-            List::new(items)
-                .block(Block::default().title("Changes").borders(Borders::ALL))
-                .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
-            entries,
-            &mut list_state,
-        );
-        if self
-            .preview
-            .as_ref()
-            .is_none_or(|(index, _)| *index != selected)
-        {
-            self.preview = capture
-                .entries
-                .get(selected - start)
-                .map(|entry| (selected, entry_preview(entry)));
-            self.scroll = 0;
-        }
-        let text = self.preview.as_ref().map_or(
-            "No node inputs or outputs have been received",
-            |(_, text)| text.as_str(),
-        );
-        let paragraph = Paragraph::new(text)
-            .block(
-                Block::default()
-                    .title("Inputs / Outputs")
-                    .borders(Borders::ALL),
-            )
-            .wrap(Wrap { trim: false });
-        self.scroll = self.scroll.min(
-            paragraph
-                .line_count(values.width.saturating_sub(2))
-                .saturating_sub(usize::from(values.height.saturating_sub(2)))
-                .min(u16::MAX as usize) as u16,
-        );
-        frame.render_widget(paragraph.scroll((self.scroll, 0)), values);
-        frame.render_widget(Paragraph::new("j/k or arrows: change | Home: first | End/f: follow latest\nPgUp/PgDn: scroll values | v/Esc: graph | Ctrl-C: interrupt/close"), footer);
-    }
-}
-
-fn entry_label(entry: &SnapshotEntry) -> String {
-    let mut label = String::new();
-    for scope in &entry.scope {
-        label.push_str(&format!("{}[{}]/", scope.loop_id, scope.index.get()));
-    }
-    label.push_str(&entry.node);
-    label
-}
-
-fn entry_preview(entry: &SnapshotEntry) -> String {
-    let node = entry
-        .snapshot
-        .node(&entry.scope, &entry.node)
-        .expect("history entries reference an existing node");
-    let mut text = format!("{}\nStatus: {:?}\n", entry_label(entry), node.outcome);
-    if let Some(error) = &node.error {
-        text.push_str(&format!("Error: {error}\n"));
-    }
-    if !node.skipped.is_empty() {
-        text.push_str(&format!("Skipped outputs: {:?}\n", node.skipped));
-    }
-    text.push_str(&format!(
-        "\nInputs:\n{}\n\nOutputs:\n{}",
-        value_preview(&node.inputs),
-        value_preview(&node.outputs)
-    ));
     text
 }
 
@@ -368,7 +245,6 @@ mod tests {
     use super::*;
     use mf_runtime::{NodeSnapshot, SnapshotOutcome, SnapshotRecord, SnapshotRecorder};
     use mf_telemetry::snapshot::packets;
-    use ratatui::{Terminal, backend::TestBackend};
     use serde_json::json;
     use std::sync::{Arc, Mutex};
 
@@ -506,35 +382,6 @@ mod tests {
                 .contains("unknown snapshot value")
         );
         assert_eq!(capture.store.value_count(), 0);
-    }
-
-    #[test]
-    fn history_navigation_preserves_selection_and_renders_values() {
-        let capture = Arc::new(Mutex::new(SnapshotCapture::default()));
-        let recorder = recorder(capture.clone());
-        recorder.record(vec![], "node", snapshot(42.into()));
-        recorder.finish();
-        capture.lock().unwrap().finish();
-        let mut view = HistoryView::default();
-        assert!(view.handle_key(KeyCode::Char('v'), 1));
-        assert!(view.handle_key(KeyCode::Home, 1));
-        assert_eq!(view.selected, Some(0));
-        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
-        let window = capture.lock().unwrap().view(view.selection(), 24);
-        terminal.draw(|frame| view.draw(frame, &window)).unwrap();
-        let text: String = terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect();
-        assert!(text.contains("Inputs / Outputs"));
-        assert!(text.contains("42"));
-        view.handle_key(KeyCode::End, 2);
-        assert!(view.selected.is_none());
-        view.handle_key(KeyCode::Esc, 2);
-        assert!(!view.visible);
     }
 
     #[test]
