@@ -6,9 +6,9 @@
 
 ## 2. Retain logs and correlate snapshot data
 
-- [ ] 2.1 Add bounded LogRecord retention and span/session queries without coupling raw detail drops to lifecycle integrity.
-- [ ] 2.2 Preserve active span context on snapshot export and through reordered/fragmented assembly into decoded node data.
-- [ ] 2.3 Validate cross-run isolation, deduplication, log-before-span delivery, repeated-node association, fragmented data, and typed failures; commit this group.
+- [x] 2.1 Add bounded LogRecord retention and span/session queries without coupling raw detail drops to lifecycle integrity.
+- [x] 2.2 Preserve active span context on snapshot export and through reordered/fragmented assembly into decoded node data.
+- [x] 2.3 Validate cross-run isolation, deduplication, log-before-span delivery, repeated-node association, fragmented data, and typed failures; commit this group.
 
 ## 3. Present traces, data, and logs together
 

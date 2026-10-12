@@ -1,6 +1,7 @@
 //! Bounded loopback OTLP/HTTP reception for one local workflow session.
 
-use crate::snapshots::{HistorySnapshot, SnapshotCapture};
+use crate::logs::{LogSnapshot, LogStore};
+use crate::snapshots::{HistorySnapshot, SnapshotCapture, SpanData};
 use crate::state::{Admission, SessionState, StateError, StateSnapshot};
 use crate::traces::{TraceSnapshot, TraceSpan, TraceStore};
 use http_body_util::{BodyExt, Full};
@@ -74,6 +75,7 @@ struct Context {
     state: Arc<Mutex<SessionState>>,
     snapshots: Mutex<SnapshotCapture>,
     traces: Mutex<TraceStore>,
+    logs: Mutex<LogStore>,
     workflow_id: WorkflowId,
     run_id: String,
 }
@@ -105,6 +107,7 @@ impl LoopbackReceiver {
             state: Arc::new(Mutex::new(state)),
             snapshots: Mutex::new(SnapshotCapture::default()),
             traces: Mutex::new(TraceStore::default()),
+            logs: Mutex::new(LogStore::default()),
             workflow_id,
             run_id: run_id.to_string(),
         });
@@ -145,6 +148,22 @@ impl LoopbackReceiver {
             .lock()
             .expect("trace store was not poisoned")
             .snapshot()
+    }
+
+    pub fn log_snapshot(&self) -> Arc<LogSnapshot> {
+        self.context
+            .logs
+            .lock()
+            .expect("log store was not poisoned")
+            .snapshot()
+    }
+
+    pub fn span_data(&self, trace_id: &[u8], span_id: &[u8]) -> SpanData {
+        self.context
+            .snapshots
+            .lock()
+            .expect("snapshot capture was not poisoned")
+            .data(trace_id, span_id)
     }
 
     pub fn history_snapshot(&self, selected: Option<usize>, rows: usize) -> HistorySnapshot {
@@ -365,15 +384,32 @@ fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), IngestError> {
     }
     let mut rejected = false;
     for resource in request.resource_logs {
+        let resource_attributes = resource.resource.map(Arc::new);
         for scope in resource.scope_logs {
-            let scope_name = scope.scope.as_ref().map(|scope| scope.name.as_str());
-            if !matches!(
-                scope_name,
-                Some(INSTRUMENTATION_SCOPE | mf_telemetry::snapshot::SCOPE)
-            ) {
-                continue;
-            }
+            let instrumentation = scope.scope.map(Arc::new);
+            let scope_name = instrumentation.as_ref().map(|scope| scope.name.as_str());
             for record in scope.log_records {
+                if string_attribute(&record.attributes, "mf.run.id")
+                    == Some(context.run_id.as_str())
+                    && string_attribute(&record.attributes, "mf.workflow.id")
+                        == Some(context.workflow_id.as_str())
+                {
+                    context
+                        .logs
+                        .lock()
+                        .expect("log store was not poisoned")
+                        .admit(
+                            record.clone(),
+                            resource_attributes.clone(),
+                            instrumentation.clone(),
+                        );
+                }
+                if !matches!(
+                    scope_name,
+                    Some(INSTRUMENTATION_SCOPE | mf_telemetry::snapshot::SCOPE)
+                ) {
+                    continue;
+                }
                 let result = if scope_name == Some(mf_telemetry::snapshot::SCOPE) {
                     receive_snapshot(record, context)
                 } else {

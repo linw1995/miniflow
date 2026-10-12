@@ -293,13 +293,26 @@ impl SnapshotExporter {
     }
 
     pub fn emit(&mut self, body: serde_json::Value) -> Result<(), SnapshotExportError> {
-        use opentelemetry::logs::Logger as _;
+        use opentelemetry::{
+            logs::{LogRecord as _, Logger as _},
+            trace::TraceContextExt as _,
+        };
         self.check_error()?;
         ensure!(!self.closed, ClosedSnafu);
+        let context = opentelemetry::Context::current();
+        let span = context.span();
+        let correlation = span.span_context();
         for packet in crate::snapshot::packets(self.sequence, body)? {
             self.check_error()?;
             let mut record = self.logger.create_log_record();
             packet.write_to(&mut record, self.workflow.as_str(), self.run.as_str())?;
+            if correlation.is_valid() {
+                record.set_trace_context(
+                    correlation.trace_id(),
+                    correlation.span_id(),
+                    Some(correlation.trace_flags()),
+                );
+            }
             self.logger.emit(record);
             self.buffered += 1;
             // Waiting before filling the queue prevents a dropped value definition from
@@ -434,5 +447,64 @@ mod snapshot_tests {
                 matches!(source.as_ref(), OTelSdkError::InternalFailure(message) if message == "delivery failed")
             );
         }
+    }
+    #[derive(Debug)]
+    struct CollectContext(Arc<Mutex<Vec<Option<opentelemetry_sdk::logs::TraceContext>>>>);
+
+    impl LogExporter for CollectContext {
+        async fn export(&self, batch: LogBatch<'_>) -> OTelSdkResult {
+            self.0.lock().unwrap().extend(
+                batch
+                    .iter()
+                    .map(|(record, _)| record.trace_context().cloned()),
+            );
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn snapshot_fragments_preserve_active_span_context_without_inventing_missing_context() {
+        use opentelemetry::trace::{
+            SpanContext, SpanId, TraceContextExt, TraceFlags, TraceId, TraceState,
+        };
+        let collected = Arc::new(Mutex::new(Vec::new()));
+        let mut exporter = SnapshotExporter::with_exporter(
+            workflow(),
+            crate::identity::RunId::new(),
+            CollectContext(collected.clone()),
+        );
+        let context = SpanContext::new(
+            TraceId::from_bytes([1; 16]),
+            SpanId::from_bytes([2; 8]),
+            TraceFlags::SAMPLED,
+            false,
+            TraceState::default(),
+        );
+        {
+            let _guard = opentelemetry::Context::new()
+                .with_remote_span_context(context.clone())
+                .attach();
+            exporter
+                .emit(serde_json::json!({"payload":"x".repeat(100_000)}))
+                .unwrap();
+        }
+        exporter.emit(serde_json::json!({"record":"end"})).unwrap();
+        exporter.finish().unwrap();
+        let records = collected.lock().unwrap();
+        assert!(records.len() > 2);
+        for record in &records[..records.len() - 1] {
+            let record = record.as_ref().unwrap();
+            assert_eq!(record.trace_id, context.trace_id());
+            assert_eq!(record.span_id, context.span_id());
+            assert_eq!(record.trace_flags, Some(TraceFlags::SAMPLED));
+        }
+        assert!(
+            records
+                .last()
+                .unwrap()
+                .as_ref()
+                .is_none_or(|context| context.trace_id == TraceId::INVALID
+                    && context.span_id == SpanId::INVALID)
+        );
     }
 }

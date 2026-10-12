@@ -23,7 +23,7 @@ use std::{
 const MAX_SPANS: usize = 4096;
 const MAX_TRACE_BYTES: usize = 16 * 1024 * 1024;
 const PREVIEW_BYTES: usize = 64 * 1024;
-type SpanKey = (Vec<u8>, Vec<u8>);
+pub type SpanKey = (Vec<u8>, Vec<u8>);
 
 #[derive(Clone, Debug)]
 pub struct TraceSpan {
