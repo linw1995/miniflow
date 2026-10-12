@@ -768,3 +768,30 @@ do not change workflow results or request retries. Terminal events follow drain 
 The current terminal launcher and snapshot recorder remain unavailable for stream mode.
 
 Workflow graph construction is owned by `mf-compiler`: `FlowBuilder::prepare` validates configured nodes and graph connections, then `into_tasks` or `into_stream` produces an executable runtime plan. `FlowBuildError`, `StreamBuildError`, and `WorkflowBuildError` are compiler errors. The runtime binds validated owned or borrowed plans and schedules executors without depending on the compiler. Node factories and their `NodeBuildError` contract remain shared provider contracts in `mf-runtime`.
+
+## Execute a prepared isolated task
+
+`NodeTarget` records retain a compiled task's original resolved inputs, outputs, context references, and
+resource contract. Bind a record to the prepared source plan with `bind_flow` or `bind_stream`, then call
+`FlowRuntime::execute_target` with qualified `WorkflowArguments` and a separate flat context object.
+Execution needs no registry and neither schedules surrounding graph domains nor starts a stream instance.
+The dynamic adapter invokes only that task, including when its normal graph path uses typed generation.
+
+`execute_target_with_observation` owns a fresh execution context and an optional observation.
+`execute_target_in_context` accepts a caller-owned top-level context for stdin, snapshots, and observation;
+it validates values and initializes independent target state before invocation. Runtime options retain
+worker limits for composite operations. Inputs and context are revalidated for programmatic callers, and
+publication validates all produced outputs before target-port results are collected. Skipped optional ports
+are omitted, explicit null remains present, and zero-output tasks return an empty map.
+
+A selected Loop or Iteration runs its complete prepared body with existing scope rules, limits, ordered
+results, and error policy. External context injection does not grant additional nested-body visibility.
+Body-local nodes and synthetic scope controls cannot be selected as top-level operations.
+
+A selected Task from a stream flow retains its original `execution.limits.workers` ceiling.
+Runtime options may reduce that ceiling, and finite-flow callers retain their ordinary configurable
+worker limit. The compiled target record carries the stream ceiling and rejects resource-contract drift.
+
+Isolated context contracts compare complete reference IDs and resolved types. Provider diagnostic
+labels remain available in metadata but rewording them does not cause binding drift. Every declared
+external reference remains required.

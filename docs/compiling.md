@@ -215,3 +215,62 @@ Parse text explicitly downstream when typed values are needed. Application-speci
 StreamNode implementations. Initial producers receive their requirements through workflow parameters.
 The old input mechanism and its dedicated validation rules are removed; fields and graph endpoints follow
 the normal schema and graph rules.
+
+## Execute an isolated task
+
+The generated build emits `node-targets.json` alongside execution layouts, using the same validated
+provider preparation. Each target retains its compiled index, resolved port types, external context
+references, stdin conditions, and a finite operation description. `NodeTarget::bind_flow` and
+`NodeTarget::bind_stream` bind a top-level task to that frozen contract and reject contract drift before
+business execution. Inference still follows the original graph, including forwarding output types.
+
+Isolated task support reuses whole-plan preparation. An unrelated provider factory can still fail during
+initialization and prevent selection from running; preparation does not call business methods or consume
+source data. Producers and Event executors are recorded for accurate unsupported-target diagnostics and
+cannot be bound as isolated tasks. Recompile existing executables to obtain `--node` support.
+
+The isolated runner invocation contract uses the selected task's qualified inputs:
+
+```sh
+./flow --node transform --transform.amount 21
+./flow --node=transform --inputs '{"transform.amount":"21"}'
+./flow --node transform --inputs-file inputs.json
+./flow --node route --context-file context.json
+./flow -vv --node transform --transform.amount 21
+```
+
+`--node` identifies one exact top-level Task. Named values follow ordinary string/JSON rules; use inline
+syntax for a string starting with `--`. Named inputs cannot mix with JSON input transport. Required inputs
+of other roots are neither required nor accepted, and optional omissions remain absent. The selected
+contract is independent of definition-schema startup promotion.
+
+Verbosity flags retain their ordinary diagnostic levels for selected execution. Lifecycle records describe
+the finite selected operation and remain on stderr, including in runners compiled with `--no-telemetry`.
+
+Context documents are flat objects keyed by the target's declared external reference IDs, such as
+`{"source.value":{"count":42}}`. Supply either `--context JSON` or `--context-file PATH`, only with selection.
+Every declared reference must be supplied; unrelated keys and duplicate keys are rejected. Values are
+checked against the original graph's referenced output types. Null is a value, not a skipped-output marker.
+Context files resolve from the invocation directory, must be regular files, and are read once with a
+bounded reader. Each port/context transport and their combined canonical JSON payload must fit within
+1 MiB. Context values do not execute their producers or change the target's compiled types.
+
+A selected invocation returns one JSON object keyed by all produced output port names, independently of
+workflow output aliases. Explicitly skipped ports are omitted and null values remain present. Provider
+construction and execution diagnostics are routed to stderr; stdout contains only the finite result.
+Failure returns a nonzero status without a successful result object. This finite behavior also applies
+when the selected Task belongs to a stream flow: other producers, Event callbacks, and timers do not start.
+
+For the repository CEL example:
+
+```sh
+mf compile examples/cel-scalar.json --output ./flow
+./flow --node transform --transform.amount 30
+```
+
+The selected result is `{"doubled":60}`. A selected Loop or Iteration runs its complete prepared body,
+including its usual limits, exit behavior, worker bounds, and error policy. Producer and Event selection,
+body-local nodes, synthetic scope controls, and `mf run --tui --node` are not supported in this phase.
+Direct manifest inspection continues to describe whole-flow startup and observation; target selection does
+not expand the manifest interface. See [isolated observations](observability.md#isolated-task-observations)
+for selected-operation identity, counts, and opt-in snapshots.

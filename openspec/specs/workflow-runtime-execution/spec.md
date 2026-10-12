@@ -173,7 +173,7 @@ Concurrent domain completion SHALL NOT change declared output names, port select
 
 ### Requirement: Execute only complete validated plans
 
-FlowRuntime SHALL only accept prepared executable Flows or prepared stream plans. Construction SHALL validate executor kinds, dependencies, graph ordering, workflow output selections, execution-domain partitioning, and message ownership before returning a plan. Execution entry points MUST NOT instantiate nodes, validate graph structure, or construct domain plans.
+FlowRuntime SHALL accept only prepared Flows, stream plans, or Task targets from those plans. Preparation MUST validate executor kinds, dependencies, graph order, selected outputs, domain partitions, and message ownership before returning plans. Targets MUST retain original resolved contracts and validate isolated bindings without weakening graph validation. Execution MUST NOT instantiate nodes, validate graph structure, or construct domain plans.
 
 #### Scenario: Build a generated oneshot workflow
 
@@ -195,9 +195,14 @@ FlowRuntime SHALL only accept prepared executable Flows or prepared stream plans
 - **WHEN** a constructor receives a data connection, control dependency, or output selection referencing an undeclared port
 - **THEN** construction fails before execution, including direct Flow and prepared-stream construction APIs
 
+#### Scenario: Execute a prepared isolated target
+
+- **WHEN** a caller supplies a prepared Task target with validated isolated input and context bindings
+- **THEN** execution uses its original resolved contracts without requiring a registry or running external dependencies
+
 ### Requirement: Execute compiled graph layouts in generated runners
 
-Generated runners SHALL bind initialized executors to immutable compiled dependency, node-index, output, execution-domain, and message-ownership data. Launch MUST NOT rebuild the graph, resolve graph node names into indices, partition execution domains, or derive message ownership. In-memory construction and generated execution SHALL share plan records and the same runtime scheduling implementation.
+Generated runners SHALL bind executors to immutable compiled dependency, node-index, output, execution-domain, and message-ownership records. Launch MUST NOT rebuild graphs, resolve edge names into indices, repartition domains, or derive ownership. Isolated selection SHALL map exact IDs to compiled indices without constructing a graph. In-memory and generated execution SHALL share plan records and runtime scheduling; isolated Tasks SHALL share the per-node lifecycle.
 
 #### Scenario: Launch a generated fork and join
 
@@ -213,6 +218,11 @@ Generated runners SHALL bind initialized executors to immutable compiled depende
 
 - **WHEN** the same compiled graph is instantiated twice
 - **THEN** immutable layout data is shared while contexts and mutable stream state remain independent
+
+#### Scenario: Select a compiled middle task
+
+- **WHEN** a runner selects a noninitial Task by its exact definition ID
+- **THEN** dispatch uses its existing compiled index and resolved contract without removing edges or repartitioning domains
 
 ### Requirement: Preserve typed runtime lookup causes
 
@@ -333,3 +343,25 @@ solely because a payload was moved.
 - **WHEN** a declared contextual reader accesses a transitive predecessor output
 - **THEN** generated execution materializes or retains that output through the dynamic path and exposes the same value
   as in-memory execution
+
+### Requirement: Reject isolated target contract drift
+
+Generated isolated invocation SHALL compare its prepared target with the compiled target contract before
+business execution. Executor category, port identities, resolved types, required flags, declared external
+references, and stdin conditions MUST agree. Drift MUST fail with affected node, port, or resource context
+and preserve the underlying typed error causes where present.
+
+#### Scenario: Reject changed output metadata
+
+- **WHEN** a prepared target exposes a different output type from its build-emitted target contract
+- **THEN** selection fails before invoking the target with node and output context
+
+#### Scenario: Reject changed context or resource requirements
+
+- **WHEN** the prepared target changes a declared external reference or stdin condition
+- **THEN** selection fails before reading input resources or invoking business logic
+
+#### Scenario: Reword a diagnostic reference label
+
+- **WHEN** a target's prepared references retain their IDs and types but change diagnostic labels
+- **THEN** binding accepts the unchanged reference contract without treating label wording as interface drift

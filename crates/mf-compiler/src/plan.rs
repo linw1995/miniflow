@@ -35,10 +35,20 @@ pub struct GeneratedExecutionArtifacts {
     pub rust_source: String,
     pub manifest_bytes: Vec<u8>,
     pub typed_plan_json: String,
+    pub node_targets_json: String,
 }
 
 #[derive(Debug, Snafu)]
 pub enum PlanError {
+    #[snafu(display("node target `{definition_id}` references unknown context output `{output}`"))]
+    UnknownTargetReference {
+        definition_id: DefinitionId,
+        output: String,
+    },
+    #[snafu(transparent)]
+    TargetInputs {
+        source: mf_runtime::WorkflowInputError,
+    },
     #[snafu(display("invalid typed constructor for node `{definition_id}`: {source}"))]
     TypedConstructor {
         definition_id: DefinitionId,
@@ -93,6 +103,72 @@ pub enum PlanError {
 }
 
 impl CompiledWorkflow {
+    /// Describe isolated targets using metadata already prepared in execution order.
+    pub fn node_targets(
+        &self,
+        nodes: &[mf_runtime::FlowNode],
+    ) -> Result<Vec<mf_runtime::NodeTarget>, PlanError> {
+        crate::validate_execution(&self.definition).map_err(crate::WorkflowBuildError::from)?;
+        ensure!(
+            nodes.len() == self.execution_order.len(),
+            InvalidExecutionOrderSnafu
+        );
+        let original = crate::describe_compiled(self)?;
+        let mut bodies = BTreeMap::<&str, Vec<_>>::new();
+        for body in &original.loop_bodies {
+            if let Some(root) = body.path.first() {
+                bodies.entry(root.as_str()).or_default().push(body.clone());
+            }
+        }
+        let output_types: BTreeMap<_, _> = nodes
+            .iter()
+            .flat_map(|node| {
+                node.metadata.ports.outputs.iter().map(move |port| {
+                    (
+                        mf_runtime::output_id(node.definition_id.as_str(), &port.name),
+                        port.value_type.clone(),
+                    )
+                })
+            })
+            .collect();
+        nodes.iter().enumerate().map(|(index, node)| {
+            let id = node.definition_id.to_string();
+            ensure!(self.execution_order.get(index) == Some(&node.definition_id), InvalidExecutionOrderSnafu);
+            let kind = match node.node.as_ref() {
+                Some(mf_runtime::NodeExecution::Task(_)) => mf_runtime::NodeTargetKind::Task,
+                Some(mf_runtime::NodeExecution::Event(_)) => mf_runtime::NodeTargetKind::Event,
+                Some(mf_runtime::NodeExecution::Stream(_)) => mf_runtime::NodeTargetKind::Stream,
+                None => return UnknownNodeSnafu { definition_id: node.definition_id.clone() }.fail(),
+            };
+            let inputs = crate::workflow_input_schema(std::iter::once((node, true)), |_, _| false)?;
+            let mut description = mf_telemetry::description::WorkflowDescription {
+                version: mf_telemetry::description::WorkflowDescriptionVersion::CURRENT,
+                workflow_id: original.workflow_id.clone(), execution: None,
+                nodes: vec![original.nodes[index].clone()],
+                data_edges: Vec::new(), control_edges: Vec::new(),
+                execution_order: vec![id.clone()],
+                loop_bodies: bodies.get(id.as_str()).cloned().unwrap_or_default(),
+            };
+            description.workflow_id = mf_telemetry::identity::WorkflowId::from_definition(
+                &serde_json::json!({"isolation_format": 1, "workflow_id": original.workflow_id, "target": id}),
+                &description.execution_order,
+            ).context(crate::compiler::ContractSnafu)?;
+            description.validate().context(crate::compiler::ContractSnafu)?;
+            let context = node.metadata.context_references.iter().map(|reference| {
+                let value_type = output_types.get(&reference.output).context(UnknownTargetReferenceSnafu {
+                    definition_id: node.definition_id.clone(), output: &reference.output,
+                })?;
+                Ok((reference.output.clone(), value_type.clone()))
+            }).collect::<Result<_, PlanError>>()?;
+            Ok(mf_runtime::NodeTarget {
+                id, index, kind, inputs, outputs: mf_runtime::target_ports(&node.metadata.ports.outputs),
+                worker_limit: self.definition.execution.as_ref().and_then(|execution| std::num::NonZeroUsize::new(execution.limits.workers)),
+                context,
+                original_workflow_id: original.workflow_id.clone(), description,
+            })
+        }).collect()
+    }
+
     pub fn start_stream_observation(
         &self,
         observer: &mf_telemetry::observation::Observer,
@@ -771,6 +847,8 @@ impl CompiledWorkflow {
         if order != self.execution_order {
             return InvalidExecutionOrderSnafu.fail();
         }
+        let node_targets_json =
+            serde_json::to_string(&self.node_targets(&nodes)?).context(SerializeSnafu)?;
         let flow = crate::FlowBuilder::prepare(
             nodes,
             self.definition.edges.clone(),
@@ -870,6 +948,7 @@ impl CompiledWorkflow {
             rust_source: prettyplease::unparse(&syntax),
             manifest_bytes: manifest.to_bytes()?,
             typed_plan_json: serde_json::to_string_pretty(&typed_plan).context(SerializeSnafu)?,
+            node_targets_json,
         })
     }
 }

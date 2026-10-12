@@ -9,6 +9,7 @@ mod iteration;
 mod loop_node;
 mod message_domain;
 mod node;
+mod node_target;
 mod number;
 mod registry;
 mod runner;
@@ -77,6 +78,9 @@ pub use node::{
     TypedConstructor, TypedGeneration, TypedGenerationError, TypedNodeValue, TypedPort,
     TypedTaskHandle,
 };
+pub use node_target::{
+    NodeTarget, NodeTargetError, NodeTargetKind, PreparedTaskTarget, target_ports,
+};
 pub use number::{compare_json_numbers, number_to_f64, number_to_i64};
 pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::WorkflowRunError;
@@ -116,7 +120,7 @@ pub use workflow_inputs::{
     WorkflowInputError, WorkflowInputSchema,
 };
 
-pub use runner_arguments::{RunnerArgumentError, RunnerArguments};
+pub use runner_arguments::{RunnerArgumentError, RunnerArguments, RunnerInvocation};
 
 pub use workflow_inputs::{
     JsonSnafu as WorkflowInputJsonSnafu, TooLargeSnafu as WorkflowInputTooLargeSnafu,

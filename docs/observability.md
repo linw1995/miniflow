@@ -498,3 +498,23 @@ Collectors do not change workflow results or trigger retries.
 Whole-run snapshot capture is unavailable for streaming instances. `StreamOptions.snapshots` and
 `MF_CAPTURE_SNAPSHOTS=1` are rejected before input admission or node execution. Validation and description
 modes remain free of execution and ignore capture/export setup. Existing finite-run history is unchanged.
+
+## Isolated task observations
+
+A selected task uses a finite operation description containing that root at position zero, no external
+execution edges, and only its required Loop body descriptions. Its identity hashes the original workflow
+identity, exact target ID, and isolation format. Different targets and whole-flow execution have distinct
+identities; supplying different port or context values does not change a selected operation's identity.
+The root span carries `mf.workflow.original_id` and `mf.node.target_id` for correlation with the containing
+flow. Automatic descriptions and lifecycle metadata still exclude configuration and business values.
+
+`NodeTarget::start_observation` starts this scope before preparation. Unrelated factory failures retain
+preparation diagnostics without inventing a target or provider lifecycle. A successful ordinary selected
+Task reports one visited top-level node; a selected Loop adds its actual body invocations and retains pass
+paths. Iteration retains one outer lifecycle and its existing item detail records. Neighboring nodes are
+absent from the selected description and do not receive synthetic skip or completion events.
+
+Opt-in snapshots belong to the finite selected operation, including when its Task is selected from a
+streaming binary. Snapshot export must use the selected description's identity. Whole-stream invocation
+continues to reject whole-run snapshot capture. Export and snapshot sink failures retain existing bounded
+cleanup and diagnostics without changing business results or exit status.
