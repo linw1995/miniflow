@@ -211,6 +211,16 @@ fn embed_workflows_at(
         let module = plan
             .generate_embedded_artifacts(&directory)
             .context(GenerationSnafu { name, path: &path })?;
+        let providers: BTreeSet<_> = request
+            .providers
+            .iter()
+            .map(|(_, crate_name)| crate_name)
+            .collect();
+        let providers = providers
+            .into_iter()
+            .map(|name| quote::format_ident!("{name}"));
+        let anchors = quote::quote! { #(extern crate #providers as _;)* };
+        let module_source = format!("{anchors}\n{}", module.rust_source);
         batches.push((
             output.join(directory),
             [
@@ -221,7 +231,7 @@ fn embed_workflows_at(
                     "typed-fast-paths.json",
                     layouts.typed_plan_json.into_bytes(),
                 ),
-                ("workflow.rs", module.rust_source.into_bytes()),
+                ("workflow.rs", module_source.into_bytes()),
             ],
         ));
     }

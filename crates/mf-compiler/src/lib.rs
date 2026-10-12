@@ -21,6 +21,29 @@ mod streaming;
 #[cfg(feature = "codegen")]
 mod typed_plan;
 
+// Generated modules use the compiler's dependencies so host renames stay hygienic.
+#[doc(hidden)]
+pub use mf_runtime as __runtime;
+#[doc(hidden)]
+pub use serde_json as __serde_json;
+#[doc(hidden)]
+pub use snafu as __snafu;
+
+/// Include a workflow emitted by the build-time `embed_workflows` helper.
+///
+/// The module exposes `manifest` and either `prepare_workflow` or `prepare_stream`.
+/// The macro is available without the `codegen` feature; execution uses the host's runtime APIs.
+#[macro_export]
+macro_rules! embed_workflow {
+    ($visibility:vis mod $name:ident) => {
+        $visibility mod $name {
+            use $crate as mf_compiler;
+            use $crate::{__runtime as mf_runtime, __serde_json as serde_json, __snafu as snafu};
+            include!(concat!(env!("OUT_DIR"), "/mf-embedded/", stringify!($name), "/workflow.rs"));
+        }
+    };
+}
+
 #[cfg(feature = "codegen")]
 pub use cache::{BuildDirectory, CacheError, default_build_directory};
 #[cfg(feature = "codegen")]

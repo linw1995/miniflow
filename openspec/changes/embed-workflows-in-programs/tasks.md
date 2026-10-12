@@ -14,10 +14,10 @@
 
 ## 3. Host Inclusion and Preparation
 
-- [ ] Export a feature-independent declarative macro with renamed compiler dependency support.
-- [ ] Anchor host provider crates and support explicit renamed support-crate bindings.
-- [ ] Expose preparation and manifest APIs with applicable metadata and startup schema checks.
-- [ ] Preserve independent instances and host ownership of execution options and resources.
+- [x] Export a feature-independent declarative macro with renamed compiler dependency support.
+- [x] Anchor host provider crates and support renamed support dependencies through hygienic imports.
+- [x] Expose preparation and manifest APIs with applicable metadata and startup schema checks.
+- [x] Preserve independent instances and host ownership of execution options and resources.
 
 ## 4. Acceptance and Delivery
 

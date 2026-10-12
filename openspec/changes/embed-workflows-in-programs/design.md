@@ -77,8 +77,9 @@ ambiguous typed constructor selection fail during the build. The host remains re
 normal and build provider declarations; relevant runtime contract drift is checked before execution.
 
 Generated support crate paths must also work with renamed dependencies. Keep standalone defaults,
-offer explicit embedding path configuration where needed, and use `$crate` for the macro's compiler
-reference. Do not patch generated Rust through textual substitutions.
+use `$crate` for the macro's compiler reference, and import runtime/serialization/error support through
+hidden compiler re-exports. Hosts do not need separate serialization or error dependencies merely
+to compile generated code. Do not patch generated Rust through textual substitutions.
 
 ### 3. Share the generator and isolate output files
 

@@ -69,6 +69,17 @@ impl ArtifactProfile<'_> {
             _ => TokenStream::new(),
         }
     }
+
+    fn validate_schema(self, schema: TokenStream) -> TokenStream {
+        if matches!(self, Self::Embedded { .. }) {
+            quote! {
+                manifest().and_then(|manifest| manifest.validate_prepared_schema(#schema))
+                    .boxed().context(mf_compiler::WorkflowMetadataSnafu { definition_id: "<workflow>" })?;
+            }
+        } else {
+            TokenStream::new()
+        }
+    }
 }
 
 #[derive(Debug, Snafu)]
@@ -443,7 +454,8 @@ impl CompiledWorkflow {
             TokenStream::new()
         };
         let preparation_body = if !matches!(profile, ArtifactProfile::Runner) {
-            quote! { use snafu::ResultExt as _; let mut observation = observation; #(#preparations)* Ok(#root_flow) }
+            let validation = profile.validate_schema(quote! { #root_flow.input_schema() });
+            quote! { use snafu::ResultExt as _; let mut observation = observation; #(#preparations)* #validation Ok(#root_flow) }
         } else {
             quote! { mf_prepare_generated_workflow!(registry, observation) }
         };
@@ -512,6 +524,7 @@ fn generate_stream_artifacts(
     );
     let layouts = profile.layouts();
     let manifest = profile.manifest();
+    let validation = profile.validate_schema(quote! { prepared.plan().input_schema() });
     let generated = quote! {
         #layouts
         #manifest
@@ -525,10 +538,12 @@ fn generate_stream_artifacts(
                 .context(mf_compiler::WorkflowMetadataSnafu { definition_id: "<workflow>" })?;
             let nodes = vec![#(#nodes),*];
             let input_schema = mf_compiler::stream_workflow_inputs(&nodes, STREAM_DEPENDENCIES)?;
-            Ok(mf_runtime::PreparedStream::from_plan(
+            let prepared = mf_runtime::PreparedStream::from_plan(
                 execution, nodes, std::borrow::Cow::Borrowed(STREAM_DEPENDENCIES),
                 STREAM_MESSAGE_DOMAINS.clone(), std::borrow::Cow::Borrowed(STREAM_OUTPUTS), input_schema,
-            ))
+            );
+            #validation
+            Ok(prepared)
         }
     };
     let syntax: syn::File = syn::parse2(generated).context(GeneratedSyntaxSnafu)?;
