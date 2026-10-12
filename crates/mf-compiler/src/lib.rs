@@ -7,6 +7,8 @@ mod construction;
 #[cfg(feature = "codegen")]
 mod dependency_project;
 #[cfg(feature = "codegen")]
+mod embedding;
+#[cfg(feature = "codegen")]
 mod inputs;
 mod iteration;
 mod loops;
@@ -34,6 +36,8 @@ pub use dependency_project::{
     DependencyProjectError, RunnerOptions, SupportPackages, write_dependency_project,
     write_dependency_project_with_options,
 };
+#[cfg(feature = "codegen")]
+pub use embedding::{EmbedRequest, EmbeddingError, embed_workflows};
 #[cfg(feature = "codegen")]
 pub use inputs::{BuildInputs, InputError};
 pub use mf_runtime::{

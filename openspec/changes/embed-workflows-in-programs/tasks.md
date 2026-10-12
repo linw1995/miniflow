@@ -8,9 +8,9 @@
 
 ## 2. Build-Time Embedding
 
-- [ ] Add `EmbedRequest`, typed errors, and the `codegen`-gated build helper at the compiler boundary.
-- [ ] Validate names, provider mappings, duplicate output ownership, and definition paths.
-- [ ] Generate validated artifacts under per-workflow `OUT_DIR` directories with Cargo input tracking.
+- [x] Add `EmbedRequest`, typed errors, and the `codegen`-gated build helper at the compiler boundary.
+- [x] Validate names, provider mappings, duplicate output ownership, and definition paths.
+- [x] Generate validated artifacts under per-workflow `OUT_DIR` directories with Cargo input tracking.
 
 ## 3. Host Inclusion and Preparation
 
