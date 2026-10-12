@@ -253,6 +253,62 @@ impl CompiledWorkflow {
         Ok(plan)
     }
 
+    /// Generate a self-contained module that prepares nodes from the host registry.
+    #[cfg(feature = "codegen")]
+    pub fn generate_embedded_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {
+        ensure!(
+            crate::structural_order(&self.definition)? == self.execution_order,
+            InvalidExecutionOrderSnafu
+        );
+        let plan_json = self.to_json()?;
+        let source = LitStr::new(&plan_json, Span::call_site());
+        let preparation = if self.definition.execution.is_some() {
+            quote! {
+                pub fn prepare_stream(
+                    registry: &mf_runtime::NodeRegistry,
+                ) -> Result<mf_runtime::PreparedStream, mf_compiler::PlanError> {
+                    Ok(mf_compiler::instantiate_stream(&plan()?, registry)?)
+                }
+            }
+        } else {
+            quote! {
+                pub fn prepare_workflow(
+                    registry: &mf_runtime::NodeRegistry,
+                    observation: Option<&mut mf_runtime::RunObservation>,
+                ) -> Result<mf_runtime::Flow, mf_compiler::PlanError> {
+                    Ok(mf_compiler::instantiate_compiled_with_observation(
+                        &plan()?, registry, observation,
+                    )?)
+                }
+            }
+        };
+        let generated = quote! {
+            pub fn plan() -> Result<mf_compiler::CompiledWorkflow, mf_compiler::PlanError> {
+                mf_compiler::CompiledWorkflow::from_json(#source)
+            }
+
+            pub fn manifest(
+                registry: &mf_runtime::NodeRegistry,
+            ) -> Result<mf_runtime::WorkflowManifest, mf_compiler::PlanError> {
+                let plan = plan()?;
+                let manifest = mf_runtime::WorkflowManifest {
+                    version: mf_runtime::WorkflowManifestVersion::V2026_10_07,
+                    description: mf_compiler::describe_compiled(&plan)?,
+                    interface: mf_compiler::describe_interface(&plan, registry)?,
+                };
+                manifest.validate()?;
+                Ok(manifest)
+            }
+
+            #preparation
+        };
+        let syntax: syn::File = syn::parse2(generated).context(GeneratedSyntaxSnafu)?;
+        Ok(GeneratedWorkflowArtifacts {
+            rust_source: prettyplease::unparse(&syntax),
+            plan_json,
+        })
+    }
+
     /// Generate preparation and execution entry points for custom runners.
     #[cfg(feature = "codegen")]
     pub fn generate_artifacts(&self) -> Result<GeneratedWorkflowArtifacts, PlanError> {

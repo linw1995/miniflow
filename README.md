@@ -3,7 +3,8 @@
 [![CI](https://github.com/linw1995/miniflow/actions/workflows/CI.yaml/badge.svg)](https://github.com/linw1995/miniflow/actions/workflows/CI.yaml)
 [![codecov](https://codecov.io/github/linw1995/miniflow/graph/badge.svg?token=AZZ4U2PD3T)](https://codecov.io/github/linw1995/miniflow)
 
-miniflow compiles declarative workflows into standalone executables with statically linked Rust nodes.
+miniflow compiles declarative workflows into standalone executables or embeds them in Rust programs
+with statically linked nodes.
 
 ## Quick start
 
@@ -31,6 +32,7 @@ If those packages are not yet available, use the [repository development command
 ## Documentation
 
 - [Compiling workflows](docs/compiling.md): CLI build, usage, and build failures.
+- [Embedding workflows](docs/embedding.md): source generation and host-side preparation for Rust programs.
 - [Workflow definitions](docs/workflows.md): JSON format, built-in nodes, and validation.
 - [Node development](docs/node-development.md): node registration and dependency selection.
 - [Observation contracts](docs/observability.md): lifecycle schema, identity, loss semantics, and package boundaries.

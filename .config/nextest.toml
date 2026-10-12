@@ -56,6 +56,8 @@ filter = '''
     test(=generated_runner_describes_embedded_graph_and_exports_correlated_otel)) |
 (binary_id(=mf-cli::stream_tui) &
     test(=generated_streams_run_in_tui_with_parameters_files_and_interrupts)) |
+(binary_id(=mf-compiler::embedding_host) &
+    test(=embedded_host_preserves_execution_and_build_contracts)) |
 (binary_id(=mf-compiler::if_else) &
     test(=compiled_branches_match_memory_and_rebuild_when_precedence_changes))
 '''
@@ -108,6 +110,8 @@ filter = '''
     test(=generated_runner_describes_embedded_graph_and_exports_correlated_otel)) |
 (binary_id(=mf-cli::stream_tui) &
     test(=generated_streams_run_in_tui_with_parameters_files_and_interrupts)) |
+(binary_id(=mf-compiler::embedding_host) &
+    test(=embedded_host_preserves_execution_and_build_contracts)) |
 (binary_id(=mf-compiler::if_else) &
     test(=compiled_branches_match_memory_and_rebuild_when_precedence_changes))
 '''

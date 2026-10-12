@@ -1,0 +1,34 @@
+{
+  "version": "2026-10-03",
+  "dependencies": {
+    "fixture": {
+      "package": "fixture-multi-nodes",
+      "path": "unused-by-host"
+    }
+  },
+  "nodes": [
+    {
+      "id": "source",
+      "kind": "fixture.typed_text"
+    },
+    {
+      "id": "echo",
+      "kind": "fixture.typed_text"
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "source",
+      "from_output": "text",
+      "to_node": "echo",
+      "to_input": "text"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "reply",
+      "node": "echo",
+      "port": "text"
+    }
+  ]
+}

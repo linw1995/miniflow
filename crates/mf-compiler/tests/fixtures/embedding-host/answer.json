@@ -1,0 +1,37 @@
+{
+  "version": "2026-10-03",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "version": "0.1.0"
+    }
+  },
+  "nodes": [
+    {
+      "id": "source",
+      "kind": "builtin.constant",
+      "config": {
+        "value": 42
+      }
+    },
+    {
+      "id": "echo",
+      "kind": "builtin.identity"
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "source",
+      "from_output": "value",
+      "to_node": "echo",
+      "to_input": "input"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "answer",
+      "node": "echo",
+      "port": "value"
+    }
+  ]
+}

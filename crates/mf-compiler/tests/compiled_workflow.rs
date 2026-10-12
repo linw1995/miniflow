@@ -196,6 +196,11 @@ fn rejects_a_plan_with_a_modified_execution_order() {
 
     let error = instantiate_compiled(&plan, &registry).err().unwrap();
     assert!(matches!(error, WorkflowCompileError::NonCanonicalPlanOrder));
+    #[cfg(feature = "codegen")]
+    assert!(matches!(
+        plan.generate_embedded_artifacts().unwrap_err(),
+        mf_compiler::PlanError::InvalidExecutionOrder
+    ));
 }
 
 #[test]

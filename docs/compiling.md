@@ -1,5 +1,8 @@
 # Compiling workflows
 
+To include validated workflows in an existing Rust application or library, see
+[Embedding workflows](embedding.md).
+
 ## Build the CLI
 
 ```sh

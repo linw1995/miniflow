@@ -1,0 +1,28 @@
+{
+  "version": "2026-10-03",
+  "execution": {
+    "mode": "stream"
+  },
+  "dependencies": {
+    "fixture": {
+      "package": "fixture-multi-nodes",
+      "path": "unused-by-host"
+    }
+  },
+  "nodes": [
+    {
+      "id": "source",
+      "kind": "fixture.startup_contract",
+      "config": {
+        "stream": true
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "result",
+      "node": "source",
+      "port": "value"
+    }
+  ]
+}
