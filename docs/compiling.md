@@ -165,6 +165,24 @@ inputs; the next build resynchronizes them from the Flow.
 
 Retained directories contain embedded configuration and diagnostics and are created with user-private permissions. To reclaim space, delete an inactive build directory using its reported path; never remove a directory while a build is running. A later invocation recreates it from the definition and lock. Automatic eviction and sharing compiled targets across different Flows are not provided.
 
+## Runner help
+
+Newly compiled runners expose their embedded input schema through `--help` or `-h`:
+
+```sh
+./flow --help
+./flow --node transform --help
+```
+
+Help lists qualified input names, types, required flags, JSON transports, and verbosity options. With
+`--node`, it shows only the selected task's inputs. Help writes to stdout and exits successfully without
+constructing providers, reading input/context files, or executing nodes. CLI syntax errors write to stderr
+and exit with status 2; input, context, and execution validation errors remain failures.
+
+JSON and file transports also accept inline values, such as `--inputs='{"read.path":"data.txt"}'` and
+`--inputs-file=parameters.json`. A named string value starting with `--` must use inline syntax, such as
+`--read.path=--literal`; short-option-looking values such as `-v` remain literal when following a named input.
+
 ## Streaming runners
 
 Use schema `2026-10-03` with `execution.mode` set to `stream`. Sources are explicit nodes. The repository
