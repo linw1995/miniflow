@@ -85,6 +85,7 @@ normal node linking, preparation failure reporting, and source-independent execu
 Remove the old generation profile, provider map, extra artifacts, and frozen schema comparison.
 
 The new preparation boundary requires kind/config/port acceptance cases even though lower-level
-validators have their own tests. Avoid a duplicate helper success test. Keep Cargo.toml.in fixtures
-so Cargo packages include the host inputs instead of excluding a nested package. Detailed reports
+validators have their own tests. Verify Cargo environment boundaries in an isolated process.
+Keep Cargo.template.toml fixtures so Cargo packages include the host inputs instead of excluding
+a nested package. Detailed reports
 and timings remain under ignored `target/`.

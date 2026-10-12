@@ -19,6 +19,6 @@
 
 - [x] Review APIs, module boundaries, errors, fixtures, and commits against AGENTS.md.
 - [x] Run ablations and remove unneeded design or duplicated coverage.
-- [ ] Run pinned coverage, hooks, full Nix checks, packaging, and strict validation.
+- [x] Run pinned coverage, hooks, full Nix checks, packaging, and strict validation.
 - [ ] Archive the specification after review and commit the final state.
 - [ ] Push, open the replacement PR, and resolve CI or review findings.

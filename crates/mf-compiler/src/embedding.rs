@@ -173,6 +173,60 @@ mod tests {
     }
 
     #[test]
+    fn requires_cargo_environment_and_resolves_manifest_relative_inputs() {
+        if let Ok(case) = env::var("MF_EMBEDDING_ENV_CASE") {
+            let requests = [request()];
+            let result = embed_workflows(if case == "empty" { &[] } else { &requests });
+            match case.as_str() {
+                "manifest" => assert!(matches!(
+                    result,
+                    Err(EmbeddingError::CargoEnvironment {
+                        variable: "CARGO_MANIFEST_DIR"
+                    })
+                )),
+                "output" => assert!(matches!(
+                    result,
+                    Err(EmbeddingError::CargoEnvironment {
+                        variable: "OUT_DIR"
+                    })
+                )),
+                _ => result.unwrap(),
+            }
+            return;
+        }
+        // Cargo environment contracts are process-local; avoid mutating the parallel test process.
+        let root = tempfile::tempdir().unwrap();
+        write_definition(root.path(), &definition());
+        let working_directory = root.path().join("cwd");
+        fs::create_dir(&working_directory).unwrap();
+        for case in ["manifest", "output", "empty", "generate"] {
+            let directory = root.path().join(case);
+            let mut command = std::process::Command::new(env::current_exe().unwrap());
+            command
+                .args(["--exact", "embedding::tests::requires_cargo_environment_and_resolves_manifest_relative_inputs"])
+                .current_dir(&working_directory)
+                .env("MF_EMBEDDING_ENV_CASE", case)
+                .env("CARGO_MANIFEST_DIR", root.path())
+                .env("OUT_DIR", &directory);
+            if case == "manifest" {
+                command.env_remove("CARGO_MANIFEST_DIR");
+            } else if case == "output" {
+                command.env_remove("OUT_DIR");
+            }
+            let output = command.output().unwrap();
+            assert!(
+                output.status.success(),
+                "{case}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                directory.join("mf-embedded/answer/workflow.rs").is_file(),
+                case == "generate"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_invalid_requests_before_replacing_existing_artifacts() {
         let root = tempfile::tempdir().unwrap();
         let output = root.path().join("out");
