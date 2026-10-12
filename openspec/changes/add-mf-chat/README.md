@@ -9,4 +9,4 @@ Plan for a reusable `mf-chat` core with SQLite session storage, application-owne
 - [Workflow execution](specs/chat-workflow-execution/spec.md): embedding, conversation, and title contracts.
 - [Usage statistics](specs/chat-usage-statistics/spec.md): call accounting and unknown usage contracts.
 
-Planning is complete; implementation has not started. Existing terminal UI integration is a follow-up change.
+Planning is complete; implementation is in progress. Existing terminal UI integration is a follow-up change.

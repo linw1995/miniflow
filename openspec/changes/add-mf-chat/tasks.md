@@ -2,11 +2,11 @@
 
 ## 1. Crate and Storage Initialization
 
-- [ ] 1.1 Add the `mf-chat` library and workspace-managed Diesel, migration, SQLite, and ownership-lock dependencies; verify pinned-toolchain compilation and unique SQLite native linkage.
-- [ ] 1.2 Add the four-table migration, generated schema, row models, and database constraints; verify fresh initialization, migration rollback/reapply in a disposable database, and reopen without data loss.
-- [ ] 1.3 Implement `mf_chat.storage.initialize`, connection pragmas, and exclusive host ownership; verify overlapping owners fail before recovery and ownership is released after initialization failure or shutdown.
-- [ ] 1.4 Embed migrations with build-script directory tracking; verify migration-only changes rebuild the host and initialization succeeds without migration source files.
-- [ ] 1.5 Document the database path, single-owner boundary, migration behavior, and typed storage errors in `docs/chat.md`; verify documented initialization against a temporary file-backed database.
+- [x] 1.1 Add the `mf-chat` library and workspace-managed Diesel, migration, SQLite, and ownership-lock dependencies; verify pinned-toolchain compilation and unique SQLite native linkage.
+- [x] 1.2 Add the four-table migration, generated schema, row models, and database constraints; verify fresh initialization, migration rollback/reapply in a disposable database, and reopen without data loss.
+- [x] 1.3 Implement `mf_chat.storage.initialize`, connection pragmas, and exclusive host ownership; verify overlapping owners fail before recovery and ownership is released after initialization failure or shutdown.
+- [x] 1.4 Embed migrations with build-script directory tracking; verify migration-only changes rebuild the host and initialization succeeds without migration source files.
+- [x] 1.5 Document the database path, single-owner boundary, migration behavior, and typed storage errors in `docs/chat.md`; verify documented initialization against a temporary file-backed database.
 
 ## 2. Session and Message Nodes
 
