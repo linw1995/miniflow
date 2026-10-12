@@ -3,6 +3,24 @@ members = ["crates/mf-*", "crates/builtin-nodes/*"]
 default-members = ["crates/mf-cli"]
 resolver = "3"
 
+# Coverage of test binaries cannot observe CLI and generated-runner subprocesses.
+[[workspace.metadata.affected.rule]]
+globs = ["crates/mf-cli/src/**/*.rs", "crates/mf-tui/src/**/*.rs"]
+filterset = "package(=mf-cli) & kind(test)"
+
+[[workspace.metadata.affected.rule]]
+globs = [
+    "crates/mf-compiler/src/**/*.rs",
+    "crates/mf-runtime/src/**/*.rs",
+    "crates/mf-telemetry/src/**/*.rs",
+    "crates/builtin-nodes/*/src/**/*.rs",
+]
+filterset = "(package(=mf-cli) | package(=mf-compiler)) & kind(test)"
+
+[[workspace.metadata.affected.rule]]
+globs = ["crates/mf-runtime/src/**/*.rs"]
+filterset = "binary_id(=mf-runtime::input_derive_compile)"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
