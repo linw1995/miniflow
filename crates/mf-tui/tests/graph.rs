@@ -440,6 +440,10 @@ fn fan_graph(count: usize) -> WorkflowDescription {
 
 fn assert_completed_geometry_is_safe(layout: &GraphLayout) {
     use mf_tui::graph::routing::Intersection;
+    for edge in layout.edges() {
+        assert!(edge.from_row > 0 && edge.from_row < layout.nodes()[edge.from].rect.height - 1);
+        assert!(edge.to_row > 0 && edge.to_row < layout.nodes()[edge.to].rect.height - 1);
+    }
     for (index, route) in layout.routes().iter().enumerate() {
         if route.unresolved.is_some() {
             assert!(route.points.is_empty());
@@ -469,6 +473,16 @@ fn assert_completed_geometry_is_safe(layout: &GraphLayout) {
             }
         }
     }
+}
+
+#[test]
+fn compact_chain_aligns_ports_without_vertical_detours() {
+    let layout = GraphLayout::new(&fan_graph(1)).unwrap();
+    assert!(layout.size().1 <= 8);
+    let route = &layout.routes()[0];
+    assert_eq!(route.points.len(), 2);
+    assert_eq!(route.points[0].y, route.points[1].y);
+    assert_completed_geometry_is_safe(&layout);
 }
 
 #[test]
@@ -616,6 +630,35 @@ fn routing_budgets_retain_all_connections_without_unsafe_paths() {
         assert!(layout.routing_stats().geometry_items <= limits.max_geometry_items);
         assert_completed_geometry_is_safe(&layout);
     }
+    let graph = crowded_graph(4, true);
+    for limits in [
+        RoutingLimits {
+            max_geometry_items: 1_000,
+            ..RoutingLimits::default()
+        },
+        RoutingLimits {
+            max_conflict_checks: 5_000,
+            ..RoutingLimits::default()
+        },
+        RoutingLimits {
+            max_total_expansions: 16,
+            retry_rounds: 1,
+            ..RoutingLimits::default()
+        },
+    ] {
+        let layout = GraphLayout::with_routing_limits(&graph, limits).unwrap();
+        let stats = layout.routing_stats();
+        assert_eq!(
+            layout.edges().len(),
+            graph.data_edges.len() + graph.control_edges.len()
+        );
+        assert!(stats.geometry_items <= limits.max_geometry_items);
+        assert!(stats.conflict_checks <= limits.max_conflict_checks);
+        assert!(stats.search_expansions <= limits.max_total_expansions);
+        assert!(stats.retry_rounds <= limits.retry_rounds);
+        assert!(layout.crossings().len() <= limits.max_crossings);
+        assert_completed_geometry_is_safe(&layout);
+    }
 }
 
 #[test]
@@ -757,11 +800,27 @@ fn unresolved_connections_keep_inspectable_kind_ports_and_reason() {
     assert_eq!(details, layout.routing_details(1));
 }
 
-fn crowded_graph() -> WorkflowDescription {
-    let mut graph = fan_graph(5);
+fn crowded_graph(width: usize, control: bool) -> WorkflowDescription {
+    let mut graph = fan_graph(width * 3 - 1);
+    for (index, node) in graph.nodes.iter_mut().enumerate() {
+        node.id = format!("node-{index:05}");
+    }
+    if width == 2 {
+        let names = [
+            "source-a", "source-b", "middle-a", "middle-b", "sink-a", "sink-b",
+        ];
+        for (node, name) in graph.nodes.iter_mut().zip(names) {
+            node.id = name.into();
+        }
+    }
+    graph.execution_order = graph.nodes.iter().map(|node| node.id.clone()).collect();
     graph.data_edges.clear();
-    for from in 0..4 {
-        for to in if from < 2 { 2..6 } else { 4..6 } {
+    for from in 0..width * 2 {
+        for to in if from < width {
+            width..width * 3
+        } else {
+            width * 2..width * 3
+        } {
             graph.data_edges.push(DataEdge {
                 from_node: graph.execution_order[from].clone(),
                 from_output: "value".into(),
@@ -770,13 +829,15 @@ fn crowded_graph() -> WorkflowDescription {
             });
         }
     }
-    for from in 0..2 {
-        for to in 4..6 {
-            graph.control_edges.push(ControlEdge {
-                from_node: graph.execution_order[from].clone(),
-                from_output: "gate".into(),
-                to_node: graph.execution_order[to].clone(),
-            });
+    if control {
+        for from in 0..width {
+            for to in width * 2..width * 3 {
+                graph.control_edges.push(ControlEdge {
+                    from_node: graph.execution_order[from].clone(),
+                    from_output: "gate".into(),
+                    to_node: graph.execution_order[to].clone(),
+                });
+            }
         }
     }
     graph
@@ -785,70 +846,79 @@ fn crowded_graph() -> WorkflowDescription {
 #[test]
 fn input_permutations_keep_geometry_crossing_layers_and_rendered_styles() {
     use std::collections::{BTreeMap, BTreeSet};
-    let mut graph = crowded_graph();
-    let baseline = GraphLayout::new(&graph).unwrap();
-    assert!(!baseline.crossings().is_empty());
-    assert_eq!(baseline.unresolved_count(), 0);
-    let signature = |layout: &GraphLayout| {
-        let routes = layout
-            .edges()
+    for (mut graph, height_bound) in [
+        (crowded_graph(2, true), 100),
+        (crowded_graph(4, false), 240),
+        (crowded_graph(4, true), 500),
+    ] {
+        let baseline = GraphLayout::new(&graph).unwrap();
+        assert!(!baseline.crossings().is_empty());
+        assert_eq!(baseline.unresolved_count(), 0);
+        assert!(baseline.size().1 < height_bound);
+        assert_completed_geometry_is_safe(&baseline);
+        let signature = |layout: &GraphLayout| {
+            let routes = layout
+                .edges()
+                .iter()
+                .zip(layout.routes())
+                .map(|(edge, route)| (edge.key.clone(), route.clone()))
+                .collect::<BTreeMap<_, _>>();
+            let crossings = layout
+                .crossings()
+                .iter()
+                .map(|crossing| {
+                    (
+                        crossing.point,
+                        layout.edges()[crossing.horizontal].key.clone(),
+                        layout.edges()[crossing.vertical].key.clone(),
+                        layout.edges()[crossing.upper].key.clone(),
+                    )
+                })
+                .collect::<BTreeSet<_>>();
+            (layout.nodes().to_vec(), routes, crossings)
+        };
+        let expected = signature(&baseline);
+        let mut observations: Vec<_> = baseline
+            .nodes()
             .iter()
-            .zip(layout.routes())
-            .map(|(edge, route)| (edge.key.clone(), route.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let crossings = layout
-            .crossings()
-            .iter()
-            .map(|crossing| {
-                (
-                    crossing.point,
-                    layout.edges()[crossing.horizontal].key.clone(),
-                    layout.edges()[crossing.vertical].key.clone(),
-                    layout.edges()[crossing.upper].key.clone(),
-                )
-            })
-            .collect::<BTreeSet<_>>();
-        (layout.nodes().to_vec(), routes, crossings)
-    };
-    let expected = signature(&baseline);
-    let mut observations: Vec<_> = baseline
-        .nodes()
-        .iter()
-        .map(|node| NodeObservation::pending(&node.id, &node.kind))
-        .collect();
-    for (index, node) in observations.iter_mut().enumerate() {
-        if index % 2 == 0 {
-            node.status = NodeStatus::Succeeded;
-            node.produced_ports.push("value".into());
-            node.skipped_ports.push("gate".into());
-        } else {
-            node.status = NodeStatus::Unknown;
+            .map(|node| NodeObservation::pending(&node.id, &node.kind))
+            .collect();
+        for (index, node) in observations.iter_mut().enumerate() {
+            if index % 2 == 0 {
+                node.status = NodeStatus::Succeeded;
+                node.produced_ports.push("value".into());
+                node.skipped_ports.push("gate".into());
+            } else {
+                node.status = NodeStatus::Unknown;
+            }
         }
-    }
-    let area = Rect::new(0, 0, baseline.size().0 as u16, baseline.size().1 as u16);
-    let mut reference = Buffer::empty(area);
-    GraphView::new(&baseline)
-        .nodes(&observations)
-        .render(area, &mut reference);
-    for index in 0..8 {
-        graph.data_edges.rotate_left(1);
-        graph.control_edges.rotate_right(1);
-        if index % 2 == 0 {
-            graph.data_edges.reverse();
-        }
-        let layout = GraphLayout::new(&graph).unwrap();
-        assert_eq!(signature(&layout), expected);
-        let mut rendered = Buffer::empty(area);
-        GraphView::new(&layout)
+        let area = Rect::new(0, 0, baseline.size().0 as u16, baseline.size().1 as u16);
+        let mut reference = Buffer::empty(area);
+        GraphView::new(&baseline)
             .nodes(&observations)
-            .render(area, &mut rendered);
-        assert_eq!(rendered, reference);
+            .render(area, &mut reference);
+        for index in 0..8 {
+            graph.data_edges.rotate_left(1);
+            if !graph.control_edges.is_empty() {
+                graph.control_edges.rotate_right(1);
+            }
+            if index % 2 == 0 {
+                graph.data_edges.reverse();
+            }
+            let layout = GraphLayout::new(&graph).unwrap();
+            assert_eq!(signature(&layout), expected);
+            let mut rendered = Buffer::empty(area);
+            GraphView::new(&layout)
+                .nodes(&observations)
+                .render(area, &mut rendered);
+            assert_eq!(rendered, reference);
+        }
     }
 }
 
 #[test]
 fn root_and_loop_body_share_routing_geometry() {
-    let body_graph = crowded_graph();
+    let body_graph = crowded_graph(4, true);
     let root = GraphLayout::new(&body_graph).unwrap();
     let mut description = body_graph.clone();
     description.version = WorkflowDescriptionVersion::V2026_09_29;

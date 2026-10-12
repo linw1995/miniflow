@@ -26,10 +26,10 @@ use std::{
 };
 
 const NODE_WIDTH: u32 = 24;
-const NODE_HEIGHT: u32 = 6;
+const NODE_HEIGHT: u32 = 4;
 const COLUMN_GAP: u32 = 10;
-const ROW_GAP: u32 = routing::ATTACHMENT_SPACING;
-const COMPONENT_GAP: u32 = 12;
+const ROW_GAP: u32 = 2;
+const COMPONENT_GAP: u32 = 4;
 const MARGIN: u32 = 2;
 const LAYOUT_STACK_BYTES: usize = 64 * 1024 * 1024;
 
@@ -124,6 +124,56 @@ impl GraphLayout {
             });
         }
 
+        let compact =
+            Self::with_attachment_spacing(description, limits, routing::ATTACHMENT_SPACING)?;
+        if compact.unresolved_count() == 0 {
+            return Ok(compact);
+        }
+        let spent = compact.routing_stats;
+        // A wider layout may recover crowded routes, but both attempts share the scope budget.
+        let remaining = routing::RoutingLimits {
+            max_geometry_items: limits
+                .max_geometry_items
+                .saturating_sub(spent.geometry_items),
+            max_conflict_checks: limits
+                .max_conflict_checks
+                .saturating_sub(spent.conflict_checks),
+            max_total_expansions: limits
+                .max_total_expansions
+                .saturating_sub(spent.search_expansions),
+            max_crossings: limits.max_crossings.saturating_sub(compact.crossings.len()),
+            retry_rounds: limits.retry_rounds.saturating_sub(spent.retry_rounds),
+            ..limits
+        };
+        let estimate = description
+            .nodes
+            .len()
+            .saturating_mul(4)
+            .saturating_add(compact.edges.len().saturating_mul(10));
+        if remaining.max_geometry_items < estimate || remaining.max_conflict_checks == 0 {
+            return Ok(compact);
+        }
+        let relaxed = Self::with_attachment_spacing(description, remaining, 6)?;
+        let extra = relaxed.routing_stats;
+        let mut selected = if relaxed.unresolved_count() < compact.unresolved_count() {
+            relaxed
+        } else {
+            compact
+        };
+        selected.routing_stats = routing::RoutingStats {
+            geometry_items: spent.geometry_items + extra.geometry_items,
+            conflict_checks: spent.conflict_checks + extra.conflict_checks,
+            search_expansions: spent.search_expansions + extra.search_expansions,
+            retry_rounds: spent.retry_rounds + extra.retry_rounds,
+        };
+        Ok(selected)
+    }
+
+    fn with_attachment_spacing(
+        description: &WorkflowDescription,
+        limits: routing::RoutingLimits,
+        attachment_spacing: u32,
+    ) -> Result<Self, GraphError> {
         let described: BTreeMap<_, _> = description
             .nodes
             .iter()
@@ -201,8 +251,18 @@ impl GraphLayout {
             incoming[edge.to].push(index);
         }
         for (index, node) in nodes.iter_mut().enumerate() {
-            let count = outgoing[index].len().max(incoming[index].len()) as u32;
-            node.rect.height = NODE_HEIGHT.max(count * routing::ATTACHMENT_SPACING);
+            let outgoing_height =
+                outgoing[index].len().saturating_sub(1) as u32 * attachment_spacing + 3;
+            let incoming_height = incoming[index].last().map_or(0, |&edge| {
+                let aligned = incoming[index].len() == 1 && outgoing[edges[edge].from].len() == 1;
+                (incoming[index].len() - 1) as u32 * attachment_spacing
+                    + if aligned {
+                        3
+                    } else {
+                        attachment_spacing / 2 + 3
+                    }
+            });
+            node.rect.height = NODE_HEIGHT.max(outgoing_height).max(incoming_height);
         }
 
         let vertices: Vec<_> = (0..nodes.len())
@@ -276,7 +336,7 @@ impl GraphLayout {
                 .map(|layer| {
                     layer
                         .iter()
-                        .map(|(id, _)| nodes[*id].rect.height + ROW_GAP)
+                        .map(|(id, _)| row_stride(&nodes[*id], attachment_spacing))
                         .sum::<u32>()
                 })
                 .max()
@@ -289,17 +349,16 @@ impl GraphLayout {
                 });
                 let layer_height = layer
                     .iter()
-                    .map(|(id, _)| nodes[*id].rect.height + ROW_GAP)
+                    .map(|(id, _)| row_stride(&nodes[*id], attachment_spacing))
                     .sum::<u32>();
-                let centering = (component_height - layer_height)
-                    / (2 * routing::ATTACHMENT_SPACING)
-                    * routing::ATTACHMENT_SPACING;
+                let centering = (component_height - layer_height) / (2 * attachment_spacing)
+                    * attachment_spacing;
                 let mut row_y = component_top + centering;
                 for (id, _) in layer.iter() {
                     if let Some(node) = nodes.get_mut(*id) {
                         node.rect.x = MARGIN + column as u32 * (NODE_WIDTH + COLUMN_GAP);
                         node.rect.y = row_y;
-                        row_y += node.rect.height + ROW_GAP;
+                        row_y += row_stride(node, attachment_spacing);
                         node_components[*id] = component_bottoms.len();
                         placed[*id] = true;
                     }
@@ -317,14 +376,22 @@ impl GraphLayout {
                 component_top += node.rect.height + ROW_GAP;
             }
         }
-        for (index, attachments) in outgoing.iter_mut().enumerate() {
+        for attachments in &mut outgoing {
             attachments.sort_by_key(|&edge| (nodes[edges[edge].to].rect.y, &edges[edge].key));
             for (row, &edge) in attachments.iter().enumerate() {
-                edges[edge].from_row = 1 + row as u32 * routing::ATTACHMENT_SPACING;
+                edges[edge].from_row = 1 + row as u32 * attachment_spacing;
             }
-            incoming[index].sort_by_key(|&edge| (nodes[edges[edge].from].rect.y, &edges[edge].key));
-            for (row, &edge) in incoming[index].iter().enumerate() {
-                edges[edge].to_row = 4 + row as u32 * routing::ATTACHMENT_SPACING;
+        }
+        for attachments in &mut incoming {
+            attachments.sort_by_key(|&edge| (nodes[edges[edge].from].rect.y, &edges[edge].key));
+            for (row, &edge) in attachments.iter().enumerate() {
+                let aligned = attachments.len() == 1 && outgoing[edges[edge].from].len() == 1;
+                // Stagger fan/join arrivals so channel crossings stay clear of their turns.
+                edges[edge].to_row = if aligned {
+                    1
+                } else {
+                    attachment_spacing / 2 + 1
+                } + row as u32 * attachment_spacing;
             }
         }
         let estimate = nodes
@@ -438,6 +505,11 @@ impl GraphLayout {
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
+}
+
+fn row_stride(node: &GraphNode, attachment_spacing: u32) -> u32 {
+    // Keep sibling port rows on the same grid so staggered arrivals avoid channel turns.
+    (node.rect.height + ROW_GAP).div_ceil(attachment_spacing) * attachment_spacing
 }
 
 pub struct GraphView<'a> {
@@ -870,7 +942,7 @@ fn display_line(value: &str) -> String {
 #[cfg(test)]
 mod rendering_tests {
     use super::*;
-    use routing::{Point, RoutingStats, crossing_cells};
+    use routing::{Point, RoutingStats};
 
     fn crossing_layout(
         horizontal: EdgeKind,
@@ -953,20 +1025,44 @@ mod rendering_tests {
                     GraphView::new(&layout)
                         .nodes(&observations)
                         .render(buffer.area, &mut buffer);
-                    for cell in crossing_cells(horizontal, vertical, upper_horizontal) {
-                        let rendered = buffer
-                            .cell(Position::new((10 + cell.dx) as u16, (10 + cell.dy) as u16))
-                            .unwrap();
-                        assert_eq!(rendered.symbol(), cell.symbol);
-                        assert_eq!(
-                            rendered.fg,
-                            if cell.upper {
-                                Color::Green
-                            } else {
-                                Color::Magenta
+                    for along in [-2i16, -1, 0, 1, 2] {
+                        for horizontal_axis in [true, false] {
+                            let is_upper = horizontal_axis == upper_horizontal;
+                            if along == 0 && !is_upper {
+                                continue;
                             }
-                        );
-                        assert_eq!(rendered.modifier.contains(Modifier::BOLD), cell.upper);
+                            let kind = if horizontal_axis {
+                                horizontal
+                            } else {
+                                vertical
+                            };
+                            let rendered = buffer
+                                .cell(Position::new(
+                                    (10 + if horizontal_axis { along } else { 0 }) as u16,
+                                    (10 + if horizontal_axis { 0 } else { along }) as u16,
+                                ))
+                                .unwrap();
+                            let expected = if !is_upper && along.abs() == 1 {
+                                " "
+                            } else {
+                                match (kind, horizontal_axis) {
+                                    (EdgeKind::Data, true) => "═",
+                                    (EdgeKind::Data, false) => "║",
+                                    (EdgeKind::Control, true) => "─",
+                                    (EdgeKind::Control, false) => "│",
+                                }
+                            };
+                            assert_eq!(rendered.symbol(), expected);
+                            assert_eq!(
+                                rendered.fg,
+                                if is_upper {
+                                    Color::Green
+                                } else {
+                                    Color::Magenta
+                                }
+                            );
+                            assert_eq!(rendered.modifier.contains(Modifier::BOLD), is_upper);
+                        }
                     }
                 }
             }
@@ -975,21 +1071,30 @@ mod rendering_tests {
 
     #[test]
     fn partially_visible_crossings_match_full_canvas_symbols_and_styles() {
-        let layout = crossing_layout(EdgeKind::Data, EdgeKind::Control, false);
-        let mut full = Buffer::empty(Rect::new(0, 0, 22, 22));
-        GraphView::new(&layout).render(full.area, &mut full);
-        for offset in [(9, 9), (10, 10), (11, 9), (8, 11), (0, 0)] {
-            let mut clipped = Buffer::empty(Rect::new(3, 5, 4, 5));
-            GraphView::new(&layout)
-                .offset(offset.0, offset.1)
-                .render(clipped.area, &mut clipped);
-            for y in 0..5 {
-                for x in 0..4 {
-                    assert_eq!(
-                        clipped.cell(Position::new(3 + x, 5 + y)).unwrap(),
-                        full.cell(Position::new(offset.0 as u16 + x, offset.1 as u16 + y))
-                            .unwrap()
-                    );
+        for horizontal in [EdgeKind::Data, EdgeKind::Control] {
+            for vertical in [EdgeKind::Data, EdgeKind::Control] {
+                for upper_horizontal in [true, false] {
+                    let layout = crossing_layout(horizontal, vertical, upper_horizontal);
+                    let mut full = Buffer::empty(Rect::new(0, 0, 22, 22));
+                    GraphView::new(&layout).render(full.area, &mut full);
+                    for offset in [(9, 9), (10, 10), (11, 9), (8, 11), (0, 0)] {
+                        let mut clipped = Buffer::empty(Rect::new(3, 5, 4, 5));
+                        GraphView::new(&layout)
+                            .offset(offset.0, offset.1)
+                            .render(clipped.area, &mut clipped);
+                        for y in 0..5 {
+                            for x in 0..4 {
+                                assert_eq!(
+                                    clipped.cell(Position::new(3 + x, 5 + y)).unwrap(),
+                                    full.cell(Position::new(
+                                        offset.0 as u16 + x,
+                                        offset.1 as u16 + y
+                                    ))
+                                    .unwrap()
+                                );
+                            }
+                        }
+                    }
                 }
             }
         }
