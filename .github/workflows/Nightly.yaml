@@ -1,0 +1,118 @@
+name: Nightly full tests
+
+on:
+  schedule:
+    - cron: "23 18 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: nightly-full-tests
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      run: ${{ steps.plan.outputs.run }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+      - name: Decide whether full tests are due
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: python3 scripts/nightly_tests.py
+
+  test:
+    name: Full tests (${{ matrix.runner }})
+    needs: plan
+    if: needs.plan.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, macos-14]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-nix
+        with:
+          cache-key-name: test
+      - name: Cache collection dependencies
+        if: matrix.runner == 'ubuntu-latest'
+        uses: actions/cache@v6
+        with:
+          path: |
+            target/affected/build
+            target/nextest-build-cache/collect
+          key: collect-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            collect-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
+      - name: Run full macOS flake checks
+        if: matrix.runner == 'macos-14'
+        run: nix flake check -L
+      - name: Run full Linux tests and collect affected-test baseline
+        if: matrix.runner == 'ubuntu-latest'
+        env:
+          MF_TEST_BUILD_CACHE_DIR: ${{ github.workspace }}/target/nextest-build-cache/collect
+        run: nix develop --command bash scripts/run-cov.sh --collect-affected
+      - name: Save affected-test baseline
+        if: matrix.runner == 'ubuntu-latest' && github.ref_name == github.event.repository.default_branch
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            target/affected/coverage.db
+            target/affected/baseline.sha
+          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+  coverage:
+    name: Full coverage
+    needs: plan
+    if: needs.plan.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+      - uses: ./.github/actions/setup-nix
+        with:
+          cache-key-name: coverage
+      - name: Cache coverage dependencies
+        uses: actions/cache@v6
+        with:
+          path: |
+            target/coverage/build/debug
+            target/coverage/build/.mf-coverage-identity
+            target/coverage/build/nextest-build-cache/ci
+          key: coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+          restore-keys: |
+            coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
+            coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-
+      - name: Run native coverage
+        env:
+          NEXTEST_PROFILE: ci
+          MF_TEST_BUILD_CACHE_DIR: ${{ github.workspace }}/target/coverage/build/nextest-build-cache/ci
+        run: nix develop --command bash scripts/run-cov.sh
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage
+          path: target/coverage/result/
+          overwrite: true
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          files: target/coverage/result/lcov.info
+          # A full report also seeds the comparison base for PR patch reports.
+          flags: rust,rust-affected
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}

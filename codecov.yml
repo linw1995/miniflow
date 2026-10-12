@@ -1,0 +1,26 @@
+coverage:
+  status:
+    default_rules:
+      flag_coverage_not_uploaded_behavior: exclude
+    project:
+      default:
+        flags: [rust]
+        target: auto
+        # Preserve the status context without comparing a partial report.
+        flag_coverage_not_uploaded_behavior: pass
+    patch:
+      default:
+        flags: [rust-affected]
+        target: auto
+        only_pulls: true
+
+flags:
+  rust:
+    carryforward: false
+  rust-affected:
+    carryforward: false
+
+comment:
+  layout: "header, files, footer"
+  hide_project_coverage: true
+  require_head: true

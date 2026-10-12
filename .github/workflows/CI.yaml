@@ -33,8 +33,8 @@ jobs:
             --skip cargo-check \
             --skip actionlint \
             --skip third-party-notices
-      - name: Check timing monitor
-        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+      - name: Check CI scripts
+        run: nix develop --command python3 -m unittest discover -s scripts -p 'test_*.py'
 
   check:
     strategy:
@@ -57,17 +57,34 @@ jobs:
           nix build --no-link -L \
             '.#checks.x86_64-linux.miniflow' \
             '.#checks.x86_64-linux.clippy'
-      - name: Run all flake checks
+      - name: Build package and check macOS
         if: matrix.runner == 'macos-14'
-        run: nix flake check -L
+        run: |
+          nix build --no-link -L \
+            '.#checks.aarch64-darwin.miniflow' \
+            '.#checks.aarch64-darwin.clippy' \
+            '.#checks.aarch64-darwin.fmt' \
+            '.#checks.aarch64-darwin.workflows'
 
   coverage:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - uses: ./.github/actions/setup-nix
         with:
           cache-key-name: coverage
+      # Only the default branch's full nightly suite publishes coverage mappings.
+      - name: Restore affected-test baseline
+        uses: actions/cache/restore@v6
+        with:
+          path: |
+            target/affected/coverage.db
+            target/affected/baseline.sha
+          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-
       - name: Cache coverage dependencies
         uses: actions/cache@v6
         with:
@@ -79,23 +96,42 @@ jobs:
           restore-keys: |
             coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
             coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-
-      - name: Run native coverage
+            coverage-${{ runner.os }}-${{ runner.arch }}-
+      - name: Run affected tests and coverage
+        id: coverage
         env:
           NEXTEST_PROFILE: ci
-          # Each hosted job has an isolated filesystem; retain stable vendor paths across runs.
           MF_TEST_BUILD_CACHE_DIR: ${{ github.workspace }}/target/coverage/build/nextest-build-cache/ci
-        run: nix develop --command bash scripts/run-cov.sh
+        run: |
+          nix develop --command bash scripts/run-cov.sh --affected
+          if [[ -s target/coverage/result/lcov.info ]]; then
+            echo "report=true" >> "$GITHUB_OUTPUT"
+            if jq -e '.selection.summary.mode == "full-suite-no-listing"' target/affected/report.json > /dev/null; then
+              echo "full=true" >> "$GITHUB_OUTPUT"
+              echo "flags=rust,rust-affected" >> "$GITHUB_OUTPUT"
+            else
+              echo "flags=rust-affected" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+      - name: Upload test-selection report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: affected-tests
+          path: target/affected/report.json
+          overwrite: true
       - name: Upload coverage artifact
+        if: steps.coverage.outputs.report == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: target/coverage/result/
-          # Successful reruns otherwise conflict with this run's existing report.
           overwrite: true
       - name: Upload coverage to Codecov
+        if: steps.coverage.outputs.report == 'true' && (github.event_name == 'pull_request' || steps.coverage.outputs.full == 'true')
         uses: codecov/codecov-action@v7
         with:
           files: target/coverage/result/lcov.info
-          flags: rust
+          flags: ${{ steps.coverage.outputs.flags }}
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
