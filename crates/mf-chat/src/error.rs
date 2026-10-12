@@ -4,6 +4,21 @@ use std::{error::Error, io, path::PathBuf};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ChatError {
+    #[snafu(display("chat session {id:?} is archived"))]
+    SessionArchived { id: String },
+    #[snafu(display("chat session {id:?} already has a running turn"))]
+    SessionBusy { id: String },
+    #[snafu(display("chat turn {id:?} does not exist"))]
+    TurnMissing { id: String },
+    #[snafu(display("model call {id:?} does not exist"))]
+    CallMissing { id: String },
+    #[snafu(display("model call {id:?} has a conflicting identity, state, or response"))]
+    Conflict { id: String },
+    #[snafu(display("could not {operation}: {source}"))]
+    Integer {
+        operation: &'static str,
+        source: std::num::TryFromIntError,
+    },
     #[snafu(display("invalid chat {field}: {reason}"))]
     Invalid {
         field: &'static str,

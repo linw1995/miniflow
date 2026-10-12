@@ -6,7 +6,7 @@ See [proposal.md](proposal.md) for the scope and issue reference. The existing e
 
 `mf-tui` currently owns one externally launched runner, its terminal, output spool, and OTLP receiver. This change delivers the reusable application core first. The existing TUI remains the intended integration destination; selecting a transport or command syntax belongs to that subsequent change.
 
-The reference [trees database module](https://github.com/linw1995/trees/blob/main/src/database.rs) uses Diesel SQLite, embedded migrations, bundled SQLite, and per-connection pragmas. Its storage layer separates external operations from short database transactions. Follow those patterns, while retaining this repository's Snafu errors and node preparation contracts.
+Use Diesel SQLite, embedded migrations, bundled SQLite, and per-connection pragmas. Separate model requests from short database transactions and retain this repository's Snafu errors and node preparation contracts.
 
 ## Goals / Non-Goals
 
@@ -36,7 +36,7 @@ Initially prepare flows as needed instead of adding a hidden prepared-flow cache
 
 ### 3. Initialize storage once and connect only during node execution
 
-Use workspace-managed `diesel` and `diesel_migrations` dependencies in the 2.3 family and the compatible `libsqlite3-sys` bundled feature, following `trees`. Resolve exact versions in the workspace lockfile during implementation and verify that native SQLite linkage is unique. Use file-backed temporary databases in integration tests.
+Use workspace-managed `diesel` and `diesel_migrations` dependencies in the 2.3 family and the compatible `libsqlite3-sys` bundled feature. Resolve exact versions in the workspace lockfile during implementation and verify that native SQLite linkage is unique. Use file-backed temporary databases in integration tests.
 
 The host takes an explicit database path. Acquire an exclusive advisory ownership lock on a stable sibling lock file before initialization. A second owning host returns a typed busy error. This initial single-owner boundary supports many concurrent sessions within one host and makes restart recovery safe without adding process leases. Readers that do not own application execution do not perform recovery.
 

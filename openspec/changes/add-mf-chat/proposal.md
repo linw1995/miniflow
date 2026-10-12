@@ -6,7 +6,7 @@
 
 ## What Changes
 
-- Add `mf-chat` with SQLite persistence through `diesel` and `diesel_migrations`, following the database initialization and short transaction patterns in [linw1995/trees](https://github.com/linw1995/trees).
+- Add `mf-chat` with SQLite persistence through `diesel` and `diesel_migrations`, embedded schema migrations, and short storage transactions.
 - Register typed `mf_chat.*` nodes for storage initialization, session management, turn lifecycle, title generation support, and usage queries.
 - Persist sessions, ordered messages, turns, and model calls separately; retain failed submissions while excluding them from model history.
 - Embed conversation, session title, and usage statistics workflows as Rust modules with the existing compiler build helper and macro.

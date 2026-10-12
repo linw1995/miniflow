@@ -78,10 +78,18 @@ impl ChatDatabase {
             InitializeInputs { database_path },
             &mut ExecutionContext::default(),
         )?;
-        Ok(Self {
+        let database = Self {
             path,
             _ownership: ownership,
-        })
+        };
+        let _: crate::nodes::RecoveryOutputs = crate::operation::execute(
+            database.path(),
+            "mf_chat.storage.recover",
+            crate::nodes::RecoveryInputs {
+                database_path: String::new(),
+            },
+        )?;
+        Ok(database)
     }
 
     pub fn path(&self) -> &Path {

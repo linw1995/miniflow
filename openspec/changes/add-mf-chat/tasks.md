@@ -18,11 +18,11 @@
 
 ## 3. Turn and Model-Call Lifecycle
 
-- [ ] 3.1 Implement atomic `turn.begin` with explicit turn/call IDs and per-session running admission; verify concurrent submissions admit only one and leave no database transaction open during provider waiting.
-- [ ] 3.2 Implement `turn.complete` with atomic assistant message, usage, turn state, and activity updates; verify injected transaction failures leave no partial completion.
-- [ ] 3.3 Implement idempotent completion replay and fresh-identity model retry with `retry_of`; verify equivalent replay adds no records and conflicting replay fails without changing the saved result.
-- [ ] 3.4 Implement turn/call failure finalization and owner-protected startup recovery; verify cancelled and abandoned work is excluded from history and late cleanup cannot replace a committed success.
-- [ ] 3.5 Document turn states, commit retries, model retries, and the remote-call crash boundary; verify failed submissions and their linked retries remain inspectable after reopen.
+- [x] 3.1 Implement atomic `turn.begin` with explicit turn/call IDs and per-session running admission; verify concurrent submissions admit only one and leave no database transaction open during provider waiting.
+- [x] 3.2 Implement `turn.complete` with atomic assistant message, usage, turn state, and activity updates; verify injected transaction failures leave no partial completion.
+- [x] 3.3 Implement idempotent completion replay and fresh-identity model retry with `retry_of`; verify equivalent replay adds no records and conflicting replay fails without changing the saved result.
+- [x] 3.4 Implement turn/call failure finalization and owner-protected startup recovery; verify cancelled and abandoned work is excluded from history and late cleanup cannot replace a committed success.
+- [x] 3.5 Document turn states, commit retries, model retries, and the remote-call crash boundary; verify failed submissions and their linked retries remain inspectable after reopen.
 
 ## 4. Embedded Conversation Flow and Host Lifecycle
 
