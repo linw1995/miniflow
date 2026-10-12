@@ -14,7 +14,7 @@ use mf_tui::{
 use ratatui::{
     buffer::Buffer,
     layout::{Position, Rect},
-    style::Color,
+    style::{Color, Modifier},
     widgets::Widget,
 };
 
@@ -297,6 +297,31 @@ fn graph_renders_blocks_edges_and_running_elapsed_time() {
     assert!(text.contains("no"));
     assert!(text.contains('═'));
     assert!(text.contains('─'));
+
+    let mut focused = buffer.clone();
+    for selected in [0, 1, 0] {
+        GraphView::new(&layout)
+            .snapshot(&snapshot)
+            .elapsed_ns(1_200_000_100)
+            .selected(selected)
+            .render(focused.area, &mut focused);
+        for index in [0, 1] {
+            let rect = layout.nodes()[index].rect;
+            let position = Position::new(rect.x as u16 + 1, rect.y as u16 + 1);
+            let original = buffer.cell(position).unwrap();
+            let actual = focused.cell(position).unwrap();
+            assert_eq!(actual.symbol(), original.symbol());
+            assert_eq!(actual.fg, original.fg);
+            assert_eq!(actual.bg, original.bg);
+            assert_eq!(
+                actual.modifier.contains(Modifier::REVERSED),
+                index == selected
+            );
+            if index != selected {
+                assert_eq!(actual, original);
+            }
+        }
+    }
 
     let mut panned = Buffer::empty(Rect::new(0, 0, 20, 8));
     GraphView::new(&layout)

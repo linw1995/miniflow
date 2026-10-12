@@ -983,6 +983,7 @@ fn draw(
             graph
         } else { graph };
         let mut graph_view = GraphView::new(layout)
+            .selected(view_state.selected)
             .offset(view_state.offset.0, view_state.offset.1)
             .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64);
         if view_state.path.is_empty() {
