@@ -76,3 +76,15 @@ Check warm definition edits, target-node metadata edits, execution after removin
 files, and the documented example. Retain standalone regressions. Run negative ablations for input
 tracking, ordinary node linking, observation reporting, and source independence. Keep reports under
 ignored `target/`; validate, commit, and archive only after review.
+
+## Review Decisions
+
+Keep the runtime re-export required for renamed dependencies and the shared observed preparation
+entry point used by generated and in-memory execution. Negative ablations confirm Cargo tracking,
+normal node linking, preparation failure reporting, and source-independent execution are necessary.
+Remove the old generation profile, provider map, extra artifacts, and frozen schema comparison.
+
+The new preparation boundary requires kind/config/port acceptance cases even though lower-level
+validators have their own tests. Avoid a duplicate helper success test. Keep Cargo.toml.in fixtures
+so Cargo packages include the host inputs instead of excluding a nested package. Detailed reports
+and timings remain under ignored `target/`.
