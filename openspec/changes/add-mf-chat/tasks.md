@@ -10,11 +10,11 @@
 
 ## 2. Session and Message Nodes
 
-- [ ] 2.1 Register typed session create/list/load/rename/archive/restore nodes and stable value contracts; verify node preparation performs no filesystem or database I/O and execution errors preserve sources.
-- [ ] 2.2 Implement bounded keyset pagination and stable message ordering; verify page boundaries, unknown sessions, archive/restore preservation, and isolation between two sessions.
-- [ ] 2.3 Implement successful-turn history loading and its configurable byte bound; verify failed turns and the current prompt are excluded, system instructions remain separate, and excess history fails without trimming.
-- [ ] 2.4 Add host session operations through isolated node targets or embedded maintenance flows; verify every operation uses the configured database and explicit session identity.
-- [ ] 2.5 Document session operations and archived-session behavior alongside the nodes; verify the examples exercise create, rename, archive, restore, and paginated loading.
+- [x] 2.1 Register typed session create/list/load/rename/archive/restore nodes and stable value contracts; verify node preparation performs no filesystem or database I/O and execution errors preserve sources.
+- [x] 2.2 Implement bounded keyset pagination and stable message ordering; verify page boundaries, unknown sessions, archive/restore preservation, and isolation between two sessions.
+- [x] 2.3 Implement successful-turn history loading and its configurable byte bound; verify failed turns and the current prompt are excluded, system instructions remain separate, and excess history fails without trimming.
+- [x] 2.4 Add host session operations through isolated node targets or embedded maintenance flows; verify every operation uses the configured database and explicit session identity.
+- [x] 2.5 Document session operations and archived-session behavior alongside the nodes; verify the examples exercise create, rename, archive, restore, and paginated loading.
 
 ## 3. Turn and Model-Call Lifecycle
 

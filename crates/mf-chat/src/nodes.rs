@@ -3,7 +3,7 @@ use serde::Deserialize;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct EmptyConfig {}
+pub(super) struct EmptyConfig {}
 
 macro_rules! register_task {
     ($kind:literal, $node:expr) => {
@@ -18,6 +18,30 @@ macro_rules! register_task {
         }
     };
 }
+
+macro_rules! register_operation {
+    ($kind:literal, $name:ident, $input:ty, $output:ty, $execute:path) => {
+        struct $name;
+        impl mf_runtime::TypedTaskNode for $name {
+            type Input = $input;
+            type Output = $output;
+            fn execute(
+                &self,
+                input: Self::Input,
+                _: &mut mf_runtime::ExecutionContext,
+            ) -> Result<mf_runtime::TypedNodeResult<Self::Output>, mf_runtime::NodeExecutionError>
+            {
+                Ok($execute(input)?.into())
+            }
+        }
+        register_task!($kind, $name);
+    };
+}
+
+pub use crate::session::{
+    CreateSessionInputs, HistoryInputs, HistoryOutputs, ListSessionsInputs, MessagePageOutputs,
+    MessagesInputs, RenameSessionInputs, SessionInputs, SessionOutputs, SessionPageOutputs,
+};
 
 #[derive(Clone, Debug, NodeValue)]
 pub struct InitializeInputs {
