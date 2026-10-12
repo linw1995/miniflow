@@ -18,24 +18,39 @@ mode and reason; any selection fields describe its status preflight.
 
 Successful Linux collections on the default branch publish the coverage
 database and its Git commit anchor. PRs restore that baseline without publishing
-a replacement. The cache fingerprint includes root and `crates/` manifests,
-excluding all `target/` directories so generated-project and vendored manifests
-cannot change the key between restore and save. The checkout includes full Git history.
+a replacement. The cache fingerprint includes the root manifest and manifests
+matching workspace members (`crates/mf-*/Cargo.toml` and
+`crates/builtin-nodes/*/Cargo.toml`). Fixture, generated-project, and vendored
+manifests cannot change the key between restore and save. The checkout includes full Git history.
 Missing baselines, missing Git anchors, and changed build fingerprints fall
 back to all tests. Each run uploads `affected-tests`, a JSON selection report.
 Collection uses `scripts/run-cov.sh --collect-affected` so its ambient
 instrumentation flags match affected runs and do not invalidate the fingerprint.
 
-Coverage-based selection is approximate. Changes to non-Rust inputs, Rust
-fixtures, build scripts, and the runtime derive crate force the full suite.
+Coverage-based selection is approximate. Exact-path metadata rules in
+`Cargo.toml` map known fixtures and examples to their consuming test binaries:
+
+- Compiler helper fixtures select their specific integration binaries.
+- The shared multi-nodes fixture selects CLI and compiler integration tests.
+- Telemetry fixtures select contract tests and, where needed, telemetry unit tests.
+- Workflow examples select the CLI examples suite and their other consumers.
+
+The wrapper reads those same exact paths before deciding on a full-suite fallback;
+it does not maintain a separate input allowlist or reimplement glob matching.
+New, renamed, or unmapped fixtures and examples, including Rust files under
+`examples/`, and other unmapped non-Rust inputs still require the full suite.
+Global test/build configuration (including
+`.config/nextest.toml`), build scripts, and the runtime derive crate retain full
+execution even if an input rule matches. Update rules when adding consumers.
 Known documentation files (`AGENTS.md`, `README.md`, Markdown under `docs/`
 and `openspec/`, and OpenSpec `.openspec.yaml` files) are exempt; fixture and
-unknown Markdown files still force the full suite. Metadata rules in
+unknown Markdown files without exact rules still force the full suite. Metadata rules in
 `Cargo.toml` select CLI and generated-runner integration tests when their Rust
 inputs change, because coverage from the test binary cannot observe every
 subprocess. Keep these rules current when adding subprocess test suites or
 proc-macro crates. This intentionally limits speedups for compiler and runtime
-changes; measured CI timings determine whether finer selection is worthwhile.
+changes. Changes to the root manifest or cache fingerprint initially require
+a new full baseline before selective execution becomes available again.
 
 ## Codecov reports
 

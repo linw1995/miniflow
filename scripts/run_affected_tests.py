@@ -4,6 +4,7 @@ import argparse
 import json
 from pathlib import Path, PurePosixPath
 import subprocess
+import tomllib
 
 
 def is_documentation(path):
@@ -15,13 +16,25 @@ def is_documentation(path):
     )
 
 
-def requires_full_suite(paths):
+def mapped_inputs(manifest):
+    with manifest.open("rb") as source:
+        rules = tomllib.load(source).get("workspace", {}).get("metadata", {}).get("affected", {}).get("rule", [])
+    # Only exact paths exempt external inputs; broad globs cannot certify new consumers.
+    return {path for rule in rules for path in rule["globs"] if not any(char in path for char in "*?[]{}\\")}
+
+
+def requires_full_suite(paths, inputs=()):
     # LLVM does not map build inputs, proc macros, or external fixture code to tests.
     return any(
-        PurePosixPath(path).suffix != ".rs"
-        or PurePosixPath(path).name == "build.rs"
+        PurePosixPath(path).name == "build.rs"
         or path.startswith("crates/mf-runtime-derive/")
-        or "/tests/fixtures/" in path
+        or path.startswith((".cargo/", ".config/", ".github/", "scripts/"))
+        or path in {"Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "flake.nix", "flake.lock"}
+        or (path not in inputs and (
+            PurePosixPath(path).suffix != ".rs"
+            or "/tests/fixtures/" in path
+            or path.startswith("examples/")
+        ))
         for path in paths if not is_documentation(path)
     )
 
@@ -37,7 +50,8 @@ def full_suite_reason(baseline):
     if result.returncode:
         return "baseline commit is unavailable"
     paths = result.stdout.decode().rstrip("\0").split("\0") if result.stdout else []
-    inputs = [path for path in paths if requires_full_suite([path])]
+    mapped = mapped_inputs(Path("Cargo.toml"))
+    inputs = [path for path in paths if requires_full_suite([path], mapped)]
     return "changed inputs: " + ", ".join(inputs) if inputs else None
 
 

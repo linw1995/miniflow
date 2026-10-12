@@ -82,9 +82,9 @@ jobs:
           path: |
             target/affected/coverage.db
             target/affected/baseline.sha
-          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '!**/target/**') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mf-*/Cargo.toml', 'crates/builtin-nodes/*/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '!**/target/**') }}-
+            affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mf-*/Cargo.toml', 'crates/builtin-nodes/*/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-
       - name: Cache coverage dependencies
         uses: actions/cache@v6
         with:
@@ -126,7 +126,7 @@ jobs:
           path: |
             target/affected/coverage.db
             target/affected/baseline.sha
-          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '!**/target/**') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mf-*/Cargo.toml', 'crates/builtin-nodes/*/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Upload test-selection report
         if: always()
         uses: actions/upload-artifact@v7

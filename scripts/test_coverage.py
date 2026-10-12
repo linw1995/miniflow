@@ -35,6 +35,7 @@ class CoverageTests(unittest.TestCase):
 
             for name in ["src", "tests", "scripts", ".config"]:
                 (root / name).mkdir()
+            (root / "tests/fixtures").mkdir()
             source_scripts = Path(__file__).resolve().parent
             for name in ["run-cov.sh", "run_affected_tests.py"]:
                 shutil.copyfile(source_scripts / name, root / "scripts" / name)
@@ -49,6 +50,10 @@ edition = "2024"
 [[workspace.metadata.affected.rule]]
 globs = ["src/**/*.rs"]
 filterset = "kind(test)"
+
+[[workspace.metadata.affected.rule]]
+globs = ["tests/fixtures/answer.json", "tests/fixtures/external.rs"]
+filterset = "binary_id(=coverage-fixture::runner)"
 ''')
             (root / "src/lib.rs").write_text("pub mod alpha;\npub mod beta;\n")
             for module, value in [("alpha", 1), ("beta", 2)]:
@@ -68,8 +73,20 @@ mod tests {{
 fn runner_input_rule() {
     assert_eq!(std::env::var("COVERAGE_SETUP").unwrap(), "1");
     assert_eq!(coverage_fixture::beta::value(), 2);
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let input = std::fs::read_to_string(root.join("tests/fixtures/answer.json")).unwrap();
+    assert!(input.contains("42"));
+    let binary = root.join("target/external-runner");
+    assert!(std::process::Command::new("rustc")
+        .arg(root.join("tests/fixtures/external.rs"))
+        .arg("-o").arg(&binary).status().unwrap().success());
+    let output = std::process::Command::new(binary).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "42");
 }
 ''')
+            (root / "tests/fixtures/answer.json").write_text('{"answer":42}\n')
+            (root / "tests/fixtures/external.rs").write_text('fn main() { println!("42"); }\n')
             (root / "scripts/setup.py").write_text('''import os
 from pathlib import Path
 import subprocess
@@ -137,6 +154,23 @@ setup = "integration-env"
             self.assertEqual(report()["collection"]["mode"], "incremental")
             self.assertEqual(report()["selection"]["summary"]["selected"], 0)
             self.assertEqual(beta_regions(), untouched_regions)
+
+            for name, contents in [
+                ("answer.json", '{"answer": 42}\n'),
+                ("external.rs", 'fn main() { println!("{}", 40 + 2); }\n'),
+            ]:
+                (root / "tests/fixtures" / name).write_text(contents)
+                commit("test(ci): change mapped external input")
+                execute("bash", "scripts/run-cov.sh", "--affected")
+                self.assertEqual(report()["cache"]["status"], "hit-with-divergence")
+                summary = report()["selection"]["summary"]
+                self.assertEqual(summary["selected"], 1)
+                self.assertEqual(summary["config"], 1)
+                self.assertEqual(summary["skipped"], 2)
+                self.assertGreater(lcov.stat().st_size, 0)
+                execute("bash", "scripts/run-cov.sh", "--refresh-affected")
+                self.assertEqual(report()["collection"]["mode"], "incremental")
+                self.assertEqual(beta_regions(), untouched_regions)
 
             (root / "fixture.json").write_text("{}\n")
             commit("test(ci): change external input")
