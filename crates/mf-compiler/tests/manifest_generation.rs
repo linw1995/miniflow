@@ -108,9 +108,9 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
         let repeated = plan.generate_execution_plans(&registry).unwrap();
         assert_eq!(artifacts, repeated);
 
-        let embedded = plan
-            .generate_embedded_artifacts("mf-embedded/example")
-            .unwrap();
+        let before = PREPARATIONS.load(Ordering::SeqCst);
+        let embedded = plan.generate_embedded_artifacts().unwrap();
+        assert_eq!(PREPARATIONS.load(Ordering::SeqCst), before);
         let syntax = syn::parse_file(&embedded.rust_source).unwrap();
         let functions: Vec<_> = syntax
             .items
@@ -126,6 +126,7 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
         assert_eq!(
             functions,
             [
+                "plan",
                 "manifest",
                 if stream {
                     "prepare_stream"
@@ -134,16 +135,11 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
                 }
             ]
         );
-        assert!(
-            embedded
-                .rust_source
-                .contains("/mf-embedded/example/flow-plans.rs")
-        );
-        assert!(
-            embedded
-                .rust_source
-                .contains("/mf-embedded/example/workflow-manifest.bin")
-        );
+        assert!(embedded.rust_source.contains(if stream {
+            "instantiate_stream"
+        } else {
+            "instantiate_compiled_with_observation"
+        }));
         assert_eq!(embedded.plan_json, plan.to_json().unwrap());
     }
 }

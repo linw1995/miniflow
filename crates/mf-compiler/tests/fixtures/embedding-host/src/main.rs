@@ -1,3 +1,7 @@
+use code_nodes as _;
+use core_nodes as _;
+use fixture_provider as _;
+
 compiler::embed_workflow!(pub mod answer);
 compiler::embed_workflow!(pub mod events);
 compiler::embed_workflow!(pub mod contract);
@@ -20,18 +24,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let registry = runtime::NodeRegistry::from_inventory()?;
     if std::env::var_os("MF_EMBEDDING_DESCRIBE").is_some() {
         println!(
-            "{:?}",
-            contract::manifest()?.interface.schema.inputs["source"]["path./~"].value_type
+            "{:?}/{:?}",
+            contract::manifest(&registry)?.interface.schema.inputs["source"]["path./~"].value_type,
+            contract_stream::manifest(&registry)?
+                .interface
+                .schema
+                .inputs["source"]["path./~"]
+                .value_type,
         );
         return Ok(());
     }
-    if std::env::var_os("MF_FIXTURE_INTERFACE_CHANGE").is_some() {
-        if std::env::var_os("MF_EMBEDDING_STREAM_DRIFT").is_some() {
+    if std::env::var_os("MF_EMBEDDING_VALIDATE").is_some() {
+        let _ = answer::prepare_workflow(&registry, None)?;
+        return Ok(());
+    }
+    if std::env::var_os("MF_EMBEDDING_VALIDATE_CONTRACT").is_some() {
+        if std::env::var_os("MF_EMBEDDING_VALIDATE_STREAM").is_some() {
             let _ = contract_stream::prepare_stream(&registry)?;
-        } else {
-            let _ = contract::prepare_workflow(&registry, None)?;
+            return Ok(());
         }
-        panic!("incompatible startup metadata was accepted");
+        let harness = capture::Harness::new(true);
+        let observation = contract::plan()?
+            .start_observation(&harness.observer(), mf_telemetry::identity::RunId::new())?;
+        let result = runtime::ExecutionContext::run(Some(observation), |state| {
+            contract::prepare_workflow(&registry, state.observation_mut())
+        });
+        let error = match result {
+            Ok(_) => panic!("invalid node configuration was accepted"),
+            Err(error) => error,
+        };
+        let mut current: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+        let mut found = false;
+        while let Some(source) = current {
+            found |= source.is::<runtime::NodeBuildError>();
+            current = source.source();
+        }
+        assert!(found, "{error}");
+        let records = harness.records();
+        assert!(records.iter().any(|record| {
+            record.event_name == "mf.node.finished"
+                && record.attributes["mf.outcome"] == "failed"
+                && record.attributes["mf.node.id"] == "source"
+                && record.attributes["mf.failure.phase"] == "preparation"
+        }));
+        assert_eq!(
+            records.last().unwrap().attributes["mf.failure.phase"],
+            "preparation"
+        );
+        return Err(error.into());
     }
     let runtime = runtime::FlowRuntime::default();
     let counter = counter::prepare_workflow(&registry, None)?;
@@ -64,7 +104,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     let harness = capture::Harness::new(true);
-    let manifest = typed::manifest()?;
+    let manifest = typed::manifest(&registry)?;
     let observation = harness.observer().start_with_description(
         manifest.description.clone(),
         mf_telemetry::identity::RunId::new(),

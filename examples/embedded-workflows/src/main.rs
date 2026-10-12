@@ -1,3 +1,5 @@
+use core_nodes as _;
+
 mf_compiler::embed_workflow!(pub mod answer);
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

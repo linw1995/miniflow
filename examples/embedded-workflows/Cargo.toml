@@ -15,5 +15,3 @@ serde_json = "1.0.151"
 
 [build-dependencies]
 mf-compiler = { path = "../../crates/mf-compiler", default-features = false, features = ["codegen"] }
-mf-runtime = { path = "../../crates/mf-runtime" }
-core_nodes = { package = "mfn-core", path = "../../crates/builtin-nodes/core" }

@@ -1,14 +1,14 @@
 # Embedding workflows in Rust programs
 
-Use `mf-compiler`'s build helper and `embed_workflow!` macro to add workflows to an existing Rust
-application or library. The host build validates graph structure, node configuration, inferred ports,
-and execution contracts. Generated modules bind provider instances to compiled layouts; execution
-does not read definitions, invoke Cargo, or repartition graphs.
+Use the `mf-compiler` build helper and `embed_workflow!` macro to include workflows in an existing
+application or library. The build checks definition structure and emits Rust source. Preparation
+uses the host registry to validate actual node configuration, inferred ports, and execution contracts.
+Execution uses existing runtime APIs without reading workflow or generated source files.
 
 ## Cargo setup
 
-Enable `codegen` in build dependencies and disable the compiler's default features in normal
-dependencies. Declare each provider in both sections with compatible sources, versions, and features:
+Declare node crates only in normal dependencies. Enable compiler codegen in build dependencies and
+disable it in the normal dependency:
 
 ```toml
 [dependencies]
@@ -18,55 +18,45 @@ core_nodes = { package = "mfn-core", version = "=0.1.0" }
 
 [build-dependencies]
 mf-compiler = { version = "=0.1.0", default-features = false, features = ["codegen"] }
-mf-runtime = "=0.1.0"
-core_nodes = { package = "mfn-core", version = "=0.1.0" }
 ```
 
-The host's Cargo manifest and Cargo.lock select packages and features. Dependency descriptors inside
-workflow JSON retain their existing format but do not install packages, resolve local paths, or
-override the host manifest. Binding `core` to `core_nodes` associates a workflow dependency alias with
-its Rust crate name in the host. Bind every declared workflow dependency exactly once.
+Cargo and the host lockfile select packages and features. Dependency descriptors in workflow JSON
+retain their existing format but do not install packages, resolve paths, or override the host graph.
+No provider alias mapping or node build dependencies are required. Link node registrations in the
+host with ordinary Rust imports, such as `use core_nodes as _;`.
 
-Keep build and normal provider declarations compatible. Cargo can resolve their features separately.
-Providers must obey the existing contract that metadata is stable for the same configuration across
-build and execution environments. Preparation checks the compiled startup interface before execution.
-
-## Build-time validation
-
-Add a build script:
+## Generate source during the build
 
 ```rust
 // build.rs
-use core_nodes as _;
-
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let registry = mf_runtime::NodeRegistry::from_inventory()?;
-    let answer = mf_compiler::EmbedRequest::new("answer", "workflows/answer.json")
-        .with_provider("core", "core_nodes");
-    mf_compiler::embed_workflows(&[answer], &registry)?;
+    mf_compiler::embed_workflows(&[
+        mf_compiler::EmbedRequest::new("answer", "workflows/answer.json"),
+    ])?;
     Ok(())
 }
 ```
 
-Import providers in the build script so their inventory registrations are linked. The generated target
-module anchors the bound provider crates automatically. The build helper does not execute node
-business operations and does not start a nested Cargo build.
-
-Definition paths are relative to `CARGO_MANIFEST_DIR`; absolute paths are accepted. Submit all
+The helper accepts definitions relative to `CARGO_MANIFEST_DIR`, or absolute paths. Submit all
 workflows in one batch. Names must be ASCII Rust module identifiers, excluding keywords, raw
-identifiers, and `_`; duplicate names fail before files are replaced. Each workflow owns
-`OUT_DIR/mf-embedded/<name>/`, containing module source, execution layouts, and a manifest.
+identifiers, and `_`. Invalid or duplicate names and invalid graph structure fail before modules
+from a prior successful build are replaced.
 
-The helper emits `cargo:rerun-if-changed` for definitions. Provider source and feature changes use
-Cargo's ordinary build-script dependency tracking. Existing build scripts can call the helper alongside
-their other generators; retain tracking for their other inputs. Keep the workflow JSON available when
-packaging the host crate, because consumers compile its build script.
+Each workflow emits one file, `OUT_DIR/mf-embedded/<name>/workflow.rs`, containing its normalized
+structural plan and preparation entry points. The helper does not load node crates, execute node
+constructors, or start a nested Cargo build. Unknown kinds, invalid node configuration, incompatible
+ports, and node execution contracts are validated during preparation, not by Rust type checking.
 
-## Oneshot calls
+The helper emits `cargo:rerun-if-changed` for definitions. Retain tracking for other inputs when
+calling it from an existing build script. Keep workflow JSON in the host package because consumers
+compile its build script. Node source/feature changes are ordinary normal-dependency rebuilds;
+preparation uses their current metadata without a separate build-time node feature graph.
 
-Include the generated module and prepare a flow:
+## Prepare and execute tasks
 
 ```rust
+use core_nodes as _;
+
 mf_compiler::embed_workflow!(pub mod answer);
 
 fn run() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
@@ -76,36 +66,30 @@ fn run() -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
 }
 ```
 
-A prepared `Flow` can be executed repeatedly. Each preparation constructs independent provider
-instances; providers can retain state across executions of the same instance. The host controls
-`RuntimeOptions` and supplies startup inputs with `execute_with_inputs`:
+Preparation returns a `Flow` and preserves errors through `mf_compiler::PlanError`. Inspect typed
+sources for node construction or contract failures. Each preparation constructs independent nodes
+and prepares layouts; repeated execution of the same flow retains its node state and reuses layouts.
+There is no hidden prepared-instance cache.
+
+Use `RuntimeOptions` and existing input/context APIs. For a workflow exposing `request.text`:
 
 ```rust
 let arguments = mf_runtime::WorkflowArguments::from_json(
     br#"{"request.text":"hello"}"#,
 )?;
-let outputs = runtime.execute_with_inputs(&flow, arguments)?;
-```
-
-This example assumes a workflow exposing `request.text`. Values use the existing workflow input
-contract. For intermediate outputs, host-supplied stdin, snapshots, or observation, execute through
-your own `ExecutionContext`:
-
-```rust
 let mut context = mf_runtime::ExecutionContext::default();
 context.set_workflow_arguments(arguments);
 let outputs = runtime.execute_in_context(&flow, &mut context)?;
 let intermediate = context.output("request.result")?;
 ```
 
-Embedding follows the general-purpose/custom-runner contract and preserves intermediate context
-outputs. Typed providers execute through the existing dynamic path; standard-runner typed fast paths
-that elide intermediate outputs are not enabled for embedding. Loop and Iteration keep their existing
-scope, limits, and error behavior.
+Embedding uses ordinary dynamic preparation and execution, including typed node registrations,
+intermediate outputs, Loop, and Iteration. Standalone runner optimizations that elide intermediate
+outputs are unchanged and are not enabled for embedding.
 
-## Streaming calls
+## Prepare streams
 
-A workflow declaring streaming execution exposes `prepare_stream` instead of `prepare_workflow`:
+Streaming definitions expose `prepare_stream`:
 
 ```rust
 mf_compiler::embed_workflow!(pub mod events);
@@ -122,22 +106,26 @@ fn run_events(registry: &mf_runtime::NodeRegistry) -> Result<(), Box<dyn std::er
 }
 ```
 
-Here `consume` is the host's output handler. Drain deliveries before calling `join`. Starting a stream
-consumes its `PreparedStream`; prepare again for another instance. Provide startup arguments, stdin,
-observation, and snapshots through `StreamOptions`. For a workflow requiring stdin, supply a
-`TextInput` explicitly, for example `TextInput::new(file)`. The module does not claim global stdio or
-initialize exporters. Use the instance's cancellation handle to stop an ongoing stream.
+Here `consume` is the host's handler. Drain deliveries before `join`. Starting consumes the prepared
+stream; prepare again for another instance. Supply arguments, stdin, observation, and snapshots
+through `StreamOptions`; use `TextInput::new(file)` for explicit stdin and the cancellation handle
+to stop a running instance. Generated modules do not claim global stdio or initialize exporters.
 
-## Manifests and observation
+## Plans, manifests, and observation
 
-Both module kinds expose `manifest() -> Result<WorkflowManifest, WorkflowManifestError>`. The
-manifest uses the existing graph and startup interface format and retains the compiled workflow
-identity. Hosts can use its description with their existing observer. For a oneshot workflow:
+Every module exposes `plan() -> Result<CompiledWorkflow, PlanError>`. It reads embedded program data
+and supports existing planning, description, and observation APIs without loading nodes.
+
+`manifest(&registry) -> Result<WorkflowManifest, PlanError>` derives the current configured interface
+from the host registry. Inspection prepares separate nodes without executing them. There is no
+frozen build-time schema or comparison between build and target node features. Node metadata must
+obey the existing preparation contracts and remain stable for the same configuration.
+
+Start task observation from the structural plan before fallible preparation:
 
 ```rust
-let manifest = answer::manifest()?;
-let observation = observer.start_with_description(
-    manifest.description,
+let observation = answer::plan()?.start_observation(
+    &observer,
     mf_telemetry::identity::RunId::new(),
 )?;
 let outputs = mf_runtime::ExecutionContext::run(Some(observation), |context| {
@@ -146,18 +134,19 @@ let outputs = mf_runtime::ExecutionContext::run(Some(observation), |context| {
 })?;
 ```
 
-The host supplies `observer` and declares any telemetry dependencies it uses. Embedded manifests are
-module data rather than standalone executable manifest sections. A host with several workflows is
-not automatically a runner accepted by `mf run --tui`; the host owns invocation and observation setup.
+The host supplies `observer` and its telemetry dependencies. For streaming preparation observation,
+use the structural plan with existing `mf_compiler::start_stream` and `StreamOptions` APIs.
+Manifests are module data, without standalone executable sections; a multi-workflow host is not
+automatically a runner accepted by `mf run --tui`.
 
 ## Repository example
 
-The [embedded-workflows example](../examples/embedded-workflows) uses local support crates and prints
-`{"answer":42}`. From the repository root:
+The [embedded-workflows example](../examples/embedded-workflows) prints `{"answer":42}` and declares
+`mfn-core` only as a normal dependency. From the repository root:
 
 ```sh
 CARGO_TARGET_DIR="$PWD/target/embedded-example" nix develop --command \
   cargo run --manifest-path examples/embedded-workflows/Cargo.toml --offline
 ```
 
-After building, the executable runs without its workflow JSON, generated sources, or build tools.
+After building, the executable prepares and runs without workflow JSON, generated sources, or build tools.

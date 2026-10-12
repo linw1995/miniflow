@@ -131,32 +131,74 @@ fn embedded_host_preserves_execution_and_build_contracts() {
     for stream in [false, true] {
         let mut command = Command::new(&executable);
         command
-            .env("MF_FIXTURE_INTERFACE_CHANGE", "type")
+            .env("MF_FIXTURE_INTERFACE_CHANGE", "initialization")
+            .env("MF_EMBEDDING_VALIDATE_CONTRACT", "1")
             .env("MF_FIXTURE_EXECUTION_MARKER", &marker);
         if stream {
-            command.env("MF_EMBEDDING_STREAM_DRIFT", "1");
+            command.env("MF_EMBEDDING_VALIDATE_STREAM", "1");
         }
         let output = command.output().unwrap();
         assert!(!output.status.success(), "stream={stream}");
         assert!(
-            String::from_utf8_lossy(&output.stderr).contains("InterfaceDrift"),
+            String::from_utf8_lossy(&output.stderr).contains("NodeConstruction"),
             "stream={stream}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
         assert!(!marker.exists());
     }
+    let described = Command::new(&executable)
+        .env("MF_EMBEDDING_DESCRIBE", "1")
+        .env("MF_FIXTURE_INTERFACE_CHANGE", "type")
+        .output()
+        .unwrap();
+    assert!(
+        described.status.success(),
+        "{}",
+        String::from_utf8_lossy(&described.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&described.stdout).trim(),
+        "Int64/Int64"
+    );
     let answer = root.path().join("answer.json");
     let mut definition: Value = serde_json::from_slice(&fs::read(&answer).unwrap()).unwrap();
     definition["nodes"][0]["config"]["value"] = json!(43);
     fs::write(&answer, definition.to_string()).unwrap();
     assert_build_success(root.path());
     assert_eq!(run(&executable, &input)["answer"]["answer"], 43);
+    for (mutation, expected) in [
+        ("kind", "UnknownNodeKind"),
+        ("config", "NodeConstruction"),
+        ("port", "UnknownOutputPort"),
+    ] {
+        let mut invalid = definition.clone();
+        match mutation {
+            "kind" => invalid["nodes"][0]["kind"] = json!("missing.kind"),
+            "config" => invalid["nodes"][0]["config"] = json!({}),
+            "port" => invalid["edges"][0]["from_output"] = json!("missing"),
+            _ => unreachable!(),
+        }
+        fs::write(&answer, invalid.to_string()).unwrap();
+        assert_build_success(root.path());
+        let output = Command::new(&executable)
+            .env("MF_EMBEDDING_VALIDATE", "1")
+            .output()
+            .unwrap();
+        assert!(!output.status.success(), "{mutation}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(expected),
+            "{mutation}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    fs::write(&answer, definition.to_string()).unwrap();
+    assert_build_success(root.path());
     let mut invalid = definition.clone();
-    invalid["edges"][0]["from_output"] = json!("missing");
+    invalid["edges"][0]["to_node"] = json!("source");
     fs::write(&answer, invalid.to_string()).unwrap();
     let output = build(root.path());
     assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("UnknownOutputPort"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Cycle"));
     assert_eq!(run(&executable, &input)["answer"]["answer"], 43);
     fs::write(&answer, definition.to_string()).unwrap();
     let provider = root.path().join("provider/src/interface_fixture.rs");
@@ -172,7 +214,10 @@ fn embedded_host_preserves_execution_and_build_contracts() {
         .output()
         .unwrap();
     assert!(described.status.success());
-    assert_eq!(String::from_utf8_lossy(&described.stdout).trim(), "Boolean");
+    assert_eq!(
+        String::from_utf8_lossy(&described.stdout).trim(),
+        "Boolean/Boolean"
+    );
     let portable = root.path().join("portable-host");
     fs::copy(&executable, &portable).unwrap();
     for entry in fs::read_dir(root.path()).unwrap() {
@@ -194,6 +239,8 @@ fn embedded_host_preserves_execution_and_build_contracts() {
     let output_directory = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
     fs::remove_dir_all(output_directory.join("mf-embedded")).unwrap();
     fs::remove_file(root.path().join("build.rs")).unwrap();
+    fs::remove_file(root.path().join("Cargo.toml")).unwrap();
+    fs::remove_file(root.path().join("Cargo.lock")).unwrap();
     let output = Command::new(&portable)
         .arg(&input)
         .env("PATH", "")

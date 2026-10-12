@@ -8,12 +8,12 @@
 
 ## 2. Source Generation and Host Preparation
 
-- [ ] Remove build registry and provider bindings; emit only structural source modules.
-- [ ] Reuse shared task/stream preparation and attributed error observation.
-- [ ] Expose embedded plans and manifests based on current host node metadata.
-- [ ] Remove the embedding layout profile and unnecessary macro support exports.
-- [ ] Verify error boundaries, renamed normal dependencies, and state/resource contracts.
-- [ ] Update the example/docs, validate focused checks, and commit.
+- [x] Remove build registry and provider bindings; emit only structural source modules.
+- [x] Reuse shared task/stream preparation and attributed error observation.
+- [x] Expose embedded plans and manifests based on current host node metadata.
+- [x] Remove the embedding layout profile and unnecessary macro support exports.
+- [x] Verify error boundaries, renamed normal dependencies, and state/resource contracts.
+- [x] Update the example/docs, validate focused checks, and commit.
 
 ## 3. Review and Delivery
 

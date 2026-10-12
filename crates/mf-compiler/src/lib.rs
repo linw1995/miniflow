@@ -21,24 +21,20 @@ mod streaming;
 #[cfg(feature = "codegen")]
 mod typed_plan;
 
-// Generated modules use the compiler's dependencies so host renames stay hygienic.
+// Generated modules use the compiler's runtime so host dependency renames stay hygienic.
 #[doc(hidden)]
 pub use mf_runtime as __runtime;
-#[doc(hidden)]
-pub use serde_json as __serde_json;
-#[doc(hidden)]
-pub use snafu as __snafu;
 
 /// Include a workflow emitted by the build-time `embed_workflows` helper.
 ///
-/// The module exposes `manifest` and either `prepare_workflow` or `prepare_stream`.
+/// The module exposes `plan`, `manifest`, and either `prepare_workflow` or `prepare_stream`.
 /// The macro is available without the `codegen` feature; execution uses the host's runtime APIs.
 #[macro_export]
 macro_rules! embed_workflow {
     ($visibility:vis mod $name:ident) => {
         $visibility mod $name {
             use $crate as mf_compiler;
-            use $crate::{__runtime as mf_runtime, __serde_json as serde_json, __snafu as snafu};
+            use $crate::__runtime as mf_runtime;
             include!(concat!(env!("OUT_DIR"), "/mf-embedded/", stringify!($name), "/workflow.rs"));
         }
     };
@@ -51,8 +47,9 @@ pub use compatibility::{RuntimeCompatibilityError, validate_runtime_identity};
 pub use compiler::{
     CyclePath, DescriptionError, TypeInferenceState, WorkflowCompileError, WorkflowExecutionError,
     compile_definition, describe_compiled, describe_interface, describe_workflow_inputs,
-    execute_compiled, execute_compiled_with_inputs, instantiate_compiled, plan_definition,
-    resolve_nodes, structural_order, topological_order, validate_definition,
+    execute_compiled, execute_compiled_with_inputs, instantiate_compiled,
+    instantiate_compiled_with_observation, plan_definition, resolve_nodes, structural_order,
+    topological_order, validate_definition,
 };
 #[cfg(feature = "codegen")]
 pub use dependency_project::{
