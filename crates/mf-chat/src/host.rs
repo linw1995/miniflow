@@ -331,14 +331,11 @@ impl ChatHost {
                 limit: self.inner.config.max_active
             }
         );
-        let mut index = 0;
-        while index < workers.handles.len() {
-            if workers.handles[index].is_finished() {
-                let handle = workers.handles.swap_remove(index);
-                let _ = handle.join();
-            } else {
-                index += 1;
-            }
+        for handle in workers
+            .handles
+            .extract_if(.., |handle| handle.is_finished())
+        {
+            let _ = handle.join();
         }
         workers.active.insert(
             invocation.call_id.clone(),

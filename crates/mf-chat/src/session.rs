@@ -582,10 +582,11 @@ mod tests {
     use diesel::connection::SimpleConnection;
 
     #[test]
-    fn preparation_is_pure_and_query_errors_keep_their_sources() {
+    fn node_preparation_accepts_empty_config_and_query_errors_keep_sources() {
         let directory = tempfile::tempdir().unwrap();
         let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
         for kind in [
+            "mf_chat.storage.initialize",
             "mf_chat.session.create",
             "mf_chat.session.load",
             "mf_chat.session.list",
@@ -601,7 +602,6 @@ mod tests {
                 .instantiate(serde_json::json!({}))
                 .unwrap();
         }
-        assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
         let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
         storage::connect(database.path())
             .unwrap()

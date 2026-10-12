@@ -140,7 +140,7 @@ mod tests {
         let path = directory.path().join("chat.sqlite");
         let database = ChatDatabase::open(&path).unwrap();
         let mut connection = connect(database.path()).unwrap();
-        connection.revert_last_migration(MIGRATIONS).unwrap();
+        connection.revert_all_migrations(MIGRATIONS).unwrap();
         connection.run_pending_migrations(MIGRATIONS).unwrap();
         connection.batch_execute("INSERT INTO sessions VALUES ('session', 'New conversation', 'provisional', 0, 0, 'default', NULL, 0, 0, 1, 1);").unwrap();
         drop(connection);
@@ -177,17 +177,5 @@ mod tests {
             ChatDatabase::open(&invalid),
             Err(ChatError::Node { .. })
         ));
-    }
-
-    #[test]
-    fn preparing_initialization_does_not_create_storage() {
-        let directory = tempfile::tempdir().unwrap();
-        let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
-        registry
-            .get("mf_chat.storage.initialize")
-            .unwrap()
-            .instantiate(serde_json::json!({}))
-            .unwrap();
-        assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
     }
 }

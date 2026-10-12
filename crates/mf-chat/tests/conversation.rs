@@ -528,10 +528,8 @@ fn close_joins_pending_work_before_releasing_ownership() {
 }
 
 #[test]
-fn invalid_model_preparation_requires_no_database_or_credentials() {
-    let directory = tempfile::tempdir().unwrap();
+fn model_preparation_validates_config_without_resolving_credentials() {
     assert!(ModelProfile::new("default", json!({"model":""})).is_err());
-    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     ModelProfile::new(
         "default",
         json!({"model":"example", "api_key_env":"MF_CHAT_MISSING_PREPARATION_KEY"}),

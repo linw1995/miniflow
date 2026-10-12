@@ -12,19 +12,9 @@ pub struct ModelResponse {
     pub response: Reply,
 }
 
+// Object envelopes preserve absent optional fields without routing missing output ports.
 struct Model {
     node: Box<dyn TaskNode>,
-}
-
-// Object envelopes preserve absent optional fields without routing missing output ports.
-
-fn call(
-    node: &dyn TaskNode,
-    request: mfn_llm::LlmInputs,
-    context: &mut ExecutionContext,
-) -> Result<Reply, ChatError> {
-    let result = node.execute(request.into_values()?, context)?;
-    Ok(mfn_llm::LlmOutputs::from_values(result.outputs)?.into())
 }
 
 impl TypedTaskNode for Model {
@@ -36,8 +26,14 @@ impl TypedTaskNode for Model {
         input: Self::Input,
         context: &mut ExecutionContext,
     ) -> Result<TypedNodeResult<Self::Output>, mf_runtime::NodeExecutionError> {
+        let result = self.node.execute(
+            input.request.into_values().map_err(ChatError::from)?,
+            context,
+        )?;
         Ok(ModelResponse {
-            response: call(self.node.as_ref(), input.request, context)?,
+            response: mfn_llm::LlmOutputs::from_values(result.outputs)
+                .map_err(ChatError::from)?
+                .into(),
         }
         .into())
     }
