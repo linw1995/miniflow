@@ -12,6 +12,10 @@ case "${1:-}" in
     test_mode="collect"
     shift
     ;;
+  --refresh-affected)
+    test_mode="refresh"
+    shift
+    ;;
 esac
 
 if [[ "$test_mode" != "full" && "$#" != 0 ]]; then
@@ -38,14 +42,19 @@ mark_fixture_target() {
   fi
 }
 
-if [[ "$test_mode" == "collect" ]]; then
+if [[ "$test_mode" == "collect" || "$test_mode" == "refresh" ]]; then
   # Keep the ambient flags identical to affected runs, or the coverage DB always misses.
   cargo fetch --locked
   mark_target_directory "${workspace_root}/target/affected/build"
   mark_fixture_target
   cargo clean --workspace --profile dev --target-dir "${workspace_root}/target/affected/build"
-  cargo affected collect -- --locked --workspace --all-targets --all-features --profile ci --no-fail-fast
-  git rev-parse HEAD > "${workspace_root}/target/affected/baseline.sha"
+  if [[ "$test_mode" == "refresh" ]]; then
+    export CARGO_TARGET_DIR="${workspace_root}/target/affected/build"
+    python3 scripts/run_affected_tests.py --collect
+  else
+    cargo affected collect -- --locked --workspace --all-targets --all-features --profile ci --no-fail-fast
+    git rev-parse HEAD > "${workspace_root}/target/affected/baseline.sha"
+  fi
   exit 0
 fi
 

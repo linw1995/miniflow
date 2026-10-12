@@ -75,20 +75,21 @@ jobs:
       - uses: ./.github/actions/setup-nix
         with:
           cache-key-name: coverage
-      # Only the default branch's full nightly suite publishes coverage mappings.
+      # PRs consume default-branch mappings without publishing replacements.
       - name: Restore affected-test baseline
         uses: actions/cache/restore@v6
         with:
           path: |
             target/affected/coverage.db
             target/affected/baseline.sha
-          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '!**/target/**') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-
+            affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '!**/target/**') }}-
       - name: Cache coverage dependencies
         uses: actions/cache@v6
         with:
           path: |
+            target/affected/build
             target/coverage/build/debug
             target/coverage/build/.mf-coverage-identity
             target/coverage/build/nextest-build-cache/ci
@@ -103,6 +104,11 @@ jobs:
           NEXTEST_PROFILE: ci
           MF_TEST_BUILD_CACHE_DIR: ${{ github.workspace }}/target/coverage/build/nextest-build-cache/ci
         run: |
+          if [[ "$GITHUB_REF" == "refs/heads/main" && "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
+            nix develop --command bash scripts/run-cov.sh --refresh-affected
+            echo "baseline=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           nix develop --command bash scripts/run-cov.sh --affected
           if [[ -s target/coverage/result/lcov.info ]]; then
             echo "report=true" >> "$GITHUB_OUTPUT"
@@ -113,6 +119,14 @@ jobs:
               echo "flags=rust-affected" >> "$GITHUB_OUTPUT"
             fi
           fi
+      - name: Save affected-test baseline
+        if: steps.coverage.outputs.baseline == 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: |
+            target/affected/coverage.db
+            target/affected/baseline.sha
+          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/**/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '!**/target/**') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Upload test-selection report
         if: always()
         uses: actions/upload-artifact@v7
