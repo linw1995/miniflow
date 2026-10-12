@@ -29,6 +29,7 @@ bash scripts/run-cov.sh --affected
 - Initial collection runs the full suite once. After committing changes, use `bash scripts/run-cov.sh --refresh-affected` to update affected mappings while preserving unaffected tests' original commit anchors. Collection requires a clean working tree.
 - Known fixture and example inputs use exact-path rules in `Cargo.toml` to select their consuming test binaries. When adding inputs or consumers, update the rules; wildcard rules do not exempt unknown external inputs from full-suite fallback.
 - Missing or incompatible baselines, unmapped fixtures/examples/non-Rust inputs, global test/build configuration, build scripts, and proc macros conservatively trigger full-suite execution. Known documentation files are exempt; unmapped fixture and unknown Markdown files are not.
+- From a clean commit, `bash scripts/run-cov.sh --refresh-affected-cov` refreshes mappings and cumulative per-test coverage in one run. Its compact profiles and Git bundle remain under `target/affected/`; keep compilation artifacts in a separate cache.
 - Affected mode reduces test execution, but still compiles test binaries and generates coverage reports. Plain `cargo nextest run` and `nix flake check` do not automatically use this database. See `docs/ci.md` for selection rules and coverage behavior.
 
 ## Rust Visibility and Module Boundaries

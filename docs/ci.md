@@ -1,10 +1,26 @@
 # CI tests
 
-Pull requests run `scripts/run-cov.sh --affected`, using
-`cargo affected run` with the same
-workspace, target, feature, and nextest profile selection as the full suite.
-The pinned `cargo-affected` version is provided by `nix develop`.
-Formatting, package builds, Clippy, and repository hooks still run in CI.
+Pull requests run `scripts/run-cov.sh --refresh-affected-cov`. They restore
+an isolated baseline for the same PR and build fingerprint first, then fall
+back to main mappings. Successful collection writes a new snapshot keyed by
+PR, host, fingerprint, and tested merge commit. Failed or cancelled runs do
+not publish snapshots. Main never restores PR namespaces.
+
+The PR baseline cache contains `coverage.db`, `baseline.sha`, `commits.bundle`,
+and compact per-test profiles under `target/affected/profiles/`. Compilation
+artifacts use the independent build cache. The bundle preserves actual
+collection coordinates when earlier PR merge refs disappear. GitHub handles
+retention through its inactivity and least-recently-accessed eviction rules;
+all caches still share the repository's storage limit.
+
+Selected tests execute once. A small patch to pinned cargo-affected 0.4.1
+includes explicit input rules in diff collection and exports sparse merged
+counters before raw profiles are deleted. Updated tests replace their
+profiles; profiles without corresponding database mappings are pruned. Full
+fallback clears older profiles. PR reports merge the retained valid per-test
+counters against current binaries, preserving earlier commits' patch coverage.
+The pinned tool is provided by `nix develop`. Formatting, package builds,
+Clippy, and repository hooks still run in CI.
 
 Pushes to `main` run `scripts/run-cov.sh --refresh-affected` instead. Compatible
 baselines use `cargo affected collect --diff` to execute and refresh only affected
@@ -17,8 +33,7 @@ run. The `collection` field in `affected-tests` records the actual collection
 mode and reason; any selection fields describe its status preflight.
 
 Successful Linux collections on the default branch publish the coverage
-database and its Git commit anchor. PRs restore that baseline without publishing
-a replacement. The cache fingerprint includes the root manifest and manifests
+database and its Git commit anchor. PRs use that baseline as a fallback and publish only their own isolated snapshots. The cache fingerprint includes the root manifest and manifests
 matching workspace members (`crates/mf-*/Cargo.toml` and
 `crates/builtin-nodes/*/Cargo.toml`). Fixture, generated-project, and vendored
 manifests cannot change the key between restore and save. The checkout includes full Git history.
@@ -60,8 +75,8 @@ provides project coverage, and `rust-affected` seeds the baseline for patch
 comparisons. A full-suite fallback in PR CI can therefore also report project
 coverage. When only an incremental report is uploaded, the project status
 passes without evaluating full-project coverage, preserving its status context;
-the patch status evaluates the uploaded coverage. No tests selected means no
-coverage report is generated or uploaded.
+the patch status evaluates the uploaded coverage. With no new tests selected, retained PR profiles can still supply the cumulative
+patch report; without retained profiles, no report is generated.
 The `main` collection job does not generate aggregate coverage reports.
 Nightly supplies complete default-branch reports, keeping coverage history
 and the badge based on full-suite coverage.
@@ -69,8 +84,9 @@ and the badge based on full-suite coverage.
 Neither flag uses carryforward. Codecov carries forward a whole missing flag,
 not unexecuted tests within a newly uploaded flag. A partial report cannot
 replace `rust`, and merging old LCOV hits into a new report could mask genuine
-coverage losses. Patch coverage describes the current selected tests; it does
-not establish full-suite coverage of unchanged code. See Codecov's
+coverage losses. PR patch coverage uses the retained per-test snapshot, replacing rerun tests
+rather than merging obsolete aggregate LCOV hits. It does not establish freshly
+executed full-suite coverage of unchanged code. See Codecov's
 [carryforward flags](https://docs.codecov.com/docs/carryforward-flags) and
 [patch-only comments](https://docs.codecov.com/docs/pull-request-comments).
 

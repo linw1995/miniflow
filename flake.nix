@@ -35,10 +35,13 @@
         cargoAffected = craneLib.buildPackage {
           pname = "cargo-affected";
           version = "0.4.1";
-          src = pkgs.fetchCrate {
-            pname = "cargo-affected";
-            version = "0.4.1";
-            hash = "sha256-TCHqWOKT/n9oLmvB7yOpV/YImKLow/xa7YGYmSma9u0=";
+          src = pkgs.applyPatches {
+            src = pkgs.fetchCrate {
+              pname = "cargo-affected";
+              version = "0.4.1";
+              hash = "sha256-TCHqWOKT/n9oLmvB7yOpV/YImKLow/xa7YGYmSma9u0=";
+            };
+            patches = [ ./nix/patches/cargo-affected-pr-coverage.patch ];
           };
           doCheck = false;
         };
