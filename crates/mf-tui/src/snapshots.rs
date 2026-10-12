@@ -42,14 +42,12 @@ pub struct SnapshotCapture {
     finished: bool,
     pending_contexts: BTreeMap<usize, Option<SpanKey>>,
     nodes_by_span: BTreeMap<SpanKey, Arc<NodeSnapshot>>,
-    revision: usize,
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct SpanData {
     pub node: Option<Arc<NodeSnapshot>>,
     pub status: String,
-    pub revision: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -70,7 +68,6 @@ impl SnapshotCapture {
         if let Some(error) = &self.diagnostic {
             return Err(error.clone());
         }
-        self.revision = self.revision.saturating_add(1);
         let result = (|| -> Result<(), CaptureError> {
             let first = self.assembler.next_sequence();
             let sequence = record
@@ -125,13 +122,11 @@ impl SnapshotCapture {
     }
 
     pub fn fail(&mut self, error: &str) {
-        self.revision = self.revision.saturating_add(1);
         self.diagnostic
             .get_or_insert_with(|| Arc::new(UnavailableSnafu { message: error }.build()));
     }
 
     pub fn finish(&mut self) {
-        self.revision = self.revision.saturating_add(1);
         self.finished = true;
         if self.diagnostic.is_none()
             && (self.assembler.has_pending()
@@ -152,8 +147,20 @@ impl SnapshotCapture {
                 .nodes_by_span
                 .get(&(trace_id.to_vec(), span_id.to_vec()))
                 .cloned(),
-            status: self.view(None, 1).status,
-            revision: self.revision,
+            status: self.status(),
+        }
+    }
+
+    fn status(&self) -> String {
+        if let Some(error) = &self.diagnostic {
+            error.to_string()
+        } else if self.store.is_complete() {
+            "Complete".into()
+        } else if self.finished && !self.store.is_initialized() {
+            "Data snapshots unavailable; the runner must support telemetry and snapshot capture"
+                .into()
+        } else {
+            "Collecting".into()
         }
     }
 
@@ -166,16 +173,7 @@ impl SnapshotCapture {
         let first = selected
             .saturating_sub(rows / 2)
             .min(history.len().saturating_sub(rows));
-        let status = if let Some(error) = &self.diagnostic {
-            error.to_string()
-        } else if self.store.is_complete() {
-            "Complete".into()
-        } else if self.finished && !self.store.is_initialized() {
-            "Data snapshots unavailable; the runner must support telemetry and snapshot capture"
-                .into()
-        } else {
-            "Collecting".into()
-        };
+        let status = self.status();
         HistorySnapshot {
             history_len: history.len(),
             value_count: self.store.value_count(),

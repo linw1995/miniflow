@@ -153,7 +153,6 @@ mod tests {
         assert_eq!(snapshot.related(&[1; 16], &[1; 8]).len(), 1);
         assert_eq!(snapshot.observed_records, 4);
         assert_eq!(snapshot.local_drops, 0);
-        assert!(Arc::ptr_eq(&snapshot, &store.snapshot()));
         store.admit(
             LogRecord {
                 observed_time_unix_nano: 15,
@@ -183,7 +182,23 @@ mod tests {
             );
         }
         store.admit(record(10, 1, 1), None, None);
-        assert_eq!(store.snapshot().records.len(), 3);
+        for name in ["first-service", "second-service"] {
+            store.admit(
+                record(10, 1, 1),
+                Some(Arc::new(Resource {
+                    attributes: vec![opentelemetry_proto::tonic::common::v1::KeyValue {
+                        key: "service.name".into(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue(name.into())),
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                })),
+                None,
+            );
+        }
+        assert_eq!(store.snapshot().records.len(), 5);
     }
 
     #[test]

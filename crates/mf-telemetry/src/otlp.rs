@@ -293,26 +293,13 @@ impl SnapshotExporter {
     }
 
     pub fn emit(&mut self, body: serde_json::Value) -> Result<(), SnapshotExportError> {
-        use opentelemetry::{
-            logs::{LogRecord as _, Logger as _},
-            trace::TraceContextExt as _,
-        };
+        use opentelemetry::logs::Logger as _;
         self.check_error()?;
         ensure!(!self.closed, ClosedSnafu);
-        let context = opentelemetry::Context::current();
-        let span = context.span();
-        let correlation = span.span_context();
         for packet in crate::snapshot::packets(self.sequence, body)? {
             self.check_error()?;
             let mut record = self.logger.create_log_record();
             packet.write_to(&mut record, self.workflow.as_str(), self.run.as_str())?;
-            if correlation.is_valid() {
-                record.set_trace_context(
-                    correlation.trace_id(),
-                    correlation.span_id(),
-                    Some(correlation.trace_flags()),
-                );
-            }
             self.logger.emit(record);
             self.buffered += 1;
             // Waiting before filling the queue prevents a dropped value definition from

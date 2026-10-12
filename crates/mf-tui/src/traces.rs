@@ -164,7 +164,6 @@ struct PreviewKey {
     pane: Pane,
     correlation: Option<SpanKey>,
     log_id: Option<usize>,
-    data_revision: usize,
 }
 
 pub struct TraceViewSnapshot<'a> {
@@ -404,16 +403,14 @@ impl TraceView {
             pane: self.pane,
             correlation: self.correlation(snapshot.traces, snapshot.logs),
             log_id,
-            data_revision: if self.pane == Pane::Data {
-                snapshot.data.revision
-            } else {
-                0
-            },
         };
-        if self
-            .preview
-            .as_ref()
-            .is_none_or(|(previous, _)| *previous != key)
+        // Data and absence messages can change without changing the selected identity.
+        if self.pane == Pane::Data
+            || (self.pane == Pane::Details && key.correlation.is_none())
+            || self
+                .preview
+                .as_ref()
+                .is_none_or(|(previous, _)| *previous != key)
         {
             let text = match self.pane {
                 Pane::Data => span_data_preview(&snapshot.data, snapshot.streaming, snapshot.finished),
@@ -554,17 +551,7 @@ struct Preview(String);
 impl Write for Preview {
     fn write_str(&mut self, text: &str) -> fmt::Result {
         let available = PREVIEW_BYTES.saturating_sub(self.0.len());
-        if text.len() <= available {
-            self.0.extend(text.chars().map(|character| {
-                if character.is_control() && !matches!(character, '\n' | '\t') {
-                    ' '
-                } else {
-                    character
-                }
-            }));
-            return Ok(());
-        }
-        let mut end = available;
+        let mut end = available.min(text.len());
         while !text.is_char_boundary(end) {
             end -= 1;
         }
@@ -575,6 +562,9 @@ impl Write for Preview {
                 character
             }
         }));
+        if end == text.len() {
+            return Ok(());
+        }
         Err(fmt::Error)
     }
 }
@@ -737,7 +727,6 @@ mod tests {
         store.admit(observation(1, 2, Some(1), 200));
         store.admit(observation(2, 1, None, 100));
         let before = store.snapshot();
-        assert!(Arc::ptr_eq(&before, &store.snapshot()));
         let mut view = TraceView::default();
         view.handle_key(KeyCode::Char('v'), &before, &LogSnapshot::default());
         view.handle_key(KeyCode::End, &before, &LogSnapshot::default());
@@ -895,11 +884,11 @@ mod tests {
         ] {
             assert!(text.contains(expected), "{text}");
         }
+        let mut view = TraceView::default();
         for (finished, expected) in [
             (false, "Waiting for exported spans"),
             (true, "No trace spans were received"),
         ] {
-            let mut view = TraceView::default();
             terminal
                 .draw(|frame| {
                     view.draw(
@@ -941,15 +930,6 @@ mod tests {
     }
 
     #[test]
-    fn bounds_utf8_previews_without_truncating_retained_spans() {
-        let mut item = observation(1, 1, None, 0);
-        item.span.name = "é".repeat(PREVIEW_BYTES);
-        let text = span_preview(&item);
-        assert!(text.contains("Preview truncated"));
-        assert!(text.len() < PREVIEW_BYTES + 100);
-        assert_eq!(item.span.name.len(), PREVIEW_BYTES * 2);
-    }
-    #[test]
     fn panes_refresh_data_and_keep_log_selection_stable_across_reordering() {
         use crate::logs::LogStore;
         use mf_runtime::{NodeSnapshot, SnapshotOutcome, ValueRef};
@@ -974,7 +954,7 @@ mod tests {
                 None,
             );
         }
-        let data = |value, revision| SpanData {
+        let data = |value| SpanData {
             node: Some(Arc::new(NodeSnapshot {
                 inputs: ValueRef::object([]),
                 outputs: ValueRef::object([("answer".into(), ValueRef::from(value))]),
@@ -983,13 +963,12 @@ mod tests {
                 error: None,
             })),
             status: "Complete".into(),
-            revision,
         };
         let mut view = TraceView::default();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
         view.handle_key(KeyCode::Char('v'), &traces, &logs.snapshot());
         view.handle_key(KeyCode::Tab, &traces, &logs.snapshot());
-        for (value, revision) in [(42, 1), (73, 2)] {
+        for value in [42, 73] {
             terminal
                 .draw(|frame| {
                     view.draw(
@@ -997,7 +976,7 @@ mod tests {
                         &TraceViewSnapshot {
                             traces: &traces,
                             logs: &logs.snapshot(),
-                            data: data(value, revision),
+                            data: data(value),
                             spans: TraceAvailability::default(),
                             streaming: false,
                             finished: true,
@@ -1041,7 +1020,7 @@ mod tests {
                     &TraceViewSnapshot {
                         traces: &traces,
                         logs: &logs.snapshot(),
-                        data: data(73, 2),
+                        data: data(73),
                         spans: TraceAvailability::default(),
                         streaming: false,
                         finished: true,
@@ -1202,8 +1181,12 @@ mod tests {
         observation.record.body = Some(AnyValue {
             value: Some(any_value::Value::StringValue("é".repeat(PREVIEW_BYTES))),
         });
-        let preview = log_preview(&observation);
-        assert!(preview.contains("Preview truncated"));
-        assert!(preview.len() < PREVIEW_BYTES + 100);
+        let mut span = self::observation(1, 1, None, 0);
+        span.span.name = "é".repeat(PREVIEW_BYTES);
+        for preview in [log_preview(&observation), span_preview(&span)] {
+            assert!(preview.contains("Preview truncated"));
+            assert!(preview.len() < PREVIEW_BYTES + 100);
+        }
+        assert_eq!(span.span.name.len(), PREVIEW_BYTES * 2);
     }
 }

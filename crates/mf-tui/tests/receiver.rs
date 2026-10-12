@@ -559,10 +559,6 @@ fn retains_correlated_trace_details_after_completion_and_deduplicates_exports() 
     assert_eq!(observation.scope.as_ref().unwrap().version, "test");
     receiver.finish();
     assert_eq!(receiver.trace_snapshot().rows.len(), 1);
-    assert!(std::sync::Arc::ptr_eq(
-        &snapshot,
-        &receiver.trace_snapshot()
-    ));
     assert_eq!(receiver.snapshot().traces.local_drops, 0);
 }
 

@@ -14,7 +14,7 @@ Keep resource and scope metadata with immutable span/log observations. Use trace
 
 ### Correlate data through native LogRecord context
 
-Explicitly preserve the active trace/span context on snapshot export. Carry each snapshot sequence's
+Use the pinned logging SDK's automatic active trace/span association on snapshot export. Carry each snapshot sequence's
 correlation through ordered/fragmented assembly, and associate decoded Node records with the
 corresponding span. Value definitions continue using the existing shared store. Do not infer a
 relationship from node name, arrival order, or timing: Loop passes and parallel Iteration items can
@@ -32,7 +32,7 @@ records matching both trace and span IDs and allows selection for complete recor
 dedicated session log mode exposes run-level records and logs whose spans are absent or unsampled.
 Keyboard hints make each mode discoverable; graph navigation remains available through `v` or Esc.
 
-Keep selections attached to stable identities when newly exported parents or logs reorder lists. Cache immutable snapshots and bounded previews so frame rendering does not repeatedly clone payloads. Sanitize terminal labels and bound span/log previews to 64 KiB; preserve the existing 64 KiB limit per input/output object.
+Keep selections attached to stable identities when newly exported parents or logs reorder lists. Cache immutable trace/log snapshots and span/log previews. Derive mutable Data and empty-state details from the current observation snapshot so completion and late values remain visible without a global revision counter. Sanitize terminal labels and bound span/log previews to 64 KiB; preserve the existing 64 KiB limit per input/output object.
 
 ### Preserve launch and failure behavior
 
