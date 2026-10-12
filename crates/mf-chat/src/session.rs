@@ -687,4 +687,66 @@ mod tests {
         assert_eq!(tail.messages[0].turn_state, "failed");
         assert_eq!(tail.messages[0].message.content, "failed question");
     }
+
+    #[test]
+    fn invalid_session_values_do_not_create_or_rename_records() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
+        let base = CreateSessionInputs {
+            database_path: database.path().to_str().unwrap().into(),
+            session_id: "session".into(),
+            profile: "default".into(),
+            system: None,
+            title: None,
+        };
+        let mut id = base.clone();
+        id.session_id.clear();
+        let mut profile = base.clone();
+        profile.profile = " ".into();
+        let mut title = base.clone();
+        title.title = Some(" ".into());
+        for (input, expected) in [(id, "session_id"), (profile, "profile"), (title, "title")] {
+            assert!(
+                matches!(create(input), Err(ChatError::Invalid { field, .. }) if field == expected)
+            );
+        }
+        assert!(
+            database
+                .list_sessions(false, 10, None)
+                .unwrap()
+                .sessions
+                .is_empty()
+        );
+        let owner = create(base).unwrap().session;
+        assert!(matches!(
+            rename(RenameSessionInputs {
+                database_path: database.path().to_str().unwrap().into(),
+                session_id: owner.id.clone(),
+                title: " ".into(),
+            }),
+            Err(ChatError::Invalid { field: "title", .. })
+        ));
+        assert_eq!(database.session(&owner.id).unwrap().title, owner.title);
+        let default = HistoryInputs::from_values(mf_runtime::Inputs::from([
+            (
+                "database_path".into(),
+                database.path().to_str().unwrap().into(),
+            ),
+            ("session_id".into(), owner.id.clone().into()),
+        ]))
+        .unwrap();
+        assert_eq!(default.max_bytes, DEFAULT_HISTORY_BYTES);
+        assert!(load_history(default).unwrap().context.history.is_empty());
+        assert!(matches!(
+            load_history(HistoryInputs {
+                database_path: database.path().to_str().unwrap().into(),
+                session_id: owner.id,
+                max_bytes: 0,
+            }),
+            Err(ChatError::Invalid {
+                field: "max_bytes",
+                ..
+            })
+        ));
+    }
 }

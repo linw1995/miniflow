@@ -33,6 +33,25 @@ fn first_turn_schedules_once_and_manual_titles_win_before_or_during_generation()
         .unwrap();
     let calls = database.pending_titles(10).unwrap();
     assert_eq!(calls.len(), 1);
+    assert!(matches!(
+        prepare(PrepareTitleInputs {
+            database_path: database.path().to_str().unwrap().into(),
+            call_id: calls[0].id.clone(),
+            model: identity(),
+            max_bytes: 0,
+        }),
+        Err(ChatError::Invalid {
+            field: "max_bytes",
+            ..
+        })
+    ));
+    assert!(matches!(
+        retry(crate::nodes::SessionInputs {
+            database_path: database.path().to_str().unwrap().into(),
+            session_id: owner.id.clone(),
+        }),
+        Err(ChatError::TitleBusy { .. })
+    ));
     let started = prepare(PrepareTitleInputs {
         database_path: database.path().to_str().unwrap().into(),
         call_id: calls[0].id.clone(),
@@ -50,6 +69,26 @@ fn first_turn_schedules_once_and_manual_titles_win_before_or_during_generation()
         )
         .unwrap();
     assert_eq!(result.outcome, TitleOutcome::Stale);
+    let completion = CompleteTitleInputs {
+        database_path: database.path().to_str().unwrap().into(),
+        invocation: started.invocation.clone(),
+        title_revision: started.title_revision,
+        response: reply("Different response"),
+    };
+    assert!(matches!(
+        complete(completion.clone()),
+        Err(ChatError::Conflict { .. })
+    ));
+    let mut foreign = completion;
+    foreign.invocation.session_id = "different".into();
+    assert!(matches!(complete(foreign), Err(ChatError::Conflict { .. })));
+    assert!(matches!(
+        retry(crate::nodes::SessionInputs {
+            database_path: database.path().to_str().unwrap().into(),
+            session_id: owner.id.clone(),
+        }),
+        Err(ChatError::Invalid { field: "title", .. })
+    ));
     assert_eq!(database.session(&owner.id).unwrap().title, "Manual");
     assert_eq!(
         database

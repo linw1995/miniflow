@@ -995,4 +995,125 @@ mod tests {
                 .is_empty()
         );
     }
+
+    #[test]
+    fn invalid_begin_requests_do_not_reserve_message_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
+        let owner = database.create_session("default", None, None).unwrap();
+        let other = database.create_session("default", None, None).unwrap();
+        let previous = database
+            .begin_turn(&other.id, "other", identity(), None, 1024)
+            .unwrap();
+        database
+            .fail_turn(previous.invocation.clone(), "failed", "failed")
+            .unwrap();
+        let base = BeginTurnInputs {
+            database_path: database.path().to_str().unwrap().into(),
+            session_id: owner.id.clone(),
+            turn_id: "turn".into(),
+            call_id: "call".into(),
+            prompt: "question".into(),
+            model: identity(),
+            retry_of: None,
+            max_history_bytes: 1024,
+        };
+        let mut prompt = base.clone();
+        prompt.prompt.clear();
+        let mut invocation = base.clone();
+        invocation.call_id.clear();
+        let mut model = base.clone();
+        model.model.model.clear();
+        let mut profile = base.clone();
+        profile.model.profile = "different".into();
+        let mut retry = base.clone();
+        retry.retry_of = Some(previous.invocation.turn_id);
+        for (input, expected) in [
+            (prompt, "prompt"),
+            (invocation, "invocation"),
+            (model, "model"),
+            (profile, "profile"),
+            (retry, "retry_of"),
+        ] {
+            assert!(
+                matches!(begin(input), Err(ChatError::Invalid { field, .. }) if field == expected)
+            );
+        }
+        assert_eq!(database.session(&owner.id).unwrap().next_sequence, 0);
+        assert!(
+            database
+                .messages(&owner.id, 10, None)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+        assert_eq!(begin(base).unwrap().invocation.call_id, "call");
+    }
+
+    #[test]
+    fn invalid_completions_preserve_running_state_and_unicode_errors_are_bounded() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
+        let owner = database.create_session("default", None, None).unwrap();
+        let begun = database
+            .begin_turn(&owner.id, "question", identity(), None, 1024)
+            .unwrap();
+        let base = CompleteTurnInputs {
+            database_path: database.path().to_str().unwrap().into(),
+            invocation: begun.invocation.clone(),
+            response: reply("answer"),
+        };
+        let mut empty = base.clone();
+        empty.response.text.clear();
+        let mut negative = base.clone();
+        negative.response.usage = Some(BTreeMap::from([("input_tokens".into(), -1)]));
+        let mut unsupported = base.clone();
+        unsupported.response.usage = Some(BTreeMap::from([("cost".into(), 1)]));
+        for input in [empty, negative, unsupported] {
+            assert!(matches!(complete(input), Err(ChatError::Invalid { .. })));
+        }
+        let mut foreign = base.clone();
+        foreign.invocation.session_id = "different".into();
+        assert!(matches!(
+            complete(foreign.clone()),
+            Err(ChatError::Conflict { .. })
+        ));
+        assert!(matches!(
+            fail(FailTurnInputs {
+                database_path: base.database_path.clone(),
+                invocation: foreign.invocation,
+                state: "failed".into(),
+                error: "wrong identity".into(),
+            }),
+            Err(ChatError::Conflict { .. })
+        ));
+        assert!(matches!(
+            fail_call(FailCallInputs {
+                database_path: base.database_path.clone(),
+                call_id: begun.invocation.call_id.clone(),
+                state: "running".into(),
+                error: "invalid terminal state".into(),
+            }),
+            Err(ChatError::Invalid { field: "state", .. })
+        ));
+        assert_eq!(
+            database.turn(&begun.invocation.turn_id).unwrap().state,
+            "running"
+        );
+        assert_eq!(
+            database
+                .messages(&owner.id, 10, None)
+                .unwrap()
+                .messages
+                .len(),
+            1
+        );
+        let error = format!("{}{}", "x".repeat(4095), "\u{1f4ac}".repeat(3));
+        database
+            .fail_turn(begun.invocation.clone(), "failed", &error)
+            .unwrap();
+        let saved = database.turn(&begun.invocation.turn_id).unwrap();
+        assert_eq!(saved.error.unwrap(), "x".repeat(4095));
+        assert!(matches!(complete(base), Err(ChatError::Conflict { .. })));
+    }
 }

@@ -225,6 +225,12 @@ impl ChatHost {
                 }
             );
         }
+        if let Some(key) = &config.title_profile {
+            ensure!(
+                config.profiles.contains_key(key),
+                ProfileMissingSnafu { name: key }
+            );
+        }
         let host = Self {
             inner: Arc::new(Inner {
                 database: ChatDatabase::open(path)?,
@@ -233,12 +239,6 @@ impl ChatHost {
                 foreground_admissions: AtomicUsize::new(0),
             }),
         };
-        if let Some(key) = &host.inner.config.title_profile {
-            ensure!(
-                host.inner.config.profiles.contains_key(key),
-                ProfileMissingSnafu { name: key }
-            );
-        }
         if host.inner.config.automatic_titles {
             host.dispatch_titles()?;
         }

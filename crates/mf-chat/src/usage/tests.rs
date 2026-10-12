@@ -260,3 +260,79 @@ fn pending_titles_do_not_count_but_discarded_title_results_keep_their_usage() {
     assert_eq!(usage.groups[0].key, "title");
     assert_eq!(database.session(&owner.id).unwrap().title, "Manual");
 }
+
+#[test]
+fn model_profile_and_purpose_groups_preserve_attribution_and_validate_cursors() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
+    for (profile, model, tokens) in [("alpha", "model-a", 1), ("beta", "model-b", 2)] {
+        let owner = database
+            .create_session(profile, None, Some("Manual".into()))
+            .unwrap();
+        let mut identity = identity(profile);
+        identity.profile = profile.into();
+        identity.model = model.into();
+        let begun = database
+            .begin_turn(&owner.id, "question", identity, None, 1024)
+            .unwrap();
+        database
+            .complete_turn(
+                begun.invocation,
+                Reply {
+                    text: "answer".into(),
+                    usage: Some(BTreeMap::from([("output_tokens".into(), tokens)])),
+                    finish_reason: None,
+                },
+            )
+            .unwrap();
+    }
+    for (grouping, expected) in [
+        (UsageGrouping::Model, vec!["model-a", "model-b"]),
+        (UsageGrouping::Profile, vec!["alpha", "beta"]),
+        (UsageGrouping::Purpose, vec!["conversation"]),
+    ] {
+        let result = database
+            .usage(UsageQuery {
+                group_by: Some(grouping),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            result
+                .groups
+                .iter()
+                .map(|group| group.key.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(result.overall.output_tokens.known_subtotal, Some(3));
+        assert_eq!(
+            result
+                .groups
+                .iter()
+                .map(|group| group.summary.output_tokens.known_subtotal.unwrap())
+                .sum::<i64>(),
+            3
+        );
+    }
+    let scoped = database
+        .usage(UsageQuery {
+            profile: Some("alpha".into()),
+            model: Some("model-a".into()),
+            config_id: Some("alpha".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(scoped.overall.attempted_calls, 1);
+    assert_eq!(scoped.overall.output_tokens.known_subtotal, Some(1));
+    assert!(matches!(
+        query(UsageInputs {
+            database_path: database.path().to_str().unwrap().into(),
+            query: UsageQuery {
+                after: Some("cursor".into()),
+                ..Default::default()
+            },
+        }),
+        Err(ChatError::Invalid { field: "after", .. })
+    ));
+}

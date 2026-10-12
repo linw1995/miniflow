@@ -36,10 +36,16 @@ fn probe(server: &Server, scenario: &str, second_url: Option<&str>) -> Value {
     let mut child = command.spawn().unwrap();
     if matches!(
         scenario,
-        "cancel" | "capacity" | "parallel" | "shutdown" | "title_rename" | "title_cancel"
+        "cancel"
+            | "capacity"
+            | "parallel"
+            | "shutdown"
+            | "title_rename"
+            | "title_cancel"
+            | "abandon"
     ) {
         server.wait_for_requests(
-            if scenario == "title_rename" || scenario == "title_cancel" {
+            if matches!(scenario, "title_rename" | "title_cancel" | "abandon") {
                 2
             } else {
                 1
@@ -170,6 +176,9 @@ fn execution_probe() {
     let url = std::env::var("MF_CHAT_TEST_URL").unwrap();
     let mut config = HostConfig::new(profile("default", &url));
     config.automatic_titles = false;
+    if scenario == "conversation" || scenario == "title_auto" {
+        config.observer = Some(mf_telemetry::observation::Observer::stderr(1));
+    }
     if scenario == "title_auto" {
         config.automatic_titles = true;
         config.title_profile = Some("second".into());
@@ -281,6 +290,19 @@ fn execution_probe() {
                     panic!("{error:?}");
                 };
                 assert_eq!(pending.purpose, mf_chat::CallPurpose::Title);
+                let mut wrong = (*pending).clone();
+                wrong.database_path = path.with_extension("other.sqlite");
+                assert!(matches!(
+                    host.retry_title_completion(wrong),
+                    Err(ChatError::Invalid {
+                        field: "completion",
+                        ..
+                    })
+                ));
+                let error = host.retry_title_completion(*pending).unwrap_err();
+                let ChatError::Uncommitted { pending, .. } = error else {
+                    panic!("{error:?}");
+                };
                 connection
                     .batch_execute("DROP TRIGGER reject_title;")
                     .unwrap();
@@ -371,6 +393,79 @@ fn execution_probe() {
                 .unwrap();
             let completion = host.retry_completion(*pending).unwrap();
             json!({"text":completion.reply.text, "messages":host.database().messages(&session.id, 10, None).unwrap().messages.len()})
+        }
+        "abandon" => {
+            let mut connection =
+                diesel::SqliteConnection::establish(path.to_str().unwrap()).unwrap();
+            connection.batch_execute("CREATE TRIGGER reject_completion BEFORE UPDATE ON model_calls WHEN NEW.state = 'succeeded' BEGIN SELECT RAISE(ABORT, 'injected write failure'); END;").unwrap();
+            let error = host
+                .submit(&session.id, "persist once")
+                .unwrap()
+                .join()
+                .unwrap_err();
+            let ChatError::Uncommitted { pending, .. } = error else {
+                panic!("{error:?}");
+            };
+            let invocation = pending.completion.invocation.clone();
+            let mut wrong = (*pending).clone();
+            wrong.purpose = mf_chat::CallPurpose::Title;
+            assert!(matches!(
+                host.retry_completion(wrong),
+                Err(ChatError::Invalid {
+                    field: "purpose",
+                    ..
+                })
+            ));
+            let mut wrong = (*pending).clone();
+            wrong.database_path = path.with_extension("other.sqlite");
+            assert!(matches!(
+                host.retry_completion(wrong),
+                Err(ChatError::Invalid {
+                    field: "database_path",
+                    ..
+                })
+            ));
+            let mut wrong = invocation.clone();
+            wrong.session_id = "another-session".into();
+            assert!(matches!(
+                host.abandon_completion(wrong),
+                Err(ChatError::Conflict { .. })
+            ));
+            assert_eq!(
+                host.database().call(&invocation.call_id).unwrap().state,
+                "running"
+            );
+            assert!(host.abandon_completion(invocation.clone()).unwrap());
+            connection
+                .batch_execute("DROP TRIGGER reject_completion;")
+                .unwrap();
+            let mut job = host.retry(&invocation.turn_id).unwrap();
+            synchronize();
+            assert!(!job.poll());
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while !job.poll() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let result = job.join().unwrap();
+            assert_ne!(result.invocation.call_id, invocation.call_id);
+            assert_eq!(
+                host.database()
+                    .turn(&result.invocation.turn_id)
+                    .unwrap()
+                    .retry_of,
+                Some(invocation.turn_id.clone())
+            );
+            assert!(!host.abandon_completion(result.invocation.clone()).unwrap());
+            assert!(matches!(
+                host.retry(&result.invocation.turn_id),
+                Err(ChatError::Invalid {
+                    field: "retry_of",
+                    ..
+                })
+            ));
+            json!({"result":result, "original_state":host.database().turn(&invocation.turn_id).unwrap().state,
+                "history":host.database().history(&session.id, 1024).unwrap().history.len()})
         }
         "cleanup" => {
             let mut connection =
@@ -529,10 +624,97 @@ fn close_joins_pending_work_before_releasing_ownership() {
 
 #[test]
 fn model_preparation_validates_config_without_resolving_credentials() {
+    assert!(ModelProfile::new(" ", json!({"model":"example"})).is_err());
     assert!(ModelProfile::new("default", json!({"model":""})).is_err());
     ModelProfile::new(
         "default",
         json!({"model":"example", "api_key_env":"MF_CHAT_MISSING_PREPARATION_KEY"}),
     )
     .unwrap();
+}
+
+#[test]
+fn invalid_host_configuration_is_rejected_before_database_initialization() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("chat.sqlite");
+    let base = HostConfig::new(profile("default", "http://127.0.0.1:1/v1"));
+    let mut limits = base.clone();
+    limits.max_active = 0;
+    let mut profiles = base.clone();
+    profiles.profiles.clear();
+    let mut alias = base.clone();
+    alias
+        .profiles
+        .insert("alias".into(), base.profiles["default"].clone());
+    let mut title = base.clone();
+    title.title_profile = Some("missing".into());
+    for config in [limits, profiles, alias, title] {
+        assert!(ChatHost::open(&path, config).is_err());
+        assert!(!path.exists());
+    }
+    ChatHost::open(&path, base).unwrap().close().unwrap();
+}
+
+#[test]
+fn rejected_submissions_leave_sessions_and_usage_unchanged() {
+    let directory = tempfile::tempdir().unwrap();
+    let model = profile("default", "http://127.0.0.1:1/v1");
+    assert_eq!(model.identity().profile, "default");
+    let host =
+        ChatHost::open(directory.path().join("chat.sqlite"), HostConfig::new(model)).unwrap();
+    let missing = host
+        .database()
+        .create_session("missing", None, None)
+        .unwrap();
+    assert!(matches!(
+        host.submit(&missing.id, "question"),
+        Err(ChatError::ProfileMissing { .. })
+    ));
+    let archived = host
+        .database()
+        .create_session("default", None, None)
+        .unwrap();
+    assert!(matches!(
+        host.submit(&archived.id, ""),
+        Err(ChatError::Invalid {
+            field: "prompt",
+            ..
+        })
+    ));
+    host.database().archive_session(&archived.id).unwrap();
+    assert!(matches!(
+        host.submit(&archived.id, "question"),
+        Err(ChatError::SessionArchived { .. })
+    ));
+    for id in [&missing.id, &archived.id] {
+        assert!(
+            host.database()
+                .messages(id, 10, None)
+                .unwrap()
+                .messages
+                .is_empty()
+        );
+    }
+    assert_eq!(
+        host.usage(mf_chat::UsageQuery::default())
+            .unwrap()
+            .overall
+            .attempted_calls,
+        0
+    );
+    host.close().unwrap();
+}
+
+#[test]
+fn abandoning_a_reply_preserves_identity_and_allows_a_fresh_polled_retry() {
+    let mut reply = Reply::text("retry answer");
+    reply.header_delay = Duration::from_millis(1200);
+    let server = Server::start(vec![Reply::text("uncommitted"), reply]);
+    let result = probe(&server, "abandon", None);
+    assert_eq!(result["original_state"], "cancelled");
+    assert_eq!(result["history"], 2);
+    assert_eq!(result["result"]["reply"]["text"], "retry answer");
+    let requests = server.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(messages(&requests[0]), messages(&requests[1]));
 }
