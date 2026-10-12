@@ -112,6 +112,25 @@ filterset = "binary_id(=mf-cli::examples) | binary_id(=mf-compiler::llm_workflow
 globs = ["examples/stream-batch.json"]
 filterset = "binary_id(=mf-cli::examples) | binary_id(=mf-cli::runner_observability) | binary_id(=mf-compiler::batch) | binary_id(=mf-compiler::stream_observation) | binary_id(=mf-compiler::stream_runner)"
 
+[[workspace.metadata.affected.rule]]
+globs = [
+    "crates/mf-compiler/tests/fixtures/embedding-host/Cargo.template.toml",
+    "crates/mf-compiler/tests/fixtures/embedding-host/answer.json",
+    "crates/mf-compiler/tests/fixtures/embedding-host/build.rs",
+    "crates/mf-compiler/tests/fixtures/embedding-host/contract-stream.json",
+    "crates/mf-compiler/tests/fixtures/embedding-host/contract.json",
+    "crates/mf-compiler/tests/fixtures/embedding-host/counter.json",
+    "crates/mf-compiler/tests/fixtures/embedding-host/events.json",
+    "crates/mf-compiler/tests/fixtures/embedding-host/src/main.rs",
+    "crates/mf-compiler/tests/fixtures/embedding-host/typed.json",
+    "crates/mf-compiler/tests/fixtures/embedding_stateful.rs",
+    "examples/embedded-workflows/Cargo.toml",
+    "examples/embedded-workflows/answer.json",
+    "examples/embedded-workflows/build.rs",
+    "examples/embedded-workflows/src/main.rs",
+]
+filterset = "binary_id(=mf-compiler::embedding_host)"
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
