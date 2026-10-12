@@ -1,0 +1,24 @@
+# Implementation Tasks
+
+## 1. File Fixtures
+
+- [ ] Extract fixed host Cargo, Rust, and JSON inputs into file fixtures.
+- [ ] Keep temporary copying and path/scenario mutations in the acceptance test.
+- [ ] Include fixtures in Nix/Cargo sources, validate unchanged behavior, and commit.
+
+## 2. Source Generation and Host Preparation
+
+- [ ] Remove build registry and provider bindings; emit only structural source modules.
+- [ ] Reuse shared task/stream preparation and attributed error observation.
+- [ ] Expose embedded plans and manifests based on current host node metadata.
+- [ ] Remove the embedding layout profile and unnecessary macro support exports.
+- [ ] Verify error boundaries, renamed normal dependencies, and state/resource contracts.
+- [ ] Update the example/docs, validate focused checks, and commit.
+
+## 3. Review and Delivery
+
+- [ ] Review APIs, module boundaries, errors, fixtures, and commits against AGENTS.md.
+- [ ] Run ablations and remove unneeded design or duplicated coverage.
+- [ ] Run pinned coverage, hooks, full Nix checks, packaging, and strict validation.
+- [ ] Archive the specification after review and commit the final state.
+- [ ] Push, open the replacement PR, and resolve CI or review findings.
