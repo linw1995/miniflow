@@ -327,3 +327,51 @@ fn combined_canonical_payload_has_a_checked_boundary() {
         .is_err()
     );
 }
+
+#[test]
+fn node_help_uses_the_selected_schema_without_reading_context() {
+    let target = target();
+    let workflow: WorkflowInputSchema = serde_json::from_value(json!({
+        "inputs":{"source":{"path":{"type":"string", "required":true}}}, "stdin":{}
+    }))
+    .unwrap();
+    for args in [
+        vec!["--node=copy.part", "--help"],
+        vec!["--help", "--node", "copy.part"],
+        vec!["--node=copy.part", "--context-file=missing", "-h"],
+    ] {
+        let error = RunnerInvocation::parse(
+            args.into_iter().map(Into::into),
+            &workflow,
+            std::slice::from_ref(&target),
+        )
+        .unwrap_err();
+        let mf_runtime::RunnerArgumentError::Cli { source } = error else {
+            panic!("expected a clap help response");
+        };
+        assert_eq!(source.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = source.to_string();
+        assert!(help.contains("Run workflow node copy.part"));
+        assert!(help.contains("--copy.part.text <VALUE>"));
+        assert!(help.contains("--context-file <PATH>"));
+        assert!(!help.contains("--source.path"));
+    }
+    let error =
+        RunnerInvocation::parse(["--help".into()], &workflow, std::slice::from_ref(&target))
+            .unwrap_err();
+    assert!(error.to_string().contains("--source.path <VALUE>"));
+    assert!(!error.to_string().contains("--copy.part.text"));
+    assert!(
+        RunnerInvocation::parse(
+            [
+                "--node=copy.part",
+                "--copy.part.text=x",
+                "--source.path=data.txt"
+            ]
+            .map(Into::into),
+            &workflow,
+            std::slice::from_ref(&target),
+        )
+        .is_err()
+    );
+}

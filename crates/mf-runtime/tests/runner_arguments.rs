@@ -32,6 +32,7 @@ fn runner_verbosity_preserves_workflow_values_and_transport_validation() {
 fn runner_verbosity_accumulates_clusters_and_caps_at_full_records() {
     for (flags, expected) in [
         (vec![], 0),
+        (vec!["--"], 0),
         (vec!["-vv"], 2),
         (vec!["-v", "--verbose"], 2),
         (vec!["-vvv"], 3),
@@ -125,8 +126,16 @@ fn rejects_invalid_named_parameters_and_mixed_transports() {
         vec!["--read.part.path=x", "--read.part.items=[\"wrong\"]"],
         vec!["--read.part.path=x", "--read.part.object={\"a\":1,\"a\":2}"],
         vec!["--read.part.path=x", "--read.part.count=1,\"injected\":2"],
-        vec!["--read.part.path=x", "--inputs", "{}"],
-        vec!["--inputs", "{}", "--read.part.path=x"],
+        vec![
+            "--read.part.path=x",
+            "--inputs",
+            r#"{"read.part.path":"y"}"#,
+        ],
+        vec![
+            "--inputs",
+            r#"{"read.part.path":"y"}"#,
+            "--read.part.path=x",
+        ],
         vec!["--read.part.path=x", "--inputs-file", "missing"],
         vec!["--inputs", "{\"read.part\":{\"path\":\"x\"}}"],
     ] {
@@ -182,10 +191,85 @@ fn parameter_sources_are_unambiguous() {
     for flag in ["--validate", "--describe", "--describe-interface"] {
         let error =
             WorkflowArguments::parse([flag.into()], &WorkflowInputSchema::default()).unwrap_err();
-        assert!(error.to_string().contains("unknown workflow argument"));
+        let mf_runtime::RunnerArgumentError::Cli { source } = error else {
+            panic!("expected a clap error");
+        };
+        assert_eq!(source.kind(), clap::error::ErrorKind::UnknownArgument);
     }
     assert_eq!(
         WorkflowArguments::parse([], &WorkflowInputSchema::default()).unwrap(),
         WorkflowArguments::default()
     );
+}
+
+#[test]
+fn long_options_remain_flags_and_short_option_values_remain_literal() {
+    for flag in ["--verbose", "--inputs", "--help"] {
+        assert!(
+            mf_runtime::RunnerArguments::parse(
+                ["--read.part.path", flag].map(Into::into),
+                &schema(),
+            )
+            .is_err(),
+            "{flag}",
+        );
+    }
+    for value in ["-h", "-", "-42"] {
+        let options = mf_runtime::RunnerArguments::parse(
+            ["--read.part.path", value, "-v"].map(Into::into),
+            &schema(),
+        )
+        .unwrap();
+        assert_eq!(options.inputs.0["read.part.path"], json!(value));
+        assert_eq!(options.verbose, 1);
+    }
+}
+
+#[test]
+fn inline_transports_preserve_exclusivity_and_file_limits() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("inputs.json");
+    std::fs::write(&path, r#"{"read.part.path":"data.txt"}"#).unwrap();
+    for argument in [
+        r#"--inputs={"read.part.path":"data.txt"}"#.to_owned(),
+        format!("--inputs-file={}", path.display()),
+    ] {
+        let options = mf_runtime::RunnerArguments::parse([argument.into()], &schema()).unwrap();
+        assert_eq!(options.inputs.0["read.part.path"], json!("data.txt"));
+    }
+    for args in [
+        vec!["--inputs={}", "--inputs={}"],
+        vec!["--inputs={}", "--inputs-file=missing"],
+        vec![r#"--inputs={"read.part.path":"y"}"#, "--read.part.path=x"],
+    ] {
+        assert!(
+            mf_runtime::RunnerArguments::parse(args.into_iter().map(Into::into), &schema())
+                .is_err()
+        );
+    }
+    std::fs::write(&path, " ".repeat(mf_runtime::MAX_WORKFLOW_INPUT_BYTES + 1)).unwrap();
+    assert!(
+        mf_runtime::RunnerArguments::parse(
+            [format!("--inputs-file={}", path.display()).into()],
+            &schema(),
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn help_describes_dynamic_inputs_without_required_input_validation() {
+    for flag in ["--help", "-h"] {
+        let error = mf_runtime::RunnerArguments::parse([flag.into()], &schema()).unwrap_err();
+        let mf_runtime::RunnerArgumentError::Cli { source } = error else {
+            panic!("expected a clap help response");
+        };
+        assert_eq!(source.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = source.to_string();
+        assert!(help.contains("--read.part.path <VALUE>"));
+        assert!(help.contains("string (required)"));
+        assert!(help.contains("list<int64> (optional)"));
+        assert!(help.contains("--inputs-file <PATH>"));
+        assert!(help.contains("--verbose"));
+    }
 }

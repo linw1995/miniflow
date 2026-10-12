@@ -77,9 +77,11 @@ fn moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts() 
                 .stdin(Stdio::null())
                 .output()
                 .unwrap();
-            assert!(!output.status.success());
+            assert_eq!(output.status.code(), Some(2));
             assert!(output.stdout.is_empty());
-            assert!(String::from_utf8_lossy(&output.stderr).contains("unknown workflow argument"));
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(stderr.contains("unexpected argument"), "{stderr}");
+            assert!(stderr.contains(flag), "{stderr}");
         }
         assert!(!data.exists());
         fs::write(&data, "hello\n").unwrap();

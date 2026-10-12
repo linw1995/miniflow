@@ -285,8 +285,15 @@ fn packaged_cli_acceptance() {
         command
     };
     let invalid = command().arg("--unknown").output().unwrap();
-    assert!(!invalid.status.success());
-    assert!(String::from_utf8_lossy(&invalid.stderr).contains("usage:"));
+    assert_eq!(invalid.status.code(), Some(2));
+    assert!(invalid.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&invalid.stderr);
+    assert!(stderr.contains("Usage:"), "{stderr}");
+    assert!(stderr.contains("--unknown"), "{stderr}");
+    let help = command().arg("--help").output().unwrap();
+    assert!(help.status.success());
+    assert!(help.stderr.is_empty());
+    assert!(String::from_utf8_lossy(&help.stdout).contains("Usage:"));
     assert_eq!(
         serde_json::from_slice::<Value>(&checked(&mut command()).stdout).unwrap(),
         json!({"result":14})

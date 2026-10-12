@@ -74,7 +74,14 @@ fn workflow_manifest() -> Result<mf_runtime::WorkflowManifest, mf_runtime::Workf
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
-        Err(error) => { eprintln!("{error}"); std::process::ExitCode::FAILURE }
+        Err(error) => {
+            if let Some(mf_runtime::RunnerArgumentError::Cli { source }) = error.downcast_ref() {
+                let _ = source.print();
+                return std::process::ExitCode::from(source.exit_code() as u8);
+            }
+            eprintln!("{error}");
+            std::process::ExitCode::FAILURE
+        }
     }
 }
 

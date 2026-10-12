@@ -20,7 +20,8 @@ opentelemetry.workspace = true
 inventory.workspace = true
 rpds.workspace = true
 
-# Runtime values and error reporting.
+# Runner argument parsing, runtime values, and error reporting.
+clap = { workspace = true, features = ["string"] }
 mf-runtime-derive.workspace = true
 serde = { workspace = true, features = ["derive", "rc"] }
 serde_json.workspace = true
