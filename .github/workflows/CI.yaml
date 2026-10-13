@@ -70,39 +70,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-        with:
-          fetch-depth: 0
       - uses: ./.github/actions/setup-nix
         with:
           cache-key-name: coverage
-      - name: Restore PR affected-test baseline
-        if: github.event_name == 'pull_request'
-        id: pr-baseline
-        uses: actions/cache/restore@v6
-        with:
-          path: |
-            target/affected/coverage.db
-            target/affected/baseline.sha
-            target/affected/commits.bundle
-            target/affected/profiles
-          key: affected-pr-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mf-*/Cargo.toml', 'crates/builtin-nodes/*/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.event.pull_request.number }}-${{ github.sha }}
-          restore-keys: |
-            affected-pr-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mf-*/Cargo.toml', 'crates/builtin-nodes/*/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.event.pull_request.number }}-
-      - name: Restore affected-test baseline
-        if: github.event_name != 'pull_request' || steps.pr-baseline.outputs.cache-matched-key == ''
-        uses: actions/cache/restore@v6
-        with:
-          path: |
-            target/affected/coverage.db
-            target/affected/baseline.sha
-          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mf-*/Cargo.toml', 'crates/builtin-nodes/*/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          restore-keys: |
-            affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mf-*/Cargo.toml', 'crates/builtin-nodes/*/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-
       - name: Cache coverage dependencies
         uses: actions/cache@v6
         with:
           path: |
-            target/affected/build
             target/coverage/build/debug
             target/coverage/build/.mf-coverage-identity
             target/coverage/build/nextest-build-cache/ci
@@ -111,70 +85,22 @@ jobs:
             coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
             coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-
             coverage-${{ runner.os }}-${{ runner.arch }}-
-      - name: Run affected tests and coverage
-        id: coverage
+      - name: Run native coverage
         env:
           NEXTEST_PROFILE: ci
           MF_TEST_BUILD_CACHE_DIR: ${{ github.workspace }}/target/coverage/build/nextest-build-cache/ci
-        run: |
-          if [[ "$GITHUB_REF" == "refs/heads/main" && "$GITHUB_EVENT_NAME" != "pull_request" ]]; then
-            nix develop --command bash scripts/run-cov.sh --refresh-affected
-            echo "baseline=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          if [[ "$GITHUB_EVENT_NAME" == "pull_request" ]]; then
-            nix develop --command bash scripts/run-cov.sh --refresh-affected-cov
-            echo "pr-baseline=true" >> "$GITHUB_OUTPUT"
-          else
-            nix develop --command bash scripts/run-cov.sh --affected
-          fi
-          if [[ -s target/coverage/result/lcov.info ]]; then
-            echo "report=true" >> "$GITHUB_OUTPUT"
-            if [[ "$GITHUB_EVENT_NAME" != "pull_request" ]] && jq -e '.selection.summary.mode == "full-suite-no-listing"' target/affected/report.json > /dev/null; then
-              echo "full=true" >> "$GITHUB_OUTPUT"
-              echo "flags=rust,rust-affected" >> "$GITHUB_OUTPUT"
-            else
-              echo "flags=rust-affected" >> "$GITHUB_OUTPUT"
-            fi
-          fi
-      - name: Save affected-test baseline
-        if: steps.coverage.outputs.baseline == 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: |
-            target/affected/coverage.db
-            target/affected/baseline.sha
-          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mf-*/Cargo.toml', 'crates/builtin-nodes/*/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-      - name: Save PR affected-test baseline
-        if: steps.coverage.outputs.pr-baseline == 'true' && steps.pr-baseline.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v6
-        with:
-          path: |
-            target/affected/coverage.db
-            target/affected/baseline.sha
-            target/affected/commits.bundle
-            target/affected/profiles
-          key: affected-pr-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mf-*/Cargo.toml', 'crates/builtin-nodes/*/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.event.pull_request.number }}-${{ github.sha }}
-      - name: Upload test-selection report
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: affected-tests
-          path: target/affected/report.json
-          overwrite: true
+        run: nix develop --command bash scripts/run-cov.sh
       - name: Upload coverage artifact
-        if: steps.coverage.outputs.report == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: target/coverage/result/
           overwrite: true
       - name: Upload coverage to Codecov
-        if: steps.coverage.outputs.report == 'true' && (github.event_name == 'pull_request' || steps.coverage.outputs.full == 'true')
         uses: codecov/codecov-action@v7
         with:
           files: target/coverage/result/lcov.info
           disable_search: true
-          flags: ${{ steps.coverage.outputs.flags }}
+          flags: rust
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}

@@ -42,37 +42,11 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 0
       - uses: ./.github/actions/setup-nix
         with:
           cache-key-name: test
-      - name: Cache collection dependencies
-        if: matrix.runner == 'ubuntu-latest'
-        uses: actions/cache@v6
-        with:
-          path: |
-            target/affected/build
-            target/nextest-build-cache/collect
-          key: collect-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
-          restore-keys: |
-            collect-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
-      - name: Run full macOS flake checks
-        if: matrix.runner == 'macos-14'
+      - name: Run full flake checks
         run: nix flake check -L
-      - name: Run full Linux tests and collect affected-test baseline
-        if: matrix.runner == 'ubuntu-latest'
-        env:
-          MF_TEST_BUILD_CACHE_DIR: ${{ github.workspace }}/target/nextest-build-cache/collect
-        run: nix develop --command bash scripts/run-cov.sh --collect-affected
-      - name: Save affected-test baseline
-        if: matrix.runner == 'ubuntu-latest' && github.ref_name == github.event.repository.default_branch
-        uses: actions/cache/save@v6
-        with:
-          path: |
-            target/affected/coverage.db
-            target/affected/baseline.sha
-          # Collection creates manifests under target; they must not change the restore key.
-          key: affected-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/mf-*/Cargo.toml', 'crates/builtin-nodes/*/Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock') }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
 
   coverage:
     name: Full coverage
@@ -83,7 +57,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 0
       - uses: ./.github/actions/setup-nix
         with:
           cache-key-name: coverage
@@ -114,7 +87,6 @@ jobs:
         with:
           files: target/coverage/result/lcov.info
           disable_search: true
-          # A full report also seeds the comparison base for PR patch reports.
-          flags: rust,rust-affected
+          flags: rust
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}

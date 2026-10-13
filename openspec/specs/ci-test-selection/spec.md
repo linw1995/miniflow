@@ -2,142 +2,81 @@
 
 ## Purpose
 
-Define how repository CI selects Rust tests, refreshes trusted per-test coverage mappings, and separates PR patch feedback from complete project coverage.
+Define complete Rust test execution, coverage reporting, and scheduled
+cross-platform verification for repository CI.
 
 ## Requirements
 
-### Requirement: Restore compatible default-branch mappings
+### Requirement: Execute the complete Linux suite in regular CI
 
-CI SHALL restore per-test coverage mappings and their companion commit anchor from the default branch. Restore
-and save SHALL use the same source-input fingerprint, scoped by host platform. Only the root manifest,
-workspace member manifests, the lockfile, and pinned build inputs SHALL contribute to that fingerprint. Non-
-workspace manifests MUST NOT change cache identity. PRs MUST NOT publish replacement main mappings; PR
-snapshots SHALL use an isolated namespace.
+Pull requests and pushes to main SHALL execute the complete Linux test suite
+with the pinned toolchain and generate coverage for the current source tree.
+Test execution MUST NOT depend on prior coverage mappings or changed-input
+selection. Compilation or test failures SHALL fail CI and prevent report
+publication.
 
-#### Scenario: Collection creates generated manifests
+#### Scenario: A pull request changes one source file
 
-- **WHEN** a successful collection creates Cargo manifests in generated directories
-- **THEN** its saved baseline remains compatible with a clean checkout using the same source manifests and pinned build inputs
+- **WHEN** a pull request changes a Rust source file, fixture, or build input
+- **THEN** CI runs the complete Linux test suite before uploading coverage
 
-#### Scenario: A source manifest changes
+#### Scenario: A test fails
 
-- **WHEN** a workspace manifest, lockfile, or pinned build input changes
-- **THEN** CI does not assume the old database is compatible and retains full-suite fallback
+- **WHEN** compilation or a test fails during coverage execution
+- **THEN** CI fails and does not upload a successful coverage report
 
-#### Scenario: A standalone fixture manifest changes
+### Requirement: Cache build artifacts without changing test selection
 
-- **WHEN** a change modifies a standalone fixture manifest with an explicit test-input mapping
-- **THEN** the baseline cache identity remains compatible and the rule selects the fixture's consuming tests
+CI SHALL reuse compatible coverage dependencies and generated-project build
+artifacts. The coverage script SHALL remove previous report data and workspace
+binaries before execution so stale coverage mappings cannot contribute to
+current reports. Missing caches MUST NOT prevent complete test execution.
 
-### Requirement: Refresh mappings after successful main verification
+#### Scenario: No compatible build cache exists
 
-Main-branch CI SHALL execute incremental collection when the database is compatible and inputs support selective execution. It SHALL retain untouched tests' mappings and original source coordinates. Missing data, incompatible fingerprints, unavailable anchors, or untracked inputs SHALL require full collection. Only successful collection SHALL advance the companion commit anchor and publish the baseline.
+- **WHEN** CI starts without a compatible dependency cache
+- **THEN** it builds the required binaries and executes the complete suite
 
-#### Scenario: A Rust source change affects part of the suite
+### Requirement: Publish complete coverage reports
 
-- **WHEN** main changes Rust source covered by a compatible database
-- **THEN** CI collects affected tests once and preserves mappings for untouched tests without repeating aggregate coverage execution
+PR, main, and nightly coverage runs SHALL upload the current complete LCOV
+report under the same rust flag with automatic report discovery disabled.
+Codecov SHALL evaluate project coverage and PR patch coverage using that flag
+without carrying forward prior reports.
 
-#### Scenario: A collection fails
+#### Scenario: Main verification succeeds
 
-- **WHEN** compilation or a selected test fails during collection
-- **THEN** the companion anchor remains unchanged and CI does not publish a replacement baseline
+- **WHEN** main passes complete coverage execution
+- **THEN** CI uploads complete project coverage for the current source tree
 
-### Requirement: Apply conservative input fallbacks
+### Requirement: Retain scheduled cross-platform full verification
 
-Selection SHALL compare changes since collection. Exact-path Cargo metadata rules SHALL select known fixture
-and example consumers and supply the wrapper's exemptions. Wildcards MUST NOT exempt unknown inputs. Global
-build/test configuration, build scripts, proc macros, and unmapped fixtures, examples, snapshots, or other
-non-Rust inputs SHALL require full execution. Known repository documentation SHALL be exempt. Diagnostics
-SHALL identify fallback inputs and collection mode.
+Nightly SHALL run complete Linux and macOS flake checks and complete Linux
+coverage. Scheduling SHALL retain daily recent-change verification, retries
+for commits without successful full verification, and at least weekly full
+verification. Skipped, failed, or partial suites MUST NOT reset the weekly
+deadline. Manual dispatch SHALL always run the full suite.
 
-#### Scenario: A mapped external input changes
+#### Scenario: The branch is quiet after successful verification
 
-- **WHEN** a compatible baseline exists and a change modifies a fixture or example listed by an exact-path input rule
-- **THEN** affected execution and incremental collection select its consuming tests while preserving unrelated tests' mappings
+- **WHEN** the current commit passed the full nightly suite within the last
+  seven days and the default branch has no commits in the last 24 hours
+- **THEN** the scheduled workflow may skip full verification
 
-#### Scenario: An unknown input matches a wildcard rule
+#### Scenario: Manual verification is requested
 
-- **WHEN** a fixture, example, or non-Rust input changes without an exact-path rule, even if it matches a wildcard rule
-- **THEN** CI retains full-suite execution
+- **WHEN** a user manually dispatches nightly
+- **THEN** Linux and macOS full checks and complete Linux coverage execute
 
-#### Scenario: Global nextest configuration changes
+### Requirement: Support focused local checks without replacing validation
 
-- **WHEN** a change modifies global nextest configuration even if an input rule matches it
-- **THEN** CI retains full-suite execution
+Local coverage execution SHALL use the pinned toolchain, generate reports
+under ignored target directories, and support explicit nextest filters and
+persistent generated-project build caches. Focused runs SHALL NOT replace
+required repository hooks and complete flake validation.
 
-#### Scenario: Rust changes include OpenSpec documentation
+#### Scenario: Repeat a local test iteration
 
-- **WHEN** a change modifies Rust source and OpenSpec Markdown or metadata
-- **THEN** documentation alone does not force the full suite
-
-#### Scenario: A Markdown fixture changes
-
-- **WHEN** a change modifies Markdown used as an unmapped fixture or an unknown input
-- **THEN** CI retains full-suite execution
-
-### Requirement: Separate partial and complete coverage reporting
-
-PRs SHALL retain patch coverage from selected tests and use only the patch coverage flag, including initial full collection and full-suite fallbacks. Main mapping collection SHALL not publish aggregate partial reports as complete project coverage. Nightly SHALL retain full-platform verification and complete Codecov reports. Incremental collection MUST NOT relabel untouched mappings as freshly collected coverage.
-
-#### Scenario: A PR performs full collection
-
-- **WHEN** a PR collects all tests to initialize or replace its baseline
-- **THEN** it uploads only patch coverage and leaves complete project coverage to full coverage runs outside PR CI
-
-#### Scenario: Main performs incremental collection
-
-- **WHEN** main refreshes only affected tests
-- **THEN** it publishes mappings while complete project coverage remains the responsibility of full coverage runs
-
-### Requirement: Support explicit local affected-test iterations
-
-Local development SHALL support clean-commit baseline collection, affected execution after source edits, and compatible incremental refresh after committing. Collection and execution SHALL use the same pinned toolchain, host platform, and instrumentation settings. Developers SHALL be able to reuse a persistent generated-project cache. Generated mappings and reports SHALL remain under ignored target directories, and affected execution SHALL not replace required final validation.
-
-#### Scenario: Repeat a local Rust edit
-
-- **WHEN** a developer edits Rust source after collecting a compatible local baseline
-- **THEN** the explicit affected command selects relevant tests and can reuse prepared fixture dependencies
-
-### Requirement: Reuse isolated successful PR baselines
-
-PR CI SHALL restore its latest compatible successful snapshot before falling back to main. Snapshot keys SHALL
-include PR, host, environment fingerprint, and tested commit. Only successful collection SHALL publish
-mappings, their anchor, and required Git objects. Compilation artifacts MUST use a separate cache. Selected
-tests SHALL execute once for both mappings and patch coverage. Retention SHALL rely on GitHub's automatic
-eviction.
-
-#### Scenario: Another commit arrives in the same PR
-
-- **WHEN** a PR adds a commit after compatible successful collection
-- **THEN** CI selects from its preserved per-test anchors and saves a new isolated snapshot while retaining untouched mappings
-
-#### Scenario: The previous merge commit is not advertised
-
-- **WHEN** a fresh runner restores mappings anchored to an earlier PR merge commit
-- **THEN** cached Git objects make the actual tested source tree available before selection
-
-#### Scenario: Collection fails or is cancelled
-
-- **WHEN** selected test execution or coverage extraction fails or is cancelled
-- **THEN** no replacement PR snapshot is published
-
-#### Scenario: The PR baseline was evicted
-
-- **WHEN** no compatible PR snapshot remains available
-- **THEN** CI falls back to compatible main mappings or a full collection
-
-#### Scenario: A mapped fixture changes between PR commits
-
-- **WHEN** an exact input rule selects a fixture consumer without a Rust coverage overlap
-- **THEN** incremental collection executes that consumer once and updates its mappings and current patch report
-
-#### Scenario: An earlier PR change remains unmodified
-
-- **WHEN** a later commit does not reselect a test that covered an earlier PR change
-- **THEN** its retained valid counters still contribute to current PR patch coverage
-
-#### Scenario: A test is removed
-
-- **WHEN** incremental collection prunes a test's mappings
-- **THEN** its cached counters are also removed rather than contributing obsolete hits
+- **WHEN** a developer runs the coverage script with an explicit nextest filter
+- **THEN** the selected tests execute and compatible build dependencies may
+  be reused without requiring a prior coverage database
