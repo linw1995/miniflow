@@ -281,12 +281,8 @@ impl StreamDataStore {
             return Some(0);
         }
         let received = self.witnesses.range(next..=highest).count() as u64;
-        Some(
-            highest
-                .saturating_sub(next)
-                .saturating_add(1)
-                .saturating_sub(received),
-        )
+        let missing = u128::from(highest) - u128::from(next) + 1 - u128::from(received);
+        Some(u64::try_from(missing).expect("the highest sequence has a retained witness"))
     }
 
     pub fn snapshot(&mut self) -> Arc<DataSnapshot> {
@@ -602,7 +598,7 @@ mod tests {
         assert!(store.witnesses.len() <= MAX_WITNESSES);
         let mut extreme = super::tests::store();
         extreme.admit(ports(&extreme, u64::MAX, 1)).unwrap();
-        assert!(extreme.snapshot().gaps.unwrap() > 0);
+        assert_eq!(extreme.snapshot().gaps, Some(u64::MAX));
         assert_eq!(extreme.witnesses.len(), 1);
     }
     #[test]

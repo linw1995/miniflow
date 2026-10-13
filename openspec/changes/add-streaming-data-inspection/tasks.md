@@ -36,8 +36,8 @@
 
 ## 6. Integration and final validation
 
-- [ ] 6.1 Run end-to-end stream observation with queue saturation, retention eviction, interrupted producers, failed export, and omitted large values; verify retained data remains inspectable and business results and lifecycle meanings remain unchanged. Run affected coverage during implementation and inspect `target/affected/report.json` for selection/fallback behavior.
-- [ ] 6.2 Run `openspec validate add-streaming-data-inspection --strict`, `nix develop --command prek -a`, and `nix flake check -L`; verify all required checks pass and review implementation against both spec deltas.
+- [x] 6.1 Run end-to-end stream observation with queue saturation, retention eviction, interrupted producers, failed export, and omitted large values; verify retained data remains inspectable and business results and lifecycle meanings remain unchanged. Run affected coverage during implementation and inspect `target/affected/report.json` for selection/fallback behavior.
+- [x] 6.2 Run `openspec validate add-streaming-data-inspection --strict`, `nix develop --command prek -a`, and `nix flake check -L`; verify all required checks pass and review implementation against both spec deltas.
 
 ## Workflow follow-up
 

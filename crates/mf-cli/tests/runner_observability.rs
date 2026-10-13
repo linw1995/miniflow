@@ -1190,6 +1190,7 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
     let mut child = command(&runner)
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
         .env("MF_RUN_ID", run_id.to_string())
+        .env(mf_telemetry::STREAM_DATA_CAPTURE_ENV, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1224,6 +1225,31 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         snapshot.stream.unwrap().counts.unwrap().delivered_outputs,
         2
     );
+    let data = receiver.data_snapshot();
+    assert!(data.status.contains("verified"), "{data:?}");
+    assert_eq!(data.faults, 0);
+    assert_eq!(data.sender_drops, 0);
+    let traces = receiver.trace_snapshot();
+    let feed = traces.rows.iter().find(|row| row.observation.span.attributes.iter().any(|attribute|
+        attribute.key == "mf.node.id" && matches!(attribute.value.as_ref().and_then(|value| value.value.as_ref()), Some(any_value::Value::StringValue(value)) if value == "feed"))).unwrap();
+    let related = data.related(
+        &feed.observation.span.trace_id,
+        &feed.observation.span.span_id,
+    );
+    assert_eq!(related.len(), 6);
+    assert_eq!(
+        related
+            .iter()
+            .filter(|row| matches!(
+                row.record.payload,
+                mf_telemetry::stream_data::DataPayload::Ports {
+                    direction: mf_telemetry::stream_data::Direction::Output,
+                    ..
+                }
+            ))
+            .count(),
+        5
+    );
     let closed = TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
@@ -1256,4 +1282,215 @@ fn stream_proto_value(value: &opentelemetry_proto::tonic::common::v1::AnyValue) 
         ),
         _ => panic!("unexpected stream metadata value"),
     }
+}
+
+#[test]
+fn streaming_data_receiver_retains_values_after_omission_and_retention_pressure() {
+    use mf_telemetry::stream_data::{DataPayload, DataValue, Direction, MAX_RECORD_BYTES};
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    if !loopback_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version": "2026-10-03", "execution": {"mode": "stream"},
+        "dependencies": {"core": {"package": "mfn-core", "path": crates_dir().join("builtin-nodes/core")}},
+        "nodes": [{"id": "feed", "kind": "builtin.readline"}],
+        "outputs": [{"name": "line", "node": "feed", "port": "line"}]
+    })).unwrap();
+    let runner = build(
+        &root.path().join("build"),
+        &root.path().join("flow.lock"),
+        &definition,
+    );
+    let description = read_manifest(&runner).unwrap().description;
+    let execute = |capture: bool| {
+        let run = mf_telemetry::identity::RunId::new();
+        let mut receiver = LoopbackReceiver::bind(description.clone(), run).unwrap();
+        let mut child = command(&runner)
+            .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
+            .env("MF_RUN_ID", run.to_string())
+            .env(
+                mf_telemetry::STREAM_DATA_CAPTURE_ENV,
+                if capture { "1" } else { "0" },
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("small\n{}\nafter\n", "x".repeat(MAX_RECORD_BYTES + 1)).as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let state = receiver.finish();
+        assert_eq!(state.lifecycle.completeness, Completeness::Complete);
+        (output, receiver.data_snapshot())
+    };
+    let (plain, unavailable) = execute(false);
+    let (captured, data) = execute(true);
+    assert_eq!(plain.stdout, captured.stdout);
+    assert!(unavailable.status.contains("unavailable"));
+    assert_eq!(data.omissions, 1);
+    assert!(data.records.iter().any(|row| matches!(
+        &row.record.payload,
+        DataPayload::Ports {
+            omission: Some(_),
+            ..
+        }
+    )));
+    assert!(data.records.iter().any(|row| matches!(&row.record.payload, DataPayload::Ports { values: Some(values), .. } if values.to_json()["line"] == "after")));
+
+    let run = mf_telemetry::identity::RunId::new();
+    let mut receiver = LoopbackReceiver::bind(description.clone(), run).unwrap();
+    let mut child = command(&runner)
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
+        .env("MF_RUN_ID", run.to_string())
+        .env(mf_telemetry::STREAM_DATA_CAPTURE_ENV, "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut output = child.stdout.take().unwrap();
+    let stdout = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        output.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+    let mut input = child.stdin.take().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(90);
+    // Pace admission on actual receiver evidence so this checks local retention,
+    // independently of sender queue loss tested at the exporter boundary.
+    for index in 0..mf_tui::stream_data::MAX_DATA_RECORDS + 8 {
+        writeln!(input, "value-{index}").unwrap();
+        loop {
+            let observed = receiver.data_snapshot().observed;
+            if observed >= index as u64 + 2 {
+                break;
+            }
+            if Instant::now() >= deadline {
+                child.kill().unwrap();
+                panic!("stream data did not arrive before deadline");
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+    drop(input);
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bytes = stdout.join().unwrap();
+    assert_eq!(
+        bytes
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .count(),
+        mf_tui::stream_data::MAX_DATA_RECORDS + 8
+    );
+    let state = receiver.finish();
+    assert_eq!(state.lifecycle.completeness, Completeness::Complete);
+    let data = receiver.data_snapshot();
+    assert_eq!(data.records.len(), mf_tui::stream_data::MAX_DATA_RECORDS);
+    assert!(data.evicted > 0 && data.retained_bytes <= mf_tui::stream_data::MAX_DATA_BYTES);
+    assert_eq!(data.gaps, Some(0));
+    assert_eq!(data.sender_drops, 0);
+    assert!(data.status.contains("verified"));
+    let last = data.records.last().unwrap();
+    assert!(
+        matches!(&last.record.payload, DataPayload::Ports { direction: Direction::Output, values: Some(DataValue::Object(values)), .. }
+        if values["line"].to_json() == format!("value-{}", mf_tui::stream_data::MAX_DATA_RECORDS + 7))
+    );
+
+    let (endpoint, stalled) = stalled_collector();
+    let started = Instant::now();
+    let mut saturated = command(&runner)
+        .env(
+            "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT",
+            format!("{endpoint}/v1/logs"),
+        )
+        .env(mf_telemetry::STREAM_DATA_CAPTURE_ENV, "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let count = mf_telemetry::stream_data::MAX_QUEUE_RECORDS * 4;
+    saturated
+        .stdin
+        .take()
+        .unwrap()
+        .write_all("pressure\n".repeat(count).as_bytes())
+        .unwrap();
+    let output = saturated.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .count(),
+        count
+    );
+    assert!(String::from_utf8_lossy(&output.stderr).contains("stream data export incomplete"));
+    assert!(
+        started.elapsed() < Duration::from_secs(8),
+        "stalled telemetry blocked the stream shutdown"
+    );
+    assert!(stalled.join().unwrap());
+
+    let run = mf_telemetry::identity::RunId::new();
+    let mut receiver = LoopbackReceiver::bind(description, run).unwrap();
+    let mut child = command(&runner)
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
+        .env("MF_RUN_ID", run.to_string())
+        .env(mf_telemetry::STREAM_DATA_CAPTURE_ENV, "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"before-interrupt\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while receiver.data_snapshot().observed < 2 {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            panic!("producer did not export live data");
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        receiver
+            .trace_snapshot()
+            .rows
+            .iter()
+            .all(|row| row.observation.span.name != "mf.node")
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+    drop(input);
+    receiver.finish();
+    let data = receiver.data_snapshot();
+    assert!(data.status.contains("end record missing"));
+    assert!(data.records.iter().any(
+        |row| matches!(&row.record.payload, DataPayload::Ports { values: Some(values), .. }
+        if values.to_json()["line"] == "before-interrupt")
+    ));
 }
