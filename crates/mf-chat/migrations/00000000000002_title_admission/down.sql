@@ -1,1 +1,0 @@
-DROP INDEX one_active_title_per_session;

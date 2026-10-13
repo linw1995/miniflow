@@ -63,6 +63,8 @@ CREATE TABLE model_calls (
 
 CREATE UNIQUE INDEX one_running_turn_per_session ON turns(session_id) WHERE state = 'running';
 CREATE UNIQUE INDEX one_conversation_call_per_turn ON model_calls(turn_id) WHERE purpose = 'conversation';
+CREATE UNIQUE INDEX one_active_title_per_session ON model_calls(session_id)
+    WHERE purpose = 'title' AND state IN ('pending', 'running');
 CREATE INDEX session_listing ON sessions(archived, created_at, id);
 CREATE INDEX message_order ON messages(session_id, sequence);
 CREATE INDEX call_filters ON model_calls(session_id, purpose, config_id, started_at);
