@@ -498,3 +498,256 @@ fn a_matching_event_over_the_admission_budget_is_counted_as_local_loss() {
         Completeness::UnverifiedTail
     );
 }
+
+#[test]
+fn retains_correlated_trace_details_after_completion_and_deduplicates_exports() {
+    if !loopback_available() {
+        return;
+    }
+    let mut receiver = LoopbackReceiver::bind(graph(), run_id()).unwrap();
+    let bytes = traces(&run_id().to_string());
+    let mut request = ExportTraceServiceRequest::decode(bytes.as_slice()).unwrap();
+    let resource = &mut request.resource_spans[0];
+    resource.resource = Some(opentelemetry_proto::tonic::resource::v1::Resource {
+        attributes: vec![attribute("service.name", string("test-workflow"))],
+        ..Default::default()
+    });
+    resource.scope_spans[0].scope = Some(InstrumentationScope {
+        name: "mf.workflow".into(),
+        version: "test".into(),
+        ..Default::default()
+    });
+    let span = &mut resource.scope_spans[0].spans[0];
+    span.start_time_unix_nano = 10;
+    span.end_time_unix_nano = 52;
+    span.attributes
+        .push(attribute("custom.attribute", string("trace-detail")));
+    let bytes = request.encode_to_vec();
+    for _ in 0..2 {
+        assert_eq!(
+            send(
+                receiver.endpoint(),
+                "/v1/traces",
+                "application/x-protobuf",
+                &bytes
+            ),
+            200
+        );
+    }
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/traces",
+            "application/x-protobuf",
+            &traces("87654321-4321-4321-9234-123456789abc")
+        ),
+        200
+    );
+    let snapshot = receiver.trace_snapshot();
+    assert_eq!(snapshot.rows.len(), 1);
+    let observation = &snapshot.rows[0].observation;
+    assert_eq!(observation.span.start_time_unix_nano, 10);
+    assert_eq!(observation.span.end_time_unix_nano, 52);
+    assert_eq!(
+        observation.span.attributes.last().unwrap().key,
+        "custom.attribute"
+    );
+    assert_eq!(
+        observation.resource.as_ref().unwrap().attributes[0].key,
+        "service.name"
+    );
+    assert_eq!(observation.scope.as_ref().unwrap().version, "test");
+    receiver.finish();
+    assert_eq!(receiver.trace_snapshot().rows.len(), 1);
+    assert_eq!(receiver.snapshot().traces.local_drops, 0);
+}
+
+#[test]
+fn rejects_invalid_trace_identity_parent_and_timestamps_without_lifecycle_loss() {
+    if !loopback_available() {
+        return;
+    }
+    let receiver = LoopbackReceiver::bind(graph(), run_id()).unwrap();
+    for invalid in 0..4 {
+        let bytes = traces(&run_id().to_string());
+        let mut request = ExportTraceServiceRequest::decode(bytes.as_slice()).unwrap();
+        let span = &mut request.resource_spans[0].scope_spans[0].spans[0];
+        match invalid {
+            0 => span.trace_id = vec![0; 16],
+            1 => span.span_id = vec![0; 8],
+            2 => span.parent_span_id = vec![1; 7],
+            _ => {
+                span.start_time_unix_nano = 2;
+                span.end_time_unix_nano = 1;
+            }
+        }
+        assert_eq!(
+            send(
+                receiver.endpoint(),
+                "/v1/traces",
+                "application/x-protobuf",
+                &request.encode_to_vec()
+            ),
+            400
+        );
+    }
+    assert!(receiver.trace_snapshot().rows.is_empty());
+    let snapshot = receiver.snapshot();
+    assert_eq!(snapshot.traces.local_drops, 4);
+    assert_eq!(snapshot.lifecycle.local_drops, 0);
+}
+
+#[test]
+fn retains_session_logs_before_spans_and_ignores_other_runs() {
+    if !loopback_available() {
+        return;
+    }
+    let receiver = LoopbackReceiver::bind(graph(), run_id()).unwrap();
+    let mut record = record(1, false, &run_id().to_string(), 1);
+    record.event_name = "custom.log".into();
+    record.trace_id = vec![1; 16];
+    record.span_id = vec![2; 8];
+    let mut request =
+        ExportLogsServiceRequest::decode(logs(vec![record.clone()]).as_slice()).unwrap();
+    request.resource_logs[0].scope_logs[0]
+        .scope
+        .as_mut()
+        .unwrap()
+        .name = "custom.scope".into();
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &request.encode_to_vec()
+        ),
+        200
+    );
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &request.encode_to_vec()
+        ),
+        200
+    );
+    let mut unrelated = record.clone();
+    unrelated
+        .attributes
+        .iter_mut()
+        .find(|attribute| attribute.key == "mf.run.id")
+        .unwrap()
+        .value = Some(string("87654321-4321-4321-9234-123456789abc"));
+    request.resource_logs[0].scope_logs[0].log_records = vec![unrelated];
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &request.encode_to_vec()
+        ),
+        200
+    );
+    assert!(receiver.trace_snapshot().rows.is_empty());
+    let retained = receiver.log_snapshot();
+    assert_eq!(retained.records.len(), 1);
+    assert_eq!(retained.observed_records, 2);
+    assert_eq!(retained.related(&[1; 16], &[2; 8]).len(), 1);
+    assert_eq!(
+        retained.records[0].scope.as_ref().unwrap().name,
+        "custom.scope"
+    );
+    assert_eq!(receiver.snapshot().lifecycle.observation_errors, 0);
+}
+
+#[test]
+fn raw_log_limits_do_not_stop_lifecycle_reduction_or_snapshot_assembly() {
+    if !loopback_available() {
+        return;
+    }
+    let mut receiver = LoopbackReceiver::bind(graph(), run_id()).unwrap();
+    for first in (0..4096).step_by(512) {
+        let records = (first..first + 512)
+            .map(|index| {
+                let mut record = record(1, false, &run_id().to_string(), 1);
+                record.time_unix_nano = index as u64 + 1;
+                record.event_name = "custom.log".into();
+                record
+            })
+            .collect();
+        let mut request = ExportLogsServiceRequest::decode(logs(records).as_slice()).unwrap();
+        request.resource_logs[0].scope_logs[0]
+            .scope
+            .as_mut()
+            .unwrap()
+            .name = "custom.scope".into();
+        assert_eq!(
+            send(
+                receiver.endpoint(),
+                "/v1/logs",
+                "application/x-protobuf",
+                &request.encode_to_vec()
+            ),
+            200
+        );
+    }
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &logs(vec![
+                record(1, false, &run_id().to_string(), 1),
+                record(2, true, &run_id().to_string(), 1)
+            ])
+        ),
+        200
+    );
+    let bodies = [
+        serde_json::json!({"record":"header","version":1}),
+        serde_json::json!({"record":"value","id":0,"value":{"kind":"object","data":{}}}),
+        serde_json::json!({"record":"node","scope":[],"node":"step","inputs":0,"outputs":0,"skipped":[],"outcome":"succeeded"}),
+        serde_json::json!({"record":"end"}),
+    ];
+    let records = bodies
+        .into_iter()
+        .enumerate()
+        .flat_map(|(sequence, body)| {
+            mf_telemetry::snapshot::packets(sequence, body)
+                .unwrap()
+                .map(|packet| {
+                    let mut record =
+                        packet.into_log_record(graph().workflow_id.as_str(), &run_id().to_string());
+                    record.trace_id = vec![1; 16];
+                    record.span_id = vec![2; 8];
+                    record
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let mut request = ExportLogsServiceRequest::decode(logs(records).as_slice()).unwrap();
+    request.resource_logs[0].scope_logs[0]
+        .scope
+        .as_mut()
+        .unwrap()
+        .name = mf_telemetry::snapshot::SCOPE.into();
+    assert_eq!(
+        send(
+            receiver.endpoint(),
+            "/v1/logs",
+            "application/x-protobuf",
+            &request.encode_to_vec()
+        ),
+        200
+    );
+    let state = receiver.finish();
+    assert_eq!(state.lifecycle.completeness, Completeness::Complete);
+    assert_eq!(state.lifecycle.local_drops, 0);
+    assert_eq!(state.lifecycle.observation_errors, 0);
+    assert_eq!(receiver.log_snapshot().records.len(), 4096);
+    assert_eq!(receiver.log_snapshot().local_drops, 6);
+    let data = receiver.span_data(&[1; 16], &[2; 8]);
+    assert!(data.node.is_some());
+    assert_eq!(data.status, "Complete");
+}

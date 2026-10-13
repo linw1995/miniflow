@@ -1003,6 +1003,30 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         "Complete"
     );
     assert_eq!(selected_receiver.history_len(), 2);
+    let traces = selected_receiver.trace_snapshot();
+    let node = traces
+        .rows
+        .iter()
+        .find(|row| row.observation.span.name == "mf.node")
+        .unwrap();
+    let data = selected_receiver
+        .span_data(
+            &node.observation.span.trace_id,
+            &node.observation.span.span_id,
+        )
+        .node
+        .unwrap();
+    assert_eq!(data.inputs["input"], json!([10, 20]));
+    assert_eq!(data.outputs["value"], json!([10, 20]));
+    assert!(
+        !selected_receiver
+            .log_snapshot()
+            .related(
+                &node.observation.span.trace_id,
+                &node.observation.span.span_id
+            )
+            .is_empty()
+    );
 
     let plain = execute(None, None);
     let (endpoint, collector) = collector();

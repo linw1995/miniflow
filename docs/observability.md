@@ -408,20 +408,42 @@ Ctrl-C or the two-second deadline forces termination. After the runner exits, th
 until `q`, Enter, Esc at the root, or Ctrl-C. The terminal is restored before the captured stdout is
 copied to CLI stdout.
 
-For finite runs, press `v` to browse recorded inputs and outputs, including Loop passes and Iteration items.
-Streaming runs show an explicit unavailable message instead. The launcher sets `MF_CAPTURE_SNAPSHOTS=0`
-for streams even when the parent environment enables capture; finite runs retain capture support.
-Use `j`/`k` or Up/Down to select a change, Home for the first change, and End/`f` to follow the latest.
-PgUp/PgDn scroll values; `v` or Esc returns to the graph. Previews are limited to 64 KiB per
-input/output object, while the complete values remain in memory. The view copies only the visible
-history entries and shares their immutable roots with the receiver.
+Press `v` to open OTEL Tracing for finite and streaming runs. The span tree groups records by
+trace and parent span IDs and orders siblings by start time. Children received before their parents
+remain visible and move under them when they arrive; selection stays attached to the same span.
+Spans appear after completion and export. Use `j`/`k` or Up/Down to select, Home for the first
+entry, and End/`f` to follow the last entry in tree order. `v` or Esc returns to the graph.
+
+Tab switches the selected span's right-hand pane:
+
+- **Details** shows timing, status, IDs, attributes, span events, links, resource, and scope metadata.
+- **Data** shows decoded node inputs/outputs, outcome, skipped ports, errors, and snapshot capture
+  diagnostics. Matching uses native trace/span IDs carried by snapshot LogRecords, including through
+  reordering and fragmentation. Repeated node names never substitute for invocation identity.
+- **Logs** shows independent LogRecords associated with both the selected trace and span IDs. Press
+  `l` to focus that list and select a record for its timestamp, severity, body, attributes, and metadata.
+
+Press `g` to switch between spans and session-wide LogRecords. Session logs remain available before
+spans finish, when spans are unsampled, or when records lack a retained span. In session log mode,
+Tab switches Logs and Data; a node-correlated log can expose decoded values while its span is still
+running. Records without valid correlation cannot be assigned guessed node data. PgUp/PgDn scroll
+all detail panes. Span events remain part of Details rather than being converted into LogRecords.
+
+Finite TUI children keep `MF_CAPTURE_SNAPSHOTS=1`. Streaming children receive capture disabled,
+even when inherited settings request it; their Data pane explains the unsupported mode while
+Details and Logs remain available. The receiver retains at most 4,096 unique spans and 4,096 unique
+LogRecords, with a separate 16 MiB encoded-data budget for each signal including resource/scope
+metadata. Admitted raw detail remains available throughout the session; overflow is counted as
+signal-specific display drops and does not stop lifecycle reduction or snapshot reconstruction.
+Span/log previews are limited to 64 KiB and each input/output object preview retains its 64 KiB limit.
+Capture errors preserve already decoded values and remain separate from raw signal retention loss.
 
 The CLI keeps at most 256 MiB of stdout in a private temporary spool and 1 MiB of recent stderr. It drains both pipes
 without waiting for a frame. If stdout capture fails or reaches its limit, the CLI stops the process group, displays the
 incomplete output state, and delivers any recoverable prefix after leaving the TUI. A failed final stdout copy is
 reported separately from the child result. Stderr history eviction is counted and shown. Missing OTel records never
 change the runner's exit result: the footer distinguishes known sequence gaps, local drops, and an unverified tail when
-the final lifecycle record is absent. Trace drops and diagnostic truncation are separate indicators.
+the final lifecycle record is absent. Trace/log display drops and diagnostic truncation are separate indicators.
 
 Run the local graph preview from an interactive terminal to see simulated node starts, completions, elapsed time, and an
 inactive branch:

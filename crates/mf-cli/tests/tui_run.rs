@@ -1,5 +1,9 @@
 #![cfg(unix)]
 
+#[path = "support/terminal.rs"]
+mod terminal;
+use terminal::Screen;
+
 use mf_telemetry::{
     description::{NodeDescription, WorkflowDescription, WorkflowDescriptionVersion},
     identity::WorkflowId,
@@ -25,46 +29,52 @@ fn tui_preserves_stdout_and_restores_terminal_after_missing_telemetry() {
 }
 
 #[test]
-fn tui_enables_data_history_and_browses_values_after_completion() {
+fn tui_browses_span_data_and_logs_after_completion() {
     check_capture(true);
 }
 
-fn check_capture(with_history: bool) {
+fn check_capture(with_observation: bool) {
     if !loopback_available() {
         return;
     }
     let directory = tempfile::tempdir().unwrap();
     let runner = directory.path().join("fake-runner");
-    let records = [
-        serde_json::json!({"record":"header","version":1}),
-        serde_json::json!({"record":"value","id":0,"value":{"kind":"string","data":"history-payload-42"}}),
-        serde_json::json!({"record":"value","id":1,"value":{"kind":"object","data":{"result":0}}}),
-        serde_json::json!({"record":"value","id":2,"value":{"kind":"object","data":{}}}),
-        serde_json::json!({"record":"node","scope":[],"node":"step","inputs":2,"outputs":1,"skipped":[],"outcome":"succeeded"}),
-        serde_json::json!({"record":"end"}),
-    ];
+    use opentelemetry_proto::tonic::{
+        collector::{logs::v1::ExportLogsServiceRequest, trace::v1::ExportTraceServiceRequest},
+        common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
+        logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
+        trace::v1::{ResourceSpans, ScopeSpans, Span},
+    };
     let placeholder = "00000000-0000-4000-8000-000000000000";
-    let workflow = format!("sha256:{}", "a".repeat(64));
-    let logs = records
-        .into_iter()
-        .enumerate()
-        .flat_map(|(sequence, body)| {
-            mf_telemetry::snapshot::packets(sequence, body)
-                .unwrap()
-                .map(|packet| packet.into_log_record(&workflow, placeholder))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let request = opentelemetry_proto::tonic::collector::logs::v1::ExportLogsServiceRequest {
-        resource_logs: vec![opentelemetry_proto::tonic::logs::v1::ResourceLogs {
-            scope_logs: vec![opentelemetry_proto::tonic::logs::v1::ScopeLogs {
-                scope: Some(
-                    opentelemetry_proto::tonic::common::v1::InstrumentationScope {
-                        name: mf_telemetry::snapshot::SCOPE.into(),
+    let request = ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            scope_spans: vec![ScopeSpans {
+                scope: Some(InstrumentationScope {
+                    name: "mf.workflow".into(),
+                    ..Default::default()
+                }),
+                spans: vec![Span {
+                    trace_id: vec![1; 16],
+                    span_id: vec![2; 8],
+                    name: "mf.node".into(),
+                    start_time_unix_nano: 100,
+                    end_time_unix_nano: 200,
+                    attributes: [
+                        ("mf.workflow.id", format!("sha256:{}", "a".repeat(64))),
+                        ("mf.run.id", placeholder.into()),
+                        ("mf.node.id", "step".into()),
+                    ]
+                    .into_iter()
+                    .map(|(key, value)| KeyValue {
+                        key: key.into(),
+                        value: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue(value)),
+                        }),
                         ..Default::default()
-                    },
-                ),
-                log_records: logs,
+                    })
+                    .collect(),
+                    ..Default::default()
+                }],
                 ..Default::default()
             }],
             ..Default::default()
@@ -74,16 +84,82 @@ fn check_capture(with_history: bool) {
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect();
-    let record = if with_history {
+    let bodies = [
+        serde_json::json!({"record":"header","version":1}),
+        serde_json::json!({"record":"value","id":0,"value":{"kind":"string","data":"history-payload-42"}}),
+        serde_json::json!({"record":"value","id":1,"value":{"kind":"object","data":{"result":0}}}),
+        serde_json::json!({"record":"value","id":2,"value":{"kind":"object","data":{}}}),
+        serde_json::json!({"record":"node","scope":[],"node":"step","inputs":2,"outputs":1,"skipped":[],"outcome":"succeeded"}),
+        serde_json::json!({"record":"end"}),
+    ];
+    let snapshots = bodies
+        .into_iter()
+        .enumerate()
+        .flat_map(|(sequence, body)| {
+            mf_telemetry::snapshot::packets(sequence, body)
+                .unwrap()
+                .map(|packet| {
+                    let mut record =
+                        packet.into_log_record(description().workflow_id.as_str(), placeholder);
+                    record.trace_id = vec![1; 16];
+                    record.span_id = vec![2; 8];
+                    record
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let logs = ExportLogsServiceRequest {
+        resource_logs: vec![ResourceLogs {
+            scope_logs: vec![
+                ScopeLogs {
+                    scope: Some(InstrumentationScope {
+                        name: mf_telemetry::snapshot::SCOPE.into(),
+                        ..Default::default()
+                    }),
+                    log_records: snapshots,
+                    ..Default::default()
+                },
+                ScopeLogs {
+                    scope: Some(InstrumentationScope {
+                        name: "test.logs".into(),
+                        ..Default::default()
+                    }),
+                    log_records: vec![LogRecord {
+                        time_unix_nano: 3_000_000_000_000_000_000,
+                        trace_id: vec![1; 16],
+                        span_id: vec![2; 8],
+                        event_name: "data-log-record-42".into(),
+                        severity_text: "INFO".into(),
+                        severity_number: 9,
+                        body: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue("log-body-42".into())),
+                        }),
+                        attributes: request.resource_spans[0].scope_spans[0].spans[0]
+                            .attributes
+                            .clone(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        }],
+    };
+    let encoded_logs: String = prost::Message::encode_to_vec(&logs)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    let record = if with_observation {
         format!(
             r#"[ "$MF_CAPTURE_SNAPSHOTS" = 1 ] || exit 10
-python3 -I -S - <<'SNAPSHOTS'
+python3 -I -S - <<'TRACES'
 import os
 import urllib.request
-payload = bytes.fromhex('{encoded}').replace(b'{placeholder}', os.environ['MF_RUN_ID'].encode())
-request = urllib.request.Request(os.environ['OTEL_EXPORTER_OTLP_ENDPOINT'] + '/v1/logs', data=payload, headers={{'Content-Type': 'application/x-protobuf'}})
-urllib.request.build_opener(urllib.request.ProxyHandler({{}})).open(request, timeout=2).read()
-SNAPSHOTS
+for signal, encoded in [('traces', '{encoded}'), ('logs', '{encoded_logs}')]:
+    payload = bytes.fromhex(encoded).replace(b'{placeholder}', os.environ['MF_RUN_ID'].encode())
+    request = urllib.request.Request(os.environ['OTEL_EXPORTER_OTLP_ENDPOINT'] + '/v1/' + signal, data=payload, headers={{'Content-Type': 'application/x-protobuf'}})
+    urllib.request.build_opener(urllib.request.ProxyHandler({{}})).open(request, timeout=2).read()
+TRACES
 "#
         )
     } else {
@@ -117,6 +193,7 @@ SNAPSHOTS
         .stdout(Stdio::piped())
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", "https://remote.invalid")
         .env("OTEL_EXPORTER_OTLP_HEADERS", "Authorization=secret")
+        .env("MF_CAPTURE_SNAPSHOTS", "1")
         .spawn()
         .unwrap();
     let mut captured_stdout = child.stdout.take().unwrap();
@@ -127,26 +204,36 @@ SNAPSHOTS
     });
     let mut master = fs::File::from(pty.master);
     let reader = thread::spawn(move || {
-        let mut output = Vec::new();
+        let mut output = String::new();
+        let mut screen = Screen::new(100, 30);
         let mut bytes = [0; 4096];
         let mut sent = false;
-        let mut opened = false;
+        let mut stage = 0;
         loop {
             match master.read(&mut bytes) {
                 Ok(0) | Err(_) => break,
                 Ok(len) => {
-                    output.extend_from_slice(&bytes[..len]);
-                    if !sent
-                        && output
-                            .windows(b"Exited:".len())
-                            .any(|part| part == b"Exited:")
-                    {
-                        if with_history && !opened {
+                    screen.feed(&bytes[..len]);
+                    let text = screen.text();
+                    output.push_str(&text);
+                    output.push('\n');
+                    if !sent && (stage > 0 || text.contains("Exited:")) {
+                        if !with_observation {
+                            master.write_all(b"q").unwrap();
+                            sent = true;
+                        } else if stage == 0 {
                             master.write_all(b"v").unwrap();
-                            opened = true;
-                        } else if !with_history
-                            || String::from_utf8_lossy(&output).contains("history-payload-42")
-                        {
+                            stage = 1;
+                        } else if stage == 1 && text.contains("OTEL Tracing") {
+                            master.write_all(b"\t").unwrap();
+                            stage = 2;
+                        } else if stage == 2 && text.contains("history-payload-42") {
+                            master.write_all(b"\t").unwrap();
+                            stage = 3;
+                        } else if stage == 3 && text.contains("log-body-42") {
+                            master.write_all(b"g").unwrap();
+                            stage = 4;
+                        } else if stage == 4 && text.contains("Session LogRecords") {
                             master.write_all(b"q").unwrap();
                             sent = true;
                         }
@@ -154,7 +241,7 @@ SNAPSHOTS
                 }
             }
         }
-        output
+        (output, stage)
     });
     let deadline = Instant::now() + Duration::from_secs(10);
     let status = loop {
@@ -163,7 +250,9 @@ SNAPSHOTS
         }
         if Instant::now() >= deadline {
             child.kill().unwrap();
-            panic!("TUI did not exit after its completed view received q");
+            drop(pty.slave);
+            let (screen, stage) = reader.join().unwrap();
+            panic!("TUI navigation timed out at stage {stage}: {screen}");
         }
         thread::sleep(Duration::from_millis(20));
     };
@@ -174,16 +263,18 @@ SNAPSHOTS
         original.local_flags & (LocalFlags::ICANON | LocalFlags::ECHO)
     );
     drop(pty.slave);
-    let screen = reader.join().unwrap();
-    let screen = String::from_utf8_lossy(&screen);
+    let (screen, _) = reader.join().unwrap();
     assert!(screen.contains("Unverif") && screen.contains("edTail"));
     assert!(screen.contains("Unknown"));
     assert_eq!(&stdout[..3], [1, 0, 255]);
     assert_eq!(stdout.len(), 3 + 131_072);
     assert!(stdout[3..].iter().all(|byte| *byte == 0));
-    if with_history {
+    if with_observation {
         assert!(screen.contains("history-payload-42"));
-        assert!(screen.contains("Data history"));
+        assert!(screen.contains("OTEL Tracing"));
+        assert!(screen.contains("log-body-42"));
+        assert!(screen.contains("Session LogRecords"));
+        assert!(!screen.contains("Data history"));
     }
     assert_eq!(status.code(), Some(0));
 }

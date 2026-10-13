@@ -17,95 +17,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-// Frame diffs can reuse characters from earlier frames, so assertions inspect rendered cells.
-struct Screen {
-    cells: Vec<Vec<char>>,
-    row: usize,
-    column: usize,
-    pending: Vec<u8>,
-}
-
-impl Screen {
-    fn new() -> Self {
-        Self {
-            cells: vec![vec![' '; 160]; 40],
-            row: 0,
-            column: 0,
-            pending: Vec::new(),
-        }
-    }
-
-    fn feed(&mut self, bytes: &[u8]) {
-        self.pending.extend_from_slice(bytes);
-        let mut index = 0;
-        while index < self.pending.len() {
-            let byte = self.pending[index];
-            if byte == 27 {
-                if index + 1 == self.pending.len() {
-                    break;
-                }
-                if self.pending[index + 1] != b'[' {
-                    index += 2;
-                    continue;
-                }
-                let Some(end) = (index + 2..self.pending.len())
-                    .find(|&i| (0x40..=0x7e).contains(&self.pending[i]))
-                else {
-                    break;
-                };
-                if self.pending[end] == b'H' {
-                    let parameters = String::from_utf8_lossy(&self.pending[index + 2..end]);
-                    let mut coordinates = parameters
-                        .split(';')
-                        .map(|value| value.parse::<usize>().unwrap_or(1).max(1));
-                    self.row = coordinates.next().unwrap_or(1).min(40) - 1;
-                    self.column = coordinates.next().unwrap_or(1).min(160) - 1;
-                }
-                index = end + 1;
-                continue;
-            }
-            match byte {
-                b'\r' => self.column = 0,
-                b'\n' => self.row = (self.row + 1).min(39),
-                0..=31 => {}
-                _ => {
-                    let length = match byte {
-                        0..=127 => 1,
-                        128..=223 => 2,
-                        224..=239 => 3,
-                        _ => 4,
-                    };
-                    if index + length > self.pending.len() {
-                        break;
-                    }
-                    let value = std::str::from_utf8(&self.pending[index..index + length])
-                        .unwrap()
-                        .chars()
-                        .next()
-                        .unwrap();
-                    if self.column == 160 {
-                        self.column = 0;
-                        self.row = (self.row + 1).min(39);
-                    }
-                    self.cells[self.row][self.column] = value;
-                    self.column += 1;
-                    index += length;
-                    continue;
-                }
-            }
-            index += 1;
-        }
-        self.pending.drain(..index);
-    }
-
-    fn text(&self) -> String {
-        self.cells
-            .iter()
-            .map(|row| row.iter().collect::<String>().trim_end().to_owned())
-            .collect::<Vec<_>>()
-            .join("\n")
-    }
-}
+#[path = "support/terminal.rs"]
+mod terminal;
+use terminal::Screen;
 
 fn run_tui(
     runner: &Path,
@@ -143,7 +57,7 @@ fn run_tui(
     let mut master = fs::File::from(pty.master);
     let display = thread::spawn(move || {
         let mut screen = String::new();
-        let mut terminal = Screen::new();
+        let mut terminal = Screen::new(160, 40);
         let mut buffer = [0; 8192];
         let mut interrupted = false;
         let mut stage = 0;
@@ -170,10 +84,16 @@ fn run_tui(
                     .write_all(if inspect { b"jv" } else { b"q" })
                     .unwrap();
                 stage = if inspect { 1 } else { 3 };
-            } else if stage == 1 && text.contains("Data history is unavailable") {
-                master.write_all(b"v").unwrap();
+            } else if stage == 1 && text.contains("OTEL Tracing") {
+                master.write_all(b"\t").unwrap();
                 stage = 2;
-            } else if stage == 2 {
+            } else if stage == 2 && text.contains("Data is unavailable for streaming workflows") {
+                master.write_all(b"\tg").unwrap();
+                stage = 4;
+            } else if stage == 4 && text.contains("Session LogRecords") {
+                master.write_all(b"v").unwrap();
+                stage = 5;
+            } else if stage == 5 {
                 master.write_all(b"q").unwrap();
                 stage = 3;
             }
@@ -273,7 +193,11 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
         screen.contains("Complete") && screen.contains("Observed calls: 6"),
         "{screen}"
     );
-    assert!(screen.contains("Data history is unavailable"));
+    assert!(screen.contains("OTEL Tracing"));
+    assert!(screen.contains("Data is unavailable for streaming workflows"));
+    assert!(screen.contains("Session LogRecords"));
+    assert!(screen.contains("mf.workflow"), "{screen}");
+    assert!(!screen.contains("No trace spans were received"), "{screen}");
     let expected: Vec<_> = ["one", "two", "three", "four", "five", "six"]
         .into_iter()
         .map(|value| json!({"value":value}))

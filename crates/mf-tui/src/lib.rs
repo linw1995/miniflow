@@ -6,15 +6,17 @@
 
 mod duration;
 pub mod graph;
+pub mod logs;
 #[cfg(unix)]
 pub mod manifest;
 pub mod receiver;
 #[cfg(unix)]
 pub mod run;
 pub mod state;
+pub mod traces;
 
 mod snapshots;
-pub use snapshots::HistorySnapshot;
+pub use snapshots::{HistorySnapshot, SpanData};
 
 #[cfg(all(test, unix))]
 #[path = "../tests/common/mod.rs"]
