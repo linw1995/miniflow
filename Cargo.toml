@@ -3,6 +3,16 @@ members = ["crates/mf-*", "crates/builtin-nodes/*"]
 default-members = ["crates/mf-cli"]
 resolver = "3"
 
+# Embedded chat integration runs credential-isolated host subprocesses.
+[[workspace.metadata.affected.rule]]
+globs = [
+    "crates/mf-chat/src/**/*.rs",
+    "crates/mf-runtime/src/**/*.rs",
+    "crates/mf-compiler/src/**/*.rs",
+    "crates/builtin-nodes/llm/src/**/*.rs",
+]
+filterset = "package(=mf-chat) & kind(test)"
+
 # Coverage of test binaries cannot observe CLI and generated-runner subprocesses.
 [[workspace.metadata.affected.rule]]
 globs = ["crates/mf-cli/src/**/*.rs", "crates/mf-tui/src/**/*.rs"]
@@ -141,7 +151,8 @@ repository = "https://github.com/linw1995/miniflow"
 # Keep versions and default-feature policy here; crates select features and optionality.
 
 # Workspace crates.
-mf-compiler = { path = "crates/mf-compiler", version = "0.1.0" }
+mf-chat = { path = "crates/mf-chat", version = "0.1.0" }
+mf-compiler = { path = "crates/mf-compiler", version = "0.1.0", default-features = false }
 mf-runtime = { path = "crates/mf-runtime", version = "0.1.0" }
 mf-runtime-derive = { path = "crates/mf-runtime-derive", version = "0.1.0" }
 mf-telemetry = { path = "crates/mf-telemetry", version = "0.1.0", default-features = false }
@@ -159,6 +170,12 @@ snafu = "0.9.2"
 cel-core = "=0.5.1"
 inventory = "0.3.24"
 rpds = "1.2.1"
+
+# Application database storage and ownership.
+diesel = { version = "2.3.12", default-features = false }
+diesel_migrations = "2.3.2"
+libsqlite3-sys = "0.37.0"
+fs2 = "0.4.3"
 
 # Rust code generation.
 prettyplease = "0.3.0"

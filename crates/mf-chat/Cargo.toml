@@ -1,0 +1,35 @@
+[package]
+name = "mf-chat"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Persistent multi-session chat through embedded miniflow workflows"
+
+[dependencies]
+# Application node contracts and host-side workflow preparation.
+mf-runtime.workspace = true
+mf-telemetry.workspace = true
+mf-compiler = { workspace = true, default-features = false }
+mfn-llm.workspace = true
+inventory.workspace = true
+
+# Portable database storage and migrations.
+diesel = { workspace = true, features = ["sqlite", "32-column-tables"] }
+diesel_migrations.workspace = true
+libsqlite3-sys = { workspace = true, features = ["bundled"] }
+fs2.workspace = true
+
+# Typed values, configuration identities, and diagnostics.
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+snafu.workspace = true
+sha2.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+
+[dev-dependencies]
+tempfile.workspace = true
+mfn-llm = { workspace = true, features = ["test-support"] }
+
+[build-dependencies]
+mf-compiler = { workspace = true, features = ["codegen"] }
