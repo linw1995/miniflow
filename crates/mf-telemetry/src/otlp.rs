@@ -524,10 +524,10 @@ struct DataExportState {
     closing: Option<std::time::Instant>,
     done: bool,
     dropped: u64,
+    fault: Option<Arc<StreamDataExportError>>,
 }
 
 struct DataExportShared {
-    fault: std::sync::Mutex<Option<Arc<StreamDataExportError>>>,
     state: std::sync::Mutex<DataExportState>,
     changed: std::sync::Condvar,
     error: std::sync::Arc<std::sync::Mutex<Option<Arc<opentelemetry_sdk::error::OTelSdkError>>>>,
@@ -585,19 +585,21 @@ impl StreamDataSender {
     }
 
     pub fn diagnostic(&self) -> Option<Arc<StreamDataExportError>> {
-        self.0
-            .fault
+        let fault = self
+            .0
+            .state
             .lock()
-            .expect("data fault state was not poisoned")
-            .clone()
-            .or_else(|| {
-                self.0
-                    .error
-                    .lock()
-                    .expect("data delivery state was not poisoned")
-                    .clone()
-                    .map(|source| Arc::new(DataDeliverySnafu.into_error(source)))
-            })
+            .expect("data export state was not poisoned")
+            .fault
+            .clone();
+        fault.or_else(|| {
+            self.0
+                .error
+                .lock()
+                .expect("data delivery state was not poisoned")
+                .clone()
+                .map(|source| Arc::new(DataDeliverySnafu.into_error(source)))
+        })
     }
 }
 
@@ -647,13 +649,13 @@ impl StreamDataExporter {
             .build();
         let logger = logs.logger(crate::stream_data::SCOPE);
         let shared = Arc::new(DataExportShared {
-            fault: std::sync::Mutex::new(None),
             state: std::sync::Mutex::new(DataExportState {
                 queue: std::collections::VecDeque::new(),
                 bytes: 0,
                 closing: None,
                 done: false,
                 dropped: 0,
+                fault: None,
             }),
             changed: std::sync::Condvar::new(),
             error,
@@ -678,11 +680,7 @@ impl StreamDataExporter {
                                     .lock()
                                     .expect("data delivery state was not poisoned")
                                     .is_some()
-                                || worker_shared
-                                    .fault
-                                    .lock()
-                                    .expect("data fault state was not poisoned")
-                                    .is_some()
+                                || state.fault.is_some()
                             {
                                 state.dropped =
                                     state.dropped.saturating_add(state.queue.len() as u64);
@@ -709,9 +707,10 @@ impl StreamDataExporter {
                     let mut record = logger.create_log_record();
                     if let Err(error) = packet.write_to(&mut record) {
                         worker_shared
-                            .fault
+                            .state
                             .lock()
-                            .expect("data fault state was not poisoned")
+                            .expect("data export state was not poisoned")
+                            .fault
                             .get_or_insert_with(|| {
                                 Arc::new(StreamDataExportError::from(Arc::new(error)))
                             });
@@ -760,15 +759,17 @@ impl StreamDataExporter {
             if remaining.is_zero() {
                 // The detached worker still has finite HTTP/shutdown deadlines.
                 self.worker.take();
+                drop(state);
                 let error = self
                     .sender
                     .diagnostic()
                     .unwrap_or_else(|| Arc::new(DataTimeoutSnafu.build()));
                 self.sender
                     .0
-                    .fault
+                    .state
                     .lock()
-                    .expect("data fault state was not poisoned")
+                    .expect("data export state was not poisoned")
+                    .fault
                     .get_or_insert(error.clone());
                 return Err(error);
             }
@@ -861,6 +862,55 @@ mod stream_data_tests {
         .encode()
         .unwrap()
     }
+    #[test]
+    fn stream_diagnostic_releases_queue_state_before_reading_sdk_failure() {
+        let sender = StreamDataSender(Arc::new(DataExportShared {
+            state: Mutex::new(DataExportState {
+                queue: Default::default(),
+                bytes: 0,
+                closing: None,
+                done: false,
+                dropped: 0,
+                fault: None,
+            }),
+            changed: Default::default(),
+            error: Arc::new(Mutex::new(None)),
+        }));
+        let delivery = sender.0.error.lock().unwrap();
+        let reader = sender.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (done_tx, done_rx) = mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx.send(reader.diagnostic()).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(matches!(
+            done_rx.recv_timeout(Duration::from_millis(50)),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
+        let capacity = sender.clone();
+        let (capacity_tx, capacity_rx) = mpsc::channel();
+        let capacity_worker = std::thread::spawn(move || {
+            capacity_tx.send(capacity.available()).unwrap();
+        });
+        let queue_available = capacity_rx.recv_timeout(Duration::from_secs(1));
+        drop(delivery);
+        assert!(
+            done_rx
+                .recv_timeout(Duration::from_secs(1))
+                .unwrap()
+                .is_none()
+        );
+        worker.join().unwrap();
+        capacity_worker.join().unwrap();
+        assert_eq!(
+            queue_available,
+            Ok(true),
+            "SDK diagnostics must not stall capacity checks"
+        );
+    }
+
     #[test]
     fn stream_queue_pressure_does_not_wait_for_export() {
         let (entered_tx, entered_rx) = mpsc::channel();

@@ -57,7 +57,7 @@ Initial implementation budgets are listed below. They are defaults to verify wit
 | Encoding | 256 KiB per complete encoded record; value depth 48 | Emit a bounded omission record identifying the affected input/emission; never allocate an entire oversized serialization first. |
 | Producer handoff/export | 128 queued records and 2 MiB total encoded bytes; 2 MiB per export batch | Nonblocking admission drops additional data, records cumulative drops, and preserves business backpressure. |
 | TUI data store | 4,096 records and 16 MiB accounted decoded/encoded storage | Evict oldest data by capture sequence, release their values and indexes, and count local evictions. |
-| Deduplication/integrity | 4,096 recent record witnesses and bounded gap ranges | Ignore ancient retransmissions; expose retired verification and unresolved evidence as uncertainty. |
+| Deduplication/integrity | 4,096 recent record witnesses and a contiguous watermark | Ignore ancient retransmissions; expose retired verification and unresolved evidence as uncertainty. |
 | Presentation | 64 KiB value preview; bounded row labels and diagnostics | Mark preview truncation and escape terminal control characters. |
 
 Budget object/key/string/index overhead, not only wire-body lengths. Data admission must not pass through the generic raw-log preview decoder's shallow truncation rules.
@@ -93,3 +93,17 @@ The new flag and independent scope are additive. An older schema-4 runner can ex
 ## Migration Plan
 
 Land the protocol/codec and bounded exporter first, then runtime hooks, generated runner configuration, receiver storage, and list UI. Add tests and documentation within each stage. No existing manifest or lifecycle version requires migration. Recompile a runner to gain stream data capture; existing executables retain their current execution and observation support. Disabling the new flag restores metadata-only stream observation.
+
+## Implementation Review
+
+The exporter stores internal faults in its existing queue state. SDK delivery errors remain
+owned by the SDK wrapper, and diagnostics release the queue lock before reading that source.
+The optional unsigned counter codec is shared with stream lifecycle identities inside
+`mf-telemetry`; it remains an internal serialization detail.
+
+Independent envelopes, the retirement watermark, exact native correlation, and record-identity
+selection remain necessary for bounded streaming inspection. The preview walks borrowed values
+and stops at its byte cap; it does not clone a complete payload into a second JSON tree.
+Malformed-record coverage is consolidated at the HTTP receiver boundary, retaining distinct
+faults, the first typed source, admitted values, and continued lifecycle reduction in one scenario.
+Local ablation measurements and probes stay under the Git-ignored `target/` directory.

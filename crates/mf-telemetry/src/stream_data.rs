@@ -3,7 +3,7 @@
 use crate::{
     event::NodeIdentity,
     identity::{RunId, WorkflowId},
-    stream::{StreamIdentity, StreamMessage, StreamTrigger, counter},
+    stream::{StreamIdentity, StreamMessage, StreamTrigger, counter, optional_counter},
     wire::TraceContext,
 };
 use serde::{Deserialize, Serialize};
@@ -127,26 +127,6 @@ pub struct DataIdentity {
     pub output: Option<StreamMessage>,
     #[serde(with = "optional_counter")]
     pub ordinal: Option<u64>,
-}
-
-mod optional_counter {
-    use serde::{Deserialize, Deserializer, Serialize, Serializer};
-    pub fn serialize<S: Serializer>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error> {
-        value.map(|value| value.to_string()).serialize(serializer)
-    }
-    pub fn deserialize<'de, D: Deserializer<'de>>(
-        deserializer: D,
-    ) -> Result<Option<u64>, D::Error> {
-        Option::<String>::deserialize(deserializer)?
-            .map(|text| {
-                let value = text.parse::<u64>().map_err(serde::de::Error::custom)?;
-                if value.to_string() != text {
-                    return Err(serde::de::Error::custom("counter must be canonical"));
-                }
-                Ok(value)
-            })
-            .transpose()
-    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]

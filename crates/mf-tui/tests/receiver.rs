@@ -829,6 +829,58 @@ fn stream_data_faults_do_not_block_lifecycle_or_later_independent_records() {
     });
     let mut unrelated = malformed.clone();
     unrelated.attributes[1] = attribute("mf.run.id", string(RunId::new().to_string()));
+    let mut unsupported = data_log(
+        1,
+        DataPayload::Status {
+            counts: Default::default(),
+        },
+    );
+    let mut body = mf_telemetry::stream_data::DataRecord::decode(
+        match unsupported.body.as_ref().unwrap().value.as_ref().unwrap() {
+            any_value::Value::BytesValue(bytes) => bytes,
+            _ => unreachable!(),
+        },
+    )
+    .unwrap();
+    body.version = 99;
+    unsupported.body = Some(AnyValue {
+        value: Some(any_value::Value::BytesValue(
+            serde_json::to_vec(&body).unwrap(),
+        )),
+    });
+    unsupported.attributes[2] = attribute("mf.stream.data.version", integer(99));
+    let ports = |sequence| {
+        use mf_telemetry::{
+            event::NodeIdentity,
+            stream::{StreamIdentity, StreamTrigger},
+            stream_data::{DataIdentity, DataValue, Direction},
+        };
+        DataPayload::Ports {
+            identity: Box::new(DataIdentity {
+                node: NodeIdentity {
+                    id: "feed".into(),
+                    kind: "test".into(),
+                    path: vec![],
+                },
+                stream: StreamIdentity {
+                    invocation: 1,
+                    trigger: StreamTrigger::Startup,
+                    message: None,
+                    parent: None,
+                },
+                output: None,
+                ordinal: Some(sequence),
+            }),
+            direction: Direction::Output,
+            port_names: vec!["value".into()],
+            ports_truncated: false,
+            values: Some(DataValue::Object(std::collections::BTreeMap::from([(
+                "value".into(),
+                DataValue::Number(sequence.into()),
+            )]))),
+            omission: None,
+        }
+    };
     let mut request = ExportLogsServiceRequest::decode(
         logs(vec![
             record(1, false, &run_id().to_string(), 1),
@@ -846,16 +898,19 @@ fn stream_data_faults_do_not_block_lifecycle_or_later_independent_records() {
             }),
             log_records: vec![
                 unrelated,
+                data_log(0, DataPayload::Start),
+                data_log(1, ports(1)),
                 malformed,
+                unsupported,
+                data_log(3, ports(3)),
                 data_log(
-                    2,
+                    4,
                     DataPayload::End {
                         counts: Default::default(),
                     },
                 ),
-                data_log(0, DataPayload::Start),
                 data_log(
-                    1,
+                    2,
                     DataPayload::Status {
                         counts: Default::default(),
                     },
@@ -874,8 +929,15 @@ fn stream_data_faults_do_not_block_lifecycle_or_later_independent_records() {
         400
     );
     let snapshot = receiver.data_snapshot();
-    assert_eq!(snapshot.faults, 1);
+    assert_eq!(snapshot.faults, 2);
     assert_eq!(snapshot.gaps, Some(0));
+    assert_eq!(snapshot.records.len(), 2);
+    for (row, expected) in snapshot.records.iter().zip([1, 3]) {
+        assert!(
+            matches!(&row.record.payload, DataPayload::Ports { values: Some(values), .. } if values.to_json()["value"] == expected)
+        );
+    }
+    assert!(snapshot.retained_bytes <= mf_tui::stream_data::MAX_DATA_BYTES);
     let diagnostic = snapshot.diagnostic.as_ref().unwrap();
     assert!(matches!(
         &**diagnostic,

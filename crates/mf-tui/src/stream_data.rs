@@ -601,28 +601,4 @@ mod tests {
         assert_eq!(extreme.snapshot().gaps, Some(u64::MAX));
         assert_eq!(extreme.witnesses.len(), 1);
     }
-    #[test]
-    fn malformed_records_keep_typed_sources_and_later_data() {
-        let mut store = store();
-        let error = store
-            .admit_log(&opentelemetry_proto::tonic::logs::v1::LogRecord::default())
-            .unwrap_err();
-        assert!(matches!(
-            &*error,
-            DataStoreError::Decode {
-                source: DataError::Invalid { .. }
-            }
-        ));
-        store.admit(ports(&store, 1, 1)).unwrap();
-        let mut unsupported = ports(&store, 2, 1);
-        unsupported.version = 99;
-        assert!(store.admit(unsupported).is_err());
-        assert!(Arc::ptr_eq(
-            &error,
-            store.snapshot().diagnostic.as_ref().unwrap()
-        ));
-        assert_eq!(store.snapshot().faults, 2);
-        assert_eq!(store.snapshot().records.len(), 1);
-        assert!(store.snapshot().retained_bytes <= MAX_DATA_BYTES);
-    }
 }

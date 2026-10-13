@@ -1752,7 +1752,8 @@ mod stream_data_tests {
             "{text}"
         );
         assert!(view.handle_data_key(KeyCode::Home, &traces, &snapshot));
-        assert_eq!(view.data_list.selected, Some(1));
+        assert!(view.handle_data_key(KeyCode::Down, &traces, &snapshot));
+        assert_eq!(view.data_list.selected, Some(3));
         snapshot.records.insert(
             1,
             row(2, None, Direction::Output, DataValue::Number(42.into())),
@@ -1760,8 +1761,9 @@ mod stream_data_tests {
         snapshot
             .records
             .push(row(4, None, Direction::Output, DataValue::Bool(true)));
-        render(&mut view, &traces, &snapshot, false);
-        assert_eq!(view.data_list.selected, Some(1));
+        let text = render(&mut view, &traces, &snapshot, false);
+        assert!(text.contains("\"value\": 73"), "{text}");
+        assert_eq!(view.data_list.selected, Some(3));
         assert!(view.handle_data_key(KeyCode::PageDown, &traces, &snapshot));
         assert_eq!(view.data_list.selected, Some(4));
         assert!(view.handle_data_key(KeyCode::Char('f'), &traces, &snapshot));
