@@ -317,6 +317,32 @@ changing the workflow result. A missing definition, conflicting retransmission, 
 is shown as incomplete history; previously received snapshots remain available. Capture uses no
 temporary files or file polling.
 
+## Streaming data protocol
+
+Streaming business data uses a separate `mf.stream.data` instrumentation scope and
+`mf.stream.data.record` LogRecords. Version 1 carries an independently decodable UTF-8 JSON
+envelope in the standard OTLP `BytesValue` body. The envelope contains `version`, `workflow_id`,
+`run_id`, unsigned-decimal `sequence`, `time_unix_nano`, optional native `trace_context`, and
+`payload`. Routing attributes repeat the workflow, run, version, and capture sequence; native
+trace/span fields must agree with the body when correlation is present.
+
+Payload kinds are `start`, `ports`, `status`, and `end`. Port records distinguish inputs from
+admitted outputs and retain the node/Loop path, stream invocation/trigger/input message, and
+applicable output message and emission ordinal. A bounded port-name summary marks truncation
+explicitly. Values use inline tagged null, bool, number, string, array, and object trees; number
+text preserves unsigned 64-bit integers and integer/float distinctions. Each record can be
+decoded without previous value definitions or contiguous arrival. An omitted value retains its
+input/emission identity and a byte/depth reason. Status and end records carry cumulative
+omission and sender-drop counts; their delivery does not establish a complete received history.
+
+Complete encoded records are capped at 256 KiB, and value depth at 48 so typed wrappers remain
+within the JSON decoder's recursion budget. The dedicated export worker retains at most 128
+queued records and 2 MiB of accounted queue storage. Queue admission is nonblocking; pressure
+drops data instead of adding business backpressure. The worker exports one bounded record per
+request, below its 2 MiB request cap and the receiver's 8 MiB ceiling. Its HTTP and shutdown
+operations use finite deadlines, and delivery diagnostics retain typed causes. Existing finite
+snapshot version 1 and streaming lifecycle schema 4 retain their original contracts.
+
 ## Graph presentation
 
 `mf-tui::graph::GraphLayout` uses `rust-sugiyama` to assign layers and sibling order from the complete described graph, including isolated nodes. Data and control edges both contribute to the topology; parallel node pairs are deduplicated only for layout. A static terminal projection allocates attachment rows and expands boxes or column gaps to fit their routes. Node boxes and routes stay in place as observations arrive.

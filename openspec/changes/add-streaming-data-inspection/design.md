@@ -27,7 +27,7 @@ Alternative: reinterpret the existing finite snapshot flag and recorder. Rejecte
 Use a separate `mf.stream.data` instrumentation scope and version 1 envelope. Keep lifecycle schema 4 and finite snapshot version 1 unchanged. Data records contain workflow/run identity, a checked capture sequence, timestamp, record kind, node/scope identity, existing stream invocation identity, and native trace/span IDs when available. An emission adds its actual output-domain message identity and invocation-local emission ordinal.
 
 Record kinds are capture start, resolved inputs, admitted outputs, bounded capture status, and capture end. Input and output records each carry a port object.
-Encode values inline as tagged null/bool/number/string/array/object trees, with decimal number text preserving unsigned integers and integer/float distinctions. No value ID refers to an earlier record. Reuse compatible scalar/value codec logic without routing stream data through the persistent `SnapshotStore`.
+The value depth limit of 48 leaves room for typed wrappers inside the JSON decoder's existing recursion budget. Encode values inline as tagged null/bool/number/string/array/object trees, with decimal number text preserving unsigned integers and integer/float distinctions. No value ID refers to an earlier record. Reuse compatible scalar/value codec logic without routing stream data through the persistent `SnapshotStore`.
 
 Reserve capture sequence numbers before encoding or queue admission; dropped records leave evidence. Capture status and end records report the last reserved sequence and cumulative omission/drop counts without per-invocation history.
 They cannot prove successful remote delivery. Receivers report gaps within their bounded verification window and an unverified tail when the end record is absent. Checked counter exhaustion disables capture with a retained diagnostic, never wraps identities or fails the workflow.
@@ -54,7 +54,7 @@ Initial implementation budgets are listed below. They are defaults to verify wit
 
 | Stage | Initial limit | Behavior at the limit |
 | --- | --- | --- |
-| Encoding | 256 KiB per complete encoded record; value depth 64 | Emit a bounded omission record identifying the affected input/emission; never allocate an entire oversized serialization first. |
+| Encoding | 256 KiB per complete encoded record; value depth 48 | Emit a bounded omission record identifying the affected input/emission; never allocate an entire oversized serialization first. |
 | Producer handoff/export | 128 queued records and 2 MiB total encoded bytes; 2 MiB per export batch | Nonblocking admission drops additional data, records cumulative drops, and preserves business backpressure. |
 | TUI data store | 4,096 records and 16 MiB accounted decoded/encoded storage | Evict oldest data by capture sequence, release their values and indexes, and count local evictions. |
 | Deduplication/integrity | 4,096 recent record witnesses and bounded gap ranges | Ignore ancient retransmissions; expose retired verification and unresolved evidence as uncertainty. |

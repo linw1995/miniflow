@@ -1,9 +1,9 @@
 ## 1. Protocol and bounded export
 
-- [ ] 1.1 Collect a clean local affected-test baseline with the pinned toolchain before Rust edits; verify `target/affected/coverage.db` and `baseline.sha` match the local clean commit and keep generated files under `target/`.
-- [ ] 1.2 Define the independently versioned stream data envelope, record identities, inline typed-value codec, and capped encoding; verify round trips for unsigned numbers, integer/float distinctions, nested values, omitted oversized/deep values, and checked counter exhaustion.
-- [ ] 1.3 Implement nonblocking count/byte-bounded data export with start/status/end evidence and typed diagnostics; verify queue pressure, missing endpoints, failed delivery, cumulative loss accounting, and finite shutdown deadlines without synchronous flushes in runtime locks.
-- [ ] 1.4 Document the new protocol and capture budgets in `docs/observability.md`; verify the documented wire fields agree with codec tests and unchanged finite snapshot/lifecycle versions.
+- [x] 1.1 Collect a clean local affected-test baseline with the pinned toolchain before Rust edits; verify `target/affected/coverage.db` and `baseline.sha` match the local clean commit and keep generated files under `target/`.
+- [x] 1.2 Define the independently versioned stream data envelope, record identities, inline typed-value codec, and capped encoding; verify round trips for unsigned numbers, integer/float distinctions, nested values, omitted oversized/deep values, and checked counter exhaustion.
+- [x] 1.3 Implement nonblocking count/byte-bounded data export with start/status/end evidence and typed diagnostics; verify queue pressure, missing endpoints, failed delivery, cumulative loss accounting, and finite shutdown deadlines without synchronous flushes in runtime locks.
+- [x] 1.4 Document the new protocol and capture budgets in `docs/observability.md`; verify the documented wire fields agree with codec tests and unchanged finite snapshot/lifecycle versions.
 
 ## 2. Runtime capture boundaries
 

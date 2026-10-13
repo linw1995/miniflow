@@ -9,8 +9,10 @@ pub mod otlp;
 #[cfg(feature = "snapshot")]
 pub mod snapshot;
 pub mod stream;
+pub mod stream_data;
 pub mod wire;
 
+pub const STREAM_DATA_CAPTURE_ENV: &str = "MF_CAPTURE_STREAM_DATA";
 pub const SNAPSHOT_CAPTURE_ENV: &str = "MF_CAPTURE_SNAPSHOTS";
 
 use snafu::{Snafu, ensure};
