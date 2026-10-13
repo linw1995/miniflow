@@ -32,19 +32,6 @@
           sha256 = "sha256-zm3dyIY2T414ZRR3EhLOvptzG6gta4WZUcawzMUWtqI=";
         };
         craneLib = (crane.mkLib pkgs).overrideToolchain toolchain;
-        cargoAffected = craneLib.buildPackage {
-          pname = "cargo-affected";
-          version = "0.4.1";
-          src = pkgs.applyPatches {
-            src = pkgs.fetchCrate {
-              pname = "cargo-affected";
-              version = "0.4.1";
-              hash = "sha256-TCHqWOKT/n9oLmvB7yOpV/YImKLow/xa7YGYmSma9u0=";
-            };
-            patches = [ ./nix/patches/cargo-affected-pr-coverage.patch ];
-          };
-          doCheck = false;
-        };
         cargoArgs = {
           pname = (builtins.fromTOML (builtins.readFile ./crates/mf-cli/Cargo.toml)).package.name;
           version = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
@@ -108,7 +95,6 @@
             pkgs.rust-analyzer
             pkgs.actionlint
             pkgs.cargo-nextest
-            cargoAffected
             pkgs.cargo-about
             pkgs.grcov
             pkgs.prek

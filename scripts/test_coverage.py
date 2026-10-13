@@ -1,59 +1,36 @@
-from contextlib import closing
-import json
 import os
 from pathlib import Path
 import shutil
-import sqlite3
 import subprocess
 import tempfile
 import unittest
 
 
 class CoverageTests(unittest.TestCase):
-    def test_incremental_reports_full_fallback_and_empty_selection(self):
+    def test_full_reports_and_failed_tests(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
-            env = dict(os.environ, NEXTEST_PROFILE="ci")
+            env = dict(os.environ)
             for name in [
                 "CARGO", "CARGO_TARGET_DIR", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET",
                 "MF_TEST_SOURCE_CONFIG", "MF_TEST_TARGET_DIR", "RUSTFLAGS", "LLVM_PROFILE_FILE",
+                "NEXTEST_PROFILE",
             ]:
                 env.pop(name, None)
-            env["MF_TEST_BUILD_CACHE_DIR"] = str(root / "target/coverage/build/nextest-build-cache/ci")
+            env["MF_TEST_BUILD_CACHE_DIR"] = str(root / "target/fixture-cache")
 
             def execute(*args):
-                result = subprocess.run(args, cwd=root, env=env, capture_output=True, text=True)
-                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return subprocess.run(args, cwd=root, env=env, capture_output=True, text=True)
 
-            def commit(message):
-                execute("git", "add", ".")
-                execute("git", "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false",
-                        "-c", "user.name=CI Fixture", "-c", "user.email=ci@example.invalid", "commit", "-qm", message)
-
-            def report():
-                return json.loads((root / "target/affected/report.json").read_text())
-
-            for name in ["src", "tests", "scripts", ".config"]:
-                (root / name).mkdir()
-            (root / "tests/fixtures").mkdir()
-            source_scripts = Path(__file__).resolve().parent
-            for name in ["run-cov.sh", "run_affected_tests.py"]:
-                shutil.copyfile(source_scripts / name, root / "scripts" / name)
-            (root / ".gitignore").write_text("/target\n")
+            (root / "src").mkdir()
+            (root / "scripts").mkdir()
+            shutil.copyfile(Path(__file__).resolve().parent / "run-cov.sh", root / "scripts/run-cov.sh")
             (root / "Cargo.toml").write_text('''[package]
 name = "coverage-fixture"
 version = "0.1.0"
 edition = "2024"
 
 [workspace]
-
-[[workspace.metadata.affected.rule]]
-globs = ["src/**/*.rs"]
-filterset = "kind(test)"
-
-[[workspace.metadata.affected.rule]]
-globs = ["tests/fixtures/answer.json", "tests/fixtures/external.rs"]
-filterset = "binary_id(=coverage-fixture::runner)"
 ''')
             (root / "src/lib.rs").write_text("pub mod alpha;\npub mod beta;\n")
             for module, value in [("alpha", 1), ("beta", 2)]:
@@ -69,200 +46,29 @@ mod tests {{
     }}
 }}
 ''')
-            (root / "tests/runner.rs").write_text('''#[test]
-fn runner_input_rule() {
-    assert_eq!(std::env::var("COVERAGE_SETUP").unwrap(), "1");
-    assert_eq!(coverage_fixture::beta::value(), 2);
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let counter = root.join("target/runner-count");
-    let count = std::fs::read_to_string(&counter).unwrap_or_default().parse::<u32>().unwrap_or(0);
-    std::fs::write(counter, (count + 1).to_string()).unwrap();
-    let input = std::fs::read_to_string(root.join("tests/fixtures/answer.json")).unwrap();
-    assert!(input.contains("42"));
-    let binary = root.join("target/external-runner");
-    assert!(std::process::Command::new("rustc")
-        .arg(root.join("tests/fixtures/external.rs"))
-        .arg("-o").arg(&binary).status().unwrap().success());
-    let output = std::process::Command::new(binary).output().unwrap();
-    assert!(output.status.success());
-    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "42");
-}
-''')
-            (root / "tests/fixtures/answer.json").write_text('{"answer":42}\n')
-            (root / "tests/fixtures/external.rs").write_text('fn main() { println!("42"); }\n')
-            (root / "scripts/setup.py").write_text('''import os
-from pathlib import Path
-import subprocess
+            result = execute("cargo", "generate-lockfile", "--offline")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            result = execute("bash", "scripts/run-cov.sh")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            report = root / "target/coverage/result/lcov.info"
+            blocks = report.read_text().split("end_of_record")
+            for module in ["alpha", "beta"]:
+                block = next(block for block in blocks if any(
+                    line.startswith("SF:") and line.endswith(f"src/{module}.rs")
+                    for line in block.splitlines()
+                ))
+                self.assertTrue(any(
+                    line.startswith("DA:") and int(line.split(",")[1]) > 0
+                    for line in block.splitlines()
+                ), block)
+            self.assertGreater((root / "target/coverage/result/cobertura.xml").stat().st_size, 0)
 
-target = Path(os.environ["MF_TEST_BUILD_CACHE_DIR"]) / "target"
-subprocess.run(["cargo", "clean", "--workspace", "--profile", "dev", "--target-dir", str(target)], check=True)
-with open(os.environ["NEXTEST_ENV"], "a") as output:
-    output.write("COVERAGE_SETUP=1\\n")
-''')
-            (root / ".config/nextest.toml").write_text('''experimental = ["setup-scripts"]
-
-[profile.ci]
-inherits = "default"
-
-[scripts.setup.integration-env]
-command = ["python3", "scripts/setup.py"]
-
-[[profile.default.scripts]]
-filter = "kind(test)"
-setup = "integration-env"
-''')
-            execute("cargo", "generate-lockfile", "--offline")
-            execute("git", "init", "-q", "-b", "main")
-            commit("test(ci): seed coverage fixture")
-            execute("bash", "scripts/run-cov.sh", "--refresh-affected-cov")
-            self.assertEqual(report()["collection"]["mode"], "full")
-            self.assertTrue((root / "target/affected/commits.bundle").is_file())
-            self.assertGreater((root / "target/coverage/result/lcov.info").stat().st_size, 0)
-
-            def beta_regions():
-                with closing(sqlite3.connect(root / "target/affected/coverage.db")) as db:
-                    return db.execute("SELECT * FROM test_regions WHERE test_name = 'beta::tests::value_matches' ORDER BY source_file, line_start").fetchall()
-
-            untouched_regions = beta_regions()
-            self.assertTrue(untouched_regions)
-
-            alpha = root / "src/alpha.rs"
-            alpha.write_text(alpha.read_text().replace("    1", "    1 + 0"))
-            commit("test(ci): change instrumented source")
-            execute("bash", "scripts/run-cov.sh", "--affected")
-            self.assertEqual(report()["cache"]["status"], "hit-with-divergence")
-            self.assertEqual(report()["selection"]["summary"]["selected"], 2)
-            self.assertEqual(report()["selection"]["summary"]["skipped"], 1)
-            lcov = root / "target/coverage/result/lcov.info"
-            self.assertGreater(lcov.stat().st_size, 0)
-
-            execute("bash", "scripts/run-cov.sh", "--refresh-affected")
-            self.assertEqual(report()["collection"]["mode"], "incremental")
-            self.assertEqual(beta_regions(), untouched_regions)
-            with closing(sqlite3.connect(root / "target/affected/coverage.db")) as db:
-                self.assertEqual(db.execute("SELECT COUNT(DISTINCT collect_sha) FROM test_regions").fetchone()[0], 2)
-            execute("bash", "scripts/run-cov.sh", "--affected")
-            # Input rules also inspect the older anchors retained for untouched tests.
-            self.assertEqual(report()["selection"]["summary"]["selected"], 1)
-            (root / "target/affected/baseline.sha").unlink()
-            execute("bash", "scripts/run-cov.sh", "--refresh-affected-cov")
-            untouched_regions = beta_regions()
-            execute("bash", "scripts/run-cov.sh", "--refresh-affected")
-            self.assertEqual(report()["cache"]["status"], "hit-exact")
-            self.assertEqual(report()["collection"]["mode"], "incremental")
-            execute("bash", "scripts/run-cov.sh", "--affected")
-            self.assertEqual(report()["selection"]["summary"]["selected"], 0)
-            self.assertFalse(lcov.exists())
-
-            (root / "README.md").write_text("Documentation only.\n")
-            commit("docs(docs): describe coverage fixture")
-            execute("bash", "scripts/run-cov.sh", "--refresh-affected")
-            self.assertEqual(report()["collection"]["mode"], "incremental")
-            self.assertEqual(report()["selection"]["summary"]["selected"], 0)
-            self.assertEqual(beta_regions(), untouched_regions)
-
-            for name, contents in [
-                ("answer.json", '{"answer": 42}\n'),
-                ("external.rs", 'fn main() { println!("{}", 40 + 2); }\n'),
-            ]:
-                (root / "tests/fixtures" / name).write_text(contents)
-                commit("test(ci): change mapped external input")
-                counter = root / "target/runner-count"
-                before = int(counter.read_text())
-                execute("bash", "scripts/run-cov.sh", "--refresh-affected-cov")
-                self.assertEqual(report()["cache"]["status"], "hit-with-divergence")
-                summary = report()["selection"]["summary"]
-                self.assertEqual(summary["selected"], 1)
-                self.assertEqual(summary["config"], 1)
-                self.assertEqual(summary["skipped"], 2)
-                self.assertGreater(lcov.stat().st_size, 0)
-                blocks = lcov.read_text().split("end_of_record")
-                alpha_coverage = next(block for block in blocks if any(line.startswith("SF:") and line.endswith("src/alpha.rs") for line in block.splitlines()))
-                self.assertTrue(any(line.startswith("DA:") and int(line.split(",")[1]) > 0 for line in alpha_coverage.splitlines()))
-                self.assertEqual(int(counter.read_text()), before + 1)
-                self.assertEqual(report()["collection"]["mode"], "incremental")
-                self.assertEqual(beta_regions(), untouched_regions)
-
-            merge = subprocess.check_output([
-                "git", "-c", "user.name=CI Fixture", "-c", "user.email=ci@example.invalid",
-                "commit-tree", "HEAD^{tree}", "-p", "HEAD", "-p", "HEAD~1", "-m", "Synthetic PR merge",
-            ], cwd=root, env=env, text=True).strip()
-            execute("git", "checkout", "-q", "--detach", merge)
-            execute("bash", "scripts/run-cov.sh", "--refresh-affected-cov")
-            execute("git", "checkout", "-q", "main")
-            with tempfile.TemporaryDirectory() as clone_directory:
-                clone = Path(clone_directory).resolve()
-                execute("git", "clone", "-q", "--no-local", "--branch", "main", str(root), str(clone))
-                self.assertNotEqual(subprocess.run(["git", "cat-file", "-e", merge], cwd=clone,
-                                                  capture_output=True).returncode, 0)
-                destination = clone / "target/affected"
-                destination.mkdir(parents=True)
-                for name in ["coverage.db", "baseline.sha", "commits.bundle"]:
-                    shutil.copyfile(root / "target/affected" / name, destination / name)
-                shutil.copytree(root / "target/affected/profiles", destination / "profiles")
-                clone_env = dict(env, MF_TEST_BUILD_CACHE_DIR=str(clone / "target/fixture-cache"))
-                restored = subprocess.run(["bash", "scripts/run-cov.sh", "--refresh-affected-cov"],
-                                          cwd=clone, env=clone_env, capture_output=True, text=True)
-                self.assertEqual(restored.returncode, 0, restored.stdout + restored.stderr)
-                self.assertEqual(json.loads((destination / "report.json").read_text())["collection"]["mode"], "incremental")
-                self.assertEqual(subprocess.run(["git", "cat-file", "-e", merge], cwd=clone,
-                                                capture_output=True).returncode, 0)
-
-            beta = root / "src/beta.rs"
-            beta.write_text(beta.read_text().replace("    2", "    2 + 0"))
-            commit("test(ci): change another covered module")
-            execute("bash", "scripts/run-cov.sh", "--refresh-affected-cov")
-            self.assertEqual(report()["selection"]["summary"]["skipped"], 1)
-            alpha_coverage = next(block for block in lcov.read_text().split("end_of_record")
-                                  if any(line.startswith("SF:") and line.endswith("src/alpha.rs") for line in block.splitlines()))
-            self.assertTrue(any(line.startswith("DA:") and int(line.split(",")[1]) > 0 for line in alpha_coverage.splitlines()))
-
-            alpha_source = alpha.read_text()
-            alpha.write_text(alpha_source.replace("    #[test]", "    #[allow(dead_code)]"))
-            commit("test(ci): remove a covered test")
-            execute("bash", "scripts/run-cov.sh", "--refresh-affected-cov")
-            identities = [json.loads(path.read_text()) for path in (root / "target/affected/profiles").rglob("identity.json")]
-            self.assertFalse(any(profile["test_name"] == "alpha::tests::value_matches" for profile in identities))
-            alpha.write_text(alpha_source)
-            commit("test(ci): restore covered test")
-            execute("bash", "scripts/run-cov.sh", "--refresh-affected-cov")
-
-            (root / "fixture.json").write_text("{}\n")
-            commit("test(ci): change external input")
-            execute("bash", "scripts/run-cov.sh", "--affected")
-            self.assertEqual(report()["cache"]["status"], "forced-all")
-            self.assertGreater(lcov.stat().st_size, 0)
-            execute("bash", "scripts/run-cov.sh", "--refresh-affected")
-            self.assertEqual(report()["collection"]["mode"], "full")
-            with closing(sqlite3.connect(root / "target/affected/coverage.db")) as db:
-                self.assertEqual(db.execute("SELECT COUNT(DISTINCT collect_sha) FROM test_regions").fetchone()[0], 1)
-            execute("bash", "scripts/run-cov.sh", "--collect-affected")
-            execute("bash", "scripts/run-cov.sh")
-            self.assertGreater(lcov.stat().st_size, 0)
-
-            database = root / "target/affected/coverage.db"
-            database.unlink()
-            execute("bash", "scripts/run-cov.sh", "--refresh-affected")
-            self.assertEqual(report()["cache"]["status"], "miss-no-coverage")
-            self.assertEqual(report()["collection"]["mode"], "full")
-
-            database.unlink()
-            execute("cargo", "affected", "collect", "--", "--workspace", "--all-features", "--profile", "ci")
-            execute("bash", "scripts/run-cov.sh", "--refresh-affected")
-            self.assertEqual(report()["cache"]["status"], "miss-fingerprint")
-            self.assertEqual(report()["collection"]["mode"], "full")
-
-            anchor = root / "target/affected/baseline.sha"
-            prior_anchor = anchor.read_text()
-            alpha.write_text(alpha.read_text().replace("    1 + 0", "    99"))
-            commit("test(ci): exercise failed collection")
-            failure = subprocess.run(
-                ["bash", "scripts/run-cov.sh", "--refresh-affected"],
-                cwd=root, env=env, capture_output=True, text=True,
-            )
-            self.assertNotEqual(failure.returncode, 0, failure.stdout + failure.stderr)
-            self.assertIn("value_matches", failure.stdout + failure.stderr)
-            self.assertEqual(anchor.read_text(), prior_anchor)
+            source = root / "src/alpha.rs"
+            source.write_text(source.read_text().replace("    1", "    99"))
+            result = execute("bash", "scripts/run-cov.sh", "-E", "test(alpha::tests::value_matches)")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("alpha::tests::value_matches", result.stdout + result.stderr)
+            self.assertFalse(report.exists())
 
 
 if __name__ == "__main__":
