@@ -646,3 +646,27 @@ Opt-in snapshots belong to the finite selected operation, including when its Tas
 streaming binary. Snapshot export must use the selected description's identity. Whole-stream invocation
 continues to reject whole-run snapshot capture while supporting the independent bounded data mode. Export and snapshot sink failures retain existing bounded
 cleanup and diagnostics without changing business results or exit status.
+
+### Streaming Data receiver retention
+
+The dedicated `mf.stream.data` scope is decoded before raw-log preview truncation.
+Its store is independent of lifecycle reduction, span retention, finite snapshot assembly,
+and the 4,096-row raw-log budget. Each payload is independently decodable; later sequences
+are immediately inspectable even when earlier packets or native spans are absent.
+Only exact native trace/span IDs create span associations. Session browsing also retains
+uncorrelated data, without inferring a span from a node name.
+
+The Data store retains at most 4,096 payload rows and 16 MiB of accounted memory,
+including decoded strings/collections, row indexes, 4,096 SHA-256 sequence witnesses,
+and a 2 MiB reservation for the first typed decoding/conflict diagnostic. Oldest rows
+are evicted; old sequence retransmissions cannot repopulate retired history. Public
+snapshots share retained rows through `Arc`; consumers must release superseded snapshots.
+
+Capture status separates value omissions, cumulative sender drops, missing transport
+sequences, local payload evictions, and decoding/conflict faults. Sender drops and gaps
+can describe the same loss and must not be summed. Sequence verification uses a contiguous
+watermark plus bounded witnesses; retiring unresolved evidence changes gaps to unknown.
+Missing start or end evidence never implies successful empty capture. A complete delivery
+status describes received envelopes, while eviction and omission counters describe which
+values remain inspectable. Data faults retain typed error sources and do not mark lifecycle
+records as lost or stop later independent Data, log, trace, or finite snapshot admission.

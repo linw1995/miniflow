@@ -13,6 +13,7 @@ pub mod receiver;
 #[cfg(unix)]
 pub mod run;
 pub mod state;
+pub mod stream_data;
 pub mod traces;
 
 mod snapshots;

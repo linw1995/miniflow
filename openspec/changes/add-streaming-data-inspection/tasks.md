@@ -22,10 +22,10 @@
 
 ## 4. Receiver and bounded data store
 
-- [ ] 4.1 Admit dedicated stream data records before generic raw-log preview truncation, validate session/version/context, and decode independently; verify out-of-order records, unrelated runs, missing prior records, sampled/missing spans, and typed malformed-record diagnostics.
-- [ ] 4.2 Implement count/byte-bounded payload storage and indexes with eviction, bounded sequence witnesses/gap accounting, and retransmission handling; verify old values/indexes are released, conflicting duplicates are diagnosed, and ancient records cannot repopulate history.
-- [ ] 4.3 Expose invocation-scoped/session data views and separate capture availability, omissions, sender loss, transport gaps, local eviction, and faults; verify missing start/end evidence, overlapping loss accounting, unsupported versions, and continued lifecycle/raw-log/finite-snapshot ingestion after Data faults.
-- [ ] 4.4 Document receiver limits and diagnostics in `docs/observability.md`; verify sustained synthetic admission remains inside the stated memory budgets including indexes and decoded values.
+- [x] 4.1 Admit dedicated stream data records before generic raw-log preview truncation, validate session/version/context, and decode independently; verify out-of-order records, unrelated runs, missing prior records, sampled/missing spans, and typed malformed-record diagnostics.
+- [x] 4.2 Implement count/byte-bounded payload storage and indexes with eviction, bounded sequence witnesses/gap accounting, and retransmission handling; verify old values/indexes are released, conflicting duplicates are diagnosed, and ancient records cannot repopulate history.
+- [x] 4.3 Expose invocation-scoped/session data views and separate capture availability, omissions, sender loss, transport gaps, local eviction, and faults; verify missing start/end evidence, overlapping loss accounting, unsupported versions, and continued lifecycle/raw-log/finite-snapshot ingestion after Data faults.
+- [x] 4.4 Document receiver limits and diagnostics in `docs/observability.md`; verify sustained synthetic admission remains inside the stated memory budgets including indexes and decoded values.
 
 ## 5. Data list presentation
 
