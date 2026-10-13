@@ -104,6 +104,12 @@ impl Observer {
 }
 
 impl StreamObservation {
+    pub fn run_id(&self) -> RunId {
+        self.0.run_id
+    }
+    pub fn is_same_run(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
     pub fn enter(&self) -> ContextGuard {
         self.0.context.clone().attach()
     }
@@ -380,6 +386,14 @@ pub(super) struct StreamInvocation {
     identity: StreamIdentity,
 }
 impl StreamInvocation {
+    pub(super) fn data_identity(&self, node: NodeIdentity) -> crate::stream_data::DataIdentity {
+        crate::stream_data::DataIdentity {
+            node,
+            stream: self.identity.clone(),
+            output: None,
+            ordinal: None,
+        }
+    }
     fn attach(self, context: Context) -> Context {
         self.annotate(&context);
         context.with_value(self)
@@ -477,6 +491,9 @@ pub struct StreamCallback {
     step: Option<NodeObservation>,
 }
 impl StreamCallback {
+    pub fn data_identity(&self) -> Option<crate::stream_data::DataIdentity> {
+        self.step.as_ref().and_then(NodeObservation::data_identity)
+    }
     pub fn enter(&self) -> ContextGuard {
         self.step.as_ref().unwrap().enter()
     }

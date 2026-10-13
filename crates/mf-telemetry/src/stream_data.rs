@@ -28,10 +28,13 @@ pub enum DataError {
     #[snafu(display("invalid stream data: {message}"))]
     Invalid { message: &'static str },
     #[snafu(display("stream data exceeded its byte budget"))]
+    #[snafu(visibility(pub))]
     TooLarge,
     #[snafu(display("stream data exceeded its depth budget"))]
+    #[snafu(visibility(pub))]
     TooDeep,
     #[snafu(display("stream data sequence exhausted"))]
+    #[snafu(visibility(pub))]
     Exhausted,
     #[snafu(display("invalid stream data JSON: {source}"))]
     Json { source: serde_json::Error },

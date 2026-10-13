@@ -16,6 +16,7 @@ mod runner;
 mod runner_arguments;
 mod snapshot;
 mod stream;
+mod stream_data;
 mod stream_instance;
 mod stream_io;
 mod stream_plan;
@@ -89,6 +90,7 @@ pub use stream::{
     StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate, TypedEventNode,
     TypedStreamNode, execute_typed_event,
 };
+pub use stream_data::{StreamCaptureError, StreamDataRecorder, StreamDataReservation};
 pub use stream_instance::{
     Emitter, MessageId, MonotonicClock, StreamClock, StreamDelivery, StreamError, StreamInstance,
     StreamMetrics, StreamOptions, StreamOutput, StreamSummary,

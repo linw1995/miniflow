@@ -7,11 +7,11 @@
 
 ## 2. Runtime capture boundaries
 
-- [ ] 2.1 Add the optional runtime-owned recorder to streaming options and propagate capture through execution contexts using existing stream identities; verify invalid observation pairing fails before startup and disabled capture creates no recorder or payload serialization.
-- [ ] 2.2 Capture synchronous task inputs and validated/published outputs, including Loop and parallel Iteration bodies; verify distinct invocation/span association and value equality with capture disabled, including dynamic fallback where required.
-- [ ] 2.3 Capture producer inputs and each successfully admitted send with output message identity and ordinal; verify live delivery before producer completion, several emissions, rejected sends, failure after a valid send, cancellation, and unchanged business backpressure.
-- [ ] 2.4 Capture event input ports and each admitted emission for input, startup, timer, and upstream-close triggers; verify zero-emission Batch buffering, timeout/close flushes, partial publication failures, and absence of fabricated input messages.
-- [ ] 2.5 Verify bounded handoff reserves identities at admission and performs encoding/export outside coordinator locks using focused concurrent runtime tests; document the programmatic setup and lock-boundary contract with a working example.
+- [x] 2.1 Add the optional runtime-owned recorder to streaming options and propagate capture through execution contexts using existing stream identities; verify invalid observation pairing fails before startup and disabled capture creates no recorder or payload serialization.
+- [x] 2.2 Capture synchronous task inputs and validated/published outputs, including Loop and parallel Iteration bodies; verify distinct invocation/span association and value equality with capture disabled, including dynamic fallback where required.
+- [x] 2.3 Capture producer inputs and each successfully admitted send with output message identity and ordinal; verify live delivery before producer completion, several emissions, rejected sends, failure after a valid send, cancellation, and unchanged business backpressure.
+- [x] 2.4 Capture event input ports and each admitted emission for input, startup, timer, and upstream-close triggers; verify zero-emission Batch buffering, timeout/close flushes, partial publication failures, and absence of fabricated input messages.
+- [x] 2.5 Verify bounded handoff reserves identities at admission and performs encoding/export outside coordinator locks using focused concurrent runtime tests; document the programmatic setup and lock-boundary contract with a working example.
 
 ## 3. Runner and TUI launch configuration
 

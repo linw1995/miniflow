@@ -343,6 +343,63 @@ request, below its 2 MiB request cap and the receiver's 8 MiB ceiling. Its HTTP 
 operations use finite deadlines, and delivery diagnostics retain typed causes. Existing finite
 snapshot version 1 and streaming lifecycle schema 4 retain their original contracts.
 
+### Programmatic stream capture
+
+Create a `StreamDataRecorder` with the same `StreamObservation` passed in
+`StreamOptions.observation`, then attach it through `StreamOptions.data_capture`. Pairing a
+recorder with another observation, or omitting that observation, fails configuration validation
+before startup. The existing `StreamOptions.snapshots` field remains unsupported for whole streams.
+
+```rust
+let observation = plan.start_stream_observation(&providers.observer(), run_id)?;
+let mut exporter = mf_telemetry::otlp::StreamDataExporter::from_env()?;
+let sender = exporter.sender();
+let capacity = sender.clone();
+let capture = mf_runtime::StreamDataRecorder::new(
+    observation.clone(),
+    move |record| Ok(sender.try_emit(record)?),
+    move || capacity.available(),
+);
+let instance = mf_compiler::start_stream(
+    &plan,
+    &registry,
+    mf_runtime::StreamOptions {
+        observation: Some(observation),
+        data_capture: Some(capture.clone()),
+        arguments,
+        ..Default::default()
+    },
+)?;
+while let Some(output) = instance.recv()? {
+    handle_output(output)?;
+}
+instance.join()?;
+if let Some(error) = capture.diagnostic() {
+    eprintln!("stream data capture incomplete: {error}");
+}
+if let Err(error) = exporter.finish() {
+    eprintln!("stream data export incomplete: {error}");
+}
+```
+
+Inputs are captured after dependency/type validation and before invocation. Synchronous task
+outputs are captured after publication validation. Producers capture each successful send while
+their span is running; a later producer failure leaves those admitted records available. Event
+callbacks record each admitted emission, including earlier emissions when a later publication or
+timer update fails. Batch buffering captures inputs without inventing an output. Timer and close
+outputs keep their actual trigger and output message identity without a fabricated input message.
+Loop and Iteration body work uses its existing invocation and native span identities; virtual
+scope input nodes have no independent invocation and are not captured as business operations.
+
+The runtime reserves emission sequence/context at admission but constructs and publishes values
+after releasing coordinator locks. Custom sinks and availability callbacks must be bounded and
+nonblocking; the supplied `StreamDataSender` implements that contract. Sink errors and panics
+disable capture with retained typed diagnostics without changing workflow results. Value
+construction has a finite byte/node budget as well as the encoded-record and depth limits.
+Capture-enabled domains use dynamic execution when intermediate values would otherwise remain
+inside an optimized typed segment. Runtime cleanup ends capture after workers have joined; the
+caller then finishes its exporter within the normal deadline.
+
 ## Graph presentation
 
 `mf-tui::graph::GraphLayout` uses `rust-sugiyama` to assign layers and sibling order from the complete described graph, including isolated nodes. Data and control edges both contribute to the topology; parallel node pairs are deduplicated only for layout. A static terminal projection allocates attachment rows and expands boxes or column gaps to fit their routes. Node boxes and routes stay in place as observations arrive.

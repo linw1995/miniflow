@@ -155,6 +155,7 @@ pub struct StreamOptions {
     pub clock: Arc<dyn StreamClock>,
     pub observation: Option<StreamObservation>,
     pub snapshots: Option<crate::SnapshotRecorder>,
+    pub data_capture: Option<crate::StreamDataRecorder>,
     pub arguments: crate::WorkflowArguments,
     pub stdin: Option<crate::TextInput>,
 }
@@ -164,6 +165,7 @@ impl Default for StreamOptions {
             clock: Arc::new(MonotonicClock::default()),
             observation: None,
             snapshots: None,
+            data_capture: None,
             arguments: crate::WorkflowArguments::default(),
             stdin: None,
         }
@@ -310,6 +312,7 @@ struct Shared {
     changed: Condvar,
     execution: StreamExecution,
     observation: Option<StreamObservation>,
+    data_capture: Option<crate::StreamDataRecorder>,
     cancellation: crate::StreamCancellation,
     worker_limit: std::num::NonZeroUsize,
 }
@@ -337,6 +340,7 @@ pub struct Emitter<'a> {
     emitted: usize,
     ports: BTreeSet<String>,
     publication_failed: bool,
+    data_identity: Option<Box<mf_telemetry::stream_data::DataIdentity>>,
 }
 
 impl Emitter<'_> {
@@ -359,12 +363,29 @@ impl Emitter<'_> {
             }
             state = self.shared.changed.wait(state).unwrap();
         }
+        let captured_ports = self
+            .shared
+            .data_capture
+            .as_ref()
+            .filter(|capture| capture.is_active())
+            .map(|_| result.outputs.clone());
+        let mut reservation = None;
         let ports = result.outputs.keys().cloned().collect::<Vec<_>>();
         let admitted: Result<(), StreamError> = (|| {
             let emitted = self.emitted.checked_add(1).context(ResourceSnafu {
                 message: "producer emission counter exhausted",
             })?;
-            enqueue_emission(&mut state, self.plan, self.index, result.into())?;
+            let message = enqueue_emission(&mut state, self.plan, self.index, result.into())?;
+            reservation = self.shared.data_capture.as_ref().and_then(|capture| {
+                self.data_identity.as_deref().and_then(|identity| {
+                    capture.reserve(
+                        identity.clone(),
+                        mf_telemetry::stream_data::Direction::Output,
+                        Some(stream_message(message)),
+                        Some(self.emitted as u64),
+                    )
+                })
+            });
             self.emitted = emitted;
             self.ports.extend(ports);
             Ok(())
@@ -375,6 +396,12 @@ impl Emitter<'_> {
             state.failure_node = Some(self.plan.nodes()[self.index].definition_id.to_string());
         }
         self.shared.changed.notify_all();
+        drop(state);
+        if let (Some(capture), Some(reservation), Some(ports)) =
+            (&self.shared.data_capture, reservation, captured_ports)
+        {
+            capture.publish(reservation, &ports);
+        }
         admitted
     }
 }
@@ -423,6 +450,16 @@ fn run_producer(
         emitted: 0,
         ports: BTreeSet::new(),
         publication_failed: false,
+        data_identity: shared
+            .data_capture
+            .as_ref()
+            .filter(|capture| capture.is_active())
+            .and_then(|_| {
+                job.callback
+                    .as_ref()
+                    .and_then(StreamCallback::data_identity)
+            })
+            .map(Box::new),
     };
     let failure = shared.state.lock().unwrap().failure.clone();
     let result = if let Some(error) = failure {
@@ -430,6 +467,13 @@ fn run_producer(
     } else {
         if let Some(callback) = job.callback.as_mut() {
             callback.started();
+        }
+        if let Some(capture) = &shared.data_capture {
+            if let Some(identity) = emitter.data_identity.as_deref() {
+                capture.inputs(identity.clone(), &job.inputs);
+            } else if capture.is_active() {
+                capture.missing_identity();
+            }
         }
         catch_unwind(AssertUnwindSafe(|| {
             node.execute(job.inputs, &mut job.context, &mut emitter)
@@ -613,6 +657,17 @@ impl PreparedStream {
                 message: "snapshot capture is unsupported for streaming instances",
             }
         );
+        if let Some(capture) = &options.data_capture {
+            ensure!(
+                options
+                    .observation
+                    .as_ref()
+                    .is_some_and(|observation| capture.matches(observation)),
+                ConfigurationSnafu {
+                    message: "stream data capture requires its owning stream observation"
+                }
+            );
+        }
         if let Some(observation) = &options.observation {
             ensure!(
                 observation.description().event_schema_version()
@@ -631,6 +686,9 @@ impl PreparedStream {
         let worker_limit = std::num::NonZeroUsize::new(domain_limit)
             .expect("validated stream worker limit is positive");
         let mut context = ExecutionContext::default();
+        if let Some(capture) = &options.data_capture {
+            context.set_stream_data_recorder(capture.clone());
+        }
         if let Some(input) = options.stdin {
             context.set_stdin(input);
         }
@@ -696,6 +754,7 @@ impl PreparedStream {
             changed: Condvar::new(),
             execution: plan.execution().clone(),
             observation: options.observation,
+            data_capture: options.data_capture,
             cancellation,
             worker_limit,
         });
@@ -1054,6 +1113,9 @@ fn tick<'a>(
                     message: queued.message,
                 },
             )?;
+        if let Some(capture) = &shared.data_capture {
+            context.set_stream_data_recorder(capture.clone());
+        }
         context.set_cancellation(shared.cancellation.clone());
         context.configure_worker_limit(shared.worker_limit);
         context.set_worker_handle(workers.handle());
@@ -1399,6 +1461,12 @@ fn check_failure(state: &mut State, shared: &Shared) -> Result<(), StreamError> 
     Ok(())
 }
 
+struct EmissionCapture<'a> {
+    recorder: &'a crate::StreamDataRecorder,
+    identity: &'a mf_telemetry::stream_data::DataIdentity,
+    pending: Vec<(crate::StreamDataReservation, crate::Outputs)>,
+}
+
 fn invoke_event<'a>(
     mut guard: MutexGuard<'a, State>,
     shared: &'a Shared,
@@ -1412,6 +1480,20 @@ fn invoke_event<'a>(
     // Only the coordinator accesses event operators; workers retain their own producer slots.
     let mut operator = guard.operators[index].take().unwrap();
     drop(guard);
+    let data_identity = shared
+        .data_capture
+        .as_ref()
+        .filter(|capture| capture.is_active())
+        .and_then(|_| callback.as_ref().and_then(StreamCallback::data_identity));
+    if let Some(capture) = &shared.data_capture {
+        if let Some(identity) = &data_identity {
+            if let NodeEvent::Input(inputs) = &event {
+                capture.inputs(identity.clone(), inputs);
+            }
+        } else if capture.is_active() {
+            capture.missing_identity();
+        }
+    }
     if let Some(callback) = callback.as_mut() {
         callback.started();
     }
@@ -1447,11 +1529,27 @@ fn invoke_event<'a>(
 
     let mut phase = FailurePhase::Execution;
     let old_pending = guard.operators[index].as_ref().unwrap().pending.len();
+    let mut captured = shared
+        .data_capture
+        .as_ref()
+        .zip(data_identity.as_ref())
+        .map(|(recorder, identity)| EmissionCapture {
+            recorder,
+            identity,
+            pending: Vec::new(),
+        });
     let result = (|| -> Result<_, StreamError> {
         let (effects, buffered, ports) = execution?;
         phase = FailurePhase::Publication;
         let count = effects.emissions.len();
-        apply_effects(&mut guard, plan, index, effects, context.now)?;
+        apply_effects(
+            &mut guard,
+            plan,
+            index,
+            effects,
+            context.now,
+            captured.as_mut(),
+        )?;
         let flushed: Vec<_> = guard.operators[index]
             .as_ref()
             .unwrap()
@@ -1470,6 +1568,17 @@ fn invoke_event<'a>(
             .collect();
         Ok((count, ports, buffered, flushed))
     })();
+    if let Some(capture) = captured.filter(|capture| !capture.pending.is_empty()) {
+        if let Err(error) = &result {
+            guard.failure_node = Some(plan.nodes()[index].definition_id.to_string());
+            guard.failure.get_or_insert(error.clone());
+        }
+        drop(guard);
+        for (reservation, ports) in capture.pending {
+            capture.recorder.publish(reservation, &ports);
+        }
+        guard = shared.state.lock().unwrap();
+    }
     match result {
         Ok((count, ports, buffered, flushed)) => {
             if let Some(callback) = callback {
@@ -1503,7 +1612,7 @@ fn enqueue_emission(
     plan: &StreamPlan,
     index: usize,
     emission: EventEmission,
-) -> Result<(), StreamError> {
+) -> Result<MessageId, StreamError> {
     let domain = plan.output_domain(index);
     ExecutionContext::for_message(&plan.nodes()[index], emission.result.clone()).context(
         WorkflowSnafu {
@@ -1523,7 +1632,7 @@ fn enqueue_emission(
             message: MessageId { domain, sequence },
             emission,
         });
-    Ok(())
+    Ok(MessageId { domain, sequence })
 }
 
 fn apply_effects(
@@ -1532,6 +1641,7 @@ fn apply_effects(
     index: usize,
     effects: EventEffects,
     now: Duration,
+    mut capture: Option<&mut EmissionCapture<'_>>,
 ) -> Result<(), StreamError> {
     let operator = state.operators[index].as_mut().unwrap();
     ensure!(
@@ -1547,8 +1657,22 @@ fn apply_effects(
             ),
         }
     );
-    for emission in effects.emissions {
-        enqueue_emission(state, plan, index, emission)?;
+    for (ordinal, emission) in effects.emissions.into_iter().enumerate() {
+        let ports = capture
+            .as_ref()
+            .filter(|capture| capture.recorder.is_active())
+            .map(|_| emission.result.outputs.clone());
+        let message = enqueue_emission(state, plan, index, emission)?;
+        if let (Some(capture), Some(ports)) = (capture.as_mut(), ports)
+            && let Some(reservation) = capture.recorder.reserve(
+                capture.identity.clone(),
+                mf_telemetry::stream_data::Direction::Output,
+                Some(stream_message(message)),
+                Some(ordinal as u64),
+            )
+        {
+            capture.pending.push((reservation, ports));
+        }
     }
     let operator = state.operators[index].as_mut().unwrap();
     match effects.timer {
@@ -1639,6 +1763,9 @@ fn finish_instance(shared: &Shared) {
     let failure = state.failure.clone();
     let node = state.failure_node.clone();
     drop(state);
+    if let Some(capture) = &shared.data_capture {
+        capture.finish();
+    }
     finish_observation(shared, summary, failure, node);
     shared.changed.notify_all();
 }

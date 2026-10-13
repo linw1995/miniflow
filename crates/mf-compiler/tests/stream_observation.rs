@@ -25,6 +25,485 @@ use std::{
     time::{Duration, Instant},
 };
 
+type CapturedData = Arc<Mutex<Vec<mf_telemetry::stream_data::DataRecord>>>;
+
+fn data_capture(
+    observation: mf_runtime::StreamObservation,
+) -> (mf_runtime::StreamDataRecorder, CapturedData) {
+    let data = CapturedData::default();
+    let captured = data.clone();
+    let recorder = mf_runtime::StreamDataRecorder::new(
+        observation,
+        move |packet| {
+            captured
+                .lock()
+                .unwrap()
+                .push(mf_telemetry::stream_data::DataRecord::decode(
+                    &packet.bytes,
+                )?);
+            Ok(true)
+        },
+        || true,
+    );
+    (recorder, data)
+}
+
+#[test]
+fn streaming_data_is_live_and_distinguishes_buffering_from_timer_outputs() {
+    use mf_telemetry::stream_data::{DataPayload, Direction};
+    let harness = Harness::new(true);
+    let plan = plan(definition());
+    let observation = plan
+        .start_stream_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let (capture, data) = data_capture(observation.clone());
+    let clock = Arc::new(Clock::default());
+    let instance = start_stream(
+        &plan,
+        &NodeRegistry::from_inventory().unwrap(),
+        StreamOptions {
+            observation: Some(observation),
+            data_capture: Some(capture.clone()),
+            clock: clock.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    instance.source.send(json!(1)).unwrap();
+    wait_until(|| instance.summary().completed_frames == 2);
+    {
+        let data = data.lock().unwrap();
+        assert!(data.iter().any(|record| matches!(&record.payload, DataPayload::Ports { identity, direction: Direction::Output, values: Some(values), .. }
+            if identity.node.id == "feed" && identity.ordinal == Some(0) && values.to_json()["item"] == json!(1))));
+        assert!(data.iter().any(|record| matches!(&record.payload, DataPayload::Ports { identity, direction: Direction::Input, .. } if identity.node.id == "collect")));
+        assert!(!data.iter().any(|record| matches!(&record.payload, DataPayload::Ports { identity, direction: Direction::Output, .. } if identity.node.id == "collect")));
+        assert!(
+            !data
+                .iter()
+                .any(|record| matches!(record.payload, DataPayload::End { .. }))
+        );
+    }
+    instance.source.send(json!(2)).unwrap();
+    wait_until(|| instance.summary().completed_frames == 3);
+    clock.advance(250);
+    let delivery = instance.receive().unwrap().unwrap();
+    assert_eq!(delivery.output().outputs["batch"], json!([1, 2]));
+    delivery.acknowledge().unwrap();
+    instance.source.close();
+    assert!(instance.recv().unwrap().is_none());
+    instance.join().unwrap();
+    assert!(capture.diagnostic().is_none());
+    let data = data.lock().unwrap();
+    let outputs = data
+        .iter()
+        .filter_map(|record| match &record.payload {
+            DataPayload::Ports {
+                identity,
+                direction: Direction::Output,
+                ..
+            } if identity.node.id == "feed" => Some(identity),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(outputs.len(), 2);
+    assert_eq!(outputs[0].stream.invocation, outputs[1].stream.invocation);
+    assert_eq!(
+        outputs
+            .iter()
+            .map(|identity| identity.ordinal.unwrap())
+            .collect::<Vec<_>>(),
+        [0, 1]
+    );
+    assert_ne!(outputs[0].output, outputs[1].output);
+    assert!(data.iter().any(|record| matches!(&record.payload, DataPayload::Ports { identity, direction: Direction::Output, values: Some(values), .. }
+        if identity.node.id == "collect" && identity.stream.trigger == StreamTrigger::Timer && identity.stream.message.is_none() && identity.output.is_some() && values.to_json()["items"] == json!([1, 2]))));
+    assert!(
+        matches!(data.last().unwrap().payload, DataPayload::End { counts } if counts.omitted == 0 && counts.dropped == 0)
+    );
+    let sequences: BTreeSet<_> = data.iter().map(|record| record.sequence).collect();
+    assert_eq!(sequences.len(), data.len());
+    for record in data
+        .iter()
+        .filter(|record| matches!(record.payload, DataPayload::Ports { .. }))
+    {
+        assert!(record.trace_context.is_some());
+    }
+}
+
+#[test]
+fn streaming_data_requires_the_owning_observation_before_startup() {
+    let harness = Harness::new(true);
+    let plan = plan(
+        json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+        "nodes":[{"id":"copy", "kind":"builtin.identity"}], "outputs":[{"name":"value","node":"copy","port":"value"}]}),
+    );
+    let owner = plan
+        .start_stream_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let (capture, _) = data_capture(owner);
+    for observation in [
+        None,
+        Some(
+            plan.start_stream_observation(&harness.observer(), RunId::new())
+                .unwrap(),
+        ),
+    ] {
+        let error = mf_compiler::start_stream(
+            &plan,
+            &NodeRegistry::from_inventory().unwrap(),
+            StreamOptions {
+                observation,
+                data_capture: Some(capture.clone()),
+                arguments: mf_runtime::WorkflowArguments::try_from(json!({"copy.input":7}))
+                    .unwrap(),
+                ..Default::default()
+            },
+        )
+        .err()
+        .unwrap();
+        assert!(error.to_string().contains("owning stream observation"));
+    }
+    assert!(!records(&harness).iter().any(|record| matches!(
+        record.payload,
+        StreamPayload::Execution(Event::NodeStarted { .. })
+    )));
+}
+
+#[test]
+fn oversized_stream_values_are_omitted_without_changing_results() {
+    use mf_telemetry::stream_data::{DataPayload, Omission};
+    let harness = Harness::new(false);
+    let mut value = definition();
+    value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|node| node["id"] == "feed")
+        .unwrap()["config"]["item_type"] = json!("string");
+    value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|node| node["id"] == "collect")
+        .unwrap()["config"]["max_items"] = json!(1);
+    let plan = plan(value);
+    let observation = plan
+        .start_stream_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let (capture, data) = data_capture(observation.clone());
+    let instance = start_stream(
+        &plan,
+        &NodeRegistry::from_inventory().unwrap(),
+        StreamOptions {
+            observation: Some(observation),
+            data_capture: Some(capture.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let value = "x".repeat(mf_telemetry::stream_data::MAX_RECORD_BYTES * 2);
+    instance.source.send(json!(value)).unwrap();
+    instance.source.close();
+    assert_eq!(
+        instance.recv().unwrap().unwrap().outputs["batch"],
+        json!([value])
+    );
+    assert!(instance.recv().unwrap().is_none());
+    instance.join().unwrap();
+    assert!(capture.diagnostic().is_none());
+    let data = data.lock().unwrap();
+    assert!(data.iter().any(|record| matches!(
+        record.payload,
+        DataPayload::Ports {
+            values: None,
+            omission: Some(Omission::Bytes),
+            ..
+        }
+    )));
+    assert!(
+        matches!(data.last().unwrap().payload, DataPayload::End { counts } if counts.omitted >= 5 && counts.dropped == 0)
+    );
+}
+
+struct PartialCapture;
+impl mf_runtime::EventNode for PartialCapture {
+    fn on_event(
+        &mut self,
+        event: mf_runtime::NodeEvent,
+        _: &mf_runtime::EventContext<'_>,
+    ) -> Result<mf_runtime::EventEffects, mf_runtime::NodeExecutionError> {
+        if !matches!(event, mf_runtime::NodeEvent::Input(_)) {
+            return Ok(Default::default());
+        }
+        Ok(mf_runtime::EventEffects {
+            emissions: vec![
+                mf_runtime::EventEmission {
+                    result: mf_runtime::Outputs::from([("value".into(), json!(1).into())]).into(),
+                    batch: None,
+                },
+                mf_runtime::EventEmission {
+                    result: mf_runtime::Outputs::from([("value".into(), json!("invalid").into())])
+                        .into(),
+                    batch: None,
+                },
+            ],
+            ..Default::default()
+        })
+    }
+}
+inventory::submit! { mf_runtime::NodeRegistration {
+    kind: "test.partial_capture",
+    factory: mf_runtime::NodeFactory::Plain(|_| Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Event(Box::new(PartialCapture)),
+        mf_runtime::NodePorts {
+            inputs: vec![mf_runtime::PortSpec::new("value", mf_runtime::ValueType::Int64, true)],
+            outputs: vec![mf_runtime::PortSpec::new("value", mf_runtime::ValueType::Int64, true)],
+        },
+    ))),
+} }
+
+#[test]
+fn partial_event_publication_keeps_only_admitted_data_and_failed_outcome() {
+    use mf_telemetry::stream_data::{DataPayload, Direction};
+    let plan = plan(
+        json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+        "nodes":[{"id":"start", "kind":"builtin.identity"}, {"id":"partial","kind":"test.partial_capture"}],
+        "edges":[{"from_node":"start","from_output":"value","to_node":"partial","to_input":"value"}],
+        "outputs":[{"name":"value","node":"partial","port":"value"}]}),
+    );
+    let harness = Harness::new(true);
+    let observation = plan
+        .start_stream_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let (capture, data) = data_capture(observation.clone());
+    let instance = mf_compiler::start_stream(
+        &plan,
+        &NodeRegistry::from_inventory().unwrap(),
+        StreamOptions {
+            observation: Some(observation),
+            data_capture: Some(capture.clone()),
+            arguments: mf_runtime::WorkflowArguments::try_from(json!({"start.input":7})).unwrap(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(instance.recv().is_err());
+    assert!(instance.join().is_err());
+    assert!(capture.diagnostic().is_none());
+    let data = data.lock().unwrap();
+    let outputs = data
+        .iter()
+        .filter_map(|record| match &record.payload {
+            DataPayload::Ports {
+                identity,
+                direction: Direction::Output,
+                values: Some(values),
+                ..
+            } if identity.node.id == "partial" => Some((identity, values)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].1.to_json()["value"], json!(1));
+    assert_eq!(outputs[0].0.ordinal, Some(0));
+    assert!(outputs[0].0.output.is_some());
+    assert!(records(&harness).iter().any(|record| matches!(&record.payload, StreamPayload::Execution(Event::NodeFinished { node, outcome: Outcome::Failed, .. }) if node.id == "partial")));
+}
+
+#[test]
+fn stream_data_sinks_can_observe_runtime_metrics_without_locking_execution() {
+    use mf_telemetry::stream_data::{DataPayload, DataRecord, Direction};
+    let harness = Harness::new(true);
+    let plan = plan(definition());
+    let observation = plan
+        .start_stream_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let holder = Arc::new(Mutex::new(
+        None::<std::sync::Weak<mf_runtime::StreamInstance>>,
+    ));
+    let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_holder = holder.clone();
+    let captured_observed = observed.clone();
+    let capture = mf_runtime::StreamDataRecorder::new(
+        observation.clone(),
+        move |packet| {
+            let record = DataRecord::decode(&packet.bytes)?;
+            if matches!(
+                record.payload,
+                DataPayload::Ports {
+                    direction: Direction::Output,
+                    ..
+                }
+            ) && let Some(instance) = captured_holder
+                .lock()
+                .unwrap()
+                .as_ref()
+                .and_then(std::sync::Weak::upgrade)
+            {
+                let (sender, receiver) = std::sync::mpsc::channel();
+                let worker = thread::spawn(move || {
+                    let _ = sender.send(instance.metrics());
+                });
+                receiver
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("runtime metrics must remain callable during data publication");
+                worker.join().unwrap();
+                captured_observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
+            Ok(true)
+        },
+        || true,
+    );
+    let mut options = StreamOptions {
+        observation: Some(observation),
+        data_capture: Some(capture.clone()),
+        ..Default::default()
+    };
+    let source = controlled::prepare_control("feed", &mut options);
+    let instance = Arc::new(
+        mf_compiler::start_stream(&plan, &NodeRegistry::from_inventory().unwrap(), options)
+            .unwrap(),
+    );
+    *holder.lock().unwrap() = Some(Arc::downgrade(&instance));
+    source.send(json!(1)).unwrap();
+    source.close();
+    assert_eq!(
+        instance.recv().unwrap().unwrap().outputs["batch"],
+        json!([1])
+    );
+    assert!(instance.recv().unwrap().is_none());
+    Arc::try_unwrap(instance).ok().unwrap().join().unwrap();
+    assert!(capture.diagnostic().is_none());
+    assert!(observed.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+}
+
+#[test]
+fn deep_values_and_failed_sinks_preserve_stream_results() {
+    use mf_telemetry::stream_data::{DataPayload, DataRecord, Omission};
+    let plan = plan(
+        json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+        "nodes":[{"id":"copy", "kind":"builtin.identity"}], "outputs":[{"name":"value","node":"copy","port":"value"}]}),
+    );
+    for mode in ["depth", "error", "panic"] {
+        let harness = Harness::new(true);
+        let observation = plan
+            .start_stream_observation(&harness.observer(), RunId::new())
+            .unwrap();
+        let data = CapturedData::default();
+        let captured = data.clone();
+        let capture = mf_runtime::StreamDataRecorder::new(
+            observation.clone(),
+            move |packet| {
+                let record = DataRecord::decode(&packet.bytes)?;
+                if matches!(record.payload, DataPayload::Ports { .. }) {
+                    if mode == "error" {
+                        return Err(std::io::Error::other("capture unavailable").into());
+                    }
+                    assert!(mode != "panic", "capture sink failure");
+                }
+                captured.lock().unwrap().push(record);
+                Ok(true)
+            },
+            || true,
+        );
+        let mut value = json!(7);
+        if mode == "depth" {
+            for _ in 0..60 {
+                value = json!([value]);
+            }
+        }
+        let instance = mf_compiler::start_stream(
+            &plan,
+            &NodeRegistry::from_inventory().unwrap(),
+            StreamOptions {
+                observation: Some(observation),
+                data_capture: Some(capture.clone()),
+                arguments: mf_runtime::WorkflowArguments::try_from(json!({"copy.input":value}))
+                    .unwrap(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(instance.recv().unwrap().unwrap().outputs["value"], value);
+        assert!(instance.recv().unwrap().is_none());
+        instance.join().unwrap();
+        match mode {
+            "depth" => {
+                assert!(capture.diagnostic().is_none());
+                let data = data.lock().unwrap();
+                assert_eq!(
+                    data.iter()
+                        .filter(|record| matches!(
+                            record.payload,
+                            DataPayload::Ports {
+                                omission: Some(Omission::Depth),
+                                values: None,
+                                ..
+                            }
+                        ))
+                        .count(),
+                    2
+                );
+            }
+            "error" => assert!(
+                matches!(capture.diagnostic().unwrap().as_ref(), mf_runtime::StreamCaptureError::Sink { source, .. } if source.downcast_ref::<std::io::Error>().is_some())
+            ),
+            _ => assert!(matches!(
+                capture.diagnostic().unwrap().as_ref(),
+                mf_runtime::StreamCaptureError::SinkPanicked
+            )),
+        }
+    }
+}
+
+#[test]
+fn unavailable_capture_capacity_leaves_sequence_and_sender_loss_evidence() {
+    use mf_telemetry::stream_data::{DataPayload, DataRecord};
+    let plan = plan(
+        json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+        "nodes":[{"id":"copy","kind":"builtin.identity"}], "outputs":[{"name":"value","node":"copy","port":"value"}]}),
+    );
+    let harness = Harness::new(true);
+    let observation = plan
+        .start_stream_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let data = CapturedData::default();
+    let captured = data.clone();
+    let capture = mf_runtime::StreamDataRecorder::new(
+        observation.clone(),
+        move |packet| {
+            captured
+                .lock()
+                .unwrap()
+                .push(DataRecord::decode(&packet.bytes)?);
+            Ok(true)
+        },
+        || false,
+    );
+    let instance = mf_compiler::start_stream(
+        &plan,
+        &NodeRegistry::from_inventory().unwrap(),
+        StreamOptions {
+            observation: Some(observation),
+            data_capture: Some(capture.clone()),
+            arguments: mf_runtime::WorkflowArguments::try_from(json!({"copy.input":7})).unwrap(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(instance.recv().unwrap().unwrap().outputs["value"], json!(7));
+    assert!(instance.recv().unwrap().is_none());
+    instance.join().unwrap();
+    let data = data.lock().unwrap();
+    assert_eq!(data.len(), 2);
+    assert_eq!(data[0].sequence, 0);
+    assert_eq!(data[1].sequence, 3);
+    assert!(
+        matches!(data[1].payload, DataPayload::End { counts } if counts.dropped == 2 && counts.omitted == 0)
+    );
+    assert!(capture.diagnostic().is_none());
+}
+
 #[derive(Default)]
 struct Clock {
     time: Mutex<Duration>,
@@ -397,11 +876,13 @@ fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
     let observation = plan
         .start_stream_observation(&harness.observer(), RunId::new())
         .unwrap();
+    let (capture, data) = data_capture(observation.clone());
     let instance = start_stream(
         &plan,
         &NodeRegistry::from_inventory().unwrap(),
         StreamOptions {
             observation: Some(observation),
+            data_capture: Some(capture.clone()),
             ..Default::default()
         },
     )
@@ -448,6 +929,53 @@ fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
         details
             .iter()
             .all(|record| !record.attributes.contains_key("mf.event.sequence"))
+    );
+    assert!(capture.diagnostic().is_none(), "{:?}", capture.diagnostic());
+    let data = data.lock().unwrap();
+    let copies = data
+        .iter()
+        .filter_map(|record| match &record.payload {
+            mf_telemetry::stream_data::DataPayload::Ports {
+                identity,
+                direction: mf_telemetry::stream_data::Direction::Output,
+                values: Some(values),
+                ..
+            } if identity.node.id == "copy" => Some((
+                identity,
+                record.trace_context.as_ref().unwrap(),
+                values.to_json(),
+            )),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(copies.len(), 6);
+    assert_eq!(
+        copies
+            .iter()
+            .map(|(identity, _, _)| identity.stream.invocation)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        6
+    );
+    assert_eq!(
+        copies
+            .iter()
+            .map(|(_, context, _)| &context.span_id)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        6
+    );
+    assert!(
+        copies
+            .iter()
+            .all(|(identity, _, _)| identity.stream.parent.is_some())
+    );
+    assert_eq!(
+        copies
+            .iter()
+            .map(|(_, _, value)| value["value"].as_i64().unwrap())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([1, 2])
     );
 }
 
