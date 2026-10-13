@@ -253,6 +253,10 @@ pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<
             .env(
                 mf_telemetry::SNAPSHOT_CAPTURE_ENV,
                 if streaming { "0" } else { "1" },
+            )
+            .env(
+                mf_telemetry::STREAM_DATA_CAPTURE_ENV,
+                if streaming { "1" } else { "0" },
             );
         let mut command = CommandWrap::from(command);
         command.wrap(ProcessGroup::leader());

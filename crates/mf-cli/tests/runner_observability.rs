@@ -177,6 +177,8 @@ fn command(executable: &Path) -> Command {
         "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
         "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
         "MF_RUN_ID",
+        "MF_CAPTURE_SNAPSHOTS",
+        "MF_CAPTURE_STREAM_DATA",
     ] {
         command.env_remove(name);
     }
@@ -938,8 +940,12 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         &root.path().join("flow.lock"),
         &definition,
     );
-    let execute = |endpoint: Option<&str>, collector: Option<&CollectorHandle>| {
+    let execute = |endpoint: Option<&str>, collector: Option<&CollectorHandle>, capture: bool| {
         let mut command = command(&runner);
+        command.env(
+            mf_telemetry::STREAM_DATA_CAPTURE_ENV,
+            if capture { "1" } else { "0" },
+        );
         if let Some(endpoint) = endpoint {
             command.env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint);
         }
@@ -979,6 +985,7 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", selected_receiver.endpoint())
         .env("MF_RUN_ID", selected_run.to_string())
         .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1")
+        .env(mf_telemetry::STREAM_DATA_CAPTURE_ENV, "1")
         .stdin(Stdio::null())
         .output()
         .unwrap();
@@ -1028,9 +1035,80 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
             .is_empty()
     );
 
-    let plain = execute(None, None);
+    let plain = execute(None, None, false);
+    let unavailable = execute(None, None, true);
+    assert_eq!(unavailable.stdout, plain.stdout);
+    assert!(
+        String::from_utf8_lossy(&unavailable.stderr).contains("stream data capture unavailable")
+    );
+    let (data_endpoint, data_collector) = collector();
+    let captured = execute(Some(&data_endpoint), Some(&data_collector), true);
+    assert_eq!(captured.stdout, plain.stdout);
+    let mut data = data_collector
+        .finish()
+        .into_iter()
+        .filter(|(path, _)| path == "/v1/logs")
+        .flat_map(|(_, body)| {
+            ExportLogsServiceRequest::decode(body.as_slice())
+                .unwrap()
+                .resource_logs
+        })
+        .flat_map(|resource| resource.scope_logs)
+        .filter(|scope| {
+            scope
+                .scope
+                .as_ref()
+                .is_some_and(|scope| scope.name == mf_telemetry::stream_data::SCOPE)
+        })
+        .flat_map(|scope| scope.log_records)
+        .map(|record| mf_telemetry::stream_data::from_log(&record).unwrap())
+        .collect::<Vec<_>>();
+    data.sort_by_key(|record| record.sequence);
+    assert!(matches!(
+        data.first().unwrap().payload,
+        mf_telemetry::stream_data::DataPayload::Start
+    ));
+    assert!(
+        matches!(data.last().unwrap().payload, mf_telemetry::stream_data::DataPayload::End { counts } if counts.dropped == 0 && counts.omitted == 0)
+    );
+    assert!(
+        data.iter()
+            .enumerate()
+            .all(|(index, record)| record.sequence == index as u64)
+    );
+    let feed = data
+        .iter()
+        .filter_map(|record| match &record.payload {
+            mf_telemetry::stream_data::DataPayload::Ports {
+                identity,
+                direction: mf_telemetry::stream_data::Direction::Output,
+                values: Some(values),
+                ..
+            } if identity.node.id == "feed" => Some((identity, values.to_json())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(feed.len(), 5);
+    assert_eq!(
+        feed.iter()
+            .map(|(_, values)| values["line"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["1", "2", "3", "4", "5"]
+    );
+    assert!(
+        feed.iter()
+            .enumerate()
+            .all(
+                |(ordinal, (identity, _))| identity.ordinal == Some(ordinal as u64)
+                    && identity.output.is_some()
+            )
+    );
+    assert!(data.iter().any(|record| matches!(&record.payload, mf_telemetry::stream_data::DataPayload::Ports { identity, values: Some(values), .. }
+        if identity.node.id == "collect" && identity.stream.trigger == mf_telemetry::stream::StreamTrigger::UpstreamClosed && values.to_json()["items"] == json!([4, 5]))));
+    assert!(data.iter().any(|record| matches!(&record.payload, mf_telemetry::stream_data::DataPayload::Ports { identity, direction: mf_telemetry::stream_data::Direction::Output, values: Some(values), .. }
+        if identity.node.id == "consume" && values.to_json()["value"] == json!([1, 2, 3]))));
     let (endpoint, collector) = collector();
-    let observed = execute(Some(&endpoint), Some(&collector));
+    let observed = execute(Some(&endpoint), Some(&collector), false);
     assert_eq!(observed.stdout, plain.stdout);
     let requests = collector.finish();
     assert!(
@@ -1151,7 +1229,7 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         .local_addr()
         .unwrap();
     assert_eq!(
-        execute(Some(&format!("http://{closed}")), None).stdout,
+        execute(Some(&format!("http://{closed}")), None, true).stdout,
         plain.stdout
     );
 }

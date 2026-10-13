@@ -319,6 +319,18 @@ temporary files or file polling.
 
 ## Streaming data protocol
 
+Generated streaming runners enable bounded value capture only when `MF_CAPTURE_STREAM_DATA=1`
+and an OTLP logs exporter are available. TUI streaming execution requests this mode through its
+child-only environment and clears `MF_CAPTURE_SNAPSHOTS`; finite TUI execution requests snapshots
+and clears the stream data flag. Ordinary execution and local verbosity do not request values.
+Recompile older schema-4 runners to gain data capture; they continue to run with their existing
+lifecycle and raw detail support when the new flag is ignored.
+
+Missing endpoints, observation setup failures, and `--no-telemetry` builds report capture
+availability on stderr and preserve business results. Whole-stream `MF_CAPTURE_SNAPSHOTS=1`
+still fails before startup. Selecting a finite Task from a streaming binary keeps the selected
+operation's finite snapshot identity and ignores the whole-stream data flag.
+
 Streaming business data uses a separate `mf.stream.data` instrumentation scope and
 `mf.stream.data.record` LogRecords. Version 1 carries an independently decodable UTF-8 JSON
 envelope in the standard OTLP `BytesValue` body. The envelope contains `version`, `workflow_id`,
@@ -512,9 +524,10 @@ Tab switches Logs and Data; a node-correlated log can expose decoded values whil
 running. Records without valid correlation cannot be assigned guessed node data. PgUp/PgDn scroll
 all detail panes. Span events remain part of Details rather than being converted into LogRecords.
 
-Finite TUI children keep `MF_CAPTURE_SNAPSHOTS=1`. Streaming children receive capture disabled,
-even when inherited settings request it; their Data pane explains the unsupported mode while
-Details and Logs remain available. The receiver retains at most 4,096 unique spans and 4,096 unique
+Finite TUI children keep `MF_CAPTURE_SNAPSHOTS=1` and clear `MF_CAPTURE_STREAM_DATA`.
+Streaming children receive `MF_CAPTURE_SNAPSHOTS=0` and `MF_CAPTURE_STREAM_DATA=1`, including
+when inherited settings request whole-run snapshots. Details and Logs remain available when a
+compatible older runner cannot provide stream data. The receiver retains at most 4,096 unique spans and 4,096 unique
 LogRecords, with a separate 16 MiB encoded-data budget for each signal including resource/scope
 metadata. Admitted raw detail remains available throughout the session; overflow is counted as
 signal-specific display drops and does not stop lifecycle reduction or snapshot reconstruction.
@@ -608,7 +621,9 @@ after joining the instance. Generated runners configure the existing bounded OTL
 attempt bounded shutdown on success and failure. Disabled export, queue pressure, and unreachable
 Collectors do not change workflow results or trigger retries.
 
-Whole-run snapshot capture is unavailable for streaming instances. `StreamOptions.snapshots` and
+Whole-run snapshot capture is unavailable for streaming instances. Bounded streaming data is
+available through `StreamOptions.data_capture` or `MF_CAPTURE_STREAM_DATA=1` as described above.
+`StreamOptions.snapshots` and
 `MF_CAPTURE_SNAPSHOTS=1` are rejected before input admission or node execution. Validation and description
 modes remain free of execution and ignore capture/export setup. Existing finite-run history is unchanged.
 
@@ -629,5 +644,5 @@ absent from the selected description and do not receive synthetic skip or comple
 
 Opt-in snapshots belong to the finite selected operation, including when its Task is selected from a
 streaming binary. Snapshot export must use the selected description's identity. Whole-stream invocation
-continues to reject whole-run snapshot capture. Export and snapshot sink failures retain existing bounded
+continues to reject whole-run snapshot capture while supporting the independent bounded data mode. Export and snapshot sink failures retain existing bounded
 cleanup and diagnostics without changing business results or exit status.

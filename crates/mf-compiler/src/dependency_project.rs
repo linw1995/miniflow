@@ -206,6 +206,29 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Resu
             Err(error) => { eprintln!("telemetry observation unavailable: {error}"); None }
         }
     });
+    #[cfg(feature = "telemetry")]
+    let mut data_exporter = if stream_data_requested() {
+        if observation.is_some() {
+            match mf_telemetry::otlp::StreamDataExporter::from_env() {
+                Ok(exporter) => Some(exporter),
+                Err(error) => { eprintln!("stream data capture unavailable: {error}"); None }
+            }
+        } else {
+            eprintln!("stream data capture unavailable: a stream observation and OTLP logs exporter are required");
+            None
+        }
+    } else { None };
+    #[cfg(feature = "telemetry")]
+    let data_capture = data_exporter.as_ref().zip(observation.as_ref()).map(|(exporter, observation)| {
+        let sender = exporter.sender();
+        let capacity = sender.clone();
+        mf_runtime::StreamDataRecorder::new(observation.clone(), move |record| Ok(sender.try_emit(record)?), move || capacity.available())
+    });
+    #[cfg(not(feature = "telemetry"))]
+    let data_capture: Option<mf_runtime::StreamDataRecorder> = {
+        if stream_data_requested() { eprintln!("stream data capture unavailable: telemetry-enabled build required"); }
+        None
+    };
     let result = (|| -> Result<(), Box<dyn std::error::Error>> {
         let _context = observation.as_ref().map(mf_runtime::StreamObservation::enter);
         let registry = mf_runtime::NodeRegistry::from_inventory()?;
@@ -216,11 +239,19 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Resu
         prepared.plan().input_schema().validate(&arguments)?;
         let needs_stdin = prepared.plan().input_schema().stdin_owner(&arguments)?.is_some();
         let stdin = if needs_stdin { stdio.take_input() } else { None };
-        let instance = mf_runtime::FlowRuntime::default().start_stream(prepared, mf_runtime::StreamOptions { observation: observation.clone(), arguments, stdin, ..Default::default() })?;
+        let instance = mf_runtime::FlowRuntime::default().start_stream(prepared, mf_runtime::StreamOptions { observation: observation.clone(), data_capture: data_capture.clone(), arguments, stdin, ..Default::default() })?;
         stdio.run(instance)?;
         Ok(())
     })();
     if let (Err(error), Some(observation)) = (&result, &observation) { observation.preparation_failed(error.to_string()); }
+    if let Some(capture) = &data_capture {
+        capture.finish();
+        if let Some(error) = capture.diagnostic() { eprintln!("stream data capture incomplete: {error}"); }
+    }
+    #[cfg(feature = "telemetry")]
+    if let Some(exporter) = data_exporter.as_mut() {
+        if let Err(error) = exporter.finish() { eprintln!("stream data export incomplete: {error}"); }
+    }
     #[cfg(feature = "telemetry")]
     if let Some(providers) = providers {
         for diagnostic in providers.shutdown() { eprintln!("telemetry export incomplete: {diagnostic}"); }
@@ -243,6 +274,11 @@ fn run_id() -> mf_telemetry::identity::RunId {
             mf_telemetry::identity::RunId::new()
         }
     }
+}
+
+#[cfg(feature = "streaming")]
+fn stream_data_requested() -> bool {
+    std::env::var(mf_telemetry::STREAM_DATA_CAPTURE_ENV).is_ok_and(|value| value == "1")
 }
 
 fn capture_requested() -> bool {

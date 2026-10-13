@@ -15,10 +15,10 @@
 
 ## 3. Runner and TUI launch configuration
 
-- [ ] 3.1 Add `MF_CAPTURE_STREAM_DATA` handling and generated runner exporter/recorder setup; verify telemetry-enabled capture, no-telemetry/missing-export diagnostics, ordinary execution without capture, and unchanged whole-run snapshot rejection.
-- [ ] 3.2 Configure TUI child environments by execution mode without changing the parent; verify stream data enablement, inherited finite snapshot suppression, finite capture, endpoint isolation, and metadata-only behavior for older compatible runners.
-- [ ] 3.3 Add generated-runner acceptance coverage comparing streaming results/order with capture enabled and disabled; verify producer, Batch, and nested task records agree with in-memory execution, and selected finite Tasks from stream binaries retain finite snapshot semantics.
-- [ ] 3.4 Update runner/TUI capture documentation and examples in `docs/observability.md`; verify examples against the generated-runner tests and state the recompilation and large-value omission behavior.
+- [x] 3.1 Add `MF_CAPTURE_STREAM_DATA` handling and generated runner exporter/recorder setup; verify telemetry-enabled capture, no-telemetry/missing-export diagnostics, ordinary execution without capture, and unchanged whole-run snapshot rejection.
+- [x] 3.2 Configure TUI child environments by execution mode without changing the parent; verify stream data enablement, inherited finite snapshot suppression, finite capture, endpoint isolation, and metadata-only behavior for older compatible runners.
+- [x] 3.3 Add generated-runner acceptance coverage comparing streaming results/order with capture enabled and disabled; verify producer, Batch, and nested task records agree with in-memory execution, and selected finite Tasks from stream binaries retain finite snapshot semantics.
+- [x] 3.4 Update runner/TUI capture documentation and examples in `docs/observability.md`; verify examples against the generated-runner tests and state the recompilation and large-value omission behavior.
 
 ## 4. Receiver and bounded data store
 
