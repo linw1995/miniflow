@@ -803,14 +803,21 @@ fn supervise(
                                     return Ok((status, interrupted_at.is_some(), capture_forced));
                                 }
                                 _ => {
-                                    view_state.handle_key(
+                                    let traces = receiver.trace_snapshot();
+                                    if !view_state.traces.handle_data_key(
                                         key.code,
-                                        &snapshot,
-                                        layout,
-                                        body_layouts,
-                                        &receiver.trace_snapshot(),
-                                        &receiver.log_snapshot(),
-                                    );
+                                        &traces,
+                                        &receiver.data_snapshot(),
+                                    ) {
+                                        view_state.handle_key(
+                                            key.code,
+                                            &snapshot,
+                                            layout,
+                                            body_layouts,
+                                            &traces,
+                                            &receiver.log_snapshot(),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -867,14 +874,21 @@ fn supervise(
                         }
                     } else {
                         let snapshot = receiver.snapshot_shared();
-                        view_state.handle_key(
+                        let traces = receiver.trace_snapshot();
+                        if !view_state.traces.handle_data_key(
                             key.code,
-                            &snapshot,
-                            layout,
-                            body_layouts,
-                            &receiver.trace_snapshot(),
-                            &receiver.log_snapshot(),
-                        );
+                            &traces,
+                            &receiver.data_snapshot(),
+                        ) {
+                            view_state.handle_key(
+                                key.code,
+                                &snapshot,
+                                layout,
+                                body_layouts,
+                                &traces,
+                                &receiver.log_snapshot(),
+                            );
+                        }
                     }
                     last_frame = Instant::now() - FRAME_INTERVAL;
                 }
@@ -937,6 +951,7 @@ fn draw(
                         traces: &traces,
                         logs: &logs,
                         data,
+                        stream_data: Some(&receiver.data_snapshot()),
                         spans: snapshot.traces,
                         streaming: snapshot.stream.is_some(),
                         finished: status.is_some(),

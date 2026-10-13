@@ -512,17 +512,31 @@ entry, and End/`f` to follow the last entry in tree order. `v` or Esc returns to
 Tab switches the selected span's right-hand pane:
 
 - **Details** shows timing, status, IDs, attributes, span events, links, resource, and scope metadata.
-- **Data** shows decoded node inputs/outputs, outcome, skipped ports, errors, and snapshot capture
-  diagnostics. Matching uses native trace/span IDs carried by snapshot LogRecords, including through
-  reordering and fragmentation. Repeated node names never substitute for invocation identity.
+- **Data** shows finite node inputs/outputs, outcome, skipped ports, errors, and snapshot capture
+  diagnostics. Streaming Data lists independently captured inputs and admitted emissions for the
+  selected span, ordered by capture sequence. Each row identifies direction, ports, trigger,
+  invocation, applicable message, emission ordinal, timestamp, and a bounded value summary.
+  Select a row to inspect its decoded values or byte/depth omission reason. Stream outcomes and
+  skipped ports keep their lifecycle meanings in Details; a payload never proves successful work.
+  Matching uses exact native trace/span IDs. Repeated node names never substitute for invocation identity.
 - **Logs** shows independent LogRecords associated with both the selected trace and span IDs. Press
   `l` to focus that list and select a record for its timestamp, severity, body, attributes, and metadata.
 
 Press `g` to switch between spans and session-wide LogRecords. Session logs remain available before
 spans finish, when spans are unsampled, or when records lack a retained span. In session log mode,
-Tab switches Logs and Data; a node-correlated log can expose decoded values while its span is still
-running. Records without valid correlation cannot be assigned guessed node data. PgUp/PgDn scroll
-all detail panes. Span events remain part of Details rather than being converted into LogRecords.
+Tab switches Logs and Data. For streaming sessions, Data lists all retained input/emission records,
+including live producers whose spans have not finished or exported. Rows without native context
+remain visible without an inferred span. Finite session Data still uses the selected correlated log
+for its node snapshot. Span events remain part of Details rather than becoming LogRecords.
+
+In span Data, press `l` to focus the record list; session Data already focuses its list. Use `j`/`k`
+or Up/Down to select, Home for the oldest retained row, and End/`f` to resume tail following.
+PgUp/PgDn page a focused Data list by ten records; otherwise they scroll the value preview.
+Selection follows the capture sequence across late insertions. If a selected value is evicted,
+Data reports its sequence and selects the nearest retained row. Scope changes reset following.
+The value preview is capped at 64 KiB, preserves UTF-8, escapes terminal controls, and marks
+preview truncation while leaving the admitted value in storage. Lists and capture diagnostics
+refresh throughout collection and remain inspectable in the finished view.
 
 Finite TUI children keep `MF_CAPTURE_SNAPSHOTS=1` and clear `MF_CAPTURE_STREAM_DATA`.
 Streaming children receive `MF_CAPTURE_SNAPSHOTS=0` and `MF_CAPTURE_STREAM_DATA=1`, including

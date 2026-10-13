@@ -6,6 +6,7 @@ use crate::{
     logs::{LogObservation, LogSnapshot},
     snapshots::span_data_preview,
     state::TraceAvailability,
+    stream_data::{DataObservation, DataSnapshot},
 };
 use crossterm::event::KeyCode;
 use opentelemetry_proto::tonic::{
@@ -170,6 +171,7 @@ pub struct TraceViewSnapshot<'a> {
     pub traces: &'a TraceSnapshot,
     pub logs: &'a LogSnapshot,
     pub data: SpanData,
+    pub stream_data: Option<&'a DataSnapshot>,
     pub spans: TraceAvailability,
     pub streaming: bool,
     pub finished: bool,
@@ -185,6 +187,7 @@ pub struct TraceView {
     session_logs: bool,
     focus_logs: bool,
     selected_log: Option<usize>,
+    data_list: DataList,
 }
 
 impl TraceView {
@@ -239,6 +242,34 @@ impl TraceView {
         }
     }
 
+    pub fn handle_data_key(
+        &mut self,
+        key: KeyCode,
+        traces: &TraceSnapshot,
+        data: &DataSnapshot,
+    ) -> bool {
+        if !self.visible || self.pane != Pane::Data || !data.streaming {
+            return false;
+        }
+        if key == KeyCode::Char('l') && !self.session_logs {
+            self.data_list.focused = !self.data_list.focused;
+            return true;
+        }
+        if !self.session_logs && !self.data_list.focused {
+            return false;
+        }
+        let correlation = traces
+            .rows
+            .get(self.position(traces))
+            .map(|row| row.observation.key());
+        let rows = self.data_list.rows(self.session_logs, correlation, data);
+        let handled = self.data_list.navigate(key, &rows);
+        if handled {
+            self.scroll = 0;
+        }
+        handled
+    }
+
     pub fn handle_key(&mut self, key: KeyCode, traces: &TraceSnapshot, logs: &LogSnapshot) -> bool {
         if key == KeyCode::Char('v') {
             self.visible = !self.visible;
@@ -257,6 +288,7 @@ impl TraceView {
                     (false, Pane::Logs) => Pane::Details,
                 };
                 self.focus_logs = false;
+                self.data_list.focused = false;
             }
             KeyCode::Char('g') => {
                 self.session_logs = !self.session_logs;
@@ -266,6 +298,7 @@ impl TraceView {
                     Pane::Details
                 };
                 self.focus_logs = false;
+                self.data_list.focused = false;
             }
             KeyCode::Char('l') if self.pane == Pane::Logs => self.focus_logs = !self.focus_logs,
             KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
@@ -334,9 +367,12 @@ impl TraceView {
         let selected = self.position(snapshot.traces);
         let records = self.log_records(snapshot.traces, snapshot.logs);
         let log_selected = self.log_position(&records);
-        if self.session_logs {
+        let stream_data = snapshot
+            .stream_data
+            .filter(|_| snapshot.streaming && self.pane == Pane::Data);
+        if self.session_logs && stream_data.is_none() {
             draw_logs(frame, entries, &records, log_selected, "Session LogRecords");
-        } else {
+        } else if !self.session_logs {
             let rows = usize::from(entries.height.saturating_sub(2)).max(1);
             let first = selected
                 .saturating_sub(rows / 2)
@@ -365,6 +401,70 @@ impl TraceView {
                 entries,
                 &mut state,
             );
+        }
+        if let Some(data) = stream_data {
+            let correlation = snapshot
+                .traces
+                .rows
+                .get(selected)
+                .map(|row| row.observation.key());
+            let rows = self.data_list.rows(self.session_logs, correlation, data);
+            let selected = self.data_list.position(&rows);
+            let sequence = rows.get(selected).map(|row| row.record.sequence);
+            if self.data_list.preview_sequence != sequence {
+                self.scroll = 0;
+                self.data_list.preview_sequence = sequence;
+            }
+            let preview_area = if self.session_logs {
+                draw_data_rows(
+                    frame,
+                    entries,
+                    &rows,
+                    selected,
+                    "Session Data (j/k: select)",
+                );
+                details
+            } else {
+                let [list_area, preview_area] = Layout::vertical([
+                    Constraint::Length((details.height / 3).clamp(3, 10)),
+                    Constraint::Min(1),
+                ])
+                .areas(details);
+                draw_data_rows(
+                    frame,
+                    list_area,
+                    &rows,
+                    selected,
+                    if self.data_list.focused {
+                        "Invocation Data (focused)"
+                    } else {
+                        "Invocation Data (l: focus)"
+                    },
+                );
+                preview_area
+            };
+            let text = stream_data_preview(
+                rows.get(selected).map(AsRef::as_ref),
+                data,
+                self.data_list.eviction,
+                self.data_list.selected.is_none(),
+            );
+            let paragraph = Paragraph::new(text)
+                .block(
+                    Block::default()
+                        .title("[Data] | Tab: pane")
+                        .borders(Borders::ALL),
+                )
+                .wrap(Wrap { trim: false });
+            self.scroll = self.scroll.min(
+                paragraph
+                    .line_count(preview_area.width.saturating_sub(2))
+                    .saturating_sub(usize::from(preview_area.height.saturating_sub(2)))
+                    .min(u16::MAX as usize) as u16,
+            );
+            frame.render_widget(paragraph.scroll((self.scroll, 0)), preview_area);
+            frame.render_widget(Paragraph::new("Tab: pane | g: spans/session | l: focus related Data | j/k: select | Home/End/f: first/follow\nPgUp/PgDn: page focused list / scroll preview | v/Esc: graph | Ctrl-C: interrupt/close"), footer);
+            return;
         }
         let (details, title) = if self.pane == Pane::Logs && !self.session_logs {
             let [logs_area, details] = Layout::vertical([
@@ -442,6 +542,341 @@ impl TraceView {
         frame.render_widget(paragraph.scroll((self.scroll, 0)), details);
         frame.render_widget(Paragraph::new("Tab: pane | g: spans/session logs | l: focus related logs | j/k: select | Home/End: first/follow\nPgUp/PgDn: scroll details | v/Esc: graph | Ctrl-C: interrupt/close"), footer);
     }
+}
+
+#[derive(Default)]
+struct DataList {
+    scope: Option<(bool, Option<SpanKey>)>,
+    selected: Option<u64>,
+    focused: bool,
+    eviction: Option<u64>,
+    preview_sequence: Option<u64>,
+}
+
+impl DataList {
+    fn rows(
+        &mut self,
+        session: bool,
+        correlation: Option<SpanKey>,
+        snapshot: &DataSnapshot,
+    ) -> Vec<Arc<DataObservation>> {
+        let scope = (session, if session { None } else { correlation });
+        if self.scope.as_ref() != Some(&scope) {
+            self.scope = Some(scope.clone());
+            self.selected = None;
+            self.eviction = None;
+        }
+        let rows = if session {
+            snapshot.records.clone()
+        } else {
+            scope
+                .1
+                .as_ref()
+                .map_or_else(Vec::new, |(trace, span)| snapshot.related(trace, span))
+        };
+        if let Some(selected) = self.selected
+            && !rows.iter().any(|row| row.record.sequence == selected)
+        {
+            self.eviction = Some(selected);
+            self.selected = rows
+                .iter()
+                .min_by_key(|row| row.record.sequence.abs_diff(selected))
+                .map(|row| row.record.sequence);
+        }
+        rows
+    }
+    fn position(&self, rows: &[Arc<DataObservation>]) -> usize {
+        self.selected
+            .and_then(|sequence| rows.iter().position(|row| row.record.sequence == sequence))
+            .unwrap_or(rows.len().saturating_sub(1))
+    }
+    fn navigate(&mut self, key: KeyCode, rows: &[Arc<DataObservation>]) -> bool {
+        let current = self.position(rows);
+        let index = match key {
+            KeyCode::Up | KeyCode::Char('k') => Some(current.saturating_sub(1)),
+            KeyCode::Down | KeyCode::Char('j') => {
+                Some((current + 1).min(rows.len().saturating_sub(1)))
+            }
+            KeyCode::PageUp => Some(current.saturating_sub(10)),
+            KeyCode::PageDown => Some((current + 10).min(rows.len().saturating_sub(1))),
+            KeyCode::Home => Some(0),
+            KeyCode::End | KeyCode::Char('f') => None,
+            _ => return false,
+        };
+        self.selected = index.and_then(|index| rows.get(index).map(|row| row.record.sequence));
+        self.eviction = None;
+        true
+    }
+}
+
+fn data_row(row: &DataObservation) -> String {
+    use mf_telemetry::stream_data::{DataPayload, Direction};
+    let DataPayload::Ports {
+        identity,
+        direction,
+        port_names,
+        ports_truncated,
+        values,
+        omission,
+    } = &row.record.payload
+    else {
+        return String::new();
+    };
+    let message = identity.output.or(identity.stream.message).map_or_else(
+        || "-".into(),
+        |message| format!("{}:{}", message.domain, message.sequence),
+    );
+    let ports = port_names
+        .iter()
+        .take(4)
+        .map(|name| data_label(name, 20))
+        .collect::<Vec<_>>()
+        .join(",");
+    let summary = values
+        .as_ref()
+        .and_then(|value| match value {
+            mf_telemetry::stream_data::DataValue::Object(values) => values.first_key_value(),
+            _ => None,
+        })
+        .map_or_else(
+            || "values".into(),
+            |(key, value)| {
+                use mf_telemetry::stream_data::DataValue;
+                let value = match value {
+                    DataValue::Null => "null".into(),
+                    DataValue::Bool(value) => value.to_string(),
+                    DataValue::Number(value) => value.to_string(),
+                    DataValue::String(value) => data_label(value, 24),
+                    DataValue::Array(values) => format!("array({})", values.len()),
+                    DataValue::Object(values) => format!("object({})", values.len()),
+                };
+                format!("{}={value}", data_label(key, 16))
+            },
+        );
+    format!(
+        "#{} {} {} [{}{}] {:?} inv={} msg={} ord={} t={} {}",
+        row.record.sequence,
+        if *direction == Direction::Input {
+            "IN"
+        } else {
+            "OUT"
+        },
+        data_label(&identity.node.id, 24),
+        ports,
+        if *ports_truncated || port_names.len() > 4 {
+            ",..."
+        } else {
+            ""
+        },
+        identity.stream.trigger,
+        identity.stream.invocation,
+        message,
+        identity
+            .ordinal
+            .map_or_else(|| "-".into(), |ordinal| ordinal.to_string()),
+        row.record.time_unix_nano,
+        omission.map_or_else(|| summary, |reason| format!("omitted:{reason:?}"))
+    )
+}
+
+fn data_label(text: &str, limit: usize) -> String {
+    let mut characters = text.chars();
+    let mut result: String = characters
+        .by_ref()
+        .take(limit)
+        .flat_map(|character| {
+            if character.is_control() {
+                character.escape_default().collect::<Vec<_>>()
+            } else {
+                vec![character]
+            }
+        })
+        .collect();
+    if characters.next().is_some() {
+        result.push_str("...");
+    }
+    result
+}
+
+fn draw_data_rows(
+    frame: &mut Frame<'_>,
+    area: ratatui::layout::Rect,
+    rows: &[Arc<DataObservation>],
+    selected: usize,
+    title: &str,
+) {
+    let visible = usize::from(area.height.saturating_sub(2)).max(1);
+    let first = selected
+        .saturating_sub(visible / 2)
+        .min(rows.len().saturating_sub(visible));
+    let items: Vec<_> = rows
+        .iter()
+        .skip(first)
+        .take(visible)
+        .map(|row| ListItem::new(data_row(row)))
+        .collect();
+    let mut state =
+        ListState::default().with_selected((!items.is_empty()).then_some(selected - first));
+    frame.render_stateful_widget(
+        List::new(items)
+            .block(Block::default().title(title).borders(Borders::ALL))
+            .highlight_style(Style::default().add_modifier(Modifier::REVERSED)),
+        area,
+        &mut state,
+    );
+}
+
+fn stream_data_preview(
+    row: Option<&DataObservation>,
+    snapshot: &DataSnapshot,
+    eviction: Option<u64>,
+    following: bool,
+) -> String {
+    use mf_telemetry::stream_data::{DataPayload, DataValue};
+    let mut preview = Preview(String::new());
+    let result = (|| -> fmt::Result {
+        writeln!(
+            preview,
+            "{} | {}",
+            snapshot.status,
+            if following {
+                "Following tail"
+            } else {
+                "Inspecting selection"
+            }
+        )?;
+        writeln!(
+            preview,
+            "Rows={} received={} evicted={} omissions={} sender drops={} gaps={} faults={}",
+            snapshot.records.len(),
+            snapshot.observed,
+            snapshot.evicted,
+            snapshot.omissions,
+            snapshot.sender_drops,
+            snapshot
+                .gaps
+                .map_or_else(|| "unknown".into(), |gaps| gaps.to_string()),
+            snapshot.faults
+        )?;
+        if let Some(sequence) = eviction {
+            writeln!(
+                preview,
+                "Selected record #{sequence} was evicted; showing nearest retained row."
+            )?;
+        }
+        if let Some(diagnostic) = &snapshot.diagnostic {
+            writeln!(
+                preview,
+                "Diagnostic: {}",
+                data_label(&diagnostic.to_string(), 1024)
+            )?;
+        }
+        let Some(row) = row else {
+            return writeln!(
+                preview,
+                "No retained Data rows in this scope. Use g then Tab for session Data."
+            );
+        };
+        writeln!(preview, "\n{}", data_row(row))?;
+        if let DataPayload::Ports {
+            identity,
+            values,
+            omission,
+            ..
+        } = &row.record.payload
+        {
+            writeln!(
+                preview,
+                "Invocation={} parent={:?} node={} kind={}",
+                identity.stream.invocation,
+                identity.stream.parent,
+                data_label(&identity.node.id, 256),
+                data_label(&identity.node.kind, 80)
+            )?;
+            for entry in &identity.node.path {
+                writeln!(
+                    preview,
+                    "Scope: {}[{}]",
+                    data_label(&entry.loop_id, 80),
+                    entry.index.get()
+                )?;
+            }
+            if let Some((trace, span)) = &row.correlation {
+                writeln!(preview, "Trace={} span={}", hex(trace), hex(span))?;
+            } else {
+                writeln!(
+                    preview,
+                    "Native context absent; no inferred span association."
+                )?;
+            }
+            if let Some(reason) = omission {
+                writeln!(preview, "Value omitted: {reason:?} capture limit.")?;
+            }
+            if let Some(values) = values {
+                fn write_data(
+                    preview: &mut Preview,
+                    value: &DataValue,
+                    depth: usize,
+                ) -> fmt::Result {
+                    match value {
+                        DataValue::Null => write!(preview, "null"),
+                        DataValue::Bool(value) => write!(preview, "{value}"),
+                        DataValue::Number(value) => write!(preview, "{value}"),
+                        DataValue::String(value) => {
+                            write!(preview, "\"")?;
+                            for character in value.chars() {
+                                match character {
+                                    '"' => write!(preview, "\\\"")?,
+                                    '\\' => write!(preview, "\\\\")?,
+                                    character if character.is_control() => {
+                                        write!(preview, "{}", character.escape_default())?
+                                    }
+                                    character => write!(preview, "{character}")?,
+                                }
+                            }
+                            write!(preview, "\"")
+                        }
+                        DataValue::Array(items) => {
+                            writeln!(preview, "[")?;
+                            for (index, item) in items.iter().enumerate() {
+                                write!(preview, "{}", "  ".repeat(depth + 1))?;
+                                write_data(preview, item, depth + 1)?;
+                                writeln!(
+                                    preview,
+                                    "{}",
+                                    if index + 1 == items.len() { "" } else { "," }
+                                )?;
+                            }
+                            write!(preview, "{}]", "  ".repeat(depth))
+                        }
+                        DataValue::Object(items) => {
+                            writeln!(preview, "{{")?;
+                            for (index, (key, value)) in items.iter().enumerate() {
+                                write!(preview, "{}", "  ".repeat(depth + 1))?;
+                                write_data(preview, &DataValue::String(key.clone()), depth + 1)?;
+                                write!(preview, ": ")?;
+                                write_data(preview, value, depth + 1)?;
+                                writeln!(
+                                    preview,
+                                    "{}",
+                                    if index + 1 == items.len() { "" } else { "," }
+                                )?;
+                            }
+                            write!(preview, "{}}}", "  ".repeat(depth))
+                        }
+                    }
+                }
+                write_data(&mut preview, values, 0)?;
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        preview.0.push_str(
+            "\n[Preview truncated at 64 KiB; complete admitted value remains in Data storage.]",
+        );
+    }
+    preview.0
 }
 
 fn draw_logs(
@@ -857,6 +1292,7 @@ mod tests {
                     &TraceViewSnapshot {
                         traces: &store.snapshot(),
                         logs: &LogSnapshot::default(),
+                        stream_data: None,
                         data: SpanData::default(),
                         spans: TraceAvailability {
                             observed_spans: 1,
@@ -896,6 +1332,7 @@ mod tests {
                         &TraceViewSnapshot {
                             traces: &TraceSnapshot::default(),
                             logs: &LogSnapshot::default(),
+                            stream_data: None,
                             data: SpanData::default(),
                             spans: TraceAvailability::default(),
                             streaming: false,
@@ -976,6 +1413,7 @@ mod tests {
                         &TraceViewSnapshot {
                             traces: &traces,
                             logs: &logs.snapshot(),
+                            stream_data: None,
                             data: data(value),
                             spans: TraceAvailability::default(),
                             streaming: false,
@@ -1020,6 +1458,7 @@ mod tests {
                     &TraceViewSnapshot {
                         traces: &traces,
                         logs: &logs.snapshot(),
+                        stream_data: None,
                         data: data(73),
                         spans: TraceAvailability::default(),
                         streaming: false,
@@ -1080,6 +1519,7 @@ mod tests {
                     &TraceViewSnapshot {
                         traces: &traces,
                         logs: &logs.snapshot(),
+                        stream_data: None,
                         data: SpanData::default(),
                         spans: TraceAvailability::default(),
                         streaming: false,
@@ -1107,6 +1547,7 @@ mod tests {
                     &TraceViewSnapshot {
                         traces: &traces,
                         logs: &logs.snapshot(),
+                        stream_data: None,
                         data: SpanData::default(),
                         spans: TraceAvailability::default(),
                         streaming: true,
@@ -1133,6 +1574,7 @@ mod tests {
                 &TraceViewSnapshot {
                     traces: &traces,
                     logs: &logs.snapshot(),
+                    stream_data: None,
                     data: SpanData::default(),
                     spans: TraceAvailability::default(),
                     streaming: true,
@@ -1188,5 +1630,289 @@ mod tests {
             assert!(preview.len() < PREVIEW_BYTES + 100);
         }
         assert_eq!(span.span.name.len(), PREVIEW_BYTES * 2);
+    }
+}
+
+#[cfg(test)]
+mod stream_data_tests {
+    use super::*;
+    use mf_telemetry::{
+        event::NodeIdentity,
+        identity::{RunId, WorkflowId},
+        stream::{StreamIdentity, StreamMessage, StreamTrigger},
+        stream_data::{DataIdentity, DataPayload, DataRecord, DataValue, Direction, Omission},
+        wire::TraceContext,
+    };
+    use ratatui::{Terminal, backend::TestBackend};
+
+    fn row(
+        sequence: u64,
+        span: Option<u8>,
+        direction: Direction,
+        value: DataValue,
+    ) -> Arc<DataObservation> {
+        let correlation = span.map(|span| (vec![1; 16], vec![span; 8]));
+        Arc::new(DataObservation {
+            correlation,
+            record: DataRecord {
+                version: 1,
+                workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
+                run_id: RunId::new(),
+                sequence,
+                time_unix_nano: sequence,
+                trace_context: span.map(|span| TraceContext {
+                    trace_id: "01".repeat(16),
+                    span_id: format!("{span:02x}").repeat(8),
+                    trace_flags: 0,
+                }),
+                payload: DataPayload::Ports {
+                    identity: Box::new(DataIdentity {
+                        node: NodeIdentity {
+                            id: "feed\u{1b}[31m".into(),
+                            kind: "producer".into(),
+                            path: vec![],
+                        },
+                        stream: StreamIdentity {
+                            invocation: span.unwrap_or(1).into(),
+                            trigger: StreamTrigger::Startup,
+                            message: None,
+                            parent: None,
+                        },
+                        output: (direction == Direction::Output).then_some(StreamMessage {
+                            domain: 0,
+                            sequence,
+                        }),
+                        ordinal: (direction == Direction::Output).then_some(sequence),
+                    }),
+                    direction,
+                    port_names: vec!["value".into()],
+                    ports_truncated: false,
+                    values: Some(DataValue::Object(BTreeMap::from([("value".into(), value)]))),
+                    omission: None,
+                },
+            },
+        })
+    }
+    fn render(
+        view: &mut TraceView,
+        traces: &TraceSnapshot,
+        data: &DataSnapshot,
+        finished: bool,
+    ) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(160, 35)).unwrap();
+        terminal
+            .draw(|frame| {
+                view.draw(
+                    frame,
+                    &TraceViewSnapshot {
+                        traces,
+                        logs: &LogSnapshot::default(),
+                        data: SpanData::default(),
+                        stream_data: Some(data),
+                        spans: TraceAvailability::default(),
+                        streaming: true,
+                        finished,
+                    },
+                )
+            })
+            .unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect()
+    }
+    fn data(records: Vec<Arc<DataObservation>>) -> DataSnapshot {
+        DataSnapshot {
+            streaming: true,
+            observed: records.len() as u64,
+            records,
+            status: "Collecting stream data; tail unverified".into(),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn live_session_data_follows_then_preserves_identity_and_refreshes_status() {
+        let traces = TraceSnapshot::default();
+        let mut snapshot = data(vec![
+            row(1, None, Direction::Input, DataValue::Null),
+            row(3, None, Direction::Output, DataValue::Number(73.into())),
+        ]);
+        let mut view = TraceView::default();
+        view.handle_key(KeyCode::Char('v'), &traces, &LogSnapshot::default());
+        view.handle_key(KeyCode::Char('g'), &traces, &LogSnapshot::default());
+        view.handle_key(KeyCode::Tab, &traces, &LogSnapshot::default());
+        let text = render(&mut view, &traces, &snapshot, false);
+        assert!(
+            text.contains("Session Data")
+                && text.contains("73")
+                && text.contains("Native context absent"),
+            "{text}"
+        );
+        assert!(view.handle_data_key(KeyCode::Home, &traces, &snapshot));
+        assert_eq!(view.data_list.selected, Some(1));
+        snapshot.records.insert(
+            1,
+            row(2, None, Direction::Output, DataValue::Number(42.into())),
+        );
+        snapshot
+            .records
+            .push(row(4, None, Direction::Output, DataValue::Bool(true)));
+        render(&mut view, &traces, &snapshot, false);
+        assert_eq!(view.data_list.selected, Some(1));
+        assert!(view.handle_data_key(KeyCode::PageDown, &traces, &snapshot));
+        assert_eq!(view.data_list.selected, Some(4));
+        assert!(view.handle_data_key(KeyCode::Char('f'), &traces, &snapshot));
+        assert_eq!(view.data_list.selected, None);
+        snapshot.status = "Capture ended with value omissions".into();
+        snapshot.omissions = 1;
+        let text = render(&mut view, &traces, &snapshot, true);
+        assert!(
+            text.contains("Finished")
+                && text.contains("Capture ended with value omissions")
+                && text.contains("true"),
+            "{text}"
+        );
+    }
+    #[test]
+    fn exact_span_scope_and_omissions_preserve_invocation_boundaries() {
+        let mut spans = TraceStore::default();
+        for span in [1, 2] {
+            spans.admit(TraceSpan {
+                span: Span {
+                    trace_id: vec![1; 16],
+                    span_id: vec![span; 8],
+                    name: "same-node".into(),
+                    ..Default::default()
+                },
+                resource: None,
+                scope: None,
+            });
+        }
+        let traces = spans.snapshot();
+        let first = row(1, Some(1), Direction::Input, DataValue::Number(42.into()));
+        let mut omitted = (*row(2, Some(1), Direction::Output, DataValue::Null)).clone();
+        if let DataPayload::Ports {
+            values, omission, ..
+        } = &mut omitted.record.payload
+        {
+            *values = None;
+            *omission = Some(Omission::Depth);
+        }
+        let snapshot = data(vec![
+            first,
+            Arc::new(omitted),
+            row(
+                3,
+                Some(2),
+                Direction::Output,
+                DataValue::String("other-invocation".into()),
+            ),
+        ]);
+        let mut view = TraceView {
+            visible: true,
+            selected: Some((vec![1; 16], vec![1; 8])),
+            pane: Pane::Data,
+            ..Default::default()
+        };
+        let text = render(&mut view, &traces, &snapshot, false);
+        assert!(
+            text.contains("Invocation Data")
+                && text.contains("omitted:Depth")
+                && text.contains("Value omitted: Depth"),
+            "{text}"
+        );
+        assert!(!text.contains("other-invocation"));
+        assert!(view.handle_data_key(KeyCode::Char('l'), &traces, &snapshot));
+        assert!(view.handle_data_key(KeyCode::Home, &traces, &snapshot));
+        assert_eq!(view.data_list.selected, Some(1));
+        assert!(render(&mut view, &traces, &snapshot, false).contains("42"));
+        view.selected = Some((vec![1; 16], vec![2; 8]));
+        let text = render(&mut view, &traces, &snapshot, false);
+        assert!(text.contains("other-invocation"));
+        assert_eq!(view.data_list.selected, None);
+        assert_eq!(view.data_list.eviction, None);
+    }
+    #[test]
+    fn eviction_selects_nearest_without_retaining_old_payload() {
+        let traces = TraceSnapshot::default();
+        let mut snapshot = data(vec![
+            row(
+                1,
+                None,
+                Direction::Output,
+                DataValue::String("old-value".into()),
+            ),
+            row(2, None, Direction::Output, DataValue::Number(42.into())),
+        ]);
+        let weak = Arc::downgrade(&snapshot.records[0]);
+        let mut view = TraceView {
+            visible: true,
+            session_logs: true,
+            pane: Pane::Data,
+            ..Default::default()
+        };
+        render(&mut view, &traces, &snapshot, false);
+        view.handle_data_key(KeyCode::Home, &traces, &snapshot);
+        snapshot.records.remove(0);
+        snapshot.evicted = 1;
+        let text = render(&mut view, &traces, &snapshot, false);
+        assert!(
+            text.contains("record #1 was evicted") && text.contains("42"),
+            "{text}"
+        );
+        assert!(!text.contains("old-value"));
+        assert_eq!(view.data_list.selected, Some(2));
+        assert!(weak.upgrade().is_none());
+    }
+    #[test]
+    fn previews_are_bounded_utf8_safe_and_escape_control_characters() {
+        let row = row(
+            1,
+            None,
+            Direction::Output,
+            DataValue::String(format!("\u{1b}[31m{}", "é".repeat(PREVIEW_BYTES))),
+        );
+        let snapshot = data(vec![row.clone()]);
+        let text = stream_data_preview(Some(&row), &snapshot, None, true);
+        assert!(text.contains("Preview truncated") && !text.contains('\u{1b}'));
+        assert!(text.len() <= PREVIEW_BYTES + 100);
+        assert!(data_row(&row).contains("\\u{1b}"));
+        let DataPayload::Ports {
+            values: Some(DataValue::Object(values)),
+            ..
+        } = &row.record.payload
+        else {
+            panic!("expected object");
+        };
+        let DataValue::String(value) = &values["value"] else {
+            panic!("expected string");
+        };
+        assert!(value.len() > PREVIEW_BYTES);
+        let mut terminal = Terminal::new(TestBackend::new(10, 4)).unwrap();
+        let mut view = TraceView {
+            visible: true,
+            session_logs: true,
+            pane: Pane::Data,
+            ..Default::default()
+        };
+        terminal
+            .draw(|frame| {
+                view.draw(
+                    frame,
+                    &TraceViewSnapshot {
+                        traces: &TraceSnapshot::default(),
+                        logs: &LogSnapshot::default(),
+                        data: SpanData::default(),
+                        stream_data: Some(&snapshot),
+                        spans: TraceAvailability::default(),
+                        streaming: true,
+                        finished: false,
+                    },
+                )
+            })
+            .unwrap();
     }
 }

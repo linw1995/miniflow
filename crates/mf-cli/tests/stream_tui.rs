@@ -87,10 +87,16 @@ fn run_tui(
             } else if stage == 1 && text.contains("OTEL Tracing") {
                 master.write_all(b"\t").unwrap();
                 stage = 2;
-            } else if stage == 2 && text.contains("Data is unavailable for streaming workflows") {
-                master.write_all(b"\tg").unwrap();
+            } else if stage == 2 && text.contains("Invocation Data") {
+                master.write_all(b"l\x1b[Hf\tg").unwrap();
                 stage = 4;
             } else if stage == 4 && text.contains("Session LogRecords") {
+                master.write_all(b"\t").unwrap();
+                stage = 6;
+            } else if stage == 6 && text.contains("Session Data") {
+                master.write_all(b"\x1b[H\x1b[6~f").unwrap();
+                stage = 7;
+            } else if stage == 7 && text.contains("Following tail") {
                 master.write_all(b"v").unwrap();
                 stage = 5;
             } else if stage == 5 {
@@ -194,7 +200,10 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
         "{screen}"
     );
     assert!(screen.contains("OTEL Tracing"));
-    assert!(screen.contains("Data is unavailable for streaming workflows"));
+    assert!(screen.contains("Invocation Data"));
+    assert!(screen.contains("Session Data"));
+    assert!(screen.contains("Capture ended; retained delivery verified"));
+    assert!(screen.contains("six"));
     assert!(screen.contains("Session LogRecords"));
     assert!(screen.contains("mf.workflow"), "{screen}");
     assert!(!screen.contains("No trace spans were received"), "{screen}");

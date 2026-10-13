@@ -29,10 +29,10 @@
 
 ## 5. Data list presentation
 
-- [ ] 5.1 Render span-correlated and session-wide stream Data lists with row summaries and selected value/omission details; verify multi-emission producers, repeated nested identities, zero-output callbacks, and live session data before a span arrives.
-- [ ] 5.2 Add record-identity selection, paging, tail following/resume, and explicit selection-eviction handling using existing TUI key conventions; verify insertions/reordering do not move an inspected selection and eviction releases its value.
-- [ ] 5.3 Preserve mutable Data refresh, bounded UTF-8/control-safe previews, completed inspection, and finite Data behavior; verify late records/status changes and collecting-to-finished transitions with rendering tests.
-- [ ] 5.4 Document Data scope/navigation and diagnostic meanings in `docs/observability.md`; verify documented keys against the implemented handlers and rendered help.
+- [x] 5.1 Render span-correlated and session-wide stream Data lists with row summaries and selected value/omission details; verify multi-emission producers, repeated nested identities, zero-output callbacks, and live session data before a span arrives.
+- [x] 5.2 Add record-identity selection, paging, tail following/resume, and explicit selection-eviction handling using existing TUI key conventions; verify insertions/reordering do not move an inspected selection and eviction releases its value.
+- [x] 5.3 Preserve mutable Data refresh, bounded UTF-8/control-safe previews, completed inspection, and finite Data behavior; verify late records/status changes and collecting-to-finished transitions with rendering tests.
+- [x] 5.4 Document Data scope/navigation and diagnostic meanings in `docs/observability.md`; verify documented keys against the implemented handlers and rendered help.
 
 ## 6. Integration and final validation
 
