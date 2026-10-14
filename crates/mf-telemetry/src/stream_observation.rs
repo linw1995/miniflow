@@ -386,14 +386,6 @@ pub(super) struct StreamInvocation {
     identity: StreamIdentity,
 }
 impl StreamInvocation {
-    pub(super) fn data_identity(&self, node: NodeIdentity) -> crate::stream_data::DataIdentity {
-        crate::stream_data::DataIdentity {
-            node,
-            stream: self.identity.clone(),
-            output: None,
-            ordinal: None,
-        }
-    }
     fn attach(self, context: Context) -> Context {
         self.annotate(&context);
         context.with_value(self)
@@ -491,9 +483,6 @@ pub struct StreamCallback {
     step: Option<NodeObservation>,
 }
 impl StreamCallback {
-    pub fn data_identity(&self) -> Option<crate::stream_data::DataIdentity> {
-        self.step.as_ref().and_then(NodeObservation::data_identity)
-    }
     pub fn enter(&self) -> ContextGuard {
         self.step.as_ref().unwrap().enter()
     }

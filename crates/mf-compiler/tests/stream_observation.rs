@@ -52,29 +52,25 @@ fn record_data(
     capture: &mf_telemetry::stream_data::StreamDataRecorder,
     event: mf_runtime::SnapshotEvent,
 ) {
-    if let Some(identity) = event.identity {
-        let (direction, values) = match event.snapshot.outcome {
-            mf_runtime::SnapshotOutcome::Started => (
-                mf_telemetry::stream_data::Direction::Input,
-                &event.snapshot.inputs,
-            ),
-            mf_runtime::SnapshotOutcome::Succeeded | mf_runtime::SnapshotOutcome::Emitted => (
-                mf_telemetry::stream_data::Direction::Output,
-                &event.snapshot.outputs,
-            ),
-            mf_runtime::SnapshotOutcome::Failed | mf_runtime::SnapshotOutcome::Skipped => return,
-        };
-        capture.record(identity, direction, values);
-    }
+    let (direction, values) = match event.snapshot.outcome {
+        mf_runtime::SnapshotOutcome::Started => (
+            mf_telemetry::stream_data::Direction::Input,
+            &event.snapshot.inputs,
+        ),
+        mf_runtime::SnapshotOutcome::Succeeded | mf_runtime::SnapshotOutcome::Emitted => (
+            mf_telemetry::stream_data::Direction::Output,
+            &event.snapshot.outputs,
+        ),
+        mf_runtime::SnapshotOutcome::Failed | mf_runtime::SnapshotOutcome::Skipped => return,
+    };
+    capture.record(&event.node, &event.scope, direction, values);
 }
 
 fn data_observer(
     capture: &mf_telemetry::stream_data::StreamDataRecorder,
 ) -> mf_runtime::SnapshotRecorder {
     let capture = capture.clone();
-    mf_runtime::SnapshotRecorder::for_run(capture.observation().run_id(), move |event| {
-        record_data(&capture, event)
-    })
+    mf_runtime::SnapshotRecorder::new(move |event| record_data(&capture, event))
 }
 
 #[test]
@@ -89,7 +85,7 @@ fn streaming_data_is_live_and_distinguishes_buffering_from_timer_outputs() {
     let recording = mf_runtime::SnapshotRecording::memory();
     let retained = recording.recorder();
     let encoded = data_observer(&capture);
-    let snapshots = mf_runtime::SnapshotRecorder::for_run(observation.run_id(), move |event| {
+    let snapshots = mf_runtime::SnapshotRecorder::new(move |event| {
         retained.record(event.clone());
         encoded.record(event);
     });
@@ -109,10 +105,10 @@ fn streaming_data_is_live_and_distinguishes_buffering_from_timer_outputs() {
     wait_until(|| instance.summary().completed_frames == 2);
     {
         let data = data.lock().unwrap();
-        assert!(data.iter().any(|record| matches!(&record.payload, DataPayload::Ports { identity, direction: Direction::Output, values: Some(values), .. }
-            if identity.node.id == "feed" && identity.ordinal == Some(0) && values.to_json()["item"] == json!(1))));
-        assert!(data.iter().any(|record| matches!(&record.payload, DataPayload::Ports { identity, direction: Direction::Input, .. } if identity.node.id == "collect")));
-        assert!(!data.iter().any(|record| matches!(&record.payload, DataPayload::Ports { identity, direction: Direction::Output, .. } if identity.node.id == "collect")));
+        assert!(data.iter().any(|record| matches!(&record.payload, DataPayload::Ports { node, direction: Direction::Output, values: Some(values), .. }
+            if node == "feed" && values.to_json()["item"] == json!(1))));
+        assert!(data.iter().any(|record| matches!(&record.payload, DataPayload::Ports { node, direction: Direction::Input, .. } if node == "collect")));
+        assert!(!data.iter().any(|record| matches!(&record.payload, DataPayload::Ports { node, direction: Direction::Output, .. } if node == "collect")));
         assert!(
             !data
                 .iter()
@@ -144,12 +140,6 @@ fn streaming_data_is_live_and_distinguishes_buffering_from_timer_outputs() {
         })
         .collect::<Vec<_>>();
     assert_eq!(emitted.len(), 2);
-    assert_eq!(emitted[0].identity.as_ref().unwrap().ordinal, Some(0));
-    assert_eq!(emitted[1].identity.as_ref().unwrap().ordinal, Some(1));
-    assert_ne!(
-        emitted[0].identity.as_ref().unwrap().output,
-        emitted[1].identity.as_ref().unwrap().output
-    );
     assert!(
         emitted[0]
             .snapshot
@@ -161,27 +151,19 @@ fn streaming_data_is_live_and_distinguishes_buffering_from_timer_outputs() {
     let data = data.lock().unwrap();
     let outputs = data
         .iter()
-        .filter_map(|record| match &record.payload {
-            DataPayload::Ports {
-                identity,
+        .filter(|record| {
+            matches!(&record.payload, DataPayload::Ports {
+                node,
                 direction: Direction::Output,
                 ..
-            } if identity.node.id == "feed" => Some(identity),
-            _ => None,
+            } if node == "feed")
         })
         .collect::<Vec<_>>();
     assert_eq!(outputs.len(), 2);
-    assert_eq!(outputs[0].stream.invocation, outputs[1].stream.invocation);
-    assert_eq!(
-        outputs
-            .iter()
-            .map(|identity| identity.ordinal.unwrap())
-            .collect::<Vec<_>>(),
-        [0, 1]
-    );
-    assert_ne!(outputs[0].output, outputs[1].output);
-    assert!(data.iter().any(|record| matches!(&record.payload, DataPayload::Ports { identity, direction: Direction::Output, values: Some(values), .. }
-        if identity.node.id == "collect" && identity.stream.trigger == StreamTrigger::Timer && identity.stream.message.is_none() && identity.output.is_some() && values.to_json()["items"] == json!([1, 1]))));
+    assert_eq!(outputs[0].trace_context, outputs[1].trace_context);
+    assert!(outputs[0].sequence < outputs[1].sequence);
+    assert!(data.iter().any(|record| matches!(&record.payload, DataPayload::Ports { node, direction: Direction::Output, values: Some(values), .. }
+        if node == "collect" && values.to_json()["items"] == json!([1, 1]))));
     assert!(
         matches!(data.last().unwrap().payload, DataPayload::End { counts } if counts.omitted == 0 && counts.dropped == 0)
     );
@@ -193,45 +175,6 @@ fn streaming_data_is_live_and_distinguishes_buffering_from_timer_outputs() {
     {
         assert!(record.trace_context.is_some());
     }
-}
-
-#[test]
-fn streaming_data_requires_the_owning_observation_before_startup() {
-    let harness = Harness::new(true);
-    let plan = plan(
-        json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
-        "nodes":[{"id":"copy", "kind":"builtin.identity"}], "outputs":[{"name":"value","node":"copy","port":"value"}]}),
-    );
-    let owner = plan
-        .start_stream_observation(&harness.observer(), RunId::new())
-        .unwrap();
-    let (capture, _) = data_capture(owner);
-    for observation in [
-        None,
-        Some(
-            plan.start_stream_observation(&harness.observer(), RunId::new())
-                .unwrap(),
-        ),
-    ] {
-        let error = mf_compiler::start_stream(
-            &plan,
-            &NodeRegistry::from_inventory().unwrap(),
-            StreamOptions {
-                observation,
-                snapshots: Some(data_observer(&capture)),
-                arguments: mf_runtime::WorkflowArguments::try_from(json!({"copy.input":7}))
-                    .unwrap(),
-                ..Default::default()
-            },
-        )
-        .err()
-        .unwrap();
-        assert!(error.to_string().contains("owning stream observation"));
-    }
-    assert!(!records(&harness).iter().any(|record| matches!(
-        record.payload,
-        StreamPayload::Execution(Event::NodeStarted { .. })
-    )));
 }
 
 #[test]
@@ -259,7 +202,7 @@ fn oversized_stream_values_are_omitted_without_changing_results() {
     let raw_outputs = Arc::new(Mutex::new(Vec::<mf_runtime::ValueRef>::new()));
     let observed = raw_outputs.clone();
     let encoded = capture.clone();
-    let observer = mf_runtime::SnapshotRecorder::for_run(observation.run_id(), move |event| {
+    let observer = mf_runtime::SnapshotRecorder::new(move |event| {
         if event.node.as_ref() == "feed"
             && event.snapshot.outcome == mf_runtime::SnapshotOutcome::Emitted
         {
@@ -377,18 +320,17 @@ fn partial_event_publication_keeps_only_admitted_data_and_failed_outcome() {
         .iter()
         .filter_map(|record| match &record.payload {
             DataPayload::Ports {
-                identity,
+                node,
                 direction: Direction::Output,
                 values: Some(values),
                 ..
-            } if identity.node.id == "partial" => Some((identity, values)),
+            } if node == "partial" => Some((record, values)),
             _ => None,
         })
         .collect::<Vec<_>>();
     assert_eq!(outputs.len(), 1);
     assert_eq!(outputs[0].1.to_json()["value"], json!(1));
-    assert_eq!(outputs[0].0.ordinal, Some(0));
-    assert!(outputs[0].0.output.is_some());
+    assert!(outputs[0].0.trace_context.is_some());
     assert!(records(&harness).iter().any(|record| matches!(&record.payload, StreamPayload::Execution(Event::NodeFinished { node, outcome: Outcome::Failed, .. }) if node.id == "partial")));
 }
 
@@ -1051,12 +993,13 @@ fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
         .iter()
         .filter_map(|record| match &record.payload {
             mf_telemetry::stream_data::DataPayload::Ports {
-                identity,
+                node,
+                scope,
                 direction: mf_telemetry::stream_data::Direction::Output,
                 values: Some(values),
                 ..
-            } if identity.node.id == "copy" => Some((
-                identity,
+            } if node == "copy" => Some((
+                scope,
                 record.trace_context.as_ref().unwrap(),
                 values.to_json(),
             )),
@@ -1067,24 +1010,12 @@ fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
     assert_eq!(
         copies
             .iter()
-            .map(|(identity, _, _)| identity.stream.invocation)
-            .collect::<BTreeSet<_>>()
-            .len(),
-        6
-    );
-    assert_eq!(
-        copies
-            .iter()
             .map(|(_, context, _)| &context.span_id)
             .collect::<BTreeSet<_>>()
             .len(),
         6
     );
-    assert!(
-        copies
-            .iter()
-            .all(|(identity, _, _)| identity.stream.parent.is_some())
-    );
+    assert!(copies.iter().all(|(scope, _, _)| !scope.is_empty()));
     assert_eq!(
         copies
             .iter()

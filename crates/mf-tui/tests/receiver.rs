@@ -849,28 +849,11 @@ fn stream_data_faults_do_not_block_lifecycle_or_later_independent_records() {
         )),
     });
     unsupported.attributes[2] = attribute("mf.stream.data.version", integer(99));
-    let ports = |sequence| {
-        use mf_telemetry::{
-            event::NodeIdentity,
-            stream::{StreamIdentity, StreamTrigger},
-            stream_data::{DataIdentity, DataValue, Direction},
-        };
+    let ports = |sequence: u64| {
+        use mf_telemetry::stream_data::{DataValue, Direction};
         DataPayload::Ports {
-            identity: Box::new(DataIdentity {
-                node: NodeIdentity {
-                    id: "feed".into(),
-                    kind: "test".into(),
-                    path: vec![],
-                },
-                stream: StreamIdentity {
-                    invocation: 1,
-                    trigger: StreamTrigger::Startup,
-                    message: None,
-                    parent: None,
-                },
-                output: None,
-                ordinal: Some(sequence),
-            }),
+            node: "feed".into(),
+            scope: vec![],
             direction: Direction::Output,
             port_names: vec!["value".into()],
             ports_truncated: false,

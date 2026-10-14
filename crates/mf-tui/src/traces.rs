@@ -612,20 +612,17 @@ impl DataList {
 fn data_row(row: &DataObservation) -> String {
     use mf_telemetry::stream_data::{DataPayload, Direction};
     let DataPayload::Ports {
-        identity,
+        node,
         direction,
         port_names,
         ports_truncated,
         values,
         omission,
+        ..
     } = &row.record.payload
     else {
         return String::new();
     };
-    let message = identity.output.or(identity.stream.message).map_or_else(
-        || "-".into(),
-        |message| format!("{}:{}", message.domain, message.sequence),
-    );
     let ports = port_names
         .iter()
         .take(4)
@@ -654,26 +651,20 @@ fn data_row(row: &DataObservation) -> String {
             },
         );
     format!(
-        "#{} {} {} [{}{}] {:?} inv={} msg={} ord={} t={} {}",
+        "#{} {} {} [{}{}] t={} {}",
         row.record.sequence,
         if *direction == Direction::Input {
             "IN"
         } else {
             "OUT"
         },
-        data_label(&identity.node.id, 24),
+        data_label(node, 24),
         ports,
         if *ports_truncated || port_names.len() > 4 {
             ",..."
         } else {
             ""
         },
-        identity.stream.trigger,
-        identity.stream.invocation,
-        message,
-        identity
-            .ordinal
-            .map_or_else(|| "-".into(), |ordinal| ordinal.to_string()),
         row.record.time_unix_nano,
         omission.map_or_else(|| summary, |reason| format!("omitted:{reason:?}"))
     )
@@ -779,21 +770,15 @@ fn stream_data_preview(
         };
         writeln!(preview, "\n{}", data_row(row))?;
         if let DataPayload::Ports {
-            identity,
+            node,
+            scope,
             values,
             omission,
             ..
         } = &row.record.payload
         {
-            writeln!(
-                preview,
-                "Invocation={} parent={:?} node={} kind={}",
-                identity.stream.invocation,
-                identity.stream.parent,
-                data_label(&identity.node.id, 256),
-                data_label(&identity.node.kind, 80)
-            )?;
-            for entry in &identity.node.path {
+            writeln!(preview, "Node={}", data_label(node, 256))?;
+            for entry in scope {
                 writeln!(
                     preview,
                     "Scope: {}[{}]",
@@ -1637,10 +1622,8 @@ mod tests {
 mod stream_data_tests {
     use super::*;
     use mf_telemetry::{
-        event::NodeIdentity,
         identity::{RunId, WorkflowId},
-        stream::{StreamIdentity, StreamMessage, StreamTrigger},
-        stream_data::{DataIdentity, DataPayload, DataRecord, DataValue, Direction, Omission},
+        stream_data::{DataPayload, DataRecord, DataValue, Direction, Omission},
         wire::TraceContext,
     };
     use ratatui::{Terminal, backend::TestBackend};
@@ -1666,24 +1649,8 @@ mod stream_data_tests {
                     trace_flags: 0,
                 }),
                 payload: DataPayload::Ports {
-                    identity: Box::new(DataIdentity {
-                        node: NodeIdentity {
-                            id: "feed\u{1b}[31m".into(),
-                            kind: "producer".into(),
-                            path: vec![],
-                        },
-                        stream: StreamIdentity {
-                            invocation: span.unwrap_or(1).into(),
-                            trigger: StreamTrigger::Startup,
-                            message: None,
-                            parent: None,
-                        },
-                        output: (direction == Direction::Output).then_some(StreamMessage {
-                            domain: 0,
-                            sequence,
-                        }),
-                        ordinal: (direction == Direction::Output).then_some(sequence),
-                    }),
+                    node: "feed\u{1b}[31m".into(),
+                    scope: vec![],
                     direction,
                     port_names: vec!["value".into()],
                     ports_truncated: false,

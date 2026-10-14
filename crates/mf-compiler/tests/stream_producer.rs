@@ -278,22 +278,17 @@ fn data_capture_preserves_admitted_outputs_when_a_producer_fails() {
             || true,
         );
         let encoded = capture.clone();
-        let observer = mf_runtime::SnapshotRecorder::for_run(observation.run_id(), move |event| {
-            if let Some(identity) = event.identity {
-                let (direction, values) = match event.snapshot.outcome {
-                    mf_runtime::SnapshotOutcome::Started => {
-                        (Direction::Input, &event.snapshot.inputs)
-                    }
-                    mf_runtime::SnapshotOutcome::Emitted
-                    | mf_runtime::SnapshotOutcome::Succeeded => {
-                        (Direction::Output, &event.snapshot.outputs)
-                    }
-                    mf_runtime::SnapshotOutcome::Failed | mf_runtime::SnapshotOutcome::Skipped => {
-                        return;
-                    }
-                };
-                encoded.record(identity, direction, values);
-            }
+        let observer = mf_runtime::SnapshotRecorder::new(move |event| {
+            let (direction, values) = match event.snapshot.outcome {
+                mf_runtime::SnapshotOutcome::Started => (Direction::Input, &event.snapshot.inputs),
+                mf_runtime::SnapshotOutcome::Emitted | mf_runtime::SnapshotOutcome::Succeeded => {
+                    (Direction::Output, &event.snapshot.outputs)
+                }
+                mf_runtime::SnapshotOutcome::Failed | mf_runtime::SnapshotOutcome::Skipped => {
+                    return;
+                }
+            };
+            encoded.record(&event.node, &event.scope, direction, values);
         });
         let instance = start(
             value,
@@ -320,11 +315,11 @@ fn data_capture_preserves_admitted_outputs_when_a_producer_fails() {
             .iter()
             .filter_map(|record| match &record.payload {
                 DataPayload::Ports {
-                    identity,
+                    node,
                     direction: Direction::Output,
                     values: Some(values),
                     ..
-                } if identity.node.id == "produce" => Some(values.to_json()),
+                } if node == "produce" => Some(values.to_json()),
                 _ => None,
             })
             .collect::<Vec<_>>();

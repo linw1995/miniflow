@@ -973,7 +973,7 @@ mod stream_data_tests {
     }
     #[test]
     fn stream_queue_bounds_bytes_before_record_capacity() {
-        use crate::stream_data::{DataIdentity, DataValue, Direction};
+        use crate::stream_data::{DataValue, Direction};
         let (entered_tx, entered_rx) = mpsc::channel();
         let (release_tx, release_rx) = mpsc::channel();
         let mut exporter = StreamDataExporter::with_exporter(Collect {
@@ -987,25 +987,8 @@ mod stream_data_tests {
         entered_rx.recv_timeout(Duration::from_secs(2)).unwrap();
         let mut large = DataRecord::decode(&packet(1).bytes).unwrap();
         large.payload = DataPayload::Ports {
-            identity: DataIdentity {
-                node: crate::event::NodeIdentity {
-                    id: "producer".into(),
-                    kind: "test".into(),
-                    path: Vec::new(),
-                },
-                stream: crate::stream::StreamIdentity {
-                    invocation: 0,
-                    trigger: crate::stream::StreamTrigger::Startup,
-                    message: None,
-                    parent: None,
-                },
-                output: Some(crate::stream::StreamMessage {
-                    domain: 1,
-                    sequence: 0,
-                }),
-                ordinal: Some(0),
-            }
-            .into(),
+            node: "producer".into(),
+            scope: Vec::new(),
             direction: Direction::Output,
             port_names: vec!["value".into()],
             ports_truncated: false,

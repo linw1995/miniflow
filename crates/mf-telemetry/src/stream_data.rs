@@ -1,9 +1,9 @@
 //! Independently decodable, bounded business data for streaming observations.
 
 use crate::{
-    event::NodeIdentity,
+    event::LoopPathEntry,
     identity::{RunId, WorkflowId},
-    stream::{StreamIdentity, StreamMessage, StreamTrigger, counter, optional_counter},
+    stream::counter,
     wire::TraceContext,
 };
 use opentelemetry::trace::TraceContextExt;
@@ -139,16 +139,6 @@ pub enum Omission {
     Depth,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct DataIdentity {
-    pub node: NodeIdentity,
-    pub stream: StreamIdentity,
-    pub output: Option<StreamMessage>,
-    #[serde(with = "optional_counter")]
-    pub ordinal: Option<u64>,
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaptureCounts {
@@ -163,7 +153,8 @@ pub struct CaptureCounts {
 pub enum DataPayload {
     Start,
     Ports {
-        identity: Box<DataIdentity>,
+        node: String,
+        scope: Vec<LoopPathEntry>,
         direction: Direction,
         port_names: Vec<String>,
         ports_truncated: bool,
@@ -203,8 +194,8 @@ impl DataRecord {
             context.validate()?;
         }
         if let DataPayload::Ports {
-            identity,
-            direction,
+            node,
+            scope,
             port_names,
             values,
             omission,
@@ -224,51 +215,15 @@ impl DataRecord {
                 }
             );
             ensure!(
-                identity.node.id.len() <= 1024
-                    && !identity.node.id.is_empty()
-                    && identity.node.kind.len() <= 256
-                    && !identity.node.kind.is_empty()
-                    && identity.node.path.len() <= crate::MAX_LOOP_DEPTH,
+                !node.is_empty() && node.len() <= 1024 && scope.len() <= crate::MAX_LOOP_DEPTH,
                 InvalidSnafu {
-                    message: "invalid node identity"
+                    message: "invalid node scope"
                 }
             );
             ensure!(
-                identity
-                    .node
-                    .path
-                    .iter()
-                    .all(|entry| entry.loop_id.len() <= 1024),
+                scope.iter().all(|entry| entry.loop_id.len() <= 1024),
                 InvalidSnafu {
                     message: "invalid Loop path"
-                }
-            );
-            ensure!(
-                matches!(
-                    identity.stream.trigger,
-                    StreamTrigger::Input | StreamTrigger::Message
-                ) == identity.stream.message.is_some(),
-                InvalidSnafu {
-                    message: "trigger and input message disagree"
-                }
-            );
-            ensure!(
-                match direction {
-                    Direction::Input => identity.ordinal.is_none() && identity.output.is_none(),
-                    Direction::Output => identity.ordinal.is_some(),
-                },
-                InvalidSnafu {
-                    message: "invalid emission identity"
-                }
-            );
-            ensure!(
-                identity
-                    .output
-                    .iter()
-                    .chain(identity.stream.message.iter())
-                    .all(|message| i64::try_from(message.domain).is_ok()),
-                InvalidSnafu {
-                    message: "message domain exceeds OTLP range"
                 }
             );
             if let Some(value) = values {
@@ -565,10 +520,6 @@ impl StreamDataRecorder {
         recorder
     }
 
-    pub fn observation(&self) -> &crate::observation::StreamObservation {
-        &self.0.observation
-    }
-
     pub fn diagnostic(&self) -> Option<Arc<StreamCaptureError>> {
         self.0.state.lock().unwrap().error.clone()
     }
@@ -598,7 +549,8 @@ impl StreamDataRecorder {
 
     pub fn record<V: DataValueSource>(
         &self,
-        identity: DataIdentity,
+        node: &str,
+        scope: &[LoopPathEntry],
         direction: Direction,
         ports: &V,
     ) {
@@ -633,7 +585,8 @@ impl StreamDataRecorder {
                 time_unix_nano,
                 trace_context,
                 DataPayload::Ports {
-                    identity: identity.into(),
+                    node: node.into(),
+                    scope: scope.to_vec(),
                     direction,
                     port_names,
                     ports_truncated,
@@ -853,25 +806,8 @@ mod tests {
             time_unix_nano: 10,
             trace_context: None,
             payload: DataPayload::Ports {
-                identity: DataIdentity {
-                    node: NodeIdentity {
-                        id: "node".into(),
-                        kind: "test".into(),
-                        path: Vec::new(),
-                    },
-                    stream: StreamIdentity {
-                        invocation: u64::MAX,
-                        trigger: StreamTrigger::Timer,
-                        message: None,
-                        parent: None,
-                    },
-                    output: Some(StreamMessage {
-                        domain: 1,
-                        sequence: u64::MAX,
-                    }),
-                    ordinal: Some(2),
-                }
-                .into(),
+                node: "node".into(),
+                scope: Vec::new(),
                 direction: Direction::Output,
                 port_names: vec!["value".into()],
                 ports_truncated: false,
@@ -881,7 +817,7 @@ mod tests {
         }
     }
     #[test]
-    fn independent_records_preserve_numeric_types_and_large_identities() {
+    fn independent_records_preserve_numeric_types() {
         let original = record(DataValue::Array(vec![
             DataValue::Number(u64::MAX.into()),
             DataValue::Number(Number::from_f64(2.0).unwrap()),
@@ -904,7 +840,7 @@ mod tests {
         assert!(value["value"][1].is_f64());
     }
     #[test]
-    fn records_enforce_byte_depth_and_identity_budgets() {
+    fn records_enforce_byte_and_depth_budgets() {
         assert!(matches!(
             record(DataValue::String("x".repeat(MAX_RECORD_BYTES))).encode(),
             Err(DataError::TooLarge)

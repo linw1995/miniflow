@@ -1,5 +1,5 @@
 use crate::{ValueKind, ValueRef};
-use mf_telemetry::{event::LoopPathEntry, identity::RunId, stream_data::DataIdentity};
+use mf_telemetry::event::LoopPathEntry;
 use rpds::RedBlackTreeMapSync;
 use serde::{Deserialize, Serialize};
 use serde_json::Number;
@@ -62,7 +62,6 @@ pub struct SnapshotEntry {
     pub scope: Vec<LoopPathEntry>,
     pub node: Arc<str>,
     pub snapshot: Snapshot,
-    pub identity: Option<DataIdentity>,
 }
 
 // Only definitions contain payloads. All later records refer to their value IDs.
@@ -90,8 +89,6 @@ pub enum SnapshotRecord {
     Node {
         scope: Vec<LoopPathEntry>,
         node: Arc<str>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        identity: Option<Box<DataIdentity>>,
         inputs: ValueId,
         outputs: ValueId,
         skipped: Arc<[String]>,
@@ -191,7 +188,6 @@ impl SnapshotStore {
             SnapshotRecord::Node {
                 scope,
                 node,
-                identity,
                 inputs,
                 outputs,
                 skipped,
@@ -217,8 +213,7 @@ impl SnapshotStore {
                     outcome,
                     error,
                 };
-                if identity.is_none()
-                    && outcome != SnapshotOutcome::Emitted
+                if outcome != SnapshotOutcome::Emitted
                     && self
                         .current
                         .node(&scope, &node)
@@ -235,7 +230,6 @@ impl SnapshotStore {
                     scope,
                     node,
                     snapshot: self.current.clone(),
-                    identity: identity.map(|identity| *identity),
                 });
                 Ok(true)
             }
@@ -397,13 +391,12 @@ impl Recording {
     }
 }
 
-/// Current node values and optional execution identity at one capture boundary.
+/// Current node values and scope at one capture boundary.
 #[derive(Clone, Debug)]
 pub struct SnapshotEvent {
     pub scope: Vec<LoopPathEntry>,
     pub node: Arc<str>,
     pub snapshot: NodeSnapshot,
-    pub identity: Option<DataIdentity>,
 }
 
 type SnapshotCallback = dyn Fn(SnapshotEvent) + Send + Sync;
@@ -412,7 +405,6 @@ type SnapshotCallback = dyn Fn(SnapshotEvent) + Send + Sync;
 #[derive(Clone)]
 pub struct SnapshotRecorder {
     callback: Arc<SnapshotCallback>,
-    run_id: Option<RunId>,
 }
 
 impl std::fmt::Debug for SnapshotRecorder {
@@ -428,22 +420,7 @@ impl SnapshotRecorder {
     pub fn new(callback: impl Fn(SnapshotEvent) + Send + Sync + 'static) -> Self {
         Self {
             callback: Arc::new(callback),
-            run_id: None,
         }
-    }
-
-    pub fn for_run(
-        run_id: RunId,
-        callback: impl Fn(SnapshotEvent) + Send + Sync + 'static,
-    ) -> Self {
-        Self {
-            callback: Arc::new(callback),
-            run_id: Some(run_id),
-        }
-    }
-
-    pub fn run_id(&self) -> Option<RunId> {
-        self.run_id
     }
 
     pub fn record(&self, event: SnapshotEvent) {
@@ -537,7 +514,6 @@ impl SnapshotRecording {
             scope,
             node: node.into(),
             snapshot,
-            identity: None,
         });
     }
 
@@ -546,14 +522,12 @@ impl SnapshotRecording {
             scope,
             node,
             snapshot,
-            identity,
         } = event;
         let mut recording = self.0.lock().expect("snapshot recorder was not poisoned");
         if recording.error.is_some() || recording.store.complete {
             return;
         }
-        if identity.is_none()
-            && snapshot.outcome != SnapshotOutcome::Emitted
+        if snapshot.outcome != SnapshotOutcome::Emitted
             && recording
                 .store
                 .current
@@ -568,7 +542,6 @@ impl SnapshotRecording {
             recording.append(SnapshotRecord::Node {
                 scope,
                 node,
-                identity: identity.map(Box::new),
                 inputs,
                 outputs,
                 skipped: snapshot.skipped,

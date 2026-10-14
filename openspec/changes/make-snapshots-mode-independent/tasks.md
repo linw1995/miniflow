@@ -1,8 +1,8 @@
 ## 1. Simplify snapshot notifications and consumers
 
-- [ ] 1.1 Remove snapshot stream identities, run binding, and unused observation accessors.
-- [ ] 1.2 Simplify Data payloads and adapt telemetry, runner, TUI, and existing test consumers.
-- [ ] 1.3 Remove emission identity bookkeeping and only notify successfully admitted producer outputs; validate and commit this group.
+- [x] 1.1 Remove snapshot stream identities, run binding, and unused observation accessors.
+- [x] 1.2 Simplify Data payloads and adapt telemetry, runner, TUI, and existing test consumers.
+- [x] 1.3 Remove emission identity bookkeeping and only notify successfully admitted producer outputs; validate and commit this group.
 
 ## 2. Verify uniform capture behavior
 

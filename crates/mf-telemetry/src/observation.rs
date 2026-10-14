@@ -756,11 +756,6 @@ pub struct NodeObservation {
 }
 
 impl NodeObservation {
-    pub fn data_identity(&self) -> Option<crate::stream_data::DataIdentity> {
-        self.context
-            .get::<StreamInvocation>()
-            .map(|invocation| invocation.data_identity(self.node.clone()))
-    }
     pub fn enter(&self) -> ContextGuard {
         self.context.clone().attach()
     }
@@ -977,11 +972,6 @@ pub struct BodyNodeObservation {
 }
 
 impl BodyNodeObservation {
-    pub fn data_identity(&self) -> Option<crate::stream_data::DataIdentity> {
-        self.context
-            .get::<StreamInvocation>()
-            .map(|invocation| invocation.data_identity(self.node.clone()))
-    }
     pub fn enter(&self) -> ContextGuard {
         self.context.clone().attach()
     }

@@ -1080,11 +1080,11 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         .iter()
         .filter_map(|record| match &record.payload {
             mf_telemetry::stream_data::DataPayload::Ports {
-                identity,
+                node,
                 direction: mf_telemetry::stream_data::Direction::Output,
                 values: Some(values),
                 ..
-            } if identity.node.id == "feed" => Some((identity, values.to_json())),
+            } if node == "feed" => Some((record, values.to_json())),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -1095,18 +1095,14 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
             .collect::<Vec<_>>(),
         ["1", "2", "3", "4", "5"]
     );
-    assert!(
-        feed.iter()
-            .enumerate()
-            .all(
-                |(ordinal, (identity, _))| identity.ordinal == Some(ordinal as u64)
-                    && identity.output.is_some()
-            )
-    );
-    assert!(data.iter().any(|record| matches!(&record.payload, mf_telemetry::stream_data::DataPayload::Ports { identity, values: Some(values), .. }
-        if identity.node.id == "collect" && identity.stream.trigger == mf_telemetry::stream::StreamTrigger::UpstreamClosed && values.to_json()["items"] == json!([4, 5]))));
-    assert!(data.iter().any(|record| matches!(&record.payload, mf_telemetry::stream_data::DataPayload::Ports { identity, direction: mf_telemetry::stream_data::Direction::Output, values: Some(values), .. }
-        if identity.node.id == "consume" && values.to_json()["value"] == json!([1, 2, 3]))));
+    assert!(feed.windows(2).all(|records| {
+        records[0].0.sequence < records[1].0.sequence
+            && records[0].0.trace_context == records[1].0.trace_context
+    }));
+    assert!(data.iter().any(|record| matches!(&record.payload, mf_telemetry::stream_data::DataPayload::Ports { node, values: Some(values), .. }
+        if node == "collect" && values.to_json()["items"] == json!([4, 5]))));
+    assert!(data.iter().any(|record| matches!(&record.payload, mf_telemetry::stream_data::DataPayload::Ports { node, direction: mf_telemetry::stream_data::Direction::Output, values: Some(values), .. }
+        if node == "consume" && values.to_json()["value"] == json!([1, 2, 3]))));
     let (endpoint, collector) = collector();
     let observed = execute(Some(&endpoint), Some(&collector), false);
     assert_eq!(observed.stdout, plain.stdout);

@@ -225,17 +225,15 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Resu
         mf_telemetry::stream_data::StreamDataRecorder::new(observation.clone(), move |record| Ok(sender.try_emit(record)?), move || capacity.available())
     });
     #[cfg(feature = "telemetry")]
-    let snapshots = data_capture.as_ref().zip(observation.as_ref()).map(|(capture, observation)| {
+    let snapshots = data_capture.as_ref().map(|capture| {
         let capture = capture.clone();
-        mf_runtime::SnapshotRecorder::for_run(observation.run_id(), move |event| {
-            if let Some(identity) = event.identity {
-                let (direction, values) = match event.snapshot.outcome {
-                    mf_runtime::SnapshotOutcome::Started => (mf_telemetry::stream_data::Direction::Input, &event.snapshot.inputs),
-                    mf_runtime::SnapshotOutcome::Succeeded | mf_runtime::SnapshotOutcome::Emitted => (mf_telemetry::stream_data::Direction::Output, &event.snapshot.outputs),
-                    mf_runtime::SnapshotOutcome::Failed | mf_runtime::SnapshotOutcome::Skipped => return,
-                };
-                capture.record(identity, direction, values);
-            }
+        mf_runtime::SnapshotRecorder::new(move |event| {
+            let (direction, values) = match event.snapshot.outcome {
+                mf_runtime::SnapshotOutcome::Started => (mf_telemetry::stream_data::Direction::Input, &event.snapshot.inputs),
+                mf_runtime::SnapshotOutcome::Succeeded | mf_runtime::SnapshotOutcome::Emitted => (mf_telemetry::stream_data::Direction::Output, &event.snapshot.outputs),
+                mf_runtime::SnapshotOutcome::Failed | mf_runtime::SnapshotOutcome::Skipped => return,
+            };
+            capture.record(&event.node, &event.scope, direction, values);
         })
     });
     #[cfg(not(feature = "telemetry"))]

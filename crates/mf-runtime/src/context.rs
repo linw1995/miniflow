@@ -624,23 +624,11 @@ impl ExecutionContext {
         result: Option<&NodeResult>,
         outcome: crate::SnapshotOutcome,
         error: Option<&dyn std::fmt::Display>,
-        identity: Option<&mf_telemetry::stream_data::DataIdentity>,
     ) {
         if let Some(recorder) = &self.snapshots {
-            let mut identity = identity.cloned();
-            if outcome == crate::SnapshotOutcome::Succeeded
-                && let Some(identity) = &mut identity
-            {
-                identity.output = identity.stream.message;
-                identity.ordinal = Some(0);
-            }
             recorder.record(crate::SnapshotEvent {
-                scope: identity.as_ref().map_or_else(
-                    || self.snapshot_path(),
-                    |identity| identity.node.path.clone(),
-                ),
+                scope: self.snapshot_path(),
                 node: node.definition_id.as_str().into(),
-                identity,
                 snapshot: crate::NodeSnapshot {
                     inputs: crate::snapshot::ports_snapshot(inputs),
                     outputs: result.map_or_else(
@@ -1050,12 +1038,6 @@ enum StepObservation {
 }
 
 impl StepObservation {
-    fn data_identity(&self) -> Option<mf_telemetry::stream_data::DataIdentity> {
-        match self {
-            Self::Root(step) => step.data_identity(),
-            Self::Body(step) => step.data_identity(),
-        }
-    }
     fn started(&mut self, ctx: &mut ExecutionContext) {
         match self {
             Self::Root(step) => ctx.observation.as_mut().unwrap().node_started(step),
@@ -1190,10 +1172,6 @@ fn execute_ordered_call_in_context<'a, N>(
             .and_then(|body| body.begin_node(id))
             .map(StepObservation::Body)
     };
-    let snapshot_identity = ctx
-        .snapshots
-        .as_ref()
-        .and_then(|_| step.as_ref().and_then(StepObservation::data_identity));
     let _root_context = match &step {
         Some(StepObservation::Root(step)) => Some(step.enter()),
         _ => None,
@@ -1230,7 +1208,6 @@ fn execute_ordered_call_in_context<'a, N>(
                     None,
                     crate::SnapshotOutcome::Failed,
                     Some(&error),
-                    snapshot_identity.as_ref(),
                 );
                 return Err(error);
             }
@@ -1282,19 +1259,11 @@ fn execute_ordered_call_in_context<'a, N>(
                     None,
                     crate::SnapshotOutcome::Failed,
                     Some(&error),
-                    snapshot_identity.as_ref(),
                 );
                 return Err(error);
             }
         }
-        ctx.capture_node(
-            node,
-            &inputs,
-            None,
-            crate::SnapshotOutcome::Started,
-            None,
-            snapshot_identity.as_ref(),
-        );
+        ctx.capture_node(node, &inputs, None, crate::SnapshotOutcome::Started, None);
         if let Some(step) = step.as_mut() {
             step.started(ctx);
         }
@@ -1314,7 +1283,6 @@ fn execute_ordered_call_in_context<'a, N>(
                         None,
                         crate::SnapshotOutcome::Failed,
                         Some(&error),
-                        snapshot_identity.as_ref(),
                     );
                 }
                 return Err(error);
@@ -1365,7 +1333,6 @@ fn execute_ordered_call_in_context<'a, N>(
                 .as_ref()
                 .err()
                 .map(|error| error as &dyn std::fmt::Display),
-            snapshot_identity.as_ref(),
         );
     }
     if let Some(step) = step.take() {

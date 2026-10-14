@@ -346,20 +346,16 @@ fn observation_bytes(observation: &DataObservation) -> usize {
         bytes += context.trace_id.capacity() + context.span_id.capacity();
     }
     if let DataPayload::Ports {
-        identity,
+        node,
+        scope,
         port_names,
         values,
         ..
     } = &record.payload
     {
-        bytes += std::mem::size_of_val(identity.as_ref())
-            + identity.node.id.capacity()
-            + identity.node.kind.capacity();
-        bytes += identity.node.path.capacity()
-            * std::mem::size_of::<mf_telemetry::event::LoopPathEntry>();
-        bytes += identity
-            .node
-            .path
+        bytes += node.capacity();
+        bytes += scope.capacity() * std::mem::size_of::<mf_telemetry::event::LoopPathEntry>();
+        bytes += scope
             .iter()
             .map(|entry| entry.loop_id.capacity())
             .sum::<usize>();
@@ -407,12 +403,7 @@ fn native_bytes(text: &str) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mf_telemetry::{
-        event::NodeIdentity,
-        stream::{StreamIdentity, StreamTrigger},
-        stream_data::{DataIdentity, Direction},
-        wire::TraceContext,
-    };
+    use mf_telemetry::{stream_data::Direction, wire::TraceContext};
 
     fn store() -> StreamDataStore {
         StreamDataStore::new(
@@ -437,21 +428,8 @@ mod tests {
             store,
             sequence,
             DataPayload::Ports {
-                identity: Box::new(DataIdentity {
-                    node: NodeIdentity {
-                        id: "feed".into(),
-                        kind: "producer".into(),
-                        path: vec![],
-                    },
-                    stream: StreamIdentity {
-                        invocation: 1,
-                        trigger: StreamTrigger::Startup,
-                        message: None,
-                        parent: None,
-                    },
-                    output: None,
-                    ordinal: Some(sequence),
-                }),
+                node: "feed".into(),
+                scope: vec![],
                 direction: Direction::Output,
                 port_names: vec!["value".into()],
                 ports_truncated: false,
