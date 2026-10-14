@@ -12,9 +12,9 @@
 
 ## 3. Optimize slow fixture tests
 
-- [ ] 3.1 Measure the runner and derive compile cases with the pinned local toolchain.
-- [ ] 3.2 Add the missing cases to the existing fixture-cache and shared-Cargo selections without changing assertions; commit the task group.
-- [ ] 3.3 Compare the same cases before and after, including setup time, and retain the local ablation report.
+- [x] 3.1 Measure the runner and derive compile cases with the pinned local toolchain.
+- [x] 3.2 Add the missing cases to the existing fixture-cache and shared-Cargo selections without changing assertions; commit the task group.
+- [x] 3.3 Compare the same cases before and after, including setup time, and retain the local ablation report.
 
 ## 4. Review and complete
 
