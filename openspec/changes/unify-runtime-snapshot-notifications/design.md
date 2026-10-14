@@ -61,3 +61,16 @@ existing live emission case to send equal values and verify distinct identities.
 Verify raw snapshots without telemetry and finite numeric/sharing behavior.
 Ablate notification deduplication or identity propagation to confirm assertions
 detect semantic regressions. Keep reports and probes in ignored `target/`.
+
+## Slow-test follow-up
+
+The single-node runner and runtime derive compile cases currently rebuild local
+fixtures in separate Cargo targets. Extend the existing nextest setup selection
+and matching shared-Cargo group to include these cases. Keep each temporary
+project and installed executable isolated, and preserve all assertions. The
+existing wrapper redirects Cargo builds to the shared target; serialization
+protects generated binaries until validation and installation finish.
+
+Measure the same cases with the pinned local toolchain before and after, including
+cache setup in the elapsed time. Do not add a second cache, harness, or tests that
+merely mirror nextest configuration. Record timings under ignored `target/`.

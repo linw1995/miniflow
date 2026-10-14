@@ -14,6 +14,7 @@ the existing snapshot boundary.
   producer/event emission through the same recorder.
 - Remove `StreamDataObserver` and `StreamOptions.data_capture`.
 - Carry optional stream identities without discarding repeated equal emissions.
+- Reuse the existing fixture build cache for slow runner and derive compile tests.
 
 ## Capabilities
 
