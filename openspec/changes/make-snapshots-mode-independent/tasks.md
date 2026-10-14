@@ -13,5 +13,5 @@
 ## 3. Review and complete
 
 - [x] 3.1 Review AGENTS.md compliance and local ablation results.
-- [ ] 3.2 Run affected coverage, prek -a, and pinned Nix validation; commit final corrections.
+- [ ] 3.2 Run affected coverage and prek -a with the pinned toolchain under origin/main AGENTS.md; commit final corrections.
 - [ ] 3.3 Archive the reviewed specification, update PR 142, and monitor final CI and review feedback.

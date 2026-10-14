@@ -33,6 +33,7 @@ hide rejected publication. Remove the admission guard experimentally to verify t
 assertion fails. Keep reports/probes under ignored target; do not add tests mirroring
 removed identity fields or nextest configuration.
 
-Run affected coverage, prek -a, and nix flake check -L. Review AGENTS.md compliance,
+Follow origin/main AGENTS.md at be0d366: run affected coverage and prek -a locally;
+leave full-suite validation to CI and do not run nix flake check locally. Review compliance,
 commit task groups separately, archive after review, then update PR 142 and inspect
 final checks and review feedback directly after completion.
