@@ -241,7 +241,7 @@ fn value_preview(value: &ValueRef) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mf_runtime::{NodeSnapshot, SnapshotOutcome, SnapshotRecord, SnapshotRecorder};
+    use mf_runtime::{NodeSnapshot, SnapshotOutcome, SnapshotRecord, SnapshotRecording};
     use mf_telemetry::snapshot::packets;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
@@ -255,9 +255,9 @@ mod tests {
             error: None,
         }
     }
-    fn recorder(capture: Arc<Mutex<SnapshotCapture>>) -> SnapshotRecorder {
+    fn recorder(capture: Arc<Mutex<SnapshotCapture>>) -> SnapshotRecording {
         let mut sequence = 0;
-        SnapshotRecorder::with_sink(move |record| {
+        SnapshotRecording::with_sink(move |record| {
             for packet in packets(sequence, serde_json::to_value(record).unwrap())? {
                 capture
                     .lock()

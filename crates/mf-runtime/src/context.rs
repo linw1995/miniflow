@@ -638,10 +638,11 @@ impl ExecutionContext {
         error: Option<&dyn std::fmt::Display>,
     ) {
         if let Some(recorder) = &self.snapshots {
-            recorder.record(
-                self.snapshot_path(),
-                node.definition_id.as_str(),
-                crate::NodeSnapshot {
+            recorder.record(crate::SnapshotEvent {
+                scope: self.snapshot_path(),
+                node: node.definition_id.as_str().into(),
+                identity: None,
+                snapshot: crate::NodeSnapshot {
                     inputs: crate::snapshot::ports_snapshot(inputs),
                     outputs: result.map_or_else(
                         || crate::ValueRef::object([]),
@@ -665,7 +666,7 @@ impl ExecutionContext {
                     outcome,
                     error: error.map(|error| error.to_string().into()),
                 },
-            );
+            });
         }
     }
 

@@ -140,7 +140,7 @@ fn execute_selected(
         }
     } else { None };
     #[cfg(not(feature = "telemetry"))]
-    let snapshots: Option<mf_runtime::SnapshotRecorder> = {
+    let snapshots: Option<mf_runtime::SnapshotRecording> = {
         if capture_requested() { eprintln!("data history unavailable: recompile the runner without --no-telemetry"); }
         None
     };
@@ -148,7 +148,7 @@ fn execute_selected(
         if target.inputs.stdin_owner(&inputs)?.is_some() {
             if let Some(input) = stdio.take_input() { state.set_stdin(input); }
         }
-        if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.clone()); }
+        if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.recorder()); }
         let registry = mf_runtime::NodeRegistry::from_inventory()?;
         #[cfg(feature = "streaming")]
         let outputs = {
@@ -346,15 +346,15 @@ fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Result<mf_r
 }
 
 #[cfg(all(feature = "telemetry", not(feature = "streaming")))]
-fn snapshot_recorder(plan: &mf_compiler::CompiledWorkflow, run_id: mf_telemetry::identity::RunId) -> Result<mf_runtime::SnapshotRecorder, Box<dyn std::error::Error>> {
+fn snapshot_recorder(plan: &mf_compiler::CompiledWorkflow, run_id: mf_telemetry::identity::RunId) -> Result<mf_runtime::SnapshotRecording, Box<dyn std::error::Error>> {
     let description = mf_compiler::describe_compiled(plan)?;
     snapshot_recorder_for_id(description.workflow_id, run_id)
 }
 
 #[cfg(feature = "telemetry")]
-fn snapshot_recorder_for_id(workflow_id: mf_telemetry::identity::WorkflowId, run_id: mf_telemetry::identity::RunId) -> Result<mf_runtime::SnapshotRecorder, Box<dyn std::error::Error>> {
+fn snapshot_recorder_for_id(workflow_id: mf_telemetry::identity::WorkflowId, run_id: mf_telemetry::identity::RunId) -> Result<mf_runtime::SnapshotRecording, Box<dyn std::error::Error>> {
     let mut exporter = mf_telemetry::otlp::SnapshotExporter::from_env(workflow_id, run_id)?;
-    Ok(mf_runtime::SnapshotRecorder::with_sink(move |record| {
+    Ok(mf_runtime::SnapshotRecording::with_sink(move |record| {
         exporter.emit(serde_json::to_value(record)?)?;
         if matches!(record, mf_runtime::SnapshotRecord::End) { exporter.finish()?; }
         Ok(())
@@ -362,7 +362,7 @@ fn snapshot_recorder_for_id(workflow_id: mf_telemetry::identity::WorkflowId, run
 }
 
 #[cfg(not(feature = "streaming"))]
-fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: Option<mf_runtime::SnapshotRecorder>, arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: Option<mf_runtime::SnapshotRecording>, arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     let result = mf_runtime::ExecutionContext::run(observation, |state| -> Result<_, Box<dyn std::error::Error>> {
         state.set_workflow_arguments(arguments);
         #[cfg(unix)]
@@ -372,7 +372,7 @@ fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: 
                 state.set_stdin(mf_runtime::TextInput::claim()?);
             }
         }
-        if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.clone()); }
+        if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.recorder()); }
         let registry = mf_runtime::NodeRegistry::from_inventory()?;
         let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
         workflow_manifest()?.validate_prepared_schema(flow.input_schema())?;

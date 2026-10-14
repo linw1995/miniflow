@@ -896,7 +896,7 @@ fn task_failures_never_publish_success_and_snapshot_requests_fail_before_input()
         &NodeRegistry::from_inventory().unwrap(),
         StreamOptions {
             observation: Some(observation),
-            snapshots: Some(mf_runtime::SnapshotRecorder::memory()),
+            snapshots: Some(mf_runtime::SnapshotRecording::memory().recorder()),
             ..Default::default()
         },
     );

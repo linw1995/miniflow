@@ -919,10 +919,10 @@ fn snapshots_retain_every_iteration_item_in_sequential_and_parallel_runs() {
         let registry = NodeRegistry::from_inventory().unwrap();
         let plan = compile_definition(&definition, &registry).unwrap();
         let flow = instantiate_compiled(&plan, &registry).unwrap();
-        let recorder = mf_runtime::SnapshotRecorder::memory();
+        let recorder = mf_runtime::SnapshotRecording::memory();
         let mut context = mf_runtime::ExecutionContext::default();
         assert!(context.snapshot_recorder().is_none());
-        context.set_snapshot_recorder(recorder.clone());
+        context.set_snapshot_recorder(recorder.recorder());
         let outputs = flow.execute_in_context(&mut context).unwrap();
         assert_eq!(outputs["results"], json!([2, null, 8]));
         for (index, input) in [1, 0, 3].into_iter().enumerate() {

@@ -299,7 +299,7 @@ fn rejects_snapshot_capture_and_insufficient_domain_capacity() {
     let error = prepare(definition())
         .unwrap()
         .start_with_options(StreamOptions {
-            snapshots: Some(mf_runtime::SnapshotRecorder::memory()),
+            snapshots: Some(mf_runtime::SnapshotRecording::memory().recorder()),
             ..Default::default()
         })
         .err()

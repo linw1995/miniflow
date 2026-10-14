@@ -1,8 +1,8 @@
 ## 1. Separate notification from recording policy
 
-- [ ] 1.1 Make SnapshotRecorder a stateless event callback and move the old state into caller-owned SnapshotRecording.
-- [ ] 1.2 Preserve finite snapshot storage/encoding and retain optional stream identities without deduplicating emissions.
-- [ ] 1.3 Adapt finite runner wiring and existing snapshot consumers/tests; commit the task group.
+- [x] 1.1 Make SnapshotRecorder a stateless event callback and move the old state into caller-owned SnapshotRecording.
+- [x] 1.2 Preserve finite snapshot storage/encoding and retain optional stream identities without deduplicating emissions.
+- [x] 1.3 Adapt finite runner wiring and existing snapshot consumers/tests; commit the task group.
 
 ## 2. Unify runtime capture
 

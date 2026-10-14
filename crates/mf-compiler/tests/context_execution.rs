@@ -122,10 +122,10 @@ fn optional_selection_defaults_round_trip_and_remain_strict() {
 
 #[test]
 fn snapshots_distinguish_null_skips_and_publication_failures() {
-    use mf_runtime::{ExecutionContext, SnapshotOutcome, SnapshotRecorder};
-    let recorder = SnapshotRecorder::memory();
+    use mf_runtime::{ExecutionContext, SnapshotOutcome, SnapshotRecording};
+    let recorder = SnapshotRecording::memory();
     let mut context = ExecutionContext::default();
-    context.set_snapshot_recorder(recorder.clone());
+    context.set_snapshot_recorder(recorder.recorder());
     flow(graph()).execute_in_context(&mut context).unwrap();
     let root = recorder.current();
     assert_eq!(root.node(&[], "b").unwrap().outputs["value"], json!(null));
@@ -145,9 +145,9 @@ fn snapshots_distinguish_null_skips_and_publication_failures() {
 
     let mut invalid = graph();
     invalid["nodes"][0]["config"]["outputs"]["extra"] = json!(true);
-    let recorder = SnapshotRecorder::memory();
+    let recorder = SnapshotRecording::memory();
     let mut context = ExecutionContext::default();
-    context.set_snapshot_recorder(recorder.clone());
+    context.set_snapshot_recorder(recorder.recorder());
     assert!(flow(invalid).execute_in_context(&mut context).is_err());
     let root = recorder.current();
     let failure = root.node(&[], "a").unwrap();
