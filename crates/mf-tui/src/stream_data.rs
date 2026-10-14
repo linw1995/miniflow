@@ -463,6 +463,8 @@ mod tests {
             [1, 2]
         );
         assert_eq!(store.snapshot().related(&[1; 16], &[2; 8]).len(), 1);
+        assert!(store.snapshot().related(&[3; 16], &[2; 8]).is_empty());
+        assert!(store.snapshot().related(&[1; 16], &[3; 8]).is_empty());
         assert_eq!(store.snapshot().gaps, Some(1));
         assert!(!store.admit(second.clone()).unwrap());
         second.time_unix_nano += 1;
