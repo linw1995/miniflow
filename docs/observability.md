@@ -298,10 +298,10 @@ endpoint. Ordinary execution does not allocate a snapshot recorder. Runners buil
 Both finite and streaming execution attach the same `SnapshotRecorder` notification handle.
 It sends current `SnapshotEvent` values and retains no history or encoding state. Callers that
 want dictionary encoding and immutable finite history own a `SnapshotRecording` and attach
-`recording.recorder()`; its store and sink policy are independent of execution. Equal finite
-states retain their existing deduplication, while stream identities and `Emitted` updates
-preserve repeated equal-valued sends. Optional identity fields are omitted from finite wire
-records, preserving the existing version 1 representation.
+`recording.recorder()`; its store and sink policy are independent of execution. Equal node
+states retain their existing deduplication; `Emitted` updates preserve
+repeated equal-valued sends in either backend. Snapshot events and storage contain no
+stream identity or run binding. Finite wire records retain their version 1 representation.
 
 Snapshot events use the `mf.snapshot` instrumentation scope and the standard OTLP `LogRecord`
 body. Each record includes `mf.workflow.id`, `mf.run.id`, `mf.snapshot.version` (currently 1),
@@ -366,11 +366,10 @@ snapshot version 1 and streaming lifecycle schema 4 retain their original contra
 ### Programmatic stream capture
 
 Attach a `mf_runtime::SnapshotRecorder` through `StreamOptions.snapshots`, using the same
-notification interface as finite execution. `SnapshotRecorder::new` accepts an unbound raw
-callback and works without telemetry. `SnapshotRecorder::for_run` binds a callback to a run ID;
-attaching that handle requires a matching `StreamOptions.observation` before startup.
-Callbacks receive original immutable values and optional existing stream identities. They own
-retention policy and must be nonblocking and must not unwind.
+notification interface as finite execution. `SnapshotRecorder::new` receives node scope,
+original immutable inputs/outputs, and outcome through one callback without requiring
+telemetry or run binding. Callers own retention policy; callbacks must be nonblocking
+and must not unwind.
 
 For OTLP inspection, the callback delegates to `mf_telemetry::stream_data::StreamDataRecorder`.
 That adapter owns encoding budgets, capture sequences, loss accounting, and typed diagnostics.
@@ -388,17 +387,15 @@ let capture = mf_telemetry::stream_data::StreamDataRecorder::new(
     move || capacity.available(),
 );
 let encoded = capture.clone();
-let recorder = mf_runtime::SnapshotRecorder::for_run(observation.run_id(), move |event| {
-    if let Some(identity) = event.identity {
-        let (direction, values) = match event.snapshot.outcome {
-            mf_runtime::SnapshotOutcome::Started =>
-                (mf_telemetry::stream_data::Direction::Input, &event.snapshot.inputs),
-            mf_runtime::SnapshotOutcome::Succeeded | mf_runtime::SnapshotOutcome::Emitted =>
-                (mf_telemetry::stream_data::Direction::Output, &event.snapshot.outputs),
-            mf_runtime::SnapshotOutcome::Failed | mf_runtime::SnapshotOutcome::Skipped => return,
-        };
-        encoded.record(identity, direction, values);
-    }
+let recorder = mf_runtime::SnapshotRecorder::new(move |event| {
+    let (direction, values) = match event.snapshot.outcome {
+        mf_runtime::SnapshotOutcome::Started =>
+            (mf_telemetry::stream_data::Direction::Input, &event.snapshot.inputs),
+        mf_runtime::SnapshotOutcome::Succeeded | mf_runtime::SnapshotOutcome::Emitted =>
+            (mf_telemetry::stream_data::Direction::Output, &event.snapshot.outputs),
+        mf_runtime::SnapshotOutcome::Failed | mf_runtime::SnapshotOutcome::Skipped => return,
+    };
+    encoded.record(&event.node, &event.scope, direction, values);
 });
 let result = (|| -> Result<(), Box<dyn std::error::Error>> {
     let instance = mf_compiler::start_stream(
@@ -432,15 +429,17 @@ outputs are captured after publication validation. Producers capture each succes
 their span is running; a later producer failure leaves those admitted records available. Event
 callbacks record each admitted emission, including earlier emissions when a later publication or
 timer update fails. Batch buffering captures inputs without inventing an output. Timer and close
-outputs keep their actual trigger and output message identity without a fabricated input message.
-Loop and Iteration body work uses its existing invocation and native span identities; virtual
-scope input nodes have no independent invocation and are not captured as business operations.
+outputs retain their active callback span without fabricated input values. Loop and Iteration
+body work retains its execution scope and active native context. Virtual scope input nodes
+have no independent invocation; their snapshots retain the currently active enclosing context.
 
-The runtime associates each admitted emission with its business message identity and invokes
-observation callbacks after releasing coordinator locks. Telemetry reserves capture sequences
-in callback delivery order, captures native context, and encodes values within its own budgets.
-Capture sequence order need not match concurrent business admission order; message identities
-retain that ordering. The supplied recorder isolates sink errors and panics as typed diagnostics
+The runtime notifies current snapshots after releasing coordinator locks. Telemetry reserves
+capture sequences in callback delivery order, captures current native trace/span context and
+time, and encodes values within its own budgets. Capture order need not match concurrent
+business admission order; lifecycle telemetry retains execution and message causality.
+Timestamp is display metadata rather than a unique identity. Adapters that queue raw events
+must capture the current context before asynchronous forwarding. The supplied recorder
+isolates sink errors and panics as typed diagnostics
 without changing workflow results, and its sender uses nonblocking bounded queue admission.
 Capture-enabled domains use dynamic execution when intermediate values would otherwise remain
 inside an optimized typed segment. The runner finishes capture after workers have joined, then
@@ -548,8 +547,8 @@ Tab switches the selected span's right-hand pane:
 - **Details** shows timing, status, IDs, attributes, span events, links, resource, and scope metadata.
 - **Data** shows finite node inputs/outputs, outcome, skipped ports, errors, and snapshot capture
   diagnostics. Streaming Data lists independently captured inputs and admitted emissions for the
-  selected span, ordered by capture sequence. Each row identifies direction, ports, trigger,
-  invocation, applicable message, emission ordinal, timestamp, and a bounded value summary.
+  selected span, ordered by capture sequence. Each row identifies node, direction, ports,
+  timestamp, and a bounded value summary; its preview also includes scope and native context.
   Select a row to inspect its decoded values or byte/depth omission reason. Stream outcomes and
   skipped ports keep their lifecycle meanings in Details; a payload never proves successful work.
   Matching uses exact native trace/span IDs. Repeated node names never substitute for invocation identity.

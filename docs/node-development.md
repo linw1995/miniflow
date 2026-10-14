@@ -769,7 +769,9 @@ Successful buffering reports zero emissions. Batch emissions carry item count an
 without exposing retained values. Transport and export queues remain bounded, and telemetry failures
 do not change workflow results or request retries. Terminal events follow drain or failure cleanup.
 
-The current terminal launcher and snapshot recorder remain unavailable for stream mode.
+Programmatic `SnapshotRecorder` callbacks observe node values in both execution modes.
+Whole-stream runners support streaming lifecycle and bounded Data export; the legacy finite
+snapshot export flag remains unsupported for whole-stream execution.
 
 Workflow graph construction is owned by `mf-compiler`: `FlowBuilder::prepare` validates configured nodes and graph connections, then `into_tasks` or `into_stream` produces an executable runtime plan. `FlowBuildError`, `StreamBuildError`, and `WorkflowBuildError` are compiler errors. The runtime binds validated owned or borrowed plans and schedules executors without depending on the compiler. Node factories and their `NodeBuildError` contract remain shared provider contracts in `mf-runtime`.
 

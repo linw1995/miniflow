@@ -160,6 +160,7 @@ fn streaming_data_is_live_and_distinguishes_buffering_from_timer_outputs() {
         })
         .collect::<Vec<_>>();
     assert_eq!(outputs.len(), 2);
+    assert!(outputs[0].trace_context.is_some());
     assert_eq!(outputs[0].trace_context, outputs[1].trace_context);
     assert!(outputs[0].sequence < outputs[1].sequence);
     assert!(data.iter().any(|record| matches!(&record.payload, DataPayload::Ports { node, direction: Direction::Output, values: Some(values), .. }

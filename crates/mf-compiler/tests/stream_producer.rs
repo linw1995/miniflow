@@ -250,8 +250,13 @@ fn receive(instance: &StreamInstance) -> i64 {
 #[test]
 fn data_capture_preserves_admitted_outputs_when_a_producer_fails() {
     use mf_telemetry::stream_data::{DataPayload, DataRecord, Direction};
-    for mode in ["fail_after", "invalid"] {
-        let key = format!("captured-{mode}");
+    for (mode, observed) in [
+        ("fail_after", false),
+        ("invalid", false),
+        ("fail_after", true),
+        ("invalid", true),
+    ] {
+        let key = format!("captured-{mode}-{observed}");
         let harness = capture::Harness::new(true);
         let mut value = graph(&key, 1);
         value["nodes"][0]["config"]["mode"] = json!(mode);
@@ -277,8 +282,18 @@ fn data_capture_preserves_admitted_outputs_when_a_producer_fails() {
             },
             || true,
         );
+        let raw = Arc::new(Mutex::new(Vec::<mf_runtime::ValueRef>::new()));
+        let original = raw.clone();
         let encoded = capture.clone();
         let observer = mf_runtime::SnapshotRecorder::new(move |event| {
+            if event.node.as_ref() == "produce"
+                && event.snapshot.outcome == mf_runtime::SnapshotOutcome::Emitted
+            {
+                original
+                    .lock()
+                    .unwrap()
+                    .push(event.snapshot.outputs.clone());
+            }
             let (direction, values) = match event.snapshot.outcome {
                 mf_runtime::SnapshotOutcome::Started => (Direction::Input, &event.snapshot.inputs),
                 mf_runtime::SnapshotOutcome::Emitted | mf_runtime::SnapshotOutcome::Succeeded => {
@@ -293,7 +308,7 @@ fn data_capture_preserves_admitted_outputs_when_a_producer_fails() {
         let instance = start(
             value,
             StreamOptions {
-                observation: Some(observation),
+                observation: observed.then_some(observation),
                 snapshots: Some(observer),
                 ..Default::default()
             },
@@ -325,9 +340,18 @@ fn data_capture_preserves_admitted_outputs_when_a_producer_fails() {
             .collect::<Vec<_>>();
         if mode == "fail_after" {
             assert_eq!(outputs, vec![json!({"value":42})]);
+            let raw = raw.lock().unwrap();
+            assert_eq!(raw.len(), 1);
+            assert_eq!(raw[0]["value"], json!(42));
         } else {
+            assert!(raw.lock().unwrap().is_empty());
             assert!(outputs.is_empty());
         }
+        assert!(
+            data.iter()
+                .filter(|record| matches!(record.payload, DataPayload::Ports { .. }))
+                .all(|record| record.trace_context.is_some() == observed)
+        );
     }
 }
 
