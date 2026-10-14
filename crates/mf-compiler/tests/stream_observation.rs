@@ -413,7 +413,7 @@ fn deep_values_and_failed_sinks_preserve_stream_results() {
         json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
         "nodes":[{"id":"copy", "kind":"builtin.identity"}], "outputs":[{"name":"value","node":"copy","port":"value"}]}),
     );
-    for mode in ["depth", "error", "panic"] {
+    for mode in ["values", "depth", "error", "panic"] {
         let harness = Harness::new(true);
         let observation = plan
             .start_stream_observation(&harness.observer(), RunId::new())
@@ -435,7 +435,11 @@ fn deep_values_and_failed_sinks_preserve_stream_results() {
             },
             || true,
         );
-        let mut value = json!(7);
+        let mut value = if mode == "values" {
+            json!({"items": [null, true, false, u64::MAX, 0, 0.0, -0.0]})
+        } else {
+            json!(7)
+        };
         if mode == "depth" {
             for _ in 0..60 {
                 value = json!([value]);
@@ -458,6 +462,24 @@ fn deep_values_and_failed_sinks_preserve_stream_results() {
         instance.join().unwrap();
         capture.finish();
         match mode {
+            "values" => {
+                assert!(capture.diagnostic().is_none());
+                let values = data
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter_map(|record| match &record.payload {
+                        DataPayload::Ports {
+                            values: Some(values),
+                            ..
+                        } => Some(values.to_json()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(values.len(), 2);
+                assert_eq!(values[0]["input"].to_string(), value.to_string());
+                assert_eq!(values[1]["value"].to_string(), value.to_string());
+            }
             "depth" => {
                 assert!(capture.diagnostic().is_none());
                 let data = data.lock().unwrap();
