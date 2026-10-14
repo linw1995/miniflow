@@ -155,7 +155,7 @@ pub struct StreamOptions {
     pub clock: Arc<dyn StreamClock>,
     pub observation: Option<StreamObservation>,
     pub snapshots: Option<crate::SnapshotRecorder>,
-    pub data_capture: Option<crate::StreamDataRecorder>,
+    pub data_capture: Option<crate::StreamDataObserver>,
     pub arguments: crate::WorkflowArguments,
     pub stdin: Option<crate::TextInput>,
 }
@@ -312,7 +312,7 @@ struct Shared {
     changed: Condvar,
     execution: StreamExecution,
     observation: Option<StreamObservation>,
-    data_capture: Option<crate::StreamDataRecorder>,
+    data_capture: Option<crate::StreamDataObserver>,
     cancellation: crate::StreamCancellation,
     worker_limit: std::num::NonZeroUsize,
 }
@@ -367,24 +367,19 @@ impl Emitter<'_> {
             .shared
             .data_capture
             .as_ref()
-            .filter(|capture| capture.is_active())
             .map(|_| result.outputs.clone());
-        let mut reservation = None;
+        let mut data_identity = None;
         let ports = result.outputs.keys().cloned().collect::<Vec<_>>();
         let admitted: Result<(), StreamError> = (|| {
             let emitted = self.emitted.checked_add(1).context(ResourceSnafu {
                 message: "producer emission counter exhausted",
             })?;
             let message = enqueue_emission(&mut state, self.plan, self.index, result.into())?;
-            reservation = self.shared.data_capture.as_ref().and_then(|capture| {
-                self.data_identity.as_deref().and_then(|identity| {
-                    capture.reserve(
-                        identity.clone(),
-                        mf_telemetry::stream_data::Direction::Output,
-                        Some(stream_message(message)),
-                        Some(self.emitted as u64),
-                    )
-                })
+            data_identity = self.data_identity.as_deref().map(|identity| {
+                let mut identity = identity.clone();
+                identity.output = Some(stream_message(message));
+                identity.ordinal = Some(self.emitted as u64);
+                identity
             });
             self.emitted = emitted;
             self.ports.extend(ports);
@@ -397,10 +392,14 @@ impl Emitter<'_> {
         }
         self.shared.changed.notify_all();
         drop(state);
-        if let (Some(capture), Some(reservation), Some(ports)) =
-            (&self.shared.data_capture, reservation, captured_ports)
+        if let (Some(capture), Some(identity), Some(ports)) =
+            (&self.shared.data_capture, data_identity, captured_ports)
         {
-            capture.publish(reservation, &ports);
+            capture.record(
+                identity,
+                mf_telemetry::stream_data::Direction::Output,
+                &ports,
+            );
         }
         admitted
     }
@@ -453,7 +452,6 @@ fn run_producer(
         data_identity: shared
             .data_capture
             .as_ref()
-            .filter(|capture| capture.is_active())
             .and_then(|_| {
                 job.callback
                     .as_ref()
@@ -468,12 +466,14 @@ fn run_producer(
         if let Some(callback) = job.callback.as_mut() {
             callback.started();
         }
-        if let Some(capture) = &shared.data_capture {
-            if let Some(identity) = emitter.data_identity.as_deref() {
-                capture.inputs(identity.clone(), &job.inputs);
-            } else if capture.is_active() {
-                capture.missing_identity();
-            }
+        if let (Some(capture), Some(identity)) =
+            (&shared.data_capture, emitter.data_identity.as_deref())
+        {
+            capture.record(
+                identity.clone(),
+                mf_telemetry::stream_data::Direction::Input,
+                &job.inputs,
+            );
         }
         catch_unwind(AssertUnwindSafe(|| {
             node.execute(job.inputs, &mut job.context, &mut emitter)
@@ -687,7 +687,7 @@ impl PreparedStream {
             .expect("validated stream worker limit is positive");
         let mut context = ExecutionContext::default();
         if let Some(capture) = &options.data_capture {
-            context.set_stream_data_recorder(capture.clone());
+            context.set_stream_data_observer(capture.clone());
         }
         if let Some(input) = options.stdin {
             context.set_stdin(input);
@@ -1114,7 +1114,7 @@ fn tick<'a>(
                 },
             )?;
         if let Some(capture) = &shared.data_capture {
-            context.set_stream_data_recorder(capture.clone());
+            context.set_stream_data_observer(capture.clone());
         }
         context.set_cancellation(shared.cancellation.clone());
         context.configure_worker_limit(shared.worker_limit);
@@ -1462,9 +1462,8 @@ fn check_failure(state: &mut State, shared: &Shared) -> Result<(), StreamError> 
 }
 
 struct EmissionCapture<'a> {
-    recorder: &'a crate::StreamDataRecorder,
     identity: &'a mf_telemetry::stream_data::DataIdentity,
-    pending: Vec<(crate::StreamDataReservation, crate::Outputs)>,
+    pending: Vec<(mf_telemetry::stream_data::DataIdentity, crate::Outputs)>,
 }
 
 fn invoke_event<'a>(
@@ -1483,16 +1482,15 @@ fn invoke_event<'a>(
     let data_identity = shared
         .data_capture
         .as_ref()
-        .filter(|capture| capture.is_active())
         .and_then(|_| callback.as_ref().and_then(StreamCallback::data_identity));
-    if let Some(capture) = &shared.data_capture {
-        if let Some(identity) = &data_identity {
-            if let NodeEvent::Input(inputs) = &event {
-                capture.inputs(identity.clone(), inputs);
-            }
-        } else if capture.is_active() {
-            capture.missing_identity();
-        }
+    if let (Some(capture), Some(identity), NodeEvent::Input(inputs)) =
+        (&shared.data_capture, &data_identity, &event)
+    {
+        capture.record(
+            identity.clone(),
+            mf_telemetry::stream_data::Direction::Input,
+            inputs,
+        );
     }
     if let Some(callback) = callback.as_mut() {
         callback.started();
@@ -1529,15 +1527,10 @@ fn invoke_event<'a>(
 
     let mut phase = FailurePhase::Execution;
     let old_pending = guard.operators[index].as_ref().unwrap().pending.len();
-    let mut captured = shared
-        .data_capture
-        .as_ref()
-        .zip(data_identity.as_ref())
-        .map(|(recorder, identity)| EmissionCapture {
-            recorder,
-            identity,
-            pending: Vec::new(),
-        });
+    let mut captured = data_identity.as_ref().map(|identity| EmissionCapture {
+        identity,
+        pending: Vec::new(),
+    });
     let result = (|| -> Result<_, StreamError> {
         let (effects, buffered, ports) = execution?;
         phase = FailurePhase::Publication;
@@ -1568,14 +1561,21 @@ fn invoke_event<'a>(
             .collect();
         Ok((count, ports, buffered, flushed))
     })();
-    if let Some(capture) = captured.filter(|capture| !capture.pending.is_empty()) {
+    if let (Some(capture), Some(observer)) = (
+        captured.filter(|capture| !capture.pending.is_empty()),
+        &shared.data_capture,
+    ) {
         if let Err(error) = &result {
             guard.failure_node = Some(plan.nodes()[index].definition_id.to_string());
             guard.failure.get_or_insert(error.clone());
         }
         drop(guard);
-        for (reservation, ports) in capture.pending {
-            capture.recorder.publish(reservation, &ports);
+        for (identity, ports) in capture.pending {
+            observer.record(
+                identity,
+                mf_telemetry::stream_data::Direction::Output,
+                &ports,
+            );
         }
         guard = shared.state.lock().unwrap();
     }
@@ -1658,20 +1658,13 @@ fn apply_effects(
         }
     );
     for (ordinal, emission) in effects.emissions.into_iter().enumerate() {
-        let ports = capture
-            .as_ref()
-            .filter(|capture| capture.recorder.is_active())
-            .map(|_| emission.result.outputs.clone());
+        let ports = capture.as_ref().map(|_| emission.result.outputs.clone());
         let message = enqueue_emission(state, plan, index, emission)?;
-        if let (Some(capture), Some(ports)) = (capture.as_mut(), ports)
-            && let Some(reservation) = capture.recorder.reserve(
-                capture.identity.clone(),
-                mf_telemetry::stream_data::Direction::Output,
-                Some(stream_message(message)),
-                Some(ordinal as u64),
-            )
-        {
-            capture.pending.push((reservation, ports));
+        if let (Some(capture), Some(ports)) = (capture.as_mut(), ports) {
+            let mut identity = capture.identity.clone();
+            identity.output = Some(stream_message(message));
+            identity.ordinal = Some(ordinal as u64);
+            capture.pending.push((identity, ports));
         }
     }
     let operator = state.operators[index].as_mut().unwrap();
@@ -1763,9 +1756,6 @@ fn finish_instance(shared: &Shared) {
     let failure = state.failure.clone();
     let node = state.failure_node.clone();
     drop(state);
-    if let Some(capture) = &shared.data_capture {
-        capture.finish();
-    }
     finish_observation(shared, summary, failure, node);
     shared.changed.notify_all();
 }

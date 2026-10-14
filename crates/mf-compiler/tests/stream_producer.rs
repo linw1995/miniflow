@@ -266,7 +266,7 @@ fn data_capture_preserves_admitted_outputs_when_a_producer_fails() {
             .unwrap();
         let data = Arc::new(Mutex::new(Vec::<DataRecord>::new()));
         let captured = data.clone();
-        let capture = mf_runtime::StreamDataRecorder::new(
+        let capture = mf_telemetry::stream_data::StreamDataRecorder::new(
             observation.clone(),
             move |packet| {
                 captured
@@ -277,11 +277,16 @@ fn data_capture_preserves_admitted_outputs_when_a_producer_fails() {
             },
             || true,
         );
+        let encoded = capture.clone();
+        let observer = mf_runtime::StreamDataObserver::new(
+            observation.clone(),
+            move |identity, direction, ports| encoded.record(identity, direction, ports),
+        );
         let instance = start(
             value,
             StreamOptions {
                 observation: Some(observation),
-                data_capture: Some(capture.clone()),
+                data_capture: Some(observer),
                 ..Default::default()
             },
         );
@@ -295,6 +300,7 @@ fn data_capture_preserves_admitted_outputs_when_a_producer_fails() {
         }
         assert!(instance.recv().is_err());
         assert!(instance.join().is_err());
+        capture.finish();
         assert!(capture.diagnostic().is_none());
         let data = data.lock().unwrap();
         let outputs = data

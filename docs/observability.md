@@ -357,41 +357,57 @@ snapshot version 1 and streaming lifecycle schema 4 retain their original contra
 
 ### Programmatic stream capture
 
-Create a `StreamDataRecorder` with the same `StreamObservation` passed in
-`StreamOptions.observation`, then attach it through `StreamOptions.data_capture`. Pairing a
-recorder with another observation, or omitting that observation, fails configuration validation
+Attach a `mf_runtime::StreamDataObserver` through `StreamOptions.data_capture` with the same
+`StreamObservation` passed in `StreamOptions.observation`. The callback receives original
+borrowed values and existing execution identities, without encoding or history retention.
+Pairing the observer with another observation, or omitting that observation, fails validation
 before startup. The existing `StreamOptions.snapshots` field remains unsupported for whole streams.
+
+For OTLP inspection, the callback delegates to `mf_telemetry::stream_data::StreamDataRecorder`.
+That adapter owns encoding budgets, capture sequences, loss accounting, and typed diagnostics.
+The caller finishes capture after execution on both success and failure, then finishes export.
+Custom callbacks own their retention policies and must be nonblocking and must not unwind.
 
 ```rust
 let observation = plan.start_stream_observation(&providers.observer(), run_id)?;
 let mut exporter = mf_telemetry::otlp::StreamDataExporter::from_env()?;
 let sender = exporter.sender();
 let capacity = sender.clone();
-let capture = mf_runtime::StreamDataRecorder::new(
+let capture = mf_telemetry::stream_data::StreamDataRecorder::new(
     observation.clone(),
     move |record| Ok(sender.try_emit(record)?),
     move || capacity.available(),
 );
-let instance = mf_compiler::start_stream(
-    &plan,
-    &registry,
-    mf_runtime::StreamOptions {
-        observation: Some(observation),
-        data_capture: Some(capture.clone()),
-        arguments,
-        ..Default::default()
-    },
-)?;
-while let Some(output) = instance.recv()? {
-    handle_output(output)?;
-}
-instance.join()?;
+let encoded = capture.clone();
+let observer = mf_runtime::StreamDataObserver::new(
+    observation.clone(),
+    move |identity, direction, ports| encoded.record(identity, direction, ports),
+);
+let result = (|| -> Result<(), Box<dyn std::error::Error>> {
+    let instance = mf_compiler::start_stream(
+        &plan,
+        &registry,
+        mf_runtime::StreamOptions {
+            observation: Some(observation),
+            data_capture: Some(observer),
+            arguments,
+            ..Default::default()
+        },
+    )?;
+    while let Some(output) = instance.recv()? {
+        handle_output(output)?;
+    }
+    instance.join()?;
+    Ok(())
+})();
+capture.finish();
 if let Some(error) = capture.diagnostic() {
     eprintln!("stream data capture incomplete: {error}");
 }
 if let Err(error) = exporter.finish() {
     eprintln!("stream data export incomplete: {error}");
 }
+result?;
 ```
 
 Inputs are captured after dependency/type validation and before invocation. Synchronous task
@@ -403,14 +419,15 @@ outputs keep their actual trigger and output message identity without a fabricat
 Loop and Iteration body work uses its existing invocation and native span identities; virtual
 scope input nodes have no independent invocation and are not captured as business operations.
 
-The runtime reserves emission sequence/context at admission but constructs and publishes values
-after releasing coordinator locks. Custom sinks and availability callbacks must be bounded and
-nonblocking; the supplied `StreamDataSender` implements that contract. Sink errors and panics
-disable capture with retained typed diagnostics without changing workflow results. Value
-construction has a finite byte/node budget as well as the encoded-record and depth limits.
+The runtime associates each admitted emission with its business message identity and invokes
+observation callbacks after releasing coordinator locks. Telemetry reserves capture sequences
+in callback delivery order, captures native context, and encodes values within its own budgets.
+Capture sequence order need not match concurrent business admission order; message identities
+retain that ordering. The supplied recorder isolates sink errors and panics as typed diagnostics
+without changing workflow results, and its sender uses nonblocking bounded queue admission.
 Capture-enabled domains use dynamic execution when intermediate values would otherwise remain
-inside an optimized typed segment. Runtime cleanup ends capture after workers have joined; the
-caller then finishes its exporter within the normal deadline.
+inside an optimized typed segment. The runner finishes capture after workers have joined, then
+finishes its exporter within the normal deadline. Historical lists belong to the TUI consumer.
 
 ## Graph presentation
 

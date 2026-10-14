@@ -29,10 +29,10 @@ type CapturedData = Arc<Mutex<Vec<mf_telemetry::stream_data::DataRecord>>>;
 
 fn data_capture(
     observation: mf_runtime::StreamObservation,
-) -> (mf_runtime::StreamDataRecorder, CapturedData) {
+) -> (mf_telemetry::stream_data::StreamDataRecorder, CapturedData) {
     let data = CapturedData::default();
     let captured = data.clone();
-    let recorder = mf_runtime::StreamDataRecorder::new(
+    let recorder = mf_telemetry::stream_data::StreamDataRecorder::new(
         observation,
         move |packet| {
             captured
@@ -46,6 +46,18 @@ fn data_capture(
         || true,
     );
     (recorder, data)
+}
+
+fn data_observer(
+    capture: &mf_telemetry::stream_data::StreamDataRecorder,
+) -> mf_runtime::StreamDataObserver {
+    let capture = capture.clone();
+    mf_runtime::StreamDataObserver::new(
+        capture.observation().clone(),
+        move |identity, direction, ports| {
+            capture.record(identity, direction, ports);
+        },
+    )
 }
 
 #[test]
@@ -63,7 +75,7 @@ fn streaming_data_is_live_and_distinguishes_buffering_from_timer_outputs() {
         &NodeRegistry::from_inventory().unwrap(),
         StreamOptions {
             observation: Some(observation),
-            data_capture: Some(capture.clone()),
+            data_capture: Some(data_observer(&capture)),
             clock: clock.clone(),
             ..Default::default()
         },
@@ -92,6 +104,7 @@ fn streaming_data_is_live_and_distinguishes_buffering_from_timer_outputs() {
     instance.source.close();
     assert!(instance.recv().unwrap().is_none());
     instance.join().unwrap();
+    capture.finish();
     assert!(capture.diagnostic().is_none());
     let data = data.lock().unwrap();
     let outputs = data
@@ -153,7 +166,7 @@ fn streaming_data_requires_the_owning_observation_before_startup() {
             &NodeRegistry::from_inventory().unwrap(),
             StreamOptions {
                 observation,
-                data_capture: Some(capture.clone()),
+                data_capture: Some(data_observer(&capture)),
                 arguments: mf_runtime::WorkflowArguments::try_from(json!({"copy.input":7}))
                     .unwrap(),
                 ..Default::default()
@@ -171,7 +184,7 @@ fn streaming_data_requires_the_owning_observation_before_startup() {
 
 #[test]
 fn oversized_stream_values_are_omitted_without_changing_results() {
-    use mf_telemetry::stream_data::{DataPayload, Omission};
+    use mf_telemetry::stream_data::{DataPayload, Direction, Omission};
     let harness = Harness::new(false);
     let mut value = definition();
     value["nodes"]
@@ -191,12 +204,24 @@ fn oversized_stream_values_are_omitted_without_changing_results() {
         .start_stream_observation(&harness.observer(), RunId::new())
         .unwrap();
     let (capture, data) = data_capture(observation.clone());
+    let raw_outputs = Arc::new(Mutex::new(Vec::<mf_runtime::Outputs>::new()));
+    let observed = raw_outputs.clone();
+    let encoded = capture.clone();
+    let observer = mf_runtime::StreamDataObserver::new(
+        observation.clone(),
+        move |identity, direction, ports| {
+            if identity.node.id == "feed" && direction == Direction::Output {
+                observed.lock().unwrap().push(ports.clone());
+            }
+            encoded.record(identity, direction, ports);
+        },
+    );
     let instance = start_stream(
         &plan,
         &NodeRegistry::from_inventory().unwrap(),
         StreamOptions {
             observation: Some(observation),
-            data_capture: Some(capture.clone()),
+            data_capture: Some(observer),
             ..Default::default()
         },
     )
@@ -210,6 +235,8 @@ fn oversized_stream_values_are_omitted_without_changing_results() {
     );
     assert!(instance.recv().unwrap().is_none());
     instance.join().unwrap();
+    capture.finish();
+    assert_eq!(raw_outputs.lock().unwrap()[0]["item"], json!(value));
     assert!(capture.diagnostic().is_none());
     let data = data.lock().unwrap();
     assert!(data.iter().any(|record| matches!(
@@ -281,7 +308,7 @@ fn partial_event_publication_keeps_only_admitted_data_and_failed_outcome() {
         &NodeRegistry::from_inventory().unwrap(),
         StreamOptions {
             observation: Some(observation),
-            data_capture: Some(capture.clone()),
+            data_capture: Some(data_observer(&capture)),
             arguments: mf_runtime::WorkflowArguments::try_from(json!({"start.input":7})).unwrap(),
             ..Default::default()
         },
@@ -289,6 +316,7 @@ fn partial_event_publication_keeps_only_admitted_data_and_failed_outcome() {
     .unwrap();
     assert!(instance.recv().is_err());
     assert!(instance.join().is_err());
+    capture.finish();
     assert!(capture.diagnostic().is_none());
     let data = data.lock().unwrap();
     let outputs = data
@@ -324,7 +352,7 @@ fn stream_data_sinks_can_observe_runtime_metrics_without_locking_execution() {
     let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let captured_holder = holder.clone();
     let captured_observed = observed.clone();
-    let capture = mf_runtime::StreamDataRecorder::new(
+    let capture = mf_telemetry::stream_data::StreamDataRecorder::new(
         observation.clone(),
         move |packet| {
             let record = DataRecord::decode(&packet.bytes)?;
@@ -356,7 +384,7 @@ fn stream_data_sinks_can_observe_runtime_metrics_without_locking_execution() {
     );
     let mut options = StreamOptions {
         observation: Some(observation),
-        data_capture: Some(capture.clone()),
+        data_capture: Some(data_observer(&capture)),
         ..Default::default()
     };
     let source = controlled::prepare_control("feed", &mut options);
@@ -373,6 +401,7 @@ fn stream_data_sinks_can_observe_runtime_metrics_without_locking_execution() {
     );
     assert!(instance.recv().unwrap().is_none());
     Arc::try_unwrap(instance).ok().unwrap().join().unwrap();
+    capture.finish();
     assert!(capture.diagnostic().is_none());
     assert!(observed.load(std::sync::atomic::Ordering::SeqCst) >= 3);
 }
@@ -391,7 +420,7 @@ fn deep_values_and_failed_sinks_preserve_stream_results() {
             .unwrap();
         let data = CapturedData::default();
         let captured = data.clone();
-        let capture = mf_runtime::StreamDataRecorder::new(
+        let capture = mf_telemetry::stream_data::StreamDataRecorder::new(
             observation.clone(),
             move |packet| {
                 let record = DataRecord::decode(&packet.bytes)?;
@@ -417,7 +446,7 @@ fn deep_values_and_failed_sinks_preserve_stream_results() {
             &NodeRegistry::from_inventory().unwrap(),
             StreamOptions {
                 observation: Some(observation),
-                data_capture: Some(capture.clone()),
+                data_capture: Some(data_observer(&capture)),
                 arguments: mf_runtime::WorkflowArguments::try_from(json!({"copy.input":value}))
                     .unwrap(),
                 ..Default::default()
@@ -427,6 +456,7 @@ fn deep_values_and_failed_sinks_preserve_stream_results() {
         assert_eq!(instance.recv().unwrap().unwrap().outputs["value"], value);
         assert!(instance.recv().unwrap().is_none());
         instance.join().unwrap();
+        capture.finish();
         match mode {
             "depth" => {
                 assert!(capture.diagnostic().is_none());
@@ -446,11 +476,11 @@ fn deep_values_and_failed_sinks_preserve_stream_results() {
                 );
             }
             "error" => assert!(
-                matches!(capture.diagnostic().unwrap().as_ref(), mf_runtime::StreamCaptureError::Sink { source, .. } if source.downcast_ref::<std::io::Error>().is_some())
+                matches!(capture.diagnostic().unwrap().as_ref(), mf_telemetry::stream_data::StreamCaptureError::Sink { source, .. } if source.downcast_ref::<std::io::Error>().is_some())
             ),
             _ => assert!(matches!(
                 capture.diagnostic().unwrap().as_ref(),
-                mf_runtime::StreamCaptureError::SinkPanicked
+                mf_telemetry::stream_data::StreamCaptureError::SinkPanicked
             )),
         }
     }
@@ -469,7 +499,7 @@ fn unavailable_capture_capacity_leaves_sequence_and_sender_loss_evidence() {
         .unwrap();
     let data = CapturedData::default();
     let captured = data.clone();
-    let capture = mf_runtime::StreamDataRecorder::new(
+    let capture = mf_telemetry::stream_data::StreamDataRecorder::new(
         observation.clone(),
         move |packet| {
             captured
@@ -485,7 +515,7 @@ fn unavailable_capture_capacity_leaves_sequence_and_sender_loss_evidence() {
         &NodeRegistry::from_inventory().unwrap(),
         StreamOptions {
             observation: Some(observation),
-            data_capture: Some(capture.clone()),
+            data_capture: Some(data_observer(&capture)),
             arguments: mf_runtime::WorkflowArguments::try_from(json!({"copy.input":7})).unwrap(),
             ..Default::default()
         },
@@ -494,6 +524,7 @@ fn unavailable_capture_capacity_leaves_sequence_and_sender_loss_evidence() {
     assert_eq!(instance.recv().unwrap().unwrap().outputs["value"], json!(7));
     assert!(instance.recv().unwrap().is_none());
     instance.join().unwrap();
+    capture.finish();
     let data = data.lock().unwrap();
     assert_eq!(data.len(), 2);
     assert_eq!(data[0].sequence, 0);
@@ -882,7 +913,7 @@ fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
         &NodeRegistry::from_inventory().unwrap(),
         StreamOptions {
             observation: Some(observation),
-            data_capture: Some(capture.clone()),
+            data_capture: Some(data_observer(&capture)),
             ..Default::default()
         },
     )
@@ -900,6 +931,7 @@ fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
     );
     assert!(instance.recv().unwrap().is_none());
     instance.join().unwrap();
+    capture.finish();
     let events = records(&harness);
     let loops: BTreeSet<_> = events
         .iter()

@@ -90,7 +90,7 @@ pub use stream::{
     StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate, TypedEventNode,
     TypedStreamNode, execute_typed_event,
 };
-pub use stream_data::{StreamCaptureError, StreamDataRecorder, StreamDataReservation};
+pub use stream_data::StreamDataObserver;
 pub use stream_instance::{
     Emitter, MessageId, MonotonicClock, StreamClock, StreamDelivery, StreamError, StreamInstance,
     StreamMetrics, StreamOptions, StreamOutput, StreamSummary,

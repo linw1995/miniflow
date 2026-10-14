@@ -202,7 +202,7 @@ pub struct ExecutionContext {
     scope_exit_cutoff: Arc<AtomicUsize>,
     remaining_steps: StepBudget,
     snapshots: Option<crate::SnapshotRecorder>,
-    stream_data: Option<crate::StreamDataRecorder>,
+    stream_data: Option<crate::StreamDataObserver>,
     snapshot_prefix: Vec<LoopPathEntry>,
     workflow_arguments: crate::WorkflowArguments,
     startup_nodes: BTreeSet<String>,
@@ -591,10 +591,10 @@ impl ExecutionContext {
         Ok(Some(inputs))
     }
 
-    pub fn set_stream_data_recorder(&mut self, recorder: crate::StreamDataRecorder) {
-        self.stream_data = Some(recorder);
+    pub fn set_stream_data_observer(&mut self, observer: crate::StreamDataObserver) {
+        self.stream_data = Some(observer);
     }
-    pub fn stream_data_recorder(&self) -> Option<&crate::StreamDataRecorder> {
+    pub fn stream_data_observer(&self) -> Option<&crate::StreamDataObserver> {
         self.stream_data.as_ref()
     }
 
@@ -1250,7 +1250,6 @@ fn execute_ordered_call_in_context<'a, N>(
     let capture_identity = ctx
         .stream_data
         .as_ref()
-        .filter(|capture| capture.is_active())
         .and_then(|_| step.as_ref().and_then(StepObservation::data_identity));
     let snapshot_inputs = ctx.snapshots.as_ref().map(|_| inputs.clone());
     let result = if skipped {
@@ -1287,14 +1286,12 @@ fn execute_ordered_call_in_context<'a, N>(
             }
         }
         ctx.capture_node(node, &inputs, None, crate::SnapshotOutcome::Started, None);
-        if let Some(capture) = &ctx.stream_data {
-            if let Some(identity) = &capture_identity {
-                capture.inputs(identity.clone(), &inputs);
-            } else if capture.is_active()
-                && !matches!(id, crate::LOOP_SOURCE_ID | crate::ITERATION_INPUT_ID)
-            {
-                capture.missing_identity();
-            }
+        if let (Some(capture), Some(identity)) = (&ctx.stream_data, &capture_identity) {
+            capture.record(
+                identity.clone(),
+                mf_telemetry::stream_data::Direction::Input,
+                &inputs,
+            );
         }
         if let Some(step) = step.as_mut() {
             step.started(ctx);
@@ -1356,7 +1353,14 @@ fn execute_ordered_call_in_context<'a, N>(
         && let (Some(capture), Some(identity), Some(outputs)) =
             (&ctx.stream_data, capture_identity, capture_result)
     {
-        capture.outputs(identity, &outputs.outputs);
+        let mut identity = identity;
+        identity.output = identity.stream.message;
+        identity.ordinal = Some(0);
+        capture.record(
+            identity,
+            mf_telemetry::stream_data::Direction::Output,
+            &outputs.outputs,
+        );
     }
     if let Some(inputs) = &snapshot_inputs {
         let outcome = if result.is_err() {
