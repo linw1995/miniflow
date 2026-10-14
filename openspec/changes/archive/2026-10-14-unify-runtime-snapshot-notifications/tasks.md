@@ -19,5 +19,5 @@
 ## 4. Review and complete
 
 - [x] 4.1 Review AGENTS.md compliance and ablate unnecessary state, abstraction, and test duplication.
-- [ ] 4.2 Run affected coverage, prek, and pinned Nix flake validation; commit final corrections.
-- [ ] 4.3 Archive the reviewed specification and update the existing PR; monitor CI and review feedback.
+- [x] 4.2 Run affected coverage, prek, and pinned Nix flake validation; commit final corrections.
+- [x] 4.3 Archive the reviewed specification and update the existing PR; monitor CI and review feedback.

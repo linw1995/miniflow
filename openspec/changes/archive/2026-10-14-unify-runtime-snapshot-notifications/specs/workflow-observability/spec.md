@@ -2,11 +2,11 @@
 
 ### Requirement: Share runtime snapshot notifications across execution modes
 
-Finite and streaming execution SHALL use the same opt-in SnapshotRecorder callback
+Finite and streaming execution SHALL share the opt-in SnapshotRecorder callback
 and ordinary-task capture boundary. The runtime recorder SHALL only notify current
 node snapshots and existing execution identities. Caller-owned recording SHALL
 manage dictionaries, encoding, history, and diagnostics. The runtime MUST NOT keep
-a separate stream data observer or duplicate ordinary-task data capture path.
+a separate stream data observer or duplicate task capture path.
 
 #### Scenario: Observe a finite task through the common recorder
 
