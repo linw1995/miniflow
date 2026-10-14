@@ -23,3 +23,29 @@ a separate stream data observer or duplicate ordinary-task data capture path.
 
 - **WHEN** a caller attaches an unbound SnapshotRecorder callback to a stream
 - **THEN** it receives original values at invocation and admitted publication boundaries without requiring an exporter or retaining runtime history
+
+## MODIFIED Requirements
+
+### Requirement: Enable streaming business data capture explicitly
+
+Streaming data capture SHALL require an explicit request through runner configuration or a
+programmatic snapshot callback. TUI launch SHALL be permitted to request it for its child.
+Disabled capture MUST NOT serialize business values. Unavailable export support SHALL report
+an actionable capture diagnostic without changing business execution. Run-bound callbacks
+SHALL require matching stream observation metadata before startup. Unbound snapshot callbacks
+SHALL remain usable without telemetry providers or exporters.
+
+#### Scenario: Execute without data capture
+
+- **WHEN** a streaming runner executes normally or with verbose lifecycle diagnostics but no stream data request
+- **THEN** its automatic telemetry contains no input/output business values and it allocates no data recorder
+
+#### Scenario: Request capture without export support
+
+- **WHEN** stream data is requested from a telemetry-disabled runner or without an available OTLP logs exporter
+- **THEN** capture is reported unavailable while the workflow retains its normal results and exit outcome
+
+#### Scenario: Attach mismatched programmatic capture
+
+- **WHEN** a run-bound recorder is attached without matching stream observation metadata
+- **THEN** configuration validation fails before source admission or node execution

@@ -6,9 +6,9 @@
 
 ## 2. Unify runtime capture
 
-- [ ] 2.1 Route stream tasks, producers, and events through SnapshotRecorder and remove StreamDataObserver/data_capture.
-- [ ] 2.2 Adapt stream telemetry and runner wiring; preserve original values, publication semantics, and out-of-lock notifications.
-- [ ] 2.3 Extend existing integration cases for equal-valued emissions and raw stream snapshots; commit the task group.
+- [x] 2.1 Route stream tasks, producers, and events through SnapshotRecorder and remove StreamDataObserver/data_capture.
+- [x] 2.2 Adapt stream telemetry and runner wiring; preserve original values, publication semantics, and out-of-lock notifications.
+- [x] 2.3 Extend existing integration cases for equal-valued emissions and raw stream snapshots; commit the task group.
 
 ## 3. Review and complete
 

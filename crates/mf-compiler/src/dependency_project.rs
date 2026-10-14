@@ -225,12 +225,21 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Resu
         mf_telemetry::stream_data::StreamDataRecorder::new(observation.clone(), move |record| Ok(sender.try_emit(record)?), move || capacity.available())
     });
     #[cfg(feature = "telemetry")]
-    let data_observer = data_capture.as_ref().zip(observation.as_ref()).map(|(capture, observation)| {
+    let snapshots = data_capture.as_ref().zip(observation.as_ref()).map(|(capture, observation)| {
         let capture = capture.clone();
-        mf_runtime::StreamDataObserver::new(observation.clone(), move |identity, direction, ports| capture.record(identity, direction, ports))
+        mf_runtime::SnapshotRecorder::for_run(observation.run_id(), move |event| {
+            if let Some(identity) = event.identity {
+                let (direction, values) = match event.snapshot.outcome {
+                    mf_runtime::SnapshotOutcome::Started => (mf_telemetry::stream_data::Direction::Input, &event.snapshot.inputs),
+                    mf_runtime::SnapshotOutcome::Succeeded | mf_runtime::SnapshotOutcome::Emitted => (mf_telemetry::stream_data::Direction::Output, &event.snapshot.outputs),
+                    mf_runtime::SnapshotOutcome::Failed | mf_runtime::SnapshotOutcome::Skipped => return,
+                };
+                capture.record(identity, direction, values);
+            }
+        })
     });
     #[cfg(not(feature = "telemetry"))]
-    let data_observer: Option<mf_runtime::StreamDataObserver> = {
+    let snapshots: Option<mf_runtime::SnapshotRecorder> = {
         if stream_data_requested() { eprintln!("stream data capture unavailable: telemetry-enabled build required"); }
         None
     };
@@ -244,7 +253,7 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Resu
         prepared.plan().input_schema().validate(&arguments)?;
         let needs_stdin = prepared.plan().input_schema().stdin_owner(&arguments)?.is_some();
         let stdin = if needs_stdin { stdio.take_input() } else { None };
-        let instance = mf_runtime::FlowRuntime::default().start_stream(prepared, mf_runtime::StreamOptions { observation: observation.clone(), data_capture: data_observer, arguments, stdin, ..Default::default() })?;
+        let instance = mf_runtime::FlowRuntime::default().start_stream(prepared, mf_runtime::StreamOptions { observation: observation.clone(), snapshots, arguments, stdin, ..Default::default() })?;
         stdio.run(instance)?;
         Ok(())
     })();

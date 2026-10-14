@@ -600,7 +600,7 @@ impl StreamDataRecorder {
         &self,
         identity: DataIdentity,
         direction: Direction,
-        ports: &BTreeMap<String, V>,
+        ports: &V,
     ) {
         let Some(sequence) = self.sequence() else {
             return;
@@ -621,7 +621,7 @@ impl StreamDataRecorder {
             }
             let (port_names, ports_truncated) = port_summary(ports);
             let mut budget = MAX_RECORD_BYTES - 4096;
-            let values = capture_ports(ports, &mut budget);
+            let values = capture_value(ports, &mut budget, 0);
             let (values, omission) = match values {
                 Ok(value) => (Some(value), None),
                 Err(DataError::TooLarge) => (None, Some(Omission::Bytes)),
@@ -767,14 +767,14 @@ fn timestamp() -> u64 {
         .min(u128::from(u64::MAX)) as u64
 }
 
-fn port_summary<V>(ports: &BTreeMap<String, V>) -> (Vec<String>, bool) {
-    let mut truncated = ports.len() > 32;
+fn port_summary<V: DataValueSource>(ports: &V) -> (Vec<String>, bool) {
+    let mut truncated = ports.object_items().take(33).count() > 32;
     let names = ports
-        .keys()
+        .object_items()
         .take(32)
-        .map(|name| {
+        .map(|(name, _)| {
             if name.len() <= 256 {
-                return name.clone();
+                return name.to_owned();
             }
             truncated = true;
             let mut end = 253;
@@ -806,19 +806,6 @@ fn text_cost(text: &str, budget: &mut usize) -> Result<(), DataError> {
         )?;
     }
     Ok(())
-}
-
-fn capture_ports<V: DataValueSource>(
-    ports: &BTreeMap<String, V>,
-    budget: &mut usize,
-) -> Result<DataValue, DataError> {
-    spend(budget, 64)?;
-    let mut values = BTreeMap::new();
-    for (key, value) in ports {
-        text_cost(key, budget)?;
-        values.insert(key.clone(), capture_value(value, budget, 1)?);
-    }
-    Ok(DataValue::Object(values))
 }
 
 fn capture_value<V: DataValueSource>(

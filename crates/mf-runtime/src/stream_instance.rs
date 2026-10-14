@@ -155,7 +155,6 @@ pub struct StreamOptions {
     pub clock: Arc<dyn StreamClock>,
     pub observation: Option<StreamObservation>,
     pub snapshots: Option<crate::SnapshotRecorder>,
-    pub data_capture: Option<crate::StreamDataObserver>,
     pub arguments: crate::WorkflowArguments,
     pub stdin: Option<crate::TextInput>,
 }
@@ -165,7 +164,6 @@ impl Default for StreamOptions {
             clock: Arc::new(MonotonicClock::default()),
             observation: None,
             snapshots: None,
-            data_capture: None,
             arguments: crate::WorkflowArguments::default(),
             stdin: None,
         }
@@ -312,7 +310,7 @@ struct Shared {
     changed: Condvar,
     execution: StreamExecution,
     observation: Option<StreamObservation>,
-    data_capture: Option<crate::StreamDataObserver>,
+    snapshots: Option<crate::SnapshotRecorder>,
     cancellation: crate::StreamCancellation,
     worker_limit: std::num::NonZeroUsize,
 }
@@ -343,6 +341,32 @@ pub struct Emitter<'a> {
     data_identity: Option<Box<mf_telemetry::stream_data::DataIdentity>>,
 }
 
+fn capture_snapshot(
+    shared: &Shared,
+    node: &str,
+    identity: Option<mf_telemetry::stream_data::DataIdentity>,
+    inputs: &Inputs,
+    outputs: &crate::Outputs,
+    outcome: crate::SnapshotOutcome,
+) {
+    if let Some(recorder) = &shared.snapshots {
+        recorder.record(crate::SnapshotEvent {
+            scope: identity
+                .as_ref()
+                .map_or_else(Vec::new, |identity| identity.node.path.clone()),
+            node: node.into(),
+            identity,
+            snapshot: crate::NodeSnapshot {
+                inputs: crate::snapshot::ports_snapshot(inputs),
+                outputs: crate::snapshot::ports_snapshot(outputs),
+                skipped: Arc::from([]),
+                outcome,
+                error: None,
+            },
+        });
+    }
+}
+
 impl Emitter<'_> {
     /// Wait for queue capacity and transfer one validated result to the runtime.
     /// Failure wakes waiting senders. Success does not imply downstream completion.
@@ -365,7 +389,7 @@ impl Emitter<'_> {
         }
         let captured_ports = self
             .shared
-            .data_capture
+            .snapshots
             .as_ref()
             .map(|_| result.outputs.clone());
         let mut data_identity = None;
@@ -392,13 +416,14 @@ impl Emitter<'_> {
         }
         self.shared.changed.notify_all();
         drop(state);
-        if let (Some(capture), Some(identity), Some(ports)) =
-            (&self.shared.data_capture, data_identity, captured_ports)
-        {
-            capture.record(
-                identity,
-                mf_telemetry::stream_data::Direction::Output,
+        if let Some(ports) = captured_ports {
+            capture_snapshot(
+                self.shared,
+                self.plan.nodes()[self.index].definition_id.as_str(),
+                data_identity,
+                &Inputs::new(),
                 &ports,
+                crate::SnapshotOutcome::Emitted,
             );
         }
         admitted
@@ -450,7 +475,7 @@ fn run_producer(
         ports: BTreeSet::new(),
         publication_failed: false,
         data_identity: shared
-            .data_capture
+            .snapshots
             .as_ref()
             .and_then(|_| {
                 job.callback
@@ -466,15 +491,14 @@ fn run_producer(
         if let Some(callback) = job.callback.as_mut() {
             callback.started();
         }
-        if let (Some(capture), Some(identity)) =
-            (&shared.data_capture, emitter.data_identity.as_deref())
-        {
-            capture.record(
-                identity.clone(),
-                mf_telemetry::stream_data::Direction::Input,
-                &job.inputs,
-            );
-        }
+        capture_snapshot(
+            shared,
+            plan.nodes()[index].definition_id.as_str(),
+            emitter.data_identity.as_deref().cloned(),
+            &job.inputs,
+            &crate::Outputs::new(),
+            crate::SnapshotOutcome::Started,
+        );
         catch_unwind(AssertUnwindSafe(|| {
             node.execute(job.inputs, &mut job.context, &mut emitter)
         }))
@@ -651,20 +675,18 @@ impl PreparedStream {
         options: StreamOptions,
         runtime_options: crate::RuntimeOptions,
     ) -> Result<StreamInstance, StreamError> {
-        ensure!(
-            options.snapshots.is_none(),
-            ConfigurationSnafu {
-                message: "snapshot capture is unsupported for streaming instances",
-            }
-        );
-        if let Some(capture) = &options.data_capture {
+        if let Some(run_id) = options
+            .snapshots
+            .as_ref()
+            .and_then(crate::SnapshotRecorder::run_id)
+        {
             ensure!(
                 options
                     .observation
                     .as_ref()
-                    .is_some_and(|observation| capture.matches(observation)),
+                    .is_some_and(|observation| observation.run_id() == run_id),
                 ConfigurationSnafu {
-                    message: "stream data capture requires its owning stream observation"
+                    message: "snapshot recorder requires its owning stream observation"
                 }
             );
         }
@@ -686,8 +708,8 @@ impl PreparedStream {
         let worker_limit = std::num::NonZeroUsize::new(domain_limit)
             .expect("validated stream worker limit is positive");
         let mut context = ExecutionContext::default();
-        if let Some(capture) = &options.data_capture {
-            context.set_stream_data_observer(capture.clone());
+        if let Some(capture) = &options.snapshots {
+            context.set_snapshot_recorder(capture.clone());
         }
         if let Some(input) = options.stdin {
             context.set_stdin(input);
@@ -754,7 +776,7 @@ impl PreparedStream {
             changed: Condvar::new(),
             execution: plan.execution().clone(),
             observation: options.observation,
-            data_capture: options.data_capture,
+            snapshots: options.snapshots,
             cancellation,
             worker_limit,
         });
@@ -1113,8 +1135,8 @@ fn tick<'a>(
                     message: queued.message,
                 },
             )?;
-        if let Some(capture) = &shared.data_capture {
-            context.set_stream_data_observer(capture.clone());
+        if let Some(capture) = &shared.snapshots {
+            context.set_snapshot_recorder(capture.clone());
         }
         context.set_cancellation(shared.cancellation.clone());
         context.configure_worker_limit(shared.worker_limit);
@@ -1462,8 +1484,11 @@ fn check_failure(state: &mut State, shared: &Shared) -> Result<(), StreamError> 
 }
 
 struct EmissionCapture<'a> {
-    identity: &'a mf_telemetry::stream_data::DataIdentity,
-    pending: Vec<(mf_telemetry::stream_data::DataIdentity, crate::Outputs)>,
+    identity: Option<&'a mf_telemetry::stream_data::DataIdentity>,
+    pending: Vec<(
+        Option<mf_telemetry::stream_data::DataIdentity>,
+        crate::Outputs,
+    )>,
 }
 
 fn invoke_event<'a>(
@@ -1480,16 +1505,17 @@ fn invoke_event<'a>(
     let mut operator = guard.operators[index].take().unwrap();
     drop(guard);
     let data_identity = shared
-        .data_capture
+        .snapshots
         .as_ref()
         .and_then(|_| callback.as_ref().and_then(StreamCallback::data_identity));
-    if let (Some(capture), Some(identity), NodeEvent::Input(inputs)) =
-        (&shared.data_capture, &data_identity, &event)
-    {
-        capture.record(
-            identity.clone(),
-            mf_telemetry::stream_data::Direction::Input,
+    if let NodeEvent::Input(inputs) = &event {
+        capture_snapshot(
+            shared,
+            plan.nodes()[index].definition_id.as_str(),
+            data_identity.clone(),
             inputs,
+            &crate::Outputs::new(),
+            crate::SnapshotOutcome::Started,
         );
     }
     if let Some(callback) = callback.as_mut() {
@@ -1527,8 +1553,8 @@ fn invoke_event<'a>(
 
     let mut phase = FailurePhase::Execution;
     let old_pending = guard.operators[index].as_ref().unwrap().pending.len();
-    let mut captured = data_identity.as_ref().map(|identity| EmissionCapture {
-        identity,
+    let mut captured = shared.snapshots.as_ref().map(|_| EmissionCapture {
+        identity: data_identity.as_ref(),
         pending: Vec::new(),
     });
     let result = (|| -> Result<_, StreamError> {
@@ -1561,20 +1587,20 @@ fn invoke_event<'a>(
             .collect();
         Ok((count, ports, buffered, flushed))
     })();
-    if let (Some(capture), Some(observer)) = (
-        captured.filter(|capture| !capture.pending.is_empty()),
-        &shared.data_capture,
-    ) {
+    if let Some(capture) = captured.filter(|capture| !capture.pending.is_empty()) {
         if let Err(error) = &result {
             guard.failure_node = Some(plan.nodes()[index].definition_id.to_string());
             guard.failure.get_or_insert(error.clone());
         }
         drop(guard);
         for (identity, ports) in capture.pending {
-            observer.record(
+            capture_snapshot(
+                shared,
+                plan.nodes()[index].definition_id.as_str(),
                 identity,
-                mf_telemetry::stream_data::Direction::Output,
+                &Inputs::new(),
                 &ports,
+                crate::SnapshotOutcome::Emitted,
             );
         }
         guard = shared.state.lock().unwrap();
@@ -1661,9 +1687,11 @@ fn apply_effects(
         let ports = capture.as_ref().map(|_| emission.result.outputs.clone());
         let message = enqueue_emission(state, plan, index, emission)?;
         if let (Some(capture), Some(ports)) = (capture.as_mut(), ports) {
-            let mut identity = capture.identity.clone();
-            identity.output = Some(stream_message(message));
-            identity.ordinal = Some(ordinal as u64);
+            let identity = capture.identity.cloned().map(|mut identity| {
+                identity.output = Some(stream_message(message));
+                identity.ordinal = Some(ordinal as u64);
+                identity
+            });
             capture.pending.push((identity, ports));
         }
     }

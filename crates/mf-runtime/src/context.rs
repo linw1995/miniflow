@@ -202,7 +202,6 @@ pub struct ExecutionContext {
     scope_exit_cutoff: Arc<AtomicUsize>,
     remaining_steps: StepBudget,
     snapshots: Option<crate::SnapshotRecorder>,
-    stream_data: Option<crate::StreamDataObserver>,
     snapshot_prefix: Vec<LoopPathEntry>,
     workflow_arguments: crate::WorkflowArguments,
     startup_nodes: BTreeSet<String>,
@@ -227,7 +226,6 @@ impl Default for ExecutionContext {
             scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
             remaining_steps: StepBudget::new(crate::MAX_SCHEDULED_STEPS),
             snapshots: None,
-            stream_data: None,
             snapshot_prefix: Vec::new(),
             workflow_arguments: crate::WorkflowArguments::default(),
             startup_nodes: BTreeSet::new(),
@@ -301,9 +299,8 @@ impl ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
-            snapshots: None,
-            stream_data: self.stream_data.clone(),
-            snapshot_prefix: Vec::new(),
+            snapshots: self.snapshots.clone(),
+            snapshot_prefix: self.snapshot_prefix.clone(),
             workflow_arguments: crate::WorkflowArguments::default(),
             startup_nodes: BTreeSet::new(),
             worker_handle: self.worker_handle.clone(),
@@ -502,7 +499,6 @@ impl ExecutionContext {
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             remaining_steps: self.remaining_steps.clone(),
             snapshots: self.snapshots.clone(),
-            stream_data: self.stream_data.clone(),
             snapshot_prefix: self.snapshot_prefix.clone(),
             workflow_arguments: self.workflow_arguments.clone(),
             startup_nodes: self.startup_nodes.clone(),
@@ -591,13 +587,6 @@ impl ExecutionContext {
         Ok(Some(inputs))
     }
 
-    pub fn set_stream_data_observer(&mut self, observer: crate::StreamDataObserver) {
-        self.stream_data = Some(observer);
-    }
-    pub fn stream_data_observer(&self) -> Option<&crate::StreamDataObserver> {
-        self.stream_data.as_ref()
-    }
-
     pub fn set_snapshot_recorder(&mut self, recorder: crate::SnapshotRecorder) {
         self.snapshots = Some(recorder);
     }
@@ -615,7 +604,6 @@ impl ExecutionContext {
         {
             child.future_executor = self.future_executor.clone();
         }
-        child.stream_data = self.stream_data.clone();
         if self.snapshots.is_some() {
             child.snapshots = self.snapshots.clone();
             child.snapshot_prefix = self.snapshot_path();
@@ -636,12 +624,23 @@ impl ExecutionContext {
         result: Option<&NodeResult>,
         outcome: crate::SnapshotOutcome,
         error: Option<&dyn std::fmt::Display>,
+        identity: Option<&mf_telemetry::stream_data::DataIdentity>,
     ) {
         if let Some(recorder) = &self.snapshots {
+            let mut identity = identity.cloned();
+            if outcome == crate::SnapshotOutcome::Succeeded
+                && let Some(identity) = &mut identity
+            {
+                identity.output = identity.stream.message;
+                identity.ordinal = Some(0);
+            }
             recorder.record(crate::SnapshotEvent {
-                scope: self.snapshot_path(),
+                scope: identity.as_ref().map_or_else(
+                    || self.snapshot_path(),
+                    |identity| identity.node.path.clone(),
+                ),
                 node: node.definition_id.as_str().into(),
-                identity: None,
+                identity,
                 snapshot: crate::NodeSnapshot {
                     inputs: crate::snapshot::ports_snapshot(inputs),
                     outputs: result.map_or_else(
@@ -1191,6 +1190,10 @@ fn execute_ordered_call_in_context<'a, N>(
             .and_then(|body| body.begin_node(id))
             .map(StepObservation::Body)
     };
+    let snapshot_identity = ctx
+        .snapshots
+        .as_ref()
+        .and_then(|_| step.as_ref().and_then(StepObservation::data_identity));
     let _root_context = match &step {
         Some(StepObservation::Root(step)) => Some(step.enter()),
         _ => None,
@@ -1227,6 +1230,7 @@ fn execute_ordered_call_in_context<'a, N>(
                     None,
                     crate::SnapshotOutcome::Failed,
                     Some(&error),
+                    snapshot_identity.as_ref(),
                 );
                 return Err(error);
             }
@@ -1248,10 +1252,6 @@ fn execute_ordered_call_in_context<'a, N>(
             }
         }
     }
-    let capture_identity = ctx
-        .stream_data
-        .as_ref()
-        .and_then(|_| step.as_ref().and_then(StepObservation::data_identity));
     let snapshot_inputs = ctx.snapshots.as_ref().map(|_| inputs.clone());
     let result = if skipped {
         None
@@ -1282,18 +1282,19 @@ fn execute_ordered_call_in_context<'a, N>(
                     None,
                     crate::SnapshotOutcome::Failed,
                     Some(&error),
+                    snapshot_identity.as_ref(),
                 );
                 return Err(error);
             }
         }
-        ctx.capture_node(node, &inputs, None, crate::SnapshotOutcome::Started, None);
-        if let (Some(capture), Some(identity)) = (&ctx.stream_data, &capture_identity) {
-            capture.record(
-                identity.clone(),
-                mf_telemetry::stream_data::Direction::Input,
-                &inputs,
-            );
-        }
+        ctx.capture_node(
+            node,
+            &inputs,
+            None,
+            crate::SnapshotOutcome::Started,
+            None,
+            snapshot_identity.as_ref(),
+        );
         if let Some(step) = step.as_mut() {
             step.started(ctx);
         }
@@ -1313,6 +1314,7 @@ fn execute_ordered_call_in_context<'a, N>(
                         None,
                         crate::SnapshotOutcome::Failed,
                         Some(&error),
+                        snapshot_identity.as_ref(),
                     );
                 }
                 return Err(error);
@@ -1345,24 +1347,7 @@ fn execute_ordered_call_in_context<'a, N>(
             .and_then(GeneratedNodeResult::dynamic)
             .cloned()
     });
-    let capture_result = capture_identity
-        .as_ref()
-        .and_then(|_| result.as_ref().and_then(GeneratedNodeResult::dynamic))
-        .cloned();
     let result = ctx.publish_generated(node, result);
-    if result.is_ok()
-        && let (Some(capture), Some(identity), Some(outputs)) =
-            (&ctx.stream_data, capture_identity, capture_result)
-    {
-        let mut identity = identity;
-        identity.output = identity.stream.message;
-        identity.ordinal = Some(0);
-        capture.record(
-            identity,
-            mf_telemetry::stream_data::Direction::Output,
-            &outputs.outputs,
-        );
-    }
     if let Some(inputs) = &snapshot_inputs {
         let outcome = if result.is_err() {
             crate::SnapshotOutcome::Failed
@@ -1380,6 +1365,7 @@ fn execute_ordered_call_in_context<'a, N>(
                 .as_ref()
                 .err()
                 .map(|error| error as &dyn std::fmt::Display),
+            snapshot_identity.as_ref(),
         );
     }
     if let Some(step) = step.take() {

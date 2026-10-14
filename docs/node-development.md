@@ -515,14 +515,18 @@ Nodes forwarding an input should move or clone its handle. New arrays and object
 handles with `ValueRef::array` and `ValueRef::object`. Context outputs remain available within their
 execution scope.
 
-History is opt-in: attach a `SnapshotRecorder` to an `ExecutionContext` when a consumer needs past
-inputs and outputs. Ordinary execution retains current bindings without recording snapshots. The
-recorder stores immutable global roots, shares unchanged branches, and interns equal values across
-nodes and scopes. A repeated identical node state does not create a new snapshot. Loop passes and
-Iteration items retain separate scope paths. Generated runners enable capture only when
-`MF_CAPTURE_SNAPSHOTS=1` requests OTLP snapshot events. `SnapshotRecorder::with_sink` supports
-other explicit consumers; records define each value once and reference its ID.
-Build validation and manifest inspection do not capture data. Call `finish()` after an explicitly recorded run.
+Data observation is opt-in: attach a `SnapshotRecorder` callback to an `ExecutionContext` or
+`StreamOptions.snapshots`. Ordinary execution retains current bindings without notifications.
+The handle only delivers current `SnapshotEvent` values; encoding and history belong to the caller.
+
+For finite history, own a `SnapshotRecording::memory()` or `SnapshotRecording::with_sink(...)`
+and attach its `recorder()` handle. That owner shares immutable roots, interns equal values, and
+preserves separate Loop/Iteration scope paths. Equal finite states reuse their root; stream
+identities and `Emitted` notifications preserve distinct equal-valued publications. Call the
+owner's `finish()` after execution and inspect its typed `diagnostic()` separately from business
+results. Generated finite runners request the existing OTLP backend through
+`MF_CAPTURE_SNAPSHOTS=1`; streaming runners select their bounded telemetry adapter through
+`MF_CAPTURE_STREAM_DATA=1`. Build validation and manifest inspection do not capture data.
 
 The runtime calls the task's single execution method. Loop assignment and exit use engine-owned scope
 operations; publication remains validated by the runtime. A Loop body has its own output scope for

@@ -600,7 +600,6 @@ impl Flow {
         state: &mut crate::ExecutionContext,
     ) -> Result<(), crate::WorkflowRunError> {
         if state.snapshot_recorder().is_none()
-            && state.stream_data_observer().is_none()
             && state.scope_path().is_empty()
             && let Some(executor) = self.inner.generated_domains.get(&domain.id)
         {

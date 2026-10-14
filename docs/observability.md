@@ -295,6 +295,14 @@ endpoint are configured. Finite TUI execution sets this flag and uses its existi
 endpoint. Ordinary execution does not allocate a snapshot recorder. Runners built with
 `--no-telemetry` report that data history requires a telemetry-enabled build.
 
+Both finite and streaming execution attach the same `SnapshotRecorder` notification handle.
+It sends current `SnapshotEvent` values and retains no history or encoding state. Callers that
+want dictionary encoding and immutable finite history own a `SnapshotRecording` and attach
+`recording.recorder()`; its store and sink policy are independent of execution. Equal finite
+states retain their existing deduplication, while stream identities and `Emitted` updates
+preserve repeated equal-valued sends. Optional identity fields are omitted from finite wire
+records, preserving the existing version 1 representation.
+
 Snapshot events use the `mf.snapshot` instrumentation scope and the standard OTLP `LogRecord`
 body. Each record includes `mf.workflow.id`, `mf.run.id`, `mf.snapshot.version` (currently 1),
 `mf.snapshot.sequence` (starting at zero), and a SHA-256 `mf.snapshot.digest` byte array.
@@ -357,11 +365,12 @@ snapshot version 1 and streaming lifecycle schema 4 retain their original contra
 
 ### Programmatic stream capture
 
-Attach a `mf_runtime::StreamDataObserver` through `StreamOptions.data_capture` with the same
-`StreamObservation` passed in `StreamOptions.observation`. The callback receives original
-borrowed values and existing execution identities, without encoding or history retention.
-Pairing the observer with another observation, or omitting that observation, fails validation
-before startup. The existing `StreamOptions.snapshots` field remains unsupported for whole streams.
+Attach a `mf_runtime::SnapshotRecorder` through `StreamOptions.snapshots`, using the same
+notification interface as finite execution. `SnapshotRecorder::new` accepts an unbound raw
+callback and works without telemetry. `SnapshotRecorder::for_run` binds a callback to a run ID;
+attaching that handle requires a matching `StreamOptions.observation` before startup.
+Callbacks receive original immutable values and optional existing stream identities. They own
+retention policy and must be nonblocking and must not unwind.
 
 For OTLP inspection, the callback delegates to `mf_telemetry::stream_data::StreamDataRecorder`.
 That adapter owns encoding budgets, capture sequences, loss accounting, and typed diagnostics.
@@ -379,17 +388,25 @@ let capture = mf_telemetry::stream_data::StreamDataRecorder::new(
     move || capacity.available(),
 );
 let encoded = capture.clone();
-let observer = mf_runtime::StreamDataObserver::new(
-    observation.clone(),
-    move |identity, direction, ports| encoded.record(identity, direction, ports),
-);
+let recorder = mf_runtime::SnapshotRecorder::for_run(observation.run_id(), move |event| {
+    if let Some(identity) = event.identity {
+        let (direction, values) = match event.snapshot.outcome {
+            mf_runtime::SnapshotOutcome::Started =>
+                (mf_telemetry::stream_data::Direction::Input, &event.snapshot.inputs),
+            mf_runtime::SnapshotOutcome::Succeeded | mf_runtime::SnapshotOutcome::Emitted =>
+                (mf_telemetry::stream_data::Direction::Output, &event.snapshot.outputs),
+            mf_runtime::SnapshotOutcome::Failed | mf_runtime::SnapshotOutcome::Skipped => return,
+        };
+        encoded.record(identity, direction, values);
+    }
+});
 let result = (|| -> Result<(), Box<dyn std::error::Error>> {
     let instance = mf_compiler::start_stream(
         &plan,
         &registry,
         mf_runtime::StreamOptions {
             observation: Some(observation),
-            data_capture: Some(observer),
+            snapshots: Some(recorder),
             arguments,
             ..Default::default()
         },
@@ -652,11 +669,11 @@ after joining the instance. Generated runners configure the existing bounded OTL
 attempt bounded shutdown on success and failure. Disabled export, queue pressure, and unreachable
 Collectors do not change workflow results or trigger retries.
 
-Whole-run snapshot capture is unavailable for streaming instances. Bounded streaming data is
-available through `StreamOptions.data_capture` or `MF_CAPTURE_STREAM_DATA=1` as described above.
-`StreamOptions.snapshots` and
-`MF_CAPTURE_SNAPSHOTS=1` are rejected before input admission or node execution. Validation and description
-modes remain free of execution and ignore capture/export setup. Existing finite-run history is unchanged.
+Programmatic `StreamOptions.snapshots` uses the common notification handle. Bounded streaming
+OTLP data is available through its telemetry adapter or `MF_CAPTURE_STREAM_DATA=1` as described
+above. The legacy `MF_CAPTURE_SNAPSHOTS=1` runner flag selects the finite wire backend and remains
+unsupported for whole-stream runner execution. Validation and description modes remain free
+of execution and ignore capture/export setup. Existing finite-run history is unchanged.
 
 ## Isolated task observations
 
