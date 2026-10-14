@@ -8,4 +8,4 @@
 
 - [x] 2.1 Review module boundaries, typed errors, and ablation results against AGENTS.md.
 - [x] 2.2 Run affected coverage, prek, and the pinned Nix flake checks; commit the implementation.
-- [ ] 2.3 Archive the reviewed spec.
+- [x] 2.3 Archive the reviewed spec.
