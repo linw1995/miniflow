@@ -4,7 +4,8 @@
 
 - Use `nix develop` for the pinned toolchain.
 - Run `prek install` to install the pre-commit and commit-msg hooks.
-- Run `prek -a` and `nix flake check -L` before submitting changes.
+- Run `prek -a` before submitting changes; it covers formatting, Clippy, Cargo check, Markdown, workflows, and the license audit.
+- Run only the tests affected by the change, for example `nix develop --command cargo nextest run -p <crate>` or `-p <crate> --test <target>`. Do not run `nix flake check -L` locally: its `test` check reruns the complete suite that CI coverage already runs.
 - When coverage is relevant, run `nix develop --command bash scripts/run-cov.sh`. Reports are written to `target/coverage/result/`, including `lcov.info`.
 
 ## Rust Visibility and Module Boundaries
