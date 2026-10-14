@@ -18,7 +18,7 @@ SHALL remain usable without telemetry providers, exporters, or run binding.
 - **WHEN** stream data is requested from a telemetry-disabled runner or without an available OTLP logs exporter
 - **THEN** capture is reported unavailable while the workflow retains its normal results and exit outcome
 
-#### Scenario: Attach raw programmatic capture
+#### Scenario: Attach mismatched programmatic capture
 
 - **WHEN** a snapshot callback is attached without a stream observation
 - **THEN** it receives original values at invocation and admitted publication boundaries
@@ -65,7 +65,7 @@ native trace/span IDs. Equal-valued emissions SHALL retain separate capture reco
 Missing native context MUST NOT cause guessed association; timestamps MUST NOT serve
 as unique identities. Snapshot notifications MUST NOT carry a separate stream identity.
 
-#### Scenario: Emit multiple equal outputs
+#### Scenario: Emit multiple output messages
 
 - **WHEN** one invocation emits several equal-valued results
 - **THEN** records share the native span context and retain distinct capture sequences
@@ -75,7 +75,7 @@ as unique identities. Snapshot notifications MUST NOT carry a separate stream id
 - **WHEN** two invocations execute identical Loop paths or Iteration item indices
 - **THEN** their data remains distinguishable by native trace/span context
 
-#### Scenario: Export data without native context
+#### Scenario: Export data without a retained span
 
 - **WHEN** a data record has no usable native context or its span is not retained
 - **THEN** its node scope, values, timestamp, and sequence remain inspectable in session Data without assignment to another span
