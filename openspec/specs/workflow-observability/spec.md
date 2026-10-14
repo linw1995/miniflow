@@ -658,9 +658,8 @@ Opt-in snapshot LogRecords emitted under a valid active span SHALL preserve its 
 Streaming data capture SHALL require an explicit request through runner configuration or a
 programmatic snapshot callback. TUI launch SHALL be permitted to request it for its child.
 Disabled capture MUST NOT serialize business values. Unavailable export support SHALL report
-an actionable capture diagnostic without changing business execution. Run-bound callbacks
-SHALL require matching stream observation metadata before startup. Unbound snapshot callbacks
-SHALL remain usable without telemetry providers or exporters.
+an actionable capture diagnostic without changing business execution. Programmatic snapshot callbacks
+SHALL remain usable without telemetry providers, exporters, or run binding.
 
 #### Scenario: Execute without data capture
 
@@ -674,12 +673,12 @@ SHALL remain usable without telemetry providers or exporters.
 
 #### Scenario: Attach mismatched programmatic capture
 
-- **WHEN** a run-bound recorder is attached without matching stream observation metadata
-- **THEN** configuration validation fails before source admission or node execution
+- **WHEN** a snapshot callback is attached without a stream observation
+- **THEN** it receives original values at invocation and admitted publication boundaries
 
 ### Requirement: Capture resolved inputs and admitted streaming outputs
 
-Enabled capture SHALL record resolved input ports before node invocation and each successfully admitted output separately after publication validation. Inputs and outputs SHALL retain their actual invocation and trigger. Zero emissions MUST NOT invent outputs. An admitted emission SHALL remain inspectable even if its producer or callback later fails. Rejected publications MUST NOT appear as admitted outputs.
+Enabled capture SHALL record resolved input ports before node invocation and each successfully admitted output separately after publication validation. Inputs and outputs SHALL retain their node scope and valid active span context. Zero emissions MUST NOT invent outputs. An admitted emission SHALL remain inspectable even if its producer or callback later fails. Rejected publications MUST NOT appear as admitted outputs.
 
 #### Scenario: Inspect a producer before completion
 
@@ -704,7 +703,7 @@ Enabled capture SHALL record resolved input ports before node invocation and eac
 #### Scenario: Flush on a timer or upstream close
 
 - **WHEN** a callback without an input message admits a batch output
-- **THEN** the output identifies its actual trigger and newly allocated output message without inventing an input message
+- **THEN** capture records the actual admitted output under its callback span without inventing input values
 
 #### Scenario: Capture nested synchronous work
 
@@ -713,22 +712,26 @@ Enabled capture SHALL record resolved input ports before node invocation and eac
 
 ### Requirement: Correlate stream data independently of node names
 
-Data records SHALL identify workflow/run, node scope, stream invocation, trigger, and applicable input message. Each emission SHALL identify its output message and invocation-local ordinal. Valid active native trace/span context SHALL be preserved. Repeated node names, Loop paths, or Iteration indices MUST NOT alias across invocations. Missing native context MUST NOT cause guessed span association.
+Data records SHALL preserve workflow/run, node scope, valid active native trace/span
+context, timestamp, and checked capture sequence. Invocation association SHALL use
+native trace/span IDs. Equal-valued emissions SHALL retain separate capture records.
+Missing native context MUST NOT cause guessed association; timestamps MUST NOT serve
+as unique identities. Snapshot notifications MUST NOT carry a separate stream identity.
 
 #### Scenario: Emit multiple output messages
 
-- **WHEN** one invocation emits several results into an output domain
-- **THEN** their records share the emitting invocation but retain distinct output message identities and ordinals
+- **WHEN** one invocation emits several equal-valued results
+- **THEN** records share the native span context and retain distinct capture sequences
 
 #### Scenario: Repeat nested paths across messages
 
-- **WHEN** two stream messages execute identical Loop paths or Iteration item indices
-- **THEN** their data remains distinguishable by invocation and native context
+- **WHEN** two invocations execute identical Loop paths or Iteration item indices
+- **THEN** their data remains distinguishable by native trace/span context
 
 #### Scenario: Export data without a retained span
 
-- **WHEN** a data record arrives without usable native context or its span is not retained
-- **THEN** its explicit stream identity remains available without assigning it to another span
+- **WHEN** a data record has no usable native context or its span is not retained
+- **THEN** its node scope, values, timestamp, and sequence remain inspectable in session Data without assignment to another span
 
 ### Requirement: Decode retained stream data without historical dependencies
 
@@ -751,8 +754,8 @@ Streaming data SHALL use a separately versioned OTLP logs protocol with self-con
 
 #### Scenario: Exhaust the capture counter
 
-- **WHEN** the next sequence or emission ordinal cannot be represented without overflow
-- **THEN** capture stops with a diagnostic instead of wrapping identity or changing workflow results
+- **WHEN** the next capture sequence cannot be represented without overflow
+- **THEN** capture stops with a diagnostic instead of wrapping the sequence or changing workflow results
 
 ### Requirement: Bound streaming data capture independently of execution
 
@@ -800,8 +803,7 @@ Capture SHALL reserve sequence numbers before encoding or enqueueing and publish
 ### Requirement: Keep streaming capture policy outside runtime execution
 
 The runtime SHALL provide current resolved input values and successfully admitted
-output values through an opt-in observation callback with existing invocation and
-message identities. It SHALL NOT encode stream data records, impose telemetry
+output values through the common opt-in snapshot callback with node scope. It SHALL NOT encode stream data records, impose telemetry
 byte/depth budgets, maintain capture sequences or loss counters, or retain
 inspection history. Telemetry SHALL own capture encoding and diagnostics, runner
 owners SHALL finish capture, and consumers SHALL manage historical retention.
@@ -820,13 +822,13 @@ owners SHALL finish capture, and consumers SHALL manage historical retention.
 #### Scenario: Inspect admitted output without blocking the scheduler
 
 - **WHEN** a producer or event callback admits an output
-- **THEN** the observation callback receives its real message identity after the scheduler lock is released
+- **THEN** the snapshot callback receives its admitted original values after the scheduler lock is released
 
 ### Requirement: Share runtime snapshot notifications across execution modes
 
 Finite and streaming execution SHALL share the opt-in SnapshotRecorder callback
 and ordinary-task capture boundary. The runtime recorder SHALL only notify current
-node snapshots and existing execution identities. Caller-owned recording SHALL
+node snapshots and scope. It MUST NOT contain stream identity or run binding. Caller-owned recording SHALL
 manage dictionaries, encoding, history, and diagnostics. The runtime MUST NOT keep
 a separate stream data observer or duplicate task capture path.
 
@@ -838,10 +840,10 @@ a separate stream data observer or duplicate task capture path.
 #### Scenario: Preserve equal stream emissions
 
 - **WHEN** one producer admits two outputs with equal values
-- **THEN** the common recorder receives two emission notifications with distinct real message/ordinal identities
+- **THEN** the common recorder receives two emission notifications under the existing active span context
 - **AND** historical recording does not collapse those notifications by value equality
 
 #### Scenario: Observe a stream without a telemetry backend
 
-- **WHEN** a caller attaches an unbound SnapshotRecorder callback to a stream
+- **WHEN** a caller attaches a SnapshotRecorder callback to a stream
 - **THEN** it receives original values at invocation and admitted publication boundaries without requiring an exporter or retaining runtime history
