@@ -653,29 +653,6 @@ Opt-in snapshot LogRecords emitted under a valid active span SHALL preserve its 
 - **WHEN** a snapshot is emitted without valid trace context
 - **THEN** it retains the normal snapshot contract without inventing a trace/span identity
 
-### Requirement: Enable streaming business data capture explicitly
-
-Streaming data capture SHALL require an explicit request through runner configuration or a
-programmatic snapshot callback. TUI launch SHALL be permitted to request it for its child.
-Disabled capture MUST NOT serialize business values. Unavailable export support SHALL report
-an actionable capture diagnostic without changing business execution. Programmatic snapshot callbacks
-SHALL remain usable without telemetry providers, exporters, or run binding.
-
-#### Scenario: Execute without data capture
-
-- **WHEN** a streaming runner executes normally or with verbose lifecycle diagnostics but no stream data request
-- **THEN** its automatic telemetry contains no input/output business values and it allocates no data recorder
-
-#### Scenario: Request capture without export support
-
-- **WHEN** stream data is requested from a telemetry-disabled runner or without an available OTLP logs exporter
-- **THEN** capture is reported unavailable while the workflow retains its normal results and exit outcome
-
-#### Scenario: Attach mismatched programmatic capture
-
-- **WHEN** a snapshot callback is attached without a stream observation
-- **THEN** it receives original values at invocation and admitted publication boundaries
-
 ### Requirement: Capture resolved inputs and admitted streaming outputs
 
 Enabled capture SHALL record resolved input ports before node invocation and each successfully admitted output separately after publication validation. Inputs and outputs SHALL retain their node scope and valid active span context. Zero emissions MUST NOT invent outputs. An admitted emission SHALL remain inspectable even if its producer or callback later fails. Rejected publications MUST NOT appear as admitted outputs.
@@ -710,102 +687,12 @@ Enabled capture SHALL record resolved input ports before node invocation and eac
 - **WHEN** a stream message executes Loop or Iteration body tasks with capture enabled
 - **THEN** their resolved inputs and published outputs are captured under their own invocation/span context
 
-### Requirement: Correlate stream data independently of node names
-
-Data records SHALL preserve workflow/run, node scope, valid active native trace/span
-context, timestamp, and checked capture sequence. Invocation association SHALL use
-native trace/span IDs. Equal-valued emissions SHALL retain separate capture records.
-Missing native context MUST NOT cause guessed association; timestamps MUST NOT serve
-as unique identities. Snapshot notifications MUST NOT carry a separate stream identity.
-
-#### Scenario: Emit multiple output messages
-
-- **WHEN** one invocation emits several equal-valued results
-- **THEN** records share the native span context and retain distinct capture sequences
-
-#### Scenario: Repeat nested paths across messages
-
-- **WHEN** two invocations execute identical Loop paths or Iteration item indices
-- **THEN** their data remains distinguishable by native trace/span context
-
-#### Scenario: Export data without a retained span
-
-- **WHEN** a data record has no usable native context or its span is not retained
-- **THEN** its node scope, values, timestamp, and sequence remain inspectable in session Data without assignment to another span
-
-### Requirement: Decode retained stream data without historical dependencies
-
-Streaming data SHALL use a separately versioned OTLP logs protocol with self-contained values and checked capture sequences independent of lifecycle sequences. Values SHALL preserve integer/float distinctions and unsigned precision. Missing, evicted, or malformed earlier data MUST NOT prevent decoding later valid records. Finite snapshot formats and lifecycle versions SHALL retain their meanings.
-
-#### Scenario: Lose a prior value record
-
-- **WHEN** an input record is lost or evicted and a later output record arrives
-- **THEN** the output can be decoded without a value definition or contiguous history from the input record
-
-#### Scenario: Preserve numeric types
-
-- **WHEN** capture exports the maximum unsigned 64-bit integer and a floating-point value representing an integer
-- **THEN** their decoded values preserve unsigned precision and their original numeric types
-
-#### Scenario: Receive data out of order
-
-- **WHEN** a later capture sequence arrives before an earlier one
-- **THEN** the later record is usable immediately and the earlier record can subsequently be admitted
-
-#### Scenario: Exhaust the capture counter
-
-- **WHEN** the next capture sequence cannot be represented without overflow
-- **THEN** capture stops with a diagnostic instead of wrapping the sequence or changing workflow results
-
-### Requirement: Bound streaming data capture independently of execution
-
-Encoding, queued records/bytes, diagnostics, and retained state SHALL have finite budgets independent of stream age. Oversized or excessive-depth values SHALL produce explicit bounded omission metadata when delivery permits. Capture admission SHALL be nonblocking; overflow or export failure MUST NOT change results, execution order, source capacity semantics, or workflow outcome. Shutdown SHALL use finite flush deadlines.
-
-#### Scenario: Saturate the data queue
-
-- **WHEN** data export cannot keep up with successful producer sends
-- **THEN** capture drops data with bounded accounting while the producer retains its existing business admission behavior
-
-#### Scenario: Exceed the value limit
-
-- **WHEN** an input or emission exceeds capture encoding limits
-- **THEN** a bounded record identifies the omitted data and reason while other data and workflow execution remain usable
-
-#### Scenario: Lose the collector
-
-- **WHEN** the collector becomes unreachable during stream execution or shutdown
-- **THEN** typed export failures remain available for diagnostics and execution/cleanup do not wait indefinitely
-
-### Requirement: Expose streaming capture loss without claiming complete history
-
-Capture SHALL reserve sequence numbers before encoding or enqueueing and publish bounded start/status/end evidence with cumulative omissions and producer drops when possible. Consumers SHALL distinguish sender loss, retained transport gaps, local eviction, and capture faults. Missing final evidence or retired unresolved gaps SHALL leave data completeness unverified. Data faults MUST NOT alter lifecycle integrity.
-
-#### Scenario: Drop an interior record
-
-- **WHEN** a reserved record is dropped before export and a later sequence is received
-- **THEN** capture loss remains observable without requesting replay or re-executing nodes
-
-#### Scenario: Receive no capture boundary
-
-- **WHEN** the process succeeds but no capture start or end evidence is received
-- **THEN** consumers cannot infer that data capture was available or complete
-
-#### Scenario: Close with producer drops
-
-- **WHEN** an end record arrives after producer-side queue drops
-- **THEN** it exposes cumulative sender drops without presenting the retained data as complete or double-counting overlapping gaps
-
-#### Scenario: Reject an unsupported data version
-
-- **WHEN** a consumer receives an unknown streaming data envelope version
-- **THEN** it reports a Data compatibility diagnostic while supported lifecycle and raw detail remain usable
-
 ### Requirement: Keep streaming capture policy outside runtime execution
 
 The runtime SHALL provide current resolved input values and successfully admitted
 output values through the common opt-in snapshot callback with node scope. It SHALL NOT encode stream data records, impose telemetry
 byte/depth budgets, maintain capture sequences or loss counters, or retain
-inspection history. Telemetry SHALL own capture encoding and diagnostics, runner
+inspection history. Caller-owned recording and exporters SHALL own encoding and diagnostics, runner
 owners SHALL finish capture, and consumers SHALL manage historical retention.
 
 #### Scenario: Observe a value above a telemetry budget
@@ -847,3 +734,41 @@ a separate stream data observer or duplicate task capture path.
 
 - **WHEN** a caller attaches a SnapshotRecorder callback to a stream
 - **THEN** it receives original values at invocation and admitted publication boundaries without requiring an exporter or retaining runtime history
+
+### Requirement: Reuse the complete snapshot pipeline across execution modes
+
+Finite and streaming runners SHALL share MF_CAPTURE_SNAPSHOTS, SnapshotRecording,
+the snapshot protocol, exporter, receiver, and caller-owned history. Runtime SHALL
+only publish common notifications. Missing records SHALL leave explicit incomplete
+history rather than requiring stream-only gap recovery, omission, or eviction policies.
+
+#### Scenario: Capture either execution mode
+
+- **WHEN** a finite or streaming runner enables snapshot capture
+- **THEN** the same recorder, exporter, and decoder handle its node snapshots
+
+#### Scenario: Lose a snapshot definition
+
+- **WHEN** ordered reconstruction cannot resolve a missing record or definition
+- **THEN** previously reconstructed history stays inspectable and capture is marked incomplete
+
+#### Scenario: Disable capture
+
+- **WHEN** snapshot capture is disabled
+- **THEN** neither execution mode creates a business-data recording or exporter
+
+#### Scenario: Preserve snapshot metadata and values
+
+- **WHEN** either mode exports snapshots
+- **THEN** native context, timestamps, sequence order, numeric types, and distinct equal emissions are preserved
+
+### Requirement: Preserve repeated snapshot observation boundaries
+
+Shared recording and reconstruction SHALL preserve every Started and Emitted notification,
+even with equal node values and scope. Completed state updates MAY reuse existing state.
+This behavior SHALL be independent of execution mode and require no additional identity.
+
+#### Scenario: Buffer repeated equal inputs
+
+- **WHEN** two callbacks accept equal input values without emitting between them
+- **THEN** each Started notification remains a separate inspectable history entry
