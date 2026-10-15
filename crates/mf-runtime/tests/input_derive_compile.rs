@@ -1,14 +1,106 @@
 use std::{fs, path::Path, process::Command};
 
-fn check(root: &Path, source: &str, outputs: bool) -> std::process::Output {
-    let source = direction(source, outputs);
-    fs::write(root.join("src/lib.rs"), source).unwrap();
-    let mut command = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
-    command
-        .current_dir(root)
-        .args(["check", "--offline", "--quiet"])
-        .env("CARGO_TARGET_DIR", root.join("target"));
-    command.output().unwrap()
+struct Case {
+    source: String,
+    diagnostic: Option<String>,
+}
+
+#[derive(Default)]
+struct Cases(Vec<Case>);
+
+impl Cases {
+    fn add(&mut self, source: &str, outputs: bool, diagnostic: Option<&str>) {
+        self.0.push(Case {
+            source: direction(source, outputs),
+            diagnostic: diagnostic.map(|text| direction(text, outputs)),
+        });
+    }
+
+    fn check(self, root: &Path) {
+        for (index, case) in self.0.iter().enumerate() {
+            fs::write(
+                root.join(format!("src/bin/case_{index}.rs")),
+                format!("{}\nfn main() {{}}\n", case.source),
+            )
+            .unwrap();
+        }
+        let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
+        let metadata = Command::new(&cargo)
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .args(["metadata", "--offline", "--no-deps", "--format-version=1"])
+            .output()
+            .unwrap();
+        assert!(
+            metadata.status.success(),
+            "{}",
+            String::from_utf8_lossy(&metadata.stderr),
+        );
+        let metadata: serde_json::Value = serde_json::from_slice(&metadata.stdout).unwrap();
+        fs::copy(
+            Path::new(metadata["workspace_root"].as_str().unwrap()).join("Cargo.lock"),
+            root.join("Cargo.lock"),
+        )
+        .unwrap();
+        // Checks reuse workspace dependencies without replacing any executable under test.
+        // Separate targets preserve diagnostic attribution within one Cargo invocation.
+        let output = Command::new(cargo)
+            .current_dir(root)
+            .args([
+                "check",
+                "--offline",
+                "--quiet",
+                "--bins",
+                "--keep-going",
+                "--message-format=json",
+            ])
+            .env(
+                "CARGO_TARGET_DIR",
+                metadata["target_directory"].as_str().unwrap(),
+            )
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let messages: Vec<serde_json::Value> = stdout
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(
+            output.status.code(),
+            Some(101),
+            "expected compile failures, got {}:\n{stdout}\n{stderr}",
+            output.status,
+        );
+        for (index, case) in self.0.iter().enumerate() {
+            let name = format!("case_{index}");
+            let mut compiled = false;
+            let mut errors = Vec::new();
+            for message in &messages {
+                if message["target"]["name"] != name {
+                    continue;
+                }
+                if message["reason"] == "compiler-artifact" {
+                    compiled = true;
+                }
+                if message["reason"] == "compiler-message" && message["message"]["level"] == "error"
+                {
+                    errors.push(message["message"]["rendered"].as_str().unwrap());
+                }
+            }
+            match &case.diagnostic {
+                None => assert!(
+                    compiled && errors.is_empty(),
+                    "{}: expected success, got {errors:?}\n{stderr}",
+                    case.source,
+                ),
+                Some(diagnostic) => assert!(
+                    !compiled && errors.iter().any(|error| error.contains(diagnostic)),
+                    "{}: expected {diagnostic}, got {errors:?}\n{stderr}",
+                    case.source,
+                ),
+            }
+        }
+    }
 }
 
 fn direction(text: &str, outputs: bool) -> String {
@@ -22,7 +114,8 @@ fn direction(text: &str, outputs: bool) -> String {
 #[test]
 fn struct_derives_compile_with_aliases_and_report_invalid_declarations() {
     let root = tempfile::tempdir().unwrap();
-    fs::create_dir(root.path().join("src")).unwrap();
+    fs::create_dir_all(root.path().join("src/bin")).unwrap();
+    let mut cases = Cases::default();
     let runtime = serde_json::to_string(env!("CARGO_MANIFEST_DIR")).unwrap();
     fs::write(root.path().join("Cargo.toml"), format!(
         "[package]\nname = \"input-derive-fixture\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\nruntime_alias = {{ package = \"mf-runtime\", path = {runtime} }}\n"
@@ -32,12 +125,7 @@ fn struct_derives_compile_with_aliases_and_report_invalid_declarations() {
         let valid = format!(
             "{prefix}pub struct Inputs<T> where T: runtime_alias::InputValue {{ pub data: T, pub path: Option<String>, pub items: Vec<T> }}"
         );
-        let output = check(root.path(), &valid, outputs);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        cases.add(&valid, outputs, None);
 
         for (declaration, diagnostic) in [
             ("enum Inputs { Value }", "requires a named-field struct"),
@@ -68,21 +156,13 @@ fn struct_derives_compile_with_aliases_and_report_invalid_declarations() {
                 "expected `rename",
             ),
         ] {
-            let output = check(root.path(), &format!("{prefix}{declaration}"), outputs);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(!output.status.success(), "accepted {declaration}");
-            assert!(
-                stderr.contains(&direction(diagnostic, outputs)),
-                "{declaration}: expected {diagnostic}, got {stderr}"
-            );
+            cases.add(&format!("{prefix}{declaration}"), outputs, Some(diagnostic));
         }
         let default_source = format!("{prefix}struct Inputs<T> {{ #[input(default)] value: T }}");
-        let output = check(root.path(), &default_source, outputs);
-        assert_eq!(
-            output.status.success(),
-            !outputs,
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
+        cases.add(
+            &default_source,
+            outputs,
+            outputs.then_some("expected `rename"),
         );
         for (attribute, diagnostic) in [
             (
@@ -92,40 +172,24 @@ fn struct_derives_compile_with_aliases_and_report_invalid_declarations() {
             ("#[input(rename = \"x\")]", "expected `runtime"),
             ("#[input(runtime = \"bad path\")]", "unexpected token"),
         ] {
-            let output = check(
-                root.path(),
+            cases.add(
                 &format!(
                     "use runtime_alias::NodeInputs;\n#[derive(NodeInputs)]\n{attribute}\nstruct Inputs {{ value: i64 }}"
                 ),
                 outputs,
-            );
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            assert!(!output.status.success(), "accepted {attribute}");
-            assert!(
-                stderr.contains(&direction(diagnostic, outputs)),
-                "{attribute}: expected {diagnostic}, got {stderr}"
+                Some(diagnostic),
             );
         }
     }
     let prefix = "use runtime_alias::NodeValue;\n#[derive(NodeValue)]\n#[value(runtime = \"::runtime_alias\")]\n";
     let valid =
         format!("{prefix}pub struct Values<T> {{ data: T, label: Option<String>, items: Vec<T> }}");
-    let output = check(root.path(), &valid, false);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    cases.add(&valid, false, None);
     let typed = valid.replace(
         "#[derive(NodeValue)]",
         "#[derive(NodeValue)]\n#[value(typed)]",
     );
-    let output = check(root.path(), &typed, false);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    cases.add(&typed, false, None);
     for (declaration, diagnostic) in [
         ("enum Values { Item }", "requires a named-field struct"),
         ("struct Values(i64);", "requires a named-field struct"),
@@ -140,24 +204,14 @@ fn struct_derives_compile_with_aliases_and_report_invalid_declarations() {
         ),
         ("struct Values { item: Vec<Option<i64>> }", "InputValue"),
     ] {
-        let output = check(root.path(), &format!("{prefix}{declaration}"), false);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            !output.status.success() && stderr.contains(diagnostic),
-            "{stderr}"
-        );
+        cases.add(&format!("{prefix}{declaration}"), false, Some(diagnostic));
     }
     let enum_prefix = "use runtime_alias::NodeEnum;\n#[derive(NodeEnum)]\n#[value(runtime = \"::runtime_alias\")]\n";
     for declaration in [
         "enum Mode { #[value(rename = \"fast\")] Fast, Safe }",
         "#[value(tag = \"kind\")] enum Payload<T> { Empty, Item { data: T, #[value(default)] limit: usize } }",
     ] {
-        let output = check(root.path(), &format!("{enum_prefix}{declaration}"), false);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        cases.add(&format!("{enum_prefix}{declaration}"), false, None);
     }
     for (declaration, diagnostic) in [
         ("struct Mode {}", "NodeEnum requires an enum"),
@@ -191,11 +245,11 @@ fn struct_derives_compile_with_aliases_and_report_invalid_declarations() {
             "duplicate field default",
         ),
     ] {
-        let output = check(root.path(), &format!("{enum_prefix}{declaration}"), false);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            !output.status.success() && stderr.contains(diagnostic),
-            "{declaration}: {stderr}"
+        cases.add(
+            &format!("{enum_prefix}{declaration}"),
+            false,
+            Some(diagnostic),
         );
     }
+    cases.check(root.path());
 }
