@@ -5,9 +5,9 @@ container marks its descendants so borrowed field/index/pointer access and typed
 shared codecs preserve sensitivity. Existing aliases remain unchanged. Equality,
 type validation, accessors, and Serde retain business JSON semantics.
 
-Distinguish a fully secret value from a public container with secret descendants.
-Cache descendant sensitivity when constructing immutable containers so ordinary
-snapshot projection does not repeatedly traverse public subtrees. Derived values
+Store only the marker for the value itself. Inspect descendants on demand when
+checking a public container for secrets; do not cache derived sensitivity or
+serialized/redacted values without representative workload evidence. Derived values
 explicitly inherit sensitivity from their source values through inherit_secrets.
 Owned Rust decoding and JSON round trips do not carry metadata.
 
@@ -33,6 +33,6 @@ retroactive removal of values observed before they were marked.
 
 Use pinned Nix tools, targeted runtime/compiler tests, and prek -a. Ablate the
 redaction entry points, recursive marking, metadata merge, and identity comparison.
-Compare cached and recursive public-subtree projection. Keep experiment scripts,
+Use on-demand descendant inspection and avoid speculative caching. Keep experiment scripts,
 logs, and measurements only under ignored target/. Review implementation and
 contract changes before archiving.

@@ -6,6 +6,7 @@ No blocking findings remain after implementation review and focused ablation.
 - Error types, Snafu selectors, and typed source chains are unchanged. Custom raw-string diagnostics remain outside the value-metadata contract.
 - Recursive marking preserves extraction semantics without changing existing aliases. JSON equality remains business equality; scope merging also preserves metadata-only writes.
 - Both public snapshot entry points redact before callbacks or storage. Public shared subtrees and the existing snapshot protocol remain usable without telemetry providers.
+- Only the value's own secret marker is stored; descendant sensitivity is computed on demand without a cache.
 - Derived-value sensitivity is explicit. Templates remain deferred to #145; ordinary owned decoding and JSON serialization cannot preserve metadata.
 - Redundant lifecycle assertions and a misleading Debug-based retention assertion were removed. Detailed ablation logs and measurements stay under ignored target/.
 - Code, comments, docs, and specifications use English. Validation uses pinned Nix tooling, affected tests, and repository hooks.

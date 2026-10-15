@@ -25,20 +25,13 @@ pub enum ValueKind {
 pub struct ValueRef {
     kind: Arc<ValueKind>,
     secret: bool,
-    contains_secret: bool,
 }
 
 impl ValueRef {
     pub fn new(kind: ValueKind) -> Self {
-        let contains_secret = match &kind {
-            ValueKind::Array(items) => items.iter().any(Self::contains_secret),
-            ValueKind::Object(entries) => entries.values().any(Self::contains_secret),
-            _ => false,
-        };
         Self {
             kind: Arc::new(kind),
             secret: false,
-            contains_secret,
         }
     }
 
@@ -60,7 +53,6 @@ impl ValueRef {
             _ => self,
         };
         value.secret = true;
-        value.contains_secret = true;
         value
     }
 
@@ -70,7 +62,12 @@ impl ValueRef {
 
     /// Includes secret descendants of otherwise public containers.
     pub fn contains_secret(&self) -> bool {
-        self.contains_secret
+        self.secret
+            || match self.kind() {
+                ValueKind::Array(items) => items.iter().any(Self::contains_secret),
+                ValueKind::Object(entries) => entries.values().any(Self::contains_secret),
+                _ => false,
+            }
     }
 
     /// Propagates sensitivity when computing a new value from runtime values.
@@ -90,7 +87,7 @@ impl ValueRef {
         if self.secret {
             return Self::from("[REDACTED]");
         }
-        if !self.contains_secret {
+        if !self.contains_secret() {
             return self.clone();
         }
         match self.kind() {
