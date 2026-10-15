@@ -42,6 +42,13 @@ pub struct NodeSnapshot {
     pub error: Option<Arc<str>>,
 }
 
+impl NodeSnapshot {
+    fn redact(&mut self) {
+        self.inputs = self.inputs.redacted();
+        self.outputs = self.outputs.redacted();
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct Snapshot {
     scopes:
@@ -423,7 +430,8 @@ impl SnapshotRecorder {
         }
     }
 
-    pub fn record(&self, event: SnapshotEvent) {
+    pub fn record(&self, mut event: SnapshotEvent) {
+        event.snapshot.redact();
         (self.callback)(event);
     }
 }
@@ -521,8 +529,10 @@ impl SnapshotRecording {
         let SnapshotEvent {
             scope,
             node,
-            snapshot,
+            mut snapshot,
         } = event;
+        // Redact before deduplication, interning, retention, or calling an external sink.
+        snapshot.redact();
         let mut recording = self.0.lock().expect("snapshot recorder was not poisoned");
         if recording.error.is_some() || recording.store.complete {
             return;
@@ -580,6 +590,88 @@ mod tests {
             skipped: Arc::from([]),
             outcome: SnapshotOutcome::Succeeded,
             error: None,
+        }
+    }
+
+    #[test]
+    fn secrets_never_reach_callbacks_dictionaries_or_retained_history() {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let captured = records.clone();
+        let recording = SnapshotRecording::with_sink(move |record| {
+            captured.lock().unwrap().push(record.clone());
+            Ok(())
+        })
+        .unwrap();
+        let value = ValueRef::object([
+            ("visible".into(), "public".into()),
+            (
+                "credential".into(),
+                ValueRef::from("sentinel-secret").into_secret(),
+            ),
+            (
+                "object".into(),
+                ValueRef::from(json!({"secret-key": [1, 2]})).into_secret(),
+            ),
+        ]);
+        let expected =
+            json!({"visible": "public", "credential": "[REDACTED]", "object": "[REDACTED]"});
+        let callback_expected = expected.clone();
+        let recorder = SnapshotRecorder::new(move |event| {
+            assert_eq!(event.snapshot.inputs["input"], callback_expected);
+            assert!(!event.snapshot.inputs.contains_secret());
+        });
+        recorder.record(SnapshotEvent {
+            scope: vec![],
+            node: "node".into(),
+            snapshot: completed(value.clone()),
+        });
+        recording.record(vec![], "node", completed(value));
+        recording.finish();
+        assert!(recording.diagnostic().is_none());
+        assert_eq!(
+            recording.current().node(&[], "node").unwrap().outputs["value"],
+            expected
+        );
+        let records = records.lock().unwrap();
+        let wire = serde_json::to_string(&*records).unwrap();
+        assert!(!wire.contains("sentinel-secret"));
+        assert!(!wire.contains("secret-key"));
+        let mut store = SnapshotStore::default();
+        for record in records.iter().cloned() {
+            store.apply(record).unwrap();
+        }
+        assert!(store.is_complete());
+        assert_eq!(store.history().len(), 1);
+        assert_eq!(
+            store.current().node(&[], "node").unwrap().outputs["value"],
+            expected
+        );
+    }
+
+    #[test]
+    fn secret_aliases_do_not_reuse_public_dictionary_values_or_suppress_updates() {
+        for secret_first in [false, true] {
+            let recording = SnapshotRecording::memory();
+            let public = ValueRef::from("same-payload");
+            let secret = public.clone().into_secret();
+            let values = if secret_first {
+                [&secret, &public]
+            } else {
+                [&public, &secret]
+            };
+            for value in values {
+                recording.record(vec![], "node", completed(value.clone()));
+                let expected = if value.is_secret() {
+                    "[REDACTED]"
+                } else {
+                    "same-payload"
+                };
+                assert_eq!(
+                    recording.current().node(&[], "node").unwrap().outputs["value"],
+                    json!(expected)
+                );
+            }
+            assert_eq!(recording.history().len(), 2);
         }
     }
 

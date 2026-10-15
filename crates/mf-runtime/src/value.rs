@@ -21,12 +21,87 @@ pub enum ValueKind {
 }
 
 /// An immutable JSON value whose descendants are shared between versions.
-#[derive(Clone, Debug)]
-pub struct ValueRef(Arc<ValueKind>);
+#[derive(Clone)]
+pub struct ValueRef {
+    kind: Arc<ValueKind>,
+    secret: bool,
+    contains_secret: bool,
+}
 
 impl ValueRef {
     pub fn new(kind: ValueKind) -> Self {
-        Self(Arc::new(kind))
+        let contains_secret = match &kind {
+            ValueKind::Array(items) => items.iter().any(Self::contains_secret),
+            ValueKind::Object(entries) => entries.values().any(Self::contains_secret),
+            _ => false,
+        };
+        Self {
+            kind: Arc::new(kind),
+            secret: false,
+            contains_secret,
+        }
+    }
+
+    /// Marks this entire value and its descendants as secret without changing aliases.
+    ///
+    /// Business accessors and `Serialize` retain the original payload. Diagnostics
+    /// and snapshots redact it. Extracted descendants retain their secret marker.
+    pub fn into_secret(self) -> Self {
+        if self.secret {
+            return self;
+        }
+        let mut value = match self.kind() {
+            ValueKind::Array(items) => Self::array(items.iter().cloned().map(Self::into_secret)),
+            ValueKind::Object(entries) => Self::object(
+                entries
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone().into_secret())),
+            ),
+            _ => self,
+        };
+        value.secret = true;
+        value.contains_secret = true;
+        value
+    }
+
+    pub fn is_secret(&self) -> bool {
+        self.secret
+    }
+
+    /// Includes secret descendants of otherwise public containers.
+    pub fn contains_secret(&self) -> bool {
+        self.contains_secret
+    }
+
+    /// Propagates sensitivity when computing a new value from runtime values.
+    ///
+    /// Call this before publishing derived values, including template results.
+    /// Converting through owned Rust values or JSON does not carry metadata.
+    pub fn inherit_secrets<'a>(self, sources: impl IntoIterator<Item = &'a Self>) -> Self {
+        if sources.into_iter().any(Self::contains_secret) {
+            self.into_secret()
+        } else {
+            self
+        }
+    }
+
+    /// Returns a safe observation value, replacing each secret subtree completely.
+    pub fn redacted(&self) -> Self {
+        if self.secret {
+            return Self::from("[REDACTED]");
+        }
+        if !self.contains_secret {
+            return self.clone();
+        }
+        match self.kind() {
+            ValueKind::Array(items) => Self::array(items.iter().map(Self::redacted)),
+            ValueKind::Object(entries) => Self::object(
+                entries
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.redacted())),
+            ),
+            _ => unreachable!("only containers can have secret descendants"),
+        }
     }
     pub fn null() -> Self {
         Self::new(ValueKind::Null)
@@ -38,13 +113,13 @@ impl ValueRef {
         Self::new(ValueKind::Object(entries.into_iter().collect()))
     }
     pub fn kind(&self) -> &ValueKind {
-        &self.0
+        &self.kind
     }
     pub(super) fn downgrade(&self) -> Weak<ValueKind> {
-        Arc::downgrade(&self.0)
+        Arc::downgrade(&self.kind)
     }
     pub fn ptr_eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
+        self.secret == other.secret && Arc::ptr_eq(&self.kind, &other.kind)
     }
     pub fn is_null(&self) -> bool {
         matches!(self.kind(), ValueKind::Null)
@@ -271,7 +346,14 @@ impl Index<usize> for ValueRef {
 }
 impl fmt::Display for ValueRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&serde_json::to_string(self).map_err(|_| fmt::Error)?)
+        f.write_str(&serde_json::to_string(&self.redacted()).map_err(|_| fmt::Error)?)
+    }
+}
+impl fmt::Debug for ValueRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("ValueRef")
+            .field(self.redacted().kind())
+            .finish()
     }
 }
 impl Serialize for ValueRef {
@@ -363,6 +445,70 @@ impl JsonView for ValueRef {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn secret_subtrees_preserve_business_values_and_protect_diagnostics() {
+        let public = ValueRef::from(json!({"private-key": ["credential", 42, null]}));
+        let secret = public.clone().into_secret();
+        assert!(!public.contains_secret());
+        assert!(secret.is_secret());
+        assert!(!secret.ptr_eq(&public));
+        assert!(secret.ptr_eq(&secret.clone().into_secret()));
+        assert_eq!(secret, public);
+        assert_eq!(
+            serde_json::to_value(&secret).unwrap(),
+            serde_json::to_value(&public).unwrap()
+        );
+        let extracted = secret.pointer("/private-key/0").unwrap().clone();
+        assert!(extracted.is_secret());
+        assert_eq!(extracted.as_str(), Some("credential"));
+        assert!(secret["private-key"][1].is_secret());
+        assert_eq!(secret["private-key"][1].as_i64(), Some(42));
+        assert!(secret["private-key"][2].is_null());
+        let mixed = ValueRef::object([
+            ("visible".into(), "public".into()),
+            ("hidden".into(), ValueRef::array([extracted])),
+            ("whole".into(), secret.clone()),
+        ]);
+        assert!(!mixed.is_secret());
+        assert!(mixed.contains_secret());
+        assert_eq!(
+            mixed.redacted(),
+            json!({
+                "visible": "public", "hidden": ["[REDACTED]"], "whole": "[REDACTED]"
+            })
+        );
+        for rendered in [
+            format!("{mixed}"),
+            format!("{mixed:?}"),
+            format!("{secret:#?}"),
+        ] {
+            assert!(!rendered.contains("credential"));
+            assert!(!rendered.contains("private-key"));
+            assert!(rendered.contains("[REDACTED]"));
+        }
+        assert!(mixed.redacted()["visible"].ptr_eq(&mixed["visible"]));
+    }
+
+    #[test]
+    fn derived_values_inherit_nested_secrets_and_shared_codecs_keep_markers() {
+        use crate::{InputValue, OutputValue, Shared};
+        let secret = ValueRef::from("credential").into_secret();
+        let mixed = ValueRef::array([ValueRef::from("public"), secret.clone()]);
+        let derived = ValueRef::from(format!("Bearer {}", secret.as_str().unwrap()))
+            .inherit_secrets([&mixed]);
+        assert!(derived.is_secret());
+        assert_eq!(derived.as_str(), Some("Bearer credential"));
+        assert_eq!(derived.to_string(), "\"[REDACTED]\"");
+        let shared = Shared::<String>::new(secret.clone()).unwrap();
+        assert_eq!(shared.decode().unwrap(), "credential");
+        assert!(shared.into_value().ptr_eq(&secret));
+        let values = Vec::<ValueRef>::decode(mixed).unwrap().encode().unwrap();
+        assert!(values[1].is_secret());
+        assert_eq!(values.redacted(), json!(["public", "[REDACTED]"]));
+        let public = ValueRef::from(42);
+        assert!(public.clone().inherit_secrets([&public]).ptr_eq(&public));
+    }
 
     #[test]
     fn pointers_decode_escapes_and_reject_invalid_array_indices() {

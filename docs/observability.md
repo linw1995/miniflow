@@ -342,7 +342,7 @@ received history remains inspectable with an incomplete-history diagnostic.
 ### Programmatic capture
 
 Attach the same `SnapshotRecorder` notification handle through finite execution context
-or `StreamOptions.snapshots`. It receives node, scope, original immutable values, and
+or `StreamOptions.snapshots`. It receives node, scope, redacted immutable values, and
 outcome without requiring telemetry or run binding. Callbacks run outside scheduler locks
 and must not unwind. The caller chooses recording and retention policy.
 
@@ -370,6 +370,47 @@ backpressure and typed capture diagnostics retain their existing snapshot behavi
 The recording/receiver owns dictionary values and historical roots; retained memory
 can grow with distinct values and execution scopes. Runtime execution owns no history
 container, value limit, capture queue, or eviction policy.
+
+### Secret runtime values
+
+Mark a sensitive `ValueRef` with `into_secret()` before supplying it as a workflow
+argument or publishing it as a node output. The marker belongs to the value, not
+its port name. Cloning, routing, container assembly, and extracting descendants
+preserve it. Marking an entire object or array also marks every descendant; existing
+aliases remain unchanged. Mark secrets at their source, before any observation.
+
+```rust
+use mf_runtime::ValueRef;
+
+let token = ValueRef::from("credential").into_secret();
+let header = ValueRef::from(format!("Bearer {}", token.as_str().unwrap()))
+    .inherit_secrets([&token]);
+assert_eq!(header.as_str(), Some("Bearer credential"));
+assert_eq!(header.to_string(), "\"[REDACTED]\"");
+```
+
+`is_secret()` identifies a fully secret value; `contains_secret()` also checks for
+secret descendants. `inherit_secrets()` marks a computed value when any source
+contains a secret. Nodes and future configuration templates must use it when
+transforming sensitive values. There is no automatic propagation from every node
+input to every output. `ValueRef` and `Shared<T>` preserve markers; decoding into
+ordinary owned Rust types or round-tripping through JSON loses them.
+
+Business accessors, equality, type validation, and Serde serialization retain the
+original JSON meaning. Serialization and runner business output can therefore
+contain secrets. `Display`, `Debug`, and `redacted()` replace secret subtrees with
+the fixed string `[REDACTED]`. Fully secret containers hide their keys, lengths,
+and descendants; mixed containers retain public fields. The placeholder carries
+no original-value hash, prefix, or length and is not a distinct JSON type.
+
+Both snapshot callbacks and direct `SnapshotRecording` calls redact inputs and
+outputs before retention, deduplication, dictionary definitions, and OTLP export.
+Finite and streaming snapshots share this boundary, including Loop and Iteration
+scopes. Snapshot protocol version 1 stays unchanged; receivers see ordinary JSON
+placeholders. Raw strings explicitly copied from secrets into custom errors,
+logs, span attributes, or object keys are outside this value-metadata boundary.
+Use value formatting or `redacted()` for diagnostics rather than raw accessors or
+business serialization. Secret metadata does not provide memory zeroization.
 
 Inputs are captured after validation and before invocation. Task outputs are captured
 after publication validation. Producers and event callbacks record each admitted emission,

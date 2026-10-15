@@ -86,6 +86,43 @@ fn echo(id: &str, inputs: Value) -> Value {
 }
 
 #[test]
+fn secret_arguments_survive_typed_nodes_and_edges_but_are_redacted_from_snapshots() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let definition = serde_json::from_value(json!({
+        "version": "2026-10-03", "dependencies": {},
+        "nodes": [
+            {"id": "first", "kind": "builtin.identity"},
+            {"id": "second", "kind": "builtin.identity"}
+        ],
+        "edges": [{"from_node": "first", "from_output": "value", "to_node": "second", "to_input": "input"}],
+        "outputs": [{"name": "result", "node": "second", "port": "value"}]
+    })).unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let flow = instantiate_compiled(&plan, &registry).unwrap();
+    let secret = mf_runtime::ValueRef::from(json!({"token": "sentinel-secret"})).into_secret();
+    let recording = mf_runtime::SnapshotRecording::memory();
+    let mut context = ExecutionContext::default();
+    context.set_workflow_arguments(WorkflowArguments(BTreeMap::from([(
+        "first.input".into(),
+        secret.clone(),
+    )])));
+    context.set_snapshot_recorder(recording.recorder());
+    let result = flow.execute_in_context(&mut context).unwrap();
+    assert!(result["result"].ptr_eq(&secret));
+    assert!(result["result"]["token"].is_secret());
+    assert_eq!(
+        serde_json::to_value(&result["result"]).unwrap(),
+        json!({"token": "sentinel-secret"})
+    );
+    for node in ["first", "second"] {
+        let current = recording.current();
+        let snapshot = current.node(&[], node).unwrap();
+        assert_eq!(snapshot.inputs["input"], json!("[REDACTED]"));
+        assert_eq!(snapshot.outputs["value"], json!("[REDACTED]"));
+    }
+}
+
+#[test]
 fn validates_all_roots_before_execution_and_preserves_optional_and_nested_values() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut definition = definition(json!([
