@@ -138,18 +138,8 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
     assert_eq!(fs::read_to_string(&trace).unwrap(), "");
 
     fs::write(&trace, "").unwrap();
-    let capture = Command::new(&executable)
-        .env("MF_CAPTURE_SNAPSHOTS", "1")
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    assert!(!capture.status.success());
-    assert!(String::from_utf8_lossy(&capture.stderr).contains("snapshot capture"));
-    assert_eq!(fs::read_to_string(&trace).unwrap(), "");
-
     let mut unavailable = Command::new(&executable)
-        .env(mf_telemetry::STREAM_DATA_CAPTURE_ENV, "1")
-        .env_remove(mf_telemetry::SNAPSHOT_CAPTURE_ENV)
+        .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

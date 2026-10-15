@@ -222,11 +222,11 @@ fn streaming_binary_selects_finite_typed_tasks_and_rejects_producers_and_events(
         assert_eq!(result(observed), json!({"value":"finite"}));
         let whole = Command::new(&binary)
             .env("MF_CAPTURE_SNAPSHOTS", "1")
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .output()
             .unwrap();
-        assert!(!whole.status.success());
-        assert!(String::from_utf8_lossy(&whole.stderr).contains("unsupported for streaming"));
+        assert!(whole.status.success(), "{:?}", whole);
+        assert!(String::from_utf8_lossy(&whole.stderr).contains("data capture unavailable"));
     }
     fs::remove_file(&definition).unwrap();
     fs::remove_dir_all(&build).unwrap();
