@@ -30,6 +30,12 @@
 
 **Migration**: Use MF_CAPTURE_SNAPSHOTS and the shared snapshot protocol, native context, and incomplete-history diagnostics.
 
+### Requirement: Gate unsupported streaming snapshot capture
+
+**Reason**: Both execution modes now use the shared snapshot pipeline.
+
+**Migration**: Enable MF_CAPTURE_SNAPSHOTS for either runner mode; no separate streaming capture flag is required.
+
 ## ADDED Requirements
 
 ### Requirement: Reuse the complete snapshot pipeline across execution modes
@@ -95,3 +101,36 @@ owners SHALL finish capture, and consumers SHALL manage historical retention.
 
 - **WHEN** a producer or event callback admits an output
 - **THEN** the snapshot callback receives its admitted original values after the scheduler lock is released
+
+### Requirement: Preserve isolated failure and snapshot boundaries
+
+Selected execution SHALL preserve preparation, input, invocation, publication, and result-selection
+failure phases. It MUST NOT emit a successful target start for rejected bindings or failed preparation.
+Unrelated provider preparation failures MUST NOT count as target execution. Opt-in snapshots SHALL follow
+the selected finite operation, including Task selection from stream binaries. Export or snapshot failures
+MUST retain ordinary bounded cleanup and business-result semantics.
+
+#### Scenario: Reject invalid isolated context
+
+- **WHEN** selected context validation fails before invocation
+- **THEN** any emitted failure identifies input or preparation context and no target-start event is emitted
+
+#### Scenario: Fail unrelated factory preparation
+
+- **WHEN** whole-plan preparation fails in a provider outside the selected operation
+- **THEN** observation reports preparation failure without inventing a lifecycle for that provider or the target
+
+#### Scenario: Capture finite task values from a streaming executable
+
+- **WHEN** a Task selected from a stream binary requests snapshots with an available logs exporter
+- **THEN** its finite snapshots use the selected-operation identity and normal bounded capture behavior
+
+#### Scenario: Keep whole-stream snapshot restrictions
+
+- **WHEN** the stream binary is invoked without selection and requests whole-stream snapshots
+- **THEN** it uses the shared snapshot backend with the same opt-in and exporter prerequisites as finite execution
+
+#### Scenario: Preserve results during export failure
+
+- **WHEN** an isolated Task succeeds but telemetry export is unavailable
+- **THEN** the runner preserves its validated result and success status while reporting bounded export diagnostics

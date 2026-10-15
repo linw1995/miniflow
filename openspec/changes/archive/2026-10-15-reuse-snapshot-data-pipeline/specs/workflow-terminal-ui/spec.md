@@ -58,3 +58,27 @@ caller-owned without stream-only eviction or omission policies.
 
 - **WHEN** a snapshot lacks native context or exceeds preview limits
 - **THEN** it remains in session history without guessed association or truncating stored values
+
+## MODIFIED Requirements
+
+### Requirement: Keep streaming display independent of snapshot capture
+
+The TUI SHALL enable the common snapshot flag for both execution modes, overriding inherited
+capture settings. Lifecycle, trace, and log display SHALL remain usable when snapshot capture
+is unavailable. Data SHALL report missing capture support or evidence rather than claiming
+successful empty capture.
+
+#### Scenario: Launch with inherited snapshot settings
+
+- **WHEN** inherited settings disable snapshots and the TUI launches either execution mode
+- **THEN** the child receives MF_CAPTURE_SNAPSHOTS=1 and lifecycle, spans, and logs remain observable
+
+#### Scenario: Inspect a finite workflow's values
+
+- **WHEN** a supported finite workflow is launched in TUI mode
+- **THEN** the shared snapshot pipeline supplies its invocation and session Data lists
+
+#### Scenario: Inspect an older compatible streaming runner
+
+- **WHEN** a compatible lifecycle-schema-4 runner lacks shared snapshot support
+- **THEN** Details and Logs remain usable and Data reports absent capture evidence without claiming complete empty history

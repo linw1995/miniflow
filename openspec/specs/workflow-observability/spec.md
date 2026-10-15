@@ -348,23 +348,6 @@ Streaming observation SHALL distinguish buffered item count from emitted batches
 - **WHEN** a batch is sealed but its business operation remains queued
 - **THEN** observation records the flush while leaving that downstream invocation pending
 
-### Requirement: Gate unsupported streaming snapshot capture
-
-Streaming instances SHALL reject the current whole-run snapshot recorder before startup execution. Generated
-runners MUST reject `MF_CAPTURE_SNAPSHOTS=1` in streaming mode with an actionable diagnostic. Ordinary
-bounded-run capture SHALL retain its existing behavior. Separately enabled bounded streaming data capture
-SHALL NOT use that whole-run recorder or inherit its rejection.
-
-#### Scenario: Request stream snapshot history
-
-- **WHEN** snapshot capture is enabled for a streaming runner or attached programmatically to a streaming instance
-- **THEN** startup rejects the unsupported mode before source admission or node execution
-
-#### Scenario: Request bounded stream data
-
-- **WHEN** a streaming run enables the supported bounded data mode without requesting whole-run snapshots
-- **THEN** execution can capture streaming inputs and outputs without allocating whole-run snapshot history
-
 ### Requirement: Version source-driven streaming observations
 
 Source-driven streams SHALL use event schema 4 with explicit startup identity. Their terminal counts SHALL
@@ -497,7 +480,7 @@ MUST retain ordinary bounded cleanup and business-result semantics.
 #### Scenario: Keep whole-stream snapshot restrictions
 
 - **WHEN** the stream binary is invoked without selection and requests whole-stream snapshots
-- **THEN** it retains the existing unsupported streaming capture diagnostic
+- **THEN** it uses the shared snapshot backend with the same opt-in and exporter prerequisites as finite execution
 
 #### Scenario: Preserve results during export failure
 

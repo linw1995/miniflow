@@ -328,22 +328,25 @@ evidence to a limit MUST permanently prevent a complete-observation claim.
 
 ### Requirement: Keep streaming display independent of snapshot capture
 
-The TUI SHALL explicitly disable whole-run value snapshots for streaming children, including inherited capture settings, while retaining lifecycle, trace, and log display. It SHALL request the separate bounded streaming data mode for streaming children and present its received data in the Data pane. Missing capture support SHALL produce an explicit availability diagnostic. Supported finite workflows SHALL retain snapshot capture and expose their decoded inputs/outputs in the observation view.
+The TUI SHALL enable the common snapshot flag for both execution modes, overriding inherited
+capture settings. Lifecycle, trace, and log display SHALL remain usable when snapshot capture
+is unavailable. Data SHALL report missing capture support or evidence rather than claiming
+successful empty capture.
 
 #### Scenario: Launch with inherited snapshot settings
 
-- **WHEN** the parent requests snapshot capture and the TUI launches a streaming workflow
-- **THEN** the child runs with whole-run snapshot capture disabled, bounded stream data requested, and lifecycle, spans, and logs observable
+- **WHEN** inherited settings disable snapshots and the TUI launches either execution mode
+- **THEN** the child receives MF_CAPTURE_SNAPSHOTS=1 and lifecycle, spans, and logs remain observable
 
 #### Scenario: Inspect a finite workflow's values
 
 - **WHEN** a supported finite workflow is launched in TUI mode
-- **THEN** its value snapshots are captured and browsable through the corresponding node span's Data pane
+- **THEN** the shared snapshot pipeline supplies its invocation and session Data lists
 
 #### Scenario: Inspect an older compatible streaming runner
 
-- **WHEN** a compatible lifecycle-schema-4 runner has no bounded stream data support
-- **THEN** Details and Logs remain usable and Data reports absent capture support/evidence without claiming empty successful capture
+- **WHEN** a compatible lifecycle-schema-4 runner lacks shared snapshot support
+- **THEN** Details and Logs remain usable and Data reports absent capture evidence without claiming complete empty history
 
 ### Requirement: Retain snapshot decoding failures until presentation
 
