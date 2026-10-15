@@ -304,27 +304,6 @@ impl<'de> Deserialize<'de> for ValueRef {
     }
 }
 
-impl mf_telemetry::stream_data::DataValueSource for ValueRef {
-    fn view(&self) -> mf_telemetry::stream_data::ValueView<'_, Self> {
-        use mf_telemetry::stream_data::ValueView;
-        match self.kind() {
-            ValueKind::Null => ValueView::Null,
-            ValueKind::Bool(value) => ValueView::Bool(*value),
-            ValueKind::Number(value) => ValueView::Number(value),
-            ValueKind::String(value) => ValueView::String(value),
-            ValueKind::Array(value) => ValueView::Array(value),
-            ValueKind::Object(_) => ValueView::Object,
-        }
-    }
-
-    fn object_items(&self) -> impl Iterator<Item = (&str, &Self)> {
-        self.as_object()
-            .into_iter()
-            .flatten()
-            .map(|(key, value)| (key.as_ref(), value))
-    }
-}
-
 pub trait JsonView: Sized {
     fn shape(&self) -> &'static str;
     fn number(&self) -> Option<&Number>;

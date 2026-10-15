@@ -202,7 +202,7 @@ fn generated_streams_run_in_tui_with_parameters_files_and_interrupts() {
     assert!(screen.contains("OTEL Tracing"));
     assert!(screen.contains("Invocation Data"));
     assert!(screen.contains("Session Data"));
-    assert!(screen.contains("Capture ended; retained delivery verified"));
+    assert!(screen.contains("Data capture: Complete"));
     assert!(screen.contains("six"));
     assert!(screen.contains("Session LogRecords"));
     assert!(screen.contains("mf.workflow"), "{screen}");

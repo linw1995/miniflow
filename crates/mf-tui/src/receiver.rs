@@ -3,7 +3,6 @@
 use crate::logs::{LogSnapshot, LogStore};
 use crate::snapshots::{HistorySnapshot, SnapshotCapture, SpanData};
 use crate::state::{Admission, SessionState, StateError, StateSnapshot};
-use crate::stream_data::{DataSnapshot, StreamDataStore};
 use crate::traces::{TraceSnapshot, TraceSpan, TraceStore};
 use http_body_util::{BodyExt, Full};
 use hyper::{
@@ -75,7 +74,6 @@ enum IngestError {
 struct Context {
     state: Arc<Mutex<SessionState>>,
     snapshots: Mutex<SnapshotCapture>,
-    data: Mutex<StreamDataStore>,
     traces: Mutex<TraceStore>,
     logs: Mutex<LogStore>,
     workflow_id: WorkflowId,
@@ -92,7 +90,6 @@ pub struct LoopbackReceiver {
 impl LoopbackReceiver {
     pub fn bind(description: WorkflowDescription, run_id: RunId) -> Result<Self, ReceiverError> {
         let workflow_id = description.workflow_id.clone();
-        let streaming = description.is_streaming();
         let state = SessionState::new(description, run_id).context(StateSnafu)?;
         let listener = TcpListener::bind("127.0.0.1:0").context(BindSnafu)?;
         let endpoint = format!("http://{}", listener.local_addr().context(BindSnafu)?);
@@ -109,7 +106,6 @@ impl LoopbackReceiver {
         let context = Arc::new(Context {
             state: Arc::new(Mutex::new(state)),
             snapshots: Mutex::new(SnapshotCapture::default()),
-            data: Mutex::new(StreamDataStore::new(workflow_id.clone(), run_id, streaming)),
             traces: Mutex::new(TraceStore::default()),
             logs: Mutex::new(LogStore::default()),
             workflow_id,
@@ -162,11 +158,11 @@ impl LoopbackReceiver {
             .snapshot()
     }
 
-    pub fn data_snapshot(&self) -> Arc<DataSnapshot> {
+    pub fn data_snapshot(&self) -> Arc<HistorySnapshot> {
         self.context
-            .data
+            .snapshots
             .lock()
-            .expect("data store was not poisoned")
+            .expect("snapshot capture was not poisoned")
             .snapshot()
     }
 
@@ -202,11 +198,6 @@ impl LoopbackReceiver {
             .snapshots
             .lock()
             .expect("snapshot capture was not poisoned")
-            .finish();
-        self.context
-            .data
-            .lock()
-            .expect("data store was not poisoned")
             .finish();
         let mut state = self
             .context
@@ -394,25 +385,6 @@ fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), IngestError> {
                     "OTLP log record count exceeded the limit",
                 );
         }
-        let data_related = request
-            .resource_logs
-            .iter()
-            .flat_map(|resource| &resource.scope_logs)
-            .filter(|scope| {
-                scope
-                    .scope
-                    .as_ref()
-                    .is_some_and(|scope| scope.name == mf_telemetry::stream_data::SCOPE)
-            })
-            .flat_map(|scope| &scope.log_records)
-            .any(|record| !other_session(record, context));
-        if data_related {
-            context
-                .data
-                .lock()
-                .expect("data store was not poisoned")
-                .note_rejection();
-        }
         return InvalidSnafu {
             message: "too many log records".to_owned(),
         }
@@ -425,18 +397,6 @@ fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), IngestError> {
             let instrumentation = scope.scope.map(Arc::new);
             let scope_name = instrumentation.as_ref().map(|scope| scope.name.as_str());
             for record in scope.log_records {
-                // Dedicated decoding precedes the independently truncated raw-log copy.
-                if scope_name == Some(mf_telemetry::stream_data::SCOPE)
-                    && !other_session(&record, context)
-                    && context
-                        .data
-                        .lock()
-                        .expect("data store was not poisoned")
-                        .admit_log(&record)
-                        .is_err()
-                {
-                    rejected = true;
-                }
                 if string_attribute(&record.attributes, "mf.run.id")
                     == Some(context.run_id.as_str())
                     && string_attribute(&record.attributes, "mf.workflow.id")
@@ -482,12 +442,6 @@ fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), IngestError> {
     } else {
         Ok(())
     }
-}
-
-fn other_session(record: &LogRecord, context: &Context) -> bool {
-    string_attribute(&record.attributes, "mf.run.id").is_some_and(|run| run != context.run_id)
-        || string_attribute(&record.attributes, "mf.workflow.id")
-            .is_some_and(|workflow| workflow != context.workflow_id.as_str())
 }
 
 fn receive_snapshot(record: LogRecord, context: &Context) -> Result<(), IngestError> {

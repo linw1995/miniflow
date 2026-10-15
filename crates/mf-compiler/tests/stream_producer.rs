@@ -249,7 +249,6 @@ fn receive(instance: &StreamInstance) -> i64 {
 
 #[test]
 fn data_capture_preserves_admitted_outputs_when_a_producer_fails() {
-    use mf_telemetry::stream_data::{DataPayload, DataRecord, Direction};
     for (mode, observed) in [
         ("fail_after", false),
         ("invalid", false),
@@ -269,47 +268,12 @@ fn data_capture_preserves_admitted_outputs_when_a_producer_fails() {
         let observation = plan
             .start_stream_observation(&harness.observer(), RunId::new())
             .unwrap();
-        let data = Arc::new(Mutex::new(Vec::<DataRecord>::new()));
-        let captured = data.clone();
-        let capture = mf_telemetry::stream_data::StreamDataRecorder::new(
-            observation.clone(),
-            move |packet| {
-                captured
-                    .lock()
-                    .unwrap()
-                    .push(DataRecord::decode(&packet.bytes)?);
-                Ok(true)
-            },
-            || true,
-        );
-        let raw = Arc::new(Mutex::new(Vec::<mf_runtime::ValueRef>::new()));
-        let original = raw.clone();
-        let encoded = capture.clone();
-        let observer = mf_runtime::SnapshotRecorder::new(move |event| {
-            if event.node.as_ref() == "produce"
-                && event.snapshot.outcome == mf_runtime::SnapshotOutcome::Emitted
-            {
-                original
-                    .lock()
-                    .unwrap()
-                    .push(event.snapshot.outputs.clone());
-            }
-            let (direction, values) = match event.snapshot.outcome {
-                mf_runtime::SnapshotOutcome::Started => (Direction::Input, &event.snapshot.inputs),
-                mf_runtime::SnapshotOutcome::Emitted | mf_runtime::SnapshotOutcome::Succeeded => {
-                    (Direction::Output, &event.snapshot.outputs)
-                }
-                mf_runtime::SnapshotOutcome::Failed | mf_runtime::SnapshotOutcome::Skipped => {
-                    return;
-                }
-            };
-            encoded.record(&event.node, &event.scope, direction, values);
-        });
+        let capture = mf_runtime::SnapshotRecording::memory();
         let instance = start(
             value,
             StreamOptions {
                 observation: observed.then_some(observation),
-                snapshots: Some(observer),
+                snapshots: Some(capture.recorder()),
                 ..Default::default()
             },
         );
@@ -325,33 +289,21 @@ fn data_capture_preserves_admitted_outputs_when_a_producer_fails() {
         assert!(instance.join().is_err());
         capture.finish();
         assert!(capture.diagnostic().is_none());
-        let data = data.lock().unwrap();
-        let outputs = data
-            .iter()
-            .filter_map(|record| match &record.payload {
-                DataPayload::Ports {
-                    node,
-                    direction: Direction::Output,
-                    values: Some(values),
-                    ..
-                } if node == "produce" => Some(values.to_json()),
-                _ => None,
+        let outputs = capture
+            .history()
+            .into_iter()
+            .filter_map(|entry| {
+                let node = entry.snapshot.node(&entry.scope, &entry.node).unwrap();
+                (entry.node.as_ref() == "produce"
+                    && node.outcome == mf_runtime::SnapshotOutcome::Emitted)
+                    .then(|| serde_json::to_value(&node.outputs).unwrap())
             })
             .collect::<Vec<_>>();
         if mode == "fail_after" {
             assert_eq!(outputs, vec![json!({"value":42})]);
-            let raw = raw.lock().unwrap();
-            assert_eq!(raw.len(), 1);
-            assert_eq!(raw[0]["value"], json!(42));
         } else {
-            assert!(raw.lock().unwrap().is_empty());
             assert!(outputs.is_empty());
         }
-        assert!(
-            data.iter()
-                .filter(|record| matches!(record.payload, DataPayload::Ports { .. }))
-                .all(|record| record.trace_context.is_some() == observed)
-        );
     }
 }
 

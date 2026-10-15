@@ -4,9 +4,8 @@ use crate::{
     SpanData,
     duration::format_duration_ns,
     logs::{LogObservation, LogSnapshot},
-    snapshots::span_data_preview,
+    snapshots::{HistorySnapshot, SnapshotMetadata, span_data_preview},
     state::TraceAvailability,
-    stream_data::{DataObservation, DataSnapshot},
 };
 use crossterm::event::KeyCode;
 use opentelemetry_proto::tonic::{
@@ -170,10 +169,8 @@ struct PreviewKey {
 pub struct TraceViewSnapshot<'a> {
     pub traces: &'a TraceSnapshot,
     pub logs: &'a LogSnapshot,
-    pub data: SpanData,
-    pub stream_data: Option<&'a DataSnapshot>,
+    pub data: &'a HistorySnapshot,
     pub spans: TraceAvailability,
-    pub streaming: bool,
     pub finished: bool,
 }
 
@@ -246,9 +243,9 @@ impl TraceView {
         &mut self,
         key: KeyCode,
         traces: &TraceSnapshot,
-        data: &DataSnapshot,
+        data: &HistorySnapshot,
     ) -> bool {
-        if !self.visible || self.pane != Pane::Data || !data.streaming {
+        if !self.visible || self.pane != Pane::Data {
             return false;
         }
         if key == KeyCode::Char('l') && !self.session_logs {
@@ -263,7 +260,7 @@ impl TraceView {
             .get(self.position(traces))
             .map(|row| row.observation.key());
         let rows = self.data_list.rows(self.session_logs, correlation, data);
-        let handled = self.data_list.navigate(key, &rows);
+        let handled = self.data_list.navigate(key, &rows, data);
         if handled {
             self.scroll = 0;
         }
@@ -367,10 +364,8 @@ impl TraceView {
         let selected = self.position(snapshot.traces);
         let records = self.log_records(snapshot.traces, snapshot.logs);
         let log_selected = self.log_position(&records);
-        let stream_data = snapshot
-            .stream_data
-            .filter(|_| snapshot.streaming && self.pane == Pane::Data);
-        if self.session_logs && stream_data.is_none() {
+        let data = (self.pane == Pane::Data).then_some(snapshot.data);
+        if self.session_logs && data.is_none() {
             draw_logs(frame, entries, &records, log_selected, "Session LogRecords");
         } else if !self.session_logs {
             let rows = usize::from(entries.height.saturating_sub(2)).max(1);
@@ -402,15 +397,17 @@ impl TraceView {
                 &mut state,
             );
         }
-        if let Some(data) = stream_data {
+        if let Some(data) = data {
             let correlation = snapshot
                 .traces
                 .rows
                 .get(selected)
                 .map(|row| row.observation.key());
             let rows = self.data_list.rows(self.session_logs, correlation, data);
-            let selected = self.data_list.position(&rows);
-            let sequence = rows.get(selected).map(|row| row.record.sequence);
+            let selected = self.data_list.position(&rows, data);
+            let sequence = rows
+                .get(selected)
+                .map(|index| data.metadata[*index].sequence);
             if self.data_list.preview_sequence != sequence {
                 self.scroll = 0;
                 self.data_list.preview_sequence = sequence;
@@ -420,6 +417,7 @@ impl TraceView {
                     frame,
                     entries,
                     &rows,
+                    data,
                     selected,
                     "Session Data (j/k: select)",
                 );
@@ -434,6 +432,7 @@ impl TraceView {
                     frame,
                     list_area,
                     &rows,
+                    data,
                     selected,
                     if self.data_list.focused {
                         "Invocation Data (focused)"
@@ -443,11 +442,11 @@ impl TraceView {
                 );
                 preview_area
             };
-            let text = stream_data_preview(
-                rows.get(selected).map(AsRef::as_ref),
+            let text = data_preview(
+                rows.get(selected).copied(),
                 data,
-                self.data_list.eviction,
                 self.data_list.selected.is_none(),
+                snapshot.finished,
             );
             let paragraph = Paragraph::new(text)
                 .block(
@@ -513,7 +512,7 @@ impl TraceView {
                 .is_none_or(|(previous, _)| *previous != key)
         {
             let text = match self.pane {
-                Pane::Data => span_data_preview(&snapshot.data, snapshot.streaming, snapshot.finished),
+                Pane::Data => unreachable!("Data is rendered from the shared history list"),
                 Pane::Logs => records.get(log_selected).map_or_else(|| "No matching LogRecords were received.".into(), |record| log_preview(record)),
                 Pane::Details => snapshot.traces.rows.get(selected).map_or_else(|| {
                     if snapshot.finished { "No trace spans were received.\nUse g to inspect session logs; spans may be unsampled or unavailable.".into() }
@@ -547,10 +546,9 @@ impl TraceView {
 #[derive(Default)]
 struct DataList {
     scope: Option<(bool, Option<SpanKey>)>,
-    selected: Option<u64>,
+    selected: Option<usize>,
     focused: bool,
-    eviction: Option<u64>,
-    preview_sequence: Option<u64>,
+    preview_sequence: Option<usize>,
 }
 
 impl DataList {
@@ -558,40 +556,37 @@ impl DataList {
         &mut self,
         session: bool,
         correlation: Option<SpanKey>,
-        snapshot: &DataSnapshot,
-    ) -> Vec<Arc<DataObservation>> {
+        snapshot: &HistorySnapshot,
+    ) -> Vec<usize> {
         let scope = (session, if session { None } else { correlation });
         if self.scope.as_ref() != Some(&scope) {
             self.scope = Some(scope.clone());
             self.selected = None;
-            self.eviction = None;
         }
-        let rows = if session {
-            snapshot.records.clone()
-        } else {
-            scope
-                .1
-                .as_ref()
-                .map_or_else(Vec::new, |(trace, span)| snapshot.related(trace, span))
-        };
-        if let Some(selected) = self.selected
-            && !rows.iter().any(|row| row.record.sequence == selected)
-        {
-            self.eviction = Some(selected);
-            self.selected = rows
-                .iter()
-                .min_by_key(|row| row.record.sequence.abs_diff(selected))
-                .map(|row| row.record.sequence);
-        }
-        rows
+        snapshot
+            .metadata
+            .iter()
+            .enumerate()
+            .filter_map(|(index, metadata)| {
+                (session
+                    || scope
+                        .1
+                        .as_ref()
+                        .is_some_and(|key| metadata.correlation.as_ref() == Some(key)))
+                .then_some(index)
+            })
+            .collect()
     }
-    fn position(&self, rows: &[Arc<DataObservation>]) -> usize {
+    fn position(&self, rows: &[usize], snapshot: &HistorySnapshot) -> usize {
         self.selected
-            .and_then(|sequence| rows.iter().position(|row| row.record.sequence == sequence))
+            .and_then(|sequence| {
+                rows.iter()
+                    .position(|index| snapshot.metadata[*index].sequence == sequence)
+            })
             .unwrap_or(rows.len().saturating_sub(1))
     }
-    fn navigate(&mut self, key: KeyCode, rows: &[Arc<DataObservation>]) -> bool {
-        let current = self.position(rows);
+    fn navigate(&mut self, key: KeyCode, rows: &[usize], snapshot: &HistorySnapshot) -> bool {
+        let current = self.position(rows, snapshot);
         let index = match key {
             KeyCode::Up | KeyCode::Char('k') => Some(current.saturating_sub(1)),
             KeyCode::Down | KeyCode::Char('j') => {
@@ -603,96 +598,33 @@ impl DataList {
             KeyCode::End | KeyCode::Char('f') => None,
             _ => return false,
         };
-        self.selected = index.and_then(|index| rows.get(index).map(|row| row.record.sequence));
-        self.eviction = None;
+        self.selected = index.and_then(|index| {
+            rows.get(index)
+                .map(|index| snapshot.metadata[*index].sequence)
+        });
         true
     }
 }
 
-fn data_row(row: &DataObservation) -> String {
-    use mf_telemetry::stream_data::{DataPayload, Direction};
-    let DataPayload::Ports {
-        node,
-        direction,
-        port_names,
-        ports_truncated,
-        values,
-        omission,
-        ..
-    } = &row.record.payload
-    else {
-        return String::new();
-    };
-    let ports = port_names
-        .iter()
-        .take(4)
-        .map(|name| data_label(name, 20))
-        .collect::<Vec<_>>()
-        .join(",");
-    let summary = values
-        .as_ref()
-        .and_then(|value| match value {
-            mf_telemetry::stream_data::DataValue::Object(values) => values.first_key_value(),
-            _ => None,
-        })
-        .map_or_else(
-            || "values".into(),
-            |(key, value)| {
-                use mf_telemetry::stream_data::DataValue;
-                let value = match value {
-                    DataValue::Null => "null".into(),
-                    DataValue::Bool(value) => value.to_string(),
-                    DataValue::Number(value) => value.to_string(),
-                    DataValue::String(value) => data_label(value, 24),
-                    DataValue::Array(values) => format!("array({})", values.len()),
-                    DataValue::Object(values) => format!("object({})", values.len()),
-                };
-                format!("{}={value}", data_label(key, 16))
-            },
-        );
+fn data_row(entry: &mf_runtime::SnapshotEntry, metadata: &SnapshotMetadata) -> String {
+    let node = entry
+        .snapshot
+        .node(&entry.scope, &entry.node)
+        .expect("history entries contain their node");
     format!(
-        "#{} {} {} [{}{}] t={} {}",
-        row.record.sequence,
-        if *direction == Direction::Input {
-            "IN"
-        } else {
-            "OUT"
-        },
-        data_label(node, 24),
-        ports,
-        if *ports_truncated || port_names.len() > 4 {
-            ",..."
-        } else {
-            ""
-        },
-        row.record.time_unix_nano,
-        omission.map_or_else(|| summary, |reason| format!("omitted:{reason:?}"))
+        "#{} {} {:?} t={}",
+        metadata.sequence,
+        label(&entry.node),
+        node.outcome,
+        metadata.time_unix_nano
     )
-}
-
-fn data_label(text: &str, limit: usize) -> String {
-    let mut characters = text.chars();
-    let mut result: String = characters
-        .by_ref()
-        .take(limit)
-        .flat_map(|character| {
-            if character.is_control() {
-                character.escape_default().collect::<Vec<_>>()
-            } else {
-                vec![character]
-            }
-        })
-        .collect();
-    if characters.next().is_some() {
-        result.push_str("...");
-    }
-    result
 }
 
 fn draw_data_rows(
     frame: &mut Frame<'_>,
     area: ratatui::layout::Rect,
-    rows: &[Arc<DataObservation>],
+    rows: &[usize],
+    snapshot: &HistorySnapshot,
     selected: usize,
     title: &str,
 ) {
@@ -704,7 +636,12 @@ fn draw_data_rows(
         .iter()
         .skip(first)
         .take(visible)
-        .map(|row| ListItem::new(data_row(row)))
+        .map(|index| {
+            ListItem::new(data_row(
+                &snapshot.entries[*index],
+                &snapshot.metadata[*index],
+            ))
+        })
         .collect();
     let mut state =
         ListState::default().with_selected((!items.is_empty()).then_some(selected - first));
@@ -717,151 +654,50 @@ fn draw_data_rows(
     );
 }
 
-fn stream_data_preview(
-    row: Option<&DataObservation>,
-    snapshot: &DataSnapshot,
-    eviction: Option<u64>,
+fn data_preview(
+    index: Option<usize>,
+    snapshot: &HistorySnapshot,
     following: bool,
+    finished: bool,
 ) -> String {
-    use mf_telemetry::stream_data::{DataPayload, DataValue};
-    let mut preview = Preview(String::new());
-    let result = (|| -> fmt::Result {
-        writeln!(
-            preview,
-            "{} | {}",
-            snapshot.status,
-            if following {
-                "Following tail"
-            } else {
-                "Inspecting selection"
-            }
-        )?;
-        writeln!(
-            preview,
-            "Rows={} received={} evicted={} omissions={} sender drops={} gaps={} faults={}",
-            snapshot.records.len(),
-            snapshot.observed,
-            snapshot.evicted,
-            snapshot.omissions,
-            snapshot.sender_drops,
-            snapshot
-                .gaps
-                .map_or_else(|| "unknown".into(), |gaps| gaps.to_string()),
-            snapshot.faults
-        )?;
-        if let Some(sequence) = eviction {
-            writeln!(
-                preview,
-                "Selected record #{sequence} was evicted; showing nearest retained row."
-            )?;
+    let mut text = format!(
+        "{} | {}\nRows={} values={}\n",
+        snapshot.status,
+        if following {
+            "Following tail"
+        } else {
+            "Inspecting selection"
+        },
+        snapshot.history_len,
+        snapshot.value_count
+    );
+    if let Some(index) = index {
+        let entry = &snapshot.entries[index];
+        let metadata = &snapshot.metadata[index];
+        text.push_str(&format!("{}\n", data_row(entry, metadata)));
+        for scope in &entry.scope {
+            text.push_str(&format!(
+                "Scope: {}[{}]\n",
+                label(&scope.loop_id),
+                scope.index.get()
+            ));
         }
-        if let Some(diagnostic) = &snapshot.diagnostic {
-            writeln!(
-                preview,
-                "Diagnostic: {}",
-                data_label(&diagnostic.to_string(), 1024)
-            )?;
+        if let Some((trace, span)) = &metadata.correlation {
+            text.push_str(&format!("Trace={} span={}\n", hex(trace), hex(span)));
+        } else {
+            text.push_str("Native context absent; no inferred span association.\n");
         }
-        let Some(row) = row else {
-            return writeln!(
-                preview,
-                "No retained Data rows in this scope. Use g then Tab for session Data."
-            );
-        };
-        writeln!(preview, "\n{}", data_row(row))?;
-        if let DataPayload::Ports {
-            node,
-            scope,
-            values,
-            omission,
-            ..
-        } = &row.record.payload
-        {
-            writeln!(preview, "Node={}", data_label(node, 256))?;
-            for entry in scope {
-                writeln!(
-                    preview,
-                    "Scope: {}[{}]",
-                    data_label(&entry.loop_id, 80),
-                    entry.index.get()
-                )?;
-            }
-            if let Some((trace, span)) = &row.correlation {
-                writeln!(preview, "Trace={} span={}", hex(trace), hex(span))?;
-            } else {
-                writeln!(
-                    preview,
-                    "Native context absent; no inferred span association."
-                )?;
-            }
-            if let Some(reason) = omission {
-                writeln!(preview, "Value omitted: {reason:?} capture limit.")?;
-            }
-            if let Some(values) = values {
-                fn write_data(
-                    preview: &mut Preview,
-                    value: &DataValue,
-                    depth: usize,
-                ) -> fmt::Result {
-                    match value {
-                        DataValue::Null => write!(preview, "null"),
-                        DataValue::Bool(value) => write!(preview, "{value}"),
-                        DataValue::Number(value) => write!(preview, "{value}"),
-                        DataValue::String(value) => {
-                            write!(preview, "\"")?;
-                            for character in value.chars() {
-                                match character {
-                                    '"' => write!(preview, "\\\"")?,
-                                    '\\' => write!(preview, "\\\\")?,
-                                    character if character.is_control() => {
-                                        write!(preview, "{}", character.escape_default())?
-                                    }
-                                    character => write!(preview, "{character}")?,
-                                }
-                            }
-                            write!(preview, "\"")
-                        }
-                        DataValue::Array(items) => {
-                            writeln!(preview, "[")?;
-                            for (index, item) in items.iter().enumerate() {
-                                write!(preview, "{}", "  ".repeat(depth + 1))?;
-                                write_data(preview, item, depth + 1)?;
-                                writeln!(
-                                    preview,
-                                    "{}",
-                                    if index + 1 == items.len() { "" } else { "," }
-                                )?;
-                            }
-                            write!(preview, "{}]", "  ".repeat(depth))
-                        }
-                        DataValue::Object(items) => {
-                            writeln!(preview, "{{")?;
-                            for (index, (key, value)) in items.iter().enumerate() {
-                                write!(preview, "{}", "  ".repeat(depth + 1))?;
-                                write_data(preview, &DataValue::String(key.clone()), depth + 1)?;
-                                write!(preview, ": ")?;
-                                write_data(preview, value, depth + 1)?;
-                                writeln!(
-                                    preview,
-                                    "{}",
-                                    if index + 1 == items.len() { "" } else { "," }
-                                )?;
-                            }
-                            write!(preview, "{}}}", "  ".repeat(depth))
-                        }
-                    }
-                }
-                write_data(&mut preview, values, 0)?;
-            }
-        }
-        Ok(())
-    })();
-    if result.is_err() {
-        preview.0.push_str(
-            "\n[Preview truncated at 64 KiB; complete admitted value remains in Data storage.]",
-        );
+        text.push_str(&span_data_preview(
+            &SpanData {
+                node: entry.snapshot.node(&entry.scope, &entry.node).cloned(),
+                status: snapshot.status.clone(),
+            },
+            finished,
+        ));
+    } else {
+        text.push_str("No snapshot entries in this scope. Use g then Tab for session Data.");
     }
-    preview.0
+    text
 }
 
 fn draw_logs(
@@ -1277,13 +1113,11 @@ mod tests {
                     &TraceViewSnapshot {
                         traces: &store.snapshot(),
                         logs: &LogSnapshot::default(),
-                        stream_data: None,
-                        data: SpanData::default(),
+                        data: &HistorySnapshot::default(),
                         spans: TraceAvailability {
                             observed_spans: 1,
                             local_drops: 3,
                         },
-                        streaming: false,
                         finished: true,
                     },
                 )
@@ -1317,10 +1151,9 @@ mod tests {
                         &TraceViewSnapshot {
                             traces: &TraceSnapshot::default(),
                             logs: &LogSnapshot::default(),
-                            stream_data: None,
-                            data: SpanData::default(),
+                            data: &HistorySnapshot::default(),
                             spans: TraceAvailability::default(),
-                            streaming: false,
+
                             finished,
                         },
                     )
@@ -1376,15 +1209,30 @@ mod tests {
                 None,
             );
         }
-        let data = |value| SpanData {
-            node: Some(Arc::new(NodeSnapshot {
-                inputs: ValueRef::object([]),
-                outputs: ValueRef::object([("answer".into(), ValueRef::from(value))]),
-                skipped: Arc::from([]),
-                outcome: SnapshotOutcome::Succeeded,
-                error: None,
-            })),
-            status: "Complete".into(),
+        let data = |value| {
+            let recording = mf_runtime::SnapshotRecording::memory();
+            recording.record(
+                vec![],
+                "node",
+                NodeSnapshot {
+                    inputs: ValueRef::object([]),
+                    outputs: ValueRef::object([("answer".into(), ValueRef::from(value))]),
+                    skipped: Arc::from([]),
+                    outcome: SnapshotOutcome::Succeeded,
+                    error: None,
+                },
+            );
+            HistorySnapshot {
+                history_len: 1,
+                entries: recording.history(),
+                metadata: vec![SnapshotMetadata {
+                    sequence: 1,
+                    time_unix_nano: 1,
+                    correlation: Some((vec![1; 16], vec![1; 8])),
+                }],
+                status: "Complete".into(),
+                ..Default::default()
+            }
         };
         let mut view = TraceView::default();
         let mut terminal = Terminal::new(TestBackend::new(120, 30)).unwrap();
@@ -1398,10 +1246,8 @@ mod tests {
                         &TraceViewSnapshot {
                             traces: &traces,
                             logs: &logs.snapshot(),
-                            stream_data: None,
-                            data: data(value),
+                            data: &data(value),
                             spans: TraceAvailability::default(),
-                            streaming: false,
                             finished: true,
                         },
                     )
@@ -1443,10 +1289,8 @@ mod tests {
                     &TraceViewSnapshot {
                         traces: &traces,
                         logs: &logs.snapshot(),
-                        stream_data: None,
-                        data: data(73),
+                        data: &data(73),
                         spans: TraceAvailability::default(),
-                        streaming: false,
                         finished: true,
                     },
                 )
@@ -1504,10 +1348,8 @@ mod tests {
                     &TraceViewSnapshot {
                         traces: &traces,
                         logs: &logs.snapshot(),
-                        stream_data: None,
-                        data: SpanData::default(),
+                        data: &HistorySnapshot::default(),
                         spans: TraceAvailability::default(),
-                        streaming: false,
                         finished: false,
                     },
                 )
@@ -1532,10 +1374,8 @@ mod tests {
                     &TraceViewSnapshot {
                         traces: &traces,
                         logs: &logs.snapshot(),
-                        stream_data: None,
-                        data: SpanData::default(),
+                        data: &HistorySnapshot::default(),
                         spans: TraceAvailability::default(),
-                        streaming: true,
                         finished: false,
                     },
                 )
@@ -1548,10 +1388,7 @@ mod tests {
             .iter()
             .map(|cell| cell.symbol())
             .collect();
-        assert!(
-            text.contains("Data is unavailable for streaming workflows"),
-            "{text}"
-        );
+        assert!(text.contains("No snapshot entries in this scope"), "{text}");
         let mut tiny = Terminal::new(TestBackend::new(1, 1)).unwrap();
         tiny.draw(|frame| {
             view.draw(
@@ -1559,15 +1396,100 @@ mod tests {
                 &TraceViewSnapshot {
                     traces: &traces,
                     logs: &logs.snapshot(),
-                    stream_data: None,
-                    data: SpanData::default(),
+
+                    data: &HistorySnapshot::default(),
                     spans: TraceAvailability::default(),
-                    streaming: true,
+
                     finished: false,
                 },
             )
         })
         .unwrap();
+    }
+
+    #[test]
+    fn data_lists_filter_native_context_and_preserve_selection() {
+        let recording = mf_runtime::SnapshotRecording::memory();
+        for value in [42, 73, 99] {
+            recording.record(
+                vec![],
+                "same",
+                mf_runtime::NodeSnapshot {
+                    inputs: mf_runtime::ValueRef::object([]),
+                    outputs: mf_runtime::ValueRef::from(serde_json::json!({"value": value})),
+                    skipped: Arc::from([]),
+                    outcome: mf_runtime::SnapshotOutcome::Emitted,
+                    error: None,
+                },
+            );
+        }
+        let mut snapshot = HistorySnapshot {
+            history_len: 3,
+            entries: recording.history(),
+            metadata: vec![
+                SnapshotMetadata {
+                    sequence: 4,
+                    time_unix_nano: 1,
+                    correlation: Some((vec![1; 16], vec![1; 8])),
+                },
+                SnapshotMetadata {
+                    sequence: 7,
+                    time_unix_nano: 2,
+                    correlation: Some((vec![2; 16], vec![1; 8])),
+                },
+                SnapshotMetadata {
+                    sequence: 9,
+                    time_unix_nano: 3,
+                    correlation: Some((vec![1; 16], vec![2; 8])),
+                },
+            ],
+            status: "Collecting".into(),
+            ..Default::default()
+        };
+        let mut list = DataList::default();
+        assert_eq!(
+            list.rows(false, Some((vec![1; 16], vec![1; 8])), &snapshot),
+            [0]
+        );
+        assert_eq!(
+            list.rows(false, Some((vec![2; 16], vec![1; 8])), &snapshot),
+            [1]
+        );
+        assert_eq!(
+            list.rows(false, Some((vec![1; 16], vec![2; 8])), &snapshot),
+            [2]
+        );
+        let rows = list.rows(true, None, &snapshot);
+        assert_eq!(rows, [0, 1, 2]);
+        assert_eq!(list.position(&rows, &snapshot), 2);
+        assert!(list.navigate(KeyCode::Home, &rows, &snapshot));
+        assert!(list.navigate(KeyCode::Down, &rows, &snapshot));
+        snapshot.entries.push(snapshot.entries[2].clone());
+        snapshot.metadata.push(SnapshotMetadata {
+            sequence: 12,
+            time_unix_nano: 4,
+            correlation: None,
+        });
+        snapshot.history_len += 1;
+        snapshot.status = "snapshot history is incomplete".into();
+        let rows = list.rows(true, None, &snapshot);
+        assert_eq!(list.position(&rows, &snapshot), 1);
+        assert_eq!(list.selected, Some(7));
+        let text = data_preview(
+            Some(rows[list.position(&rows, &snapshot)]),
+            &snapshot,
+            false,
+            true,
+        );
+        assert!(
+            text.contains("73")
+                && text.contains("incomplete")
+                && text.contains("Inspecting selection"),
+            "{text}"
+        );
+        assert!(list.navigate(KeyCode::Char('f'), &rows, &snapshot));
+        assert_eq!(list.position(&rows, &snapshot), 3);
+        assert!(data_preview(Some(3), &snapshot, true, false).contains("Native context absent"));
     }
 
     #[test]
@@ -1615,273 +1537,5 @@ mod tests {
             assert!(preview.len() < PREVIEW_BYTES + 100);
         }
         assert_eq!(span.span.name.len(), PREVIEW_BYTES * 2);
-    }
-}
-
-#[cfg(test)]
-mod stream_data_tests {
-    use super::*;
-    use mf_telemetry::{
-        identity::{RunId, WorkflowId},
-        stream_data::{DataPayload, DataRecord, DataValue, Direction, Omission},
-        wire::TraceContext,
-    };
-    use ratatui::{Terminal, backend::TestBackend};
-
-    fn row(
-        sequence: u64,
-        span: Option<u8>,
-        direction: Direction,
-        value: DataValue,
-    ) -> Arc<DataObservation> {
-        let correlation = span.map(|span| (vec![1; 16], vec![span; 8]));
-        Arc::new(DataObservation {
-            correlation,
-            record: DataRecord {
-                version: 1,
-                workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
-                run_id: RunId::new(),
-                sequence,
-                time_unix_nano: sequence,
-                trace_context: span.map(|span| TraceContext {
-                    trace_id: "01".repeat(16),
-                    span_id: format!("{span:02x}").repeat(8),
-                    trace_flags: 0,
-                }),
-                payload: DataPayload::Ports {
-                    node: "feed\u{1b}[31m".into(),
-                    scope: vec![],
-                    direction,
-                    port_names: vec!["value".into()],
-                    ports_truncated: false,
-                    values: Some(DataValue::Object(BTreeMap::from([("value".into(), value)]))),
-                    omission: None,
-                },
-            },
-        })
-    }
-    fn render(
-        view: &mut TraceView,
-        traces: &TraceSnapshot,
-        data: &DataSnapshot,
-        finished: bool,
-    ) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(160, 35)).unwrap();
-        terminal
-            .draw(|frame| {
-                view.draw(
-                    frame,
-                    &TraceViewSnapshot {
-                        traces,
-                        logs: &LogSnapshot::default(),
-                        data: SpanData::default(),
-                        stream_data: Some(data),
-                        spans: TraceAvailability::default(),
-                        streaming: true,
-                        finished,
-                    },
-                )
-            })
-            .unwrap();
-        terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|cell| cell.symbol())
-            .collect()
-    }
-    fn data(records: Vec<Arc<DataObservation>>) -> DataSnapshot {
-        DataSnapshot {
-            streaming: true,
-            observed: records.len() as u64,
-            records,
-            status: "Collecting stream data; tail unverified".into(),
-            ..Default::default()
-        }
-    }
-    #[test]
-    fn live_session_data_follows_then_preserves_identity_and_refreshes_status() {
-        let traces = TraceSnapshot::default();
-        let mut snapshot = data(vec![
-            row(1, None, Direction::Input, DataValue::Null),
-            row(3, None, Direction::Output, DataValue::Number(73.into())),
-        ]);
-        let mut view = TraceView::default();
-        view.handle_key(KeyCode::Char('v'), &traces, &LogSnapshot::default());
-        view.handle_key(KeyCode::Char('g'), &traces, &LogSnapshot::default());
-        view.handle_key(KeyCode::Tab, &traces, &LogSnapshot::default());
-        let text = render(&mut view, &traces, &snapshot, false);
-        assert!(
-            text.contains("Session Data")
-                && text.contains("73")
-                && text.contains("Native context absent"),
-            "{text}"
-        );
-        assert!(view.handle_data_key(KeyCode::Home, &traces, &snapshot));
-        assert!(view.handle_data_key(KeyCode::Down, &traces, &snapshot));
-        assert_eq!(view.data_list.selected, Some(3));
-        snapshot.records.insert(
-            1,
-            row(2, None, Direction::Output, DataValue::Number(42.into())),
-        );
-        snapshot
-            .records
-            .push(row(4, None, Direction::Output, DataValue::Bool(true)));
-        let text = render(&mut view, &traces, &snapshot, false);
-        assert!(text.contains("\"value\": 73"), "{text}");
-        assert_eq!(view.data_list.selected, Some(3));
-        assert!(view.handle_data_key(KeyCode::PageDown, &traces, &snapshot));
-        assert_eq!(view.data_list.selected, Some(4));
-        assert!(view.handle_data_key(KeyCode::Char('f'), &traces, &snapshot));
-        assert_eq!(view.data_list.selected, None);
-        snapshot.status = "Capture ended with value omissions".into();
-        snapshot.omissions = 1;
-        let text = render(&mut view, &traces, &snapshot, true);
-        assert!(
-            text.contains("Finished")
-                && text.contains("Capture ended with value omissions")
-                && text.contains("true"),
-            "{text}"
-        );
-    }
-    #[test]
-    fn exact_span_scope_and_omissions_preserve_invocation_boundaries() {
-        let mut spans = TraceStore::default();
-        for span in [1, 2] {
-            spans.admit(TraceSpan {
-                span: Span {
-                    trace_id: vec![1; 16],
-                    span_id: vec![span; 8],
-                    name: "same-node".into(),
-                    ..Default::default()
-                },
-                resource: None,
-                scope: None,
-            });
-        }
-        let traces = spans.snapshot();
-        let first = row(1, Some(1), Direction::Input, DataValue::Number(42.into()));
-        let mut omitted = (*row(2, Some(1), Direction::Output, DataValue::Null)).clone();
-        if let DataPayload::Ports {
-            values, omission, ..
-        } = &mut omitted.record.payload
-        {
-            *values = None;
-            *omission = Some(Omission::Depth);
-        }
-        let snapshot = data(vec![
-            first,
-            Arc::new(omitted),
-            row(
-                3,
-                Some(2),
-                Direction::Output,
-                DataValue::String("other-invocation".into()),
-            ),
-        ]);
-        let mut view = TraceView {
-            visible: true,
-            selected: Some((vec![1; 16], vec![1; 8])),
-            pane: Pane::Data,
-            ..Default::default()
-        };
-        let text = render(&mut view, &traces, &snapshot, false);
-        assert!(
-            text.contains("Invocation Data")
-                && text.contains("omitted:Depth")
-                && text.contains("Value omitted: Depth"),
-            "{text}"
-        );
-        assert!(!text.contains("other-invocation"));
-        assert!(view.handle_data_key(KeyCode::Char('l'), &traces, &snapshot));
-        assert!(view.handle_data_key(KeyCode::Home, &traces, &snapshot));
-        assert_eq!(view.data_list.selected, Some(1));
-        assert!(render(&mut view, &traces, &snapshot, false).contains("42"));
-        view.selected = Some((vec![1; 16], vec![2; 8]));
-        let text = render(&mut view, &traces, &snapshot, false);
-        assert!(text.contains("other-invocation"));
-        assert_eq!(view.data_list.selected, None);
-        assert_eq!(view.data_list.eviction, None);
-    }
-    #[test]
-    fn eviction_selects_nearest_without_retaining_old_payload() {
-        let traces = TraceSnapshot::default();
-        let mut snapshot = data(vec![
-            row(
-                1,
-                None,
-                Direction::Output,
-                DataValue::String("old-value".into()),
-            ),
-            row(2, None, Direction::Output, DataValue::Number(42.into())),
-        ]);
-        let weak = Arc::downgrade(&snapshot.records[0]);
-        let mut view = TraceView {
-            visible: true,
-            session_logs: true,
-            pane: Pane::Data,
-            ..Default::default()
-        };
-        render(&mut view, &traces, &snapshot, false);
-        view.handle_data_key(KeyCode::Home, &traces, &snapshot);
-        snapshot.records.remove(0);
-        snapshot.evicted = 1;
-        let text = render(&mut view, &traces, &snapshot, false);
-        assert!(
-            text.contains("record #1 was evicted") && text.contains("42"),
-            "{text}"
-        );
-        assert!(!text.contains("old-value"));
-        assert_eq!(view.data_list.selected, Some(2));
-        assert!(weak.upgrade().is_none());
-    }
-    #[test]
-    fn previews_are_bounded_utf8_safe_and_escape_control_characters() {
-        let row = row(
-            1,
-            None,
-            Direction::Output,
-            DataValue::String(format!("\u{1b}[31m{}", "é".repeat(PREVIEW_BYTES))),
-        );
-        let snapshot = data(vec![row.clone()]);
-        let text = stream_data_preview(Some(&row), &snapshot, None, true);
-        assert!(text.contains("Preview truncated") && !text.contains('\u{1b}'));
-        assert!(text.len() <= PREVIEW_BYTES + 100);
-        assert!(data_row(&row).contains("\\u{1b}"));
-        let DataPayload::Ports {
-            values: Some(DataValue::Object(values)),
-            ..
-        } = &row.record.payload
-        else {
-            panic!("expected object");
-        };
-        let DataValue::String(value) = &values["value"] else {
-            panic!("expected string");
-        };
-        assert!(value.len() > PREVIEW_BYTES);
-        let mut terminal = Terminal::new(TestBackend::new(10, 4)).unwrap();
-        let mut view = TraceView {
-            visible: true,
-            session_logs: true,
-            pane: Pane::Data,
-            ..Default::default()
-        };
-        terminal
-            .draw(|frame| {
-                view.draw(
-                    frame,
-                    &TraceViewSnapshot {
-                        traces: &TraceSnapshot::default(),
-                        logs: &LogSnapshot::default(),
-                        data: SpanData::default(),
-                        stream_data: Some(&snapshot),
-                        spans: TraceAvailability::default(),
-                        streaming: true,
-                        finished: false,
-                    },
-                )
-            })
-            .unwrap();
     }
 }

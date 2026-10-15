@@ -152,7 +152,6 @@ fn check_capture(with_observation: bool) {
     let record = if with_observation {
         format!(
             r#"[ "$MF_CAPTURE_SNAPSHOTS" = 1 ] || exit 10
-[ "$MF_CAPTURE_STREAM_DATA" = 0 ] || exit 11
 python3 -I -S - <<'TRACES'
 import os
 import urllib.request
@@ -195,7 +194,6 @@ TRACES
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", "https://remote.invalid")
         .env("OTEL_EXPORTER_OTLP_HEADERS", "Authorization=secret")
         .env("MF_CAPTURE_SNAPSHOTS", "1")
-        .env("MF_CAPTURE_STREAM_DATA", "1")
         .spawn()
         .unwrap();
     let mut captured_stdout = child.stdout.take().unwrap();

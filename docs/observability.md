@@ -291,16 +291,16 @@ proves lifecycle loss. There is no replay, persistence, reconnect, retry schedul
 ## Input and output history
 
 Generated runners collect value history only when `MF_CAPTURE_SNAPSHOTS=1` and an OTLP logs
-endpoint are configured. Finite TUI execution sets this flag and uses its existing loopback `/v1/logs`
+endpoint are configured. TUI execution sets this flag in either mode and uses its existing loopback `/v1/logs`
 endpoint. Ordinary execution does not allocate a snapshot recorder. Runners built with
 `--no-telemetry` report that data history requires a telemetry-enabled build.
 
 Both finite and streaming execution attach the same `SnapshotRecorder` notification handle.
 It sends current `SnapshotEvent` values and retains no history or encoding state. Callers that
-want dictionary encoding and immutable finite history own a `SnapshotRecording` and attach
+want dictionary encoding and immutable history own a `SnapshotRecording` and attach
 `recording.recorder()`; its store and sink policy are independent of execution. Equal node
 states retain their existing deduplication; `Emitted` updates preserve
-repeated equal-valued sends in either backend. Snapshot events and storage contain no
+repeated equal-valued sends in either execution mode. Snapshot events and storage contain no
 stream identity or run binding. Finite wire records retain their version 1 representation.
 
 Snapshot events use the `mf.snapshot` instrumentation scope and the standard OTLP `LogRecord`
@@ -325,125 +325,59 @@ changing the workflow result. A missing definition, conflicting retransmission, 
 is shown as incomplete history; previously received snapshots remain available. Capture uses no
 temporary files or file polling.
 
-## Streaming data protocol
+## Shared snapshot capture
 
-Generated streaming runners enable bounded value capture only when `MF_CAPTURE_STREAM_DATA=1`
-and an OTLP logs exporter are available. TUI streaming execution requests this mode through its
-child-only environment and clears `MF_CAPTURE_SNAPSHOTS`; finite TUI execution requests snapshots
-and clears the stream data flag. Ordinary execution and local verbosity do not request values.
-Recompile older schema-4 runners to gain data capture; they continue to run with their existing
-lifecycle and raw detail support when the new flag is ignored.
+Finite and streaming generated runners enable business-data recording with
+`MF_CAPTURE_SNAPSHOTS=1`. TUI requests it for either mode through the child environment.
+Ordinary execution and local verbosity do not request values. Missing exporters and
+telemetry-disabled builds report capture availability without changing business results.
+Recompile existing runners to use the shared capture path.
 
-Missing endpoints, observation setup failures, and `--no-telemetry` builds report capture
-availability on stderr and preserve business results. Whole-stream `MF_CAPTURE_SNAPSHOTS=1`
-still fails before startup. Selecting a finite Task from a streaming binary keeps the selected
-operation's finite snapshot identity and ignores the whole-stream data flag.
+Both modes use `SnapshotRecording`, snapshot protocol version 1, `SnapshotExporter`,
+and the same receiver/store. There is no separate streaming value model or protocol.
+The exporter captures native trace/span context synchronously before SDK batching.
+Packet sequences order reconstruction and retransmissions; timestamps describe observation
+time and are not unique identities. Missing definitions can prevent later reconstruction;
+received history remains inspectable with an incomplete-history diagnostic.
 
-Streaming business data uses a separate `mf.stream.data` instrumentation scope and
-`mf.stream.data.record` LogRecords. Version 1 carries an independently decodable UTF-8 JSON
-envelope in the standard OTLP `BytesValue` body. The envelope contains `version`, `workflow_id`,
-`run_id`, unsigned-decimal `sequence`, `time_unix_nano`, optional native `trace_context`, and
-`payload`. Routing attributes repeat the workflow, run, version, and capture sequence; native
-trace/span fields must agree with the body when correlation is present.
+### Programmatic capture
 
-Payload kinds are `start`, `ports`, `status`, and `end`. Port records distinguish inputs from
-admitted outputs and retain the node/Loop path, stream invocation/trigger/input message, and
-applicable output message and emission ordinal. A bounded port-name summary marks truncation
-explicitly. Values use inline tagged null, bool, number, string, array, and object trees; number
-text preserves unsigned 64-bit integers and integer/float distinctions. Each record can be
-decoded without previous value definitions or contiguous arrival. An omitted value retains its
-input/emission identity and a byte/depth reason. Status and end records carry cumulative
-omission and sender-drop counts; their delivery does not establish a complete received history.
-
-Complete encoded records are capped at 256 KiB, and value depth at 48 so typed wrappers remain
-within the JSON decoder's recursion budget. The dedicated export worker retains at most 128
-queued records and 2 MiB of accounted queue storage. Queue admission is nonblocking; pressure
-drops data instead of adding business backpressure. The worker exports one bounded record per
-request, below its 2 MiB request cap and the receiver's 8 MiB ceiling. Its HTTP and shutdown
-operations use finite deadlines, and delivery diagnostics retain typed causes. Existing finite
-snapshot version 1 and streaming lifecycle schema 4 retain their original contracts.
-
-### Programmatic stream capture
-
-Attach a `mf_runtime::SnapshotRecorder` through `StreamOptions.snapshots`, using the same
-notification interface as finite execution. `SnapshotRecorder::new` receives node scope,
-original immutable inputs/outputs, and outcome through one callback without requiring
-telemetry or run binding. Callers own retention policy; callbacks must be nonblocking
-and must not unwind.
-
-For OTLP inspection, the callback delegates to `mf_telemetry::stream_data::StreamDataRecorder`.
-That adapter owns encoding budgets, capture sequences, loss accounting, and typed diagnostics.
-The caller finishes capture after execution on both success and failure, then finishes export.
-Custom callbacks own their retention policies and must be nonblocking and must not unwind.
+Attach the same `SnapshotRecorder` notification handle through finite execution context
+or `StreamOptions.snapshots`. It receives node, scope, original immutable values, and
+outcome without requiring telemetry or run binding. Callbacks run outside scheduler locks
+and must not unwind. The caller chooses recording and retention policy.
 
 ```rust
-let observation = plan.start_stream_observation(&providers.observer(), run_id)?;
-let mut exporter = mf_telemetry::otlp::StreamDataExporter::from_env()?;
-let sender = exporter.sender();
-let capacity = sender.clone();
-let capture = mf_telemetry::stream_data::StreamDataRecorder::new(
-    observation.clone(),
-    move |record| Ok(sender.try_emit(record)?),
-    move || capacity.available(),
-);
-let encoded = capture.clone();
-let recorder = mf_runtime::SnapshotRecorder::new(move |event| {
-    let (direction, values) = match event.snapshot.outcome {
-        mf_runtime::SnapshotOutcome::Started =>
-            (mf_telemetry::stream_data::Direction::Input, &event.snapshot.inputs),
-        mf_runtime::SnapshotOutcome::Succeeded | mf_runtime::SnapshotOutcome::Emitted =>
-            (mf_telemetry::stream_data::Direction::Output, &event.snapshot.outputs),
-        mf_runtime::SnapshotOutcome::Failed | mf_runtime::SnapshotOutcome::Skipped => return,
-    };
-    encoded.record(&event.node, &event.scope, direction, values);
-});
-let result = (|| -> Result<(), Box<dyn std::error::Error>> {
-    let instance = mf_compiler::start_stream(
-        &plan,
-        &registry,
-        mf_runtime::StreamOptions {
-            observation: Some(observation),
-            snapshots: Some(recorder),
-            arguments,
-            ..Default::default()
-        },
-    )?;
-    while let Some(output) = instance.recv()? {
-        handle_output(output)?;
-    }
-    instance.join()?;
-    Ok(())
-})();
-capture.finish();
-if let Some(error) = capture.diagnostic() {
-    eprintln!("stream data capture incomplete: {error}");
+let recording = mf_runtime::SnapshotRecording::memory();
+let instance = mf_compiler::start_stream(
+    &plan,
+    &registry,
+    mf_runtime::StreamOptions {
+        snapshots: Some(recording.recorder()),
+        arguments,
+        ..Default::default()
+    },
+)?;
+while let Some(output) = instance.recv()? {
+    handle_output(output)?;
 }
-if let Err(error) = exporter.finish() {
-    eprintln!("stream data export incomplete: {error}");
-}
-result?;
+instance.join()?;
+recording.finish();
 ```
 
-Inputs are captured after dependency/type validation and before invocation. Synchronous task
-outputs are captured after publication validation. Producers capture each successful send while
-their span is running; a later producer failure leaves those admitted records available. Event
-callbacks record each admitted emission, including earlier emissions when a later publication or
-timer update fails. Batch buffering captures inputs without inventing an output. Timer and close
-outputs retain their active callback span without fabricated input values. Loop and Iteration
-body work retains its execution scope and active native context. Virtual scope input nodes
-have no independent invocation; their snapshots retain the currently active enclosing context.
+For OTLP export, use `SnapshotRecording::with_sink` with `SnapshotExporter`, exactly
+as for finite execution, and finish recording on both success and failure. Export
+backpressure and typed capture diagnostics retain their existing snapshot behavior.
+The recording/receiver owns dictionary values and historical roots; retained memory
+can grow with distinct values and execution scopes. Runtime execution owns no history
+container, value limit, capture queue, or eviction policy.
 
-The runtime notifies current snapshots after releasing coordinator locks. Telemetry reserves
-capture sequences in callback delivery order, captures current native trace/span context and
-time, and encodes values within its own budgets. Capture order need not match concurrent
-business admission order; lifecycle telemetry retains execution and message causality.
-Timestamp is display metadata rather than a unique identity. Adapters that queue raw events
-must capture the current context before asynchronous forwarding. The supplied recorder
-isolates sink errors and panics as typed diagnostics
-without changing workflow results, and its sender uses nonblocking bounded queue admission.
-Capture-enabled domains use dynamic execution when intermediate values would otherwise remain
-inside an optimized typed segment. The runner finishes capture after workers have joined, then
-finishes its exporter within the normal deadline. Historical lists belong to the TUI consumer.
+Inputs are captured after validation and before invocation. Task outputs are captured
+after publication validation. Producers and event callbacks record each admitted emission,
+including earlier outputs when later publication fails. Equal emissions stay distinct;
+buffering does not invent an output. Timer/close outputs retain active callback context
+without fabricated inputs. Nested work retains its scope and native context. An emission
+never implies successful completion; lifecycle telemetry retains execution and message causality.
 
 ## Graph presentation
 
@@ -545,41 +479,29 @@ entry, and End/`f` to follow the last entry in tree order. `v` or Esc returns to
 Tab switches the selected span's right-hand pane:
 
 - **Details** shows timing, status, IDs, attributes, span events, links, resource, and scope metadata.
-- **Data** shows finite node inputs/outputs, outcome, skipped ports, errors, and snapshot capture
-  diagnostics. Streaming Data lists independently captured inputs and admitted emissions for the
-  selected span, ordered by capture sequence. Each row identifies node, direction, ports,
-  timestamp, and a bounded value summary; its preview also includes scope and native context.
-  Select a row to inspect its decoded values or byte/depth omission reason. Stream outcomes and
-  skipped ports keep their lifecycle meanings in Details; a payload never proves successful work.
-  Matching uses exact native trace/span IDs. Repeated node names never substitute for invocation identity.
+- **Data** lists the selected invocation's reconstructed snapshots in both modes. Each row
+  identifies node, outcome, capture sequence, and timestamp. Select a row to inspect decoded
+  inputs, outputs, skipped ports, errors, scope, and native context. Matching uses exact
+  native trace/span IDs; repeated node names do not substitute for invocation identity.
 - **Logs** shows independent LogRecords associated with both the selected trace and span IDs. Press
   `l` to focus that list and select a record for its timestamp, severity, body, attributes, and metadata.
 
 Press `g` to switch between spans and session-wide LogRecords. Session logs remain available before
 spans finish, when spans are unsampled, or when records lack a retained span. In session log mode,
-Tab switches Logs and Data. For streaming sessions, Data lists all retained input/emission records,
-including live producers whose spans have not finished or exported. Rows without native context
-remain visible without an inferred span. Finite session Data still uses the selected correlated log
-for its node snapshot. Span events remain part of Details rather than becoming LogRecords.
+Tab switches Logs and Data. Session Data lists all reconstructed snapshots in either mode,
+including producer emissions received before span export. Missing native context remains
+visible without an inferred span. Span events remain part of Details rather than becoming LogRecords.
 
 In span Data, press `l` to focus the record list; session Data already focuses its list. Use `j`/`k`
 or Up/Down to select, Home for the oldest retained row, and End/`f` to resume tail following.
 PgUp/PgDn page a focused Data list by ten records; otherwise they scroll the value preview.
-Selection follows the capture sequence across late insertions. If a selected value is evicted,
-Data reports its sequence and selects the nearest retained row. Scope changes reset following.
+Selection follows the capture sequence as new entries arrive. Scope changes reset following.
 The value preview is capped at 64 KiB, preserves UTF-8, escapes terminal controls, and marks
 preview truncation while leaving the admitted value in storage. Lists and capture diagnostics
 refresh throughout collection and remain inspectable in the finished view.
 
-Finite TUI children keep `MF_CAPTURE_SNAPSHOTS=1` and clear `MF_CAPTURE_STREAM_DATA`.
-Streaming children receive `MF_CAPTURE_SNAPSHOTS=0` and `MF_CAPTURE_STREAM_DATA=1`, including
-when inherited settings request whole-run snapshots. Details and Logs remain available when a
-compatible older runner cannot provide stream data. The receiver retains at most 4,096 unique spans and 4,096 unique
-LogRecords, with a separate 16 MiB encoded-data budget for each signal including resource/scope
-metadata. Admitted raw detail remains available throughout the session; overflow is counted as
-signal-specific display drops and does not stop lifecycle reduction or snapshot reconstruction.
-Span/log previews are limited to 64 KiB and each input/output object preview retains its 64 KiB limit.
-Capture errors preserve already decoded values and remain separate from raw signal retention loss.
+Both finite and streaming TUI children receive `MF_CAPTURE_SNAPSHOTS=1`, including when
+inherited environment variables attempt to disable capture. Values remain opt-in outside TUI.
 
 The CLI keeps at most 256 MiB of stdout in a private temporary spool and 1 MiB of recent stderr. It drains both pipes
 without waiting for a frame. If stdout capture fails or reaches its limit, the CLI stops the process group, displays the
@@ -668,11 +590,9 @@ after joining the instance. Generated runners configure the existing bounded OTL
 attempt bounded shutdown on success and failure. Disabled export, queue pressure, and unreachable
 Collectors do not change workflow results or trigger retries.
 
-Programmatic `StreamOptions.snapshots` uses the common notification handle. Bounded streaming
-OTLP data is available through its telemetry adapter or `MF_CAPTURE_STREAM_DATA=1` as described
-above. The legacy `MF_CAPTURE_SNAPSHOTS=1` runner flag selects the finite wire backend and remains
-unsupported for whole-stream runner execution. Validation and description modes remain free
-of execution and ignore capture/export setup. Existing finite-run history is unchanged.
+Programmatic `StreamOptions.snapshots` uses the common notification handle and caller-owned
+`SnapshotRecording`. `MF_CAPTURE_SNAPSHOTS=1` selects the same backend in either runner mode.
+Validation and description modes remain free of execution and ignore capture/export setup.
 
 ## Isolated task observations
 
@@ -691,29 +611,19 @@ absent from the selected description and do not receive synthetic skip or comple
 
 Opt-in snapshots belong to the finite selected operation, including when its Task is selected from a
 streaming binary. Snapshot export must use the selected description's identity. Whole-stream invocation
-continues to reject whole-run snapshot capture while supporting the independent bounded data mode. Export and snapshot sink failures retain existing bounded
+uses the same snapshot recorder and exporter with its own workflow/run identity. Export and snapshot sink failures retain existing bounded
 cleanup and diagnostics without changing business results or exit status.
 
-### Streaming Data receiver retention
+### Shared Data history
 
-The dedicated `mf.stream.data` scope is decoded before raw-log preview truncation.
-Its store is independent of lifecycle reduction, span retention, finite snapshot assembly,
-and the 4,096-row raw-log budget. Each payload is independently decodable; later sequences
-are immediately inspectable even when earlier packets or native spans are absent.
-Only exact native trace/span IDs create span associations. Session browsing also retains
-uncorrelated data, without inferring a span from a node name.
+`mf.snapshot` records reconstruct one `SnapshotStore` independently of raw log/span retention
+and lifecycle reduction. Both Data list scopes read that same history. The receiver retains
+native correlation, sequence, and timestamp alongside each admitted snapshot entry, including
+entries without a retained span. It caches views until new capture evidence arrives.
 
-The Data store retains at most 4,096 payload rows and 16 MiB of accounted memory,
-including decoded strings/collections, row indexes, 4,096 SHA-256 sequence witnesses,
-and a 2 MiB reservation for the first typed decoding/conflict diagnostic. Oldest rows
-are evicted; old sequence retransmissions cannot repopulate retired history. Public
-snapshots share retained rows through `Arc`; consumers must release superseded snapshots.
-
-Capture status separates value omissions, cumulative sender drops, missing transport
-sequences, local payload evictions, and decoding/conflict faults. Sender drops and gaps
-can describe the same loss and must not be summed. Sequence verification uses a contiguous
-watermark plus bounded witnesses; retiring unresolved evidence changes gaps to unknown.
-Missing start or end evidence never implies successful empty capture. A complete delivery
-status describes received envelopes, while eviction and omission counters describe which
-values remain inspectable. Data faults retain typed error sources and do not mark lifecycle
-records as lost or stop later independent Data, log, trace, or finite snapshot admission.
+Dictionary definitions and historical roots remain available for the collected session;
+there is no stream-only eviction or omission policy. Missing records, conflicting evidence,
+invalid definitions, or an absent end record produce explicit capture diagnostics without
+changing workflow outcomes or lifecycle integrity. A gap waits for ordered reconstruction
+rather than exposing a value whose definitions have not arrived. Already reconstructed
+history remains available after collection finishes.

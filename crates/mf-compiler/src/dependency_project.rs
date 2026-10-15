@@ -210,8 +210,7 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Resu
     let snapshots = if capture_requested() {
         let setup = (|| -> Result<_, Box<dyn std::error::Error>> {
             let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
-            let description = mf_compiler::describe_compiled(&plan)?;
-            snapshot_recorder_for_id(description.workflow_id, run_id)
+            snapshot_recorder(&plan, run_id)
         })();
         match setup {
             Ok(recording) => Some(recording),
@@ -324,7 +323,7 @@ fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Result<mf_r
     result
 }
 
-#[cfg(all(feature = "telemetry", not(feature = "streaming")))]
+#[cfg(feature = "telemetry")]
 fn snapshot_recorder(plan: &mf_compiler::CompiledWorkflow, run_id: mf_telemetry::identity::RunId) -> Result<mf_runtime::SnapshotRecording, Box<dyn std::error::Error>> {
     let description = mf_compiler::describe_compiled(plan)?;
     snapshot_recorder_for_id(description.workflow_id, run_id)

@@ -6,9 +6,9 @@
 
 ## 2. Reuse receiving and presentation
 
-- [ ] 2.1 Use one SnapshotCapture and SnapshotStore for both modes; retain per-entry native metadata and remove the dedicated protocol/exporter/value adapter.
-- [ ] 2.2 Use one session/invocation Data list and decoded preview; remove the stream store and duplicate tests.
-- [ ] 2.3 Update documentation, validate affected tests, and commit this group.
+- [x] 2.1 Use one SnapshotCapture and SnapshotStore for both modes; retain per-entry native metadata and remove the dedicated protocol/exporter/value adapter.
+- [x] 2.2 Use one session/invocation Data list and decoded preview; remove the stream store and duplicate tests.
+- [x] 2.3 Update documentation, validate affected tests, and commit this group.
 
 ## 3. Review and finish
 

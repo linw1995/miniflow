@@ -40,7 +40,9 @@ pub struct SnapshotCapture {
     pub diagnostic: Option<Arc<CaptureError>>,
     assembler: Assembler,
     finished: bool,
-    pending_contexts: BTreeMap<usize, Option<SpanKey>>,
+    pending_contexts: BTreeMap<usize, SnapshotMetadata>,
+    metadata: Vec<SnapshotMetadata>,
+    cached: Option<Arc<HistorySnapshot>>,
     nodes_by_span: BTreeMap<SpanKey, Arc<NodeSnapshot>>,
 }
 
@@ -51,12 +53,20 @@ pub struct SpanData {
 }
 
 #[derive(Clone, Debug)]
+pub struct SnapshotMetadata {
+    pub sequence: usize,
+    pub time_unix_nano: u64,
+    pub correlation: Option<SpanKey>,
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct HistorySnapshot {
     pub history_len: usize,
     pub value_count: usize,
     pub selected: usize,
     pub first: usize,
     pub entries: Vec<SnapshotEntry>,
+    pub metadata: Vec<SnapshotMetadata>,
     pub status: String,
 }
 
@@ -68,6 +78,7 @@ impl SnapshotCapture {
         if let Some(error) = &self.diagnostic {
             return Err(error.clone());
         }
+        self.cached = None;
         let result = (|| -> Result<(), CaptureError> {
             let first = self.assembler.next_sequence();
             let sequence = record
@@ -89,10 +100,16 @@ impl SnapshotCapture {
                 ensure!(
                     self.pending_contexts
                         .get(&sequence)
-                        .is_none_or(|previous| previous == &correlation),
+                        .is_none_or(|previous| previous.correlation == correlation),
                     ConflictingContextSnafu { sequence }
                 );
-                self.pending_contexts.insert(sequence, correlation);
+                self.pending_contexts
+                    .entry(sequence)
+                    .or_insert(SnapshotMetadata {
+                        sequence,
+                        time_unix_nano: record.time_unix_nano,
+                        correlation,
+                    });
             }
             for (offset, body) in self.assembler.push(record)?.into_iter().enumerate() {
                 let record: SnapshotRecord = serde_json::from_value(body).context(RecordSnafu)?;
@@ -100,8 +117,15 @@ impl SnapshotCapture {
                     SnapshotRecord::Node { scope, node, .. } => Some((scope.clone(), node.clone())),
                     _ => None,
                 };
-                self.store.apply(record)?;
-                let correlation = self.pending_contexts.remove(&(first + offset)).flatten();
+                let changed = self.store.apply(record)?;
+                let metadata = self
+                    .pending_contexts
+                    .remove(&(first + offset))
+                    .expect("assembled records retain their packet metadata");
+                let correlation = metadata.correlation.clone();
+                if changed {
+                    self.metadata.push(metadata);
+                }
                 if let (Some((scope, node)), Some(correlation)) = (node, correlation) {
                     let snapshot = self
                         .store
@@ -122,11 +146,13 @@ impl SnapshotCapture {
     }
 
     pub fn fail(&mut self, error: &str) {
+        self.cached = None;
         self.diagnostic
             .get_or_insert_with(|| Arc::new(UnavailableSnafu { message: error }.build()));
     }
 
     pub fn finish(&mut self) {
+        self.cached = None;
         self.finished = true;
         if self.diagnostic.is_none()
             && (self.assembler.has_pending()
@@ -164,6 +190,15 @@ impl SnapshotCapture {
         }
     }
 
+    pub fn snapshot(&mut self) -> Arc<HistorySnapshot> {
+        if let Some(snapshot) = &self.cached {
+            return snapshot.clone();
+        }
+        let snapshot = Arc::new(self.view(None, usize::MAX));
+        self.cached = Some(snapshot.clone());
+        snapshot
+    }
+
     pub fn view(&self, selected: Option<usize>, rows: usize) -> HistorySnapshot {
         let history = self.store.history();
         let selected = selected
@@ -180,16 +215,19 @@ impl SnapshotCapture {
             selected,
             first,
             entries: history.iter().skip(first).take(rows).cloned().collect(),
+            metadata: self
+                .metadata
+                .iter()
+                .skip(first)
+                .take(rows)
+                .cloned()
+                .collect(),
             status,
         }
     }
 }
 
-pub fn span_data_preview(data: &SpanData, streaming: bool, finished: bool) -> String {
-    if streaming {
-        return "Data is unavailable for streaming workflows.\nDetails and Logs remain available."
-            .into();
-    }
+pub fn span_data_preview(data: &SpanData, finished: bool) -> String {
     let mut text = format!("Data capture: {}\n", data.status);
     if let Some(node) = &data.node {
         text.push_str(&format!("Outcome: {:?}\n", node.outcome));
@@ -421,6 +459,25 @@ mod tests {
             json!("second invocation")
         );
         assert!(capture.data(&[2; 16], &[1; 8]).node.is_none());
+        let history = capture.snapshot();
+        assert_eq!(history.entries.len(), 2);
+        assert_eq!(
+            history
+                .metadata
+                .iter()
+                .map(|metadata| metadata.sequence)
+                .collect::<Vec<_>>(),
+            [4, 7]
+        );
+        assert_eq!(
+            history.metadata[0].correlation,
+            Some((vec![1; 16], vec![1; 8]))
+        );
+        assert_eq!(
+            history.metadata[1].correlation,
+            Some((vec![1; 16], vec![2; 8]))
+        );
+        assert!(Arc::ptr_eq(&history, &capture.snapshot()));
         assert!(capture.pending_contexts.is_empty());
         assert_eq!(capture.data(&[1; 16], &[1; 8]).status, "Complete");
     }

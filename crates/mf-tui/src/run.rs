@@ -208,7 +208,6 @@ pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<
         description,
         arguments,
     } = prepare_launch(path, options)?;
-    let streaming = description.is_streaming();
     let layout = GraphLayout::new(&description).context(GraphSnafu)?;
     let mut body_layouts = BTreeMap::new();
     for body in &description.loop_bodies {
@@ -250,14 +249,7 @@ pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<
         command
             .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
             .env("MF_RUN_ID", run_id.to_string())
-            .env(
-                mf_telemetry::SNAPSHOT_CAPTURE_ENV,
-                if streaming { "0" } else { "1" },
-            )
-            .env(
-                mf_telemetry::STREAM_DATA_CAPTURE_ENV,
-                if streaming { "1" } else { "0" },
-            );
+            .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1");
         let mut command = CommandWrap::from(command);
         command.wrap(ProcessGroup::leader());
         let child = command.spawn().context(SpawnSnafu {
@@ -941,19 +933,13 @@ fn draw(
             .draw(|frame| {
                 let traces = receiver.trace_snapshot();
                 let logs = receiver.log_snapshot();
-                let data = view_state.traces.correlation(&traces, &logs).map_or_else(
-                    || receiver.span_data(&[], &[]),
-                    |(trace_id, span_id)| receiver.span_data(&trace_id, &span_id),
-                );
                 view_state.traces.draw(
                     frame,
                     &TraceViewSnapshot {
                         traces: &traces,
                         logs: &logs,
-                        data,
-                        stream_data: Some(&receiver.data_snapshot()),
+                        data: &receiver.data_snapshot(),
                         spans: snapshot.traces,
-                        streaming: snapshot.stream.is_some(),
                         finished: status.is_some(),
                     },
                 );
