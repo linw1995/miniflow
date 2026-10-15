@@ -527,7 +527,12 @@ impl ExecutionContext {
         for (scope_index, scope) in source.scopes.iter().enumerate() {
             if let Some(target) = self.scopes.get_mut(scope_index) {
                 for (name, value) in &scope.variables {
-                    if target.variables.get(name) != Some(value) {
+                    // JSON equality ignores secret metadata; preserve metadata-only writes.
+                    if !target
+                        .variables
+                        .get(name)
+                        .is_some_and(|previous| previous.ptr_eq(value))
+                    {
                         target.variables.insert(name.clone(), value.clone());
                         self.outputs
                             .insert(output_id(&target.source_id, name), Some(value.clone()));
@@ -1409,6 +1414,34 @@ mod tests {
 
     fn port(name: &str, value_type: ValueType, required: bool) -> PortSpec {
         PortSpec::owned(name, value_type, required)
+    }
+
+    #[test]
+    fn domain_merge_preserves_secret_only_scope_updates() {
+        let public = Value::from("credential");
+        let scope = ExecutionScope::new(
+            "loop",
+            "%loop",
+            0,
+            Outputs::from([("token".into(), public.clone())]),
+            BTreeMap::from([("token".into(), ValueType::String)]),
+        )
+        .unwrap();
+        let mut target = ExecutionContext::default();
+        target.scopes.push(scope);
+        target
+            .outputs
+            .insert("%loop.token".into(), Some(public.clone()));
+        let mut source = target.fork_domain_with_observation(None);
+        source.scopes[0]
+            .variables
+            .insert("token".into(), public.into_secret());
+        target.merge_domain_outputs::<()>(&source, std::iter::empty::<&FlowNode<()>>());
+        assert!(target.scope_values().unwrap()["token"].is_secret());
+        let ContextValue::Value(value) = target.output("%loop.token").unwrap() else {
+            panic!("scope output must be available");
+        };
+        assert!(value.is_secret());
     }
 
     #[test]

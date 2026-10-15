@@ -116,7 +116,59 @@ fn snapshots_are_live_and_distinguish_buffering_from_timer_outputs() {
     );
 }
 
+#[test]
+fn secret_emissions_survive_batching_without_entering_snapshot_definitions() {
+    let plan = plan(definition());
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let records = captured.clone();
+    let recording = mf_runtime::SnapshotRecording::with_sink(move |record| {
+        records.lock().unwrap().push(record.clone());
+        Ok(())
+    })
+    .unwrap();
+    let instance = start_stream(
+        &plan,
+        &NodeRegistry::from_inventory().unwrap(),
+        StreamOptions {
+            snapshots: Some(recording.recorder()),
+            clock: Arc::new(Clock::default()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let secret = mf_runtime::ValueRef::from(987654321).into_secret();
+    instance.source.send(secret.clone()).unwrap();
+    instance.source.send(7).unwrap();
+    instance.source.close();
+    let output = instance.recv().unwrap().unwrap();
+    assert!(output.outputs["batch"][0].ptr_eq(&secret));
+    assert_eq!(
+        serde_json::to_value(&output.outputs["batch"]).unwrap(),
+        json!([987654321, 7])
+    );
+    assert!(instance.recv().unwrap().is_none());
+    instance.join().unwrap();
+    recording.finish();
+    assert!(recording.diagnostic().is_none());
+    let records = captured.lock().unwrap();
+    assert!(
+        !serde_json::to_string(&*records)
+            .unwrap()
+            .contains("987654321")
+    );
+    let mut store = mf_runtime::SnapshotStore::default();
+    for record in records.iter().cloned() {
+        store.apply(record).unwrap();
+    }
+    assert!(store.is_complete());
+    assert_eq!(
+        store.current().node(&[], "collect").unwrap().outputs["items"],
+        json!(["[REDACTED]", 7])
+    );
+}
+
 struct PartialCapture;
+
 impl mf_runtime::EventNode for PartialCapture {
     fn on_event(
         &mut self,
