@@ -104,12 +104,6 @@ impl Observer {
 }
 
 impl StreamObservation {
-    pub fn run_id(&self) -> RunId {
-        self.0.run_id
-    }
-    pub fn is_same_run(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
     pub fn enter(&self) -> ContextGuard {
         self.0.context.clone().attach()
     }

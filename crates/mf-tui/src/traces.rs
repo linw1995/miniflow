@@ -1412,7 +1412,10 @@ mod tests {
         let recording = mf_runtime::SnapshotRecording::memory();
         for value in [42, 73, 99] {
             recording.record(
-                vec![],
+                vec![mf_telemetry::event::LoopPathEntry {
+                    loop_id: "repeat".into(),
+                    index: 2_i64.try_into().unwrap(),
+                }],
                 "same",
                 mf_runtime::NodeSnapshot {
                     inputs: mf_runtime::ValueRef::object([]),
@@ -1483,6 +1486,7 @@ mod tests {
         );
         assert!(
             text.contains("73")
+                && text.contains("Scope: repeat[2]")
                 && text.contains("incomplete")
                 && text.contains("Inspecting selection"),
             "{text}"
