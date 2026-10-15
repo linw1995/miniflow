@@ -248,6 +248,66 @@ fn receive(instance: &StreamInstance) -> i64 {
 }
 
 #[test]
+fn data_capture_preserves_admitted_outputs_when_a_producer_fails() {
+    for (mode, observed) in [
+        ("fail_after", false),
+        ("invalid", false),
+        ("fail_after", true),
+        ("invalid", true),
+    ] {
+        let key = format!("captured-{mode}-{observed}");
+        let harness = capture::Harness::new(true);
+        let mut value = graph(&key, 1);
+        value["nodes"][0]["config"]["mode"] = json!(mode);
+        let registry = NodeRegistry::from_inventory().unwrap();
+        let plan = compile_definition(
+            &serde_json::from_value::<WorkflowDefinition>(value.clone()).unwrap(),
+            &registry,
+        )
+        .unwrap();
+        let observation = plan
+            .start_stream_observation(&harness.observer(), RunId::new())
+            .unwrap();
+        let capture = mf_runtime::SnapshotRecording::memory();
+        let instance = start(
+            value,
+            StreamOptions {
+                observation: observed.then_some(observation),
+                snapshots: Some(capture.recorder()),
+                ..Default::default()
+            },
+        );
+        let producer = probe(&key);
+        let _release = Release(producer.clone());
+        instance.source.send(json!(42)).unwrap();
+        instance.source.close();
+        if mode == "fail_after" {
+            assert_eq!(receive(&instance), 42);
+            producer.release();
+        }
+        assert!(instance.recv().is_err());
+        assert!(instance.join().is_err());
+        capture.finish();
+        assert!(capture.diagnostic().is_none());
+        let outputs = capture
+            .history()
+            .into_iter()
+            .filter_map(|entry| {
+                let node = entry.snapshot.node(&entry.scope, &entry.node).unwrap();
+                (entry.node.as_ref() == "produce"
+                    && node.outcome == mf_runtime::SnapshotOutcome::Emitted)
+                    .then(|| serde_json::to_value(&node.outputs).unwrap())
+            })
+            .collect::<Vec<_>>();
+        if mode == "fail_after" {
+            assert_eq!(outputs, vec![json!({"value":42})]);
+        } else {
+            assert!(outputs.is_empty());
+        }
+    }
+}
+
+#[test]
 fn large_output_drains_after_input_closes_with_one_task_worker() {
     let instance = start(graph("large", 1_000), StreamOptions::default());
     instance.source.clone().send(json!(10)).unwrap();

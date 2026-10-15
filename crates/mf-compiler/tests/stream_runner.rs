@@ -138,15 +138,24 @@ fn generated_streams_preserve_protocol_boundaries_and_installation_guarantees() 
     assert_eq!(fs::read_to_string(&trace).unwrap(), "");
 
     fs::write(&trace, "").unwrap();
-    let capture = Command::new(&executable)
-        .env("MF_CAPTURE_SNAPSHOTS", "1")
-        .stdin(Stdio::null())
-        .output()
+    let mut unavailable = Command::new(&executable)
+        .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
-    assert!(!capture.status.success());
-    assert!(String::from_utf8_lossy(&capture.stderr).contains("snapshot capture"));
-    assert_eq!(fs::read_to_string(&trace).unwrap(), "");
-
+    unavailable
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"1\n2\n")
+        .unwrap();
+    let unavailable = unavailable.wait_with_output().unwrap();
+    assert_eq!(records(&unavailable), [json!({"batch":["1","2"]})]);
+    assert!(
+        String::from_utf8_lossy(&unavailable.stderr).contains("telemetry-enabled build required")
+    );
     fs::write(&trace, "").unwrap();
     let output = run(&executable, b"1\n2\r\n3\n4\n5");
     assert_eq!(

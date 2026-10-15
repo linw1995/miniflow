@@ -16,7 +16,7 @@ pub mod state;
 pub mod traces;
 
 mod snapshots;
-pub use snapshots::{HistorySnapshot, SpanData};
+pub use snapshots::{HistorySnapshot, SnapshotMetadata, SpanData};
 
 #[cfg(all(test, unix))]
 #[path = "../tests/common/mod.rs"]

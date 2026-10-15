@@ -328,17 +328,25 @@ evidence to a limit MUST permanently prevent a complete-observation claim.
 
 ### Requirement: Keep streaming display independent of snapshot capture
 
-The TUI SHALL explicitly disable whole-run value snapshots for streaming children, including inherited capture settings, while retaining lifecycle, trace, and log display. The Data pane SHALL explain that streaming value snapshots are unavailable. Supported finite workflows SHALL retain snapshot capture and expose their decoded inputs/outputs in the observation view.
+The TUI SHALL enable the common snapshot flag for both execution modes, overriding inherited
+capture settings. Lifecycle, trace, and log display SHALL remain usable when snapshot capture
+is unavailable. Data SHALL report missing capture support or evidence rather than claiming
+successful empty capture.
 
 #### Scenario: Launch with inherited snapshot settings
 
-- **WHEN** the parent requests snapshot capture and the TUI launches a streaming workflow
-- **THEN** the child runs with stream capture disabled and its lifecycle, spans, and logs remain observable
+- **WHEN** inherited settings disable snapshots and the TUI launches either execution mode
+- **THEN** the child receives MF_CAPTURE_SNAPSHOTS=1 and lifecycle, spans, and logs remain observable
 
 #### Scenario: Inspect a finite workflow's values
 
 - **WHEN** a supported finite workflow is launched in TUI mode
-- **THEN** its value snapshots are captured and browsable through the corresponding node span's Data pane
+- **THEN** the shared snapshot pipeline supplies its invocation and session Data lists
+
+#### Scenario: Inspect an older compatible streaming runner
+
+- **WHEN** a compatible lifecycle-schema-4 runner lacks shared snapshot support
+- **THEN** Details and Logs remain usable and Data reports absent capture evidence without claiming complete empty history
 
 ### Requirement: Retain snapshot decoding failures until presentation
 
@@ -634,3 +642,36 @@ Raw span and log retention SHALL have finite count and byte budgets, deduplicate
 
 - **WHEN** the runner exits and the final view remains open
 - **THEN** retained spans, logs, and associated data remain inspectable until the user closes the TUI
+
+### Requirement: Browse shared snapshot history as Data lists
+
+Both execution modes SHALL share session and exact native trace/span Data lists
+over reconstructed snapshot history. Rows SHALL identify node, outcome, time, and
+sequence; selection SHALL reveal decoded snapshot values. Capture diagnostics and
+history SHALL remain inspectable after execution. History retention SHALL be
+caller-owned without stream-only eviction or omission policies.
+
+#### Scenario: Inspect an active producer
+
+- **WHEN** an active producer publishes several equal admitted outputs before its span ends
+- **THEN** session Data presents distinct reconstructed snapshot entries before span export
+
+#### Scenario: Inspect repeated invocations
+
+- **WHEN** invocations share a node name but have different native trace/span context
+- **THEN** selecting a span shows only its own snapshot entries
+
+#### Scenario: Preserve selection
+
+- **WHEN** a user selects an older entry and more snapshots arrive
+- **THEN** that entry stays selected until the user resumes following
+
+#### Scenario: Inspect incomplete history
+
+- **WHEN** collection ends without complete reconstruction
+- **THEN** the common capture diagnostic and previously reconstructed entries remain inspectable
+
+#### Scenario: Inspect missing context and large values
+
+- **WHEN** a snapshot lacks native context or exceeds preview limits
+- **THEN** it remains in session history without guessed association or truncating stored values

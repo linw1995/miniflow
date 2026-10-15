@@ -299,8 +299,8 @@ impl ExecutionContext {
             pending_loop_write: None,
             current_position: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
-            snapshots: None,
-            snapshot_prefix: Vec::new(),
+            snapshots: self.snapshots.clone(),
+            snapshot_prefix: self.snapshot_prefix.clone(),
             workflow_arguments: crate::WorkflowArguments::default(),
             startup_nodes: BTreeSet::new(),
             worker_handle: self.worker_handle.clone(),
@@ -626,10 +626,10 @@ impl ExecutionContext {
         error: Option<&dyn std::fmt::Display>,
     ) {
         if let Some(recorder) = &self.snapshots {
-            recorder.record(
-                self.snapshot_path(),
-                node.definition_id.as_str(),
-                crate::NodeSnapshot {
+            recorder.record(crate::SnapshotEvent {
+                scope: self.snapshot_path(),
+                node: node.definition_id.as_str().into(),
+                snapshot: crate::NodeSnapshot {
                     inputs: crate::snapshot::ports_snapshot(inputs),
                     outputs: result.map_or_else(
                         || crate::ValueRef::object([]),
@@ -653,7 +653,7 @@ impl ExecutionContext {
                     outcome,
                     error: error.map(|error| error.to_string().into()),
                 },
-            );
+            });
         }
     }
 

@@ -310,6 +310,7 @@ struct Shared {
     changed: Condvar,
     execution: StreamExecution,
     observation: Option<StreamObservation>,
+    snapshots: Option<crate::SnapshotRecorder>,
     cancellation: crate::StreamCancellation,
     worker_limit: std::num::NonZeroUsize,
 }
@@ -339,6 +340,28 @@ pub struct Emitter<'a> {
     publication_failed: bool,
 }
 
+fn capture_snapshot(
+    shared: &Shared,
+    node: &str,
+    inputs: &Inputs,
+    outputs: &crate::Outputs,
+    outcome: crate::SnapshotOutcome,
+) {
+    if let Some(recorder) = &shared.snapshots {
+        recorder.record(crate::SnapshotEvent {
+            scope: Vec::new(),
+            node: node.into(),
+            snapshot: crate::NodeSnapshot {
+                inputs: crate::snapshot::ports_snapshot(inputs),
+                outputs: crate::snapshot::ports_snapshot(outputs),
+                skipped: Arc::from([]),
+                outcome,
+                error: None,
+            },
+        });
+    }
+}
+
 impl Emitter<'_> {
     /// Wait for queue capacity and transfer one validated result to the runtime.
     /// Failure wakes waiting senders. Success does not imply downstream completion.
@@ -359,6 +382,11 @@ impl Emitter<'_> {
             }
             state = self.shared.changed.wait(state).unwrap();
         }
+        let captured_ports = self
+            .shared
+            .snapshots
+            .as_ref()
+            .map(|_| result.outputs.clone());
         let ports = result.outputs.keys().cloned().collect::<Vec<_>>();
         let admitted: Result<(), StreamError> = (|| {
             let emitted = self.emitted.checked_add(1).context(ResourceSnafu {
@@ -375,6 +403,18 @@ impl Emitter<'_> {
             state.failure_node = Some(self.plan.nodes()[self.index].definition_id.to_string());
         }
         self.shared.changed.notify_all();
+        drop(state);
+        if admitted.is_ok()
+            && let Some(ports) = captured_ports
+        {
+            capture_snapshot(
+                self.shared,
+                self.plan.nodes()[self.index].definition_id.as_str(),
+                &Inputs::new(),
+                &ports,
+                crate::SnapshotOutcome::Emitted,
+            );
+        }
         admitted
     }
 }
@@ -431,6 +471,13 @@ fn run_producer(
         if let Some(callback) = job.callback.as_mut() {
             callback.started();
         }
+        capture_snapshot(
+            shared,
+            plan.nodes()[index].definition_id.as_str(),
+            &job.inputs,
+            &crate::Outputs::new(),
+            crate::SnapshotOutcome::Started,
+        );
         catch_unwind(AssertUnwindSafe(|| {
             node.execute(job.inputs, &mut job.context, &mut emitter)
         }))
@@ -607,12 +654,6 @@ impl PreparedStream {
         options: StreamOptions,
         runtime_options: crate::RuntimeOptions,
     ) -> Result<StreamInstance, StreamError> {
-        ensure!(
-            options.snapshots.is_none(),
-            ConfigurationSnafu {
-                message: "snapshot capture is unsupported for streaming instances",
-            }
-        );
         if let Some(observation) = &options.observation {
             ensure!(
                 observation.description().event_schema_version()
@@ -631,6 +672,9 @@ impl PreparedStream {
         let worker_limit = std::num::NonZeroUsize::new(domain_limit)
             .expect("validated stream worker limit is positive");
         let mut context = ExecutionContext::default();
+        if let Some(capture) = &options.snapshots {
+            context.set_snapshot_recorder(capture.clone());
+        }
         if let Some(input) = options.stdin {
             context.set_stdin(input);
         }
@@ -696,6 +740,7 @@ impl PreparedStream {
             changed: Condvar::new(),
             execution: plan.execution().clone(),
             observation: options.observation,
+            snapshots: options.snapshots,
             cancellation,
             worker_limit,
         });
@@ -1054,6 +1099,9 @@ fn tick<'a>(
                     message: queued.message,
                 },
             )?;
+        if let Some(capture) = &shared.snapshots {
+            context.set_snapshot_recorder(capture.clone());
+        }
         context.set_cancellation(shared.cancellation.clone());
         context.configure_worker_limit(shared.worker_limit);
         context.set_worker_handle(workers.handle());
@@ -1412,6 +1460,15 @@ fn invoke_event<'a>(
     // Only the coordinator accesses event operators; workers retain their own producer slots.
     let mut operator = guard.operators[index].take().unwrap();
     drop(guard);
+    if let NodeEvent::Input(inputs) = &event {
+        capture_snapshot(
+            shared,
+            plan.nodes()[index].definition_id.as_str(),
+            inputs,
+            &crate::Outputs::new(),
+            crate::SnapshotOutcome::Started,
+        );
+    }
     if let Some(callback) = callback.as_mut() {
         callback.started();
     }
@@ -1447,11 +1504,19 @@ fn invoke_event<'a>(
 
     let mut phase = FailurePhase::Execution;
     let old_pending = guard.operators[index].as_ref().unwrap().pending.len();
+    let mut captured = shared.snapshots.as_ref().map(|_| Vec::new());
     let result = (|| -> Result<_, StreamError> {
         let (effects, buffered, ports) = execution?;
         phase = FailurePhase::Publication;
         let count = effects.emissions.len();
-        apply_effects(&mut guard, plan, index, effects, context.now)?;
+        apply_effects(
+            &mut guard,
+            plan,
+            index,
+            effects,
+            context.now,
+            captured.as_mut(),
+        )?;
         let flushed: Vec<_> = guard.operators[index]
             .as_ref()
             .unwrap()
@@ -1470,6 +1535,23 @@ fn invoke_event<'a>(
             .collect();
         Ok((count, ports, buffered, flushed))
     })();
+    if let Some(capture) = captured.filter(|capture| !capture.is_empty()) {
+        if let Err(error) = &result {
+            guard.failure_node = Some(plan.nodes()[index].definition_id.to_string());
+            guard.failure.get_or_insert(error.clone());
+        }
+        drop(guard);
+        for ports in capture {
+            capture_snapshot(
+                shared,
+                plan.nodes()[index].definition_id.as_str(),
+                &Inputs::new(),
+                &ports,
+                crate::SnapshotOutcome::Emitted,
+            );
+        }
+        guard = shared.state.lock().unwrap();
+    }
     match result {
         Ok((count, ports, buffered, flushed)) => {
             if let Some(callback) = callback {
@@ -1503,7 +1585,7 @@ fn enqueue_emission(
     plan: &StreamPlan,
     index: usize,
     emission: EventEmission,
-) -> Result<(), StreamError> {
+) -> Result<MessageId, StreamError> {
     let domain = plan.output_domain(index);
     ExecutionContext::for_message(&plan.nodes()[index], emission.result.clone()).context(
         WorkflowSnafu {
@@ -1523,7 +1605,7 @@ fn enqueue_emission(
             message: MessageId { domain, sequence },
             emission,
         });
-    Ok(())
+    Ok(MessageId { domain, sequence })
 }
 
 fn apply_effects(
@@ -1532,6 +1614,7 @@ fn apply_effects(
     index: usize,
     effects: EventEffects,
     now: Duration,
+    mut capture: Option<&mut Vec<crate::Outputs>>,
 ) -> Result<(), StreamError> {
     let operator = state.operators[index].as_mut().unwrap();
     ensure!(
@@ -1548,7 +1631,11 @@ fn apply_effects(
         }
     );
     for emission in effects.emissions {
+        let ports = capture.as_ref().map(|_| emission.result.outputs.clone());
         enqueue_emission(state, plan, index, emission)?;
+        if let (Some(capture), Some(ports)) = (capture.as_mut(), ports) {
+            capture.push(ports);
+        }
     }
     let operator = state.operators[index].as_mut().unwrap();
     match effects.timer {

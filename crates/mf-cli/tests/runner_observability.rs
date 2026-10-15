@@ -177,6 +177,7 @@ fn command(executable: &Path) -> Command {
         "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
         "OTEL_EXPORTER_OTLP_LOGS_PROTOCOL",
         "MF_RUN_ID",
+        "MF_CAPTURE_SNAPSHOTS",
     ] {
         command.env_remove(name);
     }
@@ -938,8 +939,12 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         &root.path().join("flow.lock"),
         &definition,
     );
-    let execute = |endpoint: Option<&str>, collector: Option<&CollectorHandle>| {
+    let execute = |endpoint: Option<&str>, collector: Option<&CollectorHandle>, capture: bool| {
         let mut command = command(&runner);
+        command.env(
+            mf_telemetry::SNAPSHOT_CAPTURE_ENV,
+            if capture { "1" } else { "0" },
+        );
         if let Some(endpoint) = endpoint {
             command.env("OTEL_EXPORTER_OTLP_ENDPOINT", endpoint);
         }
@@ -1028,9 +1033,64 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
             .is_empty()
     );
 
-    let plain = execute(None, None);
+    let plain = execute(None, None, false);
+    let unavailable = execute(None, None, true);
+    assert_eq!(unavailable.stdout, plain.stdout);
+    assert!(String::from_utf8_lossy(&unavailable.stderr).contains("data capture unavailable"));
+    let (data_endpoint, data_collector) = collector();
+    let captured = execute(Some(&data_endpoint), Some(&data_collector), true);
+    assert_eq!(captured.stdout, plain.stdout);
+    let data = data_collector
+        .finish()
+        .into_iter()
+        .filter(|(path, _)| path == "/v1/logs")
+        .flat_map(|(_, body)| {
+            ExportLogsServiceRequest::decode(body.as_slice())
+                .unwrap()
+                .resource_logs
+        })
+        .flat_map(|resource| resource.scope_logs)
+        .filter(|scope| {
+            scope
+                .scope
+                .as_ref()
+                .is_some_and(|scope| scope.name == mf_telemetry::snapshot::SCOPE)
+        })
+        .flat_map(|scope| scope.log_records)
+        .collect::<Vec<_>>();
+    let mut assembler = mf_telemetry::snapshot::Assembler::default();
+    let mut store = mf_runtime::SnapshotStore::default();
+    for record in &data {
+        for body in assembler.push(record.clone()).unwrap() {
+            store.apply(serde_json::from_value(body).unwrap()).unwrap();
+        }
+    }
+    assert!(store.is_complete());
+    let feed = store
+        .history()
+        .iter()
+        .filter_map(|entry| {
+            let node = entry.snapshot.node(&entry.scope, &entry.node).unwrap();
+            (entry.node.as_ref() == "feed" && node.outcome == mf_runtime::SnapshotOutcome::Emitted)
+                .then_some(node)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        feed.iter()
+            .map(|node| node.outputs["line"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["1", "2", "3", "4", "5"]
+    );
+    assert_eq!(
+        store.current().node(&[], "collect").unwrap().outputs["items"],
+        json!([4, 5])
+    );
+    assert_eq!(
+        store.current().node(&[], "consume").unwrap().outputs["value"],
+        json!([4, 5])
+    );
     let (endpoint, collector) = collector();
-    let observed = execute(Some(&endpoint), Some(&collector));
+    let observed = execute(Some(&endpoint), Some(&collector), false);
     assert_eq!(observed.stdout, plain.stdout);
     let requests = collector.finish();
     assert!(
@@ -1112,6 +1172,7 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
     let mut child = command(&runner)
         .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
         .env("MF_RUN_ID", run_id.to_string())
+        .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -1146,12 +1207,40 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         snapshot.stream.unwrap().counts.unwrap().delivered_outputs,
         2
     );
+    let data = receiver.data_snapshot();
+    assert_eq!(data.status, "Complete", "{data:?}");
+    let traces = receiver.trace_snapshot();
+    let feed = traces.rows.iter().find(|row| row.observation.span.attributes.iter().any(|attribute|
+        attribute.key == "mf.node.id" && matches!(attribute.value.as_ref().and_then(|value| value.value.as_ref()), Some(any_value::Value::StringValue(value)) if value == "feed"))).unwrap();
+    let key = (
+        feed.observation.span.trace_id.clone(),
+        feed.observation.span.span_id.clone(),
+    );
+    let related = data
+        .entries
+        .iter()
+        .zip(&data.metadata)
+        .filter(|(_, metadata)| metadata.correlation.as_ref() == Some(&key))
+        .collect::<Vec<_>>();
+    assert_eq!(related.len(), 6);
+    assert_eq!(
+        related
+            .iter()
+            .filter(|(entry, _)| entry
+                .snapshot
+                .node(&entry.scope, &entry.node)
+                .unwrap()
+                .outcome
+                == mf_runtime::SnapshotOutcome::Emitted)
+            .count(),
+        5
+    );
     let closed = TcpListener::bind("127.0.0.1:0")
         .unwrap()
         .local_addr()
         .unwrap();
     assert_eq!(
-        execute(Some(&format!("http://{closed}")), None).stdout,
+        execute(Some(&format!("http://{closed}")), None, true).stdout,
         plain.stdout
     );
 }
@@ -1178,4 +1267,129 @@ fn stream_proto_value(value: &opentelemetry_proto::tonic::common::v1::AnyValue) 
         ),
         _ => panic!("unexpected stream metadata value"),
     }
+}
+
+#[test]
+fn streaming_snapshots_preserve_large_values_and_report_interrupted_history() {
+    use std::process::Stdio;
+    use std::time::{Duration, Instant};
+    if !loopback_available() {
+        return;
+    }
+    let root = tempfile::tempdir().unwrap();
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version": "2026-10-03", "execution": {"mode": "stream"},
+        "dependencies": {"core": {"package": "mfn-core", "path": crates_dir().join("builtin-nodes/core")}},
+        "nodes": [{"id": "feed", "kind": "builtin.readline"}],
+        "outputs": [{"name": "line", "node": "feed", "port": "line"}]
+    })).unwrap();
+    let runner = build(
+        &root.path().join("build"),
+        &root.path().join("flow.lock"),
+        &definition,
+    );
+    let description = read_manifest(&runner).unwrap().description;
+    let value = "x".repeat(300_000);
+    let execute = |capture: bool| {
+        let run = mf_telemetry::identity::RunId::new();
+        let mut receiver = LoopbackReceiver::bind(description.clone(), run).unwrap();
+        let mut child = command(&runner)
+            .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
+            .env("MF_RUN_ID", run.to_string())
+            .env(
+                mf_telemetry::SNAPSHOT_CAPTURE_ENV,
+                if capture { "1" } else { "0" },
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // Read stdout concurrently so a large business value cannot fill its pipe.
+        let stdout = child.stdout.take().unwrap();
+        let reader = thread::spawn(move || {
+            let mut bytes = Vec::new();
+            std::io::Read::read_to_end(&mut { stdout }, &mut bytes).unwrap();
+            bytes
+        });
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(format!("small\n{value}\nafter\n").as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert_eq!(
+            receiver.finish().lifecycle.completeness,
+            Completeness::Complete
+        );
+        (reader.join().unwrap(), receiver.data_snapshot())
+    };
+    let (plain, unavailable) = execute(false);
+    let (captured, data) = execute(true);
+    assert_eq!(plain, captured);
+    assert!(unavailable.status.contains("unavailable"));
+    assert_eq!(data.status, "Complete");
+    let outputs = data
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let node = entry.snapshot.node(&entry.scope, &entry.node).unwrap();
+            (node.outcome == mf_runtime::SnapshotOutcome::Emitted)
+                .then(|| node.outputs["line"].as_str().unwrap())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(outputs, ["small", &value, "after"]);
+
+    let run = mf_telemetry::identity::RunId::new();
+    let mut receiver = LoopbackReceiver::bind(description, run).unwrap();
+    let mut child = command(&runner)
+        .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
+        .env("MF_RUN_ID", run.to_string())
+        .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut input = child.stdin.take().unwrap();
+    input.write_all(b"before-interrupt\n").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while receiver.history_len() < 2 {
+        if Instant::now() >= deadline {
+            child.kill().unwrap();
+            panic!("producer did not export live snapshots");
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
+    assert!(
+        receiver
+            .trace_snapshot()
+            .rows
+            .iter()
+            .all(|row| row.observation.span.name != "mf.node")
+    );
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "producer must remain active before interruption"
+    );
+    child.kill().unwrap();
+    child.wait().unwrap();
+    drop(input);
+    receiver.finish();
+    let data = receiver.data_snapshot();
+    assert!(data.status.contains("incomplete"), "{}", data.status);
+    assert!(data.entries.iter().any(|entry| {
+        entry
+            .snapshot
+            .node(&entry.scope, &entry.node)
+            .unwrap()
+            .outputs["line"]
+            == json!("before-interrupt")
+    }));
 }

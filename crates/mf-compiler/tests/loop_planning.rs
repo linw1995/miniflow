@@ -798,9 +798,9 @@ fn snapshots_preserve_inputs_and_outputs_from_all_loop_passes() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&parse(definition()), &registry).unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
-    let recorder = mf_runtime::SnapshotRecorder::memory();
+    let recorder = mf_runtime::SnapshotRecording::memory();
     let mut context = ExecutionContext::default();
-    context.set_snapshot_recorder(recorder.clone());
+    context.set_snapshot_recorder(recorder.recorder());
     assert_eq!(
         flow.execute_in_context(&mut context).unwrap()["count"],
         json!(3)

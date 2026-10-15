@@ -52,6 +52,8 @@ filter = '''
 )) |
 (binary_id(=mf-compiler::observation) &
     test(=generated_execution_matches_memory_for_success_and_failures)) |
+binary_id(=mf-compiler::single_node_runner) |
+binary_id(=mf-runtime::input_derive_compile) |
 (binary_id(=mf-cli::runner_observability) &
     test(=generated_runner_describes_embedded_graph_and_exports_correlated_otel)) |
 (binary_id(=mf-cli::stream_tui) &
@@ -106,6 +108,8 @@ filter = '''
 )) |
 (binary_id(=mf-compiler::observation) &
     test(=generated_execution_matches_memory_for_success_and_failures)) |
+binary_id(=mf-compiler::single_node_runner) |
+binary_id(=mf-runtime::input_derive_compile) |
 (binary_id(=mf-cli::runner_observability) &
     test(=generated_runner_describes_embedded_graph_and_exports_correlated_otel)) |
 (binary_id(=mf-cli::stream_tui) &
@@ -137,7 +141,8 @@ filter = '''
 )) |
 (binary_id(=mf-cli::runner_observability) & (
     test(=generated_loop_runner_exports_complete_per_pass_observations) |
-    test(=streaming_runner_exports_message_lifecycles_without_changing_results)
+    test(=streaming_runner_exports_message_lifecycles_without_changing_results) |
+    test(=streaming_snapshots_preserve_large_values_and_report_interrupted_history)
 )) |
 (binary_id(=mf-compiler::stream_runner) &
     test(=generated_streams_preserve_protocol_boundaries_and_installation_guarantees)) |
@@ -178,7 +183,8 @@ filter = '''
 )) |
 (binary_id(=mf-cli::runner_observability) & (
     test(=generated_loop_runner_exports_complete_per_pass_observations) |
-    test(=streaming_runner_exports_message_lifecycles_without_changing_results)
+    test(=streaming_runner_exports_message_lifecycles_without_changing_results) |
+    test(=streaming_snapshots_preserve_large_values_and_report_interrupted_history)
 )) |
 (binary_id(=mf-compiler::stream_runner) &
     test(=generated_streams_preserve_protocol_boundaries_and_installation_guarantees)) |

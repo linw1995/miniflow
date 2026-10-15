@@ -157,9 +157,9 @@ fn direct_transfer_preserves_owned_allocation_and_repeated_invocations() {
 fn invalid_unused_outputs_fail_before_a_successor_and_match_dynamic_errors() {
     let run = flow(true);
     let typed = run.flow.execute().unwrap_err();
-    let recorder = mf_runtime::SnapshotRecorder::memory();
+    let recorder = mf_runtime::SnapshotRecording::memory();
     let mut ctx = ExecutionContext::default();
-    ctx.set_snapshot_recorder(recorder);
+    ctx.set_snapshot_recorder(recorder.recorder());
     let dynamic = run.flow.execute_in_context(&mut ctx).unwrap_err();
     assert_eq!(typed.to_string(), dynamic.to_string());
     assert!(typed.to_string().contains("/unused/0"));
@@ -172,9 +172,9 @@ fn invalid_unused_outputs_fail_before_a_successor_and_match_dynamic_errors() {
 fn snapshot_fallback_keeps_intermediate_values_and_the_same_instances() {
     let run = flow(false);
     run.flow.execute().unwrap();
-    let recorder = mf_runtime::SnapshotRecorder::memory();
+    let recorder = mf_runtime::SnapshotRecording::memory();
     let mut ctx = ExecutionContext::default();
-    ctx.set_snapshot_recorder(recorder.clone());
+    ctx.set_snapshot_recorder(recorder.recorder());
     assert_eq!(
         run.flow.execute_in_context(&mut ctx).unwrap()["result"],
         json!("owned payload")

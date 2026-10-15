@@ -583,10 +583,10 @@ fn isolated_identity_counts_spans_and_snapshots_follow_the_selected_task() {
             let observation = record
                 .start_observation(&harness.observer(), mf_telemetry::identity::RunId::new())
                 .unwrap();
-            let snapshots = mf_runtime::SnapshotRecorder::memory();
+            let snapshots = mf_runtime::SnapshotRecording::memory();
             let result: Result<_, Box<dyn std::error::Error>> =
                 mf_runtime::ExecutionContext::run(Some(observation), |state| {
-                    state.set_snapshot_recorder(snapshots.clone());
+                    state.set_snapshot_recorder(snapshots.recorder());
                     let input = args(json!({"target.input":value}));
                     if stream {
                         let prepared = mf_compiler::instantiate_stream(&plan, &registry)?;
@@ -754,7 +754,7 @@ fn selected_metadata_excludes_values_and_snapshot_sink_failures_preserve_results
     let observation = record
         .start_observation(&harness.observer(), mf_telemetry::identity::RunId::new())
         .unwrap();
-    let snapshots = mf_runtime::SnapshotRecorder::with_sink(|record| {
+    let snapshots = mf_runtime::SnapshotRecording::with_sink(|record| {
         if matches!(record, mf_runtime::SnapshotRecord::Node { .. }) {
             Err(std::io::Error::other("snapshot sink unavailable").into())
         } else {
@@ -765,7 +765,7 @@ fn selected_metadata_excludes_values_and_snapshot_sink_failures_preserve_results
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     let target = record.bind_flow(&flow).unwrap();
     let result = mf_runtime::ExecutionContext::run(Some(observation), |state| {
-        state.set_snapshot_recorder(snapshots.clone());
+        state.set_snapshot_recorder(snapshots.recorder());
         FlowRuntime::default().execute_target_in_context(
             &target,
             state,

@@ -515,14 +515,17 @@ Nodes forwarding an input should move or clone its handle. New arrays and object
 handles with `ValueRef::array` and `ValueRef::object`. Context outputs remain available within their
 execution scope.
 
-History is opt-in: attach a `SnapshotRecorder` to an `ExecutionContext` when a consumer needs past
-inputs and outputs. Ordinary execution retains current bindings without recording snapshots. The
-recorder stores immutable global roots, shares unchanged branches, and interns equal values across
-nodes and scopes. A repeated identical node state does not create a new snapshot. Loop passes and
-Iteration items retain separate scope paths. Generated runners enable capture only when
-`MF_CAPTURE_SNAPSHOTS=1` requests OTLP snapshot events. `SnapshotRecorder::with_sink` supports
-other explicit consumers; records define each value once and reference its ID.
-Build validation and manifest inspection do not capture data. Call `finish()` after an explicitly recorded run.
+Data observation is opt-in: attach a `SnapshotRecorder` callback to an `ExecutionContext` or
+`StreamOptions.snapshots`. Ordinary execution retains current bindings without notifications.
+The handle only delivers current `SnapshotEvent` values; encoding and history belong to the caller.
+
+For history in either execution mode, own a `SnapshotRecording::memory()` or `SnapshotRecording::with_sink(...)`
+and attach its `recorder()` handle. That owner shares immutable roots, interns equal values, and
+preserves separate Loop/Iteration scope paths. Equal completed states reuse their root; `Started` and `Emitted` notifications preserve
+distinct equal-valued invocations and publications. Call the
+owner's `finish()` after execution and inspect its typed `diagnostic()` separately from business
+results. Generated runners request the same OTLP snapshot backend through
+`MF_CAPTURE_SNAPSHOTS=1` in either execution mode. Build validation and manifest inspection do not capture data.
 
 The runtime calls the task's single execution method. Loop assignment and exit use engine-owned scope
 operations; publication remains validated by the runtime. A Loop body has its own output scope for
@@ -740,8 +743,8 @@ one frame per output domain. Every operator's pending queue has finite message c
 quota in this layer.
 
 A custom `StreamClock` must advance monotonically and wake registered instances. Deadline expiry
-makes an emission ready; downstream execution remains subject to capacity. Snapshot capture is rejected
-before startup. Streaming definitions also compile to standalone JSON Lines runners and support
+makes an emission ready; downstream execution remains subject to capacity. Optional snapshot
+capture uses the same notification and caller-owned recording path as finite execution. Streaming definitions also compile to standalone JSON Lines runners and support
 stream-specific observation. See [streaming runners](compiling.md#streaming-runners).
 
 Run the producer/consumer example with `cargo run -p mf-compiler --example stream` inside `nix develop`.
@@ -765,7 +768,9 @@ Successful buffering reports zero emissions. Batch emissions carry item count an
 without exposing retained values. Transport and export queues remain bounded, and telemetry failures
 do not change workflow results or request retries. Terminal events follow drain or failure cleanup.
 
-The current terminal launcher and snapshot recorder remain unavailable for stream mode.
+Programmatic `SnapshotRecorder` callbacks observe node values in both execution modes.
+Whole-stream runners support streaming lifecycle and the shared snapshot backend through
+`MF_CAPTURE_SNAPSHOTS=1`.
 
 Workflow graph construction is owned by `mf-compiler`: `FlowBuilder::prepare` validates configured nodes and graph connections, then `into_tasks` or `into_stream` produces an executable runtime plan. `FlowBuildError`, `StreamBuildError`, and `WorkflowBuildError` are compiler errors. The runtime binds validated owned or borrowed plans and schedules executors without depending on the compiler. Node factories and their `NodeBuildError` contract remain shared provider contracts in `mf-runtime`.
 

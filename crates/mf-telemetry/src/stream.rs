@@ -26,7 +26,7 @@ pub mod counter {
     }
 }
 
-mod optional_counter {
+pub(crate) mod optional_counter {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     pub fn serialize<S: Serializer>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error> {
         value.map(|value| value.to_string()).serialize(serializer)

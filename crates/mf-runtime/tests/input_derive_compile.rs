@@ -8,9 +8,6 @@ fn check(root: &Path, source: &str, outputs: bool) -> std::process::Output {
         .current_dir(root)
         .args(["check", "--offline", "--quiet"])
         .env("CARGO_TARGET_DIR", root.join("target"));
-    if let Some(config) = std::env::var_os("MF_TEST_SOURCE_CONFIG") {
-        command.arg("--config").arg(config);
-    }
     command.output().unwrap()
 }
 

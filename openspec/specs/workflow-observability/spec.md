@@ -348,18 +348,6 @@ Streaming observation SHALL distinguish buffered item count from emitted batches
 - **WHEN** a batch is sealed but its business operation remains queued
 - **THEN** observation records the flush while leaving that downstream invocation pending
 
-### Requirement: Gate unsupported streaming snapshot capture
-
-Streaming instances SHALL reject the current whole-run snapshot recorder before startup execution. Generated
-runners MUST reject `MF_CAPTURE_SNAPSHOTS=1` in streaming mode with an actionable diagnostic. Ordinary
-bounded-run capture SHALL retain its existing behavior.
-
-#### Scenario: Request stream snapshot history
-
-- **WHEN** snapshot capture is enabled for a streaming runner or attached programmatically to a streaming
-  instance
-- **THEN** startup rejects the unsupported mode before source admission or node execution
-
 ### Requirement: Version source-driven streaming observations
 
 Source-driven streams SHALL use event schema 4 with explicit startup identity. Their terminal counts SHALL
@@ -492,7 +480,7 @@ MUST retain ordinary bounded cleanup and business-result semantics.
 #### Scenario: Keep whole-stream snapshot restrictions
 
 - **WHEN** the stream binary is invoked without selection and requests whole-stream snapshots
-- **THEN** it retains the existing unsupported streaming capture diagnostic
+- **THEN** it uses the shared snapshot backend with the same opt-in and exporter prerequisites as finite execution
 
 #### Scenario: Preserve results during export failure
 
@@ -647,3 +635,123 @@ Opt-in snapshot LogRecords emitted under a valid active span SHALL preserve its 
 
 - **WHEN** a snapshot is emitted without valid trace context
 - **THEN** it retains the normal snapshot contract without inventing a trace/span identity
+
+### Requirement: Capture resolved inputs and admitted streaming outputs
+
+Enabled capture SHALL record resolved input ports before node invocation and each successfully admitted output separately after publication validation. Inputs and outputs SHALL retain their node scope and valid active span context. Zero emissions MUST NOT invent outputs. An admitted emission SHALL remain inspectable even if its producer or callback later fails. Rejected publications MUST NOT appear as admitted outputs.
+
+#### Scenario: Inspect a producer before completion
+
+- **WHEN** one producer successfully sends three results and remains running
+- **THEN** capture offers its inputs and three distinct output records without waiting for its terminal event
+
+#### Scenario: Reject an invalid send
+
+- **WHEN** a producer attempts to send an invalid result after an earlier valid emission
+- **THEN** only the valid result appears as admitted output and the existing publication failure remains authoritative
+
+#### Scenario: Fail after partial callback publication
+
+- **WHEN** an event callback admits an emission before a later emission or timer update fails
+- **THEN** capture retains the admitted output without describing the callback as successful
+
+#### Scenario: Buffer without flushing
+
+- **WHEN** a Batch input callback accepts an item and emits no output
+- **THEN** capture records its input ports without fabricating an empty batch or downstream success
+
+#### Scenario: Flush on a timer or upstream close
+
+- **WHEN** a callback without an input message admits a batch output
+- **THEN** capture records the actual admitted output under its callback span without inventing input values
+
+#### Scenario: Capture nested synchronous work
+
+- **WHEN** a stream message executes Loop or Iteration body tasks with capture enabled
+- **THEN** their resolved inputs and published outputs are captured under their own invocation/span context
+
+### Requirement: Keep streaming capture policy outside runtime execution
+
+The runtime SHALL provide current resolved input values and successfully admitted
+output values through the common opt-in snapshot callback with node scope. It SHALL NOT encode stream data records, impose telemetry
+byte/depth budgets, maintain capture sequences or loss counters, or retain
+inspection history. Caller-owned recording and exporters SHALL own encoding and diagnostics, runner
+owners SHALL finish capture, and consumers SHALL manage historical retention.
+
+#### Scenario: Observe a value above a telemetry budget
+
+- **WHEN** a programmatic callback observes a valid input or admitted output exceeding a telemetry encoding budget
+- **THEN** the runtime callback receives the original value without omission or truncation
+- **AND** a separately attached telemetry adapter may apply its own export policy
+
+#### Scenario: Finish owner-managed capture
+
+- **WHEN** a runner finishes or fails stream execution
+- **THEN** its owner finishes telemetry capture and reports capture diagnostics separately from the business outcome
+
+#### Scenario: Inspect admitted output without blocking the scheduler
+
+- **WHEN** a producer or event callback admits an output
+- **THEN** the snapshot callback receives its admitted original values after the scheduler lock is released
+
+### Requirement: Share runtime snapshot notifications across execution modes
+
+Finite and streaming execution SHALL share the opt-in SnapshotRecorder callback
+and ordinary-task capture boundary. The runtime recorder SHALL only notify current
+node snapshots and scope. It MUST NOT contain stream identity or run binding. Caller-owned recording SHALL
+manage dictionaries, encoding, history, and diagnostics. The runtime MUST NOT keep
+a separate stream data observer or duplicate task capture path.
+
+#### Scenario: Observe a finite task through the common recorder
+
+- **WHEN** a caller records a finite task with SnapshotRecording
+- **THEN** current values, skips, failures, sharing, and finite wire semantics are preserved through its common SnapshotRecorder handle
+
+#### Scenario: Preserve equal stream emissions
+
+- **WHEN** one producer admits two outputs with equal values
+- **THEN** the common recorder receives two emission notifications under the existing active span context
+- **AND** historical recording does not collapse those notifications by value equality
+
+#### Scenario: Observe a stream without a telemetry backend
+
+- **WHEN** a caller attaches a SnapshotRecorder callback to a stream
+- **THEN** it receives original values at invocation and admitted publication boundaries without requiring an exporter or retaining runtime history
+
+### Requirement: Reuse the complete snapshot pipeline across execution modes
+
+Finite and streaming runners SHALL share MF_CAPTURE_SNAPSHOTS, SnapshotRecording,
+the snapshot protocol, exporter, receiver, and caller-owned history. Runtime SHALL
+only publish common notifications. Missing records SHALL leave explicit incomplete
+history rather than requiring stream-only gap recovery, omission, or eviction policies.
+
+#### Scenario: Capture either execution mode
+
+- **WHEN** a finite or streaming runner enables snapshot capture
+- **THEN** the same recorder, exporter, and decoder handle its node snapshots
+
+#### Scenario: Lose a snapshot definition
+
+- **WHEN** ordered reconstruction cannot resolve a missing record or definition
+- **THEN** previously reconstructed history stays inspectable and capture is marked incomplete
+
+#### Scenario: Disable capture
+
+- **WHEN** snapshot capture is disabled
+- **THEN** neither execution mode creates a business-data recording or exporter
+
+#### Scenario: Preserve snapshot metadata and values
+
+- **WHEN** either mode exports snapshots
+- **THEN** native context, timestamps, sequence order, numeric types, and distinct equal emissions are preserved
+
+### Requirement: Preserve repeated snapshot observation boundaries
+
+Shared recording and reconstruction SHALL preserve every Started and Emitted notification,
+even with equal node values and scope. Completed state updates MAY reuse existing state.
+This behavior SHALL be independent of execution mode and require no additional identity.
+
+#### Scenario: Buffer repeated equal inputs
+
+- **WHEN** two callbacks accept equal input values without emitting between them
+- **THEN** each Started notification remains a separate inspectable history entry

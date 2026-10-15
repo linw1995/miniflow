@@ -295,17 +295,7 @@ fn a_later_failure_preserves_the_delivered_prefix_and_never_retries() {
 }
 
 #[test]
-fn rejects_snapshot_capture_and_insufficient_domain_capacity() {
-    let error = prepare(definition())
-        .unwrap()
-        .start_with_options(StreamOptions {
-            snapshots: Some(mf_runtime::SnapshotRecorder::memory()),
-            ..Default::default()
-        })
-        .err()
-        .unwrap();
-    assert!(error.to_string().contains("snapshot capture"));
-
+fn rejects_insufficient_domain_capacity() {
     let mut value = definition();
     value["execution"]["limits"] = json!({"max_pending_messages":1});
     let error = prepare(value).unwrap_err();

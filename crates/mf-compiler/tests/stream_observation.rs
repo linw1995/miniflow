@@ -25,6 +25,239 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[test]
+fn snapshots_are_live_and_distinguish_buffering_from_timer_outputs() {
+    use mf_runtime::{SnapshotOutcome, SnapshotRecording};
+    let harness = Harness::new(true);
+    let plan = plan(definition());
+    let observation = plan
+        .start_stream_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let recording = SnapshotRecording::memory();
+    let clock = Arc::new(Clock::default());
+    let instance = start_stream(
+        &plan,
+        &NodeRegistry::from_inventory().unwrap(),
+        StreamOptions {
+            observation: Some(observation),
+            snapshots: Some(recording.recorder()),
+            clock: clock.clone(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    instance.source.send(json!(1)).unwrap();
+    wait_until(|| instance.summary().completed_frames == 2);
+    let current = recording.current();
+    assert_eq!(current.node(&[], "feed").unwrap().outputs["item"], json!(1));
+    assert_eq!(
+        current.node(&[], "collect").unwrap().inputs["item"],
+        json!(1)
+    );
+    assert!(
+        current
+            .node(&[], "collect")
+            .unwrap()
+            .outputs
+            .as_object()
+            .unwrap()
+            .is_empty()
+    );
+    instance.source.send(json!(1)).unwrap();
+    wait_until(|| instance.summary().completed_frames == 3);
+    assert_eq!(
+        recording
+            .history()
+            .iter()
+            .filter(|entry| entry.node.as_ref() == "collect"
+                && entry
+                    .snapshot
+                    .node(&entry.scope, &entry.node)
+                    .unwrap()
+                    .outcome
+                    == SnapshotOutcome::Started)
+            .count(),
+        2
+    );
+    clock.advance(250);
+    let delivery = instance.receive().unwrap().unwrap();
+    assert_eq!(delivery.output().outputs["batch"], json!([1, 1]));
+    delivery.acknowledge().unwrap();
+    instance.source.close();
+    assert!(instance.recv().unwrap().is_none());
+    instance.join().unwrap();
+    recording.finish();
+    assert!(recording.diagnostic().is_none());
+    let emitted = recording
+        .history()
+        .into_iter()
+        .filter(|entry| {
+            entry.node.as_ref() == "feed"
+                && entry
+                    .snapshot
+                    .node(&entry.scope, &entry.node)
+                    .unwrap()
+                    .outcome
+                    == SnapshotOutcome::Emitted
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(emitted.len(), 2);
+    assert!(
+        emitted[0]
+            .snapshot
+            .node(&[], "feed")
+            .unwrap()
+            .outputs
+            .ptr_eq(&emitted[1].snapshot.node(&[], "feed").unwrap().outputs)
+    );
+    assert_eq!(
+        recording.current().node(&[], "collect").unwrap().outputs["items"],
+        json!([1, 1])
+    );
+}
+
+struct PartialCapture;
+impl mf_runtime::EventNode for PartialCapture {
+    fn on_event(
+        &mut self,
+        event: mf_runtime::NodeEvent,
+        _: &mf_runtime::EventContext<'_>,
+    ) -> Result<mf_runtime::EventEffects, mf_runtime::NodeExecutionError> {
+        if !matches!(event, mf_runtime::NodeEvent::Input(_)) {
+            return Ok(Default::default());
+        }
+        Ok(mf_runtime::EventEffects {
+            emissions: vec![
+                mf_runtime::EventEmission {
+                    result: mf_runtime::Outputs::from([("value".into(), json!(1).into())]).into(),
+                    batch: None,
+                },
+                mf_runtime::EventEmission {
+                    result: mf_runtime::Outputs::from([("value".into(), json!("invalid").into())])
+                        .into(),
+                    batch: None,
+                },
+            ],
+            ..Default::default()
+        })
+    }
+}
+inventory::submit! { mf_runtime::NodeRegistration {
+    kind: "test.partial_capture",
+    factory: mf_runtime::NodeFactory::Plain(|_| Ok(mf_runtime::PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Event(Box::new(PartialCapture)),
+        mf_runtime::NodePorts {
+            inputs: vec![mf_runtime::PortSpec::new("value", mf_runtime::ValueType::Int64, true)],
+            outputs: vec![mf_runtime::PortSpec::new("value", mf_runtime::ValueType::Int64, true)],
+        },
+    ))),
+} }
+
+#[test]
+fn partial_event_publication_keeps_only_admitted_data_and_failed_outcome() {
+    let plan = plan(
+        json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+        "nodes":[{"id":"start", "kind":"builtin.identity"}, {"id":"partial","kind":"test.partial_capture"}],
+        "edges":[{"from_node":"start","from_output":"value","to_node":"partial","to_input":"value"}],
+        "outputs":[{"name":"value","node":"partial","port":"value"}]}),
+    );
+    let harness = Harness::new(true);
+    let observation = plan
+        .start_stream_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let capture = mf_runtime::SnapshotRecording::memory();
+    let instance = mf_compiler::start_stream(
+        &plan,
+        &NodeRegistry::from_inventory().unwrap(),
+        StreamOptions {
+            observation: Some(observation),
+            snapshots: Some(capture.recorder()),
+            arguments: mf_runtime::WorkflowArguments::try_from(json!({"start.input":7})).unwrap(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(instance.recv().is_err());
+    assert!(instance.join().is_err());
+    capture.finish();
+    assert!(capture.diagnostic().is_none());
+    let outputs = capture
+        .history()
+        .into_iter()
+        .filter(|entry| {
+            entry.node.as_ref() == "partial"
+                && entry
+                    .snapshot
+                    .node(&entry.scope, &entry.node)
+                    .unwrap()
+                    .outcome
+                    == mf_runtime::SnapshotOutcome::Emitted
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(
+        outputs[0].snapshot.node(&[], "partial").unwrap().outputs["value"],
+        json!(1)
+    );
+    assert!(records(&harness).iter().any(|record| matches!(&record.payload, StreamPayload::Execution(Event::NodeFinished { node, outcome: Outcome::Failed, .. }) if node.id == "partial")));
+}
+
+#[test]
+fn snapshot_callbacks_can_observe_runtime_metrics_without_locking_execution() {
+    let harness = Harness::new(true);
+    let plan = plan(definition());
+    let observation = plan
+        .start_stream_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let holder = Arc::new(Mutex::new(
+        None::<std::sync::Weak<mf_runtime::StreamInstance>>,
+    ));
+    let observed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let captured_holder = holder.clone();
+    let captured_observed = observed.clone();
+    let capture = mf_runtime::SnapshotRecorder::new(move |event| {
+        if matches!(
+            event.snapshot.outcome,
+            mf_runtime::SnapshotOutcome::Emitted | mf_runtime::SnapshotOutcome::Succeeded
+        ) && let Some(instance) = captured_holder
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(std::sync::Weak::upgrade)
+        {
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let worker = thread::spawn(move || {
+                let _ = sender.send(instance.metrics());
+            });
+            receiver
+                .recv_timeout(Duration::from_secs(2))
+                .expect("runtime metrics must remain callable during data publication");
+            worker.join().unwrap();
+            captured_observed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let mut options = StreamOptions {
+        observation: Some(observation),
+        snapshots: Some(capture),
+        ..Default::default()
+    };
+    let source = controlled::prepare_control("feed", &mut options);
+    let instance = Arc::new(
+        mf_compiler::start_stream(&plan, &NodeRegistry::from_inventory().unwrap(), options)
+            .unwrap(),
+    );
+    *holder.lock().unwrap() = Some(Arc::downgrade(&instance));
+    source.send(json!(1)).unwrap();
+    source.close();
+    assert_eq!(
+        instance.recv().unwrap().unwrap().outputs["batch"],
+        json!([1])
+    );
+    assert!(instance.recv().unwrap().is_none());
+    Arc::try_unwrap(instance).ok().unwrap().join().unwrap();
+    assert!(observed.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+}
+
 #[derive(Default)]
 struct Clock {
     time: Mutex<Duration>,
@@ -310,7 +543,7 @@ fn timers_have_no_input_message_and_terminal_events_wait_for_delivery() {
 }
 
 #[test]
-fn task_failures_never_publish_success_and_snapshot_requests_fail_before_input() {
+fn task_failures_preserve_outcomes_and_raw_snapshots_need_no_telemetry() {
     let harness = Harness::new(true);
     let mut value = definition();
     value["nodes"][0]["config"]["max_items"] = json!(1);
@@ -355,27 +588,34 @@ fn task_failures_never_publish_success_and_snapshot_requests_fail_before_input()
             if failure.node.as_deref() == Some("consume")
     )));
 
-    let harness = Harness::new(true);
-    let observation = plan
-        .start_stream_observation(&harness.observer(), RunId::new())
-        .unwrap();
-    let result = start_stream(
+    let value = json!({"items":[null, true, 7]});
+    let recording = mf_runtime::SnapshotRecording::memory();
+    let plan = self::plan(
+        json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
+        "nodes":[{"id":"copy", "kind":"builtin.identity"}],
+        "outputs":[{"name":"value","node":"copy","port":"value"}]}),
+    );
+    let instance = mf_compiler::start_stream(
         &plan,
         &NodeRegistry::from_inventory().unwrap(),
         StreamOptions {
-            observation: Some(observation),
-            snapshots: Some(mf_runtime::SnapshotRecorder::memory()),
+            snapshots: Some(recording.recorder()),
+            arguments: mf_runtime::WorkflowArguments::try_from(json!({"copy.input":value}))
+                .unwrap(),
             ..Default::default()
         },
-    );
-    assert!(
-        result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("snapshot capture")
-    );
-    assert_eq!(records(&harness).len(), 2);
+    )
+    .unwrap();
+    assert_eq!(instance.recv().unwrap().unwrap().outputs["value"], value);
+    assert!(instance.recv().unwrap().is_none());
+    instance.join().unwrap();
+    recording.finish();
+    let latest = recording.current();
+    let snapshot = latest.node(&[], "copy").unwrap();
+    assert_eq!(snapshot.inputs["input"], value);
+    assert_eq!(snapshot.outputs["value"], value);
+    assert_eq!(snapshot.outcome, mf_runtime::SnapshotOutcome::Succeeded);
+    assert!(recording.diagnostic().is_none());
 }
 
 #[test]
@@ -397,11 +637,13 @@ fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
     let observation = plan
         .start_stream_observation(&harness.observer(), RunId::new())
         .unwrap();
+    let capture = mf_runtime::SnapshotRecording::memory();
     let instance = start_stream(
         &plan,
         &NodeRegistry::from_inventory().unwrap(),
         StreamOptions {
             observation: Some(observation),
+            snapshots: Some(capture.recorder()),
             ..Default::default()
         },
     )
@@ -419,6 +661,7 @@ fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
     );
     assert!(instance.recv().unwrap().is_none());
     instance.join().unwrap();
+    capture.finish();
     let events = records(&harness);
     let loops: BTreeSet<_> = events
         .iter()
@@ -448,6 +691,35 @@ fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
         details
             .iter()
             .all(|record| !record.attributes.contains_key("mf.event.sequence"))
+    );
+    assert!(capture.diagnostic().is_none(), "{:?}", capture.diagnostic());
+    let copies = capture
+        .history()
+        .into_iter()
+        .filter(|entry| {
+            entry.node.as_ref() == "copy"
+                && entry
+                    .snapshot
+                    .node(&entry.scope, &entry.node)
+                    .unwrap()
+                    .outcome
+                    == mf_runtime::SnapshotOutcome::Succeeded
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(copies.len(), 6);
+    assert!(copies.iter().all(|entry| !entry.scope.is_empty()));
+    assert_eq!(
+        copies
+            .iter()
+            .map(|entry| entry
+                .snapshot
+                .node(&entry.scope, &entry.node)
+                .unwrap()
+                .outputs["value"]
+                .as_i64()
+                .unwrap())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([1, 2])
     );
 }
 

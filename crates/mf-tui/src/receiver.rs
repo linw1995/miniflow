@@ -158,6 +158,14 @@ impl LoopbackReceiver {
             .snapshot()
     }
 
+    pub fn data_snapshot(&self) -> Arc<HistorySnapshot> {
+        self.context
+            .snapshots
+            .lock()
+            .expect("snapshot capture was not poisoned")
+            .snapshot()
+    }
+
     pub fn span_data(&self, trace_id: &[u8], span_id: &[u8]) -> SpanData {
         self.context
             .snapshots
@@ -428,7 +436,7 @@ fn receive_logs(bytes: &[u8], context: &Context) -> Result<(), IngestError> {
     }
     if rejected {
         InvalidSnafu {
-            message: "one or more lifecycle records were rejected".to_owned(),
+            message: "one or more observation records were rejected".to_owned(),
         }
         .fail()
     } else {

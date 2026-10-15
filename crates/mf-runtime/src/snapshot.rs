@@ -30,6 +30,7 @@ pub enum SnapshotOutcome {
     Succeeded,
     Failed,
     Skipped,
+    Emitted,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -212,10 +213,11 @@ impl SnapshotStore {
                     outcome,
                     error,
                 };
-                if self
-                    .current
-                    .node(&scope, &node)
-                    .is_some_and(|previous| previous.as_ref() == &next)
+                if !matches!(outcome, SnapshotOutcome::Started | SnapshotOutcome::Emitted)
+                    && self
+                        .current
+                        .node(&scope, &node)
+                        .is_some_and(|previous| previous.as_ref() == &next)
                 {
                     return Ok(false);
                 }
@@ -389,18 +391,55 @@ impl Recording {
     }
 }
 
-/// A recorder is allocated only when its owner explicitly requests history.
-#[derive(Clone)]
-pub struct SnapshotRecorder(Arc<Mutex<Recording>>);
+/// Current node values and scope at one capture boundary.
+#[derive(Clone, Debug)]
+pub struct SnapshotEvent {
+    pub scope: Vec<LoopPathEntry>,
+    pub node: Arc<str>,
+    pub snapshot: NodeSnapshot,
+}
 
-impl fmt::Debug for SnapshotRecorder {
+type SnapshotCallback = dyn Fn(SnapshotEvent) + Send + Sync;
+
+/// A shared notification handle with no encoding or retained values.
+#[derive(Clone)]
+pub struct SnapshotRecorder {
+    callback: Arc<SnapshotCallback>,
+}
+
+impl std::fmt::Debug for SnapshotRecorder {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("SnapshotRecorder")
+            .finish_non_exhaustive()
+    }
+}
+
+impl SnapshotRecorder {
+    /// The callback must be nonblocking and must not unwind.
+    pub fn new(callback: impl Fn(SnapshotEvent) + Send + Sync + 'static) -> Self {
+        Self {
+            callback: Arc::new(callback),
+        }
+    }
+
+    pub fn record(&self, event: SnapshotEvent) {
+        (self.callback)(event);
+    }
+}
+
+/// Caller-owned dictionary encoding and retained snapshot history.
+#[derive(Clone)]
+pub struct SnapshotRecording(Arc<Mutex<Recording>>);
+
+impl fmt::Debug for SnapshotRecording {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SnapshotRecorder").finish_non_exhaustive()
+        f.debug_struct("SnapshotRecording").finish_non_exhaustive()
     }
 }
 use std::fmt;
 
-impl SnapshotRecorder {
+impl SnapshotRecording {
     pub fn memory() -> Self {
         let mut recording = Recording {
             store: SnapshotStore::default(),
@@ -465,15 +504,36 @@ impl SnapshotRecorder {
             .clone()
     }
 
+    pub fn recorder(&self) -> SnapshotRecorder {
+        let recording = self.clone();
+        SnapshotRecorder::new(move |event| recording.record_event(event))
+    }
+
     pub fn record(&self, scope: Vec<LoopPathEntry>, node: &str, snapshot: NodeSnapshot) {
+        self.record_event(SnapshotEvent {
+            scope,
+            node: node.into(),
+            snapshot,
+        });
+    }
+
+    pub fn record_event(&self, event: SnapshotEvent) {
+        let SnapshotEvent {
+            scope,
+            node,
+            snapshot,
+        } = event;
         let mut recording = self.0.lock().expect("snapshot recorder was not poisoned");
         if recording.error.is_some() || recording.store.complete {
             return;
         }
-        if recording
+        if !matches!(
+            snapshot.outcome,
+            SnapshotOutcome::Started | SnapshotOutcome::Emitted
+        ) && recording
             .store
             .current
-            .node(&scope, node)
+            .node(&scope, &node)
             .is_some_and(|previous| previous.as_ref() == &snapshot)
         {
             return;
@@ -483,7 +543,7 @@ impl SnapshotRecorder {
             let outputs = recording.intern(&snapshot.outputs)?;
             recording.append(SnapshotRecord::Node {
                 scope,
-                node: node.into(),
+                node,
                 inputs,
                 outputs,
                 skipped: snapshot.skipped,
@@ -526,7 +586,7 @@ mod tests {
     #[test]
     fn recorder_retains_sink_sources_after_failure() {
         use std::{error::Error, io};
-        let recorder = SnapshotRecorder::with_sink(|record| {
+        let recorder = SnapshotRecording::with_sink(|record| {
             if matches!(record, SnapshotRecord::Header { .. }) {
                 return Ok(());
             }
@@ -553,7 +613,7 @@ mod tests {
 
     #[test]
     fn history_shares_values_and_unchanged_nodes_across_global_roots() {
-        let recorder = SnapshotRecorder::memory();
+        let recorder = SnapshotRecording::memory();
         let value = ValueRef::from(json!({"data": [1, 2], "payload": "large payload"}));
         recorder.record(vec![], "first", completed(value.clone()));
         let first = recorder.current();
@@ -596,7 +656,7 @@ mod tests {
 
     #[test]
     fn equal_updates_reuse_the_root_and_do_not_append_history() {
-        let recorder = SnapshotRecorder::memory();
+        let recorder = SnapshotRecording::memory();
         recorder.record(vec![], "node", completed(json!({"x": 1}).into()));
         let root = recorder.current();
         let unique = recorder.value_count();
