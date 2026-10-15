@@ -78,8 +78,8 @@ dependencies.
 
 ### Requirement: Validate all startup values before execution
 
-Every invocation SHALL validate its complete startup argument object before executing any node or consuming
-any source data. It MUST reject duplicate keys, unknown qualified parameter names, invalid root object shapes, missing
+Every invocation SHALL validate its complete startup argument object and resolve declared fallbacks before executing any node or consuming
+node source data. It MUST reject duplicate keys, unknown qualified parameter names, invalid root object shapes, missing
 required values, and type violations. Errors SHALL identify the affected qualified parameter and nested path without
 coercion.
 
@@ -100,13 +100,13 @@ coercion.
 
 ### Requirement: Preserve omission and null semantics
 
-An omitted optional parameter SHALL remain absent from node inputs. Explicit null SHALL be a supplied value
-subject to its port type. The startup interface MUST NOT infer defaults, coerce values, or derive later
+An omitted optional parameter without a configured fallback SHALL remain absent from node inputs. Explicit null SHALL be a supplied value
+subject to its port type. The startup interface MUST NOT infer undeclared defaults, coerce values, or derive later
 invocation schemas from values supplied by earlier runs.
 
 #### Scenario: Omit an optional port
 
-- **WHEN** the caller omits an optional string parameter
+- **WHEN** the caller omits an optional string parameter without a fallback
 - **THEN** the node receives no binding for that port
 
 #### Scenario: Supply null to a string port
@@ -132,11 +132,12 @@ Single-run and stream entry points SHALL use the same parameter validation and b
 
 ### Requirement: Inspect an interface without running the workflow
 
-The system SHALL expose startup interface version `2026-10-11` containing workflow identity, complete parameter declarations,
-and runtime resource requirements. For compiled runners, direct manifest inspection SHALL return the
-embedded build-time interface without constructing providers. Inspection MUST exclude argument values and node
-configuration and MUST NOT execute nodes, consume source input, start timers, or emit execution events.
-Invalid or incomplete metadata SHALL prevent launch.
+The startup interface SHALL include workflow identity, complete port/resource declarations,
+and binding metadata with literal defaults. Its version SHALL be `2026-10-16` for bindings
+and `2026-10-11` otherwise. Inspection SHALL read embedded metadata without constructing
+providers, reading sources, executing nodes, starting timers, or emitting events. Invocation
+values, resolved environment values, and unrelated configuration MUST be excluded.
+Invalid metadata MUST prevent launch.
 
 #### Scenario: Inspect an external producer's dynamic ports
 
@@ -155,12 +156,12 @@ Invalid or incomplete metadata SHALL prevent launch.
 
 #### Scenario: Reject the previous nested-argument interface
 
-- **WHEN** a launcher inspects a runner exposing an older startup interface version
+- **WHEN** a launcher inspects a runner exposing an unsupported older startup interface version
 - **THEN** manifest preflight rejects it before execution and directs the user to recompile the workflow
 
 ### Requirement: Reject generated startup interface drift
 
-New generated runners SHALL compare their freshly prepared startup schema with the embedded interface during every execution invocation. Initial-node and port identities, types, required flags, and resource conditions MUST agree. Disagreement SHALL fail before executor invocation, source consumption, timers, or worker scheduling, with affected node/port/resource context. Dynamic in-memory workflows SHALL retain their existing preparation rules.
+New generated runners SHALL compare their freshly prepared startup schema with the embedded interface during every execution invocation. Initial-node and port identities, types, required flags, binding rules, and resource conditions MUST agree. Disagreement SHALL fail before executor invocation, source consumption, timers, or worker scheduling, with affected node/port/resource context. Dynamic in-memory workflows SHALL retain their existing preparation rules.
 
 #### Scenario: Reject a changed input type
 
@@ -191,6 +192,11 @@ New generated runners SHALL compare their freshly prepared startup schema with t
 
 - **WHEN** an in-memory caller prepares a workflow without a generated executable
 - **THEN** ordinary dynamic interface derivation and argument validation work without requiring an embedded manifest
+
+#### Scenario: Reject changed binding rules
+
+- **WHEN** runtime preparation changes an environment name, default value, or secret flag
+- **THEN** normal and isolated execution reject the mismatch before source resolution or node invocation
 
 ### Requirement: Describe runner arguments without execution
 
@@ -231,3 +237,71 @@ marker SHALL be accepted, followed by ordinary schema validation.
 
 - **WHEN** a string parameter receives `-v` as its following value or `--verbose` as an inline value
 - **THEN** the supplied value remains literal input data rather than a verbosity option
+
+### Requirement: Resolve declared startup sources consistently
+
+Startup input bindings MAY declare an environment name, a typed JSON default, and a
+secret flag. Explicit arguments SHALL take precedence over environment values, then
+defaults. A missing required value or an invalid present value MUST fail before node
+execution without selecting a lower-priority source. Finite, streaming, embedded,
+and isolated task execution SHALL share these rules.
+
+#### Scenario: Override an environment value
+
+- **WHEN** the caller supplies an argument and its configured environment variable is present
+- **THEN** execution uses the explicit argument without reading the lower-priority source
+
+#### Scenario: Use an environment value or default
+
+- **WHEN** no explicit argument is supplied
+- **THEN** execution uses the named environment value if present, otherwise the configured default
+
+#### Scenario: Do not treat empty text as missing
+
+- **WHEN** a string parameter has a default but its environment variable is an empty string
+- **THEN** execution supplies the empty string rather than the default
+
+#### Scenario: Reject invalid present values
+
+- **WHEN** a supplied argument or environment value violates the declared type
+- **THEN** execution fails without selecting a lower-priority source or starting any node
+
+#### Scenario: Rebind a reused execution context
+
+- **WHEN** a context is reused for a workflow with a different default and no explicit argument
+- **THEN** the new invocation resolves the new default instead of retaining the previous bound value
+
+### Requirement: Decode bounded environment input
+
+Only named environment variables SHALL be read, with an aggregate 1 MiB text budget.
+Non-Unicode values MUST fail without raw payloads in diagnostics. Strings SHALL retain
+their text; other types SHALL use the named argument JSON codec. Preparation, manifest
+inspection, help, and argument parsing MUST NOT read the environment.
+
+#### Scenario: Reject invalid environment text
+
+- **WHEN** a selected environment value is non-Unicode or not valid JSON for its declared type
+- **THEN** binding fails without falling back to a configured default
+
+#### Scenario: Preserve inspection independence
+
+- **WHEN** help or manifest inspection is requested with environment values unavailable
+- **THEN** declarations remain inspectable without resolving those sources
+
+### Requirement: Mark secret startup values before observation
+
+The shared binder SHALL mark values for secret input bindings before any node input
+snapshot, regardless of their source. Explicit argument parsing SHALL preserve the
+same marking policy. Public bindings MUST NOT remove an existing secret marker.
+Error diagnostics MUST NOT include raw environment values or duplicate JSON key text.
+Business access and serialization SHALL retain original values.
+
+#### Scenario: Protect each input source
+
+- **WHEN** a secret parameter is supplied by arguments, environment, or a default
+- **THEN** its first input snapshot is redacted and its business value remains available
+
+#### Scenario: Reject duplicate secret object keys safely
+
+- **WHEN** secret environment JSON repeats a sensitive object key
+- **THEN** parsing rejects the duplicate without including that key in the error chain

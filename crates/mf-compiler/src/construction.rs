@@ -964,6 +964,24 @@ pub fn workflow_input_schema<'a, N: 'a>(
     let mut names = BTreeSet::new();
     for (node, initial) in nodes {
         let id = node.definition_id.as_str();
+        if !initial && !node.metadata.input_bindings.is_empty() {
+            return Err(input_schema_error(
+                input_pointer("", id),
+                "input bindings require an initial node",
+            ));
+        }
+        for (name, binding) in &node.metadata.input_bindings {
+            let port = node
+                .metadata
+                .ports
+                .inputs
+                .iter()
+                .find(|port| port.name == *name)
+                .ok_or_else(|| {
+                    input_schema_error(input_pointer("", id), "input binding names an unknown port")
+                })?;
+            binding.validate(&output_id(id, name), &port.value_type)?;
+        }
         if initial {
             let mut ports = BTreeMap::new();
             for port in &node.metadata.ports.inputs {
@@ -982,6 +1000,12 @@ pub fn workflow_input_schema<'a, N: 'a>(
                             WorkflowInput {
                                 value_type: port.value_type.clone(),
                                 required: port.required,
+                                binding: node
+                                    .metadata
+                                    .input_bindings
+                                    .get(port.name.as_ref())
+                                    .cloned()
+                                    .unwrap_or_default(),
                             },
                         )
                         .is_some()

@@ -131,6 +131,7 @@ pub fn target_ports(ports: &[crate::PortSpec]) -> BTreeMap<String, WorkflowInput
                 WorkflowInput {
                     value_type: port.value_type.clone(),
                     required: port.required,
+                    binding: crate::InputBinding::default(),
                 },
             )
         })
@@ -219,8 +220,13 @@ impl NodeTarget {
             .inputs
             .get(id)
             .context(drift("input node declaration"))?;
+        let mut input_ports = target_ports(&metadata.ports.inputs);
+        for (name, binding) in &metadata.input_bindings {
+            let input = input_ports.get_mut(name).context(drift("input binding"))?;
+            input.binding = binding.clone();
+        }
         for (direction, expected, actual) in [
-            ("input", inputs, target_ports(&metadata.ports.inputs)),
+            ("input", inputs, input_ports),
             (
                 "output",
                 &self.outputs,

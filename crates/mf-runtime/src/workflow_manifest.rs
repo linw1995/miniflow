@@ -85,8 +85,15 @@ impl WorkflowManifest {
                 ensure!(
                     expected.required == actual.required,
                     InterfaceDriftSnafu {
-                        path,
+                        path: path.clone(),
                         component: "required flag"
+                    }
+                );
+                ensure!(
+                    expected.binding == actual.binding,
+                    InterfaceDriftSnafu {
+                        path,
+                        component: "input binding"
                     }
                 );
             }

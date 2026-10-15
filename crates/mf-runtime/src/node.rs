@@ -798,6 +798,7 @@ impl<N: TypedTaskNode> TaskNode for TypedTaskAdapter<N> {
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct NodeMetadata {
     pub ports: NodePorts,
+    pub input_bindings: std::collections::BTreeMap<String, crate::InputBinding>,
     pub output_derivations: Vec<OutputDerivation>,
     pub context_references: Vec<ContextReference>,
     pub stdin: Option<crate::StdinRequirement>,

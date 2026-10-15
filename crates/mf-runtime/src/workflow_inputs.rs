@@ -10,6 +10,23 @@ pub const MAX_WORKFLOW_INPUT_BYTES: usize = 1024 * 1024;
 pub enum WorkflowInterfaceVersion {
     #[serde(rename = "2026-10-11")]
     V2026_10_11,
+    #[serde(rename = "2026-10-16")]
+    V2026_10_16,
+}
+
+impl WorkflowInterfaceVersion {
+    pub fn for_schema(schema: &WorkflowInputSchema) -> Self {
+        if schema
+            .inputs
+            .values()
+            .flat_map(|ports| ports.values())
+            .any(|input| !input.binding.is_empty())
+        {
+            Self::V2026_10_16
+        } else {
+            Self::V2026_10_11
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,6 +53,14 @@ impl WorkflowInterface {
         description: &mf_telemetry::description::WorkflowDescription,
     ) -> Result<(), WorkflowInputError> {
         use std::collections::BTreeSet;
+        if self.version == WorkflowInterfaceVersion::V2026_10_11
+            && WorkflowInterfaceVersion::for_schema(&self.schema) != self.version
+        {
+            return Err(invalid(
+                String::new(),
+                "input bindings require interface version 2026-10-16",
+            ));
+        }
         if self.workflow_id != description.workflow_id {
             return Err(invalid(
                 String::new(),
@@ -89,6 +114,7 @@ impl WorkflowInterface {
                 input.value_type.check_depth().context(TypeDepthSnafu {
                     path: pointer(&pointer("", node), name),
                 })?;
+                input.binding.validate(&qualified, &input.value_type)?;
             }
         }
         for (node, requirement) in &self.schema.stdin {
@@ -127,6 +153,75 @@ pub struct WorkflowInput {
     #[serde(rename = "type")]
     pub value_type: ValueType,
     pub required: bool,
+    #[serde(default, skip_serializing_if = "InputBinding::is_empty")]
+    pub binding: InputBinding,
+}
+
+/// Startup sources are resolved before execution and before input observation.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InputBinding {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub env: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "present_default",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub default: Option<Value>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub secret: bool,
+}
+
+fn present_default<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
+    Value::deserialize(deserializer).map(Some)
+}
+
+fn is_false(value: &bool) -> bool {
+    !value
+}
+
+impl InputBinding {
+    pub fn is_empty(&self) -> bool {
+        self.env.is_none() && self.default.is_none() && !self.secret
+    }
+
+    pub fn validate(&self, name: &str, value_type: &ValueType) -> Result<(), WorkflowInputError> {
+        if let Some(env) = &self.env
+            && (env.is_empty() || env.contains(['=', '\0']))
+        {
+            return Err(invalid(
+                pointer("", name),
+                "invalid environment variable name",
+            ));
+        }
+        if let Some(value) = &self.default {
+            value_type
+                .validate_shared(&value.clone().into())
+                .context(TypeMismatchSnafu {
+                    path: pointer("", name),
+                })?;
+        }
+        Ok(())
+    }
+}
+
+impl WorkflowInput {
+    /// Uses the same text representation for named arguments and environment values.
+    pub fn parse_text(&self, text: &str) -> Result<crate::ValueRef, serde_json::Error> {
+        let value = match &self.value_type {
+            ValueType::String => crate::ValueRef::from(text),
+            ValueType::Nullable(inner) if **inner == ValueType::String && text != "null" => {
+                crate::ValueRef::from(text)
+            }
+            _ => from_unique_json::<Value>(text.as_bytes())?.into(),
+        };
+        Ok(if self.binding.secret {
+            value.into_secret()
+        } else {
+            value
+        })
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +239,11 @@ pub struct WorkflowArguments(pub Inputs);
 pub enum WorkflowInputError {
     #[snafu(display("invalid workflow arguments: {source}"), visibility(pub))]
     Json { source: serde_json::Error },
+    #[snafu(display("workflow input `{path}` requires valid JSON"))]
+    TextValue {
+        path: String,
+        source: serde_json::Error,
+    },
     #[snafu(
         display("workflow arguments exceed the {limit}-byte limit"),
         visibility(pub)
@@ -214,6 +314,7 @@ impl TryFrom<Value> for WorkflowArguments {
 }
 
 impl WorkflowInputSchema {
+    /// Checks supplied values and declarations without resolving external sources.
     pub fn validate(&self, arguments: &WorkflowArguments) -> Result<(), WorkflowInputError> {
         for (name, value) in &arguments.0 {
             let path = pointer("", name);
@@ -228,7 +329,12 @@ impl WorkflowInputSchema {
         for (node, ports) in &self.inputs {
             for (port, input) in ports {
                 let name = crate::output_id(node, port);
-                if input.required && !arguments.0.contains_key(name.as_str()) {
+                input.binding.validate(&name, &input.value_type)?;
+                if input.required
+                    && input.binding.env.is_none()
+                    && input.binding.default.is_none()
+                    && !arguments.0.contains_key(name.as_str())
+                {
                     return Err(invalid(
                         pointer("", &name),
                         "required input was not provided",
@@ -237,6 +343,72 @@ impl WorkflowInputSchema {
             }
         }
         Ok(())
+    }
+
+    /// Does not read sources; callers may inspect or forward arguments before execution.
+    pub fn mark_secrets(&self, arguments: &mut WorkflowArguments) {
+        for (node, ports) in &self.inputs {
+            for (port, input) in ports {
+                if input.binding.secret
+                    && let Some(value) = arguments.0.get_mut(&crate::output_id(node, port))
+                {
+                    *value = value.clone().into_secret();
+                }
+            }
+        }
+    }
+
+    pub fn resolve(
+        &self,
+        arguments: &WorkflowArguments,
+    ) -> Result<WorkflowArguments, WorkflowInputError> {
+        self.validate(arguments)?;
+        let mut resolved = arguments.clone();
+        let mut environment_bytes = 0usize;
+        for (node, ports) in &self.inputs {
+            for (port, input) in ports {
+                let name = crate::output_id(node, port);
+                if !resolved.0.contains_key(&name) {
+                    let environment = input.binding.env.as_ref().and_then(std::env::var_os);
+                    let value = if let Some(value) = environment {
+                        // Avoid VarError::NotUnicode, which retains the raw environment value.
+                        let text = match value.into_string() {
+                            Ok(text) => text,
+                            Err(_) => {
+                                return Err(invalid(
+                                    pointer("", &name),
+                                    "environment value is not valid Unicode",
+                                ));
+                            }
+                        };
+                        environment_bytes = environment_bytes.saturating_add(text.len());
+                        WorkflowArguments::check_size(environment_bytes)?;
+                        Some(input.parse_text(&text).context(TextValueSnafu {
+                            path: pointer("", &name),
+                        })?)
+                    } else {
+                        input.binding.default.clone().map(Into::into)
+                    };
+                    if let Some(value) = value {
+                        input
+                            .value_type
+                            .validate_shared(&value)
+                            .context(TypeMismatchSnafu {
+                                path: pointer("", &name),
+                            })?;
+                        resolved.0.insert(name.clone(), value);
+                    }
+                }
+                if input.required && !resolved.0.contains_key(&name) {
+                    return Err(invalid(
+                        pointer("", &name),
+                        "required input was not provided by arguments, environment, or default",
+                    ));
+                }
+            }
+        }
+        self.mark_secrets(&mut resolved);
+        Ok(resolved)
     }
 
     pub fn parameter(&self, name: &str) -> Option<&WorkflowInput> {
@@ -335,7 +507,7 @@ impl<'de> Deserialize<'de> for UniqueValue {
                 let mut values = serde_json::Map::new();
                 while let Some(key) = map.next_key::<String>()? {
                     if values.contains_key(&key) {
-                        return Err(de::Error::custom(format!("duplicate object key `{key}`")));
+                        return Err(de::Error::custom("duplicate object key"));
                     }
                     let UniqueValue(value) = map.next_value()?;
                     values.insert(key, value);

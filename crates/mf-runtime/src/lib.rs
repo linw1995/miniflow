@@ -117,7 +117,7 @@ pub use snapshot::{
 };
 
 pub use workflow_inputs::{
-    MAX_WORKFLOW_INPUT_BYTES, StdinRequirement, WorkflowArguments, WorkflowInput,
+    InputBinding, MAX_WORKFLOW_INPUT_BYTES, StdinRequirement, WorkflowArguments, WorkflowInput,
     WorkflowInputError, WorkflowInputSchema,
 };
 

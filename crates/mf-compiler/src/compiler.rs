@@ -568,6 +568,14 @@ fn validate_base_metadata(
     let mut output_index = BTreeMap::new();
     for node in nodes {
         let ports = registrations[&node.definition_id];
+        if !node.metadata.input_bindings.is_empty()
+            && (!startup || incoming.contains_key(node.definition_id.as_str()))
+        {
+            return Err(invalid(
+                &node.definition_id,
+                "input bindings require a top-level initial node".into(),
+            ));
+        }
         if let Some(generation) = &node.metadata.typed_generation {
             generation
                 .validate(ports)
@@ -1100,10 +1108,11 @@ pub fn describe_interface(
     registry: &NodeRegistry,
 ) -> Result<mf_runtime::WorkflowInterface, WorkflowCompileError> {
     let graph = describe_compiled(plan)?;
+    let schema = describe_workflow_inputs(plan, registry)?;
     let interface = mf_runtime::WorkflowInterface {
-        version: mf_runtime::WorkflowInterfaceVersion::V2026_10_11,
+        version: mf_runtime::WorkflowInterfaceVersion::for_schema(&schema),
         workflow_id: graph.workflow_id.clone(),
-        schema: describe_workflow_inputs(plan, registry)?,
+        schema,
     };
     interface.validate_for_description(&graph)?;
     Ok(interface)
