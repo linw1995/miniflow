@@ -521,7 +521,8 @@ The handle only delivers current `SnapshotEvent` values; encoding and history be
 
 For history in either execution mode, own a `SnapshotRecording::memory()` or `SnapshotRecording::with_sink(...)`
 and attach its `recorder()` handle. That owner shares immutable roots, interns equal values, and
-preserves separate Loop/Iteration scope paths. Equal finite states reuse their root; `Emitted` notifications preserve distinct equal-valued publications. Call the
+preserves separate Loop/Iteration scope paths. Equal completed states reuse their root; `Started` and `Emitted` notifications preserve
+distinct equal-valued invocations and publications. Call the
 owner's `finish()` after execution and inspect its typed `diagnostic()` separately from business
 results. Generated runners request the same OTLP snapshot backend through
 `MF_CAPTURE_SNAPSHOTS=1` in either execution mode. Build validation and manifest inspection do not capture data.
@@ -742,8 +743,8 @@ one frame per output domain. Every operator's pending queue has finite message c
 quota in this layer.
 
 A custom `StreamClock` must advance monotonically and wake registered instances. Deadline expiry
-makes an emission ready; downstream execution remains subject to capacity. Snapshot capture is rejected
-before startup. Streaming definitions also compile to standalone JSON Lines runners and support
+makes an emission ready; downstream execution remains subject to capacity. Optional snapshot
+capture uses the same notification and caller-owned recording path as finite execution. Streaming definitions also compile to standalone JSON Lines runners and support
 stream-specific observation. See [streaming runners](compiling.md#streaming-runners).
 
 Run the producer/consumer example with `cargo run -p mf-compiler --example stream` inside `nix develop`.
@@ -768,8 +769,8 @@ without exposing retained values. Transport and export queues remain bounded, an
 do not change workflow results or request retries. Terminal events follow drain or failure cleanup.
 
 Programmatic `SnapshotRecorder` callbacks observe node values in both execution modes.
-Whole-stream runners support streaming lifecycle and bounded Data export; the legacy finite
-snapshot export flag remains unsupported for whole-stream execution.
+Whole-stream runners support streaming lifecycle and the shared snapshot backend through
+`MF_CAPTURE_SNAPSHOTS=1`.
 
 Workflow graph construction is owned by `mf-compiler`: `FlowBuilder::prepare` validates configured nodes and graph connections, then `into_tasks` or `into_stream` produces an executable runtime plan. `FlowBuildError`, `StreamBuildError`, and `WorkflowBuildError` are compiler errors. The runtime binds validated owned or borrowed plans and schedules executors without depending on the compiler. Node factories and their `NodeBuildError` contract remain shared provider contracts in `mf-runtime`.
 

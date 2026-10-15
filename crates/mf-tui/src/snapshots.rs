@@ -342,12 +342,21 @@ mod tests {
             "first",
             snapshot(json!({"payload": "unique payload", "count": 2}).into()),
         );
+        let started = NodeSnapshot {
+            inputs: json!({"item": 1}).into(),
+            outputs: ValueRef::object([]),
+            skipped: Arc::from([]),
+            outcome: SnapshotOutcome::Started,
+            error: None,
+        };
+        recorder.record(vec![], "buffer", started.clone());
+        recorder.record(vec![], "buffer", started);
         recorder.finish();
         let mut capture = capture.lock().unwrap();
         capture.finish();
         assert!(capture.diagnostic.is_none());
         assert!(capture.store.is_complete());
-        assert_eq!(capture.store.history().len(), 3);
+        assert_eq!(capture.store.history().len(), 5);
         assert_eq!(
             first.node(&[], "first").unwrap().outputs["value"]["count"],
             json!(1)
@@ -359,7 +368,7 @@ mod tests {
         );
         let window = capture.view(None, 1);
         assert_eq!(window.entries.len(), 1);
-        assert_eq!(window.history_len, 3);
+        assert_eq!(window.history_len, 5);
         assert!(window.entries[0].snapshot.ptr_eq(latest));
     }
 

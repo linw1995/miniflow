@@ -65,6 +65,20 @@ fn snapshots_are_live_and_distinguish_buffering_from_timer_outputs() {
     );
     instance.source.send(json!(1)).unwrap();
     wait_until(|| instance.summary().completed_frames == 3);
+    assert_eq!(
+        recording
+            .history()
+            .iter()
+            .filter(|entry| entry.node.as_ref() == "collect"
+                && entry
+                    .snapshot
+                    .node(&entry.scope, &entry.node)
+                    .unwrap()
+                    .outcome
+                    == SnapshotOutcome::Started)
+            .count(),
+        2
+    );
     clock.advance(250);
     let delivery = instance.receive().unwrap().unwrap();
     assert_eq!(delivery.output().outputs["batch"], json!([1, 1]));

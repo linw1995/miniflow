@@ -298,9 +298,8 @@ endpoint. Ordinary execution does not allocate a snapshot recorder. Runners buil
 Both finite and streaming execution attach the same `SnapshotRecorder` notification handle.
 It sends current `SnapshotEvent` values and retains no history or encoding state. Callers that
 want dictionary encoding and immutable history own a `SnapshotRecording` and attach
-`recording.recorder()`; its store and sink policy are independent of execution. Equal node
-states retain their existing deduplication; `Emitted` updates preserve
-repeated equal-valued sends in either execution mode. Snapshot events and storage contain no
+`recording.recorder()`; its store and sink policy are independent of execution. Equal completed node states retain their existing deduplication; `Started` and `Emitted`
+notifications preserve repeated equal-valued invocations and sends in either execution mode. Snapshot events and storage contain no
 stream identity or run binding. Finite wire records retain their version 1 representation.
 
 Snapshot events use the `mf.snapshot` instrumentation scope and the standard OTLP `LogRecord`

@@ -8,8 +8,8 @@ SnapshotCapture reconstructs one shared SnapshotStore. Associate each admitted h
 with native trace/span context, packet sequence, and timestamp at assembly time. Keep this
 presentation metadata alongside the existing store; do not introduce another value/history model.
 Session and invocation lists read these same entries in either mode. Existing preview rendering
-shows decoded inputs, outputs, outcomes, skipped ports, and errors. Equal Emitted records remain
-distinct. Missing context stays visible in session Data without guessed correlation.
+shows decoded inputs, outputs, outcomes, skipped ports, and errors. Started and Emitted notifications remain distinct even for equal values; completed
+state updates retain existing deduplication. No additional invocation identity is introduced. Missing context stays visible in session Data without guessed correlation.
 
 Retain existing snapshot ordering, dictionary references, deduplication, and incomplete-tail
 semantics. A missing definition can prevent later reconstruction; report this instead of inventing

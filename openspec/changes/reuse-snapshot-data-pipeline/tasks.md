@@ -12,6 +12,6 @@
 
 ## 3. Review and finish
 
-- [ ] 3.1 Perform ablation and review changes against origin/main AGENTS.md; remove unnecessary design/tests.
+- [x] 3.1 Perform ablation and review changes against origin/main AGENTS.md; remove unnecessary design/tests.
 - [ ] 3.2 Run affected coverage and prek -a; commit any review fixes.
 - [ ] 3.3 Archive the reviewed spec, update PR 142, and monitor checks and reviews.

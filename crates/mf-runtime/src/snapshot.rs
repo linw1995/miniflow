@@ -213,7 +213,7 @@ impl SnapshotStore {
                     outcome,
                     error,
                 };
-                if outcome != SnapshotOutcome::Emitted
+                if !matches!(outcome, SnapshotOutcome::Started | SnapshotOutcome::Emitted)
                     && self
                         .current
                         .node(&scope, &node)
@@ -527,12 +527,14 @@ impl SnapshotRecording {
         if recording.error.is_some() || recording.store.complete {
             return;
         }
-        if snapshot.outcome != SnapshotOutcome::Emitted
-            && recording
-                .store
-                .current
-                .node(&scope, &node)
-                .is_some_and(|previous| previous.as_ref() == &snapshot)
+        if !matches!(
+            snapshot.outcome,
+            SnapshotOutcome::Started | SnapshotOutcome::Emitted
+        ) && recording
+            .store
+            .current
+            .node(&scope, &node)
+            .is_some_and(|previous| previous.as_ref() == &snapshot)
         {
             return;
         }
