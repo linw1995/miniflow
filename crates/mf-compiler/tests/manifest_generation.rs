@@ -1,6 +1,6 @@
 #![cfg(feature = "codegen")]
 
-use mf_compiler::{NodeRegistry, WorkflowDefinition, describe_workflow_inputs, plan_definition};
+use mf_compiler::{NodeRegistry, WorkflowDefinition, plan_definition};
 use mf_runtime::{
     ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeFactory, NodeMetadata,
     NodePorts, NodeRegistration, NodeResult, PortSpec, PreparedNode, StdinRequirement, TaskNode,
@@ -36,6 +36,7 @@ fn prepare(config: Value) -> Result<PreparedNode, NodeBuildError> {
     PREPARATIONS.fetch_add(1, Ordering::SeqCst);
     let port = config["port"].as_str().unwrap().to_owned();
     let metadata = NodeMetadata {
+        public_config: [("label".into(), json!("published"))].into(),
         stdin: config["stdin"]
             .as_bool()
             .unwrap_or(false)
@@ -89,9 +90,30 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
         syn::parse_file(&artifacts.rust_source).unwrap();
         let manifest = WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
         assert_eq!(manifest.description.is_streaming(), stream);
+        let before = PREPARATIONS.load(Ordering::SeqCst);
+        let (schema, configurations) = if stream {
+            let prepared = mf_compiler::instantiate_stream(&plan, &registry).unwrap();
+            (
+                prepared.plan().input_schema().clone(),
+                prepared.plan().node_configurations(),
+            )
+        } else {
+            let flow = mf_compiler::instantiate_compiled(&plan, &registry).unwrap();
+            (flow.input_schema().clone(), flow.node_configurations())
+        };
+        assert_eq!(PREPARATIONS.load(Ordering::SeqCst), before + 1);
+        assert_eq!(manifest.interface.schema, schema);
         assert_eq!(
-            manifest.interface.schema,
-            describe_workflow_inputs(&plan, &registry).unwrap()
+            configurations,
+            [(
+                "source./~".into(),
+                [("label".into(), json!("published"))].into()
+            )]
+            .into()
+        );
+        assert_eq!(
+            manifest.version,
+            mf_runtime::WorkflowManifestVersion::V2026_10_07
         );
         if version == "2026-10-03" {
             assert_eq!(

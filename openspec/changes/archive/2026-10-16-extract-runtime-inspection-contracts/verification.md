@@ -18,3 +18,7 @@ new fields; old serialized manifests remain compatible. No remote operation was 
 Archive validation synchronized three requirements into the two main specifications. Both main specifications pass
 ordinary validation. Strict-mode issue lists are identical before and after archival: the same sixteen inherited
 length warnings, no new warnings or errors. The archived task list is complete.
+
+The existing compiler manifest-generation fixture also checks both runtime inspection entry points. It verifies
+exact task/stream configuration, one preparation without execution, and unchanged legacy compiler output. The focused
+`cargo nextest run --all-features -p mf-compiler --test manifest_generation` check passed.
