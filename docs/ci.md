@@ -33,8 +33,12 @@ combined report after all selected suites pass. The shared build preserves Cargo
 feature unification and is timed separately. Package steps reuse nextest's binary
 and Cargo metadata, including only test discovery, setup, and execution. Generated
 project builds inside tests still count toward their package's time, and their
-caches are shared across steps. New workspace packages must also be added to both workflows; the
-CI script tests check that every package has exactly one step.
+caches are shared across steps. Generated-project dependencies are cleaned and
+prewarmed once per coverage preparation session, when the first matching package
+runs. Later package steps reuse that preparation; a new `--prepare` invocation
+creates a new session and invalidates the marker. Package steps must run
+sequentially against the same checkout and prepared binaries. New workspace
+packages must also be added to both workflows; the CI script tests check that every package has exactly one step.
 
 On PRs, step-level conditions skip packages absent from the affected plan.
 An empty plan skips preparation, all package steps, report generation, and uploads.
