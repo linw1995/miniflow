@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -8,6 +9,9 @@ import subprocess
 
 
 def main():
+    # Behavior fixtures need release semantics, but not optimizer throughput.
+    # Keep caller overrides and coverage instrumentation intact.
+    os.environ.setdefault("CARGO_PROFILE_RELEASE_OPT_LEVEL", "0")
     workspace = Path(os.environ["NEXTEST_WORKSPACE_ROOT"])
     cargo = shutil.which(os.environ.get("CARGO", "cargo"))
     if cargo is None:
@@ -27,6 +31,55 @@ def main():
         / "nextest-build-cache"
         / os.environ["NEXTEST_RUN_ID"]
     )
+    # Package steps share immutable binaries and one preparation session. A new
+    # coverage invocation must still discard restored workspace artifacts.
+    session = os.environ.get("MF_TEST_BUILD_CACHE_SESSION")
+    marker = directory / "prepared-session.json"
+    identity = {
+        "session": session,
+        "workspace": str(workspace.resolve()),
+        "cargo": cargo,
+        "environment": hashlib.sha256(json.dumps({
+            name: value for name, value in os.environ.items()
+            if name.startswith(("CARGO_", "RUST"))
+        }, sort_keys=True).encode()).hexdigest(),
+    }
+    prepared = None
+    if marker.is_file():
+        try:
+            prepared = json.loads(marker.read_text())
+        except (ValueError, OSError):
+            pass
+    if not session or prepared != identity or not all(
+        path.exists() for path in [directory / "target", directory / "vendor", directory / "source.toml"]
+    ):
+        marker.unlink(missing_ok=True)
+        prepare_cache(workspace, cargo, metadata, directory, bool(cache_directory))
+        if session:
+            pending = marker.with_suffix(".tmp")
+            pending.write_text(json.dumps(identity, sort_keys=True))
+            pending.replace(marker)
+    else:
+        print("Reusing generated-project dependencies prepared for this coverage session.")
+    target = directory / "target"
+    source_config = directory / "source.toml"
+    vendor = directory / "vendor"
+    with open(os.environ["NEXTEST_ENV"], "a") as output:
+        for name, value in {
+            "CARGO": workspace / "scripts/nextest-cargo.sh",
+            # Selected fixtures use local packages and already-fetched registry dependencies.
+            "CARGO_NET_OFFLINE": "true",
+            "CARGO_PROFILE_RELEASE_OPT_LEVEL": os.environ["CARGO_PROFILE_RELEASE_OPT_LEVEL"],
+            "MF_TEST_REAL_CARGO": cargo,
+            "MF_TEST_TARGET_DIR": target,
+            "MF_TEST_PACKAGE_TARGET_DIR": directory / "packaged-target",
+            "MF_TEST_SOURCE_CONFIG": source_config,
+            "MF_TEST_VENDOR_DIR": vendor,
+        }.items():
+            output.write(f"{name}={value}\n")
+
+
+def prepare_cache(workspace, cargo, metadata, directory, persistent):
     project = directory / "warmup"
     target = directory / "target"
     (project / "src").mkdir(parents=True, exist_ok=True)
@@ -95,15 +148,20 @@ def main():
     (project / "Cargo.toml").write_text(manifest)
     (project / "src/main.rs").write_text("fn main() {}\n")
     env = dict(os.environ, CARGO_TARGET_DIR=str(target))
-    if cache_directory:
+    if persistent:
         # Checkout mtimes can precede restored artifacts. Keep dependencies, never old workspace code.
-        for profile in ["release", "dev"]:
-            subprocess.run(
-                [cargo, "clean", "--workspace", "--profile", profile],
-                cwd=workspace,
-                env=env,
-                check=True,
-            )
+        targets = [(target, ["release", "dev"])]
+        package_target = directory / "packaged-target"
+        if package_target.exists():
+            targets.append((package_target, ["release"]))
+        for build_target, profiles in targets:
+            for profile in profiles:
+                subprocess.run(
+                    [cargo, "clean", "--workspace", "--profile", profile],
+                    cwd=workspace,
+                    env=dict(env, CARGO_TARGET_DIR=str(build_target)),
+                    check=True,
+                )
     # Preserve wrappers, flags, and coverage instrumentation used by the tests.
     for profile in ["release", "dev"]:
         subprocess.run(
@@ -112,17 +170,6 @@ def main():
             env=env,
             check=True,
         )
-    with open(os.environ["NEXTEST_ENV"], "a") as output:
-        for name, value in {
-            "CARGO": workspace / "scripts/nextest-cargo.sh",
-            # Selected fixtures use local packages and already-fetched registry dependencies.
-            "CARGO_NET_OFFLINE": "true",
-            "MF_TEST_REAL_CARGO": cargo,
-            "MF_TEST_TARGET_DIR": target,
-            "MF_TEST_SOURCE_CONFIG": source_config,
-            "MF_TEST_VENDOR_DIR": vendor,
-        }.items():
-            output.write(f"{name}={value}\n")
 
 
 if __name__ == "__main__":

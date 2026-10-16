@@ -191,6 +191,8 @@ fn release_lto_and_strip_preserve_standalone_factory_free_manifest() {
         fs::write(manifest_path, cargo_manifest).unwrap();
         resolve_project(&project, &root.path().join("flow.lock"), false).unwrap();
         let output = mf_compiler::cargo_command(&project)
+            // This probe covers optimized artifacts even when behavior tests build cheaply.
+            .env("CARGO_PROFILE_RELEASE_OPT_LEVEL", "3")
             .args(["build", "--offline", "--release", "--locked"])
             .output()
             .unwrap();

@@ -42,16 +42,31 @@ class CoverageTests(unittest.TestCase):
             for name in [
                 "CARGO", "CARGO_TARGET_DIR", "CARGO_ENCODED_RUSTFLAGS", "CARGO_BUILD_TARGET",
                 "MF_TEST_SOURCE_CONFIG", "MF_TEST_TARGET_DIR", "RUSTFLAGS", "LLVM_PROFILE_FILE",
-                "NEXTEST_PROFILE",
+                "NEXTEST_PROFILE", "MF_TEST_BUILD_CACHE_SESSION",
             ]:
                 env.pop(name, None)
             env["MF_TEST_BUILD_CACHE_DIR"] = str(root / "target/fixture-cache")
+            env["MF_TEST_BUILD_CACHE_SESSION"] = "inherited-session"
 
             def execute(*args):
                 return subprocess.run(args, cwd=root, env=env, capture_output=True, text=True)
 
             (root / "src").mkdir()
             (root / "scripts").mkdir()
+            (root / ".config").mkdir()
+            (root / ".config/nextest.toml").write_text('''experimental = ["setup-scripts"]
+[scripts.setup.check-session]
+command = ["python3", "scripts/check-session.py"]
+[[profile.default.scripts]]
+filter = "all()"
+setup = "check-session"
+''')
+            (root / "scripts/check-session.py").write_text('''import os
+from pathlib import Path
+session = os.environ["MF_TEST_BUILD_CACHE_SESSION"]
+assert session != "inherited-session"
+assert session == Path("target/coverage/build-cache-session").read_text().strip()
+''')
             shutil.copyfile(Path(__file__).resolve().parent / "run-cov.sh", root / "scripts/run-cov.sh")
             (root / "Cargo.toml").write_text('''[package]
 name = "coverage-fixture"
@@ -115,6 +130,9 @@ mod tests {{
             result = execute("bash", "scripts/run-cov.sh", "--prepare")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(report.exists())
+            session = root / "target/coverage/build-cache-session"
+            prepared_session = session.read_text()
+            self.assertTrue(prepared_session.strip())
             # Package steps must reuse the shared build, never compile again.
             original_source = other_source.read_text()
             other_source.write_text('compile_error!("Package steps must reuse binaries");\n')
@@ -122,6 +140,7 @@ mod tests {{
                 result = execute("bash", "scripts/run-cov.sh", "--test-package", package)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertFalse(report.exists())
+            self.assertEqual(session.read_text(), prepared_session)
             other_source.write_text(original_source)
             result = execute("bash", "scripts/run-cov.sh", "--report")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -143,6 +162,7 @@ mod tests {{
             plan.write_text(json.dumps({"packages": ["coverage-fixture"]}))
             result = execute("bash", "scripts/run-cov.sh", "--affected-plan", str(plan))
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotEqual(session.read_text(), prepared_session)
             self.assertNotIn("other/src/lib.rs", report.read_text())
             self.assertIn("src/alpha.rs", report.read_text())
 

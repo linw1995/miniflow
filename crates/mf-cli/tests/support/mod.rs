@@ -110,6 +110,7 @@ pub struct PackagedCli {
     directory: TempDir,
     cli: PathBuf,
     cargo_home: PathBuf,
+    target: PathBuf,
     pub fixture_source: PathBuf,
     pub fixture_version: String,
 }
@@ -122,7 +123,9 @@ impl PackagedCli {
             .unwrap();
         let root = directory.path();
         let workspace = workspace();
-        let target = root.join("setup-target");
+        let target = env::var_os("MF_TEST_PACKAGE_TARGET_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.join("setup-target"));
         let vendor = env::var_os("MF_TEST_VENDOR_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| root.join("vendor"));
@@ -151,7 +154,9 @@ impl PackagedCli {
                     .arg(&vendor),
             );
         }
-        if let Some(seed) = env::var_os("MF_TEST_TARGET_DIR") {
+        if !target.join("release").exists()
+            && let Some(seed) = env::var_os("MF_TEST_TARGET_DIR")
+        {
             let seed = PathBuf::from(seed).join("release");
             // Copy dependency artifacts while keeping fixture writes and executables isolated.
             for name in ["deps", ".fingerprint", "build"] {
@@ -164,6 +169,7 @@ impl PackagedCli {
         )).unwrap();
 
         let version = env!("CARGO_PKG_VERSION");
+        let mut packages = BTreeMap::new();
         for (name, path) in SUPPORT_PACKAGES {
             checked(
                 cargo()
@@ -178,12 +184,11 @@ impl PackagedCli {
                     .arg("--config")
                     .arg(&config),
             );
-            unpack_package(
-                &target
-                    .join("package")
-                    .join(format!("{name}-{version}.crate")),
-                &vendor,
-            );
+            let archive = target
+                .join("package")
+                .join(format!("{name}-{version}.crate"));
+            packages.insert(name.to_owned(), (version.to_owned(), checksum(&archive)));
+            unpack_package(&archive, &vendor);
         }
         checked(
             cargo()
@@ -263,12 +268,49 @@ impl PackagedCli {
                 .arg("--config")
                 .arg(&config),
         );
-        let fixture_source = unpack_package(
-            &target
-                .join("package")
-                .join(format!("fixture-multi-nodes-{fixture_version}.crate")),
-            &vendor,
+        let fixture_archive = target
+            .join("package")
+            .join(format!("fixture-multi-nodes-{fixture_version}.crate"));
+        packages.insert(
+            "fixture-multi-nodes".to_owned(),
+            (fixture_version.clone(), checksum(&fixture_archive)),
         );
+        let fixture_source = unpack_package(&fixture_archive, &vendor);
+        let package_marker = target.join("mf-packaged-sources.json");
+        let package_identity = serde_json::to_vec(&packages).unwrap();
+        if fs::read(&package_marker).ok().as_deref() != Some(package_identity.as_slice()) {
+            // Workspace cleanup only knows path packages. Resolve the registry
+            // identities too, so changed archives cannot reuse same-version code.
+            let cleanup = root.join("package-cleanup");
+            fs::create_dir_all(cleanup.join("src")).unwrap();
+            fs::write(cleanup.join("src/lib.rs"), "").unwrap();
+            let mut manifest = String::from(
+                "[package]\nname = \"mf-package-cleanup\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[workspace]\n[dependencies]\n",
+            );
+            for (name, (version, _)) in &packages {
+                manifest.push_str(&format!(
+                    "{name} = {{ version = \"={version}\", default-features = false }}\n"
+                ));
+            }
+            fs::write(cleanup.join("Cargo.toml"), manifest).unwrap();
+            let mut clean = cargo();
+            clean
+                .args([
+                    "clean",
+                    "--offline",
+                    "--profile",
+                    "release",
+                    "--manifest-path",
+                ])
+                .arg(cleanup.join("Cargo.toml"))
+                .arg("--config")
+                .arg(&config);
+            for (name, (version, _)) in &packages {
+                clean.args(["-p", &format!("{name}@{version}")]);
+            }
+            checked(&mut clean);
+            fs::write(package_marker, package_identity).unwrap();
+        }
         let cargo_home = root.join("cargo-home");
         fs::create_dir(&cargo_home).unwrap();
         fs::copy(&config, cargo_home.join("config.toml")).unwrap();
@@ -282,6 +324,7 @@ impl PackagedCli {
             directory,
             cli,
             cargo_home,
+            target,
             fixture_source,
             fixture_version,
         }
@@ -323,7 +366,7 @@ impl PackagedCli {
         command
             .env("CARGO", self.root().join("cargo-wrapper"))
             .env("MF_TEST_REAL_CARGO", cargo_binary())
-            .env("MF_TEST_TARGET_DIR", self.root().join("setup-target"));
+            .env("MF_TEST_TARGET_DIR", &self.target);
         if locked {
             command.arg("--locked");
         }

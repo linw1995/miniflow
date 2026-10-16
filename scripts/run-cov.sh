@@ -25,6 +25,9 @@ reset_reports() {
   rm -rf "${coverage_dir}/data" "${coverage_dir}/result"
   rm -f "${coverage_dir}/binaries.json" "${coverage_dir}/cargo-metadata.json"
   mkdir -p "${coverage_dir}/data" "${coverage_dir}/result"
+  MF_TEST_BUILD_CACHE_SESSION="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  export MF_TEST_BUILD_CACHE_SESSION
+  printf '%s\n' "$MF_TEST_BUILD_CACHE_SESSION" > "${coverage_dir}/build-cache-session"
 }
 
 prepare_coverage() {
@@ -67,6 +70,8 @@ report_coverage() {
 case "${1:-}" in
   --test-package)
     [[ $# -eq 2 && -n "$2" ]]
+    MF_TEST_BUILD_CACHE_SESSION="$(cat "${coverage_dir}/build-cache-session")"
+    export MF_TEST_BUILD_CACHE_SESSION
     # Some packages, such as derive macros, are tested only by their consumers.
     cargo nextest run \
       --cargo-metadata "${coverage_dir}/cargo-metadata.json" \
