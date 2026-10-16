@@ -204,6 +204,7 @@ pub struct ExecutionContext {
     snapshots: Option<crate::SnapshotRecorder>,
     snapshot_prefix: Vec<LoopPathEntry>,
     workflow_arguments: crate::WorkflowArguments,
+    bound_arguments: crate::WorkflowArguments,
     startup_nodes: BTreeSet<String>,
     stdin: Option<std::sync::Arc<std::sync::Mutex<crate::TextInput>>>,
     cancellation: crate::StreamCancellation,
@@ -228,6 +229,7 @@ impl Default for ExecutionContext {
             snapshots: None,
             snapshot_prefix: Vec::new(),
             workflow_arguments: crate::WorkflowArguments::default(),
+            bound_arguments: crate::WorkflowArguments::default(),
             startup_nodes: BTreeSet::new(),
             stdin: None,
             cancellation: crate::StreamCancellation::default(),
@@ -302,6 +304,7 @@ impl ExecutionContext {
             snapshots: self.snapshots.clone(),
             snapshot_prefix: self.snapshot_prefix.clone(),
             workflow_arguments: crate::WorkflowArguments::default(),
+            bound_arguments: crate::WorkflowArguments::default(),
             startup_nodes: BTreeSet::new(),
             worker_handle: self.worker_handle.clone(),
             worker_limit: self.worker_limit,
@@ -312,6 +315,7 @@ impl ExecutionContext {
 
     pub fn set_workflow_arguments(&mut self, arguments: crate::WorkflowArguments) {
         self.workflow_arguments = arguments;
+        self.bound_arguments = crate::WorkflowArguments::default();
         self.startup_nodes.clear();
     }
 
@@ -331,11 +335,7 @@ impl ExecutionContext {
         target.validate_context(&context)?;
         self.set_workflow_arguments(inputs);
         self.bind_workflow_inputs(&target.inputs)?;
-        if target
-            .inputs
-            .stdin_owner(&self.workflow_arguments)?
-            .is_none()
-        {
+        if target.inputs.stdin_owner(&self.bound_arguments)?.is_none() {
             self.stdin = None;
         }
         self.outputs = context
@@ -373,8 +373,9 @@ impl ExecutionContext {
         schema: &crate::WorkflowInputSchema,
     ) -> Result<(), WorkflowRunError> {
         self.startup_nodes.clear();
-        schema.validate(&self.workflow_arguments)?;
-        schema.validate_stdin(&self.workflow_arguments, self.stdin.is_some())?;
+        let arguments = schema.resolve(&self.workflow_arguments)?;
+        schema.validate_stdin(&arguments, self.stdin.is_some())?;
+        self.bound_arguments = arguments;
         self.startup_nodes = schema.inputs.keys().cloned().collect();
         Ok(())
     }
@@ -389,7 +390,7 @@ impl ExecutionContext {
             .inputs
             .iter()
             .filter_map(|port| {
-                self.workflow_arguments
+                self.bound_arguments
                     .0
                     .get(&output_id(id, &port.name))
                     .map(|value| (port.name.to_string(), value.clone()))
@@ -501,6 +502,7 @@ impl ExecutionContext {
             snapshots: self.snapshots.clone(),
             snapshot_prefix: self.snapshot_prefix.clone(),
             workflow_arguments: self.workflow_arguments.clone(),
+            bound_arguments: self.bound_arguments.clone(),
             startup_nodes: self.startup_nodes.clone(),
             stdin: self.stdin.clone(),
             cancellation: self.cancellation.clone(),

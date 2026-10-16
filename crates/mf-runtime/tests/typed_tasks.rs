@@ -118,6 +118,14 @@ fn preparation_derives_ports_and_never_decodes_or_executes() {
     let metadata = NodeMetadata {
         typed_generation: None,
         ports: NodePorts::default(),
+        input_bindings: [(
+            "input".into(),
+            mf_runtime::InputBinding {
+                secret: true,
+                ..Default::default()
+            },
+        )]
+        .into(),
         output_derivations: vec![OutputDerivation::forward_input("value", "input")],
         context_references: vec![ContextReference::new("source.value", "source")],
         stdin: Some(StdinRequirement::UnlessInput("input".into())),
@@ -134,6 +142,7 @@ fn preparation_derives_ports_and_never_decodes_or_executes() {
         metadata.context_references
     );
     assert_eq!(prepared.metadata.stdin, metadata.stdin);
+    assert_eq!(prepared.metadata.input_bindings, metadata.input_bindings);
     assert!(prepared.execution.as_task_node().is_some());
     let conflict = NodePorts {
         inputs: NeverDecode::ports(),

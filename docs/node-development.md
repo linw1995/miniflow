@@ -59,6 +59,15 @@ The [multi-node fixture](../crates/mf-compiler/tests/fixtures/multi-nodes/) demo
 
 See the [contribution guide](../CONTRIBUTING.md) for local checks and [dependency license auditing](licensing.md) before distributing additional plugins.
 
+## Startup input bindings
+
+`NodeMetadata.input_bindings` associates input port names with `InputBinding` declarations
+for environment fallback, a typed JSON default, and secret marking. Bindings are limited
+to top-level initial nodes. The compiler includes them in the frozen startup interface
+and isolated task contract; preparation must never read the environment. Runtime binding
+resolves sources and marks secret values before input observation. Ordinary nodes without
+bindings keep their existing argument behavior. See [`builtin.parameters`](workflows.md#parameters).
+
 ## Instance metadata
 
 Ports reflect the node's actual input and output contracts before execution. Fixed interfaces use

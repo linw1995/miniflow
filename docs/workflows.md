@@ -61,6 +61,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | Package | Kind | Configuration | Input ports | Output ports |
 | --- | --- | --- | --- | --- |
 | `mfn-core` | `builtin.constant` | Required `value`: any JSON value | None | `value`: inferred from the configured value |
+| `mfn-core` | [`builtin.parameters`](#parameters) | Named parameters with types, optional `env` and `default`, and `secret` (default `true`) | One typed startup input per parameter | One matching typed output per parameter |
 | `mfn-core` | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input, with its known type |
 | `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by control edges | One boolean activation output per branch, plus `else` |
 | `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array or object | `results`: collected array |
@@ -128,6 +129,67 @@ Run the complete [scalar example](../examples/cel-scalar.json) or [typed-list ex
 with the [repository development commands](compiling.md#repository-development). They produce `{"doubled":42}`
 and `{"doubled":[2,4]}` respectively. Replace the examples' local package paths with published package versions
 when compiling outside the checkout.
+
+### Parameters
+
+`builtin.parameters` declares a typed startup interface shared by runner arguments,
+environment variables, and configured defaults. It must be a top-level initial node,
+without incoming data or control edges; Loop and Iteration bodies cannot declare it.
+
+```json
+{
+  "id": "params",
+  "kind": "builtin.parameters",
+  "config": {
+    "parameters": {
+      "token": {"type": "string", "env": "API_TOKEN", "secret": true},
+      "endpoint": {
+        "type": "string",
+        "env": "SERVICE_URL",
+        "default": "https://example.com",
+        "secret": false
+      },
+      "timeout": {"type": "uint", "default": 30, "secret": false}
+    }
+  }
+}
+```
+
+Each parameter declares an input and a same-name output with the configured type.
+Connect `params.token` or `params.timeout` directly to downstream inputs. The parameter
+map and its names must be nonempty. Types use the ordinary port descriptors, including
+`bool`, `int`, `uint`, `string`, `{"list": "int"}`, and `{"nullable": "string"}`.
+Unknown configuration fields and defaults that do not match their declared type are rejected.
+
+```sh
+./workflow --params.endpoint https://override.example --params.timeout 60
+./workflow --inputs '{"params.timeout":60}'
+./workflow --inputs-file parameters.json
+./workflow --node params --params.timeout 60
+```
+
+For each parameter, resolution uses an explicitly supplied argument first, then its named
+environment variable, then its default. If none is available, execution fails before any
+node runs. Explicit null and empty strings count as supplied values. A present but invalid
+argument or environment value fails without falling back. Strings retain their text;
+other environment values use the same JSON conversion as named CLI arguments, including
+`null` for nullable strings. Environment names must be nonempty and contain neither `=`
+nor NUL. Non-Unicode values fail, and the combined environment text read per invocation is
+limited to 1 MiB. Unlisted variables are never read.
+
+Runtime input binding resolves sources and validates all parameters before invoking nodes.
+Runner parsing and manifest inspection do not read the environment; each execution reads
+its own process environment. In-memory, finite, streaming, and isolated node execution use
+this same binding path. Manifests with source or secret bindings use startup interface
+version `2026-10-16`; interfaces without bindings retain version `2026-10-11`.
+
+`secret` defaults to `true` for each parameter and applies to every source. Values are marked
+before input snapshots, then retain their markers through the node's matching outputs.
+Set `secret` to `false` for public parameters. Downstream access and business serialization
+retain original values; observation shows `[REDACTED]`. Configured defaults are embedded in
+the workflow and manifest, so credentials should come from arguments or environment variables.
+See [secret runtime values](observability.md#secret-runtime-values) for propagation rules.
+This node supplies runtime values; node configuration does not yet interpolate templates.
 
 ### LLM configuration and conversation values
 
@@ -447,7 +509,8 @@ has no incoming data or control edges. Its configured input types and required f
 the workflow does not repeat those declarations. A node behind a control edge still needs its required
 data connections. Loop and Iteration body inputs stay local to their enclosing scope.
 
-The startup interface version `2026-10-11` uses flat qualified arguments. Recompile runners with an older
+The startup interface uses flat qualified arguments: version `2026-10-11` for ordinary
+inputs, or `2026-10-16` when [parameter bindings](#parameters) are present. Recompile runners with an older
 interface before launching them through the updated CLI. The workflow definition schema remains `2026-10-03`.
 
 Pass parameters directly as `--node.port VALUE` or `--node.port=VALUE`:

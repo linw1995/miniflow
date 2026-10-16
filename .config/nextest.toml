@@ -53,6 +53,7 @@ filter = '''
 (binary_id(=mf-compiler::observation) &
     test(=generated_execution_matches_memory_for_success_and_failures)) |
 binary_id(=mf-compiler::single_node_runner) |
+(binary_id(=mf-compiler::parameters) & test(=standalone_parameters_share_transports_and_binding_rules)) |
 (binary_id(=mf-cli::runner_observability) &
     test(=generated_runner_describes_embedded_graph_and_exports_correlated_otel)) |
 (binary_id(=mf-cli::stream_tui) &
@@ -108,6 +109,7 @@ filter = '''
 (binary_id(=mf-compiler::observation) &
     test(=generated_execution_matches_memory_for_success_and_failures)) |
 binary_id(=mf-compiler::single_node_runner) |
+(binary_id(=mf-compiler::parameters) & test(=standalone_parameters_share_transports_and_binding_rules)) |
 (binary_id(=mf-cli::runner_observability) &
     test(=generated_runner_describes_embedded_graph_and_exports_correlated_otel)) |
 (binary_id(=mf-cli::stream_tui) &

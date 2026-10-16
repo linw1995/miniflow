@@ -1,6 +1,6 @@
 use crate::{
-    MAX_WORKFLOW_INPUT_BYTES, NodeTarget, NodeTargetKind, ValueType, WorkflowArguments,
-    WorkflowInputError, WorkflowInputSchema,
+    MAX_WORKFLOW_INPUT_BYTES, NodeTarget, NodeTargetKind, WorkflowArguments, WorkflowInputError,
+    WorkflowInputSchema,
 };
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::OsStringValueParser};
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
@@ -275,13 +275,25 @@ fn argument_command<'a>(
                 .long(name)
                 .value_name("VALUE")
                 .help(format!(
-                    "{} ({})",
+                    "{} ({}){}{}{}",
                     input.value_type,
                     if input.required {
                         "required"
                     } else {
                         "optional"
-                    }
+                    },
+                    input
+                        .binding
+                        .env
+                        .as_ref()
+                        .map(|name| format!("; env: {name}"))
+                        .unwrap_or_default(),
+                    if input.binding.default.is_some() {
+                        "; default configured"
+                    } else {
+                        ""
+                    },
+                    if input.binding.secret { "; secret" } else { "" },
                 ))
                 .value_parser(OsStringValueParser::new())
                 .conflicts_with_all(["inputs", "inputs-file"]),
@@ -373,18 +385,10 @@ fn decode_options(
         let value = value.to_str().context(InvalidSnafu {
             message: "workflow input values must be UTF-8",
         })?;
-        let value = match &input.value_type {
-            ValueType::String => serde_json::Value::String(value.to_owned()).into(),
-            ValueType::Nullable(inner) if **inner == ValueType::String && value != "null" => {
-                serde_json::Value::String(value.to_owned()).into()
-            }
-            _ => crate::workflow_inputs::from_unique_json::<serde_json::Value>(value.as_bytes())
-                .context(JsonValueSnafu { name })?
-                .into(),
-        };
+        let value = input.parse_text(value).context(JsonValueSnafu { name })?;
         values.0.insert(name.into(), value);
     }
-    let values = if let Some(path) = matches.get_one::<OsString>("inputs-file") {
+    let mut values = if let Some(path) = matches.get_one::<OsString>("inputs-file") {
         WorkflowArguments::from_file(Path::new(path))?
     } else if let Some(json) = matches.get_one::<OsString>("inputs") {
         WorkflowArguments::from_json(
@@ -397,6 +401,7 @@ fn decode_options(
     } else {
         values
     };
+    schema.mark_secrets(&mut values);
     schema.validate(&values)?;
     let encoded = serde_json::to_vec(&values).context(crate::WorkflowInputJsonSnafu)?;
     WorkflowArguments::check_size(encoded.len())?;

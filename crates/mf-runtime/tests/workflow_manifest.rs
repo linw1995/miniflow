@@ -43,6 +43,7 @@ fn sample() -> WorkflowManifest {
                         WorkflowInput {
                             value_type: mf_runtime::ValueType::String,
                             required: false,
+                            binding: Default::default(),
                         },
                     )]
                     .into(),
@@ -181,7 +182,17 @@ fn reports_exact_interface_drift_before_accepting_prepared_schemas() {
     let manifest = sample();
     let schema = manifest.interface.schema.clone();
     manifest.validate_prepared_schema(&schema).unwrap();
-    for component in ["node", "port", "type", "required", "stdin", "condition"] {
+    for component in [
+        "node",
+        "port",
+        "type",
+        "required",
+        "env",
+        "default",
+        "secret",
+        "stdin",
+        "condition",
+    ] {
         let mut actual = schema.clone();
         match component {
             "node" => {
@@ -211,6 +222,20 @@ fn reports_exact_interface_drift_before_accepting_prepared_schemas() {
             "stdin" => {
                 actual.stdin.clear();
             }
+            "env" | "default" | "secret" => {
+                let binding = &mut actual
+                    .inputs
+                    .get_mut("root.a/~")
+                    .unwrap()
+                    .get_mut("port.a/~")
+                    .unwrap()
+                    .binding;
+                match component {
+                    "env" => binding.env = Some("CONFIG_VALUE".into()),
+                    "default" => binding.default = Some(serde_json::json!("default")),
+                    _ => binding.secret = true,
+                }
+            }
             _ => {
                 actual
                     .stdin
@@ -231,7 +256,10 @@ fn reports_exact_interface_drift_before_accepting_prepared_schemas() {
             }),
             "{diagnostic}"
         );
-        if matches!(component, "port" | "type" | "required") {
+        if matches!(
+            component,
+            "port" | "type" | "required" | "env" | "default" | "secret"
+        ) {
             assert!(diagnostic.contains("/port.a~1~0"), "{diagnostic}");
         }
     }
