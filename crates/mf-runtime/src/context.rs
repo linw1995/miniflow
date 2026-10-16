@@ -1,9 +1,6 @@
 use crate::ValueRef as Value;
 use crate::node::LoopVariableTypeSnafu;
-use crate::runner::{
-    ContextSnafu, DependencySnafu, InputTypeSnafu, NodeExecutionSnafu, OutputSelectionSnafu,
-    OutputTypeSnafu,
-};
+use crate::runner::{ContextSnafu, NodeExecutionSnafu, OutputSelectionSnafu, OutputTypeSnafu};
 use crate::worker::{RuntimeWorkerHandle, WorkerJob, WorkerPool};
 use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
 use mf_telemetry::{
@@ -203,9 +200,7 @@ pub struct ExecutionContext {
     remaining_steps: StepBudget,
     snapshots: Option<crate::SnapshotRecorder>,
     snapshot_prefix: Vec<LoopPathEntry>,
-    workflow_arguments: crate::WorkflowArguments,
-    bound_arguments: crate::WorkflowArguments,
-    startup_nodes: BTreeSet<String>,
+    inputs: crate::ExecutionInputs,
     stdin: Option<std::sync::Arc<std::sync::Mutex<crate::TextInput>>>,
     cancellation: crate::StreamCancellation,
     worker_handle: Option<RuntimeWorkerHandle>,
@@ -228,9 +223,7 @@ impl Default for ExecutionContext {
             remaining_steps: StepBudget::new(crate::MAX_SCHEDULED_STEPS),
             snapshots: None,
             snapshot_prefix: Vec::new(),
-            workflow_arguments: crate::WorkflowArguments::default(),
-            bound_arguments: crate::WorkflowArguments::default(),
-            startup_nodes: BTreeSet::new(),
+            inputs: crate::ExecutionInputs::default(),
             stdin: None,
             cancellation: crate::StreamCancellation::default(),
             worker_handle: None,
@@ -303,9 +296,7 @@ impl ExecutionContext {
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             snapshots: self.snapshots.clone(),
             snapshot_prefix: self.snapshot_prefix.clone(),
-            workflow_arguments: crate::WorkflowArguments::default(),
-            bound_arguments: crate::WorkflowArguments::default(),
-            startup_nodes: BTreeSet::new(),
+            inputs: crate::ExecutionInputs::default(),
             worker_handle: self.worker_handle.clone(),
             worker_limit: self.worker_limit,
             #[cfg(feature = "async")]
@@ -314,9 +305,7 @@ impl ExecutionContext {
     }
 
     pub fn set_workflow_arguments(&mut self, arguments: crate::WorkflowArguments) {
-        self.workflow_arguments = arguments;
-        self.bound_arguments = crate::WorkflowArguments::default();
-        self.startup_nodes.clear();
+        self.inputs.set_arguments(arguments);
     }
 
     pub(super) fn initialize_target(
@@ -335,7 +324,7 @@ impl ExecutionContext {
         target.validate_context(&context)?;
         self.set_workflow_arguments(inputs);
         self.bind_workflow_inputs(&target.inputs)?;
-        if target.inputs.stdin_owner(&self.bound_arguments)?.is_none() {
+        if self.inputs.stdin_owner().is_none() {
             self.stdin = None;
         }
         self.outputs = context
@@ -372,30 +361,9 @@ impl ExecutionContext {
         &mut self,
         schema: &crate::WorkflowInputSchema,
     ) -> Result<(), WorkflowRunError> {
-        self.startup_nodes.clear();
-        let arguments = schema.resolve(&self.workflow_arguments)?;
-        schema.validate_stdin(&arguments, self.stdin.is_some())?;
-        self.bound_arguments = arguments;
-        self.startup_nodes = schema.inputs.keys().cloned().collect();
+        self.inputs
+            .bind(schema, |name| std::env::var_os(name), self.stdin.is_some())?;
         Ok(())
-    }
-
-    fn initial_inputs<N>(&self, node: &FlowNode<N>) -> Inputs {
-        let id = node.definition_id.as_str();
-        if !self.scopes.is_empty() || !self.startup_nodes.contains(id) {
-            return Inputs::new();
-        }
-        node.metadata
-            .ports
-            .inputs
-            .iter()
-            .filter_map(|port| {
-                self.bound_arguments
-                    .0
-                    .get(&output_id(id, &port.name))
-                    .map(|value| (port.name.to_string(), value.clone()))
-            })
-            .collect()
     }
 
     pub(super) fn set_frame_observation(&mut self, observation: RunObservation) {
@@ -501,9 +469,7 @@ impl ExecutionContext {
             remaining_steps: self.remaining_steps.clone(),
             snapshots: self.snapshots.clone(),
             snapshot_prefix: self.snapshot_prefix.clone(),
-            workflow_arguments: self.workflow_arguments.clone(),
-            bound_arguments: self.bound_arguments.clone(),
-            startup_nodes: self.startup_nodes.clone(),
+            inputs: self.inputs.clone(),
             stdin: self.stdin.clone(),
             cancellation: self.cancellation.clone(),
             worker_handle: self.worker_handle.clone(),
@@ -550,48 +516,19 @@ impl ExecutionContext {
         node: &FlowNode<N>,
         dependencies: &[crate::FlowDependency],
     ) -> Result<Option<Inputs>, WorkflowRunError> {
-        let id = node.definition_id.as_str();
-        self.reserve_step(id)?;
-        let mut inputs = self.initial_inputs(node);
-        let mut skipped = false;
-        for dependency in dependencies {
-            let value = self
-                .output(&output_id(
-                    &dependency.source_node,
-                    &dependency.source_output,
-                ))
-                .with_context(|_| DependencySnafu {
-                    definition_id: id,
-                    input: dependency.input.as_deref().unwrap_or("<control>"),
-                })?;
-            match value {
-                ContextValue::Value(value) => {
-                    if let Some(input) = &dependency.input {
-                        inputs.insert(input.clone().into_owned(), value.clone());
-                    }
-                }
-                ContextValue::Skipped => skipped = true,
-            }
-        }
-        if skipped {
-            return Ok(None);
-        }
-        for (name, value) in &inputs {
-            let port = node
-                .metadata
-                .ports
-                .inputs
-                .iter()
-                .find(|port| port.name == *name)
-                .ok_or_else(|| state_error(id, format!("received undeclared input `{name}`")))?;
-            port.value_type
-                .validate_shared(value)
-                .with_context(|_| InputTypeSnafu {
-                    definition_id: id,
-                    input: name,
-                })?;
-        }
-        Ok(Some(inputs))
+        self.reserve_step(node.definition_id.as_str())?;
+        let mut inputs = Inputs::new();
+        let causes = self.inputs.resolve_node(
+            node,
+            !self.scopes.is_empty(),
+            dependencies.iter().map(crate::FlowDependency::borrowed),
+            |dependency| {
+                self.output(&output_id(dependency.source_node, dependency.source_output))
+                    .map(Some)
+            },
+            &mut inputs,
+        )?;
+        Ok(causes.is_empty().then_some(inputs))
     }
 
     pub fn set_snapshot_recorder(&mut self, recorder: crate::SnapshotRecorder) {
@@ -1187,89 +1124,45 @@ fn execute_ordered_call_in_context<'a, N>(
         Some(StepObservation::Body(step)) => Some(step.enter()),
         _ => None,
     };
-    let mut inputs = ctx.initial_inputs(node);
-    let mut skipped = false;
-    let mut causes = BTreeSet::new();
-    for dependency in dependencies {
-        let key = output_id(dependency.source_node, dependency.source_output);
-        if dependency
-            .input
-            .is_some_and(|input| transferred_inputs.contains(&input))
-            && ctx.typed_outputs.contains(&key)
-        {
-            continue;
+    let mut inputs = Inputs::new();
+    let resolution = ctx.inputs.resolve_node(
+        node,
+        !ctx.scopes.is_empty(),
+        dependencies,
+        |dependency| {
+            let key = output_id(dependency.source_node, dependency.source_output);
+            if dependency
+                .input
+                .is_some_and(|input| transferred_inputs.contains(&input))
+                && ctx.typed_outputs.contains(&key)
+            {
+                return Ok(None);
+            }
+            ctx.output(&key).map(Some)
+        },
+        &mut inputs,
+    );
+    let causes = match resolution {
+        Ok(causes) => causes,
+        Err(error) => {
+            if let Some(step) = step.take() {
+                step.failed(ctx, FailurePhase::Dependency, error.to_string());
+            }
+            ctx.capture_node(
+                node,
+                &inputs,
+                None,
+                crate::SnapshotOutcome::Failed,
+                Some(&error),
+            );
+            return Err(error);
         }
-        let value = ctx.output(&key).with_context(|_| DependencySnafu {
-            definition_id: id,
-            input: dependency.input.unwrap_or("<control>"),
-        });
-        let value = match value {
-            Ok(value) => value,
-            Err(error) => {
-                if let Some(step) = step.take() {
-                    step.failed(ctx, FailurePhase::Dependency, error.to_string());
-                }
-                ctx.capture_node(
-                    node,
-                    &inputs,
-                    None,
-                    crate::SnapshotOutcome::Failed,
-                    Some(&error),
-                );
-                return Err(error);
-            }
-        };
-        match value {
-            ContextValue::Value(value) => {
-                if let Some(input) = dependency.input {
-                    inputs.insert(input.to_owned(), value.clone());
-                }
-            }
-            ContextValue::Skipped => {
-                skipped = true;
-                if step.is_some() {
-                    causes.insert(SkipCause {
-                        source_node: dependency.source_node.into(),
-                        source_output: dependency.source_output.into(),
-                    });
-                }
-            }
-        }
-    }
+    };
+    let skipped = !causes.is_empty();
     let snapshot_inputs = ctx.snapshots.as_ref().map(|_| inputs.clone());
     let result = if skipped {
         None
     } else {
-        for (name, value) in &inputs {
-            let validation = node
-                .metadata
-                .ports
-                .inputs
-                .iter()
-                .find(|port| port.name == *name)
-                .ok_or_else(|| state_error(id, format!("received undeclared input `{name}`")))
-                .and_then(|port| {
-                    port.value_type
-                        .validate_shared(value)
-                        .with_context(|_| InputTypeSnafu {
-                            definition_id: id,
-                            input: name,
-                        })
-                });
-            if let Err(error) = validation {
-                if let Some(step) = step.take() {
-                    step.failed(ctx, FailurePhase::Dependency, error.to_string());
-                }
-                ctx.capture_node(
-                    node,
-                    &inputs,
-                    None,
-                    crate::SnapshotOutcome::Failed,
-                    Some(&error),
-                );
-                return Err(error);
-            }
-        }
         ctx.capture_node(node, &inputs, None, crate::SnapshotOutcome::Started, None);
         if let Some(step) = step.as_mut() {
             step.started(ctx);
@@ -1416,6 +1309,152 @@ mod tests {
 
     fn port(name: &str, value_type: ValueType, required: bool) -> PortSpec {
         PortSpec::owned(name, value_type, required)
+    }
+
+    #[test]
+    fn startup_inputs_follow_context_fork_and_scope_boundaries() {
+        let node = FlowNode {
+            definition_id: "target".into(),
+            node: (),
+            metadata: crate::NodeMetadata::new(NodePorts {
+                inputs: vec![port("value", ValueType::Int64, true)],
+                outputs: vec![],
+            }),
+        };
+        let schema = serde_json::from_value(json!({
+            "inputs": {"target": {"value": {"type": "int", "required": true}}},
+            "stdin": {}
+        }))
+        .unwrap();
+        let mut context = ExecutionContext::default();
+        context.set_workflow_arguments(
+            crate::WorkflowArguments::try_from(json!({"target.value": 1})).unwrap(),
+        );
+        context.bind_workflow_inputs(&schema).unwrap();
+        let mut domain = context.fork_domain_with_observation(None);
+        for mut child in [context.fork_stream(None), context.fork_body(None)] {
+            assert!(child.event_inputs(&node, &[]).unwrap().unwrap().is_empty());
+        }
+        let scope =
+            ExecutionScope::new("loop", "%loop", 0, Outputs::new(), BTreeMap::new()).unwrap();
+        context
+            .run_scope(scope, |context| {
+                assert!(context.event_inputs(&node, &[])?.unwrap().is_empty());
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(
+            context.event_inputs(&node, &[]).unwrap().unwrap()["value"],
+            json!(1)
+        );
+        context.set_workflow_arguments(
+            crate::WorkflowArguments::try_from(json!({"target.value": 2})).unwrap(),
+        );
+        assert!(
+            context
+                .event_inputs(&node, &[])
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
+        context.bind_workflow_inputs(&schema).unwrap();
+        assert_eq!(
+            context.event_inputs(&node, &[]).unwrap().unwrap()["value"],
+            json!(2)
+        );
+        assert_eq!(
+            domain.event_inputs(&node, &[]).unwrap().unwrap()["value"],
+            json!(1)
+        );
+    }
+
+    #[test]
+    fn event_and_generated_inputs_share_skip_errors_and_partial_failure_snapshots() {
+        let node = FlowNode {
+            definition_id: "target".into(),
+            node: (),
+            metadata: crate::NodeMetadata::new(NodePorts {
+                inputs: vec![port("value", ValueType::Int64, true)],
+                outputs: vec![],
+            }),
+        };
+        for case in ["ready", "skipped", "missing", "wrong_type"] {
+            let value = if case == "ready" {
+                Value::from(42)
+            } else {
+                Value::from("wrong type")
+            }
+            .into_secret();
+            let mut context = ExecutionContext::default();
+            context
+                .outputs
+                .insert("source.value".into(), Some(value.clone()));
+            context.outputs.insert(
+                "gate.value".into(),
+                if matches!(case, "skipped" | "missing") {
+                    None
+                } else {
+                    Some(Value::from(true))
+                },
+            );
+            let mut dependencies = vec![
+                crate::FlowDependency {
+                    input: Some("value".into()),
+                    source_node: "source".into(),
+                    source_output: "value".into(),
+                },
+                crate::FlowDependency {
+                    input: None,
+                    source_node: "gate".into(),
+                    source_output: "value".into(),
+                },
+            ];
+            if case == "missing" {
+                dependencies.push(crate::FlowDependency {
+                    input: None,
+                    source_node: "absent".into(),
+                    source_output: "value".into(),
+                });
+            }
+            let event = context.event_inputs(&node, &dependencies);
+            let recording = crate::SnapshotRecording::memory();
+            context.set_snapshot_recorder(recording.recorder());
+            let task = execute_generated_node_in_context(
+                &node,
+                dependencies.iter().map(crate::FlowDependency::borrowed),
+                &mut context,
+                &[],
+                |inputs, _| {
+                    assert_eq!(case, "ready");
+                    assert!(inputs["value"].ptr_eq(&value));
+                    Ok(GeneratedNodeResult::Dynamic(Outputs::new().into()))
+                },
+            );
+            let snapshot = recording.current();
+            let snapshot = snapshot.node(&[], "target").unwrap();
+            assert_eq!(snapshot.inputs["value"], json!("[REDACTED]"));
+            match (event, task) {
+                (Ok(Some(inputs)), Ok(())) => {
+                    assert_eq!(case, "ready");
+                    assert!(inputs["value"].ptr_eq(&value));
+                    assert_eq!(snapshot.outcome, crate::SnapshotOutcome::Succeeded);
+                }
+                (Ok(None), Ok(())) => {
+                    assert_eq!(case, "skipped");
+                    assert_eq!(snapshot.outcome, crate::SnapshotOutcome::Skipped);
+                }
+                (Err(event), Err(task)) => {
+                    assert_eq!(event.to_string(), task.to_string());
+                    assert_eq!(snapshot.outcome, crate::SnapshotOutcome::Failed);
+                    assert!(matches!(
+                        (&task, case),
+                        (WorkflowRunError::Dependency { .. }, "missing")
+                            | (WorkflowRunError::InputType { .. }, "wrong_type")
+                    ));
+                }
+                _ => panic!("event and task resolution diverged for {case}"),
+            }
+        }
     }
 
     #[test]

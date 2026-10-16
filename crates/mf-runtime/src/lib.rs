@@ -3,6 +3,7 @@ mod config_template;
 mod context;
 mod definition;
 mod execution_domains;
+mod execution_inputs;
 mod flow;
 #[cfg(feature = "async")]
 mod future_execution;
@@ -45,6 +46,7 @@ pub use definition::{
     WorkflowDefinitionVersion, WorkflowOutputDefinition,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
+pub use execution_inputs::{ExecutionInputs, resolve_workflow_inputs};
 pub use flow::{
     Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowPlan, FlowRuntime,
     GeneratedDomainExecutor, NodeId, RuntimeOptions, TaskFlowNode,

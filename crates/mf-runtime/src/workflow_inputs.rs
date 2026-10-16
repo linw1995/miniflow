@@ -239,7 +239,10 @@ pub struct WorkflowArguments(pub Inputs);
 pub enum WorkflowInputError {
     #[snafu(display("invalid workflow arguments: {source}"), visibility(pub))]
     Json { source: serde_json::Error },
-    #[snafu(display("workflow input `{path}` requires valid JSON"))]
+    #[snafu(
+        display("workflow input `{path}` requires valid JSON"),
+        visibility(pub(super))
+    )]
     TextValue {
         path: String,
         source: serde_json::Error,
@@ -261,7 +264,7 @@ pub enum WorkflowInputError {
         format!("{path}{}", source.path),
         source.expected,
         source.actual
-    ))]
+    ), visibility(pub(super)))]
     TypeMismatch {
         path: String,
         source: crate::TypeMismatch,
@@ -356,59 +359,6 @@ impl WorkflowInputSchema {
                 }
             }
         }
-    }
-
-    pub fn resolve(
-        &self,
-        arguments: &WorkflowArguments,
-    ) -> Result<WorkflowArguments, WorkflowInputError> {
-        self.validate(arguments)?;
-        let mut resolved = arguments.clone();
-        let mut environment_bytes = 0usize;
-        for (node, ports) in &self.inputs {
-            for (port, input) in ports {
-                let name = crate::output_id(node, port);
-                if !resolved.0.contains_key(&name) {
-                    let environment = input.binding.env.as_ref().and_then(std::env::var_os);
-                    let value = if let Some(value) = environment {
-                        // Avoid VarError::NotUnicode, which retains the raw environment value.
-                        let text = match value.into_string() {
-                            Ok(text) => text,
-                            Err(_) => {
-                                return Err(invalid(
-                                    pointer("", &name),
-                                    "environment value is not valid Unicode",
-                                ));
-                            }
-                        };
-                        environment_bytes = environment_bytes.saturating_add(text.len());
-                        WorkflowArguments::check_size(environment_bytes)?;
-                        Some(input.parse_text(&text).context(TextValueSnafu {
-                            path: pointer("", &name),
-                        })?)
-                    } else {
-                        input.binding.default.clone().map(Into::into)
-                    };
-                    if let Some(value) = value {
-                        input
-                            .value_type
-                            .validate_shared(&value)
-                            .context(TypeMismatchSnafu {
-                                path: pointer("", &name),
-                            })?;
-                        resolved.0.insert(name.clone(), value);
-                    }
-                }
-                if input.required && !resolved.0.contains_key(&name) {
-                    return Err(invalid(
-                        pointer("", &name),
-                        "required input was not provided by arguments, environment, or default",
-                    ));
-                }
-            }
-        }
-        self.mark_secrets(&mut resolved);
-        Ok(resolved)
     }
 
     pub fn parameter(&self, name: &str) -> Option<&WorkflowInput> {
