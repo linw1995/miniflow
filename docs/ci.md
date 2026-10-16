@@ -25,9 +25,12 @@ The script removes previous workspace binaries and report data while retaining
 dependencies, so stale coverage mappings cannot contribute to a new report.
 The packaged CLI fixture keeps a separate target beside the generated-runner
 cache. Its registry dependencies survive subsequent runs, while preparation
-cleans checkout packages before rebuilding the CLI. Archive checksums also
+cleans checkout packages before rebuilding the CLI. Packaged source digests also
 invalidate registry builds of the support packages and external fixture whenever
-their packaged contents change, even at the same version. Dependency artifacts are
+their build inputs change, even at the same version. Cargo's generated VCS
+metadata is excluded from this identity because these crates do not consume it;
+metadata-only repackaging retains compiled dependencies. Cargo's archive and file
+checksums still cover every packaged file. Dependency artifacts are
 seeded only on the first run; installed executables, Cargo homes, and user
 projects remain temporary and isolated.
 The default and CI profiles share all CLI generated-build fixtures.
