@@ -24,6 +24,21 @@ mark_fixture_target() {
 rm -rf "${coverage_dir}/data" "${coverage_dir}/result"
 mkdir -p "${coverage_dir}/data" "${coverage_dir}/result"
 
+test_packages=(--workspace)
+if [[ "${1:-}" == "--affected-plan" ]]; then
+  plan="${2:?--affected-plan requires a JSON plan path}"
+  shift 2
+  jq -e '(.packages | type == "array") and all(.packages[]; type == "string" and length > 0)' "$plan" > /dev/null
+  test_packages=()
+  while IFS= read -r package; do
+    test_packages+=(-p "$package")
+  done < <(jq -r '.packages[]' "$plan")
+  if [[ ${#test_packages[@]} -eq 0 ]]; then
+    echo "No affected Rust package tests."
+    exit 0
+  fi
+fi
+
 # Offline fixture builds resolve the complete lockfile, including other targets.
 cargo fetch --locked
 cargo metadata --offline --locked --no-deps --format-version 1 > "${coverage_dir}/workspace.json"
@@ -40,7 +55,7 @@ mark_fixture_target
 
 # grcov scans every binary in its search directory. Remove old workspace mappings while retaining dependencies.
 cargo clean --workspace --profile dev
-cargo nextest run --workspace --all-features "$@"
+cargo nextest run --locked --all-targets --all-features "${test_packages[@]}" "$@"
 
 grcov "${coverage_dir}/data" \
   --llvm \

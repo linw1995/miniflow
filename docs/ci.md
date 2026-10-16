@@ -1,9 +1,17 @@
 # CI tests
 
-Pull requests and pushes to `main` run the complete Linux test suite and
-coverage through `nix develop --command bash scripts/run-cov.sh`. The script
-uses the pinned toolchain, instruments workspace binaries, and writes reports
-to `target/coverage/result/`, including `lcov.info`. Test failures stop report
+Pull requests use rust-analyzer's crate graph and Cargo metadata to select
+changed packages and their transitive reverse dependencies. The coverage job
+checks out the PR head with comparison history, computes changes from the merge
+base, and records the selection and reasons in its job summary. It runs those
+package suites with coverage; an empty selection skips the coverage cache,
+tests, and uploads. Dependency configuration, shared inputs, or analyzer failures
+conservatively select the full workspace.
+
+Pushes to `main` and manual CI dispatches run the complete Linux suite through
+`nix develop --command bash scripts/run-cov.sh`. Both full and selected runs use
+the pinned toolchain, instrument workspace binaries, and write reports to
+`target/coverage/result/`, including `lcov.info`. Test failures stop report
 generation and fail CI.
 
 Formatting, package builds, Clippy, repository hooks, and CI script tests
@@ -17,10 +25,15 @@ Caches accelerate compilation without changing which tests execute.
 
 ## Codecov reports
 
-PR, main, and nightly coverage runs upload the complete generated LCOV report
-with the `rust` flag and automatic report discovery disabled. Codecov uses
-that flag for project and PR patch coverage. Carryforward is disabled;
-reports describe tests executed for the current source tree.
+Main, nightly, and full-workspace PR fallback runs upload LCOV with the `rust`
+flag. Selected PR runs use `rust-affected`. Automatic report discovery and
+carryforward are disabled; reports describe tests executed for the current
+source tree.
+
+Project coverage considers only full `rust` reports, and is excluded when that
+flag is not uploaded. PR patch coverage accepts either flag. Codecov comments
+hide project-wide coverage so a partial run is not presented as a complete
+project measurement. See Codecov's [flag status rules](https://docs.codecov.com/docs/commit-status#flags).
 
 ## Scheduled full tests
 
@@ -50,7 +63,8 @@ The selector uses rust-analyzer's `rust-analyzer/viewCrateGraph` LSP request
 to discover workspace target dependencies, maps targets to Cargo packages,
 and selects changed packages plus their transitive reverse dependencies.
 It selects whole package suites, including integration tests, rather than
-individual test functions. Existing CI coverage and nightly jobs remain full-suite runs.
+individual test functions. PR CI uses this selector; main and nightly retain
+full-suite runs.
 
 Run from the checkout using the pinned tools:
 
@@ -80,6 +94,19 @@ selection has an empty command: callers must skip execution instead of invoking
 nextest without package arguments. `--run` handles that case automatically.
 `--target <triple>` applies to both rust-analyzer and the resulting nextest command.
 All selected suites use `--locked --all-targets --all-features`.
+
+To reproduce PR coverage, save the plan outside the checkout and pass it to
+the coverage script:
+
+```bash
+nix develop --command python3 scripts/affected_tests.py --base origin/main --json > /tmp/affected-tests.json
+nix develop --command bash scripts/run-cov.sh --affected-plan /tmp/affected-tests.json
+```
+
+`--affected-plan` must be the first coverage-script argument. It replaces the
+default workspace selection with explicit package arguments. Empty plans clear
+stale reports and exit without running Cargo; malformed plans fail. Other nextest
+arguments can follow the plan path.
 
 Cargo metadata supplies package paths, target ownership, and declared local
 dependencies. The analyzer graph includes test and build-script targets;

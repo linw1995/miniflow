@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 import shutil
@@ -7,7 +8,7 @@ import unittest
 
 
 class CoverageTests(unittest.TestCase):
-    def test_full_reports_and_failed_tests(self):
+    def test_full_selected_empty_and_failed_test_reports(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory).resolve()
             env = dict(os.environ)
@@ -31,6 +32,18 @@ version = "0.1.0"
 edition = "2024"
 
 [workspace]
+members = ["other"]
+''')
+            (root / "other/src").mkdir(parents=True)
+            (root / "other/Cargo.toml").write_text('''[package]
+name = "unselected-fixture"
+version = "0.1.0"
+edition = "2024"
+''')
+            other_source = root / "other/src/lib.rs"
+            other_source.write_text('''pub fn other_value() -> u32 { 3 }
+#[test]
+fn other_matches() { assert_eq!(other_value(), 3); }
 ''')
             (root / "src/lib.rs").write_text("pub mod alpha;\npub mod beta;\n")
             for module, value in [("alpha", 1), ("beta", 2)]:
@@ -62,12 +75,35 @@ mod tests {{
                     for line in block.splitlines()
                 ), block)
             self.assertGreater((root / "target/coverage/result/cobertura.xml").stat().st_size, 0)
+            self.assertIn("other/src/lib.rs", report.read_text())
+
+            # A package outside the plan must not even compile, and its old
+            # coverage mappings must not leak from the preceding full run.
+            other_source.write_text('compile_error!("Unselected package must not compile");\n')
+            plan = root / "plan.json"
+            plan.write_text(json.dumps({"packages": ["coverage-fixture"]}))
+            result = execute("bash", "scripts/run-cov.sh", "--affected-plan", str(plan))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertNotIn("other/src/lib.rs", report.read_text())
+            self.assertIn("src/alpha.rs", report.read_text())
 
             source = root / "src/alpha.rs"
             source.write_text(source.read_text().replace("    1", "    99"))
-            result = execute("bash", "scripts/run-cov.sh", "-E", "test(alpha::tests::value_matches)")
+            result = execute("bash", "scripts/run-cov.sh", "--affected-plan", str(plan), "-E", "test(alpha::tests::value_matches)")
             self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("alpha::tests::value_matches", result.stdout + result.stderr)
+            self.assertFalse(report.exists())
+
+            report.write_text("stale coverage")
+            plan.write_text(json.dumps({"packages": []}))
+            result = execute("bash", "scripts/run-cov.sh", "--affected-plan", str(plan))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("No affected Rust package tests", result.stdout)
+            self.assertFalse(report.exists())
+
+            plan.write_text("{}")
+            result = execute("bash", "scripts/run-cov.sh", "--affected-plan", str(plan))
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(report.exists())
 
 

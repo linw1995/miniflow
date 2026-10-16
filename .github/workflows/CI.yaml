@@ -70,10 +70,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
       - uses: ./.github/actions/setup-nix
         with:
           cache-key-name: coverage
+      - name: Select affected PR tests
+        id: selection
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          nix develop --command python3 scripts/affected_tests.py \
+            --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA" --json > "$RUNNER_TEMP/affected-tests.json"
+          printf 'run=%s\n' "$(jq '.packages | length > 0' "$RUNNER_TEMP/affected-tests.json")" >> "$GITHUB_OUTPUT"
+          printf 'coverage_flag=%s\n' "$(jq -r 'if .mode == "all" then "rust" else "rust-affected" end' "$RUNNER_TEMP/affected-tests.json")" >> "$GITHUB_OUTPUT"
+          {
+            echo '### Affected Rust tests'
+            echo '```json'
+            jq '{mode, packages, reasons, fallback_reasons}' "$RUNNER_TEMP/affected-tests.json"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Cache coverage dependencies
+        if: github.event_name != 'pull_request' || steps.selection.outputs.run == 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -86,21 +107,30 @@ jobs:
             coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-
             coverage-${{ runner.os }}-${{ runner.arch }}-
       - name: Run native coverage
+        if: github.event_name != 'pull_request' || steps.selection.outputs.run == 'true'
         env:
+          EVENT_NAME: ${{ github.event_name }}
           NEXTEST_PROFILE: ci
           MF_TEST_BUILD_CACHE_DIR: ${{ github.workspace }}/target/coverage/build/nextest-build-cache/ci
-        run: nix develop --command bash scripts/run-cov.sh
+        run: |
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            nix develop --command bash scripts/run-cov.sh --affected-plan "$RUNNER_TEMP/affected-tests.json"
+          else
+            nix develop --command bash scripts/run-cov.sh
+          fi
       - name: Upload coverage artifact
+        if: github.event_name != 'pull_request' || steps.selection.outputs.run == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: target/coverage/result/
           overwrite: true
       - name: Upload coverage to Codecov
+        if: github.event_name != 'pull_request' || steps.selection.outputs.run == 'true'
         uses: codecov/codecov-action@v7
         with:
           files: target/coverage/result/lcov.info
           disable_search: true
-          flags: rust
+          flags: ${{ steps.selection.outputs.coverage_flag || 'rust' }}
           fail_ci_if_error: false
           token: ${{ secrets.CODECOV_TOKEN }}
