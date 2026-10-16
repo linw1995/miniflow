@@ -460,9 +460,8 @@ impl WorkflowInputSchema {
 
 struct UniqueValue(Value);
 
-pub(super) fn from_unique_json<T: de::DeserializeOwned>(
-    bytes: &[u8],
-) -> Result<T, serde_json::Error> {
+/// Decodes JSON with unique object keys; callers bound the input before decoding.
+pub fn from_unique_json<T: de::DeserializeOwned>(bytes: &[u8]) -> Result<T, serde_json::Error> {
     let value: UniqueValue = serde_json::from_slice(bytes)?;
     serde_json::from_value(value.0)
 }

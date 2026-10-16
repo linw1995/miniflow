@@ -113,7 +113,14 @@ Graph-relative event validation checks workflow/node identity, position, sequenc
 
 Manifest payload version `2026-10-07` contains `version`, `description`, and `interface`. The existing graph
 and interface protocol versions remain independent; both records must identify the same workflow.
-The manifest excludes node configuration and supplied business values. Its combined UTF-8 JSON payload is limited to 16 MiB.
+Version `2026-10-15` additionally supports `node_configurations`, keyed by root node ID. Only fields explicitly
+selected by node authors through `NodeMetadata::public_config` are published; empty entries are omitted when
+collecting prepared metadata. Configuration remains separate from the graph description, and supplied business
+values are not included. Node authors must exclude credentials and other private values from published fields.
+Published fields do not participate in generated execution metadata checks; they are inspection data, not execution contracts.
+Readers accept older manifests without this field and reject configurations for unknown root nodes or nonempty
+configurations in version `2026-10-07`. The compiler continues to emit `2026-10-07` until configuration publishing
+is integrated. The combined UTF-8 JSON payload is limited to 16 MiB.
 New Linux and macOS runners embed these bytes in `.mf_manifest` (ELF) or `__DATA,__mf_manifest` (Mach-O), respectively.
 The section is retained through release optimization, LTO, and supported stripping, including telemetry-disabled builds.
 Compatibility commands print the same graph/interface records; they do not refresh the frozen contract by preparing providers.

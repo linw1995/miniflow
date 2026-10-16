@@ -292,6 +292,7 @@ impl CompiledWorkflow {
             ) -> Result<mf_runtime::WorkflowManifest, mf_compiler::PlanError> {
                 let plan = plan()?;
                 let manifest = mf_runtime::WorkflowManifest {
+                    node_configurations: Default::default(),
                     version: mf_runtime::WorkflowManifestVersion::V2026_10_07,
                     description: mf_compiler::describe_compiled(&plan)?,
                     interface: mf_compiler::describe_interface(&plan, registry)?,
@@ -996,6 +997,7 @@ impl CompiledWorkflow {
             schema,
         };
         let manifest = mf_runtime::WorkflowManifest {
+            node_configurations: Default::default(),
             version: mf_runtime::WorkflowManifestVersion::V2026_10_07,
             description,
             interface,

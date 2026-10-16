@@ -127,7 +127,7 @@ pub use runner_arguments::{RunnerArgumentError, RunnerArguments, RunnerInvocatio
 
 pub use workflow_inputs::{
     JsonSnafu as WorkflowInputJsonSnafu, TooLargeSnafu as WorkflowInputTooLargeSnafu,
-    WorkflowInterface, WorkflowInterfaceVersion,
+    WorkflowInterface, WorkflowInterfaceVersion, from_unique_json as decode_unique_json,
 };
 
 pub use workflow_inputs::{
@@ -137,5 +137,6 @@ pub use workflow_inputs::{
 pub use workflow_manifest::{
     MANIFEST_FRAMING_VERSION, MANIFEST_HEADER_BYTES, MANIFEST_MAGIC, MAX_MANIFEST_PADDING_BYTES,
     MAX_MANIFEST_PAYLOAD_BYTES, MAX_MANIFEST_SECTION_BYTES, WorkflowManifest,
-    WorkflowManifestError, WorkflowManifestVersion,
+    WorkflowManifestError, WorkflowManifestVersion, WorkflowNodeConfigurations,
+    published_node_configurations,
 };

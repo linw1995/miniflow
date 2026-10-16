@@ -116,6 +116,7 @@ impl TypedTaskNode for NeverExecute {
 #[test]
 fn preparation_derives_ports_and_never_decodes_or_executes() {
     let metadata = NodeMetadata {
+        public_config: Default::default(),
         typed_generation: None,
         ports: NodePorts::default(),
         input_bindings: [(

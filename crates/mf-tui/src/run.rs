@@ -1311,6 +1311,7 @@ mod tests {
         let interface = serde_json::json!({"version":"2026-10-11", "workflow_id":graph["workflow_id"],
             "schema":{"inputs":{"source/id":{"path":{"type":"string", "required":true}}}, "stdin":stdin}});
         let manifest = mf_runtime::WorkflowManifest {
+            node_configurations: Default::default(),
             version: mf_runtime::WorkflowManifestVersion::V2026_10_07,
             description: serde_json::from_value(graph).unwrap(),
             interface: serde_json::from_value(interface).unwrap(),

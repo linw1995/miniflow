@@ -12,9 +12,56 @@ use mf_telemetry::{
 };
 use std::error::Error;
 
+#[test]
+fn published_node_configuration_round_trips_with_only_nonempty_root_entries() {
+    let public = mf_runtime::NodeMetadata {
+        public_config: [("model".into(), serde_json::json!("example"))].into(),
+        ..Default::default()
+    };
+    let private = mf_runtime::NodeMetadata::default();
+    let mut manifest = sample();
+    manifest.version = WorkflowManifestVersion::CURRENT;
+    manifest.node_configurations =
+        mf_runtime::published_node_configurations([("root.a/~", &public), ("private", &private)]);
+    assert_eq!(
+        manifest.node_configurations,
+        [("root.a/~".into(), public.public_config.clone())].into()
+    );
+    let bytes = manifest.to_bytes().unwrap();
+    assert_eq!(WorkflowManifest::from_bytes(&bytes).unwrap(), manifest);
+    manifest
+        .node_configurations
+        .insert("unknown".into(), Default::default());
+    assert!(manifest.to_bytes().is_err());
+    assert!(WorkflowManifest::from_bytes(&frame(&serde_json::to_vec(&manifest).unwrap())).is_err());
+}
+
+#[test]
+fn legacy_manifests_keep_their_original_configuration_contract() {
+    let mut manifest = sample();
+    let payload = serde_json::to_vec(&manifest).unwrap();
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&payload)
+            .unwrap()
+            .get("node_configurations")
+            .is_none()
+    );
+    assert_eq!(
+        WorkflowManifest::from_bytes(&frame(&payload)).unwrap(),
+        manifest
+    );
+    manifest.node_configurations.insert(
+        "root.a/~".into(),
+        [("model".into(), serde_json::json!("example"))].into(),
+    );
+    assert!(manifest.to_bytes().is_err());
+    assert!(WorkflowManifest::from_bytes(&frame(&serde_json::to_vec(&manifest).unwrap())).is_err());
+}
+
 fn sample() -> WorkflowManifest {
     let workflow_id = WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap();
     WorkflowManifest {
+        node_configurations: Default::default(),
         version: WorkflowManifestVersion::V2026_10_07,
         description: WorkflowDescription {
             version: WorkflowDescriptionVersion::V2026_10_03,

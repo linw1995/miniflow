@@ -12,6 +12,7 @@ use mf_telemetry::{
 pub fn sample_manifest() -> WorkflowManifest {
     let workflow_id = WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap();
     WorkflowManifest {
+        node_configurations: Default::default(),
         version: WorkflowManifestVersion::V2026_10_07,
         description: WorkflowDescription {
             version: WorkflowDescriptionVersion::V2026_09_27,

@@ -5,6 +5,19 @@ use crate::{
 use mf_telemetry::{ContractError, description::WorkflowDescription};
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu, ensure};
+use std::collections::BTreeMap;
+
+pub type WorkflowNodeConfigurations = BTreeMap<String, BTreeMap<String, serde_json::Value>>;
+
+pub fn published_node_configurations<'a>(
+    nodes: impl IntoIterator<Item = (&'a str, &'a crate::NodeMetadata)>,
+) -> WorkflowNodeConfigurations {
+    nodes
+        .into_iter()
+        .filter(|(_, metadata)| !metadata.public_config.is_empty())
+        .map(|(id, metadata)| (id.to_owned(), metadata.public_config.clone()))
+        .collect()
+}
 
 pub const MANIFEST_MAGIC: &[u8; 8] = b"MFMANIF\0";
 pub const MANIFEST_FRAMING_VERSION: u32 = 1;
@@ -18,6 +31,12 @@ pub const MAX_MANIFEST_SECTION_BYTES: usize =
 pub enum WorkflowManifestVersion {
     #[serde(rename = "2026-10-07")]
     V2026_10_07,
+    #[serde(rename = "2026-10-15")]
+    V2026_10_15,
+}
+
+impl WorkflowManifestVersion {
+    pub const CURRENT: Self = Self::V2026_10_15;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -26,6 +45,8 @@ pub struct WorkflowManifest {
     pub version: WorkflowManifestVersion,
     pub description: WorkflowDescription,
     pub interface: WorkflowInterface,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub node_configurations: WorkflowNodeConfigurations,
 }
 
 #[derive(Debug, Snafu)]
@@ -111,6 +132,21 @@ impl WorkflowManifest {
     }
 
     pub fn validate(&self) -> Result<(), WorkflowManifestError> {
+        ensure!(
+            self.version != WorkflowManifestVersion::V2026_10_07
+                || self.node_configurations.is_empty(),
+            FramingSnafu {
+                message: "published node configuration requires the newer manifest version"
+            }
+        );
+        for node in self.node_configurations.keys() {
+            ensure!(
+                self.description.nodes.iter().any(|entry| &entry.id == node),
+                FramingSnafu {
+                    message: "published configuration names an unknown root node"
+                }
+            );
+        }
         self.description.validate().context(GraphSnafu)?;
         self.interface
             .validate_for_description(&self.description)
