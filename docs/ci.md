@@ -38,7 +38,17 @@ CI script tests check that every package has exactly one step.
 
 On PRs, step-level conditions skip packages absent from the affected plan.
 An empty plan skips preparation, all package steps, report generation, and uploads.
-The timing monitor omits skipped steps and computes each step's baseline median
+After each non-cancelled PR CI run, the timing monitor creates or updates one PR
+comment. Its Summary lists skipped crates, total CI wall time, coverage job time,
+the sum of executed crate-step durations, and each crate's result and duration.
+Skipped crates show `N/A`; missing timestamps also produce `N/A` rather than a
+partial total. Shared compilation, report generation, uploads, and other steps
+remain available in the detailed timing comparison. The Summary uses GitHub's
+second-resolution timestamps, so a successful `0s` step is distinct from a skip.
+Failed runs can skip crates because an earlier step failed, not just because
+the affected plan excluded them.
+
+The monitor omits skipped steps from timing comparisons and computes each step's baseline median
 from successful executions of that exact step name only. Skipped, missing, and
 failed historical steps never contribute zero-duration samples. A step without
 successful baseline samples shows `N/A`. Job and wall times still reflect the
