@@ -13,10 +13,12 @@ Before submitting changes, run:
 
 ```sh
 prek -a
-nix flake check -L
+nix develop --command python3 scripts/affected_tests.py --worktree --run
 ```
 
-These checks cover formatting, Rust diagnostics, tests, workflow configuration, Markdown, and the [dependency license audit](docs/licensing.md).
+These checks cover formatting, Rust diagnostics, affected package tests, workflow configuration, Markdown, and the [dependency license audit](docs/licensing.md).
+See [test selection](docs/ci.md#affected-package-tests) for commit and PR comparisons.
+Do not run `nix flake check -L` locally: its test check repeats the complete suite already run by CI coverage.
 
 ## Tests
 
@@ -48,7 +50,9 @@ Nix checks and CI coverage use the `ci` nextest profile. It shares the prewarmed
 
 CI's Linux `check` job reports formatting and workflow validation separately from package builds and Clippy.
 Package builds and Clippy share one Nix invocation so they can run in parallel and reuse dependencies.
-The `coverage` job runs the complete Linux test suite; main-only macOS checks run all flake checks.
+The `coverage` job runs affected package tests on PRs and the complete Linux suite on `main`.
+Its PR job summary explains the selected packages or full-workspace fallback. Main-only macOS jobs
+build the package and run static checks; nightly runs the complete macOS suite.
 
 After a PR's CI run completes, the independent `CI timing monitor` workflow updates a single bot comment
 with job and step durations. Its baseline is the median of the latest five successful CI pushes to the
