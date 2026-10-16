@@ -55,7 +55,7 @@ mark_fixture_target
 
 # grcov scans every binary in its search directory. Remove old workspace mappings while retaining dependencies.
 cargo clean --workspace --profile dev
-cargo nextest run --locked --all-targets --all-features "${test_packages[@]}" "$@"
+cargo nextest run --locked --all-features "${test_packages[@]}" "$@"
 
 grcov "${coverage_dir}/data" \
   --llvm \

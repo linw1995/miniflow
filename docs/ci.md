@@ -93,7 +93,8 @@ compare against their first parent. Renames include both old and new paths.
 selection has an empty command: callers must skip execution instead of invoking
 nextest without package arguments. `--run` handles that case automatically.
 `--target <triple>` applies to both rust-analyzer and the resulting nextest command.
-All selected suites use `--locked --all-targets --all-features`.
+The selector's `--run` command uses `--locked --all-targets --all-features`.
+Coverage retains its existing target selection and changes only the package scope.
 
 To reproduce PR coverage, save the plan outside the checkout and pass it to
 the coverage script:
