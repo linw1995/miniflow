@@ -1,16 +1,16 @@
 # Review
 
-No blocking code or specification findings remain. Final validation results are recorded in `verification.md`.
+No blocking implementation or specification findings remain.
 
-- Public APIs use the existing runtime entry points and have concrete consumers in the source compiler and chat host.
-  No facade, visibility-only module split, or mechanically narrowed visibility was introduced.
-- The shared map and collection function avoid duplicating the task, stream, and compiler-builder publication policy.
-  Template evaluation and unique-key decoding reuse existing implementations and typed errors.
-- Inspection configuration no longer participates in generated execution metadata comparison. Port and other execution
-  contract checks remain intact. Manifest configuration retains explicit version and root-node validation.
-- Compiler and TUI edits outside runtime initialize the new fields only. Compiler publishing, provider configuration,
-  chat execution, and storage are excluded from this split. Existing serialized manifests remain supported.
-- Snafu selectors and source chains are preserved. Runtime introduces no node-specific error or dependency.
-- Tests cover observable read/write compatibility and execution-contract isolation. Redundant collection/serialization
-  assertions were consolidated. Detailed reversible experiments remain local under ignored `target/`.
-- Specifications describe runtime codec support without claiming the compiler already publishes configuration.
+The implementation reuses the existing definition model and manifest section. Root-node lookup borrows the stored
+record directly; it performs no provider preparation, execution, environment lookup, or configuration projection.
+
+The previous node metadata field, map alias, collection helper, flow/stream forwarding methods, and their redundant
+tests are removed. The generated runner reuses the manifest definition instead of retaining another complete plan JSON.
+The missing-definition Snafu selector is exported only because generated runner code attaches that context.
+
+Existing visibility and module boundaries are retained. No facade, new dependency, provider-specific runtime error,
+manual source stringification, or runtime configuration drift check is introduced. Manifest version rules preserve
+legacy graph/interface readers; the new payload contains full compiled configuration and is documented accordingly.
+
+Final validation and review conclusions are recorded in `verification.md`.

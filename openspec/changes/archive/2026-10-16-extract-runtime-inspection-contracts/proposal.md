@@ -1,14 +1,16 @@
 ## Why
 
-Executable chat needs prepared configuration summaries and shared decoding helpers. Extract these runtime contracts
-from `8cdab13` so compiler and host integration can build on an independently validated change.
+Hosts need node kinds and configuration from compiled workflows without invoking providers. The compiled definition
+already contains this information; runtime inspection should reuse it instead of introducing a second configuration
+publication contract.
 
 ## What Changes
 
-- Publish explicitly selected root-node configuration through prepared flows and versioned manifests.
-- Expose the existing template evaluator and unique-key JSON decoder through established runtime entry points.
-- Keep inspection configuration outside generated execution metadata comparisons.
-- Preserve existing compiler output with empty configuration fields until its separate integration lands.
+- Embed the existing compiled definition in manifest version `2026-10-16`.
+- Add `WorkflowManifest::node_definition` for borrowed root-node lookup by exact ID.
+- Reuse the manifest definition for runner plan inspection and remove the separate runtime plan JSON embedding.
+- Expose the existing template evaluator and unique-key JSON decoder for host callers.
+- Preserve legacy manifest reading and update the generated-project cache layout.
 
 ## Capabilities
 
@@ -18,11 +20,10 @@ None.
 
 ### Modified Capabilities
 
-- `node-preparation`: collect opt-in inspection configuration without adding execution contract checks.
-- `workflow-binary-compilation`: support the configuration-bearing manifest format in the shared runtime codec.
+- `workflow-binary-compilation`: inspect and reuse the original compiled definition through the manifest.
 
 ## Impact
 
-Runtime APIs, manifest construction sites, focused regressions, and observability documentation. Public Rust struct
-literals acquire fields; old serialized manifests remain supported. Chat UI, storage, provider-specific configuration
-selection, and compiler configuration publishing remain separate changes.
+Runtime manifest contracts, compiler generation, binary inspection tests, and documentation. The manifest contains
+full compiled configuration rather than an author-selected public subset. Runtime arguments are not persisted into it.
+Rust manifest literals acquire a definition field; existing serialized manifests remain supported.

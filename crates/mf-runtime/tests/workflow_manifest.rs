@@ -13,55 +13,65 @@ use mf_telemetry::{
 use std::error::Error;
 
 #[test]
-fn published_node_configuration_round_trips_with_only_nonempty_root_entries() {
-    let public = mf_runtime::NodeMetadata {
-        public_config: [("model".into(), serde_json::json!("example"))].into(),
-        ..Default::default()
-    };
-    let private = mf_runtime::NodeMetadata::default();
+fn original_node_definitions_round_trip_without_preparing_providers() {
     let mut manifest = sample();
     manifest.version = WorkflowManifestVersion::CURRENT;
-    manifest.node_configurations =
-        mf_runtime::published_node_configurations([("root.a/~", &public), ("private", &private)]);
-    assert_eq!(
-        manifest.node_configurations,
-        [("root.a/~".into(), public.public_config.clone())].into()
+    let config = serde_json::json!({
+        "model": {"$ref": "parameters.model"}, "temperature": 0.25,
+        "options": {"labels": ["first", "second"]}
+    });
+    manifest.definition = Some(
+        serde_json::from_value(serde_json::json!({
+            "version": "2026-10-03", "dependencies": {},
+            "nodes": [{"id": "root.a/~", "kind": "fixture.input", "config": config}]
+        }))
+        .unwrap(),
     );
-    let bytes = manifest.to_bytes().unwrap();
-    assert_eq!(WorkflowManifest::from_bytes(&bytes).unwrap(), manifest);
-    manifest
-        .node_configurations
-        .insert("unknown".into(), Default::default());
+    let decoded = WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap();
+    assert_eq!(decoded, manifest);
+    let node = decoded.node_definition("root.a/~").unwrap();
+    assert_eq!(node.kind, "fixture.input");
+    assert_eq!(node.config, config);
+    assert!(std::ptr::eq(
+        node,
+        &decoded.definition.as_ref().unwrap().nodes[0]
+    ));
+    assert!(decoded.node_definition("root.a").is_none());
+
+    manifest.version = WorkflowManifestVersion::V2026_10_07;
     assert!(manifest.to_bytes().is_err());
     assert!(WorkflowManifest::from_bytes(&frame(&serde_json::to_vec(&manifest).unwrap())).is_err());
+    manifest.version = WorkflowManifestVersion::CURRENT;
+    manifest.definition = None;
+    assert!(matches!(
+        manifest.to_bytes(),
+        Err(WorkflowManifestError::MissingDefinition)
+    ));
+    assert!(matches!(
+        WorkflowManifest::from_bytes(&frame(&serde_json::to_vec(&manifest).unwrap())),
+        Err(WorkflowManifestError::MissingDefinition)
+    ));
 }
 
 #[test]
-fn legacy_manifests_keep_their_original_configuration_contract() {
-    let mut manifest = sample();
+fn legacy_manifests_remain_readable_without_original_definitions() {
+    let manifest = sample();
     let payload = serde_json::to_vec(&manifest).unwrap();
     assert!(
         serde_json::from_slice::<serde_json::Value>(&payload)
             .unwrap()
-            .get("node_configurations")
+            .get("definition")
             .is_none()
     );
-    assert_eq!(
-        WorkflowManifest::from_bytes(&frame(&payload)).unwrap(),
-        manifest
-    );
-    manifest.node_configurations.insert(
-        "root.a/~".into(),
-        [("model".into(), serde_json::json!("example"))].into(),
-    );
-    assert!(manifest.to_bytes().is_err());
-    assert!(WorkflowManifest::from_bytes(&frame(&serde_json::to_vec(&manifest).unwrap())).is_err());
+    let decoded = WorkflowManifest::from_bytes(&frame(&payload)).unwrap();
+    assert_eq!(decoded, manifest);
+    assert!(decoded.node_definition("root.a/~").is_none());
 }
 
 fn sample() -> WorkflowManifest {
     let workflow_id = WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap();
     WorkflowManifest {
-        node_configurations: Default::default(),
+        definition: None,
         version: WorkflowManifestVersion::V2026_10_07,
         description: WorkflowDescription {
             version: WorkflowDescriptionVersion::V2026_10_03,

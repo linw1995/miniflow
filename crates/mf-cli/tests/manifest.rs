@@ -205,6 +205,11 @@ fn release_lto_and_strip_preserve_standalone_factory_free_manifest() {
             .unwrap_or_else(|| project.join("target"));
         fs::copy(target.join("release/mf-generated-workflow"), &runner).unwrap();
         let before = read_manifest(&runner).unwrap();
+        assert_eq!(before.definition.as_ref(), Some(&plan.definition));
+        assert_eq!(
+            before.node_definition("a").unwrap().config,
+            json!({"print":true})
+        );
         let output = Command::new("strip").arg(&runner).output().unwrap();
         assert!(
             output.status.success(),

@@ -987,24 +987,40 @@ selected build options, successful elapsed time, and retained generated-project 
 - **WHEN** the user invokes `mf compile flow.json --output ./flow --verbose`
 - **THEN** stderr includes compilation options and a successful completion summary without changing build validation
 
-### Requirement: Support published configuration in the runtime manifest codec
+### Requirement: Inspect the original compiled definition through the manifest
 
-The runtime manifest codec SHALL support version `2026-10-15` with root-ID-keyed `node_configurations`, separate
-from the graph and interface. It SHALL accept legacy manifests without the field, omit empty maps on write,
-and reject nonempty configuration in `2026-10-07` or entries for unknown roots on both read and write.
-Existing framing, bounds, duplicate-key rejection, and graph/interface validation SHALL remain in force.
+Manifest version `2026-10-16` SHALL carry the compiler's existing definition. Runtime root-node lookup SHALL borrow
+that definition by exact ID without preparing or executing providers. It SHALL preserve raw configuration expressions
+and return `None` for unknown IDs or legacy manifests. Full static configuration is included; invocation values
+MUST NOT be materialized. Existing framing, bounds, and graph/interface validation SHALL remain in force.
 
-#### Scenario: Round-trip published configuration
+#### Scenario: Read original node configuration
 
-- **WHEN** a current-version manifest contains configuration for a declared root node
-- **THEN** framing and decoding preserve the configuration together with the graph and interface
+- **WHEN** a caller looks up a root node whose configuration contains a template and nested values
+- **THEN** it receives the original node kind and configuration without resolving the template or executing a factory
 
-#### Scenario: Preserve legacy manifests
+#### Scenario: Read a legacy manifest
 
-- **WHEN** a supported older manifest has no published configuration
-- **THEN** it remains readable and serializes without an added configuration field
+- **WHEN** a supported `2026-10-07` manifest has no definition
+- **THEN** graph and interface inspection succeed and node-definition lookup returns `None`
 
-#### Scenario: Reject incompatible or orphaned configuration
+#### Scenario: Reject incompatible payload versions
 
-- **WHEN** configuration names an unknown root node or nonempty configuration uses the older payload version
-- **THEN** both manifest encoding and decoding reject it
+- **WHEN** `2026-10-16` omits the definition or `2026-10-07` includes it
+- **THEN** both manifest encoding and decoding reject the payload
+
+### Requirement: Reuse one compiled definition for runner inspection
+
+Generated runners SHALL reconstruct their inspection plan from the manifest definition and execution order instead
+of embedding a separate complete plan JSON at runtime. Standalone and embedded-host manifests SHALL use the same
+compiled definition. Inspection MUST remain independent of providers, original build files, telemetry, and symbols.
+
+#### Scenario: Inspect a stripped standalone runner
+
+- **WHEN** a generated runner is moved away from its build files or built with LTO and stripped
+- **THEN** its original node configuration remains readable without executing provider code
+
+#### Scenario: Preserve execution and observation
+
+- **WHEN** task, stream, or nested workflows use the manifest-backed plan with telemetry enabled or disabled
+- **THEN** execution results and workflow observation identity remain unchanged

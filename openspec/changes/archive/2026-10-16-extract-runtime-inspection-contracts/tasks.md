@@ -1,9 +1,7 @@
 ## Implementation
 
-- [x] Extract runtime metadata, manifest, and shared decoding APIs with minimal construction-site updates.
-- [x] Remove inspection configuration from generated execution metadata comparisons.
-- [x] Consolidate redundant tests and run behavioral negative controls.
-- [x] Validate affected tests and required hooks with the pinned toolchain.
-- [x] Review AGENTS.md compliance and approve the specification deltas for archival.
-
-After validation, archive the reviewed deltas and commit the completed change locally.
+- [x] Replace configuration publication with the existing compiled definition in the manifest.
+- [x] Add borrowed root-node lookup and reuse the manifest in generated runner plan inspection.
+- [x] Remove duplicate metadata APIs and update compatibility tests and documentation.
+- [x] Complete focused experiments, affected-package regression, and required hooks.
+- [x] Review the final change and synchronize its archived specification.

@@ -13,10 +13,12 @@ enum BuildLayoutVersion {
     V2026_09_26,
     #[serde(rename = "2026-10-07")]
     V2026_10_07,
+    #[serde(rename = "2026-10-16")]
+    V2026_10_16,
 }
 
 impl BuildLayoutVersion {
-    const CURRENT: Self = Self::V2026_10_07;
+    const CURRENT: Self = Self::V2026_10_16;
 }
 
 #[derive(Debug, Snafu)]

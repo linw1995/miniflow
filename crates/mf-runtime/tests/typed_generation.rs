@@ -98,20 +98,6 @@ struct Floats {
 }
 
 #[test]
-fn inspection_configuration_does_not_change_generated_execution_contracts() {
-    let mut metadata = mf_runtime::NodeMetadata::default();
-    let expected = serde_json::to_value(&metadata).unwrap();
-    metadata.public_config = [("model".into(), serde_json::json!("example"))].into();
-    mf_runtime::verify_generated_metadata(&metadata, &expected).unwrap();
-    metadata.ports.outputs.push(mf_runtime::PortSpec::new(
-        "changed",
-        mf_runtime::ValueType::String,
-        false,
-    ));
-    assert!(mf_runtime::verify_generated_metadata(&metadata, &expected).is_err());
-}
-
-#[test]
 fn borrowed_validation_matches_encoding_without_consuming_fields() {
     let invalid = Floats {
         rows: vec![std::collections::BTreeMap::from([("a/b".into(), f64::NAN)])],

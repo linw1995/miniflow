@@ -5,19 +5,6 @@ use crate::{
 use mf_telemetry::{ContractError, description::WorkflowDescription};
 use serde::{Deserialize, Serialize};
 use snafu::{ResultExt, Snafu, ensure};
-use std::collections::BTreeMap;
-
-pub type WorkflowNodeConfigurations = BTreeMap<String, BTreeMap<String, serde_json::Value>>;
-
-pub fn published_node_configurations<'a>(
-    nodes: impl IntoIterator<Item = (&'a str, &'a crate::NodeMetadata)>,
-) -> WorkflowNodeConfigurations {
-    nodes
-        .into_iter()
-        .filter(|(_, metadata)| !metadata.public_config.is_empty())
-        .map(|(id, metadata)| (id.to_owned(), metadata.public_config.clone()))
-        .collect()
-}
 
 pub const MANIFEST_MAGIC: &[u8; 8] = b"MFMANIF\0";
 pub const MANIFEST_FRAMING_VERSION: u32 = 1;
@@ -31,26 +18,31 @@ pub const MAX_MANIFEST_SECTION_BYTES: usize =
 pub enum WorkflowManifestVersion {
     #[serde(rename = "2026-10-07")]
     V2026_10_07,
-    #[serde(rename = "2026-10-15")]
-    V2026_10_15,
+    #[serde(rename = "2026-10-16")]
+    V2026_10_16,
 }
 
 impl WorkflowManifestVersion {
-    pub const CURRENT: Self = Self::V2026_10_15;
+    pub const CURRENT: Self = Self::V2026_10_16;
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkflowManifest {
     pub version: WorkflowManifestVersion,
     pub description: WorkflowDescription,
     pub interface: WorkflowInterface,
-    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub node_configurations: WorkflowNodeConfigurations,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definition: Option<crate::WorkflowDefinition>,
 }
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowManifestError {
+    #[snafu(
+        display("workflow manifest has no compiled definition; recompile the workflow"),
+        visibility(pub)
+    )]
+    MissingDefinition,
     #[snafu(display("compiled workflow interface drift at `{path}`: {component} differs"))]
     InterfaceDrift {
         path: String,
@@ -71,6 +63,16 @@ pub enum WorkflowManifestError {
 }
 
 impl WorkflowManifest {
+    /// Borrows an original root node without preparing or executing its provider.
+    /// Legacy manifests and unknown node IDs return `None`.
+    pub fn node_definition(&self, id: &str) -> Option<&crate::NodeDefinition> {
+        self.definition
+            .as_ref()?
+            .nodes
+            .iter()
+            .find(|node| node.id.as_str() == id)
+    }
+
     pub fn validate_prepared_schema(
         &self,
         actual: &WorkflowInputSchema,
@@ -132,20 +134,16 @@ impl WorkflowManifest {
     }
 
     pub fn validate(&self) -> Result<(), WorkflowManifestError> {
-        ensure!(
-            self.version != WorkflowManifestVersion::V2026_10_07
-                || self.node_configurations.is_empty(),
-            FramingSnafu {
-                message: "published node configuration requires the newer manifest version"
-            }
-        );
-        for node in self.node_configurations.keys() {
-            ensure!(
-                self.description.nodes.iter().any(|entry| &entry.id == node),
+        match self.version {
+            WorkflowManifestVersion::V2026_10_07 => ensure!(
+                self.definition.is_none(),
                 FramingSnafu {
-                    message: "published configuration names an unknown root node"
+                    message: "compiled definition requires the newer manifest version"
                 }
-            );
+            ),
+            WorkflowManifestVersion::V2026_10_16 => {
+                ensure!(self.definition.is_some(), MissingDefinitionSnafu);
+            }
         }
         self.description.validate().context(GraphSnafu)?;
         self.interface

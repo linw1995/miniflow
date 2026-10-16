@@ -71,6 +71,15 @@ fn workflow_manifest() -> Result<mf_runtime::WorkflowManifest, mf_runtime::Workf
     mf_runtime::WorkflowManifest::from_bytes(&WORKFLOW_MANIFEST)
 }
 
+fn workflow_plan() -> Result<mf_compiler::CompiledWorkflow, mf_runtime::WorkflowManifestError> {
+    use snafu::OptionExt as _;
+    let manifest = workflow_manifest()?;
+    Ok(mf_compiler::CompiledWorkflow {
+        definition: manifest.definition.context(mf_runtime::WorkflowManifestMissingDefinitionSnafu)?,
+        execution_order: manifest.description.execution_order.into_iter().map(Into::into).collect(),
+    })
+}
+
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -198,7 +207,7 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Resu
     let run_id = run_id();
     let observation = observer.and_then(|observer| {
         let setup = (|| -> Result<_, Box<dyn std::error::Error>> {
-            let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
+            let plan = workflow_plan()?;
             Ok(plan.start_stream_observation(&observer, run_id)?)
         })();
         match setup {
@@ -209,7 +218,7 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Resu
     #[cfg(feature = "telemetry")]
     let snapshots = if capture_requested() {
         let setup = (|| -> Result<_, Box<dyn std::error::Error>> {
-            let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
+            let plan = workflow_plan()?;
             snapshot_recorder(&plan, run_id)
         })();
         match setup {
@@ -291,7 +300,7 @@ fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Result<mf_r
             }
             return execute_workflow(None, None, arguments);
         };
-        let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
+        let plan = workflow_plan()?;
         let run_id = run_id();
         let observation = match plan.start_observation(&observer, run_id) {
             Ok(observation) => Some(observation),
@@ -345,7 +354,7 @@ fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: 
         state.set_workflow_arguments(arguments);
         #[cfg(unix)]
         {
-            let plan = mf_compiler::CompiledWorkflow::from_json(include_str!("../workflow-plan.json"))?;
+            let plan = workflow_plan()?;
             if plan.definition.version.supports_startup_inputs() {
                 state.set_stdin(mf_runtime::TextInput::claim()?);
             }

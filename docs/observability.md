@@ -113,17 +113,18 @@ Graph-relative event validation checks workflow/node identity, position, sequenc
 
 Manifest payload version `2026-10-07` contains `version`, `description`, and `interface`. The existing graph
 and interface protocol versions remain independent; both records must identify the same workflow.
-Version `2026-10-15` additionally supports `node_configurations`, keyed by root node ID. Only fields explicitly
-selected by node authors through `NodeMetadata::public_config` are published; empty entries are omitted when
-collecting prepared metadata. Configuration remains separate from the graph description, and supplied business
-values are not included. Node authors must exclude credentials and other private values from published fields.
-Published fields do not participate in generated execution metadata checks; they are inspection data, not execution contracts.
-Readers accept older manifests without this field and reject configurations for unknown root nodes or nonempty
-configurations in version `2026-10-07`. The compiler continues to emit `2026-10-07` until configuration publishing
-is integrated. The combined UTF-8 JSON payload is limited to 16 MiB.
+Version `2026-10-16` also carries the original compiled `definition`, including node kinds, configuration,
+parameter defaults, and dependency declarations. `WorkflowManifest::node_definition(id)` borrows an exact root
+node from that definition; callers can inspect its `kind` and `config` without preparing providers or running the workflow.
+Configuration expressions remain unresolved. Invocation inputs and environment-derived values are not materialized.
+The definition contains the full compiled configuration, including any private literals written into the workflow;
+it is not a filtered public summary. Graph descriptions and automatic lifecycle records remain configuration-free.
+Readers accept legacy `2026-10-07` manifests without a definition; node lookup then returns `None`.
+Version `2026-10-16` requires a definition, and `2026-10-07` rejects one. The combined UTF-8 JSON payload remains
+limited to 16 MiB. Generated runners reuse this definition instead of embedding a separate complete plan JSON.
 New Linux and macOS runners embed these bytes in `.mf_manifest` (ELF) or `__DATA,__mf_manifest` (Mach-O), respectively.
 The section is retained through release optimization, LTO, and supported stripping, including telemetry-disabled builds.
-Compatibility commands print the same graph/interface records; they do not refresh the frozen contract by preparing providers.
+Manifest inspection reads the frozen records without preparing providers or launching the runner.
 
 | Offset | Size | Field |
 | --- | --- | --- |

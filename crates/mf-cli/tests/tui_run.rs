@@ -734,7 +734,7 @@ fn write_runner(path: &std::path::Path, script: String) {
     let manifest_path = path.with_extension("manifest");
     let description = description();
     let manifest = mf_runtime::WorkflowManifest {
-        node_configurations: Default::default(),
+        definition: None,
         version: mf_runtime::WorkflowManifestVersion::V2026_10_07,
         interface: mf_runtime::WorkflowInterface {
             version: mf_runtime::WorkflowInterfaceVersion::V2026_10_11,

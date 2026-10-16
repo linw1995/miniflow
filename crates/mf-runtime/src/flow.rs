@@ -289,14 +289,6 @@ impl Flow {
     pub fn input_schema(&self) -> &crate::WorkflowInputSchema {
         &self.inner.input_schema
     }
-    pub fn node_configurations(&self) -> crate::WorkflowNodeConfigurations {
-        crate::published_node_configurations(
-            self.inner
-                .nodes
-                .iter()
-                .map(|node| (node.definition_id.as_str(), &node.metadata)),
-        )
-    }
     pub fn with_input_schema(mut self, schema: crate::WorkflowInputSchema) -> Self {
         self.data_mut().input_schema = schema;
         self

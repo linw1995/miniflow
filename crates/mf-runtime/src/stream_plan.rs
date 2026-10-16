@@ -107,13 +107,6 @@ impl StreamPlan {
     pub fn input_schema(&self) -> &crate::WorkflowInputSchema {
         &self.input_schema
     }
-    pub fn node_configurations(&self) -> crate::WorkflowNodeConfigurations {
-        crate::published_node_configurations(
-            self.nodes
-                .iter()
-                .map(|node| (node.definition_id.as_str(), &node.metadata)),
-        )
-    }
     pub fn execution(&self) -> &StreamExecution {
         &self.execution
     }

@@ -1,28 +1,32 @@
 ## Decisions
 
-`NodeMetadata::public_config` contains only author-selected inspection values. `Flow::node_configurations`,
-`StreamPlan::node_configurations`, and compiler callers share `published_node_configurations`; the map alias keeps
-these signatures consistent. Collection omits empty entries and preserves exact root IDs.
+`WorkflowManifest::definition` stores the compiler's existing `WorkflowDefinition`, including normalized node order
+and unchanged configuration expressions. The runtime already owns this type, so inspection requires no compiler
+planning dependency or parallel configuration representation. `node_definition(id)` returns a borrowed root node by
+exact ID; unknown IDs and legacy manifests return `None`. It does not search nested scopes or invoke providers.
 
-The manifest codec supports `2026-10-15` with optional `node_configurations`. It retains the existing framing,
-size bounds, duplicate-key rejection, typed error sources, and graph/interface validation. Nonempty configuration
-requires the new version, and every entry must identify a root node. Existing compiler output stays at `2026-10-07`.
+Manifest payload version `2026-10-16` requires a definition. Legacy `2026-10-07` omits it and remains readable.
+Framing, size limits, duplicate-key decoding, and graph/interface validation are preserved. Inspection does not add
+runtime configuration drift checks or another pass through provider preparation. The manifest carries full compiled
+configuration, including static private literals, while graph descriptions and lifecycle records remain unchanged.
 
-Inspection fields are skipped by ordinary `NodeMetadata` serialization. That serialization is also used by
-`verify_generated_metadata`, so including inspection fields would impose an unintended execution drift check.
-Manifest serialization remains explicit and independent. Providers remain responsible for excluding private data.
+Both embedded-host and standalone generation populate the definition from the same compiled plan. Standalone runners
+reconstruct the plan using that definition and the description's execution order, replacing runtime inclusion of the
+complete `workflow-plan.json`. Build scripts still consume that file. Generated constructor literals remain part of
+execution code generation. The generated-project layout advances to `2026-10-16`.
 
-`ConfigTemplate::evaluate` and `decode_unique_json` reuse existing implementations. Host callers can evaluate
-already-bound values without constructing execution state, and decode bounded documents with unique object keys.
-Callers retain responsibility for input byte limits. No new facade, decoder, or visibility-only file split is needed.
+`ConfigTemplate::evaluate` and `decode_unique_json` reuse existing implementations through established runtime exports.
+Model interpretation and configuration fingerprints remain caller concerns. No provider metadata field, configuration
+collector, facade, dependency, or node-specific runtime error is needed.
 
-## Review boundaries
+## Compatibility
 
-The extracted public APIs have concrete consumers in the source compiler and chat host. Their absence from this
-standalone slice is not evidence that they are unused. No model-specific runtime errors, parent-owner protocol,
-configuration drift validator, dependency changes, or execution scheduling changes are included.
+Old manifests remain usable for graph/interface inspection but cannot supply original definitions. The new manifest
+field changes Rust struct literals; the manifest derives `PartialEq` to match the existing definition type. Newly
+generated runners return a typed error if their manifest cannot supply a required definition.
 
 ## Validation
 
-Run controlled simplifications and negative controls, retaining experiment details only under ignored `target/`.
-Run the affected-package selector and pinned hooks. Review the final implementation and spec deltas before archival.
+Cover borrowed lookup, unresolved values, exact IDs, legacy absence, version consistency, and compiler population.
+Use existing standalone task/stream/nested and release/LTO/strip fixtures to verify factory-free inspection and execution.
+Keep controlled experiments local under ignored `target/`; run affected-package tests and required hooks before updating the PR.
