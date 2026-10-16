@@ -42,14 +42,16 @@ impl TypedTaskNode for Model {
 pub fn prepare(
     config: serde_json::Value,
 ) -> Result<mf_runtime::PreparedNode, mf_runtime::NodeBuildError> {
-    let node = mfn_llm::prepare_llm(config)?
-        .execution
-        .into_task_node()
-        .context(InvalidSnafu {
-            field: "LLM node",
-            reason: "must prepare a task",
-        })?;
-    mf_runtime::PreparedNode::typed_task(Model { node }, mf_runtime::NodeMetadata::default())
+    let prepared = mfn_llm::prepare_llm(config)?;
+    let metadata = mf_runtime::NodeMetadata {
+        context_references: prepared.metadata.context_references,
+        ..Default::default()
+    };
+    let node = prepared.execution.into_task_node().context(InvalidSnafu {
+        field: "LLM node",
+        reason: "must prepare a task",
+    })?;
+    mf_runtime::PreparedNode::typed_task(Model { node }, metadata)
 }
 
 inventory::submit! {

@@ -8,7 +8,9 @@ use mf_compiler::{
     CompileRequest, NodeRegistry, RunnerOptions, SupportPackages, WorkflowDefinition,
     compile_definition, compile_project_with_options, instantiate_compiled, instantiate_stream,
 };
-use mf_runtime::{FlowRuntime, StreamOptions, WorkflowArguments};
+use mf_runtime::{
+    ExecutionContext, FlowRuntime, SnapshotRecording, StreamOptions, WorkflowArguments,
+};
 use mfn_llm::test_support::{Reply, Server, messages};
 use serde_json::{Value, json};
 use std::{fs, path::Path, process::Command};
@@ -38,7 +40,153 @@ fn memory(definition: &WorkflowDefinition, inputs: &Value) -> Vec<Value> {
         results
     } else {
         let flow = instantiate_compiled(&plan, &registry).unwrap();
-        vec![serde_json::to_value(flow.execute_with_inputs(arguments(inputs)).unwrap()).unwrap()]
+        let recording = SnapshotRecording::memory();
+        let mut context = ExecutionContext::default();
+        context.set_snapshot_recorder(recording.recorder());
+        let mut results = Vec::new();
+        for inputs in inputs
+            .as_array()
+            .map(Vec::as_slice)
+            .unwrap_or(std::slice::from_ref(inputs))
+        {
+            context.set_workflow_arguments(arguments(inputs));
+            let output = flow.execute_in_context(&mut context).unwrap();
+            if inputs.get("params.api_key").is_some() {
+                let snapshot = recording.current();
+                let params = snapshot.node(&[], "params").unwrap();
+                assert_eq!(params.inputs["api_key"], json!("[REDACTED]"));
+                assert_eq!(params.outputs["api_key"], json!("[REDACTED]"));
+            }
+            results.push(serde_json::to_value(output).unwrap());
+        }
+        results
+    }
+}
+
+fn parameter_definition() -> Value {
+    let mut value: Value =
+        serde_json::from_str(include_str!("../../../examples/llm-parameters.json")).unwrap();
+    value["dependencies"] = dependencies();
+    value
+}
+
+#[test]
+fn parameter_templates_configure_memory_and_standalone_llm_requests() {
+    let first = Server::start(vec![Reply::text("first"); 3]);
+    let second = Server::start(vec![Reply::text("second"); 3]);
+    let definition = parameter_definition();
+    let root = tempfile::tempdir().unwrap();
+    let executable = compile(&definition, root.path());
+    assert!(first.requests().is_empty());
+    let mut invocations = Vec::new();
+    let mut expected = Vec::new();
+    for (server, key, model, temperature, max_tokens) in [
+        (&first, "synthetic-first-key", "first-model", 0.1, 16),
+        (&second, "synthetic-second-key", "second-model", 0.8, 32),
+    ] {
+        let inputs = json!({"params.api_key":key, "params.base_url":server.base_url,
+            "params.model":model, "params.prompt":"Hello", "params.temperature":temperature,
+            "params.max_tokens":max_tokens});
+        let output = run(&executable, &inputs);
+        assert_eq!(output, run_memory(&definition, &inputs));
+        expected.extend(output);
+        invocations.push(inputs);
+        for request in server.requests() {
+            assert!(request.headers.contains(&format!("Bearer {key}")));
+            assert_eq!(request.body["model"], model);
+            assert_eq!(request.body["temperature"], temperature);
+            assert_eq!(request.body["max_tokens"], max_tokens);
+        }
+    }
+    assert_eq!(run_memory(&definition, &json!(invocations)), expected);
+    assert_eq!(first.requests().len(), 3);
+    assert_eq!(second.requests().len(), 3);
+    assert!(
+        first.requests()[2]
+            .headers
+            .contains("Bearer synthetic-first-key")
+    );
+    assert!(
+        second.requests()[2]
+            .headers
+            .contains("Bearer synthetic-second-key")
+    );
+    assert_eq!(second.requests()[2].body["model"], "second-model");
+}
+
+#[test]
+fn config_references_require_known_explicit_predecessors() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut definition = parameter_definition();
+    definition["nodes"][1]["config"]["model"] = json!({"$ref":"params.missing"});
+    let error =
+        compile_definition(&serde_json::from_value(definition).unwrap(), &registry).unwrap_err();
+    assert!(error.to_string().contains("is unknown"), "{error}");
+    let mut definition = parameter_definition();
+    definition["edges"] = json!([]);
+    let error =
+        compile_definition(&serde_json::from_value(definition).unwrap(), &registry).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("requires an explicit dependency"),
+        "{error}"
+    );
+}
+
+#[test]
+fn invalid_dynamic_configuration_retains_safe_typed_errors() {
+    use std::error::Error;
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for (field, value) in [
+        ("temperature", json!("synthetic-secret-value")),
+        ("base_url", json!("file:///synthetic-secret-value")),
+        ("model", json!(" ")),
+        ("api_key", json!("")),
+        ("max_tokens", json!(0)),
+        ("timeout_ms", json!(0)),
+        ("max_output_bytes", json!(0)),
+    ] {
+        let mut definition = parameter_definition();
+        definition["nodes"][0]["config"]["parameters"]["invalid"] = json!({"type":"any"});
+        definition["nodes"][1]["config"]["base_url"] = json!("http://127.0.0.1:9/v1");
+        definition["nodes"][1]["config"][field] = json!({"$ref":"params.invalid"});
+        let plan =
+            compile_definition(&serde_json::from_value(definition).unwrap(), &registry).unwrap();
+        let flow = instantiate_compiled(&plan, &registry).unwrap();
+        let recording = SnapshotRecording::memory();
+        let mut context = ExecutionContext::default();
+        context.set_snapshot_recorder(recording.recorder());
+        context.set_workflow_arguments(arguments(&json!({"params.api_key":"synthetic-key", "params.prompt":"Hello", "params.invalid":value})));
+        let error = flow.execute_in_context(&mut context).unwrap_err();
+        let snapshot = recording.current();
+        assert_eq!(
+            snapshot.node(&[], "params").unwrap().outputs["invalid"],
+            json!("[REDACTED]")
+        );
+        let mut source: &dyn Error = &error;
+        let mut typed = false;
+        let mut configuration_error = false;
+        loop {
+            typed |= source.is::<mf_runtime::InputDecodeError>();
+            configuration_error |= matches!(
+                source.downcast_ref::<mfn_llm::LlmExecutionError>(),
+                Some(mfn_llm::LlmExecutionError::Configuration { .. })
+            );
+            assert!(!source.to_string().contains("synthetic-secret-value"));
+            assert!(!format!("{source:?}").contains("synthetic-secret-value"));
+            match source.source() {
+                Some(next) => source = next,
+                None => break,
+            }
+        }
+        assert!(
+            configuration_error,
+            "expected configuration validation for {field}: {error}"
+        );
+        if field == "temperature" {
+            assert!(typed);
+        }
     }
 }
 

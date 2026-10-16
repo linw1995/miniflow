@@ -13,6 +13,15 @@ system, history, and terminal output contracts. Select it explicitly to add its 
 Its factory validates configuration without credentials or I/O; execution uses optional shared future driving.
 See [terminal conversations](workflows.md#llm-configuration-and-conversation-values).
 
+Providers can opt execution-only fields into `mf_runtime::ConfigTemplate`. Parse each selected field during
+preparation, validate its `literal()` value when present, and add `references(field_name)` to the prepared
+`NodeMetadata.context_references`. Resolve it against the invocation's `ExecutionContext` and validate the result
+with the field's typed codec and domain rules before use. `resolve` returns a `ValueRef` preserving sensitivity.
+Retain that value or explicitly inherit its metadata when publishing derived values; owned decoding does not
+retain secret markers. Keep ports, bindings, execution kinds, and output derivations independent of templates.
+The compiler requires explicit predecessor dependencies and applies the usual scope and message-domain checks.
+See [configuration templates](workflows.md#configuration-templates) for the JSON syntax.
+
 A task provider depends on `mf-runtime`, implements `TaskNode::execute`, and registers a factory through
 `inventory::submit!`. `NodeRegistration` declares a unique `kind` and its construction requirements.
 The factory returns a `PreparedNode` containing the executor and its `NodeMetadata`. See

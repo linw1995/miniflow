@@ -189,7 +189,31 @@ Set `secret` to `false` for public parameters. Downstream access and business se
 retain original values; observation shows `[REDACTED]`. Configured defaults are embedded in
 the workflow and manifest, so credentials should come from arguments or environment variables.
 See [secret runtime values](observability.md#secret-runtime-values) for propagation rules.
-This node supplies runtime values; node configuration does not yet interpolate templates.
+Nodes that support [configuration templates](#configuration-templates) can consume these outputs directly.
+
+### Configuration templates
+
+Providers explicitly enable templates for execution-time configuration fields. LLM configuration supports them;
+structural settings such as parameter declarations, node ports, and Loop bodies remain static.
+
+| Configuration value | Meaning |
+| --- | --- |
+| `{"$ref": "params.model"}` | Read an output, preserving its JSON type and secret metadata |
+| `{"$ref": "params.settings", "path": "/models/0"}` | Select a subtree using JSON Pointer |
+| `{"$template": "model-{{ params.name }}"}` | Interpolate string outputs into a string |
+| `{"$template": "{{ params.settings#/models/0 }}"}` | Interpolate a selected subtree |
+| `"{{ params.name }}"` | Ordinary literal string; it is not evaluated |
+
+References name complete output IDs. The producer must be an explicit ancestor through data or control edges;
+a template does not add an implicit dependency. References remain within the existing scope and message-domain
+boundaries. Compilation rejects unknown outputs and missing dependencies. Execution rejects missing or skipped
+values, missing paths, and incompatible field types. Interpolation accepts strings without implicit conversion;
+use a whole-value reference for numbers, booleans, arrays, or objects. JSON Pointer uses `~0` for `~` and `~1` for `/`.
+
+Templates are parsed during preparation and resolved on every invocation. Neither compilation nor manifest
+inspection reads parameter sources. Whole-value references retain the selected value's sensitivity; interpolated
+strings become secret if any selected value is secret. Use `secret: true` on credential parameters so their inputs
+and outputs are also redacted. Literal configuration and parameter defaults remain embedded in workflow artifacts.
 
 ### LLM configuration and conversation values
 
@@ -228,19 +252,47 @@ Static configuration has this shape:
 and a 1 MiB generated-text limit. Optional `temperature` must be finite and between 0 and 2; optional `max_tokens`
 must be positive. Supplied numeric fields cannot be null. Deadlines and text limits must be positive integers.
 `base_url` is an HTTP or HTTPS API prefix without embedded credentials, query, or fragment. Configuration rejects
-unknown fields, including `stream`, direct credentials, and provider-specific request overrides.
+unknown fields, including `stream` and provider-specific request overrides. Literal credentials are rejected.
 
-`mfn_llm::validate_config` checks these settings without looking up credentials, creating clients or runtimes,
+`model`, `base_url`, `temperature`, `max_tokens`, `timeout_ms`, and `max_output_bytes` also accept configuration
+templates. Use `api_key` with a runtime reference to supply credentials from a parameter; it cannot be combined
+with `api_key_env`. The latter remains a literal environment-variable name for existing workflows.
+
+```json
+{
+  "model": {"$ref": "params.model"},
+  "base_url": {"$ref": "params.base_url"},
+  "api_key": {"$ref": "params.api_key"},
+  "temperature": {"$ref": "params.temperature"},
+  "max_tokens": {"$ref": "params.max_tokens"}
+}
+```
+
+The [parameter-driven example](../examples/llm-parameters.json) declares these parameters and connects
+`params.prompt` to `chat.prompt`, establishing the dependency for all configuration references to `params`.
+
+```sh
+mf compile examples/llm-parameters.json --output ./configured-chat
+./configured-chat --params.model your-model --params.prompt Hello
+```
+
+Set `MODEL_API_KEY` in the execution environment. Override the endpoint with `--params.base_url` or other public
+settings through their named arguments. Argument values take precedence over parameter environment fallbacks.
+The same prepared node can execute with different credentials, models, endpoints, and limits on subsequent runs.
+
+`mfn_llm::validate_config` checks literal settings and template syntax without looking up credentials, creating clients or runtimes,
 or contacting the endpoint. Value structs use the runtime's nested object codecs, so malformed history has indexed
 diagnostics. Optional output metadata is omitted when absent rather than encoded as JSON null. The package's optional
 `tokio` feature forwards the workflow-managed backend; its native HTTP transport still depends on Tokio with that
 feature disabled.
 
 Preparation and manifest inspection do not read the credential environment variable or contact the provider.
-Execution reads the variable for each invocation, so credential rotation does not require recompiling a workflow.
+Execution resolves templates or reads the credential variable for each invocation, so credential rotation does not require recompiling a workflow.
 Requests use Chat Completions at the configured prefix's `/chat/completions` route; `OPENAI_BASE_URL` does not override
 that configured endpoint. The node reuses a configured HTTP client, disables redirects and automatic retries, and
 disables idle connection pooling so prepared nodes can outlive earlier workflow-managed reactors.
+Each invocation enforces its resolved deadline through the runtime future driver; the shared client retains no
+invocation-specific credentials, endpoint, or deadline.
 
 Request messages are optional system instructions, the supplied history in order, and the current user prompt.
 On success, returned history preserves the supplied records and appends the current user prompt and complete assistant

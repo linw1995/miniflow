@@ -4,8 +4,9 @@ pub mod test_support;
 mod transport;
 
 use mf_runtime::{
-    ExecutionContext, NodeBuildError, NodeExecutionError, NodeFactory, NodeMetadata,
-    NodeRegistration, NodeValue, PreparedNode, TypedNodeResult, TypedTaskNode, deserialize_config,
+    ConfigTemplate, ContextReference, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError,
+    NodeFactory, NodeMetadata, NodeRegistration, NodeValue, PreparedNode, Shared, TypedNodeResult,
+    TypedTaskNode, ValueRef, deserialize_config,
 };
 use rig_core::{
     completion::{AssistantContent, CompletionRequest, CompletionResponse, FinishReason, Message},
@@ -13,7 +14,6 @@ use rig_core::{
     providers::openai::OpenAIConfig,
 };
 use rig_reqwest::ReqwestClient;
-use serde::Deserialize;
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
@@ -47,132 +47,223 @@ pub struct LlmOutputs {
     pub finish_reason: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(mf_runtime::NodeInputs)]
 struct Config {
     model: String,
-    #[serde(default = "default_base_url")]
     base_url: String,
-    #[serde(default = "default_api_key_env")]
     api_key_env: String,
-    #[serde(default, deserialize_with = "optional_value")]
+    api_key: Option<Shared<String>>,
     temperature: Option<f64>,
-    #[serde(default, deserialize_with = "optional_value")]
     max_tokens: Option<u64>,
-    #[serde(default = "default_timeout_ms")]
     timeout_ms: u64,
-    #[serde(default = "default_max_output_bytes")]
     max_output_bytes: usize,
 }
 
-fn default_base_url() -> String {
-    "https://api.openai.com/v1".into()
-}
-fn default_api_key_env() -> String {
-    "OPENAI_API_KEY".into()
-}
-fn default_timeout_ms() -> u64 {
-    60_000
-}
-fn default_max_output_bytes() -> usize {
-    1_048_576
-}
-
-fn optional_value<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: Deserialize<'de>,
-{
-    T::deserialize(deserializer).map(Some)
+impl fmt::Debug for Config {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("Config").finish_non_exhaustive()
+    }
 }
 
 #[derive(Debug, Snafu)]
-pub enum LlmBuildError {
+pub enum LlmConfigError {
     #[snafu(display("configuration `{field}` requires {requirement}"))]
     InvalidConfig {
-        field: &'static str,
+        field: String,
         requirement: &'static str,
     },
     #[snafu(display("configuration `base_url` is not a valid absolute URL: {source}"))]
     BaseUrl { source: url::ParseError },
+    #[snafu(display("invalid LLM configuration: {source}"))]
+    Decode {
+        source: mf_runtime::InputDecodeError,
+    },
+    #[snafu(display("configuration `{field}`: {source}"))]
+    Template {
+        field: String,
+        source: mf_runtime::ConfigTemplateError,
+    },
+    #[snafu(display("configuration `{field}` has an incompatible type: {source}"))]
+    ConfigType {
+        field: String,
+        source: mf_runtime::TypeMismatch,
+    },
 }
 
-impl From<LlmBuildError> for NodeBuildError {
-    fn from(source: LlmBuildError) -> Self {
+pub type LlmBuildError = LlmConfigError;
+
+impl From<LlmConfigError> for NodeBuildError {
+    fn from(source: LlmConfigError) -> Self {
         Box::<dyn Error + Send + Sync>::from(source).into()
     }
 }
 
+struct PreparedConfig {
+    fields: BTreeMap<String, ConfigTemplate>,
+}
+
+impl PreparedConfig {
+    fn parse(value: Value) -> Result<Self, NodeBuildError> {
+        let mut fields: BTreeMap<String, Value> = deserialize_config(value)?;
+        ensure!(
+            fields.contains_key("model"),
+            InvalidConfigSnafu {
+                field: "model",
+                requirement: "a model identifier or template",
+            }
+        );
+        ensure!(
+            !(fields.contains_key("api_key") && fields.contains_key("api_key_env")),
+            InvalidConfigSnafu {
+                field: "api_key",
+                requirement: "exactly one credential source",
+            }
+        );
+        for (name, value) in [
+            ("base_url", Value::from("https://api.openai.com/v1")),
+            ("api_key_env", Value::from("OPENAI_API_KEY")),
+            ("timeout_ms", Value::from(60_000_u64)),
+            ("max_output_bytes", Value::from(1_048_576_u64)),
+        ] {
+            fields.entry(name.into()).or_insert(value);
+        }
+        let ports = <Config as mf_runtime::NodeInputs>::ports();
+        let mut templates = BTreeMap::new();
+        for (field, value) in fields {
+            let port =
+                ports
+                    .iter()
+                    .find(|port| port.name == field)
+                    .context(InvalidConfigSnafu {
+                        field: &field,
+                        requirement: "a supported LLM configuration field",
+                    })?;
+            let template = ConfigTemplate::parse(value).context(TemplateSnafu { field: &field })?;
+            if field == "api_key" {
+                ensure!(
+                    !template.references(&field).is_empty(),
+                    InvalidConfigSnafu {
+                        field: &field,
+                        requirement: "a runtime template instead of a literal credential",
+                    }
+                );
+            }
+            if field == "api_key_env" {
+                ensure!(
+                    template.literal().is_some(),
+                    InvalidConfigSnafu {
+                        field: &field,
+                        requirement: "a literal environment-variable name",
+                    }
+                );
+            }
+            if let Some(value) = template.literal() {
+                port.value_type
+                    .validate_shared(value)
+                    .context(ConfigTypeSnafu { field: &field })?;
+                validate_field(&field, value)?;
+            }
+            templates.insert(field, template);
+        }
+        Ok(Self { fields: templates })
+    }
+
+    fn references(&self) -> Vec<ContextReference> {
+        self.fields
+            .iter()
+            .flat_map(|(field, value)| value.references(field))
+            .collect()
+    }
+
+    fn resolve(&self, context: &ExecutionContext) -> Result<Config, LlmConfigError> {
+        let mut fields = Inputs::new();
+        for (field, template) in &self.fields {
+            let value = template.resolve(context).context(TemplateSnafu { field })?;
+            let value = if field == "api_key" {
+                value.into_secret()
+            } else {
+                value
+            };
+            fields.insert(field.clone(), value);
+        }
+        // Decode before semantic validation so dynamic values never reach unchecked accessors.
+        let mut config =
+            <Config as mf_runtime::NodeInputs>::from_inputs(fields.clone()).context(DecodeSnafu)?;
+        for (field, value) in &fields {
+            validate_field(field, value)?;
+        }
+        config.base_url = url::Url::parse(&config.base_url)
+            .context(BaseUrlSnafu)?
+            .as_str()
+            .trim_end_matches('/')
+            .to_owned();
+        Ok(config)
+    }
+}
+
+fn validate_field(field: &str, value: &ValueRef) -> Result<(), LlmConfigError> {
+    let requirement = match field {
+        "model" if value.as_str().unwrap().trim().is_empty() => Some("a nonblank identifier"),
+        "api_key" if value.as_str().unwrap().is_empty() => Some("a nonempty credential"),
+        "api_key_env"
+            if value.as_str().unwrap().trim().is_empty()
+                || value.as_str().unwrap().contains(['=', '\0']) =>
+        {
+            Some("a nonblank valid environment-variable name")
+        }
+        "temperature"
+            if !value
+                .as_f64()
+                .is_some_and(|value| value.is_finite() && (0.0..=2.0).contains(&value)) =>
+        {
+            Some("a finite number from 0 to 2")
+        }
+        "max_tokens" | "timeout_ms" | "max_output_bytes" if value.as_f64() == Some(0.0) => {
+            Some("a positive integer")
+        }
+        "base_url" => {
+            let base = url::Url::parse(value.as_str().unwrap()).context(BaseUrlSnafu)?;
+            ensure!(
+                matches!(base.scheme(), "http" | "https") && base.host_str().is_some(),
+                InvalidConfigSnafu {
+                    field,
+                    requirement: "an absolute HTTP or HTTPS URL",
+                }
+            );
+            ensure!(
+                base.username().is_empty()
+                    && base.password().is_none()
+                    && base.query().is_none()
+                    && base.fragment().is_none(),
+                InvalidConfigSnafu {
+                    field,
+                    requirement: "no embedded credentials, query, or fragment",
+                }
+            );
+            None
+        }
+        _ => None,
+    };
+    if let Some(requirement) = requirement {
+        return InvalidConfigSnafu { field, requirement }.fail();
+    }
+    Ok(())
+}
+
+/// Validates literals and template syntax without resolving runtime values.
+pub fn validate_config(value: Value) -> Result<(), NodeBuildError> {
+    PreparedConfig::parse(value).map(|_| ())
+}
+
+#[cfg(test)]
 fn parse_config(value: Value) -> Result<Config, NodeBuildError> {
-    let mut config: Config = deserialize_config(value)?;
-    ensure!(
-        !config.model.trim().is_empty(),
-        InvalidConfigSnafu {
-            field: "model",
-            requirement: "a nonblank identifier"
-        }
-    );
-    let base = url::Url::parse(&config.base_url).context(BaseUrlSnafu)?;
-    ensure!(
-        matches!(base.scheme(), "http" | "https") && base.host_str().is_some(),
-        InvalidConfigSnafu {
-            field: "base_url",
-            requirement: "an absolute HTTP or HTTPS URL"
-        }
-    );
-    ensure!(
-        base.username().is_empty()
-            && base.password().is_none()
-            && base.query().is_none()
-            && base.fragment().is_none(),
-        InvalidConfigSnafu {
-            field: "base_url",
-            requirement: "no embedded credentials, query, or fragment"
-        }
-    );
-    config.base_url = base.as_str().trim_end_matches('/').to_owned();
-    ensure!(
-        !config.api_key_env.trim().is_empty() && !config.api_key_env.contains(['=', '\0']),
-        InvalidConfigSnafu {
-            field: "api_key_env",
-            requirement: "a nonblank valid environment-variable name"
-        }
-    );
-    ensure!(
-        config
-            .temperature
-            .is_none_or(|value| value.is_finite() && (0.0..=2.0).contains(&value)),
-        InvalidConfigSnafu {
-            field: "temperature",
-            requirement: "a finite number from 0 to 2"
-        }
-    );
-    ensure!(
-        config.max_tokens.is_none_or(|value| value > 0),
-        InvalidConfigSnafu {
-            field: "max_tokens",
-            requirement: "a positive integer"
-        }
-    );
-    ensure!(
-        config.timeout_ms > 0,
-        InvalidConfigSnafu {
-            field: "timeout_ms",
-            requirement: "a positive integer"
-        }
-    );
-    ensure!(
-        config.max_output_bytes > 0,
-        InvalidConfigSnafu {
-            field: "max_output_bytes",
-            requirement: "a positive integer"
-        }
-    );
-    Ok(config)
+    Ok(PreparedConfig::parse(value)?.resolve(&ExecutionContext::default())?)
 }
 
 #[derive(Snafu)]
 pub enum LlmExecutionError {
+    #[snafu(transparent)]
+    Configuration { source: LlmConfigError },
     #[snafu(display("LLM input `{path}` requires {requirement}"))]
     InvalidInput {
         path: String,
@@ -234,7 +325,7 @@ impl From<LlmExecutionError> for NodeExecutionError {
 }
 
 struct LlmNode {
-    config: Config,
+    config: PreparedConfig,
     client: OnceLock<Result<ReqwestClient, Arc<reqwest::Error>>>,
 }
 
@@ -247,7 +338,6 @@ impl LlmNode {
                     .retry(reqwest::retry::never())
                     // A prepared node can outlive the reactor of an earlier execution scope.
                     .pool_max_idle_per_host(0)
-                    .timeout(Duration::from_millis(self.config.timeout_ms))
                     .build()
                     .map(ReqwestClient::from)
                     .map_err(Arc::new)
@@ -280,8 +370,10 @@ impl LlmNode {
         inputs: LlmInputs,
         context: &ExecutionContext,
     ) -> Result<LlmOutputs, LlmExecutionError> {
-        let deadline = Instant::now()
-            .checked_add(Duration::from_millis(self.config.timeout_ms))
+        let started = Instant::now();
+        let config = self.config.resolve(context)?;
+        let deadline = started
+            .checked_add(Duration::from_millis(config.timeout_ms))
             .context(DeadlineRangeSnafu)?;
         context.check_future_limits(Some(deadline))?;
         ensure!(
@@ -308,20 +400,28 @@ impl LlmNode {
                 }
             );
         }
-        let key = std::env::var(&self.config.api_key_env).context(CredentialsSnafu {
-            variable: &self.config.api_key_env,
-        })?;
-        ensure!(
-            !key.is_empty(),
-            EmptyCredentialsSnafu {
-                variable: &self.config.api_key_env
-            }
-        );
+        let key = if let Some(key) = &config.api_key {
+            key.value()
+                .as_str()
+                .expect("validated credential")
+                .to_owned()
+        } else {
+            let key = std::env::var(&config.api_key_env).context(CredentialsSnafu {
+                variable: &config.api_key_env,
+            })?;
+            ensure!(
+                !key.is_empty(),
+                EmptyCredentialsSnafu {
+                    variable: &config.api_key_env
+                }
+            );
+            key
+        };
         let transport = transport::TerminalTransport::new(self.client()?);
         let model = OpenAIConfig::new(key)
-            .with_base_url(&self.config.base_url)
+            .with_base_url(&config.base_url)
             .connect(transport.clone())
-            .chat(&self.config.model);
+            .chat(&config.model);
         let messages = history.iter().map(|message| {
             if message.role == "user" {
                 Message::user(&message.content)
@@ -331,8 +431,8 @@ impl LlmNode {
         });
         let mut request = CompletionRequest::new(&inputs.prompt)
             .messages(messages)
-            .temperature(self.config.temperature)
-            .max_tokens(self.config.max_tokens);
+            .temperature(config.temperature)
+            .max_tokens(config.max_tokens);
         if let Some(system) = inputs.system {
             request = request.preamble(system);
         }
@@ -347,12 +447,7 @@ impl LlmNode {
         if let Some(usage) = transport.usage() {
             response.usage = usage;
         }
-        let result = terminal_outputs(
-            response,
-            inputs.prompt,
-            history,
-            self.config.max_output_bytes,
-        )?;
+        let result = terminal_outputs(response, inputs.prompt, history, config.max_output_bytes)?;
         context.check_future_limits(Some(deadline))?;
         Ok(result)
     }
@@ -417,12 +512,17 @@ fn terminal_outputs(
 
 /// Prepares a complete terminal-generation task without acquiring execution resources.
 pub fn prepare_llm(value: Value) -> Result<PreparedNode, NodeBuildError> {
+    let config = PreparedConfig::parse(value)?;
+    let metadata = NodeMetadata {
+        context_references: config.references(),
+        ..Default::default()
+    };
     PreparedNode::typed_task(
         LlmNode {
-            config: parse_config(value)?,
+            config,
             client: OnceLock::new(),
         },
-        NodeMetadata::default(),
+        metadata,
     )
 }
 
@@ -494,6 +594,41 @@ mod tests {
             .downcast_ref::<LlmBuildError>()
             .unwrap();
         assert!(source.source().unwrap().is::<url::ParseError>());
+    }
+
+    #[test]
+    fn templates_declare_dependencies_without_resolving_configuration() {
+        let mut config = json!({});
+        for field in [
+            "model",
+            "base_url",
+            "api_key",
+            "temperature",
+            "max_tokens",
+            "timeout_ms",
+            "max_output_bytes",
+        ] {
+            config[field] = json!({"$ref": format!("params.{field}")});
+        }
+        validate_config(config.clone()).unwrap();
+        let prepared = prepare_llm(config.clone()).unwrap();
+        assert_eq!(prepared.metadata.context_references.len(), 7);
+        assert_eq!(prepared.metadata.ports.inputs, LlmInputs::ports());
+        assert_eq!(prepared.metadata.ports.outputs, LlmOutputs::ports());
+        config["api_key_env"] = "OTHER_KEY".into();
+        assert!(validate_config(config).is_err());
+        for patch in [
+            json!({"api_key":{"$template":"literal-key"}}),
+            json!({"api_key_env":{"$ref":"params.name"}}),
+            json!({"model":{"$ref":"params.model", "unexpected":true}}),
+        ] {
+            let mut config = json!({"model":"example"});
+            config
+                .as_object_mut()
+                .unwrap()
+                .extend(patch.as_object().unwrap().clone());
+            assert!(validate_config(config).is_err());
+        }
     }
 
     #[test]
@@ -636,7 +771,7 @@ mod tests {
         assert!(prepared.execution.as_task_node().is_some());
         assert!(prepared.metadata.stdin.is_none());
         let node = LlmNode {
-            config: parse_config(json!({"model": "example-model"})).unwrap(),
+            config: PreparedConfig::parse(json!({"model": "example-model"})).unwrap(),
             client: OnceLock::new(),
         };
         assert!(node.client.get().is_none());

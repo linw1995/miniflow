@@ -391,7 +391,7 @@ assert_eq!(header.to_string(), "\"[REDACTED]\"");
 
 `is_secret()` identifies a fully secret value; `contains_secret()` also checks for
 secret descendants. `inherit_secrets()` marks a computed value when any source
-contains a secret. Nodes and future configuration templates must use it when
+contains a secret. Nodes and configuration templates must use it when
 transforming sensitive values. There is no automatic propagation from every node
 input to every output. `ValueRef` and `Shared<T>` preserve markers; decoding into
 ordinary owned Rust types or round-tripping through JSON loses them.

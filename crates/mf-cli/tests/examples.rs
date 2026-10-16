@@ -12,7 +12,7 @@ fn workspace() -> &'static Path {
         .unwrap()
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 10] {
+fn examples() -> [(&'static str, Option<&'static str>, Value); 11] {
     [
         ("cel-list.json", None, json!({"doubled": [2, 4]})),
         ("cel-scalar.json", None, json!({"doubled": 42})),
@@ -23,6 +23,11 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 10] {
         ("loop.json", None, json!({"count": 3})),
         (
             "llm-terminal.json",
+            None,
+            json!({"text": "reply", "history": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "reply"}]}),
+        ),
+        (
+            "llm-parameters.json",
             None,
             json!({"text": "reply", "history": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "reply"}]}),
         ),
@@ -86,6 +91,8 @@ fn documented_examples_compile_and_produce_expected_outputs() {
                     .unwrap();
             let config = if name == "llm-loop.json" {
                 &mut value["nodes"][0]["loop"]["body"]["nodes"][0]["config"]
+            } else if name == "llm-parameters.json" {
+                &mut value["nodes"][1]["config"]
             } else {
                 &mut value["nodes"][0]["config"]
             };
@@ -138,6 +145,8 @@ fn documented_examples_compile_and_produce_expected_outputs() {
         if server.is_some() {
             let inputs = if name == "llm-loop.json" {
                 json!({"repeat.prompt":"Hello", "repeat.history":[], "repeat.text":""})
+            } else if name == "llm-parameters.json" {
+                json!({"params.prompt":"Hello"})
             } else {
                 json!({"chat.prompt":"Hello"})
             };
