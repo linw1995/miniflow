@@ -15,6 +15,27 @@ spec.loader.exec_module(cache)
 
 
 class BuildCacheTests(unittest.TestCase):
+    def test_persistent_preparation_cleans_checkout_packages_in_both_targets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            package_target = root / "cache/packaged-target"
+            package_target.mkdir(parents=True)
+            metadata = {"packages": [{
+                "name": "mf-compiler",
+                "dependencies": [{"name": "serde_json", "req": "^1", "kind": None}],
+            }]}
+            with patch.object(cache.subprocess, "run") as run:
+                cache.prepare_cache(root, "/bin/cargo", metadata, root / "cache", True)
+            clean = [call for call in run.call_args_list if call.args[0][1] == "clean"]
+            self.assertEqual([
+                (call.kwargs["env"]["CARGO_TARGET_DIR"], call.args[0][-1]) for call in clean
+            ], [
+                (str(root / "cache/target"), "release"),
+                (str(root / "cache/target"), "dev"),
+                (str(package_target), "release"),
+            ])
+            self.assertTrue(all("--workspace" in call.args[0] for call in clean))
+
     def test_session_reuse_invalidation_and_failed_preparation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

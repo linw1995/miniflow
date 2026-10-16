@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -35,10 +36,10 @@ def main():
         "session": session,
         "workspace": str(workspace.resolve()),
         "cargo": cargo,
-        "environment": {
+        "environment": hashlib.sha256(json.dumps({
             name: value for name, value in os.environ.items()
             if name.startswith(("CARGO_", "RUST"))
-        },
+        }, sort_keys=True).encode()).hexdigest(),
     }
     prepared = None
     if marker.is_file():
@@ -67,6 +68,7 @@ def main():
             "CARGO_NET_OFFLINE": "true",
             "MF_TEST_REAL_CARGO": cargo,
             "MF_TEST_TARGET_DIR": target,
+            "MF_TEST_PACKAGE_TARGET_DIR": directory / "packaged-target",
             "MF_TEST_SOURCE_CONFIG": source_config,
             "MF_TEST_VENDOR_DIR": vendor,
         }.items():
@@ -144,13 +146,18 @@ def prepare_cache(workspace, cargo, metadata, directory, persistent):
     env = dict(os.environ, CARGO_TARGET_DIR=str(target))
     if persistent:
         # Checkout mtimes can precede restored artifacts. Keep dependencies, never old workspace code.
-        for profile in ["release", "dev"]:
-            subprocess.run(
-                [cargo, "clean", "--workspace", "--profile", profile],
-                cwd=workspace,
-                env=env,
-                check=True,
-            )
+        targets = [(target, ["release", "dev"])]
+        package_target = directory / "packaged-target"
+        if package_target.exists():
+            targets.append((package_target, ["release"]))
+        for build_target, profiles in targets:
+            for profile in profiles:
+                subprocess.run(
+                    [cargo, "clean", "--workspace", "--profile", profile],
+                    cwd=workspace,
+                    env=dict(env, CARGO_TARGET_DIR=str(build_target)),
+                    check=True,
+                )
     # Preserve wrappers, flags, and coverage instrumentation used by the tests.
     for profile in ["release", "dev"]:
         subprocess.run(

@@ -23,6 +23,13 @@ complete macOS test execution runs in nightly.
 Coverage dependencies and generated-project builds use persistent caches.
 The script removes previous workspace binaries and report data while retaining
 dependencies, so stale coverage mappings cannot contribute to a new report.
+The packaged CLI fixture keeps a separate target beside the generated-runner
+cache. Its registry dependencies survive subsequent runs, while preparation
+cleans checkout packages before rebuilding the CLI. Archive checksums also
+invalidate registry builds of the support packages and external fixture whenever
+their packaged contents change, even at the same version. Dependency artifacts are
+seeded only on the first run; installed executables, Cargo homes, and user
+projects remain temporary and isolated.
 Caches accelerate compilation without changing which tests execute.
 
 ## Coverage step timings
