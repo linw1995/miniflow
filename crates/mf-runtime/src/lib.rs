@@ -1,4 +1,5 @@
 mod cancellation;
+mod config_template;
 mod context;
 mod definition;
 mod execution_domains;
@@ -30,6 +31,7 @@ mod workflow_manifest;
 #[cfg(feature = "async")]
 pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
+pub use config_template::{ConfigTemplate, ConfigTemplateError};
 pub use context::{
     ContextValue, ExecutionContext, ExecutionDependency, ExecutionScope, GeneratedNodeResult,
     NodeResult, TypedNodeResult, execute_generated_node_in_context, execute_node_in_context,

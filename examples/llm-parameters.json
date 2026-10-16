@@ -1,0 +1,92 @@
+{
+  "version": "2026-10-03",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "path": "../crates/builtin-nodes/llm"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "api_key": {
+            "type": "string",
+            "env": "MODEL_API_KEY"
+          },
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "temperature": {
+            "type": "double",
+            "default": 0.2,
+            "secret": false
+          },
+          "max_tokens": {
+            "type": "uint",
+            "default": 256,
+            "secret": false
+          },
+          "prompt": {
+            "type": "string",
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "chat",
+      "kind": "builtin.llm",
+      "config": {
+        "api_key": {
+          "$ref": "params.api_key"
+        },
+        "model": {
+          "$ref": "params.model"
+        },
+        "base_url": {
+          "$ref": "params.base_url"
+        },
+        "temperature": {
+          "$ref": "params.temperature"
+        },
+        "max_tokens": {
+          "$ref": "params.max_tokens"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "params",
+      "from_output": "prompt",
+      "to_node": "chat",
+      "to_input": "prompt"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "text",
+      "node": "chat",
+      "port": "text"
+    },
+    {
+      "name": "history",
+      "node": "chat",
+      "port": "history"
+    }
+  ]
+}

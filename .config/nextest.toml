@@ -34,7 +34,8 @@ filter = '''
     test(=documented_examples_compile_and_produce_expected_outputs)) |
 (binary_id(=mf-compiler::llm_workflows) & (
     test(=llm_workflows_match_memory_and_standalone_runners) |
-    test(=llm_stream_tasks_and_skips_preserve_existing_execution_contracts)
+    test(=llm_stream_tasks_and_skips_preserve_existing_execution_contracts) |
+    test(=parameter_templates_configure_memory_and_standalone_llm_requests)
 )) |
 (binary_id(=mf-compiler::runner_validation) &
     test(=build_validates_without_execution_and_reports_plugin_errors)) |
@@ -90,7 +91,8 @@ filter = '''
     test(=documented_examples_compile_and_produce_expected_outputs)) |
 (binary_id(=mf-compiler::llm_workflows) & (
     test(=llm_workflows_match_memory_and_standalone_runners) |
-    test(=llm_stream_tasks_and_skips_preserve_existing_execution_contracts)
+    test(=llm_stream_tasks_and_skips_preserve_existing_execution_contracts) |
+    test(=parameter_templates_configure_memory_and_standalone_llm_requests)
 )) |
 (binary_id(=mf-compiler::runner_validation) &
     test(=build_validates_without_execution_and_reports_plugin_errors)) |
