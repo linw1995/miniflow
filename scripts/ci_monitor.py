@@ -130,6 +130,7 @@ def render_report(run, jobs, samples, branch):
         f"Baseline: median of {len(samples)} successful CI pushes to **{label(branch)}** completed before this run started.",
         "Only matching jobs are compared; additional base-branch jobs (including macOS) are excluded.",
         "Wall time includes queueing and job dependencies; job durations include setup and cache upload.",
+        "Step baselines include only successful executions of the same step; skipped and missing steps are not zero-duration samples.",
         "",
     ]
     if not complete:

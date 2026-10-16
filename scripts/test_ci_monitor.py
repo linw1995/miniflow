@@ -106,6 +106,36 @@ class TimingTests(unittest.TestCase):
         self.assertIn("No successful baseline", report)
         self.assertIn("| <code>lint</code> (<code>failure</code>) | 1m 00s | N/A | N/A |", report)
 
+    def test_crate_timings_exclude_skipped_and_missing_samples(self):
+        def coverage(steps):
+            result = job("coverage", end=600)
+            result["steps"] = [
+                {key: value for key, value in job(name, start, end, conclusion).items() if key != "steps"}
+                for name, start, end, conclusion in steps
+            ]
+            return result
+
+        current = run(created="2026-10-11T00:00:00Z")
+        active = "Coverage tests (mf-runtime)"
+        skipped = "Coverage tests (mf-cli)"
+        new = "Coverage tests (mf-tui)"
+        jobs = {"coverage": coverage([
+            (active, 0, 120, "success"),
+            (skipped, 0, 0, "skipped"),
+            (new, 0, 30, "success"),
+        ])}
+        samples = [(current, {"coverage": coverage(steps)}) for steps in [
+            [(active, 0, 60, "success"), (skipped, 0, 300, "success")],
+            [(active, 0, 180, "success")],
+            [(active, 0, 0, "skipped"), (new, 0, 0, "skipped")],
+            [(active, 0, 1, "failure")],
+            [],
+        ]]
+        report = monitor.render_report(current, jobs, samples, "main")
+        self.assertIn(f"| <code>coverage</code> / <code>{active}</code> | 2m 00s | 2m 00s | +0m 00s (+0.0%) |", report)
+        self.assertNotIn(skipped, report)
+        self.assertIn(f"| <code>coverage</code> / <code>{new}</code> | 0m 30s | N/A | N/A |", report)
+
     def test_untrusted_labels_cannot_break_the_table(self):
         name = "unsafe|<img>\n`label`"
         current = run(created="2026-10-11T00:00:00Z")

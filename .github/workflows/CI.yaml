@@ -68,6 +68,9 @@ jobs:
 
   coverage:
     runs-on: ubuntu-latest
+    env:
+      NEXTEST_PROFILE: ci
+      MF_TEST_BUILD_CACHE_DIR: ${{ github.workspace }}/target/coverage/build/nextest-build-cache/ci
     steps:
       - uses: actions/checkout@v7
         with:
@@ -85,8 +88,11 @@ jobs:
         run: |
           nix develop --command python3 scripts/affected_tests.py \
             --base "$PR_BASE_SHA" --head "$TEST_HEAD_SHA" --json > "$RUNNER_TEMP/affected-tests.json"
-          printf 'run=%s\n' "$(jq '.packages | length > 0' "$RUNNER_TEMP/affected-tests.json")" >> "$GITHUB_OUTPUT"
-          printf 'coverage_flag=%s\n' "$(jq -r 'if .mode == "all" then "rust" else "rust-affected" end' "$RUNNER_TEMP/affected-tests.json")" >> "$GITHUB_OUTPUT"
+          {
+            printf 'run=%s\n' "$(jq '.packages | length > 0' "$RUNNER_TEMP/affected-tests.json")"
+            printf 'packages=%s\n' "$(jq -c '.packages' "$RUNNER_TEMP/affected-tests.json")"
+            printf 'coverage_flag=%s\n' "$(jq -r 'if .mode == "all" then "rust" else "rust-affected" end' "$RUNNER_TEMP/affected-tests.json")"
+          } >> "$GITHUB_OUTPUT"
           {
             echo '### Affected Rust tests'
             echo '```json'
@@ -106,18 +112,49 @@ jobs:
             coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
             coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-
             coverage-${{ runner.os }}-${{ runner.arch }}-
-      - name: Run native coverage
+      - name: Prepare and build coverage tests
         if: github.event_name != 'pull_request' || steps.selection.outputs.run == 'true'
         env:
           EVENT_NAME: ${{ github.event_name }}
-          NEXTEST_PROFILE: ci
-          MF_TEST_BUILD_CACHE_DIR: ${{ github.workspace }}/target/coverage/build/nextest-build-cache/ci
         run: |
           if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            nix develop --command bash scripts/run-cov.sh --affected-plan "$RUNNER_TEMP/affected-tests.json"
+            nix develop --command bash scripts/run-cov.sh --prepare --affected-plan "$RUNNER_TEMP/affected-tests.json"
           else
-            nix develop --command bash scripts/run-cov.sh
+            nix develop --command bash scripts/run-cov.sh --prepare
           fi
+      - name: Coverage tests (mf-chat)
+        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-chat')
+        run: nix develop --command bash scripts/run-cov.sh --test-package mf-chat
+      - name: Coverage tests (mf-cli)
+        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-cli')
+        run: nix develop --command bash scripts/run-cov.sh --test-package mf-cli
+      - name: Coverage tests (mf-compiler)
+        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-compiler')
+        run: nix develop --command bash scripts/run-cov.sh --test-package mf-compiler
+      - name: Coverage tests (mf-runtime)
+        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-runtime')
+        run: nix develop --command bash scripts/run-cov.sh --test-package mf-runtime
+      - name: Coverage tests (mf-runtime-derive)
+        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-runtime-derive')
+        run: nix develop --command bash scripts/run-cov.sh --test-package mf-runtime-derive
+      - name: Coverage tests (mf-telemetry)
+        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-telemetry')
+        run: nix develop --command bash scripts/run-cov.sh --test-package mf-telemetry
+      - name: Coverage tests (mf-tui)
+        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-tui')
+        run: nix develop --command bash scripts/run-cov.sh --test-package mf-tui
+      - name: Coverage tests (mfn-code)
+        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mfn-code')
+        run: nix develop --command bash scripts/run-cov.sh --test-package mfn-code
+      - name: Coverage tests (mfn-core)
+        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mfn-core')
+        run: nix develop --command bash scripts/run-cov.sh --test-package mfn-core
+      - name: Coverage tests (mfn-llm)
+        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mfn-llm')
+        run: nix develop --command bash scripts/run-cov.sh --test-package mfn-llm
+      - name: Generate coverage reports
+        if: github.event_name != 'pull_request' || steps.selection.outputs.run == 'true'
+        run: nix develop --command bash scripts/run-cov.sh --report
       - name: Upload coverage artifact
         if: github.event_name != 'pull_request' || steps.selection.outputs.run == 'true'
         uses: actions/upload-artifact@v7

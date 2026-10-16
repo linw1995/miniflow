@@ -21,9 +21,72 @@ mark_fixture_target() {
   fi
 }
 
-rm -rf "${coverage_dir}/data" "${coverage_dir}/result"
-mkdir -p "${coverage_dir}/data" "${coverage_dir}/result"
+reset_reports() {
+  rm -rf "${coverage_dir}/data" "${coverage_dir}/result"
+  rm -f "${coverage_dir}/binaries.json" "${coverage_dir}/cargo-metadata.json"
+  mkdir -p "${coverage_dir}/data" "${coverage_dir}/result"
+}
 
+prepare_coverage() {
+  # Offline fixture builds resolve the complete lockfile, including other targets.
+  cargo fetch --locked
+  cargo metadata --offline --locked --no-deps --format-version 1 > "${coverage_dir}/workspace.json"
+  rustc -vV > "${coverage_dir}/identity.current"
+  printf '%s\n' "$RUSTFLAGS" >> "${coverage_dir}/identity.current"
+  jq -r '.workspace_members[]' "${coverage_dir}/workspace.json" >> "${coverage_dir}/identity.current"
+  if ! cmp -s "${coverage_dir}/identity.current" "${CARGO_TARGET_DIR}/.mf-coverage-identity"; then
+    rm -rf "${CARGO_TARGET_DIR}"
+  fi
+  mkdir -p "${CARGO_TARGET_DIR}"
+  mv "${coverage_dir}/identity.current" "${CARGO_TARGET_DIR}/.mf-coverage-identity"
+  mark_target_directory "$CARGO_TARGET_DIR"
+  mark_fixture_target
+
+  # grcov scans every binary in its search directory. Remove old workspace mappings while retaining dependencies.
+  cargo clean --workspace --profile dev
+}
+
+report_coverage() {
+  grcov "${coverage_dir}/data" \
+    --llvm \
+    --branch \
+    --source-dir "${workspace_root}" \
+    --ignore-not-existing \
+    --ignore '../*' \
+    --ignore '/*' \
+    --binary-path "${CARGO_TARGET_DIR}/debug/deps" \
+    --output-types html,cobertura,lcov,markdown \
+    --output-path "${coverage_dir}/result"
+
+  test -s "${coverage_dir}/result/lcov"
+  test -s "${coverage_dir}/result/cobertura.xml"
+  cp "${coverage_dir}/result/lcov" "${coverage_dir}/result/lcov.info"
+}
+
+# CI keeps one instrumented build and accumulates profiles across package steps.
+case "${1:-}" in
+  --test-package)
+    [[ $# -eq 2 && -n "$2" ]]
+    # Some packages, such as derive macros, are tested only by their consumers.
+    cargo nextest run \
+      --cargo-metadata "${coverage_dir}/cargo-metadata.json" \
+      --binaries-metadata "${coverage_dir}/binaries.json" \
+      -E "package(=$2)" --no-tests warn
+    exit 0
+    ;;
+  --report)
+    [[ $# -eq 1 ]]
+    report_coverage
+    exit 0
+    ;;
+esac
+
+phase=full
+if [[ "${1:-}" == "--prepare" ]]; then
+  phase=prepare
+  shift
+fi
+reset_reports
 test_packages=(--workspace)
 if [[ "${1:-}" == "--affected-plan" ]]; then
   plan="${2:?--affected-plan requires a JSON plan path}"
@@ -39,35 +102,14 @@ if [[ "${1:-}" == "--affected-plan" ]]; then
   fi
 fi
 
-# Offline fixture builds resolve the complete lockfile, including other targets.
-cargo fetch --locked
-cargo metadata --offline --locked --no-deps --format-version 1 > "${coverage_dir}/workspace.json"
-rustc -vV > "${coverage_dir}/identity.current"
-printf '%s\n' "$RUSTFLAGS" >> "${coverage_dir}/identity.current"
-jq -r '.workspace_members[]' "${coverage_dir}/workspace.json" >> "${coverage_dir}/identity.current"
-if ! cmp -s "${coverage_dir}/identity.current" "${CARGO_TARGET_DIR}/.mf-coverage-identity"; then
-  rm -rf "${CARGO_TARGET_DIR}"
+prepare_coverage
+if [[ "$phase" == "prepare" ]]; then
+  [[ $# -eq 0 ]]
+  # Preserve feature unification across selected packages and compile only once.
+  cargo metadata --offline --locked --all-features --format-version 1 > "${coverage_dir}/cargo-metadata.json"
+  cargo nextest list --locked --all-features "${test_packages[@]}" \
+    --list-type binaries-only --message-format json > "${coverage_dir}/binaries.json"
+  exit 0
 fi
-mkdir -p "${CARGO_TARGET_DIR}"
-mv "${coverage_dir}/identity.current" "${CARGO_TARGET_DIR}/.mf-coverage-identity"
-mark_target_directory "$CARGO_TARGET_DIR"
-mark_fixture_target
-
-# grcov scans every binary in its search directory. Remove old workspace mappings while retaining dependencies.
-cargo clean --workspace --profile dev
 cargo nextest run --locked --all-features "${test_packages[@]}" "$@"
-
-grcov "${coverage_dir}/data" \
-  --llvm \
-  --branch \
-  --source-dir "${workspace_root}" \
-  --ignore-not-existing \
-  --ignore '../*' \
-  --ignore '/*' \
-  --binary-path "${CARGO_TARGET_DIR}/debug/deps" \
-  --output-types html,cobertura,lcov,markdown \
-  --output-path "${coverage_dir}/result"
-
-test -s "${coverage_dir}/result/lcov"
-test -s "${coverage_dir}/result/cobertura.xml"
-cp "${coverage_dir}/result/lcov" "${coverage_dir}/result/lcov.info"
+report_coverage
