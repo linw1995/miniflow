@@ -111,3 +111,52 @@ Filters accept session, profile, actual model name, configuration fingerprint, p
 Each token counter exposes `known_subtotal`, `reported_calls`, and `missing_calls`. A missing observation is not zero; an explicit zero is a reported observation. No observations yield an unknown subtotal. Treat a subtotal with missing observations as partial coverage. Attempt and status counts include begun failed, cancelled, and interrupted calls, but exclude never-started title requests.
 
 SQL computes aggregate facts without loading raw call history. Integer overflow fails explicitly. Calls from title generation remain attributed to `title`, including valid replies whose title update was stale or whose application title was rejected. Monetary estimates require separate pricing data and are not provided by the core.
+
+## Executable conversation backend
+
+`mf_chat::executable` provides the contracts and persistence lifecycle for an application that runs a
+compiled chat workflow. The application owns process launch, cancellation, output capture, and scheduling;
+the library owns conversation inputs, invocation identities, and durable state transitions.
+
+The [chat workflow example](../examples/chat-flow.json) connects a `builtin.parameters` node to one
+`builtin.llm` node. Compile it from the repository root:
+
+```sh
+nix develop --command cargo run -p mf-cli --features development-support -- compile examples/chat-flow.json --output target/chat-flow
+```
+
+Construct `ChatContract::from_manifest` from the executable's `WorkflowManifest` before opening storage.
+Preflight accepts one finite LLM node, optionally preceded by one parameter node, with no stdin resource,
+loops, or control edges. The parameter node must feed prompt, system, and history directly. Parameterized
+flows must expose `text`, `history`, optional `usage`, and optional `finish_reason` from the LLM under those
+exact names. Execute these flows as a whole; for a single LLM without a parameter node, use the runner's
+existing `--node` option with `contract.node` to return all model ports independently of workflow aliases.
+
+Resolve `contract.parameters` with `mf_runtime::resolve_workflow_inputs` before admitting work. This schema
+excludes conversation inputs, so ordinary argument validation rejects caller-supplied prompt, system, or
+history. Reuse the resolved configuration for each invocation. `model_identity` evaluates the model expression
+against public parameters and fingerprints configuration without resolved secrets. Secret model identities
+are rejected. The example reads credentials from `MODEL_API_KEY` and supports `params.model` and
+`params.base_url` overrides without recompilation.
+
+For each conversation:
+
+1. Allocate an `Invocation` and call `begin_turn_with_invocation` to durably admit the turn and load successful
+   history. Storage permits only one running conversation per session.
+2. Pass the returned request and resolved configuration to `contract.arguments`. Absent system and history
+   become an empty string and empty list for parameterized flows. Forward these arguments to the runner;
+   the model process needs no database path or conversation identity.
+3. Capture stdout within `MAX_RECOVERY_BYTES` (16 MiB), then call `reconcile_completion` with the invocation,
+   captured reply, and unsuccessful exit classification. A valid reply from a running invocation becomes
+   `CompletionState::Uncommitted`; already committed state always wins, including after late cancellation.
+4. Persist an uncommitted reply with `save_recovered`. On failure, retain the value carried by
+   `ChatError::Uncommitted` and retry saving or explicitly call `abandon_recovered`. Neither action invokes
+   the model. If reconciliation itself fails, retain captured stdout until durable facts can be checked.
+
+Malformed or missing output finalizes only the admitted invocation as failed, cancelled, or interrupted.
+Diagnostics remain separate from the durable outcome. `retry_prompt` retrieves an unsuccessful turn and
+its original prompt; a model retry must allocate fresh identities and pass the original turn as `retry_of`.
+
+Recovery values live in application memory. A crash before persistence can lose the reply and its usage;
+reopening storage interrupts abandoned work without resending it. Automatic title execution remains the
+embedded host's responsibility; the executable backend does not dispatch pending title calls.

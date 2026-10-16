@@ -4,6 +4,16 @@ use std::{error::Error, io, path::PathBuf};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ChatError {
+    #[snafu(transparent)]
+    ConfigurationTemplate {
+        source: mf_runtime::ConfigTemplateError,
+    },
+    #[snafu(display("model reply exceeds the {limit}-byte limit"))]
+    RecoveryTooLarge { limit: usize },
+    #[snafu(transparent)]
+    Manifest {
+        source: mf_runtime::WorkflowManifestError,
+    },
     #[snafu(display("chat session {id:?} already has an active title request"))]
     TitleBusy { id: String },
     #[snafu(transparent)]

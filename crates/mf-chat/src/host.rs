@@ -7,7 +7,7 @@ use crate::{
         BeginTurnInputs, Changed, CompletionOutputs, FailTurnInputs, RecoveryInputs,
         RecoveryOutputs,
     },
-    operation, turn,
+    operation,
 };
 use mf_runtime::{
     ContextValue, ExecutionContext, FlowRuntime, NodeValue, StreamCancellation, StreamError,
@@ -254,29 +254,8 @@ impl ChatHost {
     }
 
     pub fn retry(&self, turn_id: &str) -> Result<ChatJob, ChatError> {
-        let original: turn::TurnRequestOutputs = operation::execute(
-            self.database().path(),
-            "mf_chat.turn.request",
-            turn::RecordInputs {
-                database_path: String::new(),
-                id: turn_id.into(),
-            },
-        )?;
-        ensure!(
-            matches!(
-                original.turn.state.as_str(),
-                "failed" | "cancelled" | "interrupted"
-            ),
-            InvalidSnafu {
-                field: "retry_of",
-                reason: "must identify an unsuccessful turn",
-            }
-        );
-        self.start(
-            &original.turn.session_id,
-            &original.prompt,
-            Some(turn_id.into()),
-        )
+        let (original, prompt) = self.database().retry_prompt(turn_id)?;
+        self.start(&original.session_id, &prompt, Some(turn_id.into()))
     }
 
     fn start(
@@ -437,20 +416,6 @@ impl ChatHost {
         pending: UncommittedCompletion,
     ) -> Result<Completion, ChatError> {
         ensure!(
-            pending.purpose == CallPurpose::Conversation,
-            InvalidSnafu {
-                field: "purpose",
-                reason: "use retry_title_completion for a title response",
-            }
-        );
-        ensure!(
-            pending.database_path == self.database().path(),
-            InvalidSnafu {
-                field: "database_path",
-                reason: "completion belongs to another host database"
-            }
-        );
-        ensure!(
             !self
                 .inner
                 .workers
@@ -459,21 +424,11 @@ impl ChatHost {
                 .closed,
             ClosedSnafu
         );
-        match self.database().complete_turn(
-            pending.completion.invocation.clone(),
-            pending.completion.reply.clone(),
-        ) {
-            Ok(completion) => {
-                if self.inner.config.automatic_titles {
-                    let _ = self.inner.dispatch_titles();
-                }
-                Ok(completion)
-            }
-            Err(source) => Err(UncommittedSnafu {
-                pending: Box::new(pending),
-            }
-            .into_error(Box::new(source))),
+        let completion = self.database().save_recovered(pending)?;
+        if self.inner.config.automatic_titles {
+            let _ = self.inner.dispatch_titles();
         }
+        Ok(completion)
     }
 
     pub fn abandon_completion(&self, invocation: Invocation) -> Result<bool, ChatError> {

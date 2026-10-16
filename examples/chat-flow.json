@@ -1,0 +1,109 @@
+{
+  "version": "2026-10-03",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "path": "../crates/builtin-nodes/llm"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "env": "MODEL_API_KEY"
+          },
+          "prompt": {
+            "type": "string"
+          },
+          "system": {
+            "type": "string",
+            "default": ""
+          },
+          "history": {
+            "type": {
+              "list": "object"
+            },
+            "default": []
+          }
+        }
+      }
+    },
+    {
+      "id": "chat",
+      "kind": "builtin.llm",
+      "config": {
+        "model": {
+          "$ref": "params.model"
+        },
+        "base_url": {
+          "$ref": "params.base_url"
+        },
+        "api_key": {
+          "$ref": "params.api_key"
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "text",
+      "node": "chat",
+      "port": "text"
+    },
+    {
+      "name": "history",
+      "node": "chat",
+      "port": "history"
+    },
+    {
+      "name": "usage",
+      "node": "chat",
+      "port": "usage",
+      "optional": true
+    },
+    {
+      "name": "finish_reason",
+      "node": "chat",
+      "port": "finish_reason",
+      "optional": true
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "params",
+      "from_output": "prompt",
+      "to_node": "chat",
+      "to_input": "prompt"
+    },
+    {
+      "from_node": "params",
+      "from_output": "system",
+      "to_node": "chat",
+      "to_input": "system"
+    },
+    {
+      "from_node": "params",
+      "from_output": "history",
+      "to_node": "chat",
+      "to_input": "history"
+    }
+  ]
+}

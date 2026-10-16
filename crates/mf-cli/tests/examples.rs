@@ -12,10 +12,15 @@ fn workspace() -> &'static Path {
         .unwrap()
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 11] {
+fn examples() -> [(&'static str, Option<&'static str>, Value); 12] {
     [
         ("cel-list.json", None, json!({"doubled": [2, 4]})),
         ("cel-scalar.json", None, json!({"doubled": 42})),
+        (
+            "chat-flow.json",
+            None,
+            json!({"text": "reply", "history": [{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "reply"}], "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3}, "finish_reason": "stop"}),
+        ),
         ("else-if.json", None, json!({"medium": {"amount": 500}})),
         ("hello-workflow.json", None, json!({"answer": 42})),
         ("if-else.json", None, json!({"accepted": {"amount": 150}})),
@@ -82,10 +87,11 @@ fn documented_examples_compile_and_produce_expected_outputs() {
 
     for (name, input, expected) in examples() {
         let definition = definitions.join(name);
-        let server = name
-            .starts_with("llm-")
+        let server = (name.starts_with("llm-") || name == "chat-flow.json")
             .then(|| llm_support::Server::start(vec![llm_support::Reply::text("reply"); 2]));
-        if let Some(server) = &server {
+        if let Some(server) = &server
+            && name != "chat-flow.json"
+        {
             let mut value: Value =
                 serde_json::from_slice(&fs::read(workspace().join("examples").join(name)).unwrap())
                     .unwrap();
@@ -142,9 +148,11 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if server.is_some() {
+        if let Some(server) = &server {
             let inputs = if name == "llm-loop.json" {
                 json!({"repeat.prompt":"Hello", "repeat.history":[], "repeat.text":""})
+            } else if name == "chat-flow.json" {
+                json!({"params.prompt":"Hello", "params.model":"example-model", "params.base_url":server.base_url})
             } else if name == "llm-parameters.json" {
                 json!({"params.prompt":"Hello"})
             } else {

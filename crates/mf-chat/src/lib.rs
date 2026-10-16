@@ -1,6 +1,7 @@
 //! Persistent chat operations implemented as application-owned workflow nodes.
 
 mod error;
+pub mod executable;
 pub mod flows;
 mod host;
 mod model;

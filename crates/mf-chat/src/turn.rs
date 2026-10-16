@@ -18,6 +18,16 @@ pub struct Invocation {
     pub call_id: String,
 }
 
+impl Invocation {
+    pub fn new(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            turn_id: uuid::Uuid::new_v4().to_string(),
+            call_id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
 pub struct ModelIdentity {
     pub profile: String,
@@ -706,14 +716,31 @@ impl ChatDatabase {
         retry_of: Option<String>,
         max_history_bytes: usize,
     ) -> Result<TurnStarted, ChatError> {
+        self.begin_turn_with_invocation(
+            Invocation::new(session_id),
+            prompt,
+            model,
+            retry_of,
+            max_history_bytes,
+        )
+    }
+
+    pub fn begin_turn_with_invocation(
+        &self,
+        invocation: Invocation,
+        prompt: &str,
+        model: ModelIdentity,
+        retry_of: Option<String>,
+        max_history_bytes: usize,
+    ) -> Result<TurnStarted, ChatError> {
         operation::execute(
             self.path(),
             "mf_chat.turn.begin",
             BeginTurnInputs {
                 database_path: String::new(),
-                session_id: session_id.into(),
-                turn_id: uuid::Uuid::new_v4().to_string(),
-                call_id: uuid::Uuid::new_v4().to_string(),
+                session_id: invocation.session_id,
+                turn_id: invocation.turn_id,
+                call_id: invocation.call_id,
                 prompt: prompt.into(),
                 model,
                 retry_of,
