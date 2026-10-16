@@ -1324,7 +1324,6 @@ mod tests {
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
             execution: Some(ExecutionDescription {
                 mode: ExecutionMode::Stream,
-                event_schema_version: 4,
             }),
             nodes: vec![
                 NodeDescription {

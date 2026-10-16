@@ -122,7 +122,8 @@ fn compiles_a_runner_without_telemetry_and_preserves_execution() {
     assert!(
         !mf_tui::manifest::read_manifest(&output)
             .unwrap()
-            .description
+            .description()
+            .unwrap()
             .nodes
             .is_empty()
     );

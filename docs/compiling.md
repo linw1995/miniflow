@@ -69,12 +69,13 @@ node IDs/kinds, named data/control edges, and execution order. Loop-capable runn
 values. Edge names identify connected ports; the complete list of dynamic or unconnected ports is unavailable in this record.
 
 The generated Cargo build prepares the selected providers once to produce immutable execution layouts and a versioned
-workflow manifest containing the graph and startup interface. Both artifacts use the same validated preparation,
+workflow manifest containing the original definition, frozen execution orders, and prepared input schema. Both artifacts use the same validated preparation,
 including configured input types and conditional stdin requirements. The manifest is generated before linking during
 the existing runner build; it does not require a second compilation. Its wire format is documented in
-[observability](observability.md#embedded-manifest-format). The generated-project layout version is `2026-10-07`;
+[observability](observability.md#embedded-manifest-format). The generated-project layout version is `2026-10-16`;
 explicit build directories owned by an older layout must be recreated at a compatible location.
 The runner links the manifest into a dedicated ELF or Mach-O section and needs no manifest sidecar after installation.
+Runtime helpers derive graph and interface views; generated runners use them directly for observation and inspection.
 TUI preflight reads the section directly without constructing providers. Missing or corrupt manifests and unsupported
 executable formats are rejected without launching an inspection process; older runners must be recompiled.
 Normal execution compares freshly prepared startup declarations with the manifest before dispatch.

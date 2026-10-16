@@ -35,7 +35,6 @@ pub enum ExecutionMode {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ExecutionDescription {
     pub mode: ExecutionMode,
-    pub event_schema_version: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,7 +98,10 @@ impl WorkflowDescription {
                 }
                 _ => crate::LOOP_EVENT_SCHEMA_VERSION,
             },
-            |execution| execution.event_schema_version,
+            |execution| match execution.mode {
+                ExecutionMode::Single => crate::LOOP_EVENT_SCHEMA_VERSION,
+                ExecutionMode::Stream => crate::STREAM_EVENT_SCHEMA_VERSION,
+            },
         )
     }
 
@@ -148,18 +150,9 @@ impl WorkflowDescription {
 
     pub fn validate(&self) -> Result<(), ContractError> {
         if self.version == WorkflowDescriptionVersion::V2026_10_03 {
-            let execution = self
-                .execution
-                .as_ref()
-                .ok_or_else(|| crate::invalid("missing workflow execution description"))?;
             require(
-                execution.event_schema_version
-                    == if execution.mode == ExecutionMode::Stream {
-                        crate::STREAM_EVENT_SCHEMA_VERSION
-                    } else {
-                        crate::LOOP_EVENT_SCHEMA_VERSION
-                    },
-                "execution mode and event protocol disagree",
+                self.execution.is_some(),
+                "missing workflow execution description",
             )?;
         } else {
             require(

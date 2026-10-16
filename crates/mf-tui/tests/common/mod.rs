@@ -1,33 +1,17 @@
 #![allow(dead_code)]
 
-use mf_runtime::{
-    WorkflowInputSchema, WorkflowInterface, WorkflowInterfaceVersion, WorkflowManifest,
-    WorkflowManifestVersion,
-};
-use mf_telemetry::{
-    description::{WorkflowDescription, WorkflowDescriptionVersion},
-    identity::WorkflowId,
-};
+use mf_runtime::{WorkflowInputSchema, WorkflowManifest, WorkflowManifestVersion};
 
 pub fn sample_manifest() -> WorkflowManifest {
-    let workflow_id = WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap();
     WorkflowManifest {
-        version: WorkflowManifestVersion::V2026_10_07,
-        description: WorkflowDescription {
-            version: WorkflowDescriptionVersion::V2026_09_27,
-            workflow_id: workflow_id.clone(),
-            execution: None,
-            nodes: vec![],
-            data_edges: vec![],
-            control_edges: vec![],
-            execution_order: vec![],
-            loop_bodies: vec![],
-        },
-        interface: WorkflowInterface {
-            version: WorkflowInterfaceVersion::V2026_10_11,
-            workflow_id,
-            schema: WorkflowInputSchema::default(),
-        },
+        version: WorkflowManifestVersion::V2026_10_16,
+        definition: serde_json::from_value(serde_json::json!({
+            "version": "2026-10-03", "dependencies": {}, "nodes": []
+        }))
+        .unwrap(),
+        execution_order: vec![],
+        loop_orders: vec![],
+        input_schema: WorkflowInputSchema::default(),
     }
 }
 

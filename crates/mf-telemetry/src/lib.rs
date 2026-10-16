@@ -26,7 +26,7 @@ pub const MAX_LOOP_SCHEDULED_STEPS: i64 = 10_000;
 
 #[derive(Debug, Snafu)]
 pub enum ContractError {
-    #[snafu(display("invalid observation contract: {message}"))]
+    #[snafu(display("invalid observation contract: {message}"), visibility(pub))]
     Invalid { message: String },
     #[snafu(display("invalid run ID: {source}"))]
     RunId { source: uuid::Error },

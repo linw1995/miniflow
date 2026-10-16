@@ -8,15 +8,7 @@ use mf_runtime::{
     ITERATION_INPUT_KIND, ITERATION_KIND, PreparedSubgraph, iteration_input_flow_node,
 };
 use mf_runtime::{OutputDerivation, TypeCompatibility, TypeMismatch};
-use mf_telemetry::{
-    ContractError,
-    description::{
-        ControlEdge, DataEdge, LoopBodyDescription, NodeDescription, WorkflowDescription,
-        WorkflowDescriptionVersion,
-    },
-    event::NodeIdentity,
-    identity::WorkflowId,
-};
+use mf_telemetry::{ContractError, description::WorkflowDescription, event::NodeIdentity};
 use serde_json::Value;
 use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1160,88 +1152,38 @@ pub fn describe_compiled(plan: &CompiledWorkflow) -> Result<WorkflowDescription,
             && plan.execution_order.len() == plan.definition.nodes.len(),
         InvalidPlanSnafu
     );
-    let mut nodes = Vec::with_capacity(plan.execution_order.len());
     for definition_id in &plan.execution_order {
-        let id = definition_id.as_str();
-        let definition = definitions.get(id).with_context(|| MissingNodeSnafu {
-            definition_id: definition_id.clone(),
-        })?;
-        nodes.push(NodeDescription {
-            id: id.into(),
-            kind: definition.kind.clone(),
-        });
+        definitions
+            .get(definition_id.as_str())
+            .with_context(|| MissingNodeSnafu {
+                definition_id: definition_id.clone(),
+            })?;
     }
-    let order: Vec<String> = plan
+    let order = plan
         .execution_order
         .iter()
         .map(ToString::to_string)
-        .collect();
-    let mut loop_bodies = Vec::new();
-    describe_loop_bodies(&plan.definition, &mut Vec::new(), &mut loop_bodies)?;
-    let description = WorkflowDescription {
-        version: if plan.definition.version.supports_startup_inputs() {
-            WorkflowDescriptionVersion::V2026_10_03
-        } else {
-            match plan.definition.version {
-                mf_runtime::WorkflowDefinitionVersion::V2026_09_26 => {
-                    WorkflowDescriptionVersion::V2026_09_27
-                }
-                mf_runtime::WorkflowDefinitionVersion::V2026_09_29
-                | mf_runtime::WorkflowDefinitionVersion::V2026_10_02
-                | mf_runtime::WorkflowDefinitionVersion::V2026_10_03 => {
-                    WorkflowDescriptionVersion::V2026_09_29
-                }
-            }
-        },
-        execution: plan.definition.version.supports_startup_inputs().then(|| {
-            mf_telemetry::description::ExecutionDescription {
-                mode: if plan.definition.execution.is_some() {
-                    mf_telemetry::description::ExecutionMode::Stream
-                } else {
-                    mf_telemetry::description::ExecutionMode::Single
-                },
-                event_schema_version: if plan.definition.execution.is_some() {
-                    mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
-                } else {
-                    mf_telemetry::LOOP_EVENT_SCHEMA_VERSION
-                },
-            }
-        }),
-        workflow_id: WorkflowId::from_definition(&plan.definition, &order)
-            .context(ContractSnafu)?,
-        nodes,
-        data_edges: plan
-            .definition
-            .edges
-            .iter()
-            .map(|edge| DataEdge {
-                from_node: edge.from_node.to_string(),
-                from_output: edge.from_output.clone(),
-                to_node: edge.to_node.to_string(),
-                to_input: edge.to_input.clone(),
-            })
-            .collect(),
-        control_edges: plan
-            .definition
-            .control_edges
-            .iter()
-            .map(|edge| ControlEdge {
-                from_node: edge.from_node.to_string(),
-                from_output: edge.from_output.to_string(),
-                to_node: edge.to_node.to_string(),
-            })
-            .collect(),
-        execution_order: order,
-        loop_bodies,
-    };
-    description.validate().context(ContractSnafu)?;
-    Ok(description)
+        .collect::<Vec<_>>();
+    mf_runtime::describe_definition(
+        &plan.definition,
+        &order,
+        &loop_execution_orders(&plan.definition)?,
+    )
+    .context(ContractSnafu)
 }
 
-fn describe_loop_bodies(
+pub fn loop_execution_orders(
+    definition: &WorkflowDefinition,
+) -> Result<Vec<mf_runtime::LoopExecutionOrder>, DescriptionError> {
+    let mut orders = Vec::new();
+    collect_loop_execution_orders(definition, &mut Vec::new(), &mut orders)?;
+    Ok(orders)
+}
+
+fn collect_loop_execution_orders(
     definition: &WorkflowDefinition,
     path: &mut Vec<String>,
-    bodies: &mut Vec<LoopBodyDescription>,
+    orders: &mut Vec<mf_runtime::LoopExecutionOrder>,
 ) -> Result<(), DescriptionError> {
     for node in &definition.nodes {
         let Some(loop_definition) = &node.loop_definition else {
@@ -1251,41 +1193,11 @@ fn describe_loop_bodies(
         let body = crate::loops::body_definition(&loop_definition.body, &definition.dependencies);
         let order = structural_order_graph(&body)
             .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
-        let nodes_by_id: BTreeMap<_, _> = body.nodes.iter().map(|node| (&node.id, node)).collect();
-        bodies.push(LoopBodyDescription {
+        orders.push(mf_runtime::LoopExecutionOrder {
             path: path.clone(),
-            nodes: order
-                .iter()
-                .map(|id| {
-                    let node = nodes_by_id[id];
-                    NodeDescription {
-                        id: id.to_string(),
-                        kind: node.kind.clone(),
-                    }
-                })
-                .collect(),
-            data_edges: body
-                .edges
-                .iter()
-                .map(|edge| DataEdge {
-                    from_node: edge.from_node.to_string(),
-                    from_output: edge.from_output.clone(),
-                    to_node: edge.to_node.to_string(),
-                    to_input: edge.to_input.clone(),
-                })
-                .collect(),
-            control_edges: body
-                .control_edges
-                .iter()
-                .map(|edge| ControlEdge {
-                    from_node: edge.from_node.to_string(),
-                    from_output: edge.from_output.to_string(),
-                    to_node: edge.to_node.to_string(),
-                })
-                .collect(),
             execution_order: order.iter().map(ToString::to_string).collect(),
         });
-        describe_loop_bodies(&body, path, bodies)?;
+        collect_loop_execution_orders(&body, path, orders)?;
         path.pop();
     }
     Ok(())

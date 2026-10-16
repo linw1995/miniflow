@@ -4,10 +4,7 @@
 mod terminal;
 use terminal::Screen;
 
-use mf_telemetry::{
-    description::{NodeDescription, WorkflowDescription, WorkflowDescriptionVersion},
-    identity::WorkflowId,
-};
+use mf_telemetry::description::WorkflowDescription;
 use nix::{
     fcntl::{FcntlArg, FdFlag, fcntl},
     pty::{Winsize, openpty},
@@ -60,7 +57,7 @@ fn check_capture(with_observation: bool) {
                     start_time_unix_nano: 100,
                     end_time_unix_nano: 200,
                     attributes: [
-                        ("mf.workflow.id", format!("sha256:{}", "a".repeat(64))),
+                        ("mf.workflow.id", description().workflow_id.to_string()),
                         ("mf.run.id", placeholder.into()),
                         ("mf.node.id", "step".into()),
                     ]
@@ -701,21 +698,22 @@ fn failed_stdout_delivery_uses_cli_error_or_preserves_child_failure() {
     }
 }
 
-fn description() -> WorkflowDescription {
-    WorkflowDescription {
-        version: WorkflowDescriptionVersion::V2026_09_27,
-        workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
-        nodes: vec![NodeDescription {
-            id: "step".into(),
-            kind: "test.step".into(),
-        }],
-        data_edges: vec![],
-        control_edges: vec![],
+fn manifest() -> mf_runtime::WorkflowManifest {
+    mf_runtime::WorkflowManifest {
+        version: mf_runtime::WorkflowManifestVersion::V2026_10_16,
+        definition: serde_json::from_value(serde_json::json!({
+            "version": "2026-09-26", "dependencies": {},
+            "nodes": [{"id": "step", "kind": "test.step"}]
+        }))
+        .unwrap(),
         execution_order: vec!["step".into()],
-
-        execution: None,
-        loop_bodies: Vec::new(),
+        loop_orders: vec![],
+        input_schema: mf_runtime::WorkflowInputSchema::default(),
     }
+}
+
+fn description() -> WorkflowDescription {
+    manifest().description().unwrap()
 }
 
 fn loopback_available() -> bool {
@@ -732,17 +730,7 @@ fn loopback_available() -> bool {
 fn write_runner(path: &std::path::Path, script: String) {
     let source = path.with_extension("rs");
     let manifest_path = path.with_extension("manifest");
-    let description = description();
-    let manifest = mf_runtime::WorkflowManifest {
-        version: mf_runtime::WorkflowManifestVersion::V2026_10_07,
-        interface: mf_runtime::WorkflowInterface {
-            version: mf_runtime::WorkflowInterfaceVersion::V2026_10_11,
-            workflow_id: description.workflow_id.clone(),
-            schema: mf_runtime::WorkflowInputSchema::default(),
-        },
-        description,
-    };
-    fs::write(&manifest_path, manifest.to_bytes().unwrap()).unwrap();
+    fs::write(&manifest_path, manifest().to_bytes().unwrap()).unwrap();
     fs::write(&source, format!(
         r#"use std::os::unix::process::CommandExt;
 #[cfg_attr(target_os = "linux", unsafe(link_section = ".mf_manifest"))]

@@ -63,7 +63,7 @@ fn moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts() 
         .unwrap();
         let manifest = read_manifest(&installed).unwrap();
         if scenario == "nested" {
-            assert_eq!(manifest.description.loop_bodies.len(), 1);
+            assert_eq!(manifest.description().unwrap().loop_bodies.len(), 1);
         }
         fs::rename(&installed, &standalone).unwrap();
         fs::remove_file(&definition_path).unwrap();
@@ -207,6 +207,11 @@ fn release_lto_and_strip_preserve_standalone_factory_free_manifest() {
             .unwrap_or_else(|| project.join("target"));
         fs::copy(target.join("release/mf-generated-workflow"), &runner).unwrap();
         let before = read_manifest(&runner).unwrap();
+        assert_eq!(before.definition, plan.definition);
+        assert_eq!(
+            before.node_definition("a").unwrap().config,
+            json!({"print":true})
+        );
         let output = Command::new("strip").arg(&runner).output().unwrap();
         assert!(
             output.status.success(),

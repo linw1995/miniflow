@@ -141,7 +141,8 @@ impl ConfigTemplate {
         )
     }
 
-    fn evaluate(
+    /// Resolves an expression against already-bound output values.
+    pub fn evaluate(
         &self,
         lookup: &impl Fn(&str) -> Result<ValueRef, ConfigTemplateError>,
     ) -> Result<ValueRef, ConfigTemplateError> {

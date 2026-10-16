@@ -103,6 +103,32 @@ pub enum PlanError {
 }
 
 impl CompiledWorkflow {
+    pub fn manifest(
+        &self,
+        registry: &mf_runtime::NodeRegistry,
+    ) -> Result<mf_runtime::WorkflowManifest, PlanError> {
+        self.manifest_with_schema(crate::describe_workflow_inputs(self, registry)?)
+    }
+
+    fn manifest_with_schema(
+        &self,
+        input_schema: mf_runtime::WorkflowInputSchema,
+    ) -> Result<mf_runtime::WorkflowManifest, PlanError> {
+        let manifest = mf_runtime::WorkflowManifest {
+            version: mf_runtime::WorkflowManifestVersion::V2026_10_16,
+            definition: self.definition.clone(),
+            execution_order: self
+                .execution_order
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            loop_orders: crate::compiler::loop_execution_orders(&self.definition)?,
+            input_schema,
+        };
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
     /// Describe isolated targets using metadata already prepared in execution order.
     pub fn node_targets(
         &self,
@@ -290,14 +316,7 @@ impl CompiledWorkflow {
             pub fn manifest(
                 registry: &mf_runtime::NodeRegistry,
             ) -> Result<mf_runtime::WorkflowManifest, mf_compiler::PlanError> {
-                let plan = plan()?;
-                let manifest = mf_runtime::WorkflowManifest {
-                    version: mf_runtime::WorkflowManifestVersion::V2026_10_07,
-                    description: mf_compiler::describe_compiled(&plan)?,
-                    interface: mf_compiler::describe_interface(&plan, registry)?,
-                };
-                manifest.validate()?;
-                Ok(manifest)
+                plan()?.manifest(registry)
             }
 
             #preparation
@@ -989,17 +1008,7 @@ impl CompiledWorkflow {
         }
         let syntax: syn::File =
             syn::parse2(quote! { #(#layouts)* }).context(GeneratedSyntaxSnafu)?;
-        let description = crate::describe_compiled(self)?;
-        let interface = mf_runtime::WorkflowInterface {
-            version: mf_runtime::WorkflowInterfaceVersion::for_schema(&schema),
-            workflow_id: description.workflow_id.clone(),
-            schema,
-        };
-        let manifest = mf_runtime::WorkflowManifest {
-            version: mf_runtime::WorkflowManifestVersion::V2026_10_07,
-            description,
-            interface,
-        };
+        let manifest = self.manifest_with_schema(schema)?;
         Ok(GeneratedExecutionArtifacts {
             rust_source: prettyplease::unparse(&syntax),
             manifest_bytes: manifest.to_bytes()?,
