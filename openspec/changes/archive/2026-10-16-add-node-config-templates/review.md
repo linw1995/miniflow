@@ -9,7 +9,8 @@ No blocking source or specification findings remain.
 - LLM settings are resolved per invocation. The shared client retains no credential,
   endpoint, or per-invocation timeout. The chat adapter preserves reference metadata.
 - Unused serialization and cloning entry points were removed. A self-confirming
-  skipped assertion was removed, and runtime configuration failures now require
+  skipped assertion was replaced with committed runtime-state coverage. An unused
+  configuration Debug implementation was removed, and runtime configuration failures require
   typed configuration errors rather than accepting unrelated request failures.
 - Configuration errors remain in the LLM crate; shared template errors remain in the
   runtime. Snafu contexts preserve typed sources without displaying resolved secrets.

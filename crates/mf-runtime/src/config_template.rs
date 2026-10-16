@@ -238,6 +238,12 @@ mod tests {
             literal.literal().unwrap().as_str(),
             Some("{{ params.token }}")
         );
+        let object = json!({"label": "{{ params.token }}", "count": 42});
+        let literal = ConfigTemplate::parse(object.clone()).unwrap();
+        assert_eq!(
+            literal.resolve(&ExecutionContext::default()).unwrap(),
+            object
+        );
     }
 
     #[test]
@@ -253,6 +259,7 @@ mod tests {
             json!({"$template": 1}),
             json!({"$template": "{{ x"}),
             json!({"$template": "{{ }}"}),
+            json!({"$template": "{{ invalid{name }}"}),
             json!({"$template": "x", "extra": 1}),
         ] {
             assert!(ConfigTemplate::parse(value.clone()).is_err(), "{value}");
@@ -267,6 +274,27 @@ mod tests {
         assert!(matches!(
             template.resolve(&ExecutionContext::default()),
             Err(ConfigTemplateError::Context { .. })
+        ));
+        let mut context = ExecutionContext::default();
+        let source = crate::FlowNode {
+            definition_id: "params".into(),
+            node: (),
+            metadata: crate::NodePorts {
+                inputs: vec![],
+                outputs: vec![crate::PortSpec::new("key", crate::ValueType::String, false)],
+            }
+            .into(),
+        };
+        crate::execute_generated_node_in_context(&source, [], &mut context, &[], |_, _| {
+            Ok(crate::GeneratedNodeResult::Dynamic(crate::NodeResult {
+                skipped: ["key".into()].into(),
+                ..Default::default()
+            }))
+        })
+        .unwrap();
+        assert!(matches!(
+            template.resolve(&context),
+            Err(ConfigTemplateError::Skipped { .. })
         ));
     }
 }

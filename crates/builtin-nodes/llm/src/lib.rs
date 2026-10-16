@@ -59,12 +59,6 @@ struct Config {
     max_output_bytes: usize,
 }
 
-impl fmt::Debug for Config {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.debug_struct("Config").finish_non_exhaustive()
-    }
-}
-
 #[derive(Debug, Snafu)]
 pub enum LlmConfigError {
     #[snafu(display("configuration `{field}` requires {requirement}"))]
@@ -586,8 +580,9 @@ mod tests {
             assert!(parse_config(config).is_err(), "{patch}");
         }
         assert!(parse_config(json!({})).is_err());
-        let error =
-            parse_config(json!({"model": "example-model", "base_url": "/relative"})).unwrap_err();
+        let error = parse_config(json!({"model": "example-model", "base_url": "/relative"}))
+            .err()
+            .expect("relative URLs must be rejected");
         let source = error
             .source()
             .unwrap()
