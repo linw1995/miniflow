@@ -28,12 +28,12 @@ class PruneTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b"fixture")
                 path.chmod(0o644 if name.endswith("metadata") else 0o755)
-            with patch.object(prune.subprocess, "run") as run:
+            with patch.object(prune, "clean_workspace") as run:
                 prune.prune_target(target)
-            self.assertEqual([call.args[0][-1] for call in run.call_args_list], ["dev", "release"])
+            self.assertEqual(run.call_args.args[-1], ["dev", "release"])
             self.assertTrue(all(path.is_file() for path in (target / name for name in keep)))
             self.assertFalse(any(path.exists() for path in (target / name for name in remove)))
-            with patch.object(prune.subprocess, "run") as run:
+            with patch.object(prune, "clean_workspace") as run:
                 prune.prune_target(target / "missing")
             run.assert_not_called()
 
@@ -44,7 +44,7 @@ class PruneTests(unittest.TestCase):
             runner.parent.mkdir()
             runner.write_bytes(b"fixture")
             runner.chmod(0o755)
-            with patch.object(prune.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "cargo")):
+            with patch.object(prune, "clean_workspace", side_effect=subprocess.CalledProcessError(1, "cargo")):
                 with self.assertRaises(subprocess.CalledProcessError):
                     prune.prune_target(target)
             self.assertTrue(runner.is_file())

@@ -48,6 +48,7 @@
               ./crates/mf-compiler/tests/fixtures/embedding-host
               ./scripts/check-release-support.sh
               ./scripts/nextest-build-cache.py
+              ./scripts/cargo_cache.py
               ./scripts/nextest-cargo.sh
               ./LICENSE
               ./about.hbs

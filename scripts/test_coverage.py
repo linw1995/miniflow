@@ -71,7 +71,7 @@ session = os.environ["MF_TEST_BUILD_CACHE_SESSION"]
 assert session != "inherited-session"
 assert session == Path("target/coverage/build-cache-session").read_text().strip()
 ''')
-            for script in ["run-cov.sh", "prune-test-cache.py"]:
+            for script in ["run-cov.sh", "prune-test-cache.py", "cargo_cache.py"]:
                 shutil.copyfile(Path(__file__).resolve().parent / script, root / "scripts" / script)
             (root / "Cargo.toml").write_text('''[package]
 name = "coverage-fixture"

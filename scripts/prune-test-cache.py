@@ -2,8 +2,9 @@
 
 import os
 from pathlib import Path
-import subprocess
 import sys
+
+from cargo_cache import clean_workspace
 
 
 def prune_target(target):
@@ -11,12 +12,7 @@ def prune_target(target):
         return
     # Preparation already discards checkout artifacts. Do not transfer them
     # through the remote cache just to delete them on the next runner.
-    for profile in ["dev", "release"]:
-        subprocess.run(
-            ["cargo", "clean", "--workspace", "--profile", profile],
-            env=dict(os.environ, CARGO_TARGET_DIR=str(target)),
-            check=True,
-        )
+    clean_workspace("cargo", Path.cwd(), target, ["dev", "release"])
     for profile in ["debug", "release"]:
         for directory in [target / profile, target / profile / "deps"]:
             if not directory.is_dir():

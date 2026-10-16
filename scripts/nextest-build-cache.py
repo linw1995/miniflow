@@ -7,6 +7,8 @@ from pathlib import Path
 import shutil
 import subprocess
 
+from cargo_cache import clean_workspace
+
 
 def main():
     # Behavior fixtures need release semantics, but not optimizer throughput.
@@ -155,13 +157,7 @@ def prepare_cache(workspace, cargo, metadata, directory, persistent):
         if package_target.exists():
             targets.append((package_target, ["release"]))
         for build_target, profiles in targets:
-            for profile in profiles:
-                subprocess.run(
-                    [cargo, "clean", "--workspace", "--profile", profile],
-                    cwd=workspace,
-                    env=dict(env, CARGO_TARGET_DIR=str(build_target)),
-                    check=True,
-                )
+            clean_workspace(cargo, workspace, build_target, profiles, metadata)
     # Preserve wrappers, flags, and coverage instrumentation used by the tests.
     for profile in ["release", "dev"]:
         subprocess.run(

@@ -253,26 +253,6 @@ impl PackagedCli {
             let (_, source_checksum) = unpack_package(&archive, &vendor);
             packages.insert(name.to_owned(), (version.to_owned(), source_checksum));
         }
-        checked(
-            cargo()
-                .args([
-                    "build",
-                    "--release",
-                    "--locked",
-                    "--offline",
-                    "-p",
-                    "mf-cli",
-                    "--no-default-features",
-                ])
-                .arg("--config")
-                .arg(&config),
-        );
-        let cli = root
-            .join("installed")
-            .join(format!("mf{}", env::consts::EXE_SUFFIX));
-        fs::create_dir_all(cli.parent().unwrap()).unwrap();
-        fs::copy(target.join("release").join(cli.file_name().unwrap()), &cli).unwrap();
-
         let fixture_original = workspace.join("crates/mf-compiler/tests/fixtures/multi-nodes");
         let fixture_project = root.join("fixture-package");
         fs::create_dir(&fixture_project).unwrap();
@@ -374,6 +354,26 @@ impl PackagedCli {
             checked(&mut clean);
             fs::write(package_marker, package_identity).unwrap();
         }
+        checked(
+            cargo()
+                .args([
+                    "build",
+                    "--release",
+                    "--locked",
+                    "--offline",
+                    "-p",
+                    "mf-cli",
+                    "--no-default-features",
+                ])
+                .arg("--config")
+                .arg(&config),
+        );
+        let cli = root
+            .join("installed")
+            .join(format!("mf{}", env::consts::EXE_SUFFIX));
+        fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        fs::copy(target.join("release").join(cli.file_name().unwrap()), &cli).unwrap();
+
         let cargo_home = root.join("cargo-home");
         fs::create_dir(&cargo_home).unwrap();
         fs::copy(&config, cargo_home.join("config.toml")).unwrap();

@@ -30,7 +30,10 @@ invalidate registry builds of the support packages and external fixture whenever
 their build inputs change, even at the same version. Cargo's generated VCS
 metadata is excluded from this identity because these crates do not consume it;
 metadata-only repackaging retains compiled dependencies. Cargo's archive and file
-checksums still cover every packaged file. Dependency artifacts are
+checksums still cover every packaged file. Workspace cleanup excludes these
+content-validated packages: Cargo otherwise removes their registry fingerprints
+by package name even when it retains their libraries. Content invalidation runs
+before both CLI and runner compilation. Dependency artifacts are
 seeded only on the first run; installed executables, Cargo homes, and user
 projects remain temporary and isolated.
 The default and CI profiles share all CLI generated-build fixtures.
