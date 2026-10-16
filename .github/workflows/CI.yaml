@@ -71,7 +71,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
       - uses: ./.github/actions/setup-nix
         with:
@@ -81,10 +81,10 @@ jobs:
         if: github.event_name == 'pull_request'
         env:
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          TEST_HEAD_SHA: ${{ github.sha }}
         run: |
           nix develop --command python3 scripts/affected_tests.py \
-            --base "$PR_BASE_SHA" --head "$PR_HEAD_SHA" --json > "$RUNNER_TEMP/affected-tests.json"
+            --base "$PR_BASE_SHA" --head "$TEST_HEAD_SHA" --json > "$RUNNER_TEMP/affected-tests.json"
           printf 'run=%s\n' "$(jq '.packages | length > 0' "$RUNNER_TEMP/affected-tests.json")" >> "$GITHUB_OUTPUT"
           printf 'coverage_flag=%s\n' "$(jq -r 'if .mode == "all" then "rust" else "rust-affected" end' "$RUNNER_TEMP/affected-tests.json")" >> "$GITHUB_OUTPUT"
           {

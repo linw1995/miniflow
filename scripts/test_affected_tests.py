@@ -211,6 +211,10 @@ class GitTests(unittest.TestCase):
         self.git("merge", "--no-ff", "feature", "-m", "test(ci): merge fixture")
         base, _, paths = affected.changes(self.root, options(commit="HEAD"))
         self.assertEqual((base, paths), (parent, ["feature.rs"]))
+        # PR CI analyzes the tested merge snapshot while excluding changes
+        # already present on its base branch from the changed-file set.
+        base, head, paths = affected.changes(self.root, options(base=parent, head="HEAD"))
+        self.assertEqual((base, head, paths), (parent, self.git("rev-parse", "HEAD"), ["feature.rs"]))
 
 
 class ProtocolTests(unittest.TestCase):
