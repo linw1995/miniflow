@@ -13,10 +13,12 @@ Before submitting changes, run:
 
 ```sh
 prek -a
-nix flake check -L
+nix develop --command python3 scripts/affected_tests.py --worktree --run
 ```
 
-These checks cover formatting, Rust diagnostics, tests, workflow configuration, Markdown, and the [dependency license audit](docs/licensing.md).
+These checks cover formatting, Rust diagnostics, affected package tests, workflow configuration, Markdown, and the [dependency license audit](docs/licensing.md).
+See [test selection](docs/ci.md#affected-package-tests) for commit and PR comparisons.
+Do not run `nix flake check -L` locally: its test check repeats the complete suite already run by CI coverage.
 
 ## Tests
 
