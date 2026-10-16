@@ -1,20 +1,20 @@
 # Verification
 
-- Installed Git hooks and ran `nix develop --command prek -a`: all hooks passed.
-- Thirteen focused runtime/compiler/cache tests passed.
-- `NEXTEST_PROFILE=ci cargo nextest run --all-features -p mf-cli --test manifest`: both standalone tests passed,
-  covering task, stream, nested execution, missing build inputs, telemetry-disabled builds, LTO, and stripping.
-- The affected-package selector identified eight packages. Its command ran with the existing CI profile and
-  `-E 'not binary_id(=mf-cli::manifest)'` to reuse the two completed standalone tests: all remaining 646 tests passed.
-  Together these runs cover all 648 selected tests; four tests remain skipped by existing configuration.
-- `scripts/run-cov.sh --affected-plan ... --test workflow_manifest --test manifest_generation`: all nine focused
-  instrumented tests passed. All six instrumented helper lines and all modified executable lines in the runtime
-  manifest module were covered.
-- Two independent version-constraint removals failed behavioral tests; restored code passed. Detailed experiment
-  records remain only under ignored `target/manifest-definition/`.
-- Revised archived deltas passed strict OpenSpec validation from an isolated validation copy. The changed main
-  specification passes ordinary validation; its twelve inherited strict-mode length warnings are unchanged.
+- Pinned workspace checks passed for all targets and features.
+- 145 focused runtime/compiler/TUI tests passed. Manifest construction and helper contracts passed focused checks.
+- Both standalone binary tests passed. The embedded-host test passed after its remaining field accesses were migrated.
+- The affected-package selector chose nine packages. Reusing those three completed tests, all other 683 tests passed:
+  686 distinct tests passed in total, with four default skips. The existing CI profile reused generated-runner caches.
+- Fixed workflow identity, interface versions, and event schemas are tested for the current manifest format.
+- The repository coverage script passed 27 focused tests. All 186 modified executable runtime-manifest lines were covered.
+- With dependency versions matching Cargo.lock, compact manifest JSON decreased by 45.4%, 38.5%, and 38.9% for the hello,
+  Loop, and stream examples. These are payload measurements, not executable-size measurements.
+- Removing strict shape validation or discarding frozen node order failed behavioral controls; restored code passed.
+- Final pinned `prek -a` passed every hook on frozen content, including formatting, Clippy, Cargo check, rust-analyzer,
+  Markdown, workflow validation, and the license audit.
+- Archived deltas pass strict OpenSpec validation. The changed main specification passes ordinary validation;
+  its twelve inherited requirement-length warnings remain unchanged in strict mode.
 
-The final review found no blocking issues. The archive and main specification describe the same final contract:
-original compiled definitions in manifests, borrowed node lookup, and shared runner inspection data. Rust manifest
-literals require the new field, and the manifest now derives `PartialEq` to match `WorkflowDefinition`.
+All experimental sources and reports remain local under ignored `target/manifest-views/`. The final review confirms
+one contract in the archive and main specification: retain compiled facts, derive versioned inspection views without
+providers or replanning, and preserve legacy reads through the same helper API.

@@ -25,11 +25,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("MF_EMBEDDING_DESCRIBE").is_some() {
         println!(
             "{:?}/{:?}",
-            contract::manifest(&registry)?.interface.schema.inputs["source"]["path./~"].value_type,
-            contract_stream::manifest(&registry)?
-                .interface
-                .schema
-                .inputs["source"]["path./~"]
+            contract::manifest(&registry)?.input_schema().inputs["source"]["path./~"].value_type,
+            contract_stream::manifest(&registry)?.input_schema().inputs["source"]["path./~"]
                 .value_type,
         );
         return Ok(());
@@ -105,8 +102,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let harness = capture::Harness::new(true);
     let manifest = typed::manifest(&registry)?;
+    let workflow_id = manifest.workflow_id()?;
     let observation = harness.observer().start_with_description(
-        manifest.description.clone(),
+        manifest.description()?,
         mf_telemetry::identity::RunId::new(),
     )?;
     let typed_outputs = runtime::ExecutionContext::run(
@@ -133,7 +131,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         records
             .iter()
             .all(|record| record.attributes["mf.workflow.id"]
-                == json::json!(manifest.description.workflow_id.to_string()))
+                == json::json!(workflow_id.to_string()))
     );
     assert_eq!(harness.spans.get_finished_spans()?.len(), 3);
     let flow = answer::prepare_workflow(&registry, None)?;

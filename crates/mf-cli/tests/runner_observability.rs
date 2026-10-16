@@ -252,7 +252,7 @@ fn generated_loop_runner_exports_complete_per_pass_observations() {
         },
     })
     .unwrap();
-    let description = read_manifest(&executable).unwrap().description;
+    let description = read_manifest(&executable).unwrap().description().unwrap();
     assert_eq!(description.loop_bodies.len(), 1);
     let description_json = serde_json::to_string(&description).unwrap();
     assert!(!description_json.contains("count + 1"));
@@ -547,7 +547,7 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     let runner = build(&project, &flow_lock, &definition);
     let dependency_lock = fs::read(&flow_lock).unwrap();
     assert!(!trace.exists(), "build executed a plugin");
-    let description = read_manifest(&runner).unwrap().description;
+    let description = read_manifest(&runner).unwrap().description().unwrap();
     let raw = description.to_json().unwrap();
     assert_eq!(description.execution_order, ["a", "b", "c"]);
     assert_eq!(description.data_edges.len(), 1);
@@ -776,7 +776,10 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     failing.nodes[1].config["fail"] = json!(true);
     let failing_runner = build(&project, &flow_lock, &failing);
     assert_eq!(fs::read(&flow_lock).unwrap(), dependency_lock);
-    let failing_description = read_manifest(&failing_runner).unwrap().description;
+    let failing_description = read_manifest(&failing_runner)
+        .unwrap()
+        .description()
+        .unwrap();
     let (endpoint, worker) = collector();
     let failed = command(&failing_runner)
         .arg("-vv")
@@ -795,7 +798,10 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     fs::remove_dir_all(&plugin).unwrap();
     fs::remove_file(&flow_lock).unwrap();
     fs::remove_file(&trace).unwrap();
-    assert_eq!(read_manifest(&portable).unwrap().description, description);
+    assert_eq!(
+        read_manifest(&portable).unwrap().description().unwrap(),
+        description
+    );
     let portable_output = command(&portable).env("PATH", "").output().unwrap();
     assert!(portable_output.status.success());
     assert_eq!(last_json(&portable_output.stdout), json!({"answer":14}));
@@ -970,7 +976,7 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         );
         output
     };
-    let description = read_manifest(&runner).unwrap().description;
+    let description = read_manifest(&runner).unwrap().description().unwrap();
     let selected = selected_record(
         &root.path().join("build"),
         &description.workflow_id,
@@ -1288,7 +1294,7 @@ fn streaming_snapshots_preserve_large_values_and_report_interrupted_history() {
         &root.path().join("flow.lock"),
         &definition,
     );
-    let description = read_manifest(&runner).unwrap().description;
+    let description = read_manifest(&runner).unwrap().description().unwrap();
     let value = "x".repeat(300_000);
     let execute = |capture: bool| {
         let run = mf_telemetry::identity::RunId::new();

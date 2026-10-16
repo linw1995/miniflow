@@ -88,31 +88,30 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
         assert_eq!(PREPARATIONS.load(Ordering::SeqCst), before + 1);
         syn::parse_file(&artifacts.rust_source).unwrap();
         let manifest = WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
-        assert_eq!(
-            manifest.version,
-            mf_runtime::WorkflowManifestVersion::CURRENT
-        );
-        assert_eq!(manifest.definition.as_ref(), Some(&plan.definition));
+        let before = PREPARATIONS.load(Ordering::SeqCst);
+        assert_eq!(plan.manifest(&registry).unwrap(), manifest);
+        assert_eq!(PREPARATIONS.load(Ordering::SeqCst), before + 1);
+        assert_eq!(manifest.definition(), Some(&plan.definition));
         assert_eq!(
             manifest.node_definition("source./~").unwrap().config,
             plan.definition.nodes[0].config
         );
-        assert_eq!(manifest.description.is_streaming(), stream);
+        assert_eq!(manifest.description().unwrap().is_streaming(), stream);
         assert_eq!(
-            manifest.interface.schema,
+            *manifest.input_schema(),
             describe_workflow_inputs(&plan, &registry).unwrap()
         );
         if version == "2026-10-03" {
             assert_eq!(
-                manifest.interface.schema.inputs["source./~"]["path./~"].value_type,
+                manifest.input_schema().inputs["source./~"]["path./~"].value_type,
                 ValueType::String
             );
             assert_eq!(
-                manifest.interface.schema.stdin["source./~"],
+                manifest.input_schema().stdin["source./~"],
                 StdinRequirement::UnlessInput("path./~".into())
             );
         } else {
-            assert_eq!(manifest.interface.schema, Default::default());
+            assert_eq!(*manifest.input_schema(), Default::default());
         }
         let repeated = plan.generate_execution_plans(&registry).unwrap();
         assert_eq!(artifacts, repeated);

@@ -71,15 +71,6 @@ fn workflow_manifest() -> Result<mf_runtime::WorkflowManifest, mf_runtime::Workf
     mf_runtime::WorkflowManifest::from_bytes(&WORKFLOW_MANIFEST)
 }
 
-fn workflow_plan() -> Result<mf_compiler::CompiledWorkflow, mf_runtime::WorkflowManifestError> {
-    use snafu::OptionExt as _;
-    let manifest = workflow_manifest()?;
-    Ok(mf_compiler::CompiledWorkflow {
-        definition: manifest.definition.context(mf_runtime::WorkflowManifestMissingDefinitionSnafu)?,
-        execution_order: manifest.description.execution_order.into_iter().map(Into::into).collect(),
-    })
-}
-
 fn main() -> std::process::ExitCode {
     match run() {
         Ok(()) => std::process::ExitCode::SUCCESS,
@@ -100,7 +91,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         include_str!(concat!(env!("OUT_DIR"), "/node-targets.json")),
     )?;
     let invocation = mf_runtime::RunnerInvocation::parse(
-        std::env::args_os().skip(1), &manifest.interface.schema, &targets,
+        std::env::args_os().skip(1), manifest.input_schema(), &targets,
     )?;
     if let Some(id) = invocation.node.as_deref() {
         let target = mf_runtime::NodeTarget::find(&targets, id)?;
@@ -207,8 +198,7 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Resu
     let run_id = run_id();
     let observation = observer.and_then(|observer| {
         let setup = (|| -> Result<_, Box<dyn std::error::Error>> {
-            let plan = workflow_plan()?;
-            Ok(plan.start_stream_observation(&observer, run_id)?)
+            Ok(observer.start_stream(workflow_manifest()?.description()?, run_id)?)
         })();
         match setup {
             Ok(observation) => Some(observation),
@@ -218,8 +208,7 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Resu
     #[cfg(feature = "telemetry")]
     let snapshots = if capture_requested() {
         let setup = (|| -> Result<_, Box<dyn std::error::Error>> {
-            let plan = workflow_plan()?;
-            snapshot_recorder(&plan, run_id)
+            snapshot_recorder_for_id(workflow_manifest()?.workflow_id()?, run_id)
         })();
         match setup {
             Ok(recording) => Some(recording),
@@ -300,16 +289,26 @@ fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Result<mf_r
             }
             return execute_workflow(None, None, arguments);
         };
-        let plan = workflow_plan()?;
+        let description = workflow_manifest()?.description()?;
+        #[cfg(feature = "telemetry")]
+        let workflow_id = description.workflow_id.clone();
         let run_id = run_id();
-        let observation = match plan.start_observation(&observer, run_id) {
+        let started = if description.version.supports_loops() {
+            observer.start_with_description(description, run_id)
+        } else {
+            let nodes = description.nodes.into_iter().map(|node| mf_runtime::NodeIdentity {
+                id: node.id, kind: node.kind, path: Vec::new(),
+            }).collect();
+            observer.start(description.workflow_id, run_id, nodes)
+        };
+        let observation = match started {
             Ok(observation) => Some(observation),
             Err(error) => { eprintln!("telemetry observation unavailable: {error}"); None }
         };
         #[cfg(feature = "telemetry")]
         let snapshots = if capture_requested() {
             if providers.is_some() {
-                match snapshot_recorder(&plan, run_id) {
+                match snapshot_recorder_for_id(workflow_id, run_id) {
                     Ok(recorder) => Some(recorder),
                     Err(error) => { eprintln!("data history unavailable: {error}"); None }
                 }
@@ -333,12 +332,6 @@ fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Result<mf_r
 }
 
 #[cfg(feature = "telemetry")]
-fn snapshot_recorder(plan: &mf_compiler::CompiledWorkflow, run_id: mf_telemetry::identity::RunId) -> Result<mf_runtime::SnapshotRecording, Box<dyn std::error::Error>> {
-    let description = mf_compiler::describe_compiled(plan)?;
-    snapshot_recorder_for_id(description.workflow_id, run_id)
-}
-
-#[cfg(feature = "telemetry")]
 fn snapshot_recorder_for_id(workflow_id: mf_telemetry::identity::WorkflowId, run_id: mf_telemetry::identity::RunId) -> Result<mf_runtime::SnapshotRecording, Box<dyn std::error::Error>> {
     let mut exporter = mf_telemetry::otlp::SnapshotExporter::from_env(workflow_id, run_id)?;
     Ok(mf_runtime::SnapshotRecording::with_sink(move |record| {
@@ -354,8 +347,10 @@ fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: 
         state.set_workflow_arguments(arguments);
         #[cfg(unix)]
         {
-            let plan = workflow_plan()?;
-            if plan.definition.version.supports_startup_inputs() {
+            use snafu::OptionExt as _;
+            let manifest = workflow_manifest()?;
+            let definition = manifest.definition().context(mf_runtime::WorkflowManifestMissingDefinitionSnafu)?;
+            if definition.version.supports_startup_inputs() {
                 state.set_stdin(mf_runtime::TextInput::claim()?);
             }
         }

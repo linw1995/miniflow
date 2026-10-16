@@ -733,9 +733,7 @@ fn write_runner(path: &std::path::Path, script: String) {
     let source = path.with_extension("rs");
     let manifest_path = path.with_extension("manifest");
     let description = description();
-    let manifest = mf_runtime::WorkflowManifest {
-        definition: None,
-        version: mf_runtime::WorkflowManifestVersion::V2026_10_07,
+    let manifest = mf_runtime::WorkflowManifest::Legacy {
         interface: mf_runtime::WorkflowInterface {
             version: mf_runtime::WorkflowInterfaceVersion::V2026_10_11,
             workflow_id: description.workflow_id.clone(),

@@ -1,39 +1,50 @@
 ## ADDED Requirements
 
-### Requirement: Inspect the original compiled definition through the manifest
+### Requirement: Persist only manifest source facts
 
-Manifest version `2026-10-16` SHALL carry the compiler's existing definition. Runtime root-node lookup SHALL borrow
-that definition by exact ID without preparing or executing providers. It SHALL preserve raw configuration expressions
-and return `None` for unknown IDs or legacy manifests. Full static configuration is included; invocation values
-MUST NOT be materialized. Existing framing, bounds, and graph/interface validation SHALL remain in force.
+Manifest `2026-10-16` SHALL store the compiled definition, root and nested Loop execution orders, and prepared input
+schema. It MUST NOT persist derived description, interface, or workflow ID properties. The input schema SHALL retain
+provider-declared types, bindings, and stdin constraints absent from definition JSON. Full static configuration is
+included; invocation values MUST NOT be materialized. Existing framing and size bounds SHALL remain in force.
+
+#### Scenario: Serialize a current manifest
+
+- **WHEN** the compiler serializes a manifest from one provider preparation
+- **THEN** the payload contains the source facts without duplicated graph, interface, or identity views
+
+#### Scenario: Preserve provider input facts
+
+- **WHEN** a provider declares a typed input and conditional stdin requirement
+- **THEN** manifest helpers retain those declarations without loading the provider during inspection
+
+### Requirement: Derive versioned manifest views without replanning
+
+Runtime helpers SHALL derive graph, interface, and identity views from frozen facts using versioned rules, without
+planning execution or invoking providers. They SHALL borrow original nodes by exact root ID. Readers SHALL preserve
+legacy `2026-10-07` views and return `None` for unavailable definitions. Invalid root/Loop orders, inconsistent input
+contracts, missing source facts, and unexpected derived properties MUST fail on encoding or decoding as applicable.
 
 #### Scenario: Read original node configuration
 
-- **WHEN** a caller looks up a root node whose configuration contains a template and nested values
-- **THEN** it receives the original node kind and configuration without resolving the template or executing a factory
+- **WHEN** a caller looks up a node containing configuration expressions and nested values
+- **THEN** it receives the original kind and configuration without resolving expressions or executing a factory
 
-#### Scenario: Read a legacy manifest
+#### Scenario: Preserve frozen execution order
 
-- **WHEN** a supported `2026-10-07` manifest has no definition
-- **THEN** graph and interface inspection succeed and node-definition lookup returns `None`
+- **WHEN** compiled root or nested Loop order differs from definition storage order
+- **THEN** derived node positions follow the compiled order without recalculating it
 
-#### Scenario: Reject incompatible payload versions
+#### Scenario: Preserve legacy inspection
 
-- **WHEN** `2026-10-16` omits the definition or `2026-10-07` includes it
-- **THEN** both manifest encoding and decoding reject the payload
+- **WHEN** a reader opens a supported legacy manifest without original definitions
+- **THEN** graph and interface helpers retain its existing views and node-definition lookup returns `None`
 
-### Requirement: Reuse one compiled definition for runner inspection
+#### Scenario: Preserve observations and portable inspection
 
-Generated runners SHALL reconstruct their inspection plan from the manifest definition and execution order instead
-of embedding a separate complete plan JSON at runtime. Standalone and embedded-host manifests SHALL use the same
-compiled definition. Inspection MUST remain independent of providers, original build files, telemetry, and symbols.
+- **WHEN** generated task, stream, and nested runners use manifest helpers after relocation or release/LTO/stripping
+- **THEN** configuration remains readable without execution and results and observation identities remain unchanged
 
-#### Scenario: Inspect a stripped standalone runner
+#### Scenario: Preserve versioned protocol meaning
 
-- **WHEN** a generated runner is moved away from its build files or built with LTO and stripped
-- **THEN** its original node configuration remains readable without executing provider code
-
-#### Scenario: Preserve execution and observation
-
-- **WHEN** task, stream, or nested workflows use the manifest-backed plan with telemetry enabled or disabled
-- **THEN** execution results and workflow observation identity remain unchanged
+- **WHEN** a reader derives views for a startup-aware workflow in manifest `2026-10-16`
+- **THEN** single and stream views retain event schemas 2 and 4 respectively, independent of future runtime protocols

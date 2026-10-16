@@ -2,7 +2,6 @@
 
 use mf_runtime::{
     WorkflowInputSchema, WorkflowInterface, WorkflowInterfaceVersion, WorkflowManifest,
-    WorkflowManifestVersion,
 };
 use mf_telemetry::{
     description::{WorkflowDescription, WorkflowDescriptionVersion},
@@ -11,9 +10,7 @@ use mf_telemetry::{
 
 pub fn sample_manifest() -> WorkflowManifest {
     let workflow_id = WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap();
-    WorkflowManifest {
-        definition: None,
-        version: WorkflowManifestVersion::V2026_10_07,
+    WorkflowManifest::Legacy {
         description: WorkflowDescription {
             version: WorkflowDescriptionVersion::V2026_09_27,
             workflow_id: workflow_id.clone(),

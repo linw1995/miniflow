@@ -113,15 +113,18 @@ Graph-relative event validation checks workflow/node identity, position, sequenc
 
 Manifest payload version `2026-10-07` contains `version`, `description`, and `interface`. The existing graph
 and interface protocol versions remain independent; both records must identify the same workflow.
-Version `2026-10-16` also carries the original compiled `definition`, including node kinds, configuration,
-parameter defaults, and dependency declarations. `WorkflowManifest::node_definition(id)` borrows an exact root
-node from that definition; callers can inspect its `kind` and `config` without preparing providers or running the workflow.
-Configuration expressions remain unresolved. Invocation inputs and environment-derived values are not materialized.
-The definition contains the full compiled configuration, including any private literals written into the workflow;
-it is not a filtered public summary. Graph descriptions and automatic lifecycle records remain configuration-free.
-Readers accept legacy `2026-10-07` manifests without a definition; node lookup then returns `None`.
-Version `2026-10-16` requires a definition, and `2026-10-07` rejects one. The combined UTF-8 JSON payload remains
-limited to 16 MiB. Generated runners reuse this definition instead of embedding a separate complete plan JSON.
+Version `2026-10-16` stores only the compiled `definition`, root `execution_order`, optional nested `loop_orders`,
+and prepared `input_schema`. Graph descriptions, interface wrappers, and workflow IDs are not duplicated in the payload.
+`description()`, `interface()`, and `workflow_id()` derive those views using versioned rules and the frozen orders,
+without planning a DAG or preparing providers. `definition()`, `node_definition(id)`, and `input_schema()` borrow
+original data; node lookup uses exact root IDs. Input contracts remain stored because provider-declared ports,
+bindings, and stdin requirements cannot be inferred from definition JSON alone.
+The definition contains full static configuration, including private literals, parameter defaults, and dependencies.
+Configuration expressions remain unresolved; invocation values and environment-derived values are not materialized.
+The manifest version fixes the derivation rules so newer readers preserve existing observation and interface protocols.
+Legacy `2026-10-07` records keep their stored description and interface behind the same helpers; definition lookup
+returns `None`. Invalid orders, inconsistent input contracts, missing required facts, and unexpected properties fail
+validation. The combined UTF-8 JSON payload remains limited to 16 MiB.
 New Linux and macOS runners embed these bytes in `.mf_manifest` (ELF) or `__DATA,__mf_manifest` (Mach-O), respectively.
 The section is retained through release optimization, LTO, and supported stripping, including telemetry-disabled builds.
 Manifest inspection reads the frozen records without preparing providers or launching the runner.

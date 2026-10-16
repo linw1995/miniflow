@@ -1,32 +1,36 @@
-## Decisions
+## Stored facts and derived views
 
-`WorkflowManifest::definition` stores the compiler's existing `WorkflowDefinition`, including normalized node order
-and unchanged configuration expressions. The runtime already owns this type, so inspection requires no compiler
-planning dependency or parallel configuration representation. `node_definition(id)` returns a borrowed root node by
-exact ID; unknown IDs and legacy manifests return `None`. It does not search nested scopes or invoke providers.
+`WorkflowManifest` is a version-tagged representation. `Compiled` (`2026-10-16`) contains the existing
+`WorkflowDefinition`, root order, nested `LoopExecutionOrder` records, and `WorkflowInputSchema`. It does not store
+`WorkflowDescription`, `WorkflowInterface`, or workflow identity. `Legacy` preserves the released `2026-10-07` wire
+shape. The representation prevents constructing mismatched version/field combinations without an extra version enum.
 
-Manifest payload version `2026-10-16` requires a definition. Legacy `2026-10-07` omits it and remains readable.
-Framing, size limits, duplicate-key decoding, and graph/interface validation are preserved. Inspection does not add
-runtime configuration drift checks or another pass through provider preparation. The manifest carries full compiled
-configuration, including static private literals, while graph descriptions and lifecycle records remain unchanged.
+The runtime borrows original data through `definition()`, `node_definition(id)`, and `input_schema()`. It derives owned
+views through `description()`, `interface()`, and `workflow_id()`. Compiler and runtime share the same graph projection;
+only the compiler computes root and nested execution orders. Node IDs and kinds are emitted in those frozen orders,
+including the implicit Loop source. Interface version and identity are derived from the retained schema and definition.
+The manifest version fixes these rules, including observation schemas 2 and 4 for startup-aware single and stream flows.
+Validation reuses the computed identity instead of hashing the definition twice.
 
-Both embedded-host and standalone generation populate the definition from the same compiled plan. Standalone runners
-reconstruct the plan using that definition and the description's execution order, replacing runtime inclusion of the
-complete `workflow-plan.json`. Build scripts still consume that file. Generated constructor literals remain part of
-execution code generation. The generated-project layout advances to `2026-10-16`.
+Input schema remains a stored fact: provider preparation declares port types, required flags, bindings, and stdin
+ownership that definition JSON alone cannot supply. It remains subject to the existing startup drift comparison.
+No provider configuration-publication field, parallel summary map, or configuration drift validator is required.
 
-`ConfigTemplate::evaluate` and `decode_unique_json` reuse existing implementations through established runtime exports.
-Model interpretation and configuration fingerprints remain caller concerns. No provider metadata field, configuration
-collector, facade, dependency, or node-specific runtime error is needed.
+## Generation and consumers
+
+Standalone generation reuses the already prepared input schema. Embedded-host manifest construction prepares once.
+Generated runners use manifest helpers directly for observations, snapshot identity, and input binding. They neither
+embed another complete plan JSON nor reconstruct a compiler plan just to inspect it. Build scripts still consume the
+plan JSON, and generated constructors retain the literals needed for execution.
+
+TUI and other readers use the same helper API for both formats. Graph projection neither invokes factories nor replans
+the DAG. Framing, size bounds, unique-key decoding, graph validation, and input validation retain typed error sources.
+The telemetry invalid-contract selector is public because the runtime now constructs the shared graph contract.
 
 ## Compatibility
 
-Old manifests remain usable for graph/interface inspection but cannot supply original definitions. The new manifest
-field changes Rust struct literals; the manifest derives `PartialEq` to match the existing definition type. Newly
-generated runners return a typed error if their manifest cannot supply a required definition.
-
-## Validation
-
-Cover borrowed lookup, unresolved values, exact IDs, legacy absence, version consistency, and compiler population.
-Use existing standalone task/stream/nested and release/LTO/strip fixtures to verify factory-free inspection and execution.
-Keep controlled experiments local under ignored `target/`; run affected-package tests and required hooks before updating the PR.
+Legacy graph/interface views remain supported; legacy definition lookup returns `None`. Current manifests require
+all source facts and reject duplicated derived properties. The generated-project layout is `2026-10-16`.
+Raw configuration includes static private literals; invocation inputs and environment values are not materialized.
+The manifest derives `PartialEq` to match the original definition model. Rust struct-field callers migrate to variants
+and helpers. Future protocol changes must preserve existing versioned derivation rules.

@@ -61,6 +61,10 @@ pub enum RunError {
     #[snafu(display("TUI requires terminal stdin and stderr"))]
     TerminalRequired,
     #[snafu(transparent)]
+    ManifestContract {
+        source: mf_runtime::WorkflowManifestError,
+    },
+    #[snafu(transparent)]
     Inputs { source: WorkflowInputError },
     #[snafu(transparent)]
     Arguments {
@@ -144,7 +148,7 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         );
     }
     let arguments = if !options.arguments.is_empty() {
-        WorkflowArguments::parse(options.arguments.clone(), &manifest.interface.schema)?
+        WorkflowArguments::parse(options.arguments.clone(), manifest.input_schema())?
     } else if let Some(json) = &options.inputs {
         WorkflowArguments::from_json(json.as_bytes())?
     } else if let Some(path) = &options.inputs_file {
@@ -157,8 +161,8 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
     } else {
         WorkflowArguments::default()
     };
-    let description = manifest.description;
-    let interface = manifest.interface;
+    let description = manifest.description()?;
+    let schema = manifest.input_schema();
     ensure!(
         !description.is_streaming()
             || description.event_schema_version() == mf_telemetry::STREAM_EVENT_SCHEMA_VERSION,
@@ -166,8 +170,8 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
             schema_version: description.event_schema_version()
         }
     );
-    interface.schema.validate(&arguments)?;
-    let needs_stdin = interface.schema.stdin_owner(&arguments)?.is_some();
+    schema.validate(&arguments)?;
+    let needs_stdin = schema.stdin_owner(&arguments)?.is_some();
     if needs_stdin {
         return option_error(
             "TUI execution cannot supply workflow stdin; provide source parameters or run the executable directly",
@@ -1310,9 +1314,7 @@ mod tests {
         }
         let interface = serde_json::json!({"version":"2026-10-11", "workflow_id":graph["workflow_id"],
             "schema":{"inputs":{"source/id":{"path":{"type":"string", "required":true}}}, "stdin":stdin}});
-        let manifest = mf_runtime::WorkflowManifest {
-            definition: None,
-            version: mf_runtime::WorkflowManifestVersion::V2026_10_07,
+        let manifest = mf_runtime::WorkflowManifest::Legacy {
             description: serde_json::from_value(graph).unwrap(),
             interface: serde_json::from_value(interface).unwrap(),
         };
@@ -1352,7 +1354,9 @@ mod tests {
 
     #[test]
     fn routing_warnings_are_independent_of_observation_integrity() {
-        let mut description = crate::test_support::sample_manifest().description;
+        let mut description = crate::test_support::sample_manifest()
+            .description()
+            .unwrap();
         description.nodes = ["source", "target"]
             .into_iter()
             .map(|id| NodeDescription {
@@ -1490,8 +1494,13 @@ mod tests {
             Some(StdinRequirement::UnlessInput("path".into())),
         );
         let mut manifest = read_manifest(&runner).unwrap();
-        manifest
-            .interface
+        let mf_runtime::WorkflowManifest::Legacy {
+            ref mut interface, ..
+        } = manifest
+        else {
+            unreachable!()
+        };
+        interface
             .schema
             .inputs
             .get_mut("source/id")
@@ -1526,12 +1535,19 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let runner = root.path().join("runner");
         let mut manifest = crate::test_support::sample_manifest();
-        manifest.description.version = WorkflowDescriptionVersion::V2026_10_02;
-        manifest.description.nodes.push(NodeDescription {
+        let mf_runtime::WorkflowManifest::Legacy {
+            ref mut description,
+            ..
+        } = manifest
+        else {
+            unreachable!()
+        };
+        description.version = WorkflowDescriptionVersion::V2026_10_02;
+        description.nodes.push(NodeDescription {
             id: "%input".into(),
             kind: "%input".into(),
         });
-        manifest.description.execution_order.push("%input".into());
+        description.execution_order.push("%input".into());
         std::fs::write(
             &runner,
             crate::test_support::elf(Some(&manifest.to_bytes().unwrap()), 1),

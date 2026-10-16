@@ -199,7 +199,8 @@ fn packaged_cli_acceptance() {
     let description = serde_json::to_value(
         mf_tui::manifest::read_manifest(&loop_output)
             .unwrap()
-            .description,
+            .description()
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(description["version"], "2026-09-29");
