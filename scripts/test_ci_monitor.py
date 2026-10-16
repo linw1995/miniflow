@@ -106,6 +106,36 @@ class TimingTests(unittest.TestCase):
         self.assertIn("No successful baseline", report)
         self.assertIn("| <code>lint</code> (<code>failure</code>) | 1m 00s | N/A | N/A |", report)
 
+    def test_crate_timings_exclude_skipped_and_missing_samples(self):
+        def coverage(steps):
+            result = job("coverage", end=600)
+            result["steps"] = [
+                {key: value for key, value in job(name, start, end, conclusion).items() if key != "steps"}
+                for name, start, end, conclusion in steps
+            ]
+            return result
+
+        current = run(created="2026-10-11T00:00:00Z")
+        active = "Coverage tests (mf-runtime)"
+        skipped = "Coverage tests (mf-cli)"
+        new = "Coverage tests (mf-tui)"
+        jobs = {"coverage": coverage([
+            (active, 0, 120, "success"),
+            (skipped, 0, 0, "skipped"),
+            (new, 0, 30, "success"),
+        ])}
+        samples = [(current, {"coverage": coverage(steps)}) for steps in [
+            [(active, 0, 60, "success"), (skipped, 0, 300, "success")],
+            [(active, 0, 180, "success")],
+            [(active, 0, 0, "skipped"), (new, 0, 0, "skipped")],
+            [(active, 0, 1, "failure")],
+            [],
+        ]]
+        report = monitor.render_report(current, jobs, samples, "main")
+        self.assertIn(f"| <code>coverage</code> / <code>{active}</code> | 2m 00s | 2m 00s | +0m 00s (+0.0%) |", report)
+        self.assertNotIn(skipped, report)
+        self.assertIn(f"| <code>coverage</code> / <code>{new}</code> | 0m 30s | N/A | N/A |", report)
+
     def test_untrusted_labels_cannot_break_the_table(self):
         name = "unsafe|<img>\n`label`"
         current = run(created="2026-10-11T00:00:00Z")
@@ -115,6 +145,57 @@ class TimingTests(unittest.TestCase):
     def test_mentions_and_markdown_links_remain_literal_metadata(self):
         self.assertEqual(monitor.label("@someone [link](https://example.com)"),
                          "<code>@someone [link](https://example.com)</code>")
+
+
+class CoverageSummaryTests(unittest.TestCase):
+    def summary(self, steps):
+        coverage = job("coverage", 10, 600)
+        coverage["steps"] = [job(f"Coverage tests ({name})", start, end, conclusion)
+                             for name, start, end, conclusion in steps]
+        return "\n".join(monitor.coverage_summary({"coverage": coverage}, 610))
+
+    def test_full_run_reports_distinct_totals_and_zero_duration_success(self):
+        report = self.summary([("mf-cli", 10, 70, "success"), ("mf-runtime-derive", 70, 70, "success")])
+        self.assertIn("| CI wall time (including queueing) | 10m 10s |", report)
+        self.assertIn("| Coverage job (including setup and cache upload) | 9m 50s |", report)
+        self.assertIn("| Crate test steps total (excluding skipped steps) | 1m 00s |", report)
+        self.assertIn("Skipped crates: None.", report)
+        self.assertIn("| <code>mf-runtime-derive</code> | <code>success</code> | 0m 00s |", report)
+
+    def test_skips_are_listed_but_do_not_contribute_even_with_nonzero_timestamps(self):
+        report = self.summary([
+            ("mf-runtime", 10, 70, "success"),
+            ("mf-cli", 100, 400, "skipped"),
+            ("mf-compiler", 70, 100, "failure"),
+        ])
+        self.assertIn("Skipped crates: <code>mf-cli</code>.", report)
+        self.assertIn("| <code>mf-cli</code> | <code>skipped</code> | N/A |", report)
+        self.assertIn("| <code>mf-compiler</code> | <code>failure</code> | 0m 30s |", report)
+        self.assertIn("| Crate test steps total (excluding skipped steps) | 1m 30s |", report)
+        self.assertIn("blocked by an earlier failure", report)
+
+    def test_empty_selection_lists_all_skipped_crates(self):
+        report = self.summary([("mf-cli", 10, 70, "skipped"), ("mf-runtime", 70, 130, "skipped")])
+        self.assertIn("Skipped crates: <code>mf-cli</code>, <code>mf-runtime</code>.", report)
+        self.assertIn("| Crate test steps total (excluding skipped steps) | 0m 00s |", report)
+        self.assertEqual(report.count("| <code>skipped</code> | N/A |"), 2)
+
+    def test_missing_timestamps_do_not_produce_an_incomplete_total(self):
+        coverage = job("coverage")
+        coverage["steps"] = [job("Coverage tests (mf-cli)"), job("Coverage tests (mf-runtime)")]
+        coverage["steps"][1]["completed_at"] = None
+        report = "\n".join(monitor.coverage_summary({"coverage": coverage}, 70))
+        self.assertIn("| <code>mf-runtime</code> | <code>success</code> | N/A |", report)
+        self.assertIn("| Crate test steps total (excluding skipped steps) | N/A |", report)
+
+    def test_absent_or_legacy_coverage_does_not_claim_no_crates_were_skipped(self):
+        self.assertEqual(monitor.coverage_summary({}, 70), [])
+        self.assertEqual(monitor.coverage_summary({"coverage": job("coverage")}, 70), [])
+
+    def test_untrusted_crate_names_remain_literal(self):
+        report = self.summary([("unsafe|<img>\n`name`", 10, 70, "skipped")])
+        self.assertIn("<code>unsafe&#124;&lt;img&gt; &#96;name&#96;</code>", report)
+        self.assertNotIn("<img>", report)
 
 
 class CommentTests(unittest.TestCase):

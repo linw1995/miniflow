@@ -115,6 +115,47 @@ def baseline_runs(api, run, branch, current_jobs):
     return samples
 
 
+def coverage_summary(jobs, current_wall):
+    coverage = jobs.get("coverage")
+    if coverage is None:
+        return []
+    crates = [
+        (match[1], step)
+        for step in coverage.get("steps", [])
+        if (match := re.fullmatch(r"Coverage tests \(([^)]+)\)", step["name"]))
+    ]
+    if not crates:
+        return []
+    skipped = [name for name, step in crates if step["conclusion"] == "skipped"]
+    values = [duration(step) for _, step in crates if step["conclusion"] != "skipped"]
+    total = sum(values) if all(value is not None for value in values) else None
+    lines = [
+        "### Summary",
+        "",
+        "| Metric | Duration |",
+        "| --- | ---: |",
+        f"| CI wall time (including queueing) | {format_duration(current_wall)} |",
+        f"| Coverage job (including setup and cache upload) | {format_duration(duration(coverage))} |",
+        f"| Crate test steps total (excluding skipped steps) | {format_duration(total)} |",
+        "",
+        "Skipped crates: " + (", ".join(label(name) for name in skipped) if skipped else "None") + ".",
+        "",
+        "| Crate | Result | Duration |",
+        "| --- | --- | ---: |",
+    ]
+    for name, step in crates:
+        value = None if step["conclusion"] == "skipped" else duration(step)
+        lines.append(f"| {label(name)} | {label(step['conclusion'])} | {format_duration(value)} |")
+    lines.extend([
+        "",
+        "Skipped crates show N/A and are excluded from totals and timing baselines; they may be unselected or blocked by an earlier failure.",
+        "Crate totals exclude shared compilation, report generation, and uploads; those steps are listed below.",
+        "GitHub timestamps have one-second precision: a successful 0s step is not a skipped step.",
+        "",
+    ])
+    return lines
+
+
 def render_report(run, jobs, samples, branch):
     complete = run["conclusion"] == "success"
     baseline_wall = median([wall_time(candidate, sample) for candidate, sample in samples]) if samples else None
@@ -122,16 +163,22 @@ def render_report(run, jobs, samples, branch):
     lines = [
         MARKER,
         f"<!-- ci-run:{run['id']}:{run['run_attempt']} -->",
-        "## CI timing comparison",
+        "## CI timing summary",
         "",
         f"[Run #{run['run_number']}, attempt {run['run_attempt']}]({run['html_url']}) "
         f"for `{run['head_sha'][:12]}`: **{label(run['conclusion'])}**.",
         "",
+    ]
+    lines.extend(coverage_summary(jobs, current_wall))
+    lines.extend([
+        "### Timing comparison",
+        "",
         f"Baseline: median of {len(samples)} successful CI pushes to **{label(branch)}** completed before this run started.",
         "Only matching jobs are compared; additional base-branch jobs (including macOS) are excluded.",
         "Wall time includes queueing and job dependencies; job durations include setup and cache upload.",
+        "Step baselines include only successful executions of the same step; skipped and missing steps are not zero-duration samples.",
         "",
-    ]
+    ])
     if not complete:
         lines.extend(["This run is incomplete or unsuccessful; its wall-time delta is not comparable.", ""])
     if not samples:

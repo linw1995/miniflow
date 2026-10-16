@@ -11,7 +11,7 @@ tests, and uploads. Dependency configuration, shared inputs, or analyzer failure
 conservatively select the full workspace.
 
 Pushes to `main` and manual CI dispatches run the complete Linux suite through
-`nix develop --command bash scripts/run-cov.sh`. Both full and selected runs use
+the same coverage script as local runs. Both full and selected runs use
 the pinned toolchain, instrument workspace binaries, and write reports to
 `target/coverage/result/`, including `lcov.info`. Test failures stop report
 generation and fail CI.
@@ -24,6 +24,42 @@ Coverage dependencies and generated-project builds use persistent caches.
 The script removes previous workspace binaries and report data while retaining
 dependencies, so stale coverage mappings cannot contribute to a new report.
 Caches accelerate compilation without changing which tests execute.
+
+## Coverage step timings
+
+CI and nightly prepare and build the selected packages together, run a separate
+`Coverage tests (<package>)` step for each workspace package, and generate one
+combined report after all selected suites pass. The shared build preserves Cargo
+feature unification and is timed separately. Package steps reuse nextest's binary
+and Cargo metadata, including only test discovery, setup, and execution. Generated
+project builds inside tests still count toward their package's time, and their
+caches are shared across steps. New workspace packages must also be added to both workflows; the
+CI script tests check that every package has exactly one step.
+
+On PRs, step-level conditions skip packages absent from the affected plan.
+An empty plan skips preparation, all package steps, report generation, and uploads.
+After each non-cancelled PR CI run, the timing monitor creates or updates one PR
+comment. Its Summary lists skipped crates, total CI wall time, coverage job time,
+the sum of executed crate-step durations, and each crate's result and duration.
+Skipped crates show `N/A`; missing timestamps also produce `N/A` rather than a
+partial total. Shared compilation, report generation, uploads, and other steps
+remain available in the detailed timing comparison. The Summary uses GitHub's
+second-resolution timestamps, so a successful `0s` step is distinct from a skip.
+Failed runs can skip crates because an earlier step failed, not just because
+the affected plan excluded them.
+
+The monitor omits skipped steps from timing comparisons and computes each step's baseline median
+from successful executions of that exact step name only. Skipped, missing, and
+failed historical steps never contribute zero-duration samples. A step without
+successful baseline samples shows `N/A`. Job and wall times still reflect the
+work actually selected, so runs with different selections are not equivalent
+full-suite measurements.
+
+The script's `--prepare`, `--test-package <name>`, and `--report` modes support
+these separate steps. Preparation accepts `--affected-plan <path>`, clears stale
+profiles and workspace binaries, and builds only the selected package suites.
+Package steps accumulate profiles, and reporting merges them. Local invocations
+without a phase argument still prepare, test, and report in one command.
 
 ## Codecov reports
 
@@ -106,7 +142,8 @@ nix develop --command python3 scripts/affected_tests.py --base origin/main --jso
 nix develop --command bash scripts/run-cov.sh --affected-plan /tmp/affected-tests.json
 ```
 
-`--affected-plan` must be the first coverage-script argument. It replaces the
+`--affected-plan` must be the first coverage-script argument (or follow
+`--prepare` for phased execution). It replaces the
 default workspace selection with explicit package arguments. Empty plans clear
 stale reports and exit without running Cargo; malformed plans fail. Other nextest
 arguments can follow the plan path.
