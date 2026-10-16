@@ -78,19 +78,91 @@ fn file_checksums(root: &Path, directory: &Path, files: &mut BTreeMap<String, St
     }
 }
 
-fn unpack_package(archive: &Path, vendor: &Path) -> PathBuf {
+fn unpack_package(archive: &Path, vendor: &Path) -> (PathBuf, String) {
+    let directory = vendor.join(archive.file_stem().unwrap());
+    if directory.exists() {
+        fs::remove_dir_all(&directory).unwrap();
+    }
     tar::Archive::new(GzDecoder::new(File::open(archive).unwrap()))
         .unpack(vendor)
         .unwrap();
-    let directory = vendor.join(archive.file_stem().unwrap());
     let mut files = BTreeMap::new();
     file_checksums(&directory, &directory, &mut files);
     fs::write(
         directory.join(".cargo-checksum.json"),
-        serde_json::to_vec(&json!({"files": files, "package": checksum(archive)})).unwrap(),
+        serde_json::to_vec(&json!({"files": &files, "package": checksum(archive)})).unwrap(),
     )
     .unwrap();
-    directory
+    // Cargo adds the checkout revision even when all build inputs are unchanged.
+    // Our support crates do not consume this generated metadata.
+    files.remove(".cargo_vcs_info.json");
+    // Dependency builds use the consumer's lockfile. This packaged lockfile
+    // also changes when only transitive package revision metadata changes.
+    files.remove("Cargo.lock");
+    let source_checksum = Sha256::digest(serde_json::to_vec(&files).unwrap())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect();
+    (directory, source_checksum)
+}
+
+#[test]
+fn packaged_source_identity_ignores_revision_but_tracks_build_inputs() {
+    use flate2::{Compression, write::GzEncoder};
+
+    let root = tempfile::tempdir().unwrap();
+    let archive = root.path().join("fixture-0.1.0.crate");
+    let vendor = root.path().join("vendor");
+    fs::create_dir(&vendor).unwrap();
+    let write_archive = |revision: &str, source: &str, manifest: &str| {
+        let encoder = GzEncoder::new(File::create(&archive).unwrap(), Compression::fast());
+        let mut builder = tar::Builder::new(encoder);
+        let vcs = json!({"git": {"sha1": revision}}).to_string();
+        let lock = format!("version = 4\n# dependency checksum: {revision}\n");
+        for (name, contents) in [
+            ("src/lib.rs", source),
+            ("Cargo.toml", manifest),
+            ("Cargo.lock", lock.as_str()),
+            (".cargo_vcs_info.json", vcs.as_str()),
+        ] {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(
+                    &mut header,
+                    format!("fixture-0.1.0/{name}"),
+                    contents.as_bytes(),
+                )
+                .unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap();
+    };
+    write_archive("first", "pub fn value() -> u32 { 1 }", "original manifest");
+    let archive_checksum = checksum(&archive);
+    let (directory, first) = unpack_package(&archive, &vendor);
+    fs::write(directory.join("obsolete.rs"), "obsolete input").unwrap();
+    write_archive("second", "pub fn value() -> u32 { 1 }", "original manifest");
+    assert_ne!(checksum(&archive), archive_checksum);
+    let (_, second) = unpack_package(&archive, &vendor);
+    assert_eq!(first, second);
+    assert!(!directory.join("obsolete.rs").exists());
+    let checksums: Value =
+        serde_json::from_slice(&fs::read(directory.join(".cargo-checksum.json")).unwrap()).unwrap();
+    assert_eq!(checksums["package"], checksum(&archive));
+    assert_eq!(
+        checksums["files"][".cargo_vcs_info.json"],
+        checksum(&directory.join(".cargo_vcs_info.json"))
+    );
+    assert_eq!(
+        checksums["files"]["Cargo.lock"],
+        checksum(&directory.join("Cargo.lock"))
+    );
+    write_archive("second", "pub fn value() -> u32 { 2 }", "original manifest");
+    assert_ne!(unpack_package(&archive, &vendor).1, second);
+    write_archive("second", "pub fn value() -> u32 { 1 }", "changed manifest");
+    assert_ne!(unpack_package(&archive, &vendor).1, second);
 }
 
 pub fn copy_directory(source: &Path, destination: &Path) {
@@ -187,29 +259,9 @@ impl PackagedCli {
             let archive = target
                 .join("package")
                 .join(format!("{name}-{version}.crate"));
-            packages.insert(name.to_owned(), (version.to_owned(), checksum(&archive)));
-            unpack_package(&archive, &vendor);
+            let (_, source_checksum) = unpack_package(&archive, &vendor);
+            packages.insert(name.to_owned(), (version.to_owned(), source_checksum));
         }
-        checked(
-            cargo()
-                .args([
-                    "build",
-                    "--release",
-                    "--locked",
-                    "--offline",
-                    "-p",
-                    "mf-cli",
-                    "--no-default-features",
-                ])
-                .arg("--config")
-                .arg(&config),
-        );
-        let cli = root
-            .join("installed")
-            .join(format!("mf{}", env::consts::EXE_SUFFIX));
-        fs::create_dir_all(cli.parent().unwrap()).unwrap();
-        fs::copy(target.join("release").join(cli.file_name().unwrap()), &cli).unwrap();
-
         let fixture_original = workspace.join("crates/mf-compiler/tests/fixtures/multi-nodes");
         let fixture_project = root.join("fixture-package");
         fs::create_dir(&fixture_project).unwrap();
@@ -271,16 +323,16 @@ impl PackagedCli {
         let fixture_archive = target
             .join("package")
             .join(format!("fixture-multi-nodes-{fixture_version}.crate"));
+        let (fixture_source, source_checksum) = unpack_package(&fixture_archive, &vendor);
         packages.insert(
             "fixture-multi-nodes".to_owned(),
-            (fixture_version.clone(), checksum(&fixture_archive)),
+            (fixture_version.clone(), source_checksum),
         );
-        let fixture_source = unpack_package(&fixture_archive, &vendor);
         let package_marker = target.join("mf-packaged-sources.json");
         let package_identity = serde_json::to_vec(&packages).unwrap();
         if fs::read(&package_marker).ok().as_deref() != Some(package_identity.as_slice()) {
             // Workspace cleanup only knows path packages. Resolve the registry
-            // identities too, so changed archives cannot reuse same-version code.
+            // identities too, so changed build inputs cannot reuse same-version code.
             let cleanup = root.join("package-cleanup");
             fs::create_dir_all(cleanup.join("src")).unwrap();
             fs::write(cleanup.join("src/lib.rs"), "").unwrap();
@@ -311,6 +363,26 @@ impl PackagedCli {
             checked(&mut clean);
             fs::write(package_marker, package_identity).unwrap();
         }
+        checked(
+            cargo()
+                .args([
+                    "build",
+                    "--release",
+                    "--locked",
+                    "--offline",
+                    "-p",
+                    "mf-cli",
+                    "--no-default-features",
+                ])
+                .arg("--config")
+                .arg(&config),
+        );
+        let cli = root
+            .join("installed")
+            .join(format!("mf{}", env::consts::EXE_SUFFIX));
+        fs::create_dir_all(cli.parent().unwrap()).unwrap();
+        fs::copy(target.join("release").join(cli.file_name().unwrap()), &cli).unwrap();
+
         let cargo_home = root.join("cargo-home");
         fs::create_dir(&cargo_home).unwrap();
         fs::copy(&config, cargo_home.join("config.toml")).unwrap();

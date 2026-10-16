@@ -25,9 +25,17 @@ The script removes previous workspace binaries and report data while retaining
 dependencies, so stale coverage mappings cannot contribute to a new report.
 The packaged CLI fixture keeps a separate target beside the generated-runner
 cache. Its registry dependencies survive subsequent runs, while preparation
-cleans checkout packages before rebuilding the CLI. Archive checksums also
+cleans checkout packages before rebuilding the CLI. Packaged source digests also
 invalidate registry builds of the support packages and external fixture whenever
-their packaged contents change, even at the same version. Dependency artifacts are
+their build inputs change, even at the same version. Cargo's generated VCS
+metadata is excluded from this identity because these crates do not consume it;
+metadata-only repackaging retains compiled dependencies. Crate-local packaged
+lockfiles are excluded too: dependency builds use the consumer's lockfile, and
+packaged lockfiles contain revision-dependent checksums. Cargo's archive and file
+checksums still cover every packaged file. Workspace cleanup excludes these
+content-validated packages: Cargo otherwise removes their registry fingerprints
+by package name even when it retains their libraries. Content invalidation runs
+before both CLI and runner compilation. Dependency artifacts are
 seeded only on the first run; installed executables, Cargo homes, and user
 projects remain temporary and isolated.
 The default and CI profiles share all CLI generated-build fixtures.
@@ -36,6 +44,11 @@ zero by default. This keeps release semantics and artifact paths while reducing
 compilation cost. Set `CARGO_PROFILE_RELEASE_OPT_LEVEL` to override the default;
 the dedicated LTO/strip test explicitly requests level three. Existing Rust flags,
 including coverage instrumentation, are preserved.
+After reporting, CI runs `scripts/run-cov.sh --prune-cache` before saving the
+cache. It removes checkout artifacts that the next preparation would delete and
+executables belonging to temporary generated projects. Registry libraries,
+proc macros, and dependency build scripts remain cached. Reports are preserved;
+run `--prepare` again before executing more package steps after pruning.
 Caches accelerate compilation without changing which tests execute.
 
 ## Coverage step timings

@@ -155,6 +155,9 @@ jobs:
       - name: Generate coverage reports
         if: github.event_name != 'pull_request' || steps.selection.outputs.run == 'true'
         run: nix develop --command bash scripts/run-cov.sh --report
+      - name: Prune coverage build cache
+        if: github.event_name != 'pull_request' || steps.selection.outputs.run == 'true'
+        run: nix develop --command bash scripts/run-cov.sh --prune-cache
       - name: Upload coverage artifact
         if: github.event_name != 'pull_request' || steps.selection.outputs.run == 'true'
         uses: actions/upload-artifact@v7
