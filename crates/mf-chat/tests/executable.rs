@@ -72,6 +72,48 @@ fn preflight_rejects_multiple_nodes_streams_and_missing_model_information() {
     assert!(ChatContract::from_manifest(&changed).is_err());
 }
 
+#[test]
+fn preflight_rejects_incompatible_startup_ports_and_extra_connections() {
+    let original = manifest();
+    let mut mistyped = original.clone();
+    mistyped
+        .input_schema
+        .inputs
+        .get_mut("chat./~")
+        .unwrap()
+        .get_mut("prompt")
+        .unwrap()
+        .value_type = mf_runtime::ValueType::Boolean;
+    let mut extra_port = original.clone();
+    let prompt = original.input_schema.inputs["chat./~"]["prompt"].clone();
+    extra_port
+        .input_schema
+        .inputs
+        .get_mut("chat./~")
+        .unwrap()
+        .insert("extra".into(), prompt);
+    let mut extra_edge = parameter_manifest();
+    let mut edge = extra_edge.definition.edges[0].clone();
+    edge.to_input = "extra".into();
+    extra_edge.definition.edges.push(edge);
+    let mut multiple_sources = parameter_manifest();
+    multiple_sources.definition.edges.clear();
+    multiple_sources.input_schema.inputs.insert(
+        "chat".into(),
+        original.input_schema.inputs["chat./~"].clone(),
+    );
+    for incompatible in [mistyped, extra_port, extra_edge, multiple_sources] {
+        incompatible.validate().unwrap();
+        assert!(matches!(
+            ChatContract::from_manifest(&incompatible),
+            Err(mf_chat::ChatError::Invalid {
+                field: "chat executable",
+                ..
+            })
+        ));
+    }
+}
+
 fn parameter_manifest() -> mf_runtime::WorkflowManifest {
     assert_eq!(mfn_core::PARAMETERS_KIND, "builtin.parameters");
     let definition =
@@ -87,6 +129,13 @@ fn parameterized_contract_freezes_configuration_and_owns_conversation_inputs() {
     let manifest = parameter_manifest();
     let contract = ChatContract::from_manifest(&manifest).unwrap();
     assert!(contract.parameterized);
+    assert!(matches!(
+        contract.model_identity("default", &Default::default()),
+        Err(mf_chat::ChatError::Invalid {
+            field: "model identity",
+            ..
+        })
+    ));
     let arguments = mf_runtime::WorkflowArguments::from_json(
         br#"{"params.model":"chosen-model","params.api_key":"synthetic-key"}"#,
     )

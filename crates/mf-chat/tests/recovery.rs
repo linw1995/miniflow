@@ -109,18 +109,23 @@ fn committed_reply_wins_over_broken_output_and_late_cancellation() {
     let contract = contract();
     let invocation = begin(&database);
     let saved = database.complete_turn(invocation.clone(), reply()).unwrap();
-    for bytes in [b"broken JSON".to_vec(), stdout("disagreeing reply")] {
+    for (bytes, has_diagnostics) in [
+        (Some(b"broken JSON".to_vec()), true),
+        (Some(stdout("disagreeing reply")), true),
+        (Some(stdout("paid reply")), false),
+        (None, false),
+    ] {
         let resolution = database
             .reconcile_completion(ConversationExit {
                 contract: &contract,
                 invocation: &invocation,
-                stdout: Some(&bytes),
+                stdout: bytes.as_deref(),
                 outcome: TurnExit::Cancelled,
                 summary: "late cancellation",
             })
             .unwrap();
         assert!(matches!(resolution.state,CompletionState::Committed(value) if value==saved));
-        assert!(!resolution.diagnostics.is_empty());
+        assert_eq!(!resolution.diagnostics.is_empty(), has_diagnostics);
     }
 }
 
@@ -190,4 +195,59 @@ fn malformed_or_missing_model_output_finalizes_only_the_admitted_invocation() {
         );
     }
     assert_eq!(database.turn(&untouched.turn_id).unwrap().state, "running");
+}
+
+#[test]
+fn late_output_cannot_admit_or_revive_a_conversation() {
+    let root = tempfile::tempdir().unwrap();
+    let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
+    let contract = contract();
+    let cancelled = begin(&database);
+    database
+        .fail_turn(cancelled.clone(), "cancelled", "cancelled before reply")
+        .unwrap();
+    let bytes = stdout("late reply");
+    for invocation in [
+        mf_chat::Invocation::new("never-admitted"),
+        cancelled.clone(),
+    ] {
+        let resolution = database
+            .reconcile_completion(ConversationExit {
+                contract: &contract,
+                invocation: &invocation,
+                stdout: Some(&bytes),
+                outcome: TurnExit::Failed,
+                summary: "late output",
+            })
+            .unwrap();
+        if invocation == cancelled {
+            assert!(
+                matches!(resolution.state, CompletionState::Finished(turn) if turn.state == "cancelled")
+            );
+        } else {
+            assert!(matches!(resolution.state, CompletionState::NotBegun));
+        }
+        assert!(matches!(
+            resolution.diagnostics.as_slice(),
+            [mf_chat::ChatError::Invalid {
+                field: "model reply",
+                ..
+            }]
+        ));
+    }
+    assert!(
+        database
+            .history(&cancelled.session_id, 1024)
+            .unwrap()
+            .history
+            .is_empty()
+    );
+    assert_eq!(
+        database
+            .usage(Default::default())
+            .unwrap()
+            .overall
+            .attempted_calls,
+        1
+    );
 }
