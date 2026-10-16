@@ -62,6 +62,7 @@ class BuildCacheTests(unittest.TestCase):
             ):
                 cache.main()
                 first_env = env_file.read_text()
+                self.assertIn("CARGO_PROFILE_RELEASE_OPT_LEVEL=0\n", first_env)
                 env_file.write_text("")
                 os.environ["NEXTEST_RUN_ID"] = "second-package"
                 cache.main()
@@ -96,6 +97,10 @@ class BuildCacheTests(unittest.TestCase):
                 cache.main()
                 self.assertEqual(preparation.call_count, 8)
                 self.assertFalse((target / "prepared-session.json").exists())
+                os.environ["CARGO_PROFILE_RELEASE_OPT_LEVEL"] = "3"
+                env_file.write_text("")
+                cache.main()
+                self.assertIn("CARGO_PROFILE_RELEASE_OPT_LEVEL=3\n", env_file.read_text())
 
 
 if __name__ == "__main__":

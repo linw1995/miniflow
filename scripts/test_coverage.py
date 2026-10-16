@@ -46,12 +46,27 @@ class CoverageTests(unittest.TestCase):
             ]:
                 env.pop(name, None)
             env["MF_TEST_BUILD_CACHE_DIR"] = str(root / "target/fixture-cache")
+            env["MF_TEST_BUILD_CACHE_SESSION"] = "inherited-session"
 
             def execute(*args):
                 return subprocess.run(args, cwd=root, env=env, capture_output=True, text=True)
 
             (root / "src").mkdir()
             (root / "scripts").mkdir()
+            (root / ".config").mkdir()
+            (root / ".config/nextest.toml").write_text('''experimental = ["setup-scripts"]
+[scripts.setup.check-session]
+command = ["python3", "scripts/check-session.py"]
+[[profile.default.scripts]]
+filter = "all()"
+setup = "check-session"
+''')
+            (root / "scripts/check-session.py").write_text('''import os
+from pathlib import Path
+session = os.environ["MF_TEST_BUILD_CACHE_SESSION"]
+assert session != "inherited-session"
+assert session == Path("target/coverage/build-cache-session").read_text().strip()
+''')
             shutil.copyfile(Path(__file__).resolve().parent / "run-cov.sh", root / "scripts/run-cov.sh")
             (root / "Cargo.toml").write_text('''[package]
 name = "coverage-fixture"

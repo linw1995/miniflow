@@ -25,7 +25,9 @@ reset_reports() {
   rm -rf "${coverage_dir}/data" "${coverage_dir}/result"
   rm -f "${coverage_dir}/binaries.json" "${coverage_dir}/cargo-metadata.json"
   mkdir -p "${coverage_dir}/data" "${coverage_dir}/result"
-  python3 -c 'import uuid; print(uuid.uuid4())' > "${coverage_dir}/build-cache-session"
+  MF_TEST_BUILD_CACHE_SESSION="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+  export MF_TEST_BUILD_CACHE_SESSION
+  printf '%s\n' "$MF_TEST_BUILD_CACHE_SESSION" > "${coverage_dir}/build-cache-session"
 }
 
 prepare_coverage() {

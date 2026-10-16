@@ -30,6 +30,12 @@ invalidate registry builds of the support packages and external fixture whenever
 their packaged contents change, even at the same version. Dependency artifacts are
 seeded only on the first run; installed executables, Cargo homes, and user
 projects remain temporary and isolated.
+The default and CI profiles share all CLI generated-build fixtures.
+Generated-runner behavior tests use the release profile with optimization level
+zero by default. This keeps release semantics and artifact paths while reducing
+compilation cost. Set `CARGO_PROFILE_RELEASE_OPT_LEVEL` to override the default;
+the dedicated LTO/strip test explicitly requests level three. Existing Rust flags,
+including coverage instrumentation, are preserved.
 Caches accelerate compilation without changing which tests execute.
 
 ## Coverage step timings
@@ -185,11 +191,20 @@ graph format selects all workspace packages with an explicit fallback reason.
 Invalid Git refs, a mismatched checkout, and failed Cargo metadata stop with an
 error rather than emitting an unreliable plan.
 
+For repeated local CLI runs, reuse an isolated generated-project build cache:
+
+```bash
+MF_TEST_BUILD_CACHE_DIR="$PWD/target/nextest-build-cache/local" \
+  nix develop --command cargo nextest run --locked --all-features -p mf-cli
+```
+
+Do not run concurrent nextest processes against the same cache directory. Use a
+separate directory for coverage, whose instrumentation has different artifacts.
 For repeated local coverage runs, reuse a generated-project build cache:
 
 ```bash
 nix develop
-export MF_TEST_BUILD_CACHE_DIR="$PWD/target/nextest-build-cache/local"
+export MF_TEST_BUILD_CACHE_DIR="$PWD/target/nextest-build-cache/local-coverage"
 bash scripts/run-cov.sh
 ```
 

@@ -9,6 +9,9 @@ import subprocess
 
 
 def main():
+    # Behavior fixtures need release semantics, but not optimizer throughput.
+    # Keep caller overrides and coverage instrumentation intact.
+    os.environ.setdefault("CARGO_PROFILE_RELEASE_OPT_LEVEL", "0")
     workspace = Path(os.environ["NEXTEST_WORKSPACE_ROOT"])
     cargo = shutil.which(os.environ.get("CARGO", "cargo"))
     if cargo is None:
@@ -66,6 +69,7 @@ def main():
             "CARGO": workspace / "scripts/nextest-cargo.sh",
             # Selected fixtures use local packages and already-fetched registry dependencies.
             "CARGO_NET_OFFLINE": "true",
+            "CARGO_PROFILE_RELEASE_OPT_LEVEL": os.environ["CARGO_PROFILE_RELEASE_OPT_LEVEL"],
             "MF_TEST_REAL_CARGO": cargo,
             "MF_TEST_TARGET_DIR": target,
             "MF_TEST_PACKAGE_TARGET_DIR": directory / "packaged-target",
