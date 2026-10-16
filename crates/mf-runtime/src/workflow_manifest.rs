@@ -27,31 +27,25 @@ pub struct LoopExecutionOrder {
     pub execution_order: Vec<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(tag = "version", deny_unknown_fields)]
-pub enum WorkflowManifest {
-    #[serde(rename = "2026-10-07")]
-    Legacy {
-        description: WorkflowDescription,
-        interface: WorkflowInterface,
-    },
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum WorkflowManifestVersion {
     #[serde(rename = "2026-10-16")]
-    Compiled {
-        definition: crate::WorkflowDefinition,
-        execution_order: Vec<String>,
-        #[serde(default, skip_serializing_if = "Vec::is_empty")]
-        loop_orders: Vec<LoopExecutionOrder>,
-        input_schema: WorkflowInputSchema,
-    },
+    V2026_10_16,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkflowManifest {
+    pub version: WorkflowManifestVersion,
+    pub definition: crate::WorkflowDefinition,
+    pub execution_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub loop_orders: Vec<LoopExecutionOrder>,
+    pub input_schema: WorkflowInputSchema,
 }
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowManifestError {
-    #[snafu(
-        display("workflow manifest has no compiled definition; recompile the workflow"),
-        visibility(pub)
-    )]
-    MissingDefinition,
     #[snafu(display("compiled workflow interface drift at `{path}`: {component} differs"))]
     InterfaceDrift {
         path: String,
@@ -72,53 +66,21 @@ pub enum WorkflowManifestError {
 }
 
 impl WorkflowManifest {
-    pub fn definition(&self) -> Option<&crate::WorkflowDefinition> {
-        match self {
-            Self::Legacy { .. } => None,
-            Self::Compiled { definition, .. } => Some(definition),
-        }
-    }
-
     /// Borrows an original root node without preparing or executing its provider.
-    /// Legacy manifests and unknown node IDs return `None`.
     pub fn node_definition(&self, id: &str) -> Option<&crate::NodeDefinition> {
-        self.definition()?
+        self.definition
             .nodes
             .iter()
             .find(|node| node.id.as_str() == id)
     }
 
-    pub fn input_schema(&self) -> &WorkflowInputSchema {
-        match self {
-            Self::Legacy { interface, .. } => &interface.schema,
-            Self::Compiled { input_schema, .. } => input_schema,
-        }
-    }
-
     pub fn workflow_id(&self) -> Result<WorkflowId, WorkflowManifestError> {
-        match self {
-            Self::Legacy { description, .. } => Ok(description.workflow_id.clone()),
-            Self::Compiled {
-                definition,
-                execution_order,
-                ..
-            } => WorkflowId::from_definition(definition, execution_order).context(GraphSnafu),
-        }
+        WorkflowId::from_definition(&self.definition, &self.execution_order).context(GraphSnafu)
     }
 
     pub fn description(&self) -> Result<WorkflowDescription, WorkflowManifestError> {
-        match self {
-            Self::Legacy { description, .. } => {
-                description.validate().context(GraphSnafu)?;
-                Ok(description.clone())
-            }
-            Self::Compiled {
-                definition,
-                execution_order,
-                loop_orders,
-                ..
-            } => describe_definition(definition, execution_order, loop_orders).context(GraphSnafu),
-        }
+        describe_definition(&self.definition, &self.execution_order, &self.loop_orders)
+            .context(GraphSnafu)
     }
 
     pub fn interface(&self) -> Result<WorkflowInterface, WorkflowManifestError> {
@@ -126,13 +88,10 @@ impl WorkflowManifest {
     }
 
     fn interface_for(&self, workflow_id: WorkflowId) -> WorkflowInterface {
-        match self {
-            Self::Legacy { interface, .. } => interface.clone(),
-            Self::Compiled { input_schema, .. } => WorkflowInterface {
-                version: crate::WorkflowInterfaceVersion::for_schema(input_schema),
-                workflow_id,
-                schema: input_schema.clone(),
-            },
+        WorkflowInterface {
+            version: crate::WorkflowInterfaceVersion::for_schema(&self.input_schema),
+            workflow_id,
+            schema: self.input_schema.clone(),
         }
     }
 
@@ -140,7 +99,7 @@ impl WorkflowManifest {
         &self,
         actual: &WorkflowInputSchema,
     ) -> Result<(), WorkflowManifestError> {
-        let expected = self.input_schema();
+        let expected = &self.input_schema;
         for node in expected.inputs.keys().chain(actual.inputs.keys()) {
             let path = pointer("", node);
             let (Some(expected), Some(actual)) =
@@ -272,7 +231,7 @@ impl WorkflowManifest {
     }
 }
 
-/// Projects the 2026-10-16 observation view without planning or providers.
+/// Projects the observation view without planning or providers.
 pub fn describe_definition(
     definition: &crate::WorkflowDefinition,
     execution_order: &[String],
@@ -323,8 +282,6 @@ pub fn describe_definition(
                 } else {
                     ExecutionMode::Single
                 },
-                // The manifest version fixes these schemas even when newer runtimes add protocols.
-                event_schema_version: if definition.execution.is_some() { 4 } else { 2 },
             }),
         workflow_id: WorkflowId::from_definition(definition, execution_order)?,
         nodes: ordered_nodes(

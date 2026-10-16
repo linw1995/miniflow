@@ -114,7 +114,8 @@ impl CompiledWorkflow {
         &self,
         input_schema: mf_runtime::WorkflowInputSchema,
     ) -> Result<mf_runtime::WorkflowManifest, PlanError> {
-        let manifest = mf_runtime::WorkflowManifest::Compiled {
+        let manifest = mf_runtime::WorkflowManifest {
+            version: mf_runtime::WorkflowManifestVersion::V2026_10_16,
             definition: self.definition.clone(),
             execution_order: self
                 .execution_order

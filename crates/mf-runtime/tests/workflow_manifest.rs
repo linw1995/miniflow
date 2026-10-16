@@ -1,15 +1,9 @@
 use mf_runtime::{
     MANIFEST_FRAMING_VERSION, MANIFEST_HEADER_BYTES, MANIFEST_MAGIC, MAX_MANIFEST_PADDING_BYTES,
-    MAX_MANIFEST_PAYLOAD_BYTES, WorkflowInput, WorkflowInputSchema, WorkflowInterface,
-    WorkflowInterfaceVersion, WorkflowManifest, WorkflowManifestError,
+    MAX_MANIFEST_PAYLOAD_BYTES, WorkflowInput, WorkflowInputSchema, WorkflowInterfaceVersion,
+    WorkflowManifest, WorkflowManifestError, WorkflowManifestVersion,
 };
-use mf_telemetry::{
-    description::{
-        ExecutionDescription, ExecutionMode, NodeDescription, WorkflowDescription,
-        WorkflowDescriptionVersion,
-    },
-    identity::WorkflowId,
-};
+use mf_telemetry::identity::WorkflowId;
 use std::error::Error;
 
 #[test]
@@ -23,11 +17,12 @@ fn compiled_manifests_derive_views_from_original_facts() {
         "nodes": [{"id": "root.a/~", "kind": "fixture.input", "config": config}]
     }))
     .unwrap();
-    let manifest = WorkflowManifest::Compiled {
+    let manifest = WorkflowManifest {
+        version: WorkflowManifestVersion::V2026_10_16,
         definition,
         execution_order: vec!["root.a/~".into()],
         loop_orders: vec![],
-        input_schema: sample().input_schema().clone(),
+        input_schema: sample().input_schema,
     };
     let payload = serde_json::to_value(&manifest).unwrap();
     assert_eq!(payload["version"], "2026-10-16");
@@ -39,10 +34,9 @@ fn compiled_manifests_derive_views_from_original_facts() {
     let node = decoded.node_definition("root.a/~").unwrap();
     assert_eq!(node.kind, "fixture.input");
     assert_eq!(node.config, config);
-    assert!(std::ptr::eq(node, &decoded.definition().unwrap().nodes[0]));
+    assert!(std::ptr::eq(node, &decoded.definition.nodes[0]));
     assert!(decoded.node_definition("root.a").is_none());
-    let identity =
-        WorkflowId::from_definition(decoded.definition().unwrap(), &["root.a/~".into()]).unwrap();
+    let identity = WorkflowId::from_definition(&decoded.definition, &["root.a/~".into()]).unwrap();
     let mut expected_graph = sample().description().unwrap();
     expected_graph.workflow_id = identity.clone();
     let mut expected_interface = sample().interface().unwrap();
@@ -50,21 +44,25 @@ fn compiled_manifests_derive_views_from_original_facts() {
     assert_eq!(decoded.description().unwrap(), expected_graph);
     assert_eq!(decoded.interface().unwrap(), expected_interface);
     assert_eq!(decoded.workflow_id().unwrap(), identity);
+    let description = decoded.description().unwrap();
     assert_eq!(
-        decoded.workflow_id().unwrap().as_str(),
-        "sha256:9d0a2e097af10c0d20b6106499be96c93985a50d31e884f4a59cef1eddc03619"
+        description.event_schema_version(),
+        mf_telemetry::LOOP_EVENT_SCHEMA_VERSION
     );
-    assert_eq!(decoded.description().unwrap().event_schema_version(), 2);
+    assert!(
+        serde_json::to_value(&description).unwrap()["execution"]
+            .get("event_schema_version")
+            .is_none()
+    );
     let mut stream = decoded.clone();
-    let WorkflowManifest::Compiled { definition, .. } = &mut stream else {
-        unreachable!()
-    };
+    let definition = &mut stream.definition;
     definition.execution =
         Some(serde_json::from_value(serde_json::json!({"mode": "stream"})).unwrap());
-    assert_eq!(stream.description().unwrap().event_schema_version(), 4);
-    let WorkflowManifest::Compiled { input_schema, .. } = &mut stream else {
-        unreachable!()
-    };
+    assert_eq!(
+        stream.description().unwrap().event_schema_version(),
+        mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
+    );
+    let input_schema = &mut stream.input_schema;
     input_schema
         .inputs
         .get_mut("root.a/~")
@@ -99,22 +97,6 @@ fn compiled_manifests_derive_views_from_original_facts() {
 }
 
 #[test]
-fn legacy_manifests_preserve_their_views_without_original_definitions() {
-    let manifest = sample();
-    let payload = serde_json::to_value(&manifest).unwrap();
-    assert!(payload.get("definition").is_none());
-    let decoded = WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap();
-    assert_eq!(decoded, manifest);
-    assert!(decoded.definition().is_none());
-    assert!(decoded.node_definition("root.a/~").is_none());
-    assert_eq!(
-        decoded.workflow_id().unwrap(),
-        decoded.description().unwrap().workflow_id
-    );
-    assert_eq!(decoded.interface().unwrap().schema, *decoded.input_schema());
-}
-
-#[test]
 fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
     let definition = serde_json::from_value(serde_json::json!({
         "version": "2026-09-29", "dependencies": {},
@@ -127,7 +109,8 @@ fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
         }}]
     }))
     .unwrap();
-    let manifest = WorkflowManifest::Compiled {
+    let manifest = WorkflowManifest {
+        version: WorkflowManifestVersion::V2026_10_16,
         definition,
         execution_order: vec!["repeat".into()],
         loop_orders: vec![
@@ -155,9 +138,7 @@ fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
     );
     assert_eq!(graph.loop_bodies[1].path, ["repeat", "inner"]);
     let mut reordered = manifest.clone();
-    let WorkflowManifest::Compiled { loop_orders, .. } = &mut reordered else {
-        unreachable!()
-    };
+    let loop_orders = &mut reordered.loop_orders;
     loop_orders[0].execution_order.reverse();
     assert_eq!(
         reordered.description().unwrap().loop_bodies[0]
@@ -179,15 +160,13 @@ fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
         "schema",
     ] {
         let mut invalid = manifest.clone();
-        let WorkflowManifest::Compiled {
+        let WorkflowManifest {
             definition,
             execution_order,
             loop_orders,
             input_schema,
-        } = &mut invalid
-        else {
-            unreachable!()
-        };
+            ..
+        } = &mut invalid;
         match case {
             "missing" => {
                 loop_orders.remove(0);
@@ -214,7 +193,7 @@ fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
                 execution_order.push("repeat".into());
             }
             "incomplete" => execution_order.clear(),
-            "schema" => *input_schema = sample().input_schema().clone(),
+            "schema" => *input_schema = sample().input_schema,
             _ => unreachable!(),
         }
         assert!(invalid.to_bytes().is_err(), "{case}");
@@ -226,47 +205,34 @@ fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
 }
 
 fn sample() -> WorkflowManifest {
-    let workflow_id = WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap();
-    WorkflowManifest::Legacy {
-        description: WorkflowDescription {
-            version: WorkflowDescriptionVersion::V2026_10_03,
-            workflow_id: workflow_id.clone(),
-            execution: Some(ExecutionDescription {
-                mode: ExecutionMode::Single,
-                event_schema_version: mf_telemetry::LOOP_EVENT_SCHEMA_VERSION,
-            }),
-            nodes: vec![NodeDescription {
-                id: "root.a/~".into(),
-                kind: "fixture.input".into(),
-            }],
-            data_edges: vec![],
-            control_edges: vec![],
-            execution_order: vec!["root.a/~".into()],
-            loop_bodies: vec![],
-        },
-        interface: WorkflowInterface {
-            version: WorkflowInterfaceVersion::V2026_10_11,
-            workflow_id,
-            schema: WorkflowInputSchema {
-                inputs: [(
-                    "root.a/~".into(),
-                    [(
-                        "port.a/~".into(),
-                        WorkflowInput {
-                            value_type: mf_runtime::ValueType::String,
-                            required: false,
-                            binding: Default::default(),
-                        },
-                    )]
-                    .into(),
+    WorkflowManifest {
+        version: WorkflowManifestVersion::V2026_10_16,
+        definition: serde_json::from_value(serde_json::json!({
+            "version": "2026-10-03", "dependencies": {},
+            "nodes": [{"id": "root.a/~", "kind": "fixture.input"}]
+        }))
+        .unwrap(),
+        execution_order: vec!["root.a/~".into()],
+        loop_orders: vec![],
+        input_schema: WorkflowInputSchema {
+            inputs: [(
+                "root.a/~".into(),
+                [(
+                    "port.a/~".into(),
+                    WorkflowInput {
+                        value_type: mf_runtime::ValueType::String,
+                        required: false,
+                        binding: Default::default(),
+                    },
                 )]
                 .into(),
-                stdin: [(
-                    "root.a/~".into(),
-                    mf_runtime::StdinRequirement::UnlessInput("port.a/~".into()),
-                )]
-                .into(),
-            },
+            )]
+            .into(),
+            stdin: [(
+                "root.a/~".into(),
+                mf_runtime::StdinRequirement::UnlessInput("port.a/~".into()),
+            )]
+            .into(),
         },
     }
 }
@@ -339,9 +305,8 @@ fn rejects_corrupt_framing_and_lengths_without_allocating_declared_payloads() {
 fn rejects_invalid_versions_and_duplicate_members_with_json_sources() {
     let payload = serde_json::to_string(&sample()).unwrap();
     for invalid in [
-        payload.replace("2026-10-07", "2099-01-01"),
-        payload.replace("2026-10-11", "2026-10-03"),
-        payload.replacen("{", "{\"version\":\"2026-10-07\",", 1),
+        payload.replace("2026-10-16", "2099-01-01"),
+        payload.replacen("{", "{\"version\":\"2026-10-16\",", 1),
         payload.replace("\"required\":false", "\"required\":false,\"required\":true"),
         format!("{payload}{{}}"),
         "{".into(),
@@ -353,61 +318,9 @@ fn rejects_invalid_versions_and_duplicate_members_with_json_sources() {
 }
 
 #[test]
-fn rejects_inconsistent_graphs_and_interfaces_on_read_and_write() {
-    let mut manifest = sample();
-    let WorkflowManifest::Legacy {
-        ref mut interface, ..
-    } = manifest
-    else {
-        unreachable!()
-    };
-    interface.workflow_id = WorkflowId::try_from(format!("sha256:{}", "b".repeat(64))).unwrap();
-    assert!(matches!(
-        manifest.to_bytes(),
-        Err(WorkflowManifestError::Interface { .. })
-    ));
-    let bytes = frame(&serde_json::to_vec(&manifest).unwrap());
-    assert!(matches!(
-        WorkflowManifest::from_bytes(&bytes),
-        Err(WorkflowManifestError::Interface { .. })
-    ));
-    manifest = sample();
-    let WorkflowManifest::Legacy {
-        ref mut description,
-        ..
-    } = manifest
-    else {
-        unreachable!()
-    };
-    description.execution_order.clear();
-    let error = manifest.to_bytes().unwrap_err();
-    assert!(matches!(error, WorkflowManifestError::Graph { .. }));
-    assert!(error.source().unwrap().is::<mf_telemetry::ContractError>());
-    manifest = sample();
-    let WorkflowManifest::Legacy {
-        ref mut interface, ..
-    } = manifest
-    else {
-        unreachable!()
-    };
-    interface.schema.inputs.clear();
-    assert!(matches!(
-        manifest.to_bytes(),
-        Err(WorkflowManifestError::Interface { .. })
-    ));
-}
-
-#[test]
 fn limits_the_combined_serialized_payload() {
     let mut manifest = sample();
-    let WorkflowManifest::Legacy {
-        ref mut description,
-        ..
-    } = manifest
-    else {
-        unreachable!()
-    };
-    description.nodes[0].kind = "x".repeat(MAX_MANIFEST_PAYLOAD_BYTES);
+    manifest.definition.nodes[0].kind = "x".repeat(MAX_MANIFEST_PAYLOAD_BYTES);
     assert!(matches!(
         manifest.to_bytes(),
         Err(WorkflowManifestError::TooLarge { .. })
@@ -417,7 +330,7 @@ fn limits_the_combined_serialized_payload() {
 #[test]
 fn reports_exact_interface_drift_before_accepting_prepared_schemas() {
     let manifest = sample();
-    let schema = manifest.input_schema().clone();
+    let schema = manifest.input_schema.clone();
     manifest.validate_prepared_schema(&schema).unwrap();
     for component in [
         "node",

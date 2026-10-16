@@ -2,7 +2,7 @@
 
 ## Availability and package boundaries
 
-`mf-telemetry` provides versioned descriptions, lifecycle events, workflow/run identities, sequence reservation, validation, and mapping into OpenTelemetry log records. Shared runtime instrumentation and generated execution accept caller-owned observations. Compiled runners embed graph and interface records and initialize OTel export only when an endpoint is configured.
+`mf-telemetry` provides versioned descriptions, lifecycle events, workflow/run identities, sequence reservation, validation, and mapping into OpenTelemetry log records. Shared runtime instrumentation and generated execution accept caller-owned observations. Compiled runners embed the facts needed to derive graph and interface views and initialize OTel export only when an endpoint is configured.
 
 `mf-tui` contains the local OTLP receiver, state reducer, graph renderer, and CLI-only process supervisor used by `mf run <executable> --tui`.
 
@@ -111,20 +111,18 @@ Graph-relative event validation checks workflow/node identity, position, sequenc
 
 ## Embedded manifest format
 
-Manifest payload version `2026-10-07` contains `version`, `description`, and `interface`. The existing graph
-and interface protocol versions remain independent; both records must identify the same workflow.
-Version `2026-10-16` stores only the compiled `definition`, root `execution_order`, optional nested `loop_orders`,
-and prepared `input_schema`. Graph descriptions, interface wrappers, and workflow IDs are not duplicated in the payload.
-`description()`, `interface()`, and `workflow_id()` derive those views using versioned rules and the frozen orders,
-without planning a DAG or preparing providers. `definition()`, `node_definition(id)`, and `input_schema()` borrow
-original data; node lookup uses exact root IDs. Input contracts remain stored because provider-declared ports,
+Manifest payload version `2026-10-16` stores only the compiled `definition`, root `execution_order`, optional nested
+`loop_orders`, and prepared `input_schema`. Graph descriptions, interface wrappers, and workflow IDs are not duplicated
+in the payload. `description()`, `interface()`, and `workflow_id()` derive those views from the stored facts without
+planning a DAG or preparing providers. Original definition and input schema are directly accessible fields;
+`node_definition(id)` borrows a root node by exact ID. Input contracts remain stored because provider-declared ports,
 bindings, and stdin requirements cannot be inferred from definition JSON alone.
 The definition contains full static configuration, including private literals, parameter defaults, and dependencies.
 Configuration expressions remain unresolved; invocation values and environment-derived values are not materialized.
-The manifest version fixes the derivation rules so newer readers preserve existing observation and interface protocols.
-Legacy `2026-10-07` records keep their stored description and interface behind the same helpers; definition lookup
-returns `None`. Invalid orders, inconsistent input contracts, missing required facts, and unexpected properties fail
-validation. The combined UTF-8 JSON payload remains limited to 16 MiB.
+Execution descriptions store the mode; `event_schema_version()` derives the event protocol without a duplicate field.
+Since miniflow has not released, older manifest layouts are unsupported and require recompilation. Invalid orders,
+inconsistent input contracts, missing required facts, and unexpected properties fail validation.
+The combined UTF-8 JSON payload remains limited to 16 MiB.
 New Linux and macOS runners embed these bytes in `.mf_manifest` (ELF) or `__DATA,__mf_manifest` (Mach-O), respectively.
 The section is retained through release optimization, LTO, and supported stripping, including telemetry-disabled builds.
 Manifest inspection reads the frozen records without preparing providers or launching the runner.

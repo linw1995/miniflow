@@ -30,7 +30,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 use signal_hook::{SigId, consts::SIGINT, flag, low_level::unregister};
-use snafu::{ResultExt, Snafu, ensure};
+use snafu::{ResultExt, Snafu};
 use std::{
     collections::{BTreeMap, VecDeque},
     env,
@@ -76,10 +76,6 @@ pub enum RunError {
     InputFile { path: PathBuf, source: io::Error },
     #[snafu(display("could not prepare private workflow arguments: {source}"))]
     ArgumentFile { source: io::Error },
-    #[snafu(display(
-        "streaming event schema {schema_version} is unsupported by TUI; recompile the workflow for schema 4"
-    ))]
-    UnsupportedStream { schema_version: i64 },
     #[snafu(display("could not inspect workflow: {source}"))]
     Manifest { source: ManifestReadError },
     #[snafu(display("could not layout workflow graph: {source}"))]
@@ -148,7 +144,7 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         );
     }
     let arguments = if !options.arguments.is_empty() {
-        WorkflowArguments::parse(options.arguments.clone(), manifest.input_schema())?
+        WorkflowArguments::parse(options.arguments.clone(), &manifest.input_schema)?
     } else if let Some(json) = &options.inputs {
         WorkflowArguments::from_json(json.as_bytes())?
     } else if let Some(path) = &options.inputs_file {
@@ -162,14 +158,7 @@ fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, R
         WorkflowArguments::default()
     };
     let description = manifest.description()?;
-    let schema = manifest.input_schema();
-    ensure!(
-        !description.is_streaming()
-            || description.event_schema_version() == mf_telemetry::STREAM_EVENT_SCHEMA_VERSION,
-        UnsupportedStreamSnafu {
-            schema_version: description.event_schema_version()
-        }
-    );
+    let schema = &manifest.input_schema;
     schema.validate(&arguments)?;
     let needs_stdin = schema.stdin_owner(&arguments)?.is_some();
     if needs_stdin {
@@ -1304,19 +1293,22 @@ mod tests {
     fn source_runner(directory: &Path, resource: Option<StdinRequirement>) -> PathBuf {
         use std::{fs, os::unix::fs::PermissionsExt};
         let runner = directory.join("runner");
-        let graph = serde_json::json!({"version":"2026-10-03", "workflow_id":format!("sha256:{}", "a".repeat(64)),
-            "execution":{"mode":"stream", "event_schema_version":4},
-            "nodes":[{"id":"source/id", "kind":"third-party.dynamic_source"}], "execution_order":["source/id"],
-            "data_edges":[], "control_edges":[], "loop_bodies":[]});
+        let definition = serde_json::json!({"version":"2026-10-03", "dependencies":{},
+            "execution":{"mode":"stream"},
+            "nodes":[{"id":"source/id", "kind":"third-party.dynamic_source"}]});
         let mut stdin = serde_json::Map::new();
         if let Some(resource) = resource {
             stdin.insert("source/id".into(), serde_json::json!(resource));
         }
-        let interface = serde_json::json!({"version":"2026-10-11", "workflow_id":graph["workflow_id"],
-            "schema":{"inputs":{"source/id":{"path":{"type":"string", "required":true}}}, "stdin":stdin}});
-        let manifest = mf_runtime::WorkflowManifest::Legacy {
-            description: serde_json::from_value(graph).unwrap(),
-            interface: serde_json::from_value(interface).unwrap(),
+        let manifest = mf_runtime::WorkflowManifest {
+            version: mf_runtime::WorkflowManifestVersion::V2026_10_16,
+            definition: serde_json::from_value(definition).unwrap(),
+            execution_order: vec!["source/id".into()],
+            loop_orders: vec![],
+            input_schema: serde_json::from_value(serde_json::json!({
+                "inputs":{"source/id":{"path":{"type":"string", "required":true}}}, "stdin":stdin
+            }))
+            .unwrap(),
         };
         fs::write(
             &runner,
@@ -1494,14 +1486,8 @@ mod tests {
             Some(StdinRequirement::UnlessInput("path".into())),
         );
         let mut manifest = read_manifest(&runner).unwrap();
-        let mf_runtime::WorkflowManifest::Legacy {
-            ref mut interface, ..
-        } = manifest
-        else {
-            unreachable!()
-        };
-        interface
-            .schema
+        manifest
+            .input_schema
             .inputs
             .get_mut("source/id")
             .unwrap()
@@ -1527,35 +1513,6 @@ mod tests {
         assert!(matches!(
             prepare_launch(&runner, &valid_options()),
             Err(RunError::Manifest { .. })
-        ));
-    }
-
-    #[test]
-    fn preflight_rejects_unsupported_streaming_protocol_without_starting_a_runner() {
-        let root = tempfile::tempdir().unwrap();
-        let runner = root.path().join("runner");
-        let mut manifest = crate::test_support::sample_manifest();
-        let mf_runtime::WorkflowManifest::Legacy {
-            ref mut description,
-            ..
-        } = manifest
-        else {
-            unreachable!()
-        };
-        description.version = WorkflowDescriptionVersion::V2026_10_02;
-        description.nodes.push(NodeDescription {
-            id: "%input".into(),
-            kind: "%input".into(),
-        });
-        description.execution_order.push("%input".into());
-        std::fs::write(
-            &runner,
-            crate::test_support::elf(Some(&manifest.to_bytes().unwrap()), 1),
-        )
-        .unwrap();
-        assert!(matches!(
-            prepare_launch(&runner, &RunOptions::default()),
-            Err(RunError::UnsupportedStream { schema_version: 3 })
         ));
     }
 

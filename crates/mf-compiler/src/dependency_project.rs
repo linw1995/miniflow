@@ -91,7 +91,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         include_str!(concat!(env!("OUT_DIR"), "/node-targets.json")),
     )?;
     let invocation = mf_runtime::RunnerInvocation::parse(
-        std::env::args_os().skip(1), manifest.input_schema(), &targets,
+        std::env::args_os().skip(1), &manifest.input_schema, &targets,
     )?;
     if let Some(id) = invocation.node.as_deref() {
         let target = mf_runtime::NodeTarget::find(&targets, id)?;
@@ -347,9 +347,8 @@ fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: 
         state.set_workflow_arguments(arguments);
         #[cfg(unix)]
         {
-            use snafu::OptionExt as _;
             let manifest = workflow_manifest()?;
-            let definition = manifest.definition().context(mf_runtime::WorkflowManifestMissingDefinitionSnafu)?;
+            let definition = &manifest.definition;
             if definition.version.supports_startup_inputs() {
                 state.set_stdin(mf_runtime::TextInput::claim()?);
             }

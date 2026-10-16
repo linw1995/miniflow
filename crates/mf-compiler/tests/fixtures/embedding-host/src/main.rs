@@ -25,8 +25,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if std::env::var_os("MF_EMBEDDING_DESCRIBE").is_some() {
         println!(
             "{:?}/{:?}",
-            contract::manifest(&registry)?.input_schema().inputs["source"]["path./~"].value_type,
-            contract_stream::manifest(&registry)?.input_schema().inputs["source"]["path./~"]
+            contract::manifest(&registry)?.input_schema.inputs["source"]["path./~"].value_type,
+            contract_stream::manifest(&registry)?.input_schema.inputs["source"]["path./~"]
                 .value_type,
         );
         return Ok(());
