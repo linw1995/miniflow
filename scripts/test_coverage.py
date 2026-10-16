@@ -26,6 +26,10 @@ class CoverageTests(unittest.TestCase):
                     workflow, re.DOTALL,
                 )
                 self.assertEqual(sorted(name for name, _ in steps), sorted(packages))
+                self.assertLess(workflow.index("name: Generate coverage reports"),
+                                workflow.index("name: Prune coverage build cache"))
+                self.assertLess(workflow.index("name: Prune coverage build cache"),
+                                workflow.index("name: Upload coverage artifact"))
                 for name, body in steps:
                     self.assertIn(f"scripts/run-cov.sh --test-package {name}\n", body)
                     if filename == "CI.yaml":
@@ -67,7 +71,8 @@ session = os.environ["MF_TEST_BUILD_CACHE_SESSION"]
 assert session != "inherited-session"
 assert session == Path("target/coverage/build-cache-session").read_text().strip()
 ''')
-            shutil.copyfile(Path(__file__).resolve().parent / "run-cov.sh", root / "scripts/run-cov.sh")
+            for script in ["run-cov.sh", "prune-test-cache.py"]:
+                shutil.copyfile(Path(__file__).resolve().parent / script, root / "scripts" / script)
             (root / "Cargo.toml").write_text('''[package]
 name = "coverage-fixture"
 version = "0.1.0"
@@ -75,7 +80,18 @@ edition = "2024"
 
 [workspace]
 members = ["other", "empty"]
+exclude = ["dependency"]
+
+[dependencies]
+coverage-dependency = { path = "dependency" }
 ''')
+            (root / "dependency/src").mkdir(parents=True)
+            (root / "dependency/Cargo.toml").write_text('''[package]
+name = "coverage-dependency"
+version = "0.1.0"
+edition = "2024"
+''')
+            (root / "dependency/src/lib.rs").write_text("pub fn value() -> u32 { 1 }\n")
             (root / "empty/src").mkdir(parents=True)
             (root / "empty/Cargo.toml").write_text('''[package]
 name = "empty-fixture"
@@ -126,10 +142,21 @@ mod tests {{
             self.assertGreater((root / "target/coverage/result/cobertura.xml").stat().st_size, 0)
             self.assertIn("other/src/lib.rs", report.read_text())
 
+            dependencies = list((root / "target/coverage/build/debug/deps").glob("libcoverage_dependency-*.rlib"))
+            self.assertTrue(dependencies)
+            before_pruning = report.read_bytes()
+            result = execute("bash", "scripts/run-cov.sh", "--prune-cache")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertEqual(report.read_bytes(), before_pruning)
+            self.assertTrue(all(path.is_file() for path in dependencies))
+            self.assertFalse(list((root / "target/coverage/build/debug/deps").glob("libcoverage_fixture-*.rlib")))
+
             # Separate steps must accumulate profiles without cleaning earlier crates.
             result = execute("bash", "scripts/run-cov.sh", "--prepare")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertFalse(report.exists())
+            result = execute("bash", "scripts/run-cov.sh", "--prune-cache")
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
             session = root / "target/coverage/build-cache-session"
             prepared_session = session.read_text()
             self.assertTrue(prepared_session.strip())

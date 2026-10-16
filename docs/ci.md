@@ -36,6 +36,11 @@ zero by default. This keeps release semantics and artifact paths while reducing
 compilation cost. Set `CARGO_PROFILE_RELEASE_OPT_LEVEL` to override the default;
 the dedicated LTO/strip test explicitly requests level three. Existing Rust flags,
 including coverage instrumentation, are preserved.
+After reporting, CI runs `scripts/run-cov.sh --prune-cache` before saving the
+cache. It removes checkout artifacts that the next preparation would delete and
+executables belonging to temporary generated projects. Registry libraries,
+proc macros, and dependency build scripts remain cached. Reports are preserved;
+run `--prepare` again before executing more package steps after pruning.
 Caches accelerate compilation without changing which tests execute.
 
 ## Coverage step timings

@@ -98,6 +98,8 @@ jobs:
         run: nix develop --command bash scripts/run-cov.sh --test-package mfn-llm
       - name: Generate coverage reports
         run: nix develop --command bash scripts/run-cov.sh --report
+      - name: Prune coverage build cache
+        run: nix develop --command bash scripts/run-cov.sh --prune-cache
       - name: Upload coverage artifact
         uses: actions/upload-artifact@v7
         with:
