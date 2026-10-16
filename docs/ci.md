@@ -29,7 +29,9 @@ cleans checkout packages before rebuilding the CLI. Packaged source digests also
 invalidate registry builds of the support packages and external fixture whenever
 their build inputs change, even at the same version. Cargo's generated VCS
 metadata is excluded from this identity because these crates do not consume it;
-metadata-only repackaging retains compiled dependencies. Cargo's archive and file
+metadata-only repackaging retains compiled dependencies. Crate-local packaged
+lockfiles are excluded too: dependency builds use the consumer's lockfile, and
+packaged lockfiles contain revision-dependent checksums. Cargo's archive and file
 checksums still cover every packaged file. Workspace cleanup excludes these
 content-validated packages: Cargo otherwise removes their registry fingerprints
 by package name even when it retains their libraries. Content invalidation runs

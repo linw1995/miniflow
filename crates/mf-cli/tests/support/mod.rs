@@ -96,6 +96,9 @@ fn unpack_package(archive: &Path, vendor: &Path) -> (PathBuf, String) {
     // Cargo adds the checkout revision even when all build inputs are unchanged.
     // Our support crates do not consume this generated metadata.
     files.remove(".cargo_vcs_info.json");
+    // Dependency builds use the consumer's lockfile. This packaged lockfile
+    // also changes when only transitive package revision metadata changes.
+    files.remove("Cargo.lock");
     let source_checksum = Sha256::digest(serde_json::to_vec(&files).unwrap())
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -115,9 +118,11 @@ fn packaged_source_identity_ignores_revision_but_tracks_build_inputs() {
         let encoder = GzEncoder::new(File::create(&archive).unwrap(), Compression::fast());
         let mut builder = tar::Builder::new(encoder);
         let vcs = json!({"git": {"sha1": revision}}).to_string();
+        let lock = format!("version = 4\n# dependency checksum: {revision}\n");
         for (name, contents) in [
             ("src/lib.rs", source),
             ("Cargo.toml", manifest),
+            ("Cargo.lock", lock.as_str()),
             (".cargo_vcs_info.json", vcs.as_str()),
         ] {
             let mut header = tar::Header::new_gnu();
@@ -149,6 +154,10 @@ fn packaged_source_identity_ignores_revision_but_tracks_build_inputs() {
     assert_eq!(
         checksums["files"][".cargo_vcs_info.json"],
         checksum(&directory.join(".cargo_vcs_info.json"))
+    );
+    assert_eq!(
+        checksums["files"]["Cargo.lock"],
+        checksum(&directory.join("Cargo.lock"))
     );
     write_archive("second", "pub fn value() -> u32 { 2 }", "original manifest");
     assert_ne!(unpack_package(&archive, &vendor).1, second);
