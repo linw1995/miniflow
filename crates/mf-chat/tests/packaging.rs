@@ -23,6 +23,38 @@ fn copy_tree(source: &Path, destination: &Path) {
     }
 }
 
+fn copy_chat_workspace(root: &Path, destination: &Path) {
+    let mut manifest: toml::Table = fs::read_to_string(root.join("Cargo.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let workspace = manifest["workspace"].as_table_mut().unwrap();
+    for key in ["members", "default-members"] {
+        workspace.insert(
+            key.into(),
+            toml::Value::Array(vec!["crates/mf-chat".into()]),
+        );
+    }
+    // Only the chat build inputs are deleted by this fixture. Stable dependency
+    // paths let Cargo reuse the same artifacts as the generated-runner tests.
+    for (_, dependency) in workspace["dependencies"].as_table_mut().unwrap().iter_mut() {
+        if let Some(path) = dependency.get_mut("path") {
+            *path = root.join(path.as_str().unwrap()).to_str().unwrap().into();
+        }
+    }
+    fs::create_dir_all(destination).unwrap();
+    fs::write(
+        destination.join("Cargo.toml"),
+        toml::to_string(&manifest).unwrap(),
+    )
+    .unwrap();
+    fs::copy(root.join("Cargo.lock"), destination.join("Cargo.lock")).unwrap();
+    copy_tree(
+        &root.join("crates/mf-chat"),
+        &destination.join("crates/mf-chat"),
+    );
+}
+
 #[test]
 fn packaged_inputs_include_workflows_migrations_and_host_fixture() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -72,20 +104,15 @@ fn source_free_host_preserves_multi_session_retry_title_and_statistics() {
         .parent()
         .unwrap();
     let copy = directory.path().join("workspace");
-    fs::create_dir(&copy).unwrap();
-    for file in ["Cargo.toml", "Cargo.lock"] {
-        fs::copy(root.join(file), copy.join(file)).unwrap();
-    }
-    copy_tree(&root.join("crates"), &copy.join("crates"));
+    copy_chat_workspace(root, &copy);
     let host = copy.join("crates/mf-chat/tests/fixtures/host");
     fs::rename(host.join("Cargo.toml.in"), host.join("Cargo.toml")).unwrap();
     fs::copy(root.join("Cargo.lock"), host.join("Cargo.lock")).unwrap();
-    let target = match std::env::var_os("MF_TEST_BUILD_CACHE_DIR") {
-        Some(path) => PathBuf::from(path).join("target"),
-        None => root.join("target/chat-host-fixture"),
-    };
-    let output = Command::new("cargo")
-        .args(["build", "--offline", "--manifest-path"])
+    let target = std::env::var_os("MF_TEST_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target/chat-host-fixture"));
+    let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args(["build", "--release", "--offline", "--manifest-path"])
         .arg(host.join("Cargo.toml"))
         .env("CARGO_TARGET_DIR", &target)
         .output()
@@ -100,14 +127,12 @@ fn source_free_host_preserves_multi_session_retry_title_and_statistics() {
         .join(format!("chat-host{}", std::env::consts::EXE_SUFFIX));
     fs::copy(
         target
-            .join("debug")
+            .join("release")
             .join(format!("chat-host-fixture{}", std::env::consts::EXE_SUFFIX)),
         &binary,
     )
     .unwrap();
-    fs::remove_dir_all(copy.join("crates/mf-chat/workflows")).unwrap();
-    fs::remove_dir_all(copy.join("crates/mf-chat/migrations")).unwrap();
-    fs::remove_dir_all(host.join("src")).unwrap();
+    fs::remove_dir_all(&copy).unwrap();
     let mut failed = Reply::json(json!({"error":{"message":"synthetic failure"}}));
     failed.status = 500;
     let server = Server::start(vec![

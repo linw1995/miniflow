@@ -28,6 +28,7 @@ sha2.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
+toml.workspace = true
 tempfile.workspace = true
 mfn-llm = { workspace = true, features = ["test-support"] }
 

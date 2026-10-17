@@ -18,6 +18,8 @@ capture-stderr = true
 platform = 'cfg(unix)'
 # Keep this selection identical to the shared-cargo override below.
 filter = '''
+(binary_id(=mf-chat::packaging) &
+    test(=source_free_host_preserves_multi_session_retry_title_and_statistics)) |
 (binary_id(=mf-cli::compile) & (
     test(=development_support_uses_checkout_crates_without_override) |
     test(=compiles_a_runner_without_telemetry_and_preserves_execution) |
@@ -85,6 +87,8 @@ setup = "package-dependencies"
 platform = 'cfg(unix)'
 # Serialize generated builds that share the prewarmed Cargo target.
 filter = '''
+(binary_id(=mf-chat::packaging) &
+    test(=source_free_host_preserves_multi_session_retry_title_and_statistics)) |
 (binary_id(=mf-cli::compile) & (
     test(=development_support_uses_checkout_crates_without_override) |
     test(=compiles_a_runner_without_telemetry_and_preserves_execution) |
