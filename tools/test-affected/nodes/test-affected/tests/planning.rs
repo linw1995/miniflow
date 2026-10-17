@@ -217,6 +217,8 @@ fn script_verifies_selection_runs_cases_and_preserves_empty_stale_and_failed_pla
         Command::new("python3")
             .arg(&script)
             .arg(&path)
+            // CI shares a target directory, but these repositories have identical package names.
+            .env("CARGO_TARGET_DIR", root.join("target/fixture-build"))
             .args(args)
             .output()
             .unwrap()
