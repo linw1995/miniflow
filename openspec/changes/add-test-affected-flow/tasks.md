@@ -8,11 +8,11 @@
 
 ## 2. LSP Stream provider
 
-- [ ] 2.1 Define typed analysis request/outcome ports and opaque context passthrough; verify value metadata preservation, snapshot/configuration identities, and standard-only shapes without testing or Cargo fields.
-- [ ] 2.2 Implement stdio framing, capabilities, negotiated offsets, server requests/notifications, and partial results; verify interleaved fake-server messages, non-ASCII positions, and unsupported-method gaps.
-- [ ] 2.3 Implement batched standard queries and small optional server profiles with one session per snapshot/configuration per invocation; verify session reuse, base/head isolation, and no unconfigured Rust extension calls.
-- [ ] 2.4 Implement bounded I/O, deadlines, cancellation, and child cleanup before terminal publication; verify missing servers and deadlines yield one incomplete outcome, while cancellation/disposal stops idle reads without publishing fallback or leaking children.
-- [ ] 2.5 Register `lsp.analyze` as `TypedStreamNode`; verify one terminal emission, no-server `not_requested` passthrough, progress-only observations, emitter failure propagation, and side-effect-free preparation/inspection; document its node contract.
+- [x] 2.1 Define typed analysis request/outcome ports and opaque context passthrough; verify value metadata preservation, snapshot/configuration identities, and standard-only shapes without testing or Cargo fields.
+- [x] 2.2 Implement stdio framing, capabilities, negotiated offsets, server requests/notifications, and partial results; verify interleaved fake-server messages, non-ASCII positions, and unsupported-method gaps.
+- [x] 2.3 Implement batched standard queries and small optional server profiles with one session per snapshot/configuration per invocation; verify session reuse, base/head isolation, and no unconfigured Rust extension calls.
+- [x] 2.4 Implement bounded I/O, deadlines, cancellation, and child cleanup before terminal publication; verify missing servers and deadlines yield one incomplete outcome, while cancellation/disposal stops idle reads without publishing fallback or leaking children.
+- [x] 2.5 Register `lsp.analyze` as `TypedStreamNode`; verify one terminal emission, no-server `not_requested` passthrough, progress-only observations, emitter failure propagation, and side-effect-free preparation/inspection; document its node contract.
 
 ## 3. Git facts, planning, and script consumption
 

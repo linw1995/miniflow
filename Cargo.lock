@@ -1780,6 +1780,17 @@ dependencies = [
 [[package]]
 name = "mfn-lsp"
 version = "0.1.0"
+dependencies = [
+ "inventory",
+ "libc",
+ "mf-runtime",
+ "opentelemetry",
+ "serde",
+ "serde_json",
+ "snafu",
+ "tempfile",
+ "url",
+]
 
 [[package]]
 name = "mfn-test-affected"

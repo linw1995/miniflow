@@ -6,3 +6,16 @@ license.workspace = true
 repository.workspace = true
 publish = false
 description = "Language-server analysis for repository developer flows"
+
+[dependencies]
+inventory.workspace = true
+mf-runtime.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+snafu.workspace = true
+url.workspace = true
+libc.workspace = true
+opentelemetry = { workspace = true, features = ["trace"] }
+
+[dev-dependencies]
+tempfile.workspace = true

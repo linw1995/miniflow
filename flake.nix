@@ -41,6 +41,7 @@
               (craneLib.fileset.commonCargoSources ./.)
               ./.config/nextest.toml
               ./examples
+              ./tools/test-affected
               ./crates/mf-chat/migrations
               ./crates/mf-chat/workflows
               ./crates/mf-chat/tests/fixtures
