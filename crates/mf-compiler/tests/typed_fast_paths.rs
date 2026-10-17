@@ -225,23 +225,27 @@ fn generated_owned_values_preserve_contracts_and_installation() {
             serde_json::to_value(expected).unwrap()
         );
     }
-    for (next, args, expected, has_segment) in [
+    for (next, cases, has_segment) in [
         (
             definition_for_extended(),
-            json!({"a.count":u64::MAX, "a.size":7, "a.ratio":-0.0, "a.payload":[null,"shared"]}),
-            json!({"count":u64::MAX,"size":7,"ratio":-0.0,"payload":[null,"shared"]}),
-            true,
-        ),
-        (
-            definition_for_extended(),
-            json!({"a.count":u64::MAX, "a.size":7.0, "a.ratio":42, "a.payload":[null,"shared"]}),
-            json!({"count":u64::MAX,"size":7,"ratio":42.0,"payload":[null,"shared"]}),
+            vec![
+                (
+                    json!({"a.count":u64::MAX, "a.size":7, "a.ratio":-0.0, "a.payload":[null,"shared"]}),
+                    json!({"count":u64::MAX,"size":7,"ratio":-0.0,"payload":[null,"shared"]}),
+                ),
+                (
+                    json!({"a.count":u64::MAX, "a.size":7.0, "a.ratio":42, "a.payload":[null,"shared"]}),
+                    json!({"count":u64::MAX,"size":7,"ratio":42.0,"payload":[null,"shared"]}),
+                ),
+            ],
             true,
         ),
         (
             definition_for_defaulted(),
-            json!({"a.text":"defaults"}),
-            json!({"result":"defaults!!!"}),
+            vec![(
+                json!({"a.text":"defaults"}),
+                json!({"result":"defaults!!!"}),
+            )],
             false,
         ),
     ] {
@@ -257,26 +261,28 @@ fn generated_owned_values_preserve_contracts_and_installation() {
         if has_segment {
             assert!(!report.segments.is_empty());
         }
-        let reference = instantiate_compiled(&plan, &registry)
-            .unwrap()
-            .execute_with_inputs(WorkflowArguments::try_from(args.clone()).unwrap())
-            .unwrap();
-        assert_eq!(serde_json::to_value(reference).unwrap(), expected);
         fs::write(&definition_path, serde_json::to_vec(&definition).unwrap()).unwrap();
         compile_project_with_options(&request(), &RunnerOptions { telemetry: false }).unwrap();
-        let output = Command::new(&executable)
-            .args(["--inputs", &args.to_string()])
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
-            expected
-        );
+        for (args, expected) in cases {
+            let reference = instantiate_compiled(&plan, &registry)
+                .unwrap()
+                .execute_with_inputs(WorkflowArguments::try_from(args.clone()).unwrap())
+                .unwrap();
+            assert_eq!(serde_json::to_value(reference).unwrap(), expected);
+            let output = Command::new(&executable)
+                .args(["--inputs", &args.to_string()])
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+                expected
+            );
+        }
     }
     let installed = fs::read(&executable).unwrap();
     for flag in ["bad_constructor", "bad_names"] {

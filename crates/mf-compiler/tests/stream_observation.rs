@@ -803,14 +803,16 @@ fn stream_sequences_outlive_the_legacy_run_budget_and_close_exactly_once() {
             .callback("collect", None, StreamTrigger::Timer)
             .is_none()
     );
-    let events = records(&harness);
-    assert!(events.last().unwrap().sequence > mf_telemetry::maximum_loop_event_count());
-    assert_eq!(events.len(), 40_022);
-    let wire = harness.records().pop().unwrap();
-    assert_eq!(
-        StreamRecord::decode(&wire).unwrap(),
-        *events.last().unwrap()
-    );
+    // Other lifecycle tests decode each event shape; this probe checks sequence capacity.
+    let captured = harness.capture.0.lock().unwrap();
+    let mut events = captured
+        .iter()
+        .filter(|record| record.scope == INSTRUMENTATION_SCOPE);
+    assert_eq!(events.clone().count(), 40_022);
+    let last = StreamRecord::decode(events.next_back().unwrap()).unwrap();
+    assert!(last.sequence > mf_telemetry::maximum_loop_event_count());
+    let wire = captured.last().unwrap();
+    assert_eq!(StreamRecord::decode(wire).unwrap(), last);
     assert!(wire.decode().is_err());
 }
 
