@@ -210,6 +210,7 @@ fn script_verifies_selection_runs_cases_and_preserves_empty_stale_and_failed_pla
     let head = commit(root);
     let comparison = compare(root, &base, &head);
     let mut plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    let passing_plan = plan.clone();
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../run-tests.py");
     let path = root.join("target/plan.json");
     let run = |plan: &mfn_test_affected::TestPlan, args: &[&str]| {
@@ -217,8 +218,8 @@ fn script_verifies_selection_runs_cases_and_preserves_empty_stale_and_failed_pla
         Command::new("python3")
             .arg(&script)
             .arg(&path)
-            // CI shares a target directory, but these repositories have identical package names.
-            .env("CARGO_TARGET_DIR", root.join("target/fixture-build"))
+            // Revisit older snapshots under the same inherited build directory.
+            .env("CARGO_TARGET_DIR", root.join("target/shared-build"))
             .args(args)
             .output()
             .unwrap()
@@ -278,6 +279,12 @@ fn script_verifies_selection_runs_cases_and_preserves_empty_stale_and_failed_pla
     let output = run(&plan, &[]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("FAIL"));
+    let output = run(&passing_plan, &[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

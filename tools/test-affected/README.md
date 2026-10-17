@@ -66,6 +66,8 @@ all features on the host target. No tests or test builds run inside the Flow.
 
 The separate script validates identities, builds/lists the baseline once, validates exact cases,
 and reuses the build for execution with nextest's default profile and no user configuration file.
+Cargo artifacts live in `<snapshot>/target/test-affected`, isolating workspace binaries even when
+the caller supplies a shared `CARGO_TARGET_DIR`. Listing and execution use the same directory.
 Missing exact names widen to baseline. Empty plans invoke no test command; compile/test failures
 preserve a nonzero exit code. The script accepts either a plan object or the Flow's `{"plan": ...}` output.
 

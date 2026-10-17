@@ -124,8 +124,6 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
     let output = Command::new("python3")
         .arg(script)
         .arg(&plan_path)
-        // CI shares a target directory, but these repositories have identical package names.
-        .env("CARGO_TARGET_DIR", root.join("target/fixture-build"))
         .current_dir(std::env::temp_dir())
         .output()
         .unwrap();

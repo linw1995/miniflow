@@ -123,6 +123,8 @@ def filterset(packages, tests):
 
 def cargo_arguments(plan, operation):
     args = ["cargo", "nextest", operation, "--locked", "--all-targets", "--profile", "default", "--user-config-file", "none"]
+    # Older snapshots can otherwise reuse newer workspace binaries from a shared target.
+    args += ["--target-dir", str(Path(plan["snapshot"]) / "target/test-affected")]
     configuration = plan["configuration"]
     if configuration["target"]:
         args += ["--target", configuration["target"]]
