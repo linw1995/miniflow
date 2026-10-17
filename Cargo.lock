@@ -1626,7 +1626,9 @@ name = "mf-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "diesel",
  "flate2",
+ "mf-chat",
  "mf-compiler",
  "mf-runtime",
  "mf-telemetry",
@@ -1719,6 +1721,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "mf-chat",
  "mf-runtime",
  "mf-telemetry",
  "nix",
