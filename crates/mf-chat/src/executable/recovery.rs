@@ -6,9 +6,27 @@ use crate::{
     turn,
 };
 use mf_runtime::NodeValue;
-use snafu::{IntoError, ResultExt, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, ensure};
 
 pub const MAX_RECOVERY_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(NodeValue)]
+struct WorkflowResult {
+    status: String,
+    text: Option<String>,
+    metadata: Option<mfn_llm::MessageMetadata>,
+    usages: Vec<mfn_llm::CallUsage>,
+    finish_reason: Option<String>,
+    error: Option<String>,
+}
+
+enum Delivered {
+    Succeeded(Completion),
+    Failed {
+        error: String,
+        usages: Vec<mfn_llm::CallUsage>,
+    },
+}
 
 impl ChatContract {
     pub fn decode_completion(
@@ -16,21 +34,78 @@ impl ChatContract {
         bytes: &[u8],
         invocation: &Invocation,
     ) -> Result<Completion, ChatError> {
+        match self.decode_result(bytes, invocation)? {
+            Delivered::Succeeded(completion) => Ok(completion),
+            Delivered::Failed { .. } => InvalidSnafu {
+                field: "workflow result",
+                reason: "workflow reported failure",
+            }
+            .fail(),
+        }
+    }
+
+    fn decode_result(&self, bytes: &[u8], invocation: &Invocation) -> Result<Delivered, ChatError> {
         ensure!(
             bytes.len() <= MAX_RECOVERY_BYTES,
             RecoveryTooLargeSnafu {
                 limit: MAX_RECOVERY_BYTES
             }
         );
-        let values: mf_runtime::NodeValues =
+        let mut values: mf_runtime::NodeValues =
             mf_runtime::decode_unique_json(bytes).context(JsonSnafu)?;
-        let response = mfn_llm::LlmOutputs::from_values(values)?;
-        let completion = Completion {
-            invocation: invocation.clone(),
-            reply: response.into(),
-        };
-        turn::validate_reply(&completion.reply)?;
-        Ok(completion)
+        values.retain(|name, _| {
+            matches!(
+                name.as_str(),
+                "status" | "text" | "metadata" | "usages" | "finish_reason" | "error"
+            )
+        });
+        let result = WorkflowResult::from_values(values)?;
+        turn::validate_usages(&result.usages)?;
+        match result.status.as_str() {
+            "succeeded" => {
+                ensure!(
+                    result.error.as_ref().is_none_or(|error| error.is_empty()),
+                    InvalidSnafu {
+                        field: "workflow result",
+                        reason: "success cannot include an error"
+                    }
+                );
+                let text = result.text.context(InvalidSnafu {
+                    field: "workflow result",
+                    reason: "success requires text",
+                })?;
+                let reply = crate::Reply {
+                    text,
+                    metadata: result.metadata,
+                    usages: Some(result.usages),
+                    usage: None,
+                    finish_reason: result.finish_reason,
+                };
+                turn::validate_reply(&reply)?;
+                Ok(Delivered::Succeeded(Completion {
+                    invocation: invocation.clone(),
+                    reply,
+                }))
+            }
+            "failed" => {
+                let error = result
+                    .error
+                    .filter(|error| !error.trim().is_empty())
+                    .context(InvalidSnafu {
+                        field: "workflow result",
+                        reason: "failure requires an error summary",
+                    })?;
+                Ok(Delivered::Failed {
+                    error,
+                    usages: result.usages,
+                })
+            }
+            _ => InvalidSnafu {
+                field: "workflow result",
+                reason: "requires succeeded or failed status",
+            }
+            .fail(),
+        }
     }
 }
 
@@ -64,13 +139,21 @@ impl ChatDatabase {
         let mut diagnostics = Vec::new();
         let delivered = exit
             .stdout
-            .map(|bytes| exit.contract.decode_completion(bytes, exit.invocation));
+            .map(|bytes| exit.contract.decode_result(bytes, exit.invocation));
         if let InvocationState::Committed(saved) = stored {
             match delivered {
-                Some(Ok(completion)) if completion != saved => diagnostics.push(
+                Some(Ok(Delivered::Succeeded(completion))) if completion != saved => diagnostics
+                    .push(
+                        InvalidSnafu {
+                            field: "model reply",
+                            reason: "disagrees with the committed reply",
+                        }
+                        .build(),
+                    ),
+                Some(Ok(Delivered::Failed { .. })) => diagnostics.push(
                     InvalidSnafu {
-                        field: "model reply",
-                        reason: "disagrees with the committed reply",
+                        field: "workflow result",
+                        reason: "failure arrived after committed success",
                     }
                     .build(),
                 ),
@@ -83,7 +166,9 @@ impl ChatDatabase {
             });
         }
         match delivered {
-            Some(Ok(completion)) if matches!(stored, InvocationState::Running) => {
+            Some(Ok(Delivered::Succeeded(completion)))
+                if matches!(stored, InvocationState::Running) =>
+            {
                 return Ok(ReconciledCompletion {
                     state: CompletionState::Uncommitted(UncommittedCompletion {
                         database_path: self.path().to_owned(),
@@ -92,6 +177,33 @@ impl ChatDatabase {
                     }),
                     diagnostics,
                 });
+            }
+            Some(Ok(Delivered::Failed { error, usages }))
+                if matches!(stored, InvocationState::Running) =>
+            {
+                self.fail_turn_with_usages(exit.invocation.clone(), &error, usages)?;
+            }
+            Some(Ok(Delivered::Failed { error, usages })) => {
+                if let InvocationState::Finished(turn) = &stored
+                    && turn.state == "failed"
+                {
+                    let call = self.call(&exit.invocation.call_id)?;
+                    if call.usages.as_deref() == Some(usages.as_slice())
+                        && call.error.as_deref() == Some(turn::failure_summary(&error))
+                    {
+                        return Ok(ReconciledCompletion {
+                            state: CompletionState::Finished(turn.clone()),
+                            diagnostics,
+                        });
+                    }
+                }
+                diagnostics.push(
+                    InvalidSnafu {
+                        field: "workflow result",
+                        reason: "disagrees with the finished execution",
+                    }
+                    .build(),
+                );
             }
             Some(Err(source)) => diagnostics.push(source),
             Some(Ok(_)) => diagnostics.push(

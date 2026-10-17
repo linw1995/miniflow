@@ -1,5 +1,9 @@
 use crate::{
-    CallPurpose, ChatDatabase, ChatError, error::*, flows, schema::model_calls, session, storage,
+    CallPurpose, ChatDatabase, ChatError,
+    error::*,
+    flows,
+    schema::{model_calls as invocations, usage_facts as model_calls},
+    session, storage,
 };
 use diesel::{
     dsl::{count, count_star, sql},
@@ -92,6 +96,7 @@ pub struct UsageGroup {
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
 pub struct UsageStatistics {
+    pub unreported_invocations: i64,
     pub overall: UsageSummary,
     pub groups: Vec<UsageGroup>,
     pub next_after: Option<String>,
@@ -122,31 +127,34 @@ macro_rules! measures {
     };
 }
 macro_rules! filtered {
-    ($statement:expr, $filter:expr) => {{
+    ($statement:expr, $filter:expr) => {
+        filtered!($statement, $filter, model_calls)
+    };
+    ($statement:expr, $filter:expr, $source:ident) => {{
         let filter = $filter;
         let mut statement = $statement
             .into_boxed::<Sqlite>()
-            .filter(model_calls::started_at.is_not_null());
+            .filter($source::started_at.is_not_null());
         if let Some(value) = &filter.session_id {
-            statement = statement.filter(model_calls::session_id.eq(value));
+            statement = statement.filter($source::session_id.eq(value));
         }
         if let Some(value) = &filter.profile {
-            statement = statement.filter(model_calls::profile.eq(value));
+            statement = statement.filter($source::profile.eq(value));
         }
         if let Some(value) = &filter.model {
-            statement = statement.filter(model_calls::model.eq(value));
+            statement = statement.filter($source::model.eq(value));
         }
         if let Some(value) = &filter.config_id {
-            statement = statement.filter(model_calls::config_id.eq(value));
+            statement = statement.filter($source::config_id.eq(value));
         }
         if let Some(value) = filter.purpose {
-            statement = statement.filter(model_calls::purpose.eq(value.as_str()));
+            statement = statement.filter($source::purpose.eq(value.as_str()));
         }
         if let Some(value) = filter.start_ms {
-            statement = statement.filter(model_calls::started_at.ge(value));
+            statement = statement.filter($source::started_at.ge(value));
         }
         if let Some(value) = filter.end_ms {
-            statement = statement.filter(model_calls::started_at.lt(value));
+            statement = statement.filter($source::started_at.lt(value));
         }
         statement
     }};
@@ -237,6 +245,18 @@ pub fn query(input: UsageInputs) -> Result<UsageOutputs, ChatError> {
         if let Some(id) = &input.query.session_id {
             session::load(connection, id)?;
         }
+        let unreported_invocations = filtered!(
+            invocations::table.select(invocations::id),
+            &input.query,
+            invocations
+        )
+        .filter(invocations::model.is_null())
+        .filter(invocations::usages.is_null())
+        .count()
+        .get_result::<i64>(connection)
+        .context(DatabaseSnafu {
+            operation: "count unreported workflow invocations",
+        })?;
         let totals: Vec<(String, Measures)> = filtered!(
             model_calls::table
                 .select(model_calls::state)
@@ -255,6 +275,7 @@ pub fn query(input: UsageInputs) -> Result<UsageOutputs, ChatError> {
         let Some(grouping) = input.query.group_by else {
             return Ok(UsageOutputs {
                 statistics: UsageStatistics {
+                    unreported_invocations,
                     overall,
                     groups: vec![],
                     next_after: None,
@@ -311,6 +332,7 @@ pub fn query(input: UsageInputs) -> Result<UsageOutputs, ChatError> {
         }
         Ok(UsageOutputs {
             statistics: UsageStatistics {
+                unreported_invocations,
                 overall,
                 next_after,
                 groups: summaries

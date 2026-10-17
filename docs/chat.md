@@ -114,49 +114,126 @@ SQL computes aggregate facts without loading raw call history. Integer overflow 
 
 ## Executable conversation backend
 
-`mf_chat::executable` provides the contracts and persistence lifecycle for an application that runs a
-compiled chat workflow. The application owns process launch, cancellation, output capture, and scheduling;
-the library owns conversation inputs, invocation identities, and durable state transitions.
+`mf_chat::executable` validates a finite executable's external conversation contract. Internal node kinds,
+node counts, control edges, preprocessing, and loops are workflow implementation choices. Execute the whole
+workflow; there is no isolated-model execution mode or assumption that a workflow contains one LLM.
 
-The [chat workflow example](../examples/chat-flow.json) connects a `builtin.parameters` node to one
-`builtin.llm` node. Compile it from the repository root:
+The startup interface supplies an unambiguous `prompt` string and optionally `system` and `history`.
+Their qualified names can belong to any startup node. Remaining declared inputs form `contract.parameters`;
+resolve them with `mf_runtime::resolve_workflow_inputs` before admission. The contract rejects ambiguous or
+mistyped conversation ports, stdin-dependent execution, and streaming output protocols.
+
+Both the [single-call example](../examples/chat-flow.json) and the
+[loop example](../examples/chat-loop-flow.json) can be compiled directly:
 
 ```sh
-nix develop --command cargo run -p mf-cli --features development-support -- compile examples/chat-flow.json --output target/chat-flow
+nix develop --command cargo run -p mf-cli --features development-support -- compile examples/chat-loop-flow.json --output target/chat-flow
 ```
 
-Construct `ChatContract::from_manifest` from the executable's `WorkflowManifest` before opening storage.
-Preflight accepts one finite LLM node, optionally preceded by one parameter node, with no stdin resource,
-loops, or control edges. The parameter node must feed prompt, system, and history directly. Parameterized
-flows must expose `text`, `history`, optional `usage`, and optional `finish_reason` from the LLM under those
-exact names. Execute these flows as a whole; for a single LLM without a parameter node, use the runner's
-existing `--node` option with `contract.node` to return all model ports independently of workflow aliases.
+The loop explicitly accumulates usage lists with `builtin.concat` and stops after a reported model failure.
+Its model configuration is passed into the loop through declared variables. The runner receives conversation
+arguments and configuration, while the application owns database admission, process supervision, and saving.
 
-Resolve `contract.parameters` with `mf_runtime::resolve_workflow_inputs` before admitting work. This schema
-excludes conversation inputs, so ordinary argument validation rejects caller-supplied prompt, system, or
-history. Reuse the resolved configuration for each invocation. `model_identity` evaluates the model expression
-against public parameters and fingerprints configuration without resolved secrets. Secret model identities
-are rejected. The example reads credentials from `MODEL_API_KEY` and supports `params.model` and
-`params.base_url` overrides without recompilation.
+## History metadata
 
-For each conversation:
+History remains a list of user and assistant messages. Each message accepts an optional object-valued
+`metadata` field; omitting it means no annotations. System instructions and the current prompt remain separate.
 
-1. Allocate an `Invocation` and call `begin_turn_with_invocation` to durably admit the turn and load successful
-   history. Storage permits only one running conversation per session.
-2. Pass the returned request and resolved configuration to `contract.arguments`. Absent system and history
-   become an empty string and empty list for parameterized flows. Forward these arguments to the runner;
-   the model process needs no database path or conversation identity.
-3. Capture stdout within `MAX_RECOVERY_BYTES` (16 MiB), then call `reconcile_completion` with the invocation,
-   captured reply, and unsuccessful exit classification. A valid reply from a running invocation becomes
-   `CompletionState::Uncommitted`; already committed state always wins, including after late cancellation.
-4. Persist an uncommitted reply with `save_recovered`. On failure, retain the value carried by
-   `ChatError::Uncommitted` and retry saving or explicitly call `abandon_recovered`. Neither action invokes
-   the model. If reconciliation itself fails, retain captured stdout until durable facts can be checked.
+```json
+{
+  "role": "assistant",
+  "content": "See the referenced document.",
+  "metadata": {
+    "citations": [{"uri": "https://example.com/reference"}],
+    "agent": "researcher"
+  }
+}
+```
 
-Malformed or missing output finalizes only the admitted invocation as failed, cancelled, or interrupted.
-Diagnostics remain separate from the durable outcome. `retry_prompt` retrieves an unsuccessful turn and
-its original prompt; a model retry must allocate fresh identities and pass the original turn as `retry_of`.
+Metadata is opaque application data. The LLM adapter forwards only role and content to the provider and
+preserves existing metadata in its returned history. The chat application persists response metadata on the
+new assistant message, including through save retries and database reopen. Returned history never replaces
+stored messages or changes their metadata. New user messages currently have no metadata.
 
-Recovery values live in application memory. A crash before persistence can lose the reply and its usage;
-reopening storage interrupts abandoned work without resending it. Automatic title execution remains the
-embedded host's responsibility; the executable backend does not dispatch pending title calls.
+Metadata contributes to the canonical encoded history limit and the executable response limit. Existing
+SQLite databases receive a forward migration; old messages retain absent metadata.
+
+## Workflow results and reported calls
+
+Executables declare `status`, `text`, and a nonoptional `usages` output. A successful result has nonempty
+text; optional `metadata` belongs to that assistant message. `finish_reason` is optional. Other workflow
+outputs, including returned history, do not change persisted conversation state.
+
+```json
+{
+  "status": "succeeded",
+  "text": "Final answer",
+  "metadata": {"agent": "researcher"},
+  "usages": [
+    {
+      "call_id": "call-001",
+      "node": {"id": "answer", "kind": "builtin.llm", "path": [{"node": "repeat", "index": 0}]},
+      "model": "example-model",
+      "usage": {"input_tokens": 120, "output_tokens": 35, "total_tokens": 155}
+    }
+  ]
+}
+```
+
+Each usage entry describes one actual call attempt, including calls without reported token counters.
+Each attempt also reports its start time in UTC Unix milliseconds; statistics use that time when available.
+The node path identifies enclosing loop invocations; repeated executions of one node have distinct call IDs.
+Node identity is available independently of observation. Direct node calls outside a workflow may lack node
+information. Models are resolved by the calling node and must be public identifiers. The application does
+not infer a model by inspecting the executable graph.
+
+The workflow explicitly combines the lists it intends to report. `builtin.concat` preserves list order and
+values; it does not deduplicate or synthesize counters. Duplicate call IDs within a result are rejected.
+Input, output, and total token counts are independent optional nonnegative integers; absent is unknown and
+zero is a reported value. The backend never derives total tokens by adding other counters.
+
+A failed result still reports all collected calls and a nonblank error summary, but requires no reply text:
+
+```json
+{
+  "status": "failed",
+  "error": "The final model request failed",
+  "usages": [
+    {
+      "call_id": "call-002",
+      "node": {"id": "answer", "kind": "builtin.llm"},
+      "model": "example-model",
+      "error": "Provider unavailable"
+    }
+  ]
+}
+```
+
+Set `capture_errors: true` on LLM nodes that must return request failures as workflow data. Provider errors,
+node deadlines, and response conversion failures then return failed status and a usage entry. The default
+remains typed execution errors for existing workflows. Configuration/input failures and cancellation can
+still abort execution before a final result is available. The workflow must wire status and usage outputs
+through its chosen branches and accumulators. Successful status permits absent or empty error text.
+
+## Persistence and recovery
+
+Allocate an `Invocation`, durably begin its turn, and pass the resulting request to `contract.arguments`.
+`model_identity` provides the admission profile and a fingerprint of the workflow and public parameters;
+its model is absent because actual model identities arrive in `usages`. Capture stdout within
+`MAX_RECOVERY_BYTES` (16 MiB) and pass it to `reconcile_completion`.
+
+Successful results become `CompletionState::Uncommitted`; `save_recovered` atomically saves the assistant
+message, metadata, usages, and successful turn state. Failed results atomically save their usages and the
+failed turn without creating an assistant message. Committed success wins over late cancellation or
+conflicting output. If persistence fails, retain the recovery value or captured failure result and retry
+storage only. No recovery operation invokes a model. Explicit abandon finalizes unfinished work.
+
+One durable execution record can contain many reported model calls. Usage statistics expand these lists
+inside SQLite and retain legacy call facts for existing records. `unreported_invocations` counts matching
+executions without either a known single-model identity or a returned usage list. An explicit empty list
+means no calls were reported; an interrupted execution with no result is not treated as confirmed zero.
+A crash or cancellation before delivering the final result can lose otherwise completed call facts.
+
+The current workflow output contract requires recompiling and updating older chat executables. The scalar
+LLM `usage` output and legacy embedded-host reply field remain available for single-call consumers; new
+executable accounting uses `usages`. No terminal interface or implicit runtime usage collector is installed.

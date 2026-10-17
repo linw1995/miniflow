@@ -14,6 +14,69 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Debug, diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
+#[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+pub struct StoredJson<T>(Option<T>);
+
+impl<T> From<Option<T>> for StoredJson<T> {
+    fn from(value: Option<T>) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> From<StoredJson<T>> for Option<T> {
+    fn from(value: StoredJson<T>) -> Self {
+        value.0
+    }
+}
+
+impl<T: serde::de::DeserializeOwned>
+    diesel::deserialize::FromSql<
+        diesel::sql_types::Nullable<diesel::sql_types::Text>,
+        diesel::sqlite::Sqlite,
+    > for StoredJson<T>
+{
+    fn from_sql(
+        value: diesel::sqlite::SqliteValue<'_, '_, '_>,
+    ) -> diesel::deserialize::Result<Self> {
+        Self::from_nullable_sql(Some(value))
+    }
+
+    fn from_nullable_sql(
+        value: Option<diesel::sqlite::SqliteValue<'_, '_, '_>>,
+    ) -> diesel::deserialize::Result<Self> {
+        let encoded = <Option<String> as diesel::deserialize::FromSql<
+            diesel::sql_types::Nullable<diesel::sql_types::Text>,
+            diesel::sqlite::Sqlite,
+        >>::from_nullable_sql(value)?;
+        Ok(Self(
+            encoded
+                .map(|value| serde_json::from_str(&value))
+                .transpose()?,
+        ))
+    }
+}
+
+impl<T: serde::Serialize + std::fmt::Debug>
+    diesel::serialize::ToSql<
+        diesel::sql_types::Nullable<diesel::sql_types::Text>,
+        diesel::sqlite::Sqlite,
+    > for StoredJson<T>
+{
+    fn to_sql<'b>(
+        &'b self,
+        output: &mut diesel::serialize::Output<'b, '_, diesel::sqlite::Sqlite>,
+    ) -> diesel::serialize::Result {
+        match &self.0 {
+            Some(value) => {
+                output.set_value(serde_json::to_string(value)?);
+                Ok(diesel::serialize::IsNull::No)
+            }
+            None => Ok(diesel::serialize::IsNull::Yes),
+        }
+    }
+}
+
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 const CONNECTION_PRAGMAS: &str = "PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;";
 
@@ -152,6 +215,66 @@ mod tests {
                 .get_result::<i64>(&mut connect(reopened.path()).unwrap())
                 .unwrap(),
             1
+        );
+    }
+
+    #[test]
+    fn upgrading_existing_records_preserves_legacy_usage_and_empty_metadata() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("chat.sqlite");
+        let database = ChatDatabase::open(&path).unwrap();
+        let session = database
+            .create_session("default", None, Some("Existing".into()))
+            .unwrap();
+        let begun = database
+            .begin_turn(
+                &session.id,
+                "question",
+                crate::ModelIdentity {
+                    profile: "default".into(),
+                    model: Some("old-model".into()),
+                    config_id: "old-config".into(),
+                },
+                None,
+                1024,
+            )
+            .unwrap();
+        database
+            .complete_turn(
+                begun.invocation.clone(),
+                crate::Reply {
+                    text: "old reply".into(),
+                    usage: Some(std::collections::BTreeMap::from([(
+                        "input_tokens".into(),
+                        4,
+                    )])),
+                    usages: None,
+                    metadata: None,
+                    finish_reason: None,
+                },
+            )
+            .unwrap();
+        let mut connection = connect(&path).unwrap();
+        connection.revert_last_migration(MIGRATIONS).unwrap();
+        drop(connection);
+        drop(database);
+        let reopened = ChatDatabase::open(path).unwrap();
+        let call = reopened.call(&begun.invocation.call_id).unwrap();
+        assert_eq!(call.model.as_deref(), Some("old-model"));
+        assert!(call.usages.is_none() && call.metadata.is_none());
+        assert!(
+            reopened.history(&session.id, 1024).unwrap().history[1]
+                .metadata
+                .is_none()
+        );
+        assert_eq!(
+            reopened
+                .usage(Default::default())
+                .unwrap()
+                .overall
+                .input_tokens
+                .known_subtotal,
+            Some(4)
         );
     }
 

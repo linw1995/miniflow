@@ -26,3 +26,5 @@ pub use turn::{Completion, Invocation, ModelIdentity, Reply};
 pub use usage::{
     TokenCounter, UsageGroup, UsageGrouping, UsageQuery, UsageStatistics, UsageSummary,
 };
+
+pub use mfn_llm::{CallUsage, MessageMetadata, UsageNode, UsageScope};

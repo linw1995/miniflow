@@ -2,12 +2,14 @@ use super::*;
 fn identity() -> ModelIdentity {
     ModelIdentity {
         profile: "default".into(),
-        model: "model".into(),
+        model: Some("model".into()),
         config_id: "config".into(),
     }
 }
 fn reply(text: &str) -> Reply {
     Reply {
+        usages: None,
+        metadata: None,
         text: text.into(),
         usage: Some(std::collections::BTreeMap::from([(
             "output_tokens".into(),

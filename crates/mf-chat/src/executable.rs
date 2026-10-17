@@ -1,11 +1,9 @@
 //! Parent-owned chat invocation state and executable contracts.
 
 use crate::{ChatError, Completion, Invocation, ModelIdentity, error::*, turn};
-use mf_runtime::{
-    ConfigTemplate, NodeValue, WorkflowArguments, WorkflowInputSchema, WorkflowManifest,
-};
+use mf_runtime::{NodeValue, WorkflowArguments, WorkflowInputSchema, WorkflowManifest};
 use sha2::{Digest, Sha256};
-use snafu::{OptionExt, ResultExt, ensure};
+use snafu::{ResultExt, ensure};
 use std::collections::BTreeMap;
 
 mod recovery;
@@ -13,180 +11,81 @@ pub use recovery::{CompletionState, ConversationExit, MAX_RECOVERY_BYTES, Reconc
 
 #[derive(Clone, Debug)]
 pub struct ChatContract {
-    pub node: String,
-    pub model: serde_json::Value,
     pub config_id: String,
     pub parameters: WorkflowInputSchema,
     inputs: BTreeMap<String, String>,
-    pub parameterized: bool,
 }
+
 impl ChatContract {
     pub fn from_manifest(manifest: &WorkflowManifest) -> Result<Self, ChatError> {
         manifest.validate()?;
-        let graph = manifest.description()?;
-        let models: Vec<_> = graph
-            .nodes
-            .iter()
-            .filter(|node| node.kind == mfn_llm::KIND)
-            .collect();
-        let parameters: Vec<_> = graph
-            .nodes
-            .iter()
-            .filter(|node| node.kind == "builtin.parameters")
-            .collect();
         ensure!(
-            !graph.is_streaming()
-                && graph.loop_bodies.is_empty()
-                && models.len() == 1
-                && parameters.len() <= 1
-                && graph.nodes.len() == models.len() + parameters.len()
-                && graph.control_edges.is_empty(),
+            !manifest.description()?.is_streaming() && manifest.input_schema.stdin.is_empty(),
             InvalidSnafu {
                 field: "chat executable",
-                reason: "requires one finite LLM node and at most one initial parameter node"
+                reason: "requires finite JSON execution without stdin"
             }
         );
-        ensure!(
-            manifest.input_schema.stdin.is_empty(),
-            InvalidSnafu {
-                field: "chat executable",
-                reason: "must not require stdin"
-            }
-        );
-        let node = models[0];
-        let source = parameters.first().copied().unwrap_or(node);
-        let ports = manifest
-            .input_schema
-            .inputs
-            .get(&source.id)
-            .context(InvalidSnafu {
-                field: "chat executable",
-                reason: "requires conversation startup inputs",
-            })?;
-        ensure!(
-            manifest.input_schema.inputs.len() == 1,
-            InvalidSnafu {
-                field: "chat executable",
-                reason: "requires a single startup source"
-            }
-        );
-        let parameterized = !parameters.is_empty();
-        let mut inputs = BTreeMap::new();
         let mut configuration = manifest.input_schema.clone();
+        let mut inputs = BTreeMap::new();
         for expected in mfn_llm::LlmInputs::ports() {
-            let name = if parameterized {
-                let edges: Vec<_> = graph
-                    .data_edges
-                    .iter()
-                    .filter(|edge| edge.to_node == node.id && edge.to_input == expected.name)
-                    .collect();
+            let candidates: Vec<_> = manifest
+                .input_schema
+                .inputs
+                .iter()
+                .filter_map(|(node, ports)| {
+                    ports.get(expected.name.as_ref()).map(|port| (node, port))
+                })
+                .collect();
+            ensure!(
+                candidates.len() <= 1 && (!expected.required || candidates.len() == 1),
+                InvalidSnafu {
+                    field: "chat inputs",
+                    reason: "requires an unambiguous prompt and optional system and history inputs"
+                }
+            );
+            if let Some((node, port)) = candidates.first() {
                 ensure!(
-                    edges.len() == 1 && edges[0].from_node == source.id,
+                    port.value_type == expected.value_type,
                     InvalidSnafu {
-                        field: "chat executable",
-                        reason: "parameter outputs must feed prompt, system, and history directly"
+                        field: "chat inputs",
+                        reason: "conversation input types must match the chat contract"
                     }
                 );
-                edges[0].from_output.as_str()
-            } else {
-                expected.name.as_ref()
-            };
-            let port = ports.get(name).context(InvalidSnafu {
-                field: "chat executable",
-                reason: "missing a conversation input",
-            })?;
-            ensure!(
-                port.value_type == expected.value_type
-                    && (parameterized || port.required == expected.required),
-                InvalidSnafu {
-                    field: "chat executable",
-                    reason: "requires fixed prompt, system, and history types"
-                }
-            );
-            ensure!(
                 configuration
                     .inputs
-                    .get_mut(&source.id)
+                    .get_mut(*node)
                     .unwrap()
-                    .remove(name)
-                    .is_some(),
-                InvalidSnafu {
-                    field: "chat executable",
-                    reason: "conversation ports must use distinct startup parameters"
-                }
-            );
-            inputs.insert(
-                expected.name.to_string(),
-                mf_runtime::output_id(&source.id, name),
-            );
+                    .remove(expected.name.as_ref());
+                inputs.insert(
+                    expected.name.to_string(),
+                    mf_runtime::output_id(node, &expected.name),
+                );
+            }
         }
-        ensure!(
-            graph.data_edges.len() == if parameterized { 3 } else { 0 },
-            InvalidSnafu {
-                field: "chat executable",
-                reason: "only conversation input edges are supported"
-            }
-        );
-        ensure!(
-            parameterized || ports.len() == inputs.len(),
-            InvalidSnafu {
-                field: "chat executable",
-                reason: "requires fixed LLM startup inputs"
-            }
-        );
-        if parameterized {
-            let expected = mfn_llm::LlmOutputs::ports();
+        for name in ["status", "text", "usages"] {
             ensure!(
-                manifest.definition.outputs.len() == expected.len()
-                    && expected
-                        .iter()
-                        .all(
-                            |port| manifest.definition.outputs.iter().any(|output| output.name
-                                == port.name
-                                && output.node.as_str() == node.id
-                                && output.port == port.name
-                                && output.optional != port.required)
-                        ),
+                manifest
+                    .definition
+                    .outputs
+                    .iter()
+                    .any(|output| output.name == name && (name == "text" || !output.optional)),
                 InvalidSnafu {
                     field: "chat outputs",
-                    reason: "requires all LLM outputs under their fixed names"
+                    reason: "requires status and usages outputs, with text for successful results"
                 }
             );
         }
-        let config = &manifest.node_definition(&node.id).unwrap().config;
-        let model = config
-            .get("model")
-            .context(InvalidSnafu {
-                field: "model identity",
-                reason: "requires the configured model or template",
-            })?
-            .clone();
-        let template = ConfigTemplate::parse(model.clone())?;
-        for reference in template.references("model") {
-            ensure!(
-                configuration.parameter(&reference.output).is_some(),
-                InvalidSnafu {
-                    field: "model identity",
-                    reason: "model references must name configuration parameters"
-                }
-            );
-        }
-        let config_id: String = Sha256::digest(serde_json::to_vec(config).context(JsonSnafu)?)
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        let contract = Self {
-            node: node.id.clone(),
-            model,
+        let config_id =
+            Sha256::digest(serde_json::to_vec(&manifest.definition).context(JsonSnafu)?)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+        Ok(Self {
             config_id,
             parameters: configuration,
             inputs,
-            parameterized,
-        };
-        if !parameterized {
-            contract.model_identity("default", &WorkflowArguments::default())?;
-        }
-        Ok(contract)
+        })
     }
 
     pub fn model_identity(
@@ -194,49 +93,20 @@ impl ChatContract {
         profile: &str,
         parameters: &WorkflowArguments,
     ) -> Result<ModelIdentity, ChatError> {
-        let template = ConfigTemplate::parse(self.model.clone())?;
-        ensure!(
-            template
-                .references("model")
-                .iter()
-                .all(|reference| parameters.0.contains_key(&reference.output)),
-            InvalidSnafu {
-                field: "model identity",
-                reason: "model parameters must be resolved before admission"
-            }
-        );
-        let model = template.evaluate(&|output| Ok(parameters.0[output].clone()))?;
-        ensure!(
-            !model.contains_secret(),
-            InvalidSnafu {
-                field: "model identity",
-                reason: "the accounting model must use public parameters"
-            }
-        );
-        let model = model
-            .as_str()
-            .filter(|name| !name.trim().is_empty())
-            .context(InvalidSnafu {
-                field: "model identity",
-                reason: "requires a nonblank resolved model name",
-            })?
-            .to_owned();
-        let config_id = if self.parameterized {
-            let public: BTreeMap<_, _> = parameters
-                .0
-                .iter()
-                .filter(|(_, value)| !value.contains_secret())
-                .collect();
+        self.parameters.validate(parameters)?;
+        let public: BTreeMap<_, _> = parameters
+            .0
+            .iter()
+            .filter(|(_, value)| !value.contains_secret())
+            .collect();
+        let config_id =
             Sha256::digest(serde_json::to_vec(&(&self.config_id, public)).context(JsonSnafu)?)
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
-                .collect()
-        } else {
-            self.config_id.clone()
-        };
+                .collect();
         Ok(ModelIdentity {
             profile: profile.into(),
-            model,
+            model: None,
             config_id,
         })
     }
@@ -246,13 +116,14 @@ impl ChatContract {
         mut input: mfn_llm::LlmInputs,
         parameters: &WorkflowArguments,
     ) -> Result<WorkflowArguments, ChatError> {
-        if self.parameterized {
-            input.system.get_or_insert_default();
-            input.history.get_or_insert_default();
-        }
+        self.parameters.validate(parameters)?;
+        input.system.get_or_insert_default();
+        input.history.get_or_insert_default();
         let mut arguments = parameters.clone();
         for (name, value) in input.into_values()? {
-            arguments.0.insert(self.inputs[&name].clone(), value);
+            if let Some(target) = self.inputs.get(&name) {
+                arguments.0.insert(target.clone(), value);
+            }
         }
         Ok(arguments)
     }

@@ -78,6 +78,10 @@ pub struct Message {
     pub role: String,
     pub content: String,
     pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[diesel(deserialize_as = crate::storage::StoredJson<mfn_llm::MessageMetadata>)]
+    #[diesel(serialize_as = crate::storage::StoredJson<mfn_llm::MessageMetadata>)]
+    pub metadata: Option<mfn_llm::MessageMetadata>,
 }
 
 #[derive(
@@ -100,7 +104,7 @@ pub struct ModelCall {
     pub turn_id: Option<String>,
     pub purpose: String,
     pub profile: String,
-    pub model: String,
+    pub model: Option<String>,
     pub config_id: String,
     pub state: String,
     pub title_revision: Option<i64>,
@@ -113,4 +117,12 @@ pub struct ModelCall {
     pub error: Option<String>,
     pub result_text: Option<String>,
     pub disposition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[diesel(deserialize_as = crate::storage::StoredJson<Vec<mfn_llm::CallUsage>>)]
+    #[diesel(serialize_as = crate::storage::StoredJson<Vec<mfn_llm::CallUsage>>)]
+    pub usages: Option<Vec<mfn_llm::CallUsage>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[diesel(deserialize_as = crate::storage::StoredJson<mfn_llm::MessageMetadata>)]
+    #[diesel(serialize_as = crate::storage::StoredJson<mfn_llm::MessageMetadata>)]
+    pub metadata: Option<mfn_llm::MessageMetadata>,
 }

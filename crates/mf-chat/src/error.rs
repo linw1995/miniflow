@@ -4,9 +4,14 @@ use std::{error::Error, io, path::PathBuf};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ChatError {
+    #[snafu(display("model call failed: {message}"))]
+    ModelFailure {
+        message: String,
+        usages: Vec<mfn_llm::CallUsage>,
+    },
     #[snafu(transparent)]
-    ConfigurationTemplate {
-        source: mf_runtime::ConfigTemplateError,
+    Inputs {
+        source: mf_runtime::WorkflowInputError,
     },
     #[snafu(display("model reply exceeds the {limit}-byte limit"))]
     RecoveryTooLarge { limit: usize },

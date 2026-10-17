@@ -38,6 +38,7 @@ diesel::table! {
         role -> Text,
         content -> Text,
         created_at -> BigInt,
+        metadata -> Nullable<Text>,
     }
 }
 
@@ -48,7 +49,7 @@ diesel::table! {
         turn_id -> Nullable<Text>,
         purpose -> Text,
         profile -> Text,
-        model -> Text,
+        model -> Nullable<Text>,
         config_id -> Text,
         state -> Text,
         title_revision -> Nullable<BigInt>,
@@ -61,6 +62,8 @@ diesel::table! {
         error -> Nullable<Text>,
         result_text -> Nullable<Text>,
         disposition -> Nullable<Text>,
+        usages -> Nullable<Text>,
+        metadata -> Nullable<Text>,
     }
 }
 
@@ -70,3 +73,19 @@ diesel::joinable!(messages -> turns (turn_id));
 diesel::joinable!(model_calls -> sessions (session_id));
 diesel::joinable!(model_calls -> turns (turn_id));
 diesel::allow_tables_to_appear_in_same_query!(sessions, turns, messages, model_calls);
+
+diesel::table! {
+    usage_facts (id) {
+        id -> Text,
+        session_id -> Text,
+        purpose -> Text,
+        profile -> Text,
+        model -> Text,
+        config_id -> Text,
+        state -> Text,
+        started_at -> Nullable<BigInt>,
+        input_tokens -> Nullable<BigInt>,
+        output_tokens -> Nullable<BigInt>,
+        total_tokens -> Nullable<BigInt>,
+    }
+}

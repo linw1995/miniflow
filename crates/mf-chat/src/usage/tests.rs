@@ -1,10 +1,11 @@
 use super::*;
+use crate::schema::model_calls;
 use crate::{ModelIdentity, Reply, nodes::PrepareTitleInputs};
 
 fn identity(config: &str) -> ModelIdentity {
     ModelIdentity {
         profile: "default".into(),
-        model: "test-model".into(),
+        model: Some("test-model".into()),
         config_id: config.into(),
     }
 }
@@ -21,6 +22,8 @@ fn complete(
         .complete_turn(
             begun.invocation.clone(),
             Reply {
+                usages: None,
+                metadata: None,
                 text: "answer".into(),
                 usage,
                 finish_reason: None,
@@ -234,6 +237,8 @@ fn pending_titles_do_not_count_but_discarded_title_results_keep_their_usage() {
     .unwrap();
     database.rename_session(&owner.id, "Manual").unwrap();
     let response = Reply {
+        usages: None,
+        metadata: None,
         text: "Generated".into(),
         usage: Some(BTreeMap::from([("output_tokens".into(), 5)])),
         finish_reason: None,
@@ -271,7 +276,7 @@ fn model_profile_and_purpose_groups_preserve_attribution_and_validate_cursors() 
             .unwrap();
         let mut identity = identity(profile);
         identity.profile = profile.into();
-        identity.model = model.into();
+        identity.model = Some(model.into());
         let begun = database
             .begin_turn(&owner.id, "question", identity, None, 1024)
             .unwrap();
@@ -279,6 +284,8 @@ fn model_profile_and_purpose_groups_preserve_attribution_and_validate_cursors() 
             .complete_turn(
                 begun.invocation,
                 Reply {
+                    usages: None,
+                    metadata: None,
                     text: "answer".into(),
                     usage: Some(BTreeMap::from([("output_tokens".into(), tokens)])),
                     finish_reason: None,

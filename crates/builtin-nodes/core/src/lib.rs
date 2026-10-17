@@ -1,4 +1,5 @@
 mod batch;
+mod concat;
 mod constant;
 mod identity;
 mod if_else;
@@ -8,6 +9,7 @@ mod parameters;
 mod readline;
 
 pub use batch::KIND as BATCH_KIND;
+pub use concat::{ConcatInputs, ConcatOutputs, KIND as CONCAT_KIND, prepare_concat};
 pub use constant::{KIND as CONSTANT_KIND, kind as constant_kind};
 pub use identity::{
     IdentityInputs, IdentityOutputs, KIND as IDENTITY_KIND, kind as identity_kind, prepare_identity,

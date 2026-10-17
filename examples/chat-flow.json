@@ -58,25 +58,37 @@
         },
         "api_key": {
           "$ref": "params.api_key"
-        }
+        },
+        "capture_errors": true
       }
     }
   ],
   "outputs": [
+    {
+      "name": "status",
+      "node": "chat",
+      "port": "status"
+    },
     {
       "name": "text",
       "node": "chat",
       "port": "text"
     },
     {
-      "name": "history",
+      "name": "usages",
       "node": "chat",
-      "port": "history"
+      "port": "usages"
     },
     {
-      "name": "usage",
+      "name": "error",
       "node": "chat",
-      "port": "usage",
+      "port": "error",
+      "optional": true
+    },
+    {
+      "name": "metadata",
+      "node": "chat",
+      "port": "metadata",
       "optional": true
     },
     {

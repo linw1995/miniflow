@@ -59,7 +59,7 @@ impl ModelProfile {
         let encoded = serde_json::to_vec(&config).context(JsonSnafu)?;
         let identity = ModelIdentity {
             profile: name.clone(),
-            model,
+            model: Some(model),
             config_id: Sha256::digest(encoded)
                 .iter()
                 .map(|byte| format!("{byte:02x}"))
@@ -565,6 +565,7 @@ impl Inner {
                             self.database.path(),
                             "mf_chat.turn.fail",
                             FailTurnInputs {
+                                usages: crate::model::failure_usages(&source),
                                 database_path: String::new(),
                                 invocation: invocation.clone(),
                                 state: state.into(),
