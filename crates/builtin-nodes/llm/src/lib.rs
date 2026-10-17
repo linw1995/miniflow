@@ -26,10 +26,42 @@ use std::{
 
 pub const KIND: &str = "builtin.llm";
 
+pub type MessageMetadata = BTreeMap<String, ValueRef>;
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]
+pub struct UsageScope {
+    pub node: String,
+    pub index: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]
+pub struct UsageNode {
+    pub id: String,
+    pub kind: String,
+    #[value(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path: Vec<UsageScope>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]
+pub struct CallUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
+    pub call_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<UsageNode>,
+    pub model: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<BTreeMap<String, i64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, NodeValue)]
 pub struct ChatMessage {
     pub role: String,
     pub content: String,
+    pub metadata: Option<MessageMetadata>,
 }
 
 #[derive(Clone, Debug, NodeValue)]
@@ -41,10 +73,14 @@ pub struct LlmInputs {
 
 #[derive(Clone, Debug, NodeValue)]
 pub struct LlmOutputs {
+    pub status: String,
+    pub usages: Vec<CallUsage>,
+    pub error: Option<String>,
     pub text: String,
     pub history: Vec<ChatMessage>,
     pub usage: Option<BTreeMap<String, i64>>,
     pub finish_reason: Option<String>,
+    pub metadata: Option<MessageMetadata>,
 }
 
 #[derive(mf_runtime::NodeInputs)]
@@ -57,6 +93,7 @@ struct Config {
     max_tokens: Option<u64>,
     timeout_ms: u64,
     max_output_bytes: usize,
+    capture_errors: bool,
 }
 
 #[derive(Debug, Snafu)]
@@ -118,6 +155,7 @@ impl PreparedConfig {
             ("api_key_env", Value::from("OPENAI_API_KEY")),
             ("timeout_ms", Value::from(60_000_u64)),
             ("max_output_bytes", Value::from(1_048_576_u64)),
+            ("capture_errors", Value::from(false)),
         ] {
             fields.entry(name.into()).or_insert(value);
         }
@@ -197,6 +235,7 @@ impl PreparedConfig {
 
 fn validate_field(field: &str, value: &ValueRef) -> Result<(), LlmConfigError> {
     let requirement = match field {
+        "model" if value.contains_secret() => Some("a public model identifier"),
         "model" if value.as_str().unwrap().trim().is_empty() => Some("a nonblank identifier"),
         "api_key" if value.as_str().unwrap().is_empty() => Some("a nonempty credential"),
         "api_key_env"
@@ -256,6 +295,10 @@ fn parse_config(value: Value) -> Result<Config, NodeBuildError> {
 
 #[derive(Snafu)]
 pub enum LlmExecutionError {
+    #[snafu(display("could not timestamp model invocation: {source}"))]
+    Clock { source: std::time::SystemTimeError },
+    #[snafu(display("model invocation timestamp exceeds the signed range: {source}"))]
+    TimestampRange { source: std::num::TryFromIntError },
     #[snafu(transparent)]
     Configuration { source: LlmConfigError },
     #[snafu(display("LLM input `{path}` requires {requirement}"))]
@@ -352,9 +395,22 @@ impl TypedTaskNode for LlmNode {
         inputs: Self::Input,
         context: &mut ExecutionContext,
     ) -> Result<TypedNodeResult<Self::Output>, NodeExecutionError> {
-        self.complete(inputs, context)
-            .map(Into::into)
-            .map_err(Into::into)
+        let outputs = self.complete(inputs, context)?;
+        let skipped = [
+            ("usage", outputs.usage.is_none()),
+            ("finish_reason", outputs.finish_reason.is_none()),
+            ("metadata", outputs.metadata.is_none()),
+            ("error", outputs.error.is_none()),
+        ]
+        .into_iter()
+        .filter(|(_, absent)| *absent)
+        .map(|(name, _)| name.to_owned())
+        .collect();
+        Ok(TypedNodeResult {
+            outputs,
+            skipped,
+            loop_summary: None,
+        })
     }
 }
 
@@ -430,21 +486,108 @@ impl LlmNode {
         if let Some(system) = inputs.system {
             request = request.preamble(system);
         }
-        let mut response = context
-            .execute_future(model.call(request), Some(deadline))?
-            .with_context(|source| ProviderSnafu {
-                kind: source.kind().code(),
-                status: source
-                    .provider_response_status()
-                    .map(|status| status.as_u16()),
-            })?;
-        if let Some(usage) = transport.usage() {
-            response.usage = usage;
+        let mut usage = CallUsage {
+            started_at: Some(
+                i64::try_from(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .context(ClockSnafu)?
+                        .as_millis(),
+                )
+                .context(TimestampRangeSnafu)?,
+            ),
+            call_id: uuid::Uuid::new_v4().to_string(),
+            node: context.current_node().map(|id| UsageNode {
+                id: id.into(),
+                kind: KIND.into(),
+                path: context
+                    .invocation_path()
+                    .into_iter()
+                    .map(|scope| UsageScope {
+                        node: scope.loop_id,
+                        index: scope.index.get(),
+                    })
+                    .collect(),
+            }),
+            model: config.model.clone(),
+            usage: None,
+            error: None,
+        };
+        let response = context
+            .execute_future(model.call(request), Some(deadline))
+            .map_err(LlmExecutionError::from)
+            .and_then(|response| {
+                response.with_context(|source| ProviderSnafu {
+                    kind: source.kind().code(),
+                    status: source
+                        .provider_response_status()
+                        .map(|status| status.as_u16()),
+                })
+            });
+        if let Some(reported) = transport.usage() {
+            usage.usage = reported_usage(&reported).ok().flatten();
         }
-        let result = terminal_outputs(response, inputs.prompt, history, config.max_output_bytes)?;
-        context.check_future_limits(Some(deadline))?;
+        let failure_history = if config.capture_errors {
+            history.clone()
+        } else {
+            Vec::new()
+        };
+        let result = response.and_then(|mut response| {
+            if let Some(usage) = transport.usage() {
+                response.usage = usage;
+            }
+            if usage.usage.is_none() {
+                usage.usage = reported_usage(&response.usage).ok().flatten();
+            }
+            terminal_outputs(response, inputs.prompt, history, config.max_output_bytes).and_then(
+                |result| {
+                    context.check_future_limits(Some(deadline))?;
+                    Ok(result)
+                },
+            )
+        });
+        let mut result = match result {
+            Ok(result) => result,
+            Err(error) if config.capture_errors => {
+                context.check_future_limits(None)?;
+                let error = error.to_string();
+                usage.error = Some(error.clone());
+                LlmOutputs {
+                    status: "failed".into(),
+                    text: String::new(),
+                    history: failure_history,
+                    usage: usage.usage.clone(),
+                    finish_reason: None,
+                    metadata: None,
+                    usages: Vec::new(),
+                    error: Some(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
+        usage.usage = result.usage.clone();
+        result.usages.push(usage);
         Ok(result)
     }
+}
+
+fn reported_usage(
+    reported: &rig_core::completion::Usage,
+) -> Result<Option<BTreeMap<String, i64>>, LlmExecutionError> {
+    let mut usage = BTreeMap::new();
+    for (counter, value) in [
+        ("input_tokens", reported.input_tokens),
+        ("output_tokens", reported.output_tokens),
+        ("total_tokens", reported.total_tokens),
+    ] {
+        if let Some(value) = value {
+            usage.insert(
+                counter.into(),
+                i64::try_from(value).context(UsageCountSnafu { counter })?,
+            );
+        }
+    }
+    Ok((!usage.is_empty()).then_some(usage))
 }
 
 fn terminal_outputs(
@@ -475,31 +618,25 @@ fn terminal_outputs(
         }
     }
     ensure!(!text.is_empty(), EmptyTextSnafu);
-    let mut usage = BTreeMap::new();
-    for (counter, value) in [
-        ("input_tokens", response.usage.input_tokens),
-        ("output_tokens", response.usage.output_tokens),
-        ("total_tokens", response.usage.total_tokens),
-    ] {
-        if let Some(value) = value {
-            usage.insert(
-                counter.into(),
-                i64::try_from(value).context(UsageCountSnafu { counter })?,
-            );
-        }
-    }
+    let usage = reported_usage(&response.usage)?;
     history.push(ChatMessage {
+        metadata: None,
         role: "user".into(),
         content: prompt,
     });
     history.push(ChatMessage {
+        metadata: None,
         role: "assistant".into(),
         content: text.clone(),
     });
     Ok(LlmOutputs {
+        status: "succeeded".into(),
+        usages: Vec::new(),
+        error: None,
+        metadata: None,
         text,
         history,
-        usage: (!usage.is_empty()).then_some(usage),
+        usage,
         finish_reason,
     })
 }
@@ -638,16 +775,28 @@ mod tests {
         );
         assert!(!inputs[2].required);
         let outputs = LlmOutputs::ports();
-        assert_eq!(outputs.len(), 4);
-        assert!(outputs[0].required && outputs[1].required);
-        assert!(!outputs[2].required && !outputs[3].required);
-        assert_eq!(
-            outputs[2].value_type,
-            ValueType::Map(Box::new(ValueType::Int64))
-        );
+        for name in ["status", "usages", "text", "history"] {
+            assert!(
+                outputs
+                    .iter()
+                    .any(|port| port.name == name && port.required)
+            );
+        }
+        for name in ["usage", "finish_reason", "metadata", "error"] {
+            assert!(
+                outputs
+                    .iter()
+                    .any(|port| port.name == name && !port.required)
+            );
+        }
         let response = LlmOutputs {
+            status: "succeeded".into(),
+            usages: Vec::new(),
+            error: None,
+            metadata: None,
             text: "reply".into(),
             history: vec![ChatMessage {
+                metadata: None,
                 role: "assistant".into(),
                 content: "reply".into(),
             }],
@@ -669,6 +818,14 @@ mod tests {
         for (history, path) in [
             (json!(null), "/history"),
             (json!([{"role": "user"}]), "/history/0/content"),
+            (
+                json!([{"role":"user","content":"hello","metadata":null}]),
+                "/history/0/metadata",
+            ),
+            (
+                json!([{"role":"user","content":"hello","metadata":[]}]),
+                "/history/0/metadata",
+            ),
             (
                 json!([{"role": "user", "content": 42}]),
                 "/history/0/content",
@@ -710,6 +867,7 @@ mod tests {
         )
         .with_finish_reason(FinishReason::Other("service_stop".into()));
         let previous = vec![ChatMessage {
+            metadata: None,
             role: "user".into(),
             content: "prior".into(),
         }];

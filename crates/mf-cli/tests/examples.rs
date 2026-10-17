@@ -12,10 +12,24 @@ fn workspace() -> &'static Path {
         .unwrap()
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 11] {
+fn chat_usage(path: Value) -> Value {
+    json!({"started_at":0,"call_id":"generated", "node":{"id":"chat", "kind":"builtin.llm", "path":path}, "model":"example-model", "usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}})
+}
+
+fn examples() -> [(&'static str, Option<&'static str>, Value); 13] {
     [
         ("cel-list.json", None, json!({"doubled": [2, 4]})),
         ("cel-scalar.json", None, json!({"doubled": 42})),
+        (
+            "chat-flow.json",
+            None,
+            json!({"status":"succeeded", "text":"reply", "usages":[chat_usage(json!([]))], "finish_reason":"stop"}),
+        ),
+        (
+            "chat-loop-flow.json",
+            None,
+            json!({"status":"succeeded", "text":"reply", "error":"", "metadata":{"strategy":"iterative"}, "usages":[chat_usage(json!([{"node":"repeat","index":0}])), chat_usage(json!([{"node":"repeat","index":1}]))]}),
+        ),
         ("else-if.json", None, json!({"medium": {"amount": 500}})),
         ("hello-workflow.json", None, json!({"answer": 42})),
         ("if-else.json", None, json!({"accepted": {"amount": 150}})),
@@ -82,10 +96,11 @@ fn documented_examples_compile_and_produce_expected_outputs() {
 
     for (name, input, expected) in examples() {
         let definition = definitions.join(name);
-        let server = name
-            .starts_with("llm-")
+        let server = (name.starts_with("llm-") || name.starts_with("chat-"))
             .then(|| llm_support::Server::start(vec![llm_support::Reply::text("reply"); 2]));
-        if let Some(server) = &server {
+        if let Some(server) = &server
+            && !name.starts_with("chat-")
+        {
             let mut value: Value =
                 serde_json::from_slice(&fs::read(workspace().join("examples").join(name)).unwrap())
                     .unwrap();
@@ -142,9 +157,11 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if server.is_some() {
+        if let Some(server) = &server {
             let inputs = if name == "llm-loop.json" {
                 json!({"repeat.prompt":"Hello", "repeat.history":[], "repeat.text":""})
+            } else if name.starts_with("chat-") {
+                json!({"params.prompt":"Hello", "params.model":"example-model", "params.base_url":server.base_url})
             } else if name == "llm-parameters.json" {
                 json!({"params.prompt":"Hello"})
             } else {
@@ -173,12 +190,22 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr),
         );
-        let actual: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
+        let mut actual: Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|error| {
             panic!(
                 "{name}: invalid JSON output: {error}\n{}",
                 String::from_utf8_lossy(&output.stdout)
             )
         });
+        if name.starts_with("chat-") {
+            let mut identities = std::collections::BTreeSet::new();
+            for usage in actual["usages"].as_array_mut().unwrap() {
+                let id = usage["call_id"].as_str().unwrap().to_owned();
+                assert!(!id.is_empty() && identities.insert(id));
+                usage["call_id"] = "generated".into();
+                assert!(usage["started_at"].as_i64().unwrap() > 0);
+                usage["started_at"] = 0.into();
+            }
+        }
         assert_eq!(actual, expected, "{name}: unexpected workflow output");
     }
 }

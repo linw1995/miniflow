@@ -179,10 +179,13 @@ pub fn history(
             break;
         }
         for message in page {
-            let encoded = serde_json::to_vec(
-                &serde_json::json!({"role": message.role, "content": message.content}),
-            )
-            .context(JsonSnafu)?;
+            let history_message = mfn_llm::ChatMessage {
+                role: message.role,
+                content: message.content,
+                metadata: message.metadata,
+            };
+            let encoded =
+                serde_json::to_vec(&history_message.clone().into_values()?).context(JsonSnafu)?;
             bytes = bytes
                 .checked_add(encoded.len() + usize::from(!result.is_empty()))
                 .context(ArithmeticSnafu {
@@ -190,10 +193,7 @@ pub fn history(
                 })?;
             ensure!(bytes <= maximum, HistoryTooLargeSnafu { limit: maximum });
             after = message.sequence;
-            result.push(mfn_llm::ChatMessage {
-                role: message.role,
-                content: message.content,
-            });
+            result.push(history_message);
         }
     }
     ensure!(bytes <= maximum, HistoryTooLargeSnafu { limit: maximum });
@@ -663,9 +663,9 @@ mod tests {
             .batch_execute(&format!(
                 "INSERT INTO turns VALUES ('good', '{}', NULL, 0, 'succeeded', 1, 2, NULL);
              INSERT INTO turns VALUES ('bad', '{}', NULL, 2, 'failed', 3, 4, 'failed');
-             INSERT INTO messages VALUES ('u', '{}', 'good', 0, 'user', 'question', 1);
-             INSERT INTO messages VALUES ('a', '{}', 'good', 1, 'assistant', 'answer', 2);
-             INSERT INTO messages VALUES ('b', '{}', 'bad', 2, 'user', 'failed question', 3);",
+             INSERT INTO messages (id, session_id, turn_id, sequence, role, content, created_at) VALUES ('u', '{}', 'good', 0, 'user', 'question', 1);
+             INSERT INTO messages (id, session_id, turn_id, sequence, role, content, created_at) VALUES ('a', '{}', 'good', 1, 'assistant', 'answer', 2);
+             INSERT INTO messages (id, session_id, turn_id, sequence, role, content, created_at) VALUES ('b', '{}', 'bad', 2, 'user', 'failed question', 3);",
                 session.id, session.id, session.id, session.id, session.id
             ))
             .unwrap();
