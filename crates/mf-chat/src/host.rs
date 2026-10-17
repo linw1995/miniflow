@@ -3,11 +3,7 @@ use crate::{
     TitleOutcome,
     error::*,
     flows,
-    nodes::{
-        BeginTurnInputs, Changed, CompletionOutputs, FailTurnInputs, RecoveryInputs,
-        RecoveryOutputs,
-    },
-    operation,
+    nodes::{BeginTurnInputs, CompletionOutputs, FailTurnInputs, RecoveryInputs, RecoveryOutputs},
 };
 use mf_runtime::{
     ContextValue, ExecutionContext, FlowRuntime, NodeValue, StreamCancellation, StreamError,
@@ -457,13 +453,16 @@ impl ChatHost {
         for handle in handles {
             panic |= handle.join().is_err();
         }
-        let _: RecoveryOutputs = operation::execute(
-            self.database().path(),
-            "mf_chat.storage.recover",
-            RecoveryInputs {
-                database_path: String::new(),
-            },
-        )?;
+        let _: RecoveryOutputs = crate::turn::recover(RecoveryInputs {
+            database_path: self
+                .database()
+                .path()
+                .to_str()
+                .context(PathSnafu {
+                    path: self.database().path(),
+                })?
+                .into(),
+        })?;
         ensure!(!panic, WorkerPanicSnafu { id: "shutdown" });
         Ok(())
     }
@@ -550,17 +549,20 @@ impl Inner {
                         } else {
                             "failed"
                         };
-                        operation::execute::<_, Changed>(
-                            self.database.path(),
-                            "mf_chat.turn.fail",
-                            FailTurnInputs {
-                                usages: crate::model::failure_usages(&source),
-                                database_path: String::new(),
-                                invocation: invocation.clone(),
-                                state: state.into(),
-                                error: source.to_string(),
-                            },
-                        )
+                        crate::turn::fail(FailTurnInputs {
+                            usages: crate::model::failure_usages(&source),
+                            database_path: self
+                                .database
+                                .path()
+                                .to_str()
+                                .context(PathSnafu {
+                                    path: self.database.path(),
+                                })?
+                                .into(),
+                            invocation: invocation.clone(),
+                            state: state.into(),
+                            error: source.to_string(),
+                        })
                         .err()
                         .map(Box::new)
                     } else {

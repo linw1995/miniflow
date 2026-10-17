@@ -1,7 +1,6 @@
 use crate::{
     ChatDatabase, ChatError, Message, Session,
     error::*,
-    operation,
     schema::{messages, sessions, turns},
     storage,
 };
@@ -460,42 +459,42 @@ impl ChatDatabase {
         system: Option<String>,
         title: Option<String>,
     ) -> Result<Session, ChatError> {
-        let result: SessionOutputs = operation::execute(
-            self.path(),
-            "mf_chat.session.create",
-            CreateSessionInputs {
-                database_path: String::new(),
-                session_id: uuid::Uuid::new_v4().to_string(),
-                profile: profile.into(),
-                system,
-                title,
-            },
-        )?;
+        let result: SessionOutputs = create(CreateSessionInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            session_id: uuid::Uuid::new_v4().to_string(),
+            profile: profile.into(),
+            system,
+            title,
+        })?;
         Ok(result.session)
     }
 
     pub fn session(&self, id: &str) -> Result<Session, ChatError> {
-        let result: SessionOutputs = operation::execute(
-            self.path(),
-            "mf_chat.session.load",
-            SessionInputs {
-                database_path: String::new(),
-                session_id: id.into(),
-            },
-        )?;
+        let result: SessionOutputs = get(SessionInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            session_id: id.into(),
+        })?;
         Ok(result.session)
     }
 
     pub fn rename_session(&self, id: &str, title: &str) -> Result<Session, ChatError> {
-        let result: SessionOutputs = operation::execute(
-            self.path(),
-            "mf_chat.session.rename",
-            RenameSessionInputs {
-                database_path: String::new(),
-                session_id: id.into(),
-                title: title.into(),
-            },
-        )?;
+        let result: SessionOutputs = rename(RenameSessionInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            session_id: id.into(),
+            title: title.into(),
+        })?;
         Ok(result.session)
     }
 
@@ -507,18 +506,16 @@ impl ChatDatabase {
     }
 
     fn change_archive(&self, id: &str, archived: bool) -> Result<Session, ChatError> {
-        let kind = if archived {
-            "mf_chat.session.archive"
-        } else {
-            "mf_chat.session.restore"
-        };
-        let result: SessionOutputs = operation::execute(
-            self.path(),
-            kind,
+        let result = set_archived(
             SessionInputs {
-                database_path: String::new(),
+                database_path: self
+                    .path()
+                    .to_str()
+                    .context(PathSnafu { path: self.path() })?
+                    .into(),
                 session_id: id.into(),
             },
+            archived,
         )?;
         Ok(result.session)
     }
@@ -529,16 +526,16 @@ impl ChatDatabase {
         limit: usize,
         after_id: Option<String>,
     ) -> Result<SessionPage, ChatError> {
-        let result: SessionPageOutputs = operation::execute(
-            self.path(),
-            "mf_chat.session.list",
-            ListSessionsInputs {
-                database_path: String::new(),
-                archived,
-                limit,
-                after_id,
-            },
-        )?;
+        let result: SessionPageOutputs = list(ListSessionsInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            archived,
+            limit,
+            after_id,
+        })?;
         Ok(result.page)
     }
 
@@ -548,29 +545,29 @@ impl ChatDatabase {
         limit: usize,
         after_sequence: Option<i64>,
     ) -> Result<MessagePage, ChatError> {
-        let result: MessagePageOutputs = operation::execute(
-            self.path(),
-            "mf_chat.messages.list",
-            MessagesInputs {
-                database_path: String::new(),
-                session_id: id.into(),
-                limit,
-                after_sequence,
-            },
-        )?;
+        let result: MessagePageOutputs = message_page(MessagesInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            session_id: id.into(),
+            limit,
+            after_sequence,
+        })?;
         Ok(result.page)
     }
 
     pub fn history(&self, id: &str, max_bytes: usize) -> Result<HistoryContext, ChatError> {
-        let result: HistoryOutputs = operation::execute(
-            self.path(),
-            "mf_chat.history.load",
-            HistoryInputs {
-                database_path: String::new(),
-                session_id: id.into(),
-                max_bytes,
-            },
-        )?;
+        let result: HistoryOutputs = load_history(HistoryInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            session_id: id.into(),
+            max_bytes,
+        })?;
         Ok(result.context)
     }
 }
@@ -607,6 +604,7 @@ mod tests {
             .batch_execute("DROP TABLE sessions;")
             .unwrap();
         let error = database.list_sessions(false, 10, None).unwrap_err();
+        assert!(matches!(&error, ChatError::Database { .. }));
         let mut source: Option<&dyn std::error::Error> = Some(&error);
         let mut found = false;
         while let Some(current) = source {

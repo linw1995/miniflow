@@ -64,7 +64,7 @@ Statistics SHALL include reported model attempts by terminal status and preserve
 
 ### Requirement: Query consistent scoped aggregates
 
-The statistics flow SHALL support all sessions or one session, optional profile, model, and purpose filters, and an optional UTC time range based on call start time. It SHALL return consistent aggregates from one storage snapshot, with bounded grouping by session, profile, model, purpose, or UTC day. Numeric overflow MUST fail explicitly.
+The statistics query SHALL support all sessions or one session, optional profile, model, and purpose filters, and an optional UTC time range based on call start time. It SHALL return consistent aggregates from one storage snapshot, with bounded grouping by session, profile, model, purpose, or UTC day. Numeric overflow MUST fail explicitly.
 
 #### Scenario: Scope to one session and purpose
 
@@ -86,9 +86,9 @@ The statistics flow SHALL support all sessions or one session, optional profile,
 - **WHEN** summing reported counters would exceed the supported integer range
 - **THEN** the query returns an explicit overflow error instead of wrapping or saturating
 
-### Requirement: Execute statistics as an embedded deterministic flow
+### Requirement: Query deterministic statistics directly
 
-The host SHALL obtain statistics through the embedded usage statistics flow and application query nodes. It SHALL aggregate persisted facts without issuing model requests or updating billing facts. Results SHALL remain reproducible for unchanged stored data and identical filters.
+The host SHALL query statistics directly through the shared storage handler. The application query node SHALL adapt that same handler for workflows without creating a nested flow. It SHALL aggregate persisted facts without issuing model requests or updating billing facts. Results SHALL remain reproducible for unchanged stored data and identical filters.
 
 #### Scenario: Query without provider credentials
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Provide durable, independent chat sessions with ordered messages and recoverable turn state through application-owned workflow nodes.
+Provide durable, independent chat sessions with ordered messages and recoverable turn state through shared storage handlers and application-owned workflow nodes.
 
 ## Requirements
 
@@ -28,12 +28,17 @@ The chat host SHALL initialize SQLite storage and apply bundled pending migratio
 
 ### Requirement: Expose application storage operations as nodes
 
-The `mf-chat` package SHALL expose typed `mf_chat.*` nodes for initialization, session management, turn transitions, title persistence, and usage queries. The host SHALL use these nodes for persisted application operations. Preparing or inspecting these nodes MUST NOT open storage, apply migrations, or execute queries.
+The `mf-chat` package SHALL expose typed `mf_chat.*` nodes for initialization, session management, turn transitions, title persistence, and usage queries. Direct database APIs and node adapters SHALL call the same storage handlers. Host storage operations MUST NOT construct or execute wrapper workflows. Preparing or inspecting these nodes MUST NOT open storage, apply migrations, or execute queries.
 
 #### Scenario: Prepare without a database
 
 - **WHEN** a structurally valid chat workflow is prepared or inspected with a nonexistent database path
 - **THEN** its node contracts are available without creating database files or applying migrations
+
+#### Scenario: Return a direct storage error
+
+- **WHEN** a database API fails to find a turn or execute a storage query
+- **THEN** it returns the typed storage error directly without runtime error wrapping
 
 #### Scenario: Attribute a storage failure
 

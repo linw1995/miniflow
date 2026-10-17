@@ -2,7 +2,7 @@
 
 use crate::{ChatError, Completion, Invocation, error::*, turn};
 use mf_runtime::{NodeValue, WorkflowArguments, WorkflowInputSchema, WorkflowManifest};
-use snafu::ensure;
+use snafu::{OptionExt, ensure};
 use std::collections::BTreeMap;
 
 mod recovery;
@@ -129,17 +129,10 @@ impl crate::ChatDatabase {
     ) -> Result<InvocationState, ChatError> {
         let turn = match self.turn(&invocation.turn_id) {
             Ok(turn) => turn,
-            Err(error) => {
-                let mut source: Option<&dyn std::error::Error> = Some(&error);
-                while let Some(cause) = source {
-                    if matches!(cause.downcast_ref::<ChatError>(), Some(ChatError::TurnMissing { id }) if id == &invocation.turn_id)
-                    {
-                        return Ok(InvocationState::NotBegun);
-                    }
-                    source = cause.source();
-                }
-                return Err(error);
+            Err(ChatError::TurnMissing { id }) if id == invocation.turn_id => {
+                return Ok(InvocationState::NotBegun);
             }
+            Err(error) => return Err(error),
         };
         let call = self.call(&invocation.call_id)?;
         ensure!(
@@ -182,14 +175,14 @@ impl crate::ChatDatabase {
     }
 
     pub fn retry_prompt(&self, turn_id: &str) -> Result<(crate::Turn, String), ChatError> {
-        let original: turn::TurnRequestOutputs = crate::operation::execute(
-            self.path(),
-            "mf_chat.turn.request",
-            turn::RecordInputs {
-                database_path: String::new(),
-                id: turn_id.into(),
-            },
-        )?;
+        let original: turn::TurnRequestOutputs = turn::get_request(turn::RecordInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            id: turn_id.into(),
+        })?;
         ensure!(
             matches!(
                 original.turn.state.as_str(),

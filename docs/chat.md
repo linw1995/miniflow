@@ -1,6 +1,6 @@
 # Embedded chat core
 
-The `mf-chat` library owns SQLite storage for multiple chat sessions. Its persisted operations are application-owned `mf_chat.*` nodes. It does not initialize a terminal or launch workflow runner processes.
+The `mf-chat` library owns SQLite storage for multiple chat sessions. Direct database APIs and application-owned `mf_chat.*` nodes share the same storage handlers. It does not initialize a terminal or launch workflow runner processes.
 
 ## Database initialization
 
@@ -11,7 +11,7 @@ let database = mf_chat::ChatDatabase::open("state/chat.sqlite")?;
 println!("{}", database.path().display());
 ```
 
-The owner creates the parent directory, acquires an exclusive sibling lock, executes the initialization node, and keeps the lock until dropped. Another owning host receives a typed busy error. Startup applies embedded pending migrations and enables WAL, foreign keys, and a finite busy timeout. No external migration files or tools are needed.
+The owner creates the parent directory, acquires an exclusive sibling lock, initializes storage directly, and keeps the lock until dropped. Another owning host receives a typed busy error. Startup applies embedded pending migrations and enables WAL, foreign keys, and a finite busy timeout. No external migration files or tools are needed.
 
 Node preparation validates contracts without opening storage. Failures retain typed filesystem, connection, query, and migration sources through `ChatError`.
 
@@ -19,7 +19,8 @@ Persisted records distinguish sessions, ordered messages, conversation turns, an
 
 ## Sessions and history
 
-Every host operation runs an application node through the existing workflow runtime:
+Database APIs call storage handlers directly, without constructing or executing workflows.
+They return storage variants of `ChatError` directly; callers can match domain errors without traversing runtime wrappers:
 
 ```rust
 let session = database.create_session("default", Some("Answer briefly".into()), None)?;
@@ -47,7 +48,7 @@ Registered kinds are `mf_chat.session.create`, `.list`, `.load`, `.rename`, `.ar
 
 A model retry creates a fresh turn and call and retains `retry_of` pointing to the original unsuccessful turn. A persistence retry reuses the original identity and response and never invokes the model again. Their database transitions are distinct.
 
-Opening a database under its ownership lock executes `mf_chat.storage.recover`: abandoned running work becomes interrupted and never automatically resends a request. A crash after a remote reply but before persistence can lose that reply and its usage. Interrupted usage remains unknown; it is not recorded as zero.
+Opening a database under its ownership lock calls the recovery handler directly: abandoned running work becomes interrupted and never automatically resends a request. A crash after a remote reply but before persistence can lose that reply and its usage. Interrupted usage remains unknown; it is not recorded as zero.
 
 ## Embedded conversation host
 
@@ -70,7 +71,8 @@ host.close()?;
 
 Profiles contain validated nonsecret LLM configuration. Credentials are read through the configured environment reference only during execution. Sessions keep their profile and system instructions; each call records the profile and model actually selected. An optional observer receives each configured flow's preparation and execution lifecycle.
 
-Provider failures finalize begun work through failure nodes in fresh contexts. If cleanup also fails, `ChatError::Execution` retains both typed errors and invocation identities. A reply whose storage write fails returns `ChatError::Uncommitted`; pass its retained value to `retry_completion` or explicitly abandon it. Repeated persistence failures return the retained reply again and never resend a model request. `retry` starts a fresh model call for an unsuccessful original turn.
+Provider failures finalize begun work through storage handlers independently of the cancelled execution context.
+If cleanup also fails, `ChatError::Execution` retains both typed errors and invocation identities. A reply whose storage write fails returns `ChatError::Uncommitted`; pass its retained value to `retry_completion` or explicitly abandon it. Repeated persistence failures return the retained reply again and never resend a model request. `retry` starts a fresh model call for an unsuccessful original turn.
 
 Run the two-turn example with an available model and credentials in the environment:
 
@@ -102,7 +104,8 @@ resent. A title response whose write fails returns an uncommitted value with pur
 
 ## Usage statistics
 
-`usage` executes the embedded `usage_statistics` flow and its `mf_chat.usage.query` node. It reads committed call facts in one SQLite snapshot and never invokes a model or changes billing records.
+The former `flows::usage_statistics` module is removed; use `ChatDatabase::usage` or `ChatHost::usage`.
+`usage` calls the query handler directly; `mf_chat.usage.query` exposes the same handler to workflows. It reads committed call facts in one SQLite snapshot and never invokes a model or changes billing records.
 
 ```rust
 let statistics = host.usage(mf_chat::UsageQuery {

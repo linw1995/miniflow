@@ -1,4 +1,4 @@
-//! Persistent chat operations implemented as application-owned workflow nodes.
+//! Persistent chat operations shared by direct APIs and application-owned workflow nodes.
 
 mod error;
 pub mod executable;
@@ -8,7 +8,6 @@ mod model;
 mod models;
 #[macro_use]
 pub mod nodes;
-mod operation;
 mod schema;
 mod session;
 mod storage;

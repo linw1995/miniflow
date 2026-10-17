@@ -1,7 +1,6 @@
 use crate::{
     ChatDatabase, ChatError, ModelCall, Turn,
     error::*,
-    operation,
     schema::{messages, model_calls, sessions, turns},
     session, storage,
 };
@@ -587,7 +586,7 @@ pub fn finalize_call(
     Ok(Changed { changed: true })
 }
 
-fn fail(input: FailTurnInputs) -> Result<Changed, ChatError> {
+pub fn fail(input: FailTurnInputs) -> Result<Changed, ChatError> {
     if let Some(usages) = &input.usages {
         validate_usages(usages)?;
     }
@@ -641,7 +640,7 @@ fn get_call(input: RecordInputs) -> Result<CallOutputs, ChatError> {
     })
 }
 
-fn get_request(input: RecordInputs) -> Result<TurnRequestOutputs, ChatError> {
+pub fn get_request(input: RecordInputs) -> Result<TurnRequestOutputs, ChatError> {
     let mut connection = storage::connect(Path::new(&input.database_path))?;
     let turn = load_turn(&mut connection, &input.id)?;
     let prompt = messages::table
@@ -655,7 +654,7 @@ fn get_request(input: RecordInputs) -> Result<TurnRequestOutputs, ChatError> {
     Ok(TurnRequestOutputs { turn, prompt })
 }
 
-fn recover(input: RecoveryInputs) -> Result<RecoveryOutputs, ChatError> {
+pub fn recover(input: RecoveryInputs) -> Result<RecoveryOutputs, ChatError> {
     let mut connection = storage::connect(Path::new(&input.database_path))?;
     connection.immediate_transaction(|connection| {
         let timestamp = session::now()?;
@@ -770,20 +769,20 @@ impl ChatDatabase {
         retry_of: Option<String>,
         max_history_bytes: usize,
     ) -> Result<TurnStarted, ChatError> {
-        operation::execute(
-            self.path(),
-            "mf_chat.turn.begin",
-            BeginTurnInputs {
-                database_path: String::new(),
-                session_id: invocation.session_id,
-                turn_id: invocation.turn_id,
-                call_id: invocation.call_id,
-                prompt: prompt.into(),
-                model,
-                retry_of,
-                max_history_bytes,
-            },
-        )
+        begin(BeginTurnInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            session_id: invocation.session_id,
+            turn_id: invocation.turn_id,
+            call_id: invocation.call_id,
+            prompt: prompt.into(),
+            model,
+            retry_of,
+            max_history_bytes,
+        })
     }
 
     pub fn complete_turn(
@@ -791,15 +790,15 @@ impl ChatDatabase {
         invocation: Invocation,
         response: Reply,
     ) -> Result<Completion, ChatError> {
-        let result: CompletionOutputs = operation::execute(
-            self.path(),
-            "mf_chat.turn.complete",
-            CompleteTurnInputs {
-                database_path: String::new(),
-                invocation,
-                response,
-            },
-        )?;
+        let result: CompletionOutputs = complete(CompleteTurnInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            invocation,
+            response,
+        })?;
         Ok(result.completion)
     }
 
@@ -809,17 +808,17 @@ impl ChatDatabase {
         error: &str,
         usages: Vec<mfn_llm::CallUsage>,
     ) -> Result<bool, ChatError> {
-        let result: Changed = operation::execute(
-            self.path(),
-            "mf_chat.turn.fail",
-            FailTurnInputs {
-                usages: Some(usages),
-                database_path: String::new(),
-                invocation,
-                state: "failed".into(),
-                error: error.into(),
-            },
-        )?;
+        let result: Changed = fail(FailTurnInputs {
+            usages: Some(usages),
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            invocation,
+            state: "failed".into(),
+            error: error.into(),
+        })?;
         Ok(result.changed)
     }
 
@@ -829,17 +828,17 @@ impl ChatDatabase {
         state: &str,
         error: &str,
     ) -> Result<bool, ChatError> {
-        let result: Changed = operation::execute(
-            self.path(),
-            "mf_chat.turn.fail",
-            FailTurnInputs {
-                usages: None,
-                database_path: String::new(),
-                invocation,
-                state: state.into(),
-                error: error.into(),
-            },
-        )?;
+        let result: Changed = fail(FailTurnInputs {
+            usages: None,
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            invocation,
+            state: state.into(),
+            error: error.into(),
+        })?;
         Ok(result.changed)
     }
 
@@ -854,41 +853,41 @@ impl ChatDatabase {
         error: &str,
         usages: Option<Vec<mfn_llm::CallUsage>>,
     ) -> Result<bool, ChatError> {
-        let result: Changed = operation::execute(
-            self.path(),
-            "mf_chat.call.fail",
-            FailCallInputs {
-                usages,
-                database_path: String::new(),
-                call_id: call_id.into(),
-                state: state.into(),
-                error: error.into(),
-            },
-        )?;
+        let result: Changed = fail_call(FailCallInputs {
+            usages,
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            call_id: call_id.into(),
+            state: state.into(),
+            error: error.into(),
+        })?;
         Ok(result.changed)
     }
 
     pub fn turn(&self, id: &str) -> Result<Turn, ChatError> {
-        let result: TurnOutputs = operation::execute(
-            self.path(),
-            "mf_chat.turn.load",
-            RecordInputs {
-                database_path: String::new(),
-                id: id.into(),
-            },
-        )?;
+        let result: TurnOutputs = get_turn(RecordInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            id: id.into(),
+        })?;
         Ok(result.turn)
     }
 
     pub fn call(&self, id: &str) -> Result<ModelCall, ChatError> {
-        let result: CallOutputs = operation::execute(
-            self.path(),
-            "mf_chat.call.load",
-            RecordInputs {
-                database_path: String::new(),
-                id: id.into(),
-            },
-        )?;
+        let result: CallOutputs = get_call(RecordInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            id: id.into(),
+        })?;
         Ok(result.call)
     }
 }

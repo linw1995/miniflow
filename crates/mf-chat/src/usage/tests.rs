@@ -224,16 +224,12 @@ fn pending_titles_do_not_count_but_discarded_title_results_keep_their_usage() {
     );
     database.schedule_titles(10).unwrap();
     let title = database.pending_titles(10).unwrap().pop().unwrap();
-    let prepared: crate::nodes::TitleStarted = crate::operation::execute(
-        database.path(),
-        "mf_chat.title.prepare",
-        PrepareTitleInputs {
-            database_path: String::new(),
-            call_id: title.id.clone(),
-            model: identity(),
-            max_bytes: 1024,
-        },
-    )
+    let prepared: crate::nodes::TitleStarted = crate::title::prepare(PrepareTitleInputs {
+        database_path: database.path().to_str().unwrap().into(),
+        call_id: title.id.clone(),
+        model: identity(),
+        max_bytes: 1024,
+    })
     .unwrap();
     database.rename_session(&owner.id, "Manual").unwrap();
     let response = Reply {

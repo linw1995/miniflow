@@ -1,7 +1,6 @@
 use crate::{
     CallPurpose, ChatDatabase, ChatError,
     error::*,
-    flows,
     schema::{model_calls as invocations, usage_facts as model_calls},
     session, storage,
 };
@@ -346,25 +345,15 @@ register_operation!(
 
 impl ChatDatabase {
     pub fn usage(&self, query: UsageQuery) -> Result<UsageStatistics, ChatError> {
-        let registry = mf_runtime::NodeRegistry::from_inventory()?;
-        let flow = flows::usage_statistics::prepare_workflow(&registry, None)?;
-        let input = UsageInputs {
+        Ok(self::query(UsageInputs {
             database_path: self
                 .path()
                 .to_str()
                 .context(PathSnafu { path: self.path() })?
                 .into(),
             query,
-        };
-        let arguments = mf_runtime::WorkflowArguments(
-            input
-                .into_values()?
-                .into_iter()
-                .map(|(name, value)| (format!("query.{name}"), value))
-                .collect(),
-        );
-        let outputs = mf_runtime::FlowRuntime::default().execute_with_inputs(&flow, arguments)?;
-        Ok(UsageOutputs::from_values(outputs)?.statistics)
+        })?
+        .statistics)
     }
 }
 

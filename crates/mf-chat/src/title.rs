@@ -1,7 +1,6 @@
 use crate::{
     ChatDatabase, ChatError, Invocation, ModelCall, ModelIdentity, Reply,
     error::*,
-    operation,
     schema::{messages, model_calls, sessions, turns},
     session, storage, turn,
 };
@@ -403,37 +402,37 @@ register_operation!(
 
 impl ChatDatabase {
     pub fn schedule_titles(&self, limit: usize) -> Result<bool, ChatError> {
-        let result: turn::Changed = operation::execute(
-            self.path(),
-            "mf_chat.title.schedule",
-            PendingTitleInputs {
-                database_path: String::new(),
-                limit,
-            },
-        )?;
+        let result: turn::Changed = schedule(PendingTitleInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            limit,
+        })?;
         Ok(result.changed)
     }
 
     pub fn pending_titles(&self, limit: usize) -> Result<Vec<ModelCall>, ChatError> {
-        let result: PendingTitles = operation::execute(
-            self.path(),
-            "mf_chat.title.pending",
-            PendingTitleInputs {
-                database_path: String::new(),
-                limit,
-            },
-        )?;
+        let result: PendingTitles = pending(PendingTitleInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            limit,
+        })?;
         Ok(result.calls)
     }
     pub fn retry_title(&self, session_id: &str) -> Result<ModelCall, ChatError> {
-        let result: crate::nodes::CallOutputs = operation::execute(
-            self.path(),
-            "mf_chat.title.retry",
-            crate::nodes::SessionInputs {
-                database_path: String::new(),
-                session_id: session_id.into(),
-            },
-        )?;
+        let result: crate::nodes::CallOutputs = retry(crate::nodes::SessionInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            session_id: session_id.into(),
+        })?;
         Ok(result.call)
     }
     pub fn complete_title(
@@ -442,16 +441,16 @@ impl ChatDatabase {
         title_revision: i64,
         response: Reply,
     ) -> Result<TitleCompletion, ChatError> {
-        let result: TitleCompletionOutputs = operation::execute(
-            self.path(),
-            "mf_chat.title.complete",
-            CompleteTitleInputs {
-                database_path: String::new(),
-                invocation,
-                title_revision,
-                response,
-            },
-        )?;
+        let result: TitleCompletionOutputs = complete(CompleteTitleInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            invocation,
+            title_revision,
+            response,
+        })?;
         Ok(result.result)
     }
 }

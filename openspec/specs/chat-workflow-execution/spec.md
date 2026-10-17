@@ -8,12 +8,12 @@ Execute persistent conversations and independent session title generation throug
 
 ### Requirement: Embed the application workflows
 
-The package SHALL embed conversation, session title, and usage statistics definitions as Rust modules using the existing workflow embedding facility. Built hosts SHALL execute them without workflow source files, generated source files, build tools, or spawning standalone workflow runners.
+The package SHALL embed conversation and session title definitions as Rust modules using the existing workflow embedding facility. Built hosts SHALL execute them without workflow source files, generated source files, build tools, or spawning standalone workflow runners.
 
 #### Scenario: Run without definition files
 
 - **WHEN** a built host runs with workflow and generated source files removed
-- **THEN** all three embedded workflows remain executable with their configured runtime resources
+- **THEN** both embedded workflows remain executable with their configured runtime resources
 
 #### Scenario: Rebuild a workflow change
 
@@ -71,7 +71,7 @@ Each invocation SHALL bind its session and call identities before execution. Cha
 
 ### Requirement: Finalize execution failures outside the success path
 
-The host SHALL finalize begun work after provider failure, deadline expiry, or cancellation through application nodes even when success-path nodes do not execute. Cleanup SHALL use a fresh execution context independent of the cancelled request. Cleanup failures MUST preserve the original error and identify unresolved work.
+The host SHALL finalize begun work after provider failure, deadline expiry, or cancellation through shared storage handlers even when success-path nodes do not execute. Cleanup SHALL run independently of the cancelled request without creating a workflow or execution context. Cleanup failures MUST preserve the original error and identify unresolved work.
 
 #### Scenario: Cancel a pending conversation
 

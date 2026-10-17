@@ -1,12 +1,7 @@
-use crate::{
-    ChatError,
-    error::*,
-    nodes::{Initialize, InitializeInputs},
-};
+use crate::{ChatError, error::*};
 use diesel::{Connection, connection::SimpleConnection, sqlite::SqliteConnection};
 use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 use fs2::FileExt;
-use mf_runtime::{ExecutionContext, TypedTaskNode};
 use snafu::{IntoError, OptionExt, ResultExt};
 use std::{
     fs::{self, File, OpenOptions},
@@ -136,22 +131,21 @@ impl ChatDatabase {
                 .into_error(source));
             }
         }
-        let database_path = path.to_str().context(PathSnafu { path: &path })?.to_owned();
-        Initialize.execute(
-            InitializeInputs { database_path },
-            &mut ExecutionContext::default(),
-        )?;
+        initialize(&path)?;
         let database = Self {
             path,
             _ownership: ownership,
         };
-        let _: crate::nodes::RecoveryOutputs = crate::operation::execute(
-            database.path(),
-            "mf_chat.storage.recover",
-            crate::nodes::RecoveryInputs {
-                database_path: String::new(),
-            },
-        )?;
+        let _: crate::nodes::RecoveryOutputs =
+            crate::turn::recover(crate::nodes::RecoveryInputs {
+                database_path: database
+                    .path()
+                    .to_str()
+                    .context(PathSnafu {
+                        path: database.path(),
+                    })?
+                    .into(),
+            })?;
         Ok(database)
     }
 
@@ -353,11 +347,11 @@ mod tests {
         fs::create_dir(&invalid).unwrap();
         assert!(matches!(
             ChatDatabase::open(&invalid),
-            Err(ChatError::Node { .. })
+            Err(ChatError::Connect { .. })
         ));
         assert!(matches!(
             ChatDatabase::open(&invalid),
-            Err(ChatError::Node { .. })
+            Err(ChatError::Connect { .. })
         ));
     }
 }
