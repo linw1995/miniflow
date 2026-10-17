@@ -38,7 +38,11 @@ by package name even when it retains their libraries. Content invalidation runs
 before both CLI and runner compilation. Dependency artifacts are
 seeded only on the first run; installed executables, Cargo homes, and user
 projects remain temporary and isolated.
-The default and CI profiles share all CLI generated-build fixtures.
+The default and CI profiles share the generated-build fixtures for the CLI,
+compiler, and chat host. The chat fixture copies only its own build inputs and
+keeps dependency paths in the checkout; it deletes the copied workspace before
+running the relocated host. All shared builds use one serialized test group.
+Only release dependencies are prewarmed; obsolete dev artifacts are removed.
 Generated-runner behavior tests use the release profile with optimization level
 zero by default. This keeps release semantics and artifact paths while reducing
 compilation cost. Set `CARGO_PROFILE_RELEASE_OPT_LEVEL` to override the default;
