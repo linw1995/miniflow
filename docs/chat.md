@@ -247,8 +247,8 @@ through its chosen branches and accumulators. Successful status permits absent o
 Allocate an `Invocation`, durably begin its turn, and pass the resulting request to `contract.arguments`.
 Supply `ModelIdentity { profile, model: None }` for workflow admission; actual model identities arrive
 in `usages`. New calls do not compute or require configuration fingerprints. Capture stdout within
-`MAX_RECOVERY_BYTES` (16 MiB) and pass it to `reconcile_completion`. Recovery and `decode_completion`
-only need the admitted invocation and output bytes; they do not require a manifest or `ChatContract`.
+`MAX_RECOVERY_BYTES` (16 MiB) and pass it to `reconcile_completion`. Recovery only needs the admitted
+invocation and output bytes; it does not require a manifest or `ChatContract`.
 
 Successful results become `CompletionState::Uncommitted`; `save_recovered` atomically saves the assistant
 message, metadata, usages, and successful turn state. Failed results atomically save their usages and the

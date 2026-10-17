@@ -28,17 +28,6 @@ enum Delivered {
     },
 }
 
-pub fn decode_completion(bytes: &[u8], invocation: &Invocation) -> Result<Completion, ChatError> {
-    match decode_result(bytes, invocation)? {
-        Delivered::Succeeded(completion) => Ok(completion),
-        Delivered::Failed { .. } => InvalidSnafu {
-            field: "workflow result",
-            reason: "workflow reported failure",
-        }
-        .fail(),
-    }
-}
-
 fn decode_result(bytes: &[u8], invocation: &Invocation) -> Result<Delivered, ChatError> {
     ensure!(
         bytes.len() <= MAX_RECOVERY_BYTES,

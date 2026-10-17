@@ -6,9 +6,7 @@ use snafu::ensure;
 use std::collections::BTreeMap;
 
 mod recovery;
-pub use recovery::{
-    CompletionState, ConversationExit, MAX_RECOVERY_BYTES, ReconciledCompletion, decode_completion,
-};
+pub use recovery::{CompletionState, ConversationExit, MAX_RECOVERY_BYTES, ReconciledCompletion};
 
 #[derive(Clone, Debug)]
 pub struct ChatContract {

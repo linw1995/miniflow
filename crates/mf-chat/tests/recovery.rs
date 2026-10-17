@@ -1,7 +1,5 @@
 use diesel::{Connection, connection::SimpleConnection};
-use mf_chat::executable::{
-    CompletionState, ConversationExit, MAX_RECOVERY_BYTES, TurnExit, decode_completion,
-};
+use mf_chat::executable::{CompletionState, ConversationExit, MAX_RECOVERY_BYTES, TurnExit};
 use mf_chat::{ChatDatabase, ModelProfile, Reply};
 use mf_runtime::NodeValue;
 use serde_json::json;
@@ -206,18 +204,33 @@ fn retained_replies_keep_database_and_purpose_ownership_until_abandoned() {
 }
 
 #[test]
-fn malformed_or_missing_model_output_finalizes_only_the_admitted_invocation() {
+fn invalid_or_missing_results_finalize_only_the_admitted_invocation() {
     let root = tempfile::tempdir().unwrap();
     let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
     let untouched = begin(&database);
+    let first = usages().remove(0);
+    let mut invalid = first.clone();
+    invalid.usage = Some(std::collections::BTreeMap::from([(
+        "input_tokens".into(),
+        -1,
+    )]));
+    let invalid_results = [
+        json!({"status":"succeeded", "text":"reply", "usages":[first.clone(), first]}),
+        json!({"status":"succeeded", "text":"reply", "usages":[invalid]}),
+        json!({"status":"succeeded", "text":"reply"}),
+        json!({"status":"unknown", "text":"reply", "usages":[]}),
+        json!({"status":"succeeded", "text":"reply", "metadata":[], "usages":[]}),
+        json!({"status":"succeeded", "text":true, "usages":[]}),
+    ];
     for bytes in [
         None,
         Some(b"{}".to_vec()),
-        Some(b"{\"text\":\"a\",\"history\":\"bad\"}".to_vec()),
-        Some(b"{\"text\":true,\"history\":[]}".to_vec()),
-        Some(b"{\"text\":\"a\",\"text\":\"b\",\"history\":[]}".to_vec()),
+        Some(br#"{"status":"succeeded","text":"a","text":"b","usages":[]}"#.to_vec()),
         Some(stdout(&"a".repeat(MAX_RECOVERY_BYTES))),
-    ] {
+    ]
+    .into_iter()
+    .chain(invalid_results.map(|result| Some(serde_json::to_vec(&result).unwrap())))
+    {
         let invocation = begin(&database);
         let resolution = database
             .reconcile_completion(ConversationExit {
@@ -227,6 +240,7 @@ fn malformed_or_missing_model_output_finalizes_only_the_admitted_invocation() {
                 summary: "no valid reply",
             })
             .unwrap();
+        assert_eq!(resolution.diagnostics.len(), usize::from(bytes.is_some()));
         assert!(matches!(resolution.state, CompletionState::Finished(_)));
         assert_eq!(
             database.turn(&invocation.turn_id).unwrap().state,
@@ -384,30 +398,6 @@ fn failed_workflow_persists_all_reported_calls_atomically_without_an_assistant_m
 }
 
 #[test]
-fn response_validation_rejects_ambiguous_or_invalid_usage_facts() {
-    let invocation = mf_chat::Invocation::new("session");
-    let first = usages().remove(0);
-    let mut invalid = first.clone();
-    invalid.usage = Some(std::collections::BTreeMap::from([(
-        "input_tokens".into(),
-        -1,
-    )]));
-    for reported in [vec![first.clone(), first], vec![invalid]] {
-        let bytes =
-            serde_json::to_vec(&json!({"status":"succeeded", "text":"reply", "usages":reported}))
-                .unwrap();
-        assert!(decode_completion(&bytes, &invocation).is_err());
-    }
-    for result in [
-        json!({"status":"succeeded", "text":"reply"}),
-        json!({"status":"unknown", "text":"reply", "usages":[]}),
-        json!({"status":"succeeded", "text":"reply", "metadata":[], "usages":[]}),
-    ] {
-        assert!(decode_completion(&serde_json::to_vec(&result).unwrap(), &invocation).is_err());
-    }
-}
-
-#[test]
 fn returned_history_cannot_rewrite_saved_message_metadata() {
     let root = tempfile::tempdir().unwrap();
     let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
@@ -431,11 +421,19 @@ fn returned_history_cannot_rewrite_saved_message_metadata() {
     output["history"] =
         json!([{"role":"assistant","content":"rewritten","metadata":{"changed":true}}]);
     output["metadata"] = json!({"current":true});
-    let completion =
-        decode_completion(&serde_json::to_vec(&output).unwrap(), &second.invocation).unwrap();
-    database
-        .complete_turn(completion.invocation, completion.reply)
+    let bytes = serde_json::to_vec(&output).unwrap();
+    let resolution = database
+        .reconcile_completion(ConversationExit {
+            invocation: &second.invocation,
+            stdout: Some(&bytes),
+            outcome: TurnExit::Failed,
+            summary: "workflow finished",
+        })
         .unwrap();
+    let CompletionState::Uncommitted(pending) = resolution.state else {
+        panic!("expected retained reply");
+    };
+    database.save_recovered(pending).unwrap();
     let history = database.history(&first.session_id, 4096).unwrap().history;
     assert_eq!(history[1].content, "paid reply");
     assert_eq!(history[1].metadata, Some(metadata()));
