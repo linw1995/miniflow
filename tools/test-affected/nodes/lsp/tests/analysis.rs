@@ -107,23 +107,13 @@ fn unsupported_capabilities_are_gaps_not_independence_claims() {
 }
 
 #[test]
-fn no_requests_never_start_a_server_and_still_emit_once() {
-    let (directory, mut config, mut request) = fixture("normal");
-    config.command = "/missing-server".into();
-    request.snapshots[0].documents.clear();
-    let outcome = analyze(&config, request, StreamCancellation::default()).unwrap();
-    assert_eq!(outcome.status, Status::NotRequested);
-    assert!(!directory.path().join("requests.pid").exists());
-}
-
-#[test]
 fn deadline_and_protocol_failure_are_incomplete_and_reap_children() {
-    for mode in ["idle", "malformed"] {
+    for mode in ["idle", "malformed", "duplicate_length"] {
         let (directory, mut config, request) = fixture(mode);
         config.deadline_ms = 500;
         let start = Instant::now();
         let outcome = analyze(&config, request, StreamCancellation::default()).unwrap();
-        assert_eq!(outcome.status, Status::Incomplete);
+        assert_eq!(outcome.status, Status::Incomplete, "{mode}");
         assert!(start.elapsed() < Duration::from_secs(3));
         reaped(directory.path());
     }
@@ -131,7 +121,8 @@ fn deadline_and_protocol_failure_are_incomplete_and_reap_children() {
 
 #[test]
 fn cancellation_interrupts_idle_reads_without_emitting_fallback() {
-    let (directory, config, request) = fixture("idle");
+    let (directory, mut config, request) = fixture("idle");
+    config.deadline_ms = 10_000;
     let cancellation = StreamCancellation::default();
     let signal = cancellation.clone();
     let pid_path = directory.path().join("requests.pid");
@@ -144,9 +135,11 @@ fn cancellation_interrupts_idle_reads_without_emitting_fallback() {
             message: "cancel fixture".into(),
         });
     });
+    let started = Instant::now();
     let result = analyze(&config, request, cancellation);
     canceller.join().unwrap();
     assert!(matches!(result, Err(Error::Cancelled { .. })));
+    assert!(started.elapsed() < Duration::from_secs(3));
     reaped(directory.path());
 }
 

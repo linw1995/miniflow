@@ -76,7 +76,11 @@ Output:
   context: ValueRef
 ```
 
-`AnalysisRequest` describes snapshot roots and identities, server settings, a finite batch of semantic operations, and the analysis budget. `AnalysisOutcome` contains a status, snapshot-attributed evidence, gap/failure reasons, and analysis timings. Status is `analyzed`, `incomplete`, or `not_requested`; `analyzed` means the requested operations finished, not that every dependency is known.
+`AnalysisRequest` describes snapshot roots and identities, changed document ranges, and initialization
+options. Node configuration selects the server, readiness profile, source extensions, and analysis budget; the
+provider issues a fixed set of standard semantic queries. `AnalysisOutcome` contains a status,
+snapshot-attributed evidence, gap/failure reasons, and analysis timings. Status is `analyzed`, `incomplete`,
+or `not_requested`; `analyzed` means the requested operations finished, not that every dependency is known.
 
 `context` is passed through unchanged, including runtime value metadata. It is not parsed, logged, or used to make policy decisions by `mfn-lsp`. The tool stores its job identity, original Git changes, immutable snapshots, and planning configuration there. The Git node does not compute a test baseline or classify test code. The final Task validates that outcome snapshot identities agree with this context.
 
@@ -94,7 +98,13 @@ The initial Flow is intentionally linear. Full-workspace policy fallback is disc
 
 Register `lsp.analyze` through `PreparedNode::typed_stream` and `TypedStreamNode`. The producer receives one finite batch per invocation; requests within one snapshot/configuration share a session. Base and head use separate sessions. The first version closes owned sessions at the end of each batch instead of pooling them across invocations.
 
-The producer handles stdio framing, response correlation, server requests, notifications, partial results, advertised capabilities, and negotiated position encoding. Generic protocol/query code knows nothing about Cargo or test selection. Server-specific readiness and optional methods are supplied by small profiles; unsupported operations become attributed gaps. Standard-only server fixtures verify the generic path without a second project adapter framework.
+The producer handles stdio framing, response correlation, server requests, notifications, partial results,
+advertised capabilities, and negotiated position encoding. Generic protocol/query code knows nothing about
+Cargo or test selection. The Rust profile adds server-specific readiness; semantic queries use statically
+advertised standard capabilities, and unsupported operations become attributed gaps. Do not add dynamic
+capability registration or extension-result registries before a consumer needs them. The unused `relatedTests`
+query was removed after paired historical replays preserved selection and standard relationship counts.
+Standard-only server fixtures verify the generic path without a second project adapter framework.
 
 A successful, incomplete, or unrequested batch produces exactly one terminal emission. LSP progress notifications use observations/diagnostics, never extra business emissions. An empty batch emits `not_requested` with the original context without starting a server. A missing server, deadline, or server crash emits `incomplete` with structured reasons after cleanup, allowing the final Task to apply fallback.
 
@@ -120,7 +130,7 @@ The #151-shaped case retains its two changed runtime tests and every test in `mf
 
 `tools/test-affected/run-tests.py` consumes the completed plan artifact and invokes nextest outside the Flow. Reuse existing command and coverage helpers where their contracts fit, without a new runner framework. The current coverage helper consumes package-only plans; it must not silently widen or ignore exact-case selection from a refined plan.
 
-The script validates snapshot and configuration identities, lists tests when required, checks exact target/case identities, and reuses the build for execution. Ambiguous or unmatched cases widen to the recorded baseline with a diagnostic; stale identities or malformed plans fail. An empty plan runs no command. Real compile/test failures preserve diagnostics and a nonzero exit status rather than becoming selection recovery.
+The script validates snapshot and configuration identities, lists tests when required, checks exact target/case identities, and reuses the build for execution. Ambiguous or unmatched cases widen to the recorded baseline with a diagnostic; stale identities or malformed plans fail. An empty plan runs no test command. Real compile/test failures preserve diagnostics and a nonzero exit status rather than becoming selection recovery.
 
 The Flow has no execution mode and does not launch this script. Reporting is an ordinary plan output or script result, with no report node. Plans describe selection as structured data rather than a shell command to evaluate.
 

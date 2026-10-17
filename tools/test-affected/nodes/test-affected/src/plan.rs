@@ -52,6 +52,17 @@ pub fn make_plan(
             message: "analysis request differs from the Git comparison"
         }
     );
+    ensure!(
+        outcome
+            .evidence
+            .iter()
+            .map(|s| &s.snapshot)
+            .chain(outcome.gaps.iter().map(|g| &g.snapshot))
+            .all(|id| comparison.request.snapshots.iter().any(|s| &s.id == id)),
+        InvalidSnafu {
+            message: "analysis evidence belongs to an unrequested snapshot"
+        }
+    );
     verify_snapshot(&comparison.base_root, &comparison.base)?;
     verify_snapshot(&comparison.head_root, &comparison.head)?;
     validate_configuration(outcome, &options.configuration)?;
@@ -151,12 +162,15 @@ pub fn make_plan(
         }
     }
     let baseline = closure(&direct, &dependencies);
-    if outcome
+    for gap in outcome
         .gaps
         .iter()
-        .any(|g| matches!(g.kind, GapKind::AnalyzerFailure | GapKind::Limit))
+        .filter(|g| matches!(g.kind, GapKind::AnalyzerFailure | GapKind::Limit))
     {
-        fallback.push("Semantic analyzer failed; retaining the full workspace".into());
+        fallback.push(format!(
+            "Semantic analyzer {} failed for {}: {}; retaining the full workspace",
+            gap.operation, gap.snapshot, gap.message
+        ));
     }
     let (baseline, selected) = if fallback.is_empty() {
         (baseline, closure(&production, &dependencies))

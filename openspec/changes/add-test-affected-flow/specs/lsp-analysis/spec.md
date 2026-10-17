@@ -68,7 +68,7 @@ Each result SHALL identify its source snapshot, root, server configuration, and 
 
 ### Requirement: Negotiate standard semantic queries
 
-The provider SHALL negotiate capabilities and document position encoding before batched symbol, reference, and call-hierarchy queries. Unsupported operations SHALL produce explicit gaps rather than successful empty results. Standard query handling SHALL NOT require Cargo, test identities, or Rust-specific methods.
+The provider SHALL negotiate statically advertised capabilities and document position encoding before batched symbol, reference, and call-hierarchy queries. It SHALL NOT advertise dynamic capability registration. Unsupported operations SHALL produce explicit gaps rather than successful empty results. Standard query handling SHALL NOT require Cargo, test identities, or Rust-specific methods.
 
 #### Scenario: Use a standard-only server
 
@@ -80,13 +80,13 @@ The provider SHALL negotiate capabilities and document position encoding before 
 - **WHEN** source bytes and negotiated LSP offsets differ
 - **THEN** the provider converts locations against the exact document content
 
-### Requirement: Attribute extensions and uncertainty
+### Requirement: Attribute readiness profiles and uncertainty
 
-Server-specific readiness and semantic methods SHALL be supplied by explicit profiles and retain their provenance. Successful indexing, empty relationships, and status `analyzed` SHALL NOT assert complete test-impact knowledge. Partial evidence and the reasons for incompleteness SHALL remain distinguishable.
+Server-specific readiness SHALL be supplied by explicit profiles and retain its provenance. Semantic queries SHALL use the standard symbol, reference, and call-hierarchy methods; a Rust readiness profile SHALL NOT implicitly enable test-specific extension queries. Successful indexing, empty relationships, and status `analyzed` SHALL NOT assert complete test-impact knowledge. Partial evidence and the reasons for incompleteness SHALL remain distinguishable.
 
-#### Scenario: Find no related tests
+#### Scenario: Find no relationships
 
-- **WHEN** a configured extension returns no related tests
+- **WHEN** standard semantic queries return no relationships
 - **THEN** the result records the observation without claiming that tests outside the result are independent
 
 ### Requirement: Bound analysis and clean up owned processes

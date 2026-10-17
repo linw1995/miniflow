@@ -39,7 +39,16 @@ class RunnerTests(unittest.TestCase):
             root = Path(directory)
             child = root / 'child.py'
             pidfile = root / 'pid'
-            child.write_text("import os, pathlib, sys, time\npathlib.Path(sys.argv[1]).write_text(str(os.getpid()))\ntime.sleep(60)\n")
+            child.write_text('''import json, os, pathlib, subprocess, sys, time
+ready = pathlib.Path(sys.argv[1] + '.ready')
+descendant = subprocess.Popen([sys.executable, '-c',
+    "import pathlib, signal, sys, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); pathlib.Path(sys.argv[1]).touch(); time.sleep(60)", str(ready)])
+while not ready.exists():
+    time.sleep(0.01)
+ready.write_text(json.dumps([os.getpid(), descendant.pid]))
+ready.replace(sys.argv[1])
+time.sleep(60)
+''')
             helper = root / 'helper.py'
             helper.write_text('''import importlib.util, pathlib, signal, sys
 spec = importlib.util.spec_from_file_location('runner', sys.argv[1])
@@ -61,9 +70,20 @@ except KeyboardInterrupt:
                 self.assertTrue(pidfile.exists())
                 process.send_signal(signal.SIGTERM)
                 self.assertEqual(process.wait(timeout=5), 130)
-                with self.assertRaises(ProcessLookupError):
-                    os.kill(int(pidfile.read_text()), 0)
+                for pid in json.loads(pidfile.read_text()):
+                    deadline = time.monotonic() + 2
+                    while time.monotonic() < deadline:
+                        try:
+                            os.kill(pid, 0)
+                        except ProcessLookupError:
+                            break
+                        time.sleep(0.01)
+                    else:
+                        self.fail(f"owned process {pid} survived cancellation")
             finally:
+                if pidfile.exists():
+                    with contextlib.suppress(ProcessLookupError):
+                        os.killpg(json.loads(pidfile.read_text())[0], signal.SIGKILL)
                 if process.poll() is None:
                     process.kill()
                     process.wait()

@@ -310,7 +310,6 @@ fn query_snapshot(
                 range,
                 references: Vec::new(),
                 incoming_calls: Vec::new(),
-                extensions: Default::default(),
             };
             if session.supports("referencesProvider") {
                 item.references =
@@ -328,12 +327,6 @@ fn query_snapshot(
                 }
             } else {
                 unsupported(gaps, snapshot, "callHierarchy/incomingCalls");
-            }
-            if config.profile == Profile::RustAnalyzer {
-                item.extensions.insert(
-                    "rust-analyzer/relatedTests".into(),
-                    session.request("rust-analyzer/relatedTests", params)?,
-                );
             }
             evidence.symbols.push(item);
             ensure!(

@@ -171,20 +171,20 @@ impl Session {
                     }
                 );
                 let header = std::str::from_utf8(&self.buffer[..header_end]).ok();
-                let lengths: Vec<usize> = header
+                let lengths: Option<Vec<usize>> = header
                     .into_iter()
                     .flat_map(str::lines)
                     .filter_map(|line| line.split_once(':'))
                     .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-                    .filter_map(|(_, value)| value.trim().parse().ok())
+                    .map(|(_, value)| value.trim().parse().ok())
                     .collect();
                 ensure!(
-                    lengths.len() == 1,
+                    lengths.as_ref().is_some_and(|values| values.len() == 1),
                     ProtocolSnafu {
                         message: "missing or invalid Content-Length"
                     }
                 );
-                let length = lengths[0];
+                let length = lengths.unwrap()[0];
                 ensure!(
                     length <= self.max_bytes,
                     LimitSnafu {
@@ -262,30 +262,6 @@ impl Session {
                     ),
                     "workspace/workspaceFolders" => {
                         json!([{ "uri": self.root_uri, "name": "snapshot" }])
-                    }
-                    "client/registerCapability" => {
-                        for entry in message["params"]["registrations"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                        {
-                            if let Some(key) = provider(entry["method"].as_str().unwrap_or("")) {
-                                self.capabilities[key] = json!(true);
-                            }
-                        }
-                        Value::Null
-                    }
-                    "client/unregisterCapability" => {
-                        for entry in message["params"]["unregisterations"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                        {
-                            if let Some(key) = provider(entry["method"].as_str().unwrap_or("")) {
-                                self.capabilities[key] = json!(false);
-                            }
-                        }
-                        Value::Null
                     }
                     "workspace/applyEdit" => json!({"applied": false}),
                     _ => {
@@ -387,14 +363,5 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         let _ = self.finish();
-    }
-}
-
-fn provider(method: &str) -> Option<&'static str> {
-    match method {
-        "textDocument/documentSymbol" => Some("documentSymbolProvider"),
-        "textDocument/references" => Some("referencesProvider"),
-        "textDocument/prepareCallHierarchy" => Some("callHierarchyProvider"),
-        _ => None,
     }
 }

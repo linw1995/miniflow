@@ -35,6 +35,12 @@
 - [x] 5.3 Measure the new Flow with warm-up and repeated serial trials; separately measure baseline, LSP, build/list, and test execution time, verify empty analysis batches start no server and record the cost of late full-fallback decisions, and retain raw artifacts only under `target/`.
 - [x] 5.4 Run installed hooks with `prek -a`, the affected-package selector and selected suites through `nix develop`, and strict OpenSpec validation; review the final diff and release boundaries without local `nix flake check -L`.
 
+## 6. Final review and ablation
+
+- [x] 6.1 Review the implementation against repository boundaries and error-handling rules; remove unconsumed semantic extensions and unadvertised dynamic registration after paired local PR replays.
+- [x] 6.2 Use fault injection to retain essential cancellation, no-request, and failure-fallback safeguards; remove duplicate tests and correct reproduced protocol/process cleanup defects.
+- [ ] 6.3 Run affected suites, pinned real-server verification, hooks, and strict specification validation; commit the reviewed implementation and archive the completed change.
+
 ## Workflow follow-up
 
 - Consider CI adoption separately after correctness and end-to-end benefit are demonstrated and the existing CI specification is reconciled.

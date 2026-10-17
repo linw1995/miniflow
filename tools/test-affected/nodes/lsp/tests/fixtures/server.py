@@ -10,6 +10,8 @@ Path(log + '.pid').write_text(str(os.getpid()))
 
 def send(message):
     payload = json.dumps({'jsonrpc': '2.0', **message}).encode()
+    if mode == 'duplicate_length':
+        sys.stdout.buffer.write(b'Content-Length: wrong\r\n')
     sys.stdout.buffer.write(f'Content-Length: {len(payload)}\r\n\r\n'.encode() + payload)
     sys.stdout.buffer.flush()
 

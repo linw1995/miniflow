@@ -109,7 +109,6 @@ pub struct SymbolEvidence {
     pub range: SourceRange,
     pub references: Vec<Value>,
     pub incoming_calls: Vec<Value>,
-    pub extensions: std::collections::BTreeMap<String, Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

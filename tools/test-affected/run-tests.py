@@ -26,8 +26,12 @@ def execute(argv, root, capture=True):
             os.killpg(process.pid, signal.SIGTERM)
             process.wait(timeout=2)
         except (ProcessLookupError, subprocess.TimeoutExpired):
-            if process.poll() is None:
-                os.killpg(process.pid, signal.SIGKILL)
+            pass
+        # A reaped group leader does not imply that its descendants have exited.
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
         process.wait()
         raise
     if process.returncode:

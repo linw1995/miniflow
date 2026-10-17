@@ -22,8 +22,10 @@ A request identifies snapshots by `id`, absolute `root`, and `documents` with re
 and UTF-8 byte ranges. `initialization_options` is forwarded to the server unchanged.
 
 The node configuration selects `command`, optional `args`, optional source `extensions`,
-and `profile` (`standard` by default, or `rust_analyzer` for its explicit readiness/related-test
-extensions). Limits default to 120000 ms, 2048 requests per snapshot, and 16 MiB per result budget.
+and `profile` (`standard` by default, or `rust_analyzer` for its explicit readiness notification). Limits default to 120000 ms, 2048 requests per snapshot, and 16 MiB per result budget.
+Queries use statically advertised standard symbol, reference, and call-hierarchy capabilities.
+The Rust profile adds readiness handling only; it does not query `relatedTests` or expose an unused
+extension-result registry. Dynamic capability registration is not advertised or supported.
 The deadline spans the entire batch. Each snapshot gets one session, reused for all its queries.
 
 Every completed batch emits exactly one `analyzed`, `incomplete`, or `not_requested` outcome.

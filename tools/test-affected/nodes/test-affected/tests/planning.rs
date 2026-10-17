@@ -133,18 +133,19 @@ fn retains_behavior_changes_shared_inputs_and_analyzer_failures() {
     let plan = make_plan(&comparison, &analysis, &PlanOptions::default()).unwrap();
     assert_eq!(plan.packages, ["sample-app", "sample-core"]);
     analysis.gaps.push(Gap {
-        snapshot: "head".into(),
+        snapshot: comparison.request.snapshots[1].id.clone(),
         operation: "initialize".into(),
         kind: GapKind::AnalyzerFailure,
         message: "unavailable".into(),
     });
     analysis.status = Status::Incomplete;
-    assert_eq!(
-        make_plan(&comparison, &analysis, &PlanOptions::default())
-            .unwrap()
-            .packages
-            .len(),
-        3
+    let fallback = make_plan(&comparison, &analysis, &PlanOptions::default()).unwrap();
+    assert_eq!(fallback.packages.len(), 3);
+    assert!(
+        fallback
+            .fallback_reasons
+            .iter()
+            .any(|reason| reason.contains("unavailable"))
     );
     write(root, ".config/nextest.toml", "[profile.default]\n");
     let next = commit(root);
@@ -183,6 +184,15 @@ fn resolves_merge_base_and_rejects_changed_snapshots_and_analysis_identities() {
     assert!(plan.packages.is_empty() && plan.tests.is_empty());
     let mut wrong = analysis.clone();
     wrong.request.snapshots[1].id = "wrong".into();
+    assert!(make_plan(&comparison, &wrong, &PlanOptions::default()).is_err());
+    let mut wrong = analysis.clone();
+    wrong.evidence.push(mfn_lsp::SnapshotEvidence {
+        snapshot: "another-snapshot".into(),
+        server_info: json!(null),
+        position_encoding: "utf-16".into(),
+        progress_notifications: 0,
+        documents: vec![],
+    });
     assert!(make_plan(&comparison, &wrong, &PlanOptions::default()).is_err());
     write(&comparison.head_root, "core/src/lib.rs", "changed\n");
     assert!(make_plan(&comparison, &analysis, &PlanOptions::default()).is_err());
