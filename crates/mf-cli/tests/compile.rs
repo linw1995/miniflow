@@ -59,30 +59,6 @@ fn compile(definition: &Path, output: &Path, rustflags: Option<&str>) -> Output 
 }
 
 #[test]
-fn development_support_uses_checkout_crates_without_override() {
-    let temporary = temporary_directory();
-    let definition = temporary.path().join("workflow.json");
-    let output = temporary.path().join("workflow");
-    fs::write(&definition, definition_json()).unwrap();
-
-    let result = compile_command(&definition, &output)
-        .env_remove("MF_DEV_SUPPORT_ROOT")
-        .output()
-        .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let execution = Command::new(output).output().unwrap();
-    assert!(execution.status.success());
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&execution.stdout).unwrap()["answer"],
-        json!(41)
-    );
-}
-
-#[test]
 fn compiles_a_runner_without_telemetry_and_preserves_execution() {
     let temporary = temporary_directory();
     let definition = temporary.path().join("workflow.json");
@@ -172,14 +148,17 @@ fn assert_rejected_definition(mut value: serde_json::Value, diagnostics: &[&str]
 }
 
 #[test]
-fn compiled_binary_replaces_target_and_runs_without_the_definition() {
+fn compiled_runner_preserves_build_cache_and_installation_contracts() {
     let temporary = temporary_directory();
     let definition = temporary.path().join("workflow.json");
     let target = temporary.path().join("workflow");
     fs::write(&definition, definition_json()).unwrap();
     fs::write(&target, b"previous executable").unwrap();
 
-    let result = compile(&definition, &target, None);
+    let result = compile_command(&definition, &target)
+        .env_remove("MF_DEV_SUPPORT_ROOT")
+        .output()
+        .unwrap();
     assert!(
         result.status.success(),
         "compile failed:\n{}\n{}",
@@ -188,10 +167,79 @@ fn compiled_binary_replaces_target_and_runs_without_the_definition() {
     );
     assert_ne!(fs::read(&target).unwrap(), b"previous executable");
 
+    // Reinstall the same runner before changing any build inputs.
+    let project = temporary.path().join(".mf-build-test");
+    let names = ["Cargo.toml", "Cargo.lock", "src/main.rs", "src/workflow.rs"];
+    let times: Vec<_> = names
+        .iter()
+        .map(|name| {
+            fs::metadata(project.join(name))
+                .unwrap()
+                .modified()
+                .unwrap()
+        })
+        .collect();
+    let cached_target = temporary.path().join("another-output");
+    let second = compile(&definition, &cached_target, None);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(String::from_utf8_lossy(&second.stderr).contains("reused compiled runner"));
+    for (name, time) in names.iter().zip(times) {
+        assert_eq!(
+            fs::metadata(project.join(name))
+                .unwrap()
+                .modified()
+                .unwrap(),
+            time,
+            "{name} was rewritten"
+        );
+    }
+    assert_eq!(fs::read_to_string(&definition).unwrap(), definition_json());
+    assert_eq!(
+        fs::read(&cached_target).unwrap(),
+        fs::read(&target).unwrap()
+    );
+
+    let lock = fs::read(definition.with_extension("lock")).unwrap();
+    let executable = fs::read(&target).unwrap();
+    let mut invalid: serde_json::Value = serde_json::from_str(&definition_json()).unwrap();
+    invalid["nodes"][0]["config"] = json!({});
+    fs::write(&definition, invalid.to_string()).unwrap();
+    let failed = compile(&definition, &target, None);
+    assert!(!failed.status.success());
+    assert!(String::from_utf8_lossy(&failed.stderr).contains("Cargo build"));
+    assert_eq!(fs::read(definition.with_extension("lock")).unwrap(), lock);
+    assert_eq!(fs::read(&target).unwrap(), executable);
+
+    // Recover the interrupted project with a valid, changed definition.
+    fs::remove_file(project.join("src/main.rs")).unwrap();
+    fs::write(project.join("Cargo.lock"), "interrupted working state").unwrap();
+    let mut changed: serde_json::Value = serde_json::from_str(&definition_json()).unwrap();
+    changed["nodes"].as_array_mut().unwrap().pop();
+    changed["outputs"].as_array_mut().unwrap().pop();
+    changed["nodes"][0]["config"]["value"] = json!(99);
+    fs::write(&definition, changed.to_string()).unwrap();
+    let result = compile(&definition, &target, None);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(project.join("src/main.rs").is_file());
+    let output = Command::new(&target).output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
+        json!({"answer":99,"original":99})
+    );
+
     fs::remove_file(&definition).unwrap();
     fs::remove_file(definition.with_extension("lock")).unwrap();
     fs::remove_dir_all(temporary.path().join(".mf-build-test")).unwrap();
-    let output = Command::new(&target)
+    let output = Command::new(&cached_target)
         .env("PATH", "")
         .current_dir(temporary.path())
         .output()
@@ -341,30 +389,6 @@ fn definition_json() -> String {
 }
 
 #[test]
-fn failed_validation_preserves_prior_lock_and_executable() {
-    let temporary = temporary_directory();
-    let definition = temporary.path().join("flow.json");
-    let target = temporary.path().join("flow");
-    fs::write(&definition, definition_json()).unwrap();
-    let first = compile(&definition, &target, None);
-    assert!(
-        first.status.success(),
-        "{}",
-        String::from_utf8_lossy(&first.stderr)
-    );
-    let lock = fs::read(definition.with_extension("lock")).unwrap();
-    let executable = fs::read(&target).unwrap();
-    let mut invalid: serde_json::Value = serde_json::from_str(&definition_json()).unwrap();
-    invalid["nodes"][0]["config"] = json!({});
-    fs::write(&definition, invalid.to_string()).unwrap();
-    let failed = compile(&definition, &target, None);
-    assert!(!failed.status.success());
-    assert!(String::from_utf8_lossy(&failed.stderr).contains("Cargo build"));
-    assert_eq!(fs::read(definition.with_extension("lock")).unwrap(), lock);
-    assert_eq!(fs::read(&target).unwrap(), executable);
-}
-
-#[test]
 fn install_failure_reports_persisted_lock_and_preserves_existing_directory() {
     let temporary = temporary_directory();
     let definition = temporary.path().join("flow.json");
@@ -422,79 +446,6 @@ fn missing_artifact_and_cargo_exit_cannot_install_a_stale_binary() {
         assert_eq!(fs::read(&target).unwrap(), b"previous");
         assert!(!definition.with_extension("lock").exists());
     }
-}
-
-#[test]
-fn warm_build_preserves_generated_inputs_and_reuses_compiled_runner() {
-    let temporary = temporary_directory();
-    let definition = temporary.path().join("flow.json");
-    let target = temporary.path().join("flow");
-    let source = definition_json();
-    fs::write(&definition, &source).unwrap();
-    let first = compile(&definition, &target, None);
-    assert!(
-        first.status.success(),
-        "{}",
-        String::from_utf8_lossy(&first.stderr)
-    );
-    let project = temporary.path().join(".mf-build-test");
-    let names = ["Cargo.toml", "Cargo.lock", "src/main.rs", "src/workflow.rs"];
-    let times: Vec<_> = names
-        .iter()
-        .map(|name| {
-            fs::metadata(project.join(name))
-                .unwrap()
-                .modified()
-                .unwrap()
-        })
-        .collect();
-    let second = compile(&definition, &temporary.path().join("another-output"), None);
-    assert!(
-        second.status.success(),
-        "{}",
-        String::from_utf8_lossy(&second.stderr)
-    );
-    assert!(String::from_utf8_lossy(&second.stderr).contains("reused compiled runner"));
-    for (name, time) in names.iter().zip(times) {
-        assert_eq!(
-            fs::metadata(project.join(name))
-                .unwrap()
-                .modified()
-                .unwrap(),
-            time,
-            "{name} was rewritten"
-        );
-    }
-    assert_eq!(fs::read_to_string(&definition).unwrap(), source);
-}
-
-#[test]
-fn repairs_partial_projects_and_updates_configuration() {
-    let temporary = temporary_directory();
-    let definition = temporary.path().join("flow.json");
-    let target = temporary.path().join("flow");
-    fs::write(&definition, definition_json()).unwrap();
-    assert!(compile(&definition, &target, None).status.success());
-    let project = temporary.path().join(".mf-build-test");
-    fs::remove_file(project.join("src/main.rs")).unwrap();
-    fs::write(project.join("Cargo.lock"), "interrupted working state").unwrap();
-    let mut changed: serde_json::Value = serde_json::from_str(&definition_json()).unwrap();
-    changed["nodes"].as_array_mut().unwrap().pop();
-    changed["outputs"].as_array_mut().unwrap().pop();
-    changed["nodes"][0]["config"]["value"] = json!(99);
-    fs::write(&definition, changed.to_string()).unwrap();
-    let result = compile(&definition, &target, None);
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert!(project.join("src/main.rs").is_file());
-    let output = Command::new(&target).output().unwrap();
-    assert_eq!(
-        serde_json::from_slice::<serde_json::Value>(&output.stdout).unwrap(),
-        json!({"answer":99,"original":99})
-    );
 }
 
 #[test]

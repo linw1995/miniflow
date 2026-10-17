@@ -21,16 +21,12 @@ filter = '''
 (binary_id(=mf-chat::packaging) &
     test(=source_free_host_preserves_multi_session_retry_title_and_statistics)) |
 (binary_id(=mf-cli::compile) & (
-    test(=development_support_uses_checkout_crates_without_override) |
     test(=compiles_a_runner_without_telemetry_and_preserves_execution) |
-    test(=compiled_binary_replaces_target_and_runs_without_the_definition) |
-    test(=warm_build_preserves_generated_inputs_and_reuses_compiled_runner) |
+    test(=compiled_runner_preserves_build_cache_and_installation_contracts) |
     test(=cargo_invalidates_features_local_sources_and_flags) |
-    test(=failed_validation_preserves_prior_lock_and_executable) |
     test(=install_failure_reports_persisted_lock_and_preserves_existing_directory) |
     test(=invalid_input_port_reports_both_edge_endpoints) |
     test(=invalid_output_port_reports_both_edge_endpoints) |
-    test(=repairs_partial_projects_and_updates_configuration) |
     test(=unknown_plugin_reports_node_and_kind)
 )) |
 (binary_id(=mf-cli::packaged_cli) & test(=packaged_cli_acceptance)) |
@@ -112,16 +108,12 @@ filter = '''
 (binary_id(=mf-chat::packaging) &
     test(=source_free_host_preserves_multi_session_retry_title_and_statistics)) |
 (binary_id(=mf-cli::compile) & (
-    test(=development_support_uses_checkout_crates_without_override) |
     test(=compiles_a_runner_without_telemetry_and_preserves_execution) |
-    test(=compiled_binary_replaces_target_and_runs_without_the_definition) |
-    test(=warm_build_preserves_generated_inputs_and_reuses_compiled_runner) |
+    test(=compiled_runner_preserves_build_cache_and_installation_contracts) |
     test(=cargo_invalidates_features_local_sources_and_flags) |
-    test(=failed_validation_preserves_prior_lock_and_executable) |
     test(=install_failure_reports_persisted_lock_and_preserves_existing_directory) |
     test(=invalid_input_port_reports_both_edge_endpoints) |
     test(=invalid_output_port_reports_both_edge_endpoints) |
-    test(=repairs_partial_projects_and_updates_configuration) |
     test(=unknown_plugin_reports_node_and_kind)
 )) |
 (binary_id(=mf-cli::packaged_cli) & test(=packaged_cli_acceptance)) |
