@@ -271,7 +271,7 @@ means no calls were reported; an interrupted execution with no result is not tre
 A crash or cancellation before delivering the final result can lose otherwise completed call facts.
 
 The current workflow output contract requires recompiling and updating older chat executables. The scalar
-LLM `usage` output remains available to other workflows, but `mf-chat::Reply` uses only `usages`. New
+LLM `usage` output remains available to other workflows, but `mf_chat::Reply` uses only `usages`. New
 reply writes leave legacy scalar token columns empty. Existing successful single-model records with
 reported scalar counters are upgraded to one usage entry using their stored call ID; explicit lists
 and unknown counters are preserved. Legacy columns remain compatibility data. No terminal interface or implicit runtime usage collector is installed.
