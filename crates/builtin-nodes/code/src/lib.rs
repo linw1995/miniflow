@@ -521,21 +521,6 @@ mod tests {
     }
 
     #[test]
-    fn reports_non_json_result_types() {
-        for expression in ["b'bytes'", "{1: 2}"] {
-            let error = factory(json!({
-                "language": "cel",
-                "inputs": {},
-                "code": {"result": expression}
-            }))
-            .err()
-            .unwrap()
-            .to_string();
-            assert!(error.contains("output `result`"), "{expression}: {error}");
-        }
-    }
-
-    #[test]
     fn evaluates_scalar_and_collection_outputs_from_one_activation() {
         let node = factory(json!({
             "language": "cel",
@@ -902,7 +887,13 @@ mod tests {
 
     #[test]
     fn rejects_static_errors_and_non_json_result_types() {
-        for expression in ["missing + 1", "amount + 'x'", "amount *", "b'bytes'"] {
+        for expression in [
+            "missing + 1",
+            "amount + 'x'",
+            "amount *",
+            "b'bytes'",
+            "{1: 2}",
+        ] {
             let error = factory(json!({
                 "language": "cel",
                 "inputs": {"amount": "int"},
@@ -913,14 +904,6 @@ mod tests {
             .to_string();
             assert!(error.contains("output `result`"), "{expression}: {error}");
         }
-        assert!(
-            factory(json!({
-                "language": "cel",
-                "inputs": {"items": {"list": "int"}},
-                "code": {"result": "items.map(x, x * 2)"}
-            }))
-            .is_ok()
-        );
     }
 
     #[test]

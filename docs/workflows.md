@@ -389,7 +389,9 @@ including when initializing a nested Loop.
 
 The surrounding graph binds the initial `count` input and may bind the final `count` output.
 Variable types use the shared port descriptor grammar: `any`, `null`, `bool`, `number`, `int`, `uint`, `usize`, `float`, `double`, `string`, `array`, `object`, and nested `{"list": T}`, `{"map": T}`, or `{"nullable": T}`.
-`builtin.code` continues to accept only its concrete subset. Initial values, assignments, and final outputs are checked against each variable's declared type; a broad source is checked at runtime when necessary.
+`builtin.code` supports the descriptors documented under [built-in nodes](#built-in-nodes), excluding `number`,
+`nullable`, `usize`, and `float`. Initial values, assignments, and final outputs are checked against each variable's
+declared type; a broad source is checked at runtime when necessary.
 
 `workflow.loop_assign` takes one required `value` input and produces a `done` control output. A
 reached assignment overwrites its target variable; a skipped assignment leaves it unchanged. A later

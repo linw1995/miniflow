@@ -33,15 +33,15 @@
 
 ## 4. Review and repository validation
 
-- [ ] 4.1 Review against AGENTS.md and perform focused ablation controls for numeric preservation, secret propagation,
+- [x] 4.1 Review against AGENTS.md and perform focused ablation controls for numeric preservation, secret propagation,
   dynamic traversal limits, and structured-list acceptance; verify retained tests detect each removed guard, remove
   redundant abstractions/tests, and keep experiment artifacts only under ignored target/.
-- [ ] 4.2 Run `nix develop --command prek install`, `nix develop --command prek -a`, and
+- [x] 4.2 Run `nix develop --command prek install`, `nix develop --command prek -a`, and
   `nix develop --command python3 scripts/affected_tests.py --worktree --run`; verify all required checks pass and
   honor the selector's conservative fallback and empty-selection behavior. For the separately committed task groups,
   also run selection with `--base c26c9da --head HEAD --run` from a clean checkout to cover the complete change.
   Run affected non-Rust checks separately.
-- [ ] 4.3 Validate the final implementation against every changed requirement and run
+- [x] 4.3 Validate the final implementation against every changed requirement and run
   `openspec validate support-code-json-values --strict --no-interactive`; confirm migration prerequisites are resolved
   and the removal delta can be applied to the integrated main specs before marking implementation complete.
 
