@@ -16,11 +16,11 @@
 
 ## 3. Git facts, planning, and script consumption
 
-- [ ] 3.1 Implement `git.diff` with local merge-base comparison, old/new ranges, and durable owned snapshots; verify no checkout changes, fetches, Cargo policy, or hidden LSP startup, and validate missing/mismatched revisions.
-- [ ] 3.2 Implement `test_affected.plan` with Cargo baseline computation and ordinary selection/union functions; verify baseline parity, all dependency kinds, test-only/production combinations, and behavior changes whose call graphs remain unchanged.
-- [ ] 3.3 Validate forwarded Git facts and base/head semantic outcomes; verify deleted definitions, shared helpers, macros, subprocess gaps, full fallback on analyzer failure, and identity mismatch without introducing a generic adapter framework.
-- [ ] 3.4 Emit structured plans and reports using an optional matching inventory; verify exact selectors, retained scopes, explicit unknown counts, and that the Flow never compiles or executes tests; document the final output format.
-- [ ] 3.5 Add the small `run-tests.py` plan consumer using existing helpers where appropriate; verify identity checks, inventory/build reuse, generated-name fallback, empty plans, cancellation, malformed plans, and nonzero exit for actual failures without a runner framework.
+- [x] 3.1 Implement `git.diff` with local merge-base comparison, old/new ranges, and durable owned snapshots; verify no checkout changes, fetches, Cargo policy, or hidden LSP startup, and validate missing/mismatched revisions.
+- [x] 3.2 Implement `test_affected.plan` with Cargo baseline computation and ordinary selection/union functions; verify baseline parity, all dependency kinds, test-only/production combinations, and behavior changes whose call graphs remain unchanged.
+- [x] 3.3 Validate forwarded Git facts and base/head semantic outcomes; verify deleted definitions, shared helpers, macros, subprocess gaps, full fallback on analyzer failure, and identity mismatch without introducing a generic adapter framework.
+- [x] 3.4 Emit structured plans and reports using an optional matching inventory; verify exact selectors, retained scopes, explicit unknown counts, and that the Flow never compiles or executes tests; document the final output format.
+- [x] 3.5 Add the small `run-tests.py` plan consumer using existing helpers where appropriate; verify identity checks, inventory/build reuse, generated-name fallback, empty plans, cancellation, malformed plans, and nonzero exit for actual failures without a runner framework.
 
 ## 4. Three-node streaming Flow
 
