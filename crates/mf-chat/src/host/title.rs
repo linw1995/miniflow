@@ -96,6 +96,8 @@ impl Inner {
         if budget == 0 {
             return Ok(0);
         }
+        self.database
+            .schedule_titles(budget.min(crate::session::MAX_PAGE_SIZE))?;
         let calls = self
             .database
             .pending_titles(budget.min(crate::session::MAX_PAGE_SIZE))?;
@@ -328,7 +330,12 @@ impl Inner {
                         };
                         let cleanup = self
                             .database
-                            .fail_call(&invocation.call_id, state, &source.to_string())
+                            .fail_call_with_usages(
+                                &invocation.call_id,
+                                state,
+                                &source.to_string(),
+                                crate::model::failure_usages(&source),
+                            )
                             .err()
                             .map(Box::new);
                         Err(ExecutionSnafu {

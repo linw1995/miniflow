@@ -79,7 +79,7 @@ fn profile(name: &str, url: &str) -> ModelProfile {
 }
 
 #[test]
-fn reopened_host_resumes_never_started_title_work() {
+fn reopened_host_schedules_titles_missing_after_conversation_commit() {
     let server = Server::start(vec![Reply::text("answer"), Reply::text("Resumed title")]);
     assert_eq!(
         probe(&server, "title_resume", None)["title"]["outcome"],
@@ -150,7 +150,7 @@ fn failed_title_preserves_conversation_and_explicit_retry_uses_a_new_call() {
     ]);
     let result = probe(&server, "title_failure", None);
     assert_eq!(result["title"]["outcome"], "applied");
-    assert_eq!(result["session"]["conversation_revision"], 1);
+    assert_eq!(result["messages"], 2);
     assert_eq!(result["messages"], 2);
     assert_eq!(server.requests().len(), 3);
 }
@@ -176,6 +176,9 @@ fn execution_probe() {
     let url = std::env::var("MF_CHAT_TEST_URL").unwrap();
     let mut config = HostConfig::new(profile("default", &url));
     config.automatic_titles = false;
+    if scenario == "captured_failure" {
+        config.profiles.insert("default".into(), ModelProfile::new("default", json!({"model":"default","base_url":url,"api_key_env":"MF_CHAT_TEST_KEY","capture_errors":true})).unwrap());
+    }
     if scenario == "conversation" || scenario == "title_auto" {
         config.observer = Some(mf_telemetry::observation::Observer::stderr(1));
     }
@@ -203,9 +206,17 @@ fn execution_probe() {
         .create_session("default", system, None)
         .unwrap();
     let output = match scenario.as_str() {
+        "captured_failure" => {
+            let job = host.submit(&session.id, "fail once").unwrap();
+            let invocation = job.invocation().clone();
+            assert!(matches!(job.join(), Err(ChatError::Execution { .. })));
+            let call = host.database().call(&invocation.call_id).unwrap();
+            assert_eq!(call.usages.as_ref().unwrap().len(), 1);
+            json!({"state":call.state, "usage":host.database().usage(Default::default()).unwrap().overall})
+        }
         "title_resume" => {
-            host.submit(&session.id, "first").unwrap().join().unwrap();
-            let call_id = host.database().pending_titles(10).unwrap()[0].id.clone();
+            let completion = host.submit(&session.id, "first").unwrap().join().unwrap();
+            assert!(host.database().pending_titles(10).unwrap().is_empty());
             host.close().unwrap();
             let reopened =
                 ChatHost::open(&path, HostConfig::new(profile("default", &url))).unwrap();
@@ -213,7 +224,7 @@ fn execution_probe() {
             loop {
                 if let Some(result) = reopened.poll_titles().pop() {
                     let result = result.unwrap();
-                    assert_eq!(result.invocation.call_id, call_id);
+                    assert_eq!(result.invocation.turn_id, completion.invocation.turn_id);
                     println!("CHAT_RESULT:{}", json!({"title":result}));
                     break;
                 }
@@ -225,6 +236,7 @@ fn execution_probe() {
         }
         "title_cancel" => {
             let completion = host.submit(&session.id, "first").unwrap().join().unwrap();
+            host.database().schedule_titles(10).unwrap();
             let call = host.database().pending_titles(10).unwrap().pop().unwrap();
             let job = host.start_title(&call.id).unwrap();
             synchronize();
@@ -256,6 +268,7 @@ fn execution_probe() {
         }
         "title_before" | "title_rename" | "title_failure" | "title_persistence" => {
             host.submit(&session.id, "first").unwrap().join().unwrap();
+            host.database().schedule_titles(10).unwrap();
             let call = host.database().pending_titles(10).unwrap().pop().unwrap();
             if scenario == "title_before" {
                 host.database()
@@ -278,10 +291,11 @@ fn execution_probe() {
                 assert!(job.join().is_err());
                 assert_eq!(
                     host.database()
-                        .session(&session.id)
+                        .history(&session.id, 1024)
                         .unwrap()
-                        .conversation_revision,
-                    1
+                        .history
+                        .len(),
+                    2
                 );
                 host.retry_title(&session.id).unwrap().join().unwrap()
             } else if scenario == "title_persistence" {
@@ -312,7 +326,7 @@ fn execution_probe() {
             };
             json!({"title":title, "session":host.database().session(&session.id).unwrap(),
                 "messages":host.database().messages(&session.id, 10, None).unwrap().messages.len(),
-                "usage":host.database().call(&title.invocation.call_id).unwrap().output_tokens})
+                "usage":json!(host.database().call(&title.invocation.call_id).unwrap().usages)[0]["usage"]["output_tokens"]})
         }
         "conversation" | "no_metadata" => {
             let first = host.submit(&session.id, "first").unwrap().join().unwrap();
@@ -522,7 +536,7 @@ fn embedded_conversation_preserves_two_turn_history_and_sparse_metadata() {
     let result = probe(&server, "conversation", None);
     assert_eq!(result["messages"], 4);
     assert_eq!(
-        result["second"]["reply"]["usage"],
+        result["second"]["reply"]["usages"][0]["usage"],
         json!({"output_tokens":1})
     );
     let requests = server.requests();
@@ -572,7 +586,7 @@ fn absent_system_and_usage_do_not_skip_response_persistence() {
     let server = Server::start(vec![reply.clone(), reply]);
     let result = probe(&server, "no_metadata", None);
     assert_eq!(result["messages"], 4);
-    assert!(result["first"]["reply"]["usage"].is_null());
+    assert!(result["first"]["reply"]["usages"][0]["usage"].is_null());
     assert!(result["first"]["reply"]["finish_reason"].is_null());
     assert_eq!(messages(&server.requests()[0]).len(), 1);
 }
@@ -717,4 +731,16 @@ fn abandoning_a_reply_preserves_identity_and_allows_a_fresh_polled_retry() {
     let requests = server.requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(messages(&requests[0]), messages(&requests[1]));
+}
+
+#[test]
+fn captured_model_failure_is_finalized_with_usage_instead_of_retained_as_a_reply() {
+    let mut reply = Reply::json(json!({"error":{"message":"unavailable"}}));
+    reply.status = 503;
+    let server = Server::start(vec![reply]);
+    let result = probe(&server, "captured_failure", None);
+    assert_eq!(result["state"], "failed");
+    assert_eq!(result["usage"]["attempted_calls"], 1);
+    assert_eq!(result["usage"]["statuses"]["failed"], 1);
+    assert_eq!(server.requests().len(), 1);
 }

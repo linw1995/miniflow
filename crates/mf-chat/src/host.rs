@@ -3,11 +3,7 @@ use crate::{
     TitleOutcome,
     error::*,
     flows,
-    nodes::{
-        BeginTurnInputs, Changed, CompletionOutputs, FailTurnInputs, RecoveryInputs,
-        RecoveryOutputs,
-    },
-    operation, turn,
+    nodes::{BeginTurnInputs, CompletionOutputs, FailTurnInputs, RecoveryInputs, RecoveryOutputs},
 };
 use mf_runtime::{
     ContextValue, ExecutionContext, FlowRuntime, NodeValue, StreamCancellation, StreamError,
@@ -15,7 +11,6 @@ use mf_runtime::{
 };
 use mf_telemetry::{identity::RunId, observation::Observer};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -32,7 +27,6 @@ mod title;
 
 #[derive(Clone, Debug)]
 pub struct ModelProfile {
-    name: String,
     config: Value,
     identity: ModelIdentity,
 }
@@ -56,20 +50,11 @@ impl ModelProfile {
                 reason: "must be a string",
             })?
             .to_owned();
-        let encoded = serde_json::to_vec(&config).context(JsonSnafu)?;
         let identity = ModelIdentity {
-            profile: name.clone(),
-            model,
-            config_id: Sha256::digest(encoded)
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect(),
+            profile: name,
+            model: Some(model),
         };
-        Ok(Self {
-            name,
-            config,
-            identity,
-        })
+        Ok(Self { config, identity })
     }
 
     pub fn identity(&self) -> &ModelIdentity {
@@ -90,7 +75,7 @@ pub struct HostConfig {
 impl HostConfig {
     pub fn new(profile: ModelProfile) -> Self {
         Self {
-            profiles: BTreeMap::from([(profile.name.clone(), profile)]),
+            profiles: BTreeMap::from([(profile.identity.profile.clone(), profile)]),
             max_active: 4,
             max_history_bytes: crate::DEFAULT_HISTORY_BYTES,
             observer: None,
@@ -218,7 +203,7 @@ impl ChatHost {
         );
         for (key, profile) in &config.profiles {
             ensure!(
-                key == &profile.name,
+                key == &profile.identity.profile,
                 InvalidSnafu {
                     field: "profiles",
                     reason: "keys must match profile names"
@@ -254,29 +239,8 @@ impl ChatHost {
     }
 
     pub fn retry(&self, turn_id: &str) -> Result<ChatJob, ChatError> {
-        let original: turn::TurnRequestOutputs = operation::execute(
-            self.database().path(),
-            "mf_chat.turn.request",
-            turn::RecordInputs {
-                database_path: String::new(),
-                id: turn_id.into(),
-            },
-        )?;
-        ensure!(
-            matches!(
-                original.turn.state.as_str(),
-                "failed" | "cancelled" | "interrupted"
-            ),
-            InvalidSnafu {
-                field: "retry_of",
-                reason: "must identify an unsuccessful turn",
-            }
-        );
-        self.start(
-            &original.turn.session_id,
-            &original.prompt,
-            Some(turn_id.into()),
-        )
+        let (original, prompt) = self.database().retry_prompt(turn_id)?;
+        self.start(&original.session_id, &prompt, Some(turn_id.into()))
     }
 
     fn start(
@@ -437,20 +401,6 @@ impl ChatHost {
         pending: UncommittedCompletion,
     ) -> Result<Completion, ChatError> {
         ensure!(
-            pending.purpose == CallPurpose::Conversation,
-            InvalidSnafu {
-                field: "purpose",
-                reason: "use retry_title_completion for a title response",
-            }
-        );
-        ensure!(
-            pending.database_path == self.database().path(),
-            InvalidSnafu {
-                field: "database_path",
-                reason: "completion belongs to another host database"
-            }
-        );
-        ensure!(
             !self
                 .inner
                 .workers
@@ -459,21 +409,11 @@ impl ChatHost {
                 .closed,
             ClosedSnafu
         );
-        match self.database().complete_turn(
-            pending.completion.invocation.clone(),
-            pending.completion.reply.clone(),
-        ) {
-            Ok(completion) => {
-                if self.inner.config.automatic_titles {
-                    let _ = self.inner.dispatch_titles();
-                }
-                Ok(completion)
-            }
-            Err(source) => Err(UncommittedSnafu {
-                pending: Box::new(pending),
-            }
-            .into_error(Box::new(source))),
+        let completion = self.database().save_recovered(pending)?;
+        if self.inner.config.automatic_titles {
+            let _ = self.inner.dispatch_titles();
         }
+        Ok(completion)
     }
 
     pub fn abandon_completion(&self, invocation: Invocation) -> Result<bool, ChatError> {
@@ -513,13 +453,16 @@ impl ChatHost {
         for handle in handles {
             panic |= handle.join().is_err();
         }
-        let _: RecoveryOutputs = operation::execute(
-            self.database().path(),
-            "mf_chat.storage.recover",
-            RecoveryInputs {
-                database_path: String::new(),
-            },
-        )?;
+        let _: RecoveryOutputs = crate::turn::recover(RecoveryInputs {
+            database_path: self
+                .database()
+                .path()
+                .to_str()
+                .context(PathSnafu {
+                    path: self.database().path(),
+                })?
+                .into(),
+        })?;
         ensure!(!panic, WorkerPanicSnafu { id: "shutdown" });
         Ok(())
     }
@@ -606,16 +549,20 @@ impl Inner {
                         } else {
                             "failed"
                         };
-                        operation::execute::<_, Changed>(
-                            self.database.path(),
-                            "mf_chat.turn.fail",
-                            FailTurnInputs {
-                                database_path: String::new(),
-                                invocation: invocation.clone(),
-                                state: state.into(),
-                                error: source.to_string(),
-                            },
-                        )
+                        crate::turn::fail(FailTurnInputs {
+                            usages: crate::model::failure_usages(&source),
+                            database_path: self
+                                .database
+                                .path()
+                                .to_str()
+                                .context(PathSnafu {
+                                    path: self.database.path(),
+                                })?
+                                .into(),
+                            invocation: invocation.clone(),
+                            state: state.into(),
+                            error: source.to_string(),
+                        })
                         .err()
                         .map(Box::new)
                     } else {

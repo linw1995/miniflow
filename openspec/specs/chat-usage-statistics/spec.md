@@ -8,7 +8,7 @@ Account for model calls from conversation and title workflows and expose reprodu
 
 ### Requirement: Preserve call identity and purpose
 
-Each begun model-call record SHALL retain its stable call identity, session identity, actual model configuration identity, purpose, and lifecycle timestamps. Conversation calls SHALL link to their turn. Title calls SHALL be distinguishable from conversation calls. A scheduled call that has not begun MUST NOT count as an attempted model call.
+Each begun model-call record SHALL retain its stable call identity, session identity, profile and actual model identity, purpose, and lifecycle timestamps. Conversation calls SHALL link to their turn. Title calls SHALL be distinguishable from conversation calls. A scheduled call that has not begun MUST NOT count as an attempted model call.
 
 #### Scenario: Count both application call types
 
@@ -55,16 +55,16 @@ Storage SHALL distinguish absent input, output, and total token counters from ex
 
 ### Requirement: Include failed attempts without inventing remote usage
 
-Statistics SHALL include begun calls by terminal status, including failed, cancelled, and interrupted attempts. Calls without reported usage SHALL remain unknown. Local cancellation and process interruption MUST NOT be treated as proof of zero remote consumption or guaranteed remote termination.
+Statistics SHALL include reported model attempts by terminal status and preserve legacy single-model call facts. Executions without a known single-model identity or returned usage list SHALL be exposed separately as unreported_invocations, not fabricated model-call counts. Calls without reported counters SHALL remain unknown. Local cancellation and process interruption MUST NOT be treated as proof of zero remote consumption or guaranteed remote termination.
 
 #### Scenario: Interrupt a provider attempt
 
-- **WHEN** a begun model call is interrupted before usable usage metadata is available
+- **WHEN** a known single-model call is interrupted before usable usage metadata is available
 - **THEN** the attempted-call count and interrupted status are retained while token usage remains unknown
 
 ### Requirement: Query consistent scoped aggregates
 
-The statistics flow SHALL support all sessions or one session, an optional model configuration and purpose filter, and an optional UTC time range based on call start time. It SHALL return consistent aggregates from one storage snapshot, with bounded grouping by session, model configuration, purpose, or UTC day. Numeric overflow MUST fail explicitly.
+The statistics query SHALL support all sessions or one session, optional profile, model, and purpose filters, and an optional UTC time range based on call start time. It SHALL return consistent aggregates from one storage snapshot, with bounded grouping by session, profile, model, purpose, or UTC day. Numeric overflow MUST fail explicitly.
 
 #### Scenario: Scope to one session and purpose
 
@@ -86,9 +86,9 @@ The statistics flow SHALL support all sessions or one session, an optional model
 - **WHEN** summing reported counters would exceed the supported integer range
 - **THEN** the query returns an explicit overflow error instead of wrapping or saturating
 
-### Requirement: Execute statistics as an embedded deterministic flow
+### Requirement: Query deterministic statistics directly
 
-The host SHALL obtain statistics through the embedded usage statistics flow and application query nodes. It SHALL aggregate persisted facts without issuing model requests or updating billing facts. Results SHALL remain reproducible for unchanged stored data and identical filters.
+The host SHALL query statistics directly through the shared storage handler. The application query node SHALL adapt that same handler for workflows without creating a nested flow. It SHALL aggregate persisted facts without issuing model requests or updating billing facts. Results SHALL remain reproducible for unchanged stored data and identical filters.
 
 #### Scenario: Query without provider credentials
 
@@ -99,3 +99,52 @@ The host SHALL obtain statistics through the embedded usage statistics flow and 
 
 - **WHEN** a title response is valid but its title update is skipped after a manual rename
 - **THEN** its saved reported usage remains included under purpose `title`
+
+### Requirement: Aggregate explicit usage lists without double counting
+
+Statistics SHALL aggregate each reported call by its model, counter presence, and reported start time,
+falling back to execution admission for older records. Empty lists mean no reported calls; legacy scalar
+facts apply only when a list is absent. Message history and metadata MUST NOT add usage, and retries
+MUST NOT duplicate call facts.
+
+#### Scenario: Repeat one node within a turn
+
+- **WHEN** one node produces two distinct reported calls in one workflow execution
+- **THEN** aggregates count both attempts and their independently reported counters
+
+#### Scenario: Distinguish unreported execution from an empty list
+
+- **WHEN** one execution returns an empty list and another ends without a final result
+- **THEN** only the latter increases unreported_invocations and neither invents model counters
+
+#### Scenario: Attribute a loop across UTC dates
+
+- **WHEN** model calls in one workflow execution start on different UTC days
+- **THEN** time filtering and grouping use their individual reported start timestamps
+
+### Requirement: Retire configuration fingerprints
+
+Call APIs and usage queries SHALL NOT require or expose configuration fingerprints. Upgrading an
+existing database SHALL preserve historical fingerprints as inert storage data, call identities,
+lifecycle state, message metadata, reported usage lists, and legacy token counters. New calls SHALL
+omit fingerprints, and statistics SHALL NOT group or filter by them.
+
+#### Scenario: Upgrade a database with configuration fingerprints
+
+- **WHEN** an existing database is opened by the updated backend
+- **THEN** its calls and usage totals remain available without configuration hashing or grouping
+
+### Requirement: Persist new replies using usage lists only
+
+Chat replies SHALL expose usages without a parallel scalar usage field. New reply persistence SHALL write only the explicit usage list and SHALL NOT populate legacy token columns. Forward migration SHALL convert successful single-model records with reported legacy counters into one call fact with their stored call ID. Existing lists, sparse counters, explicit zeroes, and historical scalar values SHALL be preserved.
+
+#### Scenario: Save a new model reply
+
+- **WHEN** the embedded host or executable backend saves a reply with call facts
+- **THEN** usages contains those facts and legacy scalar token columns remain empty
+
+#### Scenario: Upgrade a scalar-only successful reply
+
+- **WHEN** a legacy successful call has a model and reported token counters but no usage list
+- **THEN** one usage record retains its call identity, model, start time, and only the reported counters
+- **AND** replay and statistics use the migrated list without double counting the historical columns

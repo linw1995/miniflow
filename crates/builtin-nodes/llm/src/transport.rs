@@ -60,24 +60,19 @@ fn normalize(
         return Ok(bytes);
     };
     let counters: WireUsage = serde_json::from_value(counters).context(UsageMetadataSnafu)?;
+    let normalized = Usage {
+        input_tokens: counters.prompt_tokens,
+        output_tokens: counters.completion_tokens,
+        total_tokens: counters.total_tokens,
+        ..Default::default()
+    };
+    usage.get_or_init(|| normalized);
     if counters.prompt_tokens.is_some()
         && counters.completion_tokens.is_some()
         && counters.total_tokens.is_some()
     {
         return Ok(bytes);
     }
-    let normalized = Usage {
-        input_tokens: counters.prompt_tokens,
-        output_tokens: counters.completion_tokens,
-        total_tokens: counters.total_tokens.or_else(|| {
-            counters
-                .prompt_tokens
-                .zip(counters.completion_tokens)
-                .and_then(|(input, output)| input.checked_add(output))
-        }),
-        ..Default::default()
-    };
-    usage.get_or_init(|| normalized);
     // Rig's Chat DTO requires all wire counts; carry optional counts separately instead of inventing zeroes.
     object.remove("usage");
     serde_json::to_vec(&reply)
@@ -106,6 +101,8 @@ impl HttpClientExt for TerminalTransport {
                 let bytes = if successful {
                     normalize(bytes, &usage).map_err(Error::instance)?
                 } else {
+                    // Keep the original error body while retaining any valid reported counters.
+                    let _ = normalize(bytes.clone(), &usage);
                     bytes
                 };
                 Ok(U::from(bytes))

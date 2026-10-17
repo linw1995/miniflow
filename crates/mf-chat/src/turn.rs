@@ -1,7 +1,6 @@
 use crate::{
     ChatDatabase, ChatError, ModelCall, Turn,
     error::*,
-    operation,
     schema::{messages, model_calls, sessions, turns},
     session, storage,
 };
@@ -18,25 +17,38 @@ pub struct Invocation {
     pub call_id: String,
 }
 
+impl Invocation {
+    pub fn new(session_id: impl Into<String>) -> Self {
+        Self {
+            session_id: session_id.into(),
+            turn_id: uuid::Uuid::new_v4().to_string(),
+            call_id: uuid::Uuid::new_v4().to_string(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
 pub struct ModelIdentity {
     pub profile: String,
-    pub model: String,
-    pub config_id: String,
+    pub model: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
 pub struct Reply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usages: Option<Vec<mfn_llm::CallUsage>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<mfn_llm::MessageMetadata>,
     pub text: String,
-    pub usage: Option<BTreeMap<String, i64>>,
     pub finish_reason: Option<String>,
 }
 
 impl From<mfn_llm::LlmOutputs> for Reply {
     fn from(value: mfn_llm::LlmOutputs) -> Self {
         Self {
+            usages: Some(value.usages),
+            metadata: value.metadata,
             text: value.text,
-            usage: value.usage,
             finish_reason: value.finish_reason,
         }
     }
@@ -82,6 +94,7 @@ pub struct CompletionOutputs {
 
 #[derive(Clone, Debug, NodeValue)]
 pub struct FailTurnInputs {
+    pub usages: Option<Vec<mfn_llm::CallUsage>>,
     pub database_path: String,
     pub invocation: Invocation,
     pub state: String,
@@ -90,6 +103,7 @@ pub struct FailTurnInputs {
 
 #[derive(Clone, Debug, NodeValue)]
 pub struct FailCallInputs {
+    pub usages: Option<Vec<mfn_llm::CallUsage>>,
     pub database_path: String,
     pub call_id: String,
     pub state: String,
@@ -179,10 +193,14 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
         }
     );
     ensure!(
-        !input.model.model.trim().is_empty() && !input.model.config_id.is_empty(),
+        input
+            .model
+            .model
+            .as_ref()
+            .is_none_or(|model| !model.trim().is_empty()),
         InvalidSnafu {
             field: "model",
-            reason: "requires model and configuration identity"
+            reason: "model must be nonblank when supplied"
         }
     );
     let mut connection = storage::connect(Path::new(&input.database_path))?;
@@ -239,6 +257,7 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
             error: None,
         };
         let message = crate::Message {
+            metadata: None,
             id: uuid::Uuid::new_v4().to_string(),
             session_id: owner.id.clone(),
             turn_id: turn.id.clone(),
@@ -248,13 +267,14 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
             created_at: timestamp,
         };
         let call = ModelCall {
+            usages: None,
+            metadata: None,
             id: input.call_id.clone(),
             session_id: owner.id.clone(),
             turn_id: Some(turn.id.clone()),
             purpose: "conversation".into(),
             profile: input.model.profile.clone(),
             model: input.model.model.clone(),
-            config_id: input.model.config_id.clone(),
             state: "running".into(),
             title_revision: None,
             started_at: Some(timestamp),
@@ -274,13 +294,13 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
                 operation: "begin chat turn",
             })?;
         diesel::insert_into(messages::table)
-            .values(&message)
+            .values(message)
             .execute(connection)
             .context(DatabaseSnafu {
                 operation: "save user message",
             })?;
         diesel::insert_into(model_calls::table)
-            .values(&call)
+            .values(call.clone())
             .execute(connection)
             .context(DatabaseSnafu {
                 operation: "begin conversation call",
@@ -310,6 +330,58 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
     })
 }
 
+pub fn validate_usages(usages: &[mfn_llm::CallUsage]) -> Result<(), ChatError> {
+    let mut identities = std::collections::BTreeSet::new();
+    for usage in usages {
+        ensure!(
+            !usage.call_id.trim().is_empty()
+                && usage.started_at.is_none_or(|timestamp| timestamp >= 0)
+                && identities.insert(&usage.call_id)
+                && !usage.model.trim().is_empty()
+                && usage
+                    .error
+                    .as_ref()
+                    .is_none_or(|error| !error.trim().is_empty()),
+            InvalidSnafu {
+                field: "usages",
+                reason: "requires unique call identities, model names, and nonblank errors"
+            }
+        );
+        if let Some(node) = &usage.node {
+            ensure!(
+                !node.id.is_empty()
+                    && !node.kind.is_empty()
+                    && node
+                        .path
+                        .iter()
+                        .all(|scope| !scope.node.is_empty() && scope.index >= 0),
+                InvalidSnafu {
+                    field: "usages",
+                    reason: "requires valid node identities and scope indices"
+                }
+            );
+        }
+        validate_usage(usage.usage.as_ref())?;
+    }
+    Ok(())
+}
+
+fn validate_usage(usage: Option<&BTreeMap<String, i64>>) -> Result<(), ChatError> {
+    if let Some(usage) = usage {
+        ensure!(
+            usage.iter().all(|(key, count)| matches!(
+                key.as_str(),
+                "input_tokens" | "output_tokens" | "total_tokens"
+            ) && *count >= 0),
+            InvalidSnafu {
+                field: "usage",
+                reason: "requires supported nonnegative counters"
+            }
+        );
+    }
+    Ok(())
+}
+
 pub fn validate_reply(reply: &Reply) -> Result<(), ChatError> {
     ensure!(
         !reply.text.is_empty(),
@@ -318,55 +390,28 @@ pub fn validate_reply(reply: &Reply) -> Result<(), ChatError> {
             reason: "must be nonempty"
         }
     );
-    if let Some(usage) = &reply.usage {
-        for (counter, count) in usage {
-            ensure!(
-                matches!(
-                    counter.as_str(),
-                    "input_tokens" | "output_tokens" | "total_tokens"
-                ) && *count >= 0,
-                InvalidSnafu {
-                    field: "usage",
-                    reason: "requires supported nonnegative counters"
-                }
-            );
-        }
+    if let Some(usages) = &reply.usages {
+        validate_usages(usages)?;
     }
+
     Ok(())
 }
 
 pub fn reply_matches(call: &ModelCall, reply: &Reply) -> bool {
-    let count = |key: &str| {
-        reply
-            .usage
-            .as_ref()
-            .and_then(|usage| usage.get(key))
-            .copied()
-    };
     call.result_text.as_deref() == Some(&reply.text)
-        && call.input_tokens == count("input_tokens")
-        && call.output_tokens == count("output_tokens")
-        && call.total_tokens == count("total_tokens")
         && call.finish_reason == reply.finish_reason
+        && call.metadata == reply.metadata
+        && call.usages == reply.usages
 }
 
 pub fn saved_reply(call: &ModelCall) -> Result<Reply, ChatError> {
-    let mut usage = BTreeMap::new();
-    for (key, count) in [
-        ("input_tokens", call.input_tokens),
-        ("output_tokens", call.output_tokens),
-        ("total_tokens", call.total_tokens),
-    ] {
-        if let Some(count) = count {
-            usage.insert(key.into(), count);
-        }
-    }
     Ok(Reply {
+        usages: call.usages.clone(),
+        metadata: call.metadata.clone(),
         text: call
             .result_text
             .clone()
             .context(ConflictSnafu { id: &call.id })?,
-        usage: (!usage.is_empty()).then_some(usage),
         finish_reason: call.finish_reason.clone(),
     })
 }
@@ -378,23 +423,15 @@ pub fn save_response(
     timestamp: i64,
     disposition: &str,
 ) -> Result<(), ChatError> {
-    let count = |key: &str| {
-        reply
-            .usage
-            .as_ref()
-            .and_then(|usage| usage.get(key))
-            .copied()
-    };
     diesel::update(model_calls::table.find(call_id))
         .set((
             model_calls::state.eq("succeeded"),
             model_calls::finished_at.eq(Some(timestamp)),
-            model_calls::input_tokens.eq(count("input_tokens")),
-            model_calls::output_tokens.eq(count("output_tokens")),
-            model_calls::total_tokens.eq(count("total_tokens")),
             model_calls::finish_reason.eq(&reply.finish_reason),
             model_calls::result_text.eq(Some(&reply.text)),
             model_calls::disposition.eq(Some(disposition)),
+            model_calls::usages.eq(storage::StoredJson::from(reply.usages.clone())),
+            model_calls::metadata.eq(storage::StoredJson::from(reply.metadata.clone())),
         ))
         .execute(connection)
         .context(DatabaseSnafu {
@@ -431,15 +468,9 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
             call.state == "running" && turn.state == "running",
             ConflictSnafu { id: &call.id }
         );
-        let owner = session::load(connection, &call.session_id)?;
-        let revision = owner
-            .conversation_revision
-            .checked_add(1)
-            .context(ArithmeticSnafu {
-                operation: "advance conversation revision",
-            })?;
         let timestamp = session::now()?;
         let message = crate::Message {
+            metadata: input.response.metadata.clone(),
             id: uuid::Uuid::new_v4().to_string(),
             session_id: call.session_id.clone(),
             turn_id: turn.id.clone(),
@@ -451,7 +482,7 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
             created_at: timestamp,
         };
         diesel::insert_into(messages::table)
-            .values(&message)
+            .values(message)
             .execute(connection)
             .context(DatabaseSnafu {
                 operation: "save assistant message",
@@ -472,24 +503,12 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
             .context(DatabaseSnafu {
                 operation: "complete chat turn",
             })?;
-        diesel::update(sessions::table.find(&owner.id))
-            .set((
-                sessions::conversation_revision.eq(revision),
-                sessions::updated_at.eq(timestamp),
-            ))
+        diesel::update(sessions::table.find(&call.session_id))
+            .set(sessions::updated_at.eq(timestamp))
             .execute(connection)
             .context(DatabaseSnafu {
                 operation: "update completed session",
             })?;
-        if owner.conversation_revision == 0 && owner.title_source == "provisional" {
-            crate::title::schedule(
-                connection,
-                &owner.id,
-                &turn.id,
-                owner.title_revision,
-                &owner.profile,
-            )?;
-        }
         Ok(CompletionOutputs {
             completion: Completion {
                 invocation: input.invocation.clone(),
@@ -499,7 +518,7 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
     })
 }
 
-fn failure_summary(text: &str) -> &str {
+pub fn failure_summary(text: &str) -> &str {
     let mut end = text.len().min(4096);
     while !text.is_char_boundary(end) {
         end -= 1;
@@ -512,7 +531,11 @@ pub fn finalize_call(
     id: &str,
     state: &str,
     error: &str,
+    usages: Option<&[mfn_llm::CallUsage]>,
 ) -> Result<Changed, ChatError> {
+    if let Some(usages) = usages {
+        validate_usages(usages)?;
+    }
     ensure!(
         matches!(state, "failed" | "cancelled" | "interrupted"),
         InvalidSnafu {
@@ -522,12 +545,20 @@ pub fn finalize_call(
     );
     let call = load_call(connection, id)?;
     if call.state != "running" && !(call.purpose == "title" && call.state == "pending") {
+        if call.state != "succeeded"
+            && let Some(usages) = usages
+        {
+            ensure!(call.usages.as_deref() == Some(usages), ConflictSnafu { id });
+        }
         return Ok(Changed { changed: false });
     }
     let timestamp = session::now()?;
     diesel::update(model_calls::table.find(id))
         .set((
             model_calls::state.eq(state),
+            model_calls::usages.eq(storage::StoredJson::from(
+                usages.map(<[_]>::to_vec).or(call.usages.clone()),
+            )),
             model_calls::finished_at.eq(Some(timestamp)),
             model_calls::error.eq(Some(failure_summary(error))),
         ))
@@ -555,7 +586,10 @@ pub fn finalize_call(
     Ok(Changed { changed: true })
 }
 
-fn fail(input: FailTurnInputs) -> Result<Changed, ChatError> {
+pub fn fail(input: FailTurnInputs) -> Result<Changed, ChatError> {
+    if let Some(usages) = &input.usages {
+        validate_usages(usages)?;
+    }
     let mut connection = storage::connect(Path::new(&input.database_path))?;
     connection.immediate_transaction(|connection| {
         let call = load_call(connection, &input.invocation.call_id)?;
@@ -565,14 +599,26 @@ fn fail(input: FailTurnInputs) -> Result<Changed, ChatError> {
                 && call.purpose == "conversation",
             ConflictSnafu { id: &call.id }
         );
-        finalize_call(connection, &call.id, &input.state, &input.error)
+        finalize_call(
+            connection,
+            &call.id,
+            &input.state,
+            &input.error,
+            input.usages.as_deref(),
+        )
     })
 }
 
 fn fail_call(input: FailCallInputs) -> Result<Changed, ChatError> {
     let mut connection = storage::connect(Path::new(&input.database_path))?;
     connection.immediate_transaction(|connection| {
-        finalize_call(connection, &input.call_id, &input.state, &input.error)
+        finalize_call(
+            connection,
+            &input.call_id,
+            &input.state,
+            &input.error,
+            input.usages.as_deref(),
+        )
     })
 }
 
@@ -594,7 +640,7 @@ fn get_call(input: RecordInputs) -> Result<CallOutputs, ChatError> {
     })
 }
 
-fn get_request(input: RecordInputs) -> Result<TurnRequestOutputs, ChatError> {
+pub fn get_request(input: RecordInputs) -> Result<TurnRequestOutputs, ChatError> {
     let mut connection = storage::connect(Path::new(&input.database_path))?;
     let turn = load_turn(&mut connection, &input.id)?;
     let prompt = messages::table
@@ -608,7 +654,7 @@ fn get_request(input: RecordInputs) -> Result<TurnRequestOutputs, ChatError> {
     Ok(TurnRequestOutputs { turn, prompt })
 }
 
-fn recover(input: RecoveryInputs) -> Result<RecoveryOutputs, ChatError> {
+pub fn recover(input: RecoveryInputs) -> Result<RecoveryOutputs, ChatError> {
     let mut connection = storage::connect(Path::new(&input.database_path))?;
     connection.immediate_transaction(|connection| {
         let timestamp = session::now()?;
@@ -706,20 +752,37 @@ impl ChatDatabase {
         retry_of: Option<String>,
         max_history_bytes: usize,
     ) -> Result<TurnStarted, ChatError> {
-        operation::execute(
-            self.path(),
-            "mf_chat.turn.begin",
-            BeginTurnInputs {
-                database_path: String::new(),
-                session_id: session_id.into(),
-                turn_id: uuid::Uuid::new_v4().to_string(),
-                call_id: uuid::Uuid::new_v4().to_string(),
-                prompt: prompt.into(),
-                model,
-                retry_of,
-                max_history_bytes,
-            },
+        self.begin_turn_with_invocation(
+            Invocation::new(session_id),
+            prompt,
+            model,
+            retry_of,
+            max_history_bytes,
         )
+    }
+
+    pub fn begin_turn_with_invocation(
+        &self,
+        invocation: Invocation,
+        prompt: &str,
+        model: ModelIdentity,
+        retry_of: Option<String>,
+        max_history_bytes: usize,
+    ) -> Result<TurnStarted, ChatError> {
+        begin(BeginTurnInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            session_id: invocation.session_id,
+            turn_id: invocation.turn_id,
+            call_id: invocation.call_id,
+            prompt: prompt.into(),
+            model,
+            retry_of,
+            max_history_bytes,
+        })
     }
 
     pub fn complete_turn(
@@ -727,16 +790,36 @@ impl ChatDatabase {
         invocation: Invocation,
         response: Reply,
     ) -> Result<Completion, ChatError> {
-        let result: CompletionOutputs = operation::execute(
-            self.path(),
-            "mf_chat.turn.complete",
-            CompleteTurnInputs {
-                database_path: String::new(),
-                invocation,
-                response,
-            },
-        )?;
+        let result: CompletionOutputs = complete(CompleteTurnInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            invocation,
+            response,
+        })?;
         Ok(result.completion)
+    }
+
+    pub fn fail_turn_with_usages(
+        &self,
+        invocation: Invocation,
+        error: &str,
+        usages: Vec<mfn_llm::CallUsage>,
+    ) -> Result<bool, ChatError> {
+        let result: Changed = fail(FailTurnInputs {
+            usages: Some(usages),
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            invocation,
+            state: "failed".into(),
+            error: error.into(),
+        })?;
+        Ok(result.changed)
     }
 
     pub fn fail_turn(
@@ -745,54 +828,66 @@ impl ChatDatabase {
         state: &str,
         error: &str,
     ) -> Result<bool, ChatError> {
-        let result: Changed = operation::execute(
-            self.path(),
-            "mf_chat.turn.fail",
-            FailTurnInputs {
-                database_path: String::new(),
-                invocation,
-                state: state.into(),
-                error: error.into(),
-            },
-        )?;
+        let result: Changed = fail(FailTurnInputs {
+            usages: None,
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            invocation,
+            state: state.into(),
+            error: error.into(),
+        })?;
         Ok(result.changed)
     }
 
     pub fn fail_call(&self, call_id: &str, state: &str, error: &str) -> Result<bool, ChatError> {
-        let result: Changed = operation::execute(
-            self.path(),
-            "mf_chat.call.fail",
-            FailCallInputs {
-                database_path: String::new(),
-                call_id: call_id.into(),
-                state: state.into(),
-                error: error.into(),
-            },
-        )?;
+        self.fail_call_with_usages(call_id, state, error, None)
+    }
+
+    pub fn fail_call_with_usages(
+        &self,
+        call_id: &str,
+        state: &str,
+        error: &str,
+        usages: Option<Vec<mfn_llm::CallUsage>>,
+    ) -> Result<bool, ChatError> {
+        let result: Changed = fail_call(FailCallInputs {
+            usages,
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            call_id: call_id.into(),
+            state: state.into(),
+            error: error.into(),
+        })?;
         Ok(result.changed)
     }
 
     pub fn turn(&self, id: &str) -> Result<Turn, ChatError> {
-        let result: TurnOutputs = operation::execute(
-            self.path(),
-            "mf_chat.turn.load",
-            RecordInputs {
-                database_path: String::new(),
-                id: id.into(),
-            },
-        )?;
+        let result: TurnOutputs = get_turn(RecordInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            id: id.into(),
+        })?;
         Ok(result.turn)
     }
 
     pub fn call(&self, id: &str) -> Result<ModelCall, ChatError> {
-        let result: CallOutputs = operation::execute(
-            self.path(),
-            "mf_chat.call.load",
-            RecordInputs {
-                database_path: String::new(),
-                id: id.into(),
-            },
-        )?;
+        let result: CallOutputs = get_call(RecordInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            id: id.into(),
+        })?;
         Ok(result.call)
     }
 }
@@ -805,17 +900,24 @@ mod tests {
     fn identity() -> ModelIdentity {
         ModelIdentity {
             profile: "default".into(),
-            model: "test-model".into(),
-            config_id: "test-config".into(),
+            model: Some("test-model".into()),
         }
     }
     fn reply(text: &str) -> Reply {
         Reply {
+            usages: Some(vec![mfn_llm::CallUsage {
+                started_at: None,
+                call_id: "reported-call".into(),
+                node: None,
+                model: "test-model".into(),
+                usage: Some(BTreeMap::from([
+                    ("input_tokens".into(), 2),
+                    ("output_tokens".into(), 1),
+                ])),
+                error: None,
+            }]),
+            metadata: None,
             text: text.into(),
-            usage: Some(BTreeMap::from([
-                ("input_tokens".into(), 2),
-                ("output_tokens".into(), 1),
-            ])),
             finish_reason: Some("stop".into()),
         }
     }
@@ -872,9 +974,15 @@ mod tests {
                 .len(),
             2
         );
+        let stored = database.call(&begun.invocation.call_id).unwrap();
+        assert_eq!(stored.usages, reply("answer").usages);
         assert_eq!(
-            database.session(&session.id).unwrap().conversation_revision,
-            1
+            (
+                stored.input_tokens,
+                stored.output_tokens,
+                stored.total_tokens
+            ),
+            (None, None, None)
         );
         assert!(
             database
@@ -1023,7 +1131,7 @@ mod tests {
         let mut invocation = base.clone();
         invocation.call_id.clear();
         let mut model = base.clone();
-        model.model.model.clear();
+        model.model.model = Some(String::new());
         let mut profile = base.clone();
         profile.model.profile = "different".into();
         let mut retry = base.clone();
@@ -1066,9 +1174,11 @@ mod tests {
         let mut empty = base.clone();
         empty.response.text.clear();
         let mut negative = base.clone();
-        negative.response.usage = Some(BTreeMap::from([("input_tokens".into(), -1)]));
+        negative.response.usages.as_mut().unwrap()[0].usage =
+            Some(BTreeMap::from([("input_tokens".into(), -1)]));
         let mut unsupported = base.clone();
-        unsupported.response.usage = Some(BTreeMap::from([("cost".into(), 1)]));
+        unsupported.response.usages.as_mut().unwrap()[0].usage =
+            Some(BTreeMap::from([("cost".into(), 1)]));
         for input in [empty, negative, unsupported] {
             assert!(matches!(complete(input), Err(ChatError::Invalid { .. })));
         }
@@ -1080,6 +1190,7 @@ mod tests {
         ));
         assert!(matches!(
             fail(FailTurnInputs {
+                usages: None,
                 database_path: base.database_path.clone(),
                 invocation: foreign.invocation,
                 state: "failed".into(),
@@ -1089,6 +1200,7 @@ mod tests {
         ));
         assert!(matches!(
             fail_call(FailCallInputs {
+                usages: None,
                 database_path: base.database_path.clone(),
                 call_id: begun.invocation.call_id.clone(),
                 state: "running".into(),
