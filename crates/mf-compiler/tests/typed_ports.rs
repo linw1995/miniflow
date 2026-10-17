@@ -7,7 +7,7 @@ use mf_compiler::{
     NodeRegistry, WorkflowCompileError, WorkflowDefinition, compile_definition,
     instantiate_compiled, plan_definition,
 };
-use mf_runtime::WorkflowArguments;
+use mf_runtime::{WorkflowArguments, WorkflowDefinitionVersion};
 use serde_json::{Value, json};
 use std::process::Command;
 
@@ -122,6 +122,7 @@ fn generated_runner_matches_memory_for_checked_connections() {
     ] {
         // Values vary at runtime; only the connection types require new generated code.
         let mut definition = graph(source, Value::Null, target);
+        definition.version = WorkflowDefinitionVersion::V2026_10_03;
         definition.nodes[0].kind = "fixture.typed_echo".into();
         definition.nodes[0].config = json!({"type": source});
         let plan = plan_definition(&definition).unwrap();
