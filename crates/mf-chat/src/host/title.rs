@@ -96,6 +96,8 @@ impl Inner {
         if budget == 0 {
             return Ok(0);
         }
+        self.database
+            .schedule_titles(budget.min(crate::session::MAX_PAGE_SIZE))?;
         let calls = self
             .database
             .pending_titles(budget.min(crate::session::MAX_PAGE_SIZE))?;

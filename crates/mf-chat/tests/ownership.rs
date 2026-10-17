@@ -47,7 +47,6 @@ fn exact_cleanup_keeps_other_sessions_and_committed_success() {
                 usages: None,
                 metadata: None,
                 text: "saved".into(),
-                usage: None,
                 finish_reason: None,
             },
         )

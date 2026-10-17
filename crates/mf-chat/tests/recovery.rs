@@ -45,7 +45,6 @@ fn reply() -> Reply {
         usages: Some(usages()),
         metadata: Some(metadata()),
         text: "paid reply".into(),
-        usage: None,
         finish_reason: None,
     }
 }
@@ -476,7 +475,6 @@ fn unreported_workflow_invocations_are_not_counted_as_zero_model_calls() {
             Reply {
                 text: "no model was needed".into(),
                 usages: Some(Vec::new()),
-                usage: None,
                 metadata: None,
                 finish_reason: None,
             },

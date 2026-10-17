@@ -41,7 +41,6 @@ pub struct Reply {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<mfn_llm::MessageMetadata>,
     pub text: String,
-    pub usage: Option<BTreeMap<String, i64>>,
     pub finish_reason: Option<String>,
 }
 
@@ -51,7 +50,6 @@ impl From<mfn_llm::LlmOutputs> for Reply {
             usages: Some(value.usages),
             metadata: value.metadata,
             text: value.text,
-            usage: value.usage,
             finish_reason: value.finish_reason,
         }
     }
@@ -393,49 +391,21 @@ pub fn validate_reply(reply: &Reply) -> Result<(), ChatError> {
             reason: "must be nonempty"
         }
     );
-    validate_usage(reply.usage.as_ref())?;
     if let Some(usages) = &reply.usages {
         validate_usages(usages)?;
-        ensure!(
-            reply.usage.is_none() || (usages.len() == 1 && usages[0].usage == reply.usage),
-            InvalidSnafu {
-                field: "usage",
-                reason: "scalar usage must match the single reported call"
-            }
-        );
     }
 
     Ok(())
 }
 
 pub fn reply_matches(call: &ModelCall, reply: &Reply) -> bool {
-    let count = |key: &str| {
-        reply
-            .usage
-            .as_ref()
-            .and_then(|usage| usage.get(key))
-            .copied()
-    };
     call.result_text.as_deref() == Some(&reply.text)
-        && call.input_tokens == count("input_tokens")
-        && call.output_tokens == count("output_tokens")
-        && call.total_tokens == count("total_tokens")
         && call.finish_reason == reply.finish_reason
         && call.metadata == reply.metadata
         && call.usages == reply.usages
 }
 
 pub fn saved_reply(call: &ModelCall) -> Result<Reply, ChatError> {
-    let mut usage = BTreeMap::new();
-    for (key, count) in [
-        ("input_tokens", call.input_tokens),
-        ("output_tokens", call.output_tokens),
-        ("total_tokens", call.total_tokens),
-    ] {
-        if let Some(count) = count {
-            usage.insert(key.into(), count);
-        }
-    }
     Ok(Reply {
         usages: call.usages.clone(),
         metadata: call.metadata.clone(),
@@ -443,7 +413,6 @@ pub fn saved_reply(call: &ModelCall) -> Result<Reply, ChatError> {
             .result_text
             .clone()
             .context(ConflictSnafu { id: &call.id })?,
-        usage: (!usage.is_empty()).then_some(usage),
         finish_reason: call.finish_reason.clone(),
     })
 }
@@ -455,20 +424,10 @@ pub fn save_response(
     timestamp: i64,
     disposition: &str,
 ) -> Result<(), ChatError> {
-    let count = |key: &str| {
-        reply
-            .usage
-            .as_ref()
-            .and_then(|usage| usage.get(key))
-            .copied()
-    };
     diesel::update(model_calls::table.find(call_id))
         .set((
             model_calls::state.eq("succeeded"),
             model_calls::finished_at.eq(Some(timestamp)),
-            model_calls::input_tokens.eq(count("input_tokens")),
-            model_calls::output_tokens.eq(count("output_tokens")),
-            model_calls::total_tokens.eq(count("total_tokens")),
             model_calls::finish_reason.eq(&reply.finish_reason),
             model_calls::result_text.eq(Some(&reply.text)),
             model_calls::disposition.eq(Some(disposition)),
@@ -510,13 +469,6 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
             call.state == "running" && turn.state == "running",
             ConflictSnafu { id: &call.id }
         );
-        let owner = session::load(connection, &call.session_id)?;
-        let revision = owner
-            .conversation_revision
-            .checked_add(1)
-            .context(ArithmeticSnafu {
-                operation: "advance conversation revision",
-            })?;
         let timestamp = session::now()?;
         let message = crate::Message {
             metadata: input.response.metadata.clone(),
@@ -552,24 +504,12 @@ pub fn complete(input: CompleteTurnInputs) -> Result<CompletionOutputs, ChatErro
             .context(DatabaseSnafu {
                 operation: "complete chat turn",
             })?;
-        diesel::update(sessions::table.find(&owner.id))
-            .set((
-                sessions::conversation_revision.eq(revision),
-                sessions::updated_at.eq(timestamp),
-            ))
+        diesel::update(sessions::table.find(&call.session_id))
+            .set(sessions::updated_at.eq(timestamp))
             .execute(connection)
             .context(DatabaseSnafu {
                 operation: "update completed session",
             })?;
-        if owner.conversation_revision == 0 && owner.title_source == "provisional" {
-            crate::title::schedule(
-                connection,
-                &owner.id,
-                &turn.id,
-                owner.title_revision,
-                &owner.profile,
-            )?;
-        }
         Ok(CompletionOutputs {
             completion: Completion {
                 invocation: input.invocation.clone(),
@@ -966,13 +906,19 @@ mod tests {
     }
     fn reply(text: &str) -> Reply {
         Reply {
-            usages: None,
+            usages: Some(vec![mfn_llm::CallUsage {
+                started_at: None,
+                call_id: "reported-call".into(),
+                node: None,
+                model: "test-model".into(),
+                usage: Some(BTreeMap::from([
+                    ("input_tokens".into(), 2),
+                    ("output_tokens".into(), 1),
+                ])),
+                error: None,
+            }]),
             metadata: None,
             text: text.into(),
-            usage: Some(BTreeMap::from([
-                ("input_tokens".into(), 2),
-                ("output_tokens".into(), 1),
-            ])),
             finish_reason: Some("stop".into()),
         }
     }
@@ -1029,9 +975,15 @@ mod tests {
                 .len(),
             2
         );
+        let stored = database.call(&begun.invocation.call_id).unwrap();
+        assert_eq!(stored.usages, reply("answer").usages);
         assert_eq!(
-            database.session(&session.id).unwrap().conversation_revision,
-            1
+            (
+                stored.input_tokens,
+                stored.output_tokens,
+                stored.total_tokens
+            ),
+            (None, None, None)
         );
         assert!(
             database
@@ -1223,9 +1175,11 @@ mod tests {
         let mut empty = base.clone();
         empty.response.text.clear();
         let mut negative = base.clone();
-        negative.response.usage = Some(BTreeMap::from([("input_tokens".into(), -1)]));
+        negative.response.usages.as_mut().unwrap()[0].usage =
+            Some(BTreeMap::from([("input_tokens".into(), -1)]));
         let mut unsupported = base.clone();
-        unsupported.response.usage = Some(BTreeMap::from([("cost".into(), 1)]));
+        unsupported.response.usages.as_mut().unwrap()[0].usage =
+            Some(BTreeMap::from([("cost".into(), 1)]));
         for input in [empty, negative, unsupported] {
             assert!(matches!(complete(input), Err(ChatError::Invalid { .. })));
         }

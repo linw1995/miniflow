@@ -237,7 +237,6 @@ fn create(input: CreateSessionInputs) -> Result<SessionOutputs, ChatError> {
         title,
         title_source: source.into(),
         title_revision: 0,
-        conversation_revision: 0,
         profile: input.profile,
         system: input.system,
         archived: false,

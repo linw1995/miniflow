@@ -205,7 +205,7 @@ mod tests {
         let mut connection = connect(database.path()).unwrap();
         connection.revert_all_migrations(MIGRATIONS).unwrap();
         connection.run_pending_migrations(MIGRATIONS).unwrap();
-        connection.batch_execute("INSERT INTO sessions VALUES ('session', 'New conversation', 'provisional', 0, 0, 'default', NULL, 0, 0, 1, 1);").unwrap();
+        connection.batch_execute("INSERT INTO sessions (id, title, title_source, title_revision, profile, system, archived, next_sequence, created_at, updated_at) VALUES ('session', 'New conversation', 'provisional', 0, 'default', NULL, 0, 0, 1, 1);").unwrap();
         drop(connection);
         drop(database);
         let reopened = ChatDatabase::open(&path).unwrap();
@@ -220,10 +220,12 @@ mod tests {
 
     #[test]
     fn upgrading_existing_records_preserves_usage_metadata_and_legacy_fingerprints() {
-        use crate::schema::model_calls;
+        use crate::schema::{model_calls, sessions};
         use std::collections::BTreeMap;
 
-        for previous_version in [1, 2] {
+        for (previous_version, has_list, tokens) in
+            [(1, false, 4), (2, true, 4), (3, false, 0), (3, true, 4)]
+        {
             let directory = tempfile::tempdir().unwrap();
             let path = directory.path().join("chat.sqlite");
             let database = ChatDatabase::open(&path).unwrap();
@@ -242,26 +244,23 @@ mod tests {
                     1024,
                 )
                 .unwrap();
-            let counters = BTreeMap::from([("input_tokens".into(), 4)]);
-            let metadata = (previous_version == 2)
+            let counters = BTreeMap::from([("input_tokens".into(), tokens)]);
+            let metadata = (previous_version > 1)
                 .then(|| BTreeMap::from([("source".into(), "retained".into())]));
-            let usages = (previous_version == 2).then(|| {
-                vec![mfn_llm::CallUsage {
-                    started_at: Some(1),
-                    call_id: "reported-call".into(),
-                    node: None,
-                    model: "old-model".into(),
-                    usage: Some(counters.clone()),
-                    error: None,
-                }]
-            });
+            let reported = mfn_llm::CallUsage {
+                started_at: Some(1),
+                call_id: "reported-call".into(),
+                node: None,
+                model: "old-model".into(),
+                usage: Some(counters.clone()),
+                error: None,
+            };
             database
                 .complete_turn(
                     begun.invocation.clone(),
                     crate::Reply {
                         text: "old reply".into(),
-                        usage: Some(counters),
-                        usages,
+                        usages: has_list.then(|| vec![reported.clone()]),
                         metadata: metadata.clone(),
                         finish_reason: None,
                     },
@@ -269,16 +268,45 @@ mod tests {
                 .unwrap();
             let original = database.call(&begun.invocation.call_id).unwrap();
             let mut connection = connect(&path).unwrap();
-            for _ in previous_version..3 {
+            for _ in previous_version..4 {
                 connection.revert_last_migration(MIGRATIONS).unwrap();
             }
+            assert_eq!(
+                sessions::table
+                    .select(diesel::dsl::sql::<diesel::sql_types::BigInt>(
+                        "conversation_revision"
+                    ))
+                    .get_result::<i64>(&mut connection)
+                    .unwrap(),
+                1
+            );
+            diesel::update(model_calls::table.find(&begun.invocation.call_id))
+                .set(model_calls::input_tokens.eq(Some(tokens)))
+                .execute(&mut connection)
+                .unwrap();
             connection
                 .batch_execute("UPDATE model_calls SET config_id = 'legacy-config';")
                 .unwrap();
             drop(connection);
             drop(database);
             let reopened = ChatDatabase::open(path).unwrap();
-            assert_eq!(reopened.call(&begun.invocation.call_id).unwrap(), original);
+            let call = reopened.call(&begun.invocation.call_id).unwrap();
+            let expected = if has_list {
+                reported
+            } else {
+                mfn_llm::CallUsage {
+                    started_at: original.started_at,
+                    call_id: original.id.clone(),
+                    node: None,
+                    model: "old-model".into(),
+                    usage: Some(counters),
+                    error: None,
+                }
+            };
+            assert_eq!(call.usages, Some(vec![expected]));
+            assert_eq!(call.input_tokens, Some(tokens));
+            assert_eq!(call.result_text, original.result_text);
+            assert_eq!(call.metadata, metadata);
             assert_eq!(
                 reopened.history(&session.id, 1024).unwrap().history[1].metadata,
                 metadata
@@ -291,9 +319,21 @@ mod tests {
                     .unwrap(),
                 "legacy-config"
             );
+            let crate::executable::InvocationState::Committed(saved) =
+                reopened.inspect_invocation(&begun.invocation).unwrap()
+            else {
+                panic!("expected migrated completion");
+            };
+            assert_eq!(
+                reopened
+                    .complete_turn(begun.invocation, saved.reply.clone())
+                    .unwrap(),
+                saved
+            );
             let usage = reopened.usage(Default::default()).unwrap();
             assert_eq!(usage.overall.attempted_calls, 1);
-            assert_eq!(usage.overall.input_tokens.known_subtotal, Some(4));
+            assert_eq!(usage.overall.input_tokens.known_subtotal, Some(tokens));
+            assert_eq!(usage.overall.output_tokens.known_subtotal, None);
         }
     }
 

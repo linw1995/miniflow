@@ -41,7 +41,7 @@ Registered kinds are `mf_chat.session.create`, `.list`, `.load`, `.rename`, `.ar
 
 `mf_chat.turn.begin` atomically records a user message, running turn, and running model call. It reserves message order and loads successful history before releasing its short transaction. Only one conversation turn may run in a session; another session can still use the database while the provider is pending.
 
-`mf_chat.turn.complete` saves the assistant message, reported usage, and successful turn state together. Replaying the same call and response returns the saved completion. Reusing its identity with different text or metadata fails. A failure halfway through completion leaves no assistant message or partial usage update.
+`mf_chat.turn.complete` saves the assistant message, reported usages, and successful turn state together. It does not schedule titles or maintain a conversation completion counter. Replaying the same call and response returns the saved completion. Reusing its identity with different text or metadata fails. A failure halfway through completion leaves no assistant message or partial usage update.
 
 `mf_chat.turn.fail` and `mf_chat.call.fail` finalize unsuccessful work and cannot overwrite committed success. Error summaries are bounded, while live errors retain typed sources. `mf_chat.turn.load` and `mf_chat.call.load` expose individual records for inspection.
 
@@ -82,15 +82,23 @@ Set `MF_CHAT_BASE_URL` for an OpenAI-compatible endpoint. The example prints com
 
 ## Session title summaries
 
-The first successful turn of a provisionally named session atomically creates one pending title call. The embedded `session_title` flow independently reads that completed turn, invokes the existing model adapter, and applies a concise title only while the captured title revision still matches. Generated titles are trimmed, nonempty, free of control characters, and at most 120 characters.
+After conversation persistence, the host explicitly schedules titles for provisional sessions that have a successful
+turn and no previous title call. The first successful turn supplies the title source; scheduling is idempotent and
+independent of reply persistence. The embedded `session_title` flow reads that completed turn, invokes the model
+adapter, and applies a concise title only while the captured title revision still matches. Generated titles are trimmed,
+nonempty, free of control characters, and at most 120 characters.
 
-Automatic dispatch is enabled by default. `HostConfig::title_profile` selects another configured model profile; leaving it unset uses the conversation profile. Set `automatic_titles` to false to defer dispatch while keeping pending requests durable. Use `dispatch_titles`, `start_title`, or `retry_title` for explicit execution.
+Automatic dispatch is enabled by default. `HostConfig::title_profile` selects another configured model profile; leaving it unset uses the conversation profile. Set `automatic_titles` to false to disable automatic scheduling and dispatch. Explicitly queue eligible work with `database.schedule_titles(limit)`, or use `dispatch_titles` to schedule and start it. `start_title` starts an existing request; `retry_title` explicitly creates a new attempt after failure.
 
 `poll_titles` collects completed background results and dispatch errors without blocking. Its result queue is bounded by the host concurrency limit; a full queue leaves new work pending in storage until results are collected. Foreground admissions take priority over title requests that have not started.
 
 Manual names always take precedence. A rename before title execution skips the provider call; a rename during execution rejects the stale update but still saves reported usage. Rejected title text also retains usage. Title failures and cancellation preserve the successful conversation and do not add chat messages. Explicit retry creates a new title call; subsequent conversation turns do not automatically retry a failed title.
 
-Reopening resumes never-started pending requests. Interrupted provider attempts are not resent. A title response whose write fails returns an uncommitted value with purpose `title`; use `retry_title_completion` to persist that retained response without another model request.
+On startup and polling, an automatic host discovers successful sessions whose titles were not yet queued and resumes
+never-started pending requests. A title scheduling failure does not roll back a committed conversation. Existing title
+attempts, including failed or interrupted ones, prevent automatic rescheduling. Interrupted provider attempts are not
+resent. A title response whose write fails returns an uncommitted value with purpose `title`; use
+`retry_title_completion` to persist that retained response without another model request.
 
 ## Usage statistics
 
@@ -263,5 +271,7 @@ means no calls were reported; an interrupted execution with no result is not tre
 A crash or cancellation before delivering the final result can lose otherwise completed call facts.
 
 The current workflow output contract requires recompiling and updating older chat executables. The scalar
-LLM `usage` output and legacy embedded-host reply field remain available for single-call consumers; new
-executable accounting uses `usages`. No terminal interface or implicit runtime usage collector is installed.
+LLM `usage` output remains available to other workflows, but `mf-chat::Reply` uses only `usages`. New
+reply writes leave legacy scalar token columns empty. Existing successful single-model records with
+reported scalar counters are upgraded to one usage entry using their stored call ID; explicit lists
+and unknown counters are preserved. Legacy columns remain compatibility data. No terminal interface or implicit runtime usage collector is installed.

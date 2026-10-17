@@ -7,19 +7,25 @@ fn identity() -> ModelIdentity {
 }
 fn reply(text: &str) -> Reply {
     Reply {
-        usages: None,
+        usages: Some(vec![mfn_llm::CallUsage {
+            started_at: None,
+            call_id: "reported-call".into(),
+            node: None,
+            model: "model".into(),
+            usage: Some(std::collections::BTreeMap::from([(
+                "output_tokens".into(),
+                1,
+            )])),
+            error: None,
+        }]),
         metadata: None,
         text: text.into(),
-        usage: Some(std::collections::BTreeMap::from([(
-            "output_tokens".into(),
-            1,
-        )])),
         finish_reason: None,
     }
 }
 
 #[test]
-fn first_turn_schedules_once_and_manual_titles_win_before_or_during_generation() {
+fn explicit_scheduling_is_idempotent_and_manual_titles_win() {
     let directory = tempfile::tempdir().unwrap();
     let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
     let owner = database.create_session("default", None, None).unwrap();
@@ -32,6 +38,9 @@ fn first_turn_schedules_once_and_manual_titles_win_before_or_during_generation()
     database
         .complete_turn(turn.invocation, reply("answer"))
         .unwrap();
+    assert!(database.pending_titles(10).unwrap().is_empty());
+    assert!(database.schedule_titles(10).unwrap());
+    assert!(!database.schedule_titles(10).unwrap());
     let calls = database.pending_titles(10).unwrap();
     assert_eq!(calls.len(), 1);
     assert!(matches!(
@@ -92,11 +101,8 @@ fn first_turn_schedules_once_and_manual_titles_win_before_or_during_generation()
     ));
     assert_eq!(database.session(&owner.id).unwrap().title, "Manual");
     assert_eq!(
-        database
-            .call(&started.invocation.call_id)
-            .unwrap()
-            .output_tokens,
-        Some(1)
+        database.call(&started.invocation.call_id).unwrap().usages,
+        reply("Generated").usages
     );
     assert_eq!(
         database
@@ -113,6 +119,7 @@ fn first_turn_schedules_once_and_manual_titles_win_before_or_during_generation()
     database
         .complete_turn(turn.invocation, reply("answer"))
         .unwrap();
+    assert!(database.schedule_titles(10).unwrap());
     let call = database.pending_titles(10).unwrap().pop().unwrap();
     database
         .rename_session(&other.id, "Already manual")
@@ -141,6 +148,7 @@ fn pending_titles_survive_restart_and_rejected_titles_keep_usage() {
     database
         .complete_turn(turn.invocation, reply("answer"))
         .unwrap();
+    assert!(database.schedule_titles(10).unwrap());
     let call = database.pending_titles(10).unwrap().pop().unwrap();
     drop(database);
     let database = ChatDatabase::open(&path).unwrap();
@@ -160,7 +168,10 @@ fn pending_titles_survive_restart_and_rejected_titles_keep_usage() {
         )
         .unwrap();
     assert_eq!(result.outcome, TitleOutcome::Rejected);
-    assert_eq!(database.call(&call.id).unwrap().output_tokens, Some(1));
+    assert_eq!(
+        database.call(&call.id).unwrap().usages,
+        reply("two\nlines").usages
+    );
     let next = database.retry_title(&owner.id).unwrap();
     assert_ne!(next.id, call.id);
     let started = prepare(PrepareTitleInputs {
@@ -174,8 +185,62 @@ fn pending_titles_survive_restart_and_rejected_titles_keep_usage() {
         .fail_call(&next.id, "failed", "title failed")
         .unwrap();
     assert!(started.request.is_some());
+    assert!(!database.schedule_titles(10).unwrap());
+    assert_eq!(database.history(&owner.id, 1024).unwrap().history.len(), 2);
+}
+
+#[test]
+fn scheduling_failure_does_not_rollback_replies_and_uses_the_first_successful_turn() {
+    use diesel::connection::SimpleConnection;
+
+    let directory = tempfile::tempdir().unwrap();
+    let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
+    let owner = database.create_session("default", None, None).unwrap();
+    let failed = database
+        .begin_turn(&owner.id, "failed", identity(), None, 1024)
+        .unwrap();
+    database
+        .fail_turn(failed.invocation, "failed", "provider failed")
+        .unwrap();
+    assert!(!database.schedule_titles(10).unwrap());
+    let manual = database
+        .create_session("default", None, Some("Manual".into()))
+        .unwrap();
+    let manual_turn = database
+        .begin_turn(&manual.id, "question", identity(), None, 1024)
+        .unwrap();
+    database
+        .complete_turn(manual_turn.invocation, reply("answer"))
+        .unwrap();
+    assert!(!database.schedule_titles(10).unwrap());
+    let mut connection = storage::connect(database.path()).unwrap();
+    connection.batch_execute("CREATE TRIGGER reject_title_schedule BEFORE INSERT ON model_calls WHEN NEW.purpose = 'title' BEGIN SELECT RAISE(ABORT, 'injected scheduling failure'); END;").unwrap();
+    let first = database
+        .begin_turn(&owner.id, "first success", identity(), None, 1024)
+        .unwrap();
+    database
+        .complete_turn(first.invocation.clone(), reply("answer"))
+        .unwrap();
+    assert!(database.pending_titles(10).unwrap().is_empty());
+    assert!(database.schedule_titles(10).is_err());
     assert_eq!(
-        database.session(&owner.id).unwrap().conversation_revision,
-        1
+        database.turn(&first.invocation.turn_id).unwrap().state,
+        "succeeded"
     );
+    let next = database
+        .begin_turn(&owner.id, "later success", identity(), None, 1024)
+        .unwrap();
+    database
+        .complete_turn(next.invocation, reply("another answer"))
+        .unwrap();
+    connection
+        .batch_execute("DROP TRIGGER reject_title_schedule;")
+        .unwrap();
+    assert!(database.schedule_titles(10).unwrap());
+    assert!(!database.schedule_titles(10).unwrap());
+    assert_eq!(
+        database.pending_titles(10).unwrap()[0].turn_id.as_deref(),
+        Some(first.invocation.turn_id.as_str())
+    );
+    assert_eq!(database.history(&owner.id, 1024).unwrap().history.len(), 4);
 }

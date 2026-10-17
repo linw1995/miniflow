@@ -80,7 +80,7 @@ pub struct PendingTitles {
     pub calls: Vec<ModelCall>,
 }
 
-pub fn schedule(
+fn insert_pending(
     connection: &mut SqliteConnection,
     session_id: &str,
     turn_id: &str,
@@ -115,6 +115,53 @@ pub fn schedule(
             operation: "schedule session title",
         })?;
     Ok(call)
+}
+
+fn schedule(input: PendingTitleInputs) -> Result<turn::Changed, ChatError> {
+    session::validate_page(input.limit)?;
+    let mut connection = storage::connect(Path::new(&input.database_path))?;
+    connection.immediate_transaction(|connection| {
+        let candidates = sessions::table
+            .filter(sessions::title_source.eq("provisional"))
+            .filter(diesel::dsl::exists(
+                turns::table
+                    .filter(turns::session_id.eq(sessions::id))
+                    .filter(turns::state.eq("succeeded")),
+            ))
+            .filter(diesel::dsl::not(diesel::dsl::exists(
+                model_calls::table
+                    .filter(model_calls::session_id.eq(sessions::id))
+                    .filter(model_calls::purpose.eq("title")),
+            )))
+            .order((sessions::created_at.asc(), sessions::id.asc()))
+            .limit(input.limit as i64)
+            .select(crate::Session::as_select())
+            .load::<crate::Session>(connection)
+            .context(DatabaseSnafu {
+                operation: "find sessions awaiting title scheduling",
+            })?;
+        for owner in &candidates {
+            let first = turns::table
+                .filter(turns::session_id.eq(&owner.id))
+                .filter(turns::state.eq("succeeded"))
+                .order(turns::sequence.asc())
+                .select(turns::id)
+                .first::<String>(connection)
+                .context(DatabaseSnafu {
+                    operation: "load first successful title source",
+                })?;
+            insert_pending(
+                connection,
+                &owner.id,
+                &first,
+                owner.title_revision,
+                &owner.profile,
+            )?;
+        }
+        Ok(turn::Changed {
+            changed: !candidates.is_empty(),
+        })
+    })
 }
 
 pub fn prepare(input: PrepareTitleInputs) -> Result<TitleStarted, ChatError> {
@@ -295,7 +342,7 @@ fn retry(input: crate::nodes::SessionInputs) -> Result<crate::nodes::CallOutputs
                 operation: "load first successful title source",
             })?;
         Ok(crate::nodes::CallOutputs {
-            call: schedule(
+            call: insert_pending(
                 connection,
                 &owner.id,
                 &first.id,
@@ -324,6 +371,13 @@ impl mf_runtime::TypedTaskNode for PrepareTitle {
         Ok(result)
     }
 }
+register_operation!(
+    "mf_chat.title.schedule",
+    ScheduleTitles,
+    PendingTitleInputs,
+    turn::Changed,
+    schedule
+);
 register_task!("mf_chat.title.prepare", PrepareTitle);
 register_operation!(
     "mf_chat.title.complete",
@@ -348,6 +402,18 @@ register_operation!(
 );
 
 impl ChatDatabase {
+    pub fn schedule_titles(&self, limit: usize) -> Result<bool, ChatError> {
+        let result: turn::Changed = operation::execute(
+            self.path(),
+            "mf_chat.title.schedule",
+            PendingTitleInputs {
+                database_path: String::new(),
+                limit,
+            },
+        )?;
+        Ok(result.changed)
+    }
+
     pub fn pending_titles(&self, limit: usize) -> Result<Vec<ModelCall>, ChatError> {
         let result: PendingTitles = operation::execute(
             self.path(),

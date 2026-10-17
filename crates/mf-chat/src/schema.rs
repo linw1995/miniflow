@@ -6,7 +6,6 @@ diesel::table! {
         title -> Text,
         title_source -> Text,
         title_revision -> BigInt,
-        conversation_revision -> BigInt,
         profile -> Text,
         system -> Nullable<Text>,
         archived -> Bool,

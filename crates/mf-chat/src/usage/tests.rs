@@ -20,10 +20,16 @@ fn complete(
         .complete_turn(
             begun.invocation.clone(),
             Reply {
-                usages: None,
+                usages: Some(vec![mfn_llm::CallUsage {
+                    started_at: None,
+                    call_id: "reported-call".into(),
+                    node: None,
+                    model: "test-model".into(),
+                    usage,
+                    error: None,
+                }]),
                 metadata: None,
                 text: "answer".into(),
-                usage,
                 finish_reason: None,
             },
         )
@@ -216,6 +222,7 @@ fn pending_titles_do_not_count_but_discarded_title_results_keep_their_usage() {
             .attempted_calls,
         1
     );
+    database.schedule_titles(10).unwrap();
     let title = database.pending_titles(10).unwrap().pop().unwrap();
     let prepared: crate::nodes::TitleStarted = crate::operation::execute(
         database.path(),
@@ -230,10 +237,16 @@ fn pending_titles_do_not_count_but_discarded_title_results_keep_their_usage() {
     .unwrap();
     database.rename_session(&owner.id, "Manual").unwrap();
     let response = Reply {
-        usages: None,
+        usages: Some(vec![mfn_llm::CallUsage {
+            started_at: None,
+            call_id: "reported-title".into(),
+            node: None,
+            model: "test-model".into(),
+            usage: Some(BTreeMap::from([("output_tokens".into(), 5)])),
+            error: None,
+        }]),
         metadata: None,
         text: "Generated".into(),
-        usage: Some(BTreeMap::from([("output_tokens".into(), 5)])),
         finish_reason: None,
     };
     database
@@ -277,10 +290,16 @@ fn model_profile_and_purpose_groups_preserve_attribution_and_validate_cursors() 
             .complete_turn(
                 begun.invocation,
                 Reply {
-                    usages: None,
+                    usages: Some(vec![mfn_llm::CallUsage {
+                        started_at: None,
+                        call_id: "reported-call".into(),
+                        node: None,
+                        model: model.into(),
+                        usage: Some(BTreeMap::from([("output_tokens".into(), tokens)])),
+                        error: None,
+                    }]),
                     metadata: None,
                     text: "answer".into(),
-                    usage: Some(BTreeMap::from([("output_tokens".into(), tokens)])),
                     finish_reason: None,
                 },
             )

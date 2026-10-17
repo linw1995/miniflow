@@ -61,7 +61,6 @@ fn decode_result(bytes: &[u8], invocation: &Invocation) -> Result<Delivered, Cha
                 text,
                 metadata: result.metadata,
                 usages: Some(result.usages),
-                usage: None,
                 finish_reason: result.finish_reason,
             };
             turn::validate_reply(&reply)?;
