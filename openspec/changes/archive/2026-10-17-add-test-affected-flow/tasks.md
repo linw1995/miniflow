@@ -39,7 +39,7 @@
 
 - [x] 6.1 Review the implementation against repository boundaries and error-handling rules; remove unconsumed semantic extensions and unadvertised dynamic registration after paired local PR replays.
 - [x] 6.2 Use fault injection to retain essential cancellation, no-request, and failure-fallback safeguards; remove duplicate tests and correct reproduced protocol/process cleanup defects.
-- [ ] 6.3 Run affected suites, pinned real-server verification, hooks, and strict specification validation; commit the reviewed implementation and archive the completed change.
+- [x] 6.3 Run affected suites, pinned real-server verification, hooks, and strict specification validation; commit the reviewed implementation and archive the completed change.
 
 ## Workflow follow-up
 
