@@ -1610,6 +1610,7 @@ dependencies = [
  "mf-compiler",
  "mf-runtime",
  "mf-telemetry",
+ "mfn-code",
  "mfn-core",
  "mfn-llm",
  "serde",

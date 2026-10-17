@@ -512,12 +512,15 @@ fn captured_provider_failures_and_timeouts_return_explicit_call_facts() {
     failed.status = 503;
     let mut timed_out = Reply::text("too late");
     timed_out.header_delay = Duration::from_millis(300);
-    for response in [failed, timed_out] {
+    for (response, timeout, expected_error) in [
+        (failed, 60_000, "HTTP 503"),
+        (timed_out, 100, "deadline exceeded"),
+    ] {
         let server = Server::start(vec![response]);
         let result = probe(
             &server,
             json!({"inputs":[{"prompt":"hello"}]}),
-            json!({"capture_errors":true,"timeout_ms":100}),
+            json!({"capture_errors":true,"timeout_ms":timeout}),
         );
         let outputs = &result["results"][0]["outputs"];
         assert_eq!(result["results"][0]["ok"], true, "{result}");
@@ -528,8 +531,17 @@ fn captured_provider_failures_and_timeouts_return_explicit_call_facts() {
         assert!(!outputs["usages"][0]["call_id"].as_str().unwrap().is_empty());
         assert!(outputs["usages"][0].get("usage").is_none());
         assert_eq!(outputs["usages"][0]["error"], outputs["error"]);
+        assert!(
+            outputs["error"].as_str().unwrap().contains(expected_error),
+            "{outputs}"
+        );
         assert!(!outputs.to_string().contains("remote-secret"));
-        assert_eq!(server.requests().len(), 1);
+        if expected_error == "HTTP 503" {
+            assert_eq!(server.requests().len(), 1);
+        } else {
+            // A deadline can expire before the request reaches the server.
+            assert!(server.requests().len() <= 1);
+        }
     }
 }
 

@@ -206,9 +206,11 @@ fn workflow_explicitly_combines_multiple_model_calls_on_success_and_failure() {
             definition.edges.push(edge);
         }
         definition.nodes.push(
-            serde_json::from_value(
-                json!({"id":"collect","kind":mfn_core::CONCAT_KIND,"config":{}}),
-            )
+            serde_json::from_value(json!({"id":"collect","kind":mfn_code::KIND,"config":{
+                "language":"cel",
+                "inputs":{"left":{"list":"object"},"right":{"list":"object"}},
+                "code":{"value":"left + right"}
+            }}))
             .unwrap(),
         );
         for (node, input) in [("first", "left"), ("chat", "right")] {

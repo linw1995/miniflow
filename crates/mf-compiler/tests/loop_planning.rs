@@ -313,28 +313,32 @@ fn generated_loop_matches_in_memory_without_build_inputs() {
     let definition_path = directory.path().join("loop.json");
     let executable = directory.path().join("loop-runner");
     let build = directory.path().join("build");
-    for (mut value, expected) in [
+    for (index, (mut value, expected)) in [
         (definition(), json!({"count": 3})),
         (nested_definition(), json!({"count": 2})),
         (exit_definition(), json!({"count": 2})),
         (skipped_definition(), json!({})),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         assert_eq!(run_in_memory(value.clone()).unwrap(), expected);
         value["dependencies"] = json!({
             "core": {"package": "mfn-core", "path": common::crates_dir().join("builtin-nodes/core")},
             "code": {"package": "mfn-code", "path": common::crates_dir().join("builtin-nodes/code")}
         });
         fs::write(&definition_path, value.to_string()).unwrap();
-        compile_project(&CompileRequest {
+        let support = SupportPackages::Local {
+            crates_dir: common::crates_dir(),
+        };
+        let request = CompileRequest {
             definition: &definition_path,
             output: &executable,
             locked: false,
             build_dir: Some(&build),
-            support: &SupportPackages::Local {
-                crates_dir: common::crates_dir(),
-            },
-        })
-        .unwrap();
+            support: &support,
+        };
+        compile_project(&request).unwrap();
         let result = Command::new(&executable).output().unwrap();
         assert!(
             result.status.success(),
@@ -345,6 +349,9 @@ fn generated_loop_matches_in_memory_without_build_inputs() {
             serde_json::from_slice::<Value>(&result.stdout).unwrap(),
             expected
         );
+        if index == 0 {
+            assert_invalid_loop_edits_preserve_installed_binary_and_lock(&request, value);
+        }
     }
     fs::remove_file(&definition_path).unwrap();
     let result = Command::new(&executable).output().unwrap();
@@ -379,37 +386,20 @@ fn generated_loop_matches_in_memory_without_build_inputs() {
     assert!(String::from_utf8_lossy(&result.stderr).contains("budget"));
 }
 
-#[test]
-fn invalid_loop_edit_preserves_installed_binary_and_lock() {
-    let directory = tempfile::tempdir().unwrap();
-    let definition_path = directory.path().join("loop.json");
-    let executable = directory.path().join("runner");
-    let build = directory.path().join("build");
-    let mut value = definition();
-    value["dependencies"] = json!({
-        "core": {"package": "mfn-core", "path": common::crates_dir().join("builtin-nodes/core")},
-        "code": {"package": "mfn-code", "path": common::crates_dir().join("builtin-nodes/code")}
-    });
-    let support = SupportPackages::Local {
-        crates_dir: common::crates_dir(),
-    };
-    fs::write(&definition_path, value.to_string()).unwrap();
-    let request = CompileRequest {
-        definition: &definition_path,
-        output: &executable,
-        locked: false,
-        build_dir: Some(&build),
-        support: &support,
-    };
-    compile_project(&request).unwrap();
-    let installed = fs::read(&executable).unwrap();
+fn assert_invalid_loop_edits_preserve_installed_binary_and_lock(
+    request: &CompileRequest<'_>,
+    mut value: Value,
+) {
+    let definition_path = request.definition;
+    let executable = request.output;
+    let installed = fs::read(executable).unwrap();
     let lock_path = definition_path.with_extension("lock");
     let lock = fs::read(&lock_path).unwrap();
     value["nodes"][1]["loop"]["max_iterations"] = json!(0);
-    fs::write(&definition_path, value.to_string()).unwrap();
-    let error = compile_project(&request).unwrap_err();
+    fs::write(definition_path, value.to_string()).unwrap();
+    let error = compile_project(request).unwrap_err();
     assert_eq!(error.stage, "structural validation");
-    assert_eq!(fs::read(&executable).unwrap(), installed);
+    assert_eq!(fs::read(executable).unwrap(), installed);
     assert_eq!(fs::read(&lock_path).unwrap(), lock);
 
     value["nodes"][1]["loop"]["max_iterations"] = json!(5);
@@ -422,10 +412,10 @@ fn invalid_loop_edit_preserves_installed_binary_and_lock() {
         .as_object_mut()
         .unwrap()
         .remove("core");
-    fs::write(&definition_path, value.to_string()).unwrap();
-    let error = compile_project(&request).unwrap_err();
+    fs::write(definition_path, value.to_string()).unwrap();
+    let error = compile_project(request).unwrap_err();
     assert_eq!(error.stage, "Cargo build");
-    assert_eq!(fs::read(&executable).unwrap(), installed);
+    assert_eq!(fs::read(executable).unwrap(), installed);
     assert_eq!(fs::read(&lock_path).unwrap(), lock);
 }
 

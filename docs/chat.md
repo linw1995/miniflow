@@ -130,7 +130,7 @@ Both the [single-call example](../examples/chat-flow.json) and the
 nix develop --command cargo run -p mf-cli --features development-support -- compile examples/chat-loop-flow.json --output target/chat-flow
 ```
 
-The loop explicitly accumulates usage lists with `builtin.concat` and stops after a reported model failure.
+The loop explicitly accumulates usage lists with `builtin.code` using `left + right` and stops after a reported model failure.
 Its model configuration is passed into the loop through declared variables. The runner receives conversation
 arguments and configuration, while the application owns database admission, process supervision, and saving.
 
@@ -187,10 +187,37 @@ Node identity is available independently of observation. Direct node calls outsi
 information. Models are resolved by the calling node and must be public identifiers. The application does
 not infer a model by inspecting the executable graph.
 
-The workflow explicitly combines the lists it intends to report. `builtin.concat` preserves list order and
+The workflow explicitly combines the lists it intends to report. Code list addition preserves list order and
 values; it does not deduplicate or synthesize counters. Duplicate call IDs within a result are rejected.
 Input, output, and total token counts are independent optional nonnegative integers; absent is unknown and
 zero is a reported value. The backend never derives total tokens by adding other counters.
+
+To migrate a workflow using the removed `builtin.concat`, declare the `mfn-code` package and replace the node with:
+
+```json
+{
+  "id": "collect",
+  "kind": "builtin.code",
+  "config": {
+    "language": "cel",
+    "inputs": {
+      "left": {"list": "object"},
+      "right": {"list": "object"}
+    },
+    "code": {"value": "left + right"}
+  }
+}
+```
+
+The `left`, `right`, and `value` bindings remain unchanged. Use `{"list":"any"}` for arbitrary heterogeneous lists.
+Recompile without `--locked` to refresh the workflow lock, then resume locked builds. The repository's example tests
+generate their locks in temporary directories; no example locks are checked in.
+
+Code applies its [documented limits](workflows.md): 1 MiB each for serialized inputs and outputs, 10,000 collection
+entries across input and output conversion combined, and 16 nesting levels. Nested record fields count toward those
+limits, so accumulated usages can fail before reaching the old concat node's accepted size. No partial list is
+published on failure. Any secret input makes the entire Code output secret; business values remain available,
+but public siblings are also redacted in observations. Internal shared payload identity is not preserved.
 
 A failed result still reports all collected calls and a nonblank error summary, but requires no reply text:
 
