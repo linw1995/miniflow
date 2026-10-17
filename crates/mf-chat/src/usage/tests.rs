@@ -1,27 +1,26 @@
 use super::*;
-use crate::schema::model_calls;
 use crate::{ModelIdentity, Reply, nodes::PrepareTitleInputs};
 
-fn identity() -> ModelIdentity {
+fn identity(config: &str) -> ModelIdentity {
     ModelIdentity {
         profile: "default".into(),
-        model: Some("test-model".into()),
+        model: "test-model".into(),
+        config_id: config.into(),
     }
 }
 fn complete(
     database: &ChatDatabase,
     session: &str,
+    config: &str,
     usage: Option<BTreeMap<String, i64>>,
 ) -> crate::Invocation {
     let begun = database
-        .begin_turn(session, "question", identity(), None, 1024)
+        .begin_turn(session, "question", identity(config), None, 1024)
         .unwrap();
     database
         .complete_turn(
             begun.invocation.clone(),
             Reply {
-                usages: None,
-                metadata: None,
                 text: "answer".into(),
                 usage,
                 finish_reason: None,
@@ -44,6 +43,7 @@ fn sparse_usage_and_failed_attempts_preserve_unknown_counters_and_group_totals()
     complete(
         &database,
         &a.id,
+        "config-a",
         Some(BTreeMap::from([
             ("input_tokens".into(), 2),
             ("output_tokens".into(), 1),
@@ -53,15 +53,16 @@ fn sparse_usage_and_failed_attempts_preserve_unknown_counters_and_group_totals()
     complete(
         &database,
         &a.id,
+        "config-a",
         Some(BTreeMap::from([("output_tokens".into(), 3)])),
     );
     let failed = database
-        .begin_turn(&a.id, "cancelled", identity(), None, 1024)
+        .begin_turn(&a.id, "cancelled", identity("config-a"), None, 1024)
         .unwrap();
     database
         .fail_turn(failed.invocation, "cancelled", "cancelled")
         .unwrap();
-    complete(&database, &b.id, None);
+    complete(&database, &b.id, "config-b", None);
     let first = database
         .usage(UsageQuery {
             group_by: Some(UsageGrouping::Session),
@@ -122,6 +123,7 @@ fn zero_empty_and_overflow_are_distinct_from_unknown_usage() {
     complete(
         &database,
         &owner.id,
+        "zero",
         Some(BTreeMap::from([("output_tokens".into(), 0)])),
     );
     let zero = database.usage(UsageQuery::default()).unwrap();
@@ -130,11 +132,13 @@ fn zero_empty_and_overflow_are_distinct_from_unknown_usage() {
     complete(
         &database,
         &owner.id,
+        "large",
         Some(BTreeMap::from([("output_tokens".into(), i64::MAX)])),
     );
     complete(
         &database,
         &owner.id,
+        "large",
         Some(BTreeMap::from([("output_tokens".into(), 1)])),
     );
     assert!(database.usage(UsageQuery::default()).is_err());
@@ -147,8 +151,8 @@ fn utc_start_bounds_are_inclusive_exclusive_and_group_pages_do_not_change_totals
     let owner = database
         .create_session("default", None, Some("Fixed".into()))
         .unwrap();
-    let first = complete(&database, &owner.id, None);
-    let second = complete(&database, &owner.id, None);
+    let first = complete(&database, &owner.id, "config", None);
+    let second = complete(&database, &owner.id, "config", None);
     let mut connection = storage::connect(database.path()).unwrap();
     diesel::update(model_calls::table.find(first.call_id))
         .set(model_calls::started_at.eq(Some(86_399_999i64)))
@@ -207,7 +211,7 @@ fn pending_titles_do_not_count_but_discarded_title_results_keep_their_usage() {
     let directory = tempfile::tempdir().unwrap();
     let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
     let owner = database.create_session("default", None, None).unwrap();
-    complete(&database, &owner.id, None);
+    complete(&database, &owner.id, "conversation", None);
     assert_eq!(
         database
             .usage(UsageQuery::default())
@@ -223,15 +227,13 @@ fn pending_titles_do_not_count_but_discarded_title_results_keep_their_usage() {
         PrepareTitleInputs {
             database_path: String::new(),
             call_id: title.id.clone(),
-            model: identity(),
+            model: identity("title"),
             max_bytes: 1024,
         },
     )
     .unwrap();
     database.rename_session(&owner.id, "Manual").unwrap();
     let response = Reply {
-        usages: None,
-        metadata: None,
         text: "Generated".into(),
         usage: Some(BTreeMap::from([("output_tokens".into(), 5)])),
         finish_reason: None,
@@ -249,7 +251,7 @@ fn pending_titles_do_not_count_but_discarded_title_results_keep_their_usage() {
     let usage = database
         .usage(UsageQuery {
             purpose: Some(CallPurpose::Title),
-            group_by: Some(UsageGrouping::Purpose),
+            group_by: Some(UsageGrouping::Configuration),
             ..Default::default()
         })
         .unwrap();
@@ -267,9 +269,9 @@ fn model_profile_and_purpose_groups_preserve_attribution_and_validate_cursors() 
         let owner = database
             .create_session(profile, None, Some("Manual".into()))
             .unwrap();
-        let mut identity = identity();
+        let mut identity = identity(profile);
         identity.profile = profile.into();
-        identity.model = Some(model.into());
+        identity.model = model.into();
         let begun = database
             .begin_turn(&owner.id, "question", identity, None, 1024)
             .unwrap();
@@ -277,8 +279,6 @@ fn model_profile_and_purpose_groups_preserve_attribution_and_validate_cursors() 
             .complete_turn(
                 begun.invocation,
                 Reply {
-                    usages: None,
-                    metadata: None,
                     text: "answer".into(),
                     usage: Some(BTreeMap::from([("output_tokens".into(), tokens)])),
                     finish_reason: None,
@@ -319,6 +319,7 @@ fn model_profile_and_purpose_groups_preserve_attribution_and_validate_cursors() 
         .usage(UsageQuery {
             profile: Some("alpha".into()),
             model: Some("model-a".into()),
+            config_id: Some("alpha".into()),
             ..Default::default()
         })
         .unwrap();

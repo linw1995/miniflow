@@ -1610,11 +1610,10 @@ dependencies = [
  "mf-compiler",
  "mf-runtime",
  "mf-telemetry",
- "mfn-code",
- "mfn-core",
  "mfn-llm",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "snafu",
  "tempfile",
  "toml",
@@ -1776,7 +1775,6 @@ dependencies = [
  "serde_json",
  "snafu",
  "url",
- "uuid",
 ]
 
 [[package]]

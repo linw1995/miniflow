@@ -27,4 +27,3 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 snafu.workspace = true
 url.workspace = true
-uuid = { workspace = true, features = ["v4"] }

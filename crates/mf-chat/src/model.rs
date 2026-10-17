@@ -12,19 +12,6 @@ pub struct ModelResponse {
     pub response: Reply,
 }
 
-pub fn failure_usages(
-    source: &(dyn std::error::Error + 'static),
-) -> Option<Vec<mfn_llm::CallUsage>> {
-    let mut current = Some(source);
-    while let Some(source) = current {
-        if let Some(ChatError::ModelFailure { usages, .. }) = source.downcast_ref::<ChatError>() {
-            return Some(usages.clone());
-        }
-        current = source.source();
-    }
-    None
-}
-
 // Object envelopes preserve absent optional fields without routing missing output ports.
 struct Model {
     node: Box<dyn TaskNode>,
@@ -43,17 +30,10 @@ impl TypedTaskNode for Model {
             input.request.into_values().map_err(ChatError::from)?,
             context,
         )?;
-        let response = mfn_llm::LlmOutputs::from_values(result.outputs).map_err(ChatError::from)?;
-        if let Some(message) = response.error {
-            return Err(ModelFailureSnafu {
-                message,
-                usages: response.usages,
-            }
-            .build()
-            .into());
-        }
         Ok(ModelResponse {
-            response: response.into(),
+            response: mfn_llm::LlmOutputs::from_values(result.outputs)
+                .map_err(ChatError::from)?
+                .into(),
         }
         .into())
     }
