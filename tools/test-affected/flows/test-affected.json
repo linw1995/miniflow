@@ -1,0 +1,94 @@
+{
+  "version": "2026-10-03",
+  "execution": {
+    "mode": "stream",
+    "limits": {
+      "max_pending_messages": 2,
+      "workers": 1
+    }
+  },
+  "dependencies": {
+    "lsp": {
+      "package": "mfn-lsp",
+      "path": "../nodes/lsp"
+    },
+    "tests": {
+      "package": "mfn-test-affected",
+      "path": "../nodes/test-affected"
+    }
+  },
+  "nodes": [
+    {
+      "id": "changes",
+      "kind": "git.diff",
+      "config": {
+        "initialization_options": {
+          "cargo": {
+            "features": "all",
+            "buildScripts": {
+              "enable": false
+            },
+            "sysroot": null
+          },
+          "procMacro": {
+            "enable": false
+          },
+          "checkOnSave": false,
+          "cachePriming": {
+            "enable": false
+          }
+        }
+      }
+    },
+    {
+      "id": "analyze",
+      "kind": "lsp.analyze",
+      "config": {
+        "command": "rust-analyzer",
+        "profile": "rust_analyzer",
+        "extensions": [
+          "rs"
+        ],
+        "deadline_ms": 120000
+      }
+    },
+    {
+      "id": "plan",
+      "kind": "test_affected.plan",
+      "config": {}
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "changes",
+      "from_output": "request",
+      "to_node": "analyze",
+      "to_input": "request"
+    },
+    {
+      "from_node": "changes",
+      "from_output": "context",
+      "to_node": "analyze",
+      "to_input": "context"
+    },
+    {
+      "from_node": "analyze",
+      "from_output": "outcome",
+      "to_node": "plan",
+      "to_input": "outcome"
+    },
+    {
+      "from_node": "analyze",
+      "from_output": "context",
+      "to_node": "plan",
+      "to_input": "context"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "plan",
+      "node": "plan",
+      "port": "plan"
+    }
+  ]
+}

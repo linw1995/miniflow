@@ -4,7 +4,7 @@ Repository developer tooling for [issue #91](https://github.com/linw1995/miniflo
 The unpublished `mfn-lsp` and `mfn-test-affected` packages share workspace checks but are not
 product release dependencies, support packages, or bundled examples.
 
-The planned Flow is `git.diff` (Task) -> `lsp.analyze` (Stream) -> `test_affected.plan` (Task).
+The Flow is `git.diff` (Task) -> `lsp.analyze` (Stream) -> `test_affected.plan` (Task).
 It produces a test plan; a separate script consumes that plan. LSP servers are explicitly configured,
 never downloaded automatically. Ordinary tests use a local fake server. Use `nix develop` for tools
 and the pinned rust-analyzer when running real-server checks.
@@ -77,3 +77,27 @@ Keep plans and inventories under ignored `target/`. Do not remove referenced sna
 are no longer needed. Cleanup uses normal `git worktree remove` on explicitly chosen owned snapshots.
 Changing a snapshot or compilation configuration requires a new plan. The existing coverage script
 accepts package-only selection and must not be used to silently discard exact-case filters.
+
+## Compile and run the Flow
+
+From the repository root, compile using local product support crates. The output is a planning runner,
+not a test runner; stdout contains one `{"plan": ...}` record and can be saved directly for the script.
+The same definition also runs through the in-memory streaming API.
+
+```sh
+nix develop --command cargo run -p mf-cli --features development-support -- \
+  compile tools/test-affected/flows/test-affected.json \
+  --output target/test-affected-runner --build-dir target/test-affected-build --no-telemetry
+nix develop --command target/test-affected-runner \
+  --changes.repository "$PWD" --changes.base HEAD --changes.head HEAD > target/test-plan.json
+nix develop --command python3 tools/test-affected/run-tests.py target/test-plan.json
+```
+
+Replace `HEAD` with the locally available revisions to compare. The example above intentionally produces
+an empty plan and starts no server. Relative provider paths resolve against the Flow file, not the caller's
+working directory. Snapshot roots and the repository argument are recorded as absolute paths.
+
+The supplied definition configures rust-analyzer with all features, no sysroot, disabled build scripts,
+and disabled proc macros. These settings expose evidence gaps; they do not certify a complete graph.
+To use another server, configure the `lsp.analyze` node and initialization options explicitly.
+There is no Git-to-plan bypass edge: context crosses the producer boundary with its terminal outcome.

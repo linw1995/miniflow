@@ -3,3 +3,5 @@
 __pycache__/
 /examples/*.lock
 /examples/*.guard
+/tools/test-affected/flows/*.lock
+/tools/test-affected/flows/*.guard

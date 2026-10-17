@@ -19,4 +19,6 @@ proc-macro2 = { workspace = true, features = ["span-locations"] }
 quote.workspace = true
 
 [dev-dependencies]
+mf-tui.workspace = true
+mf-compiler = { workspace = true, features = ["codegen"] }
 tempfile.workspace = true

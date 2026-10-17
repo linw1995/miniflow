@@ -24,9 +24,9 @@
 
 ## 4. Three-node streaming Flow
 
-- [ ] 4.1 Add `flows/test-affected.json` using schema `2026-10-03` and stream execution with only git.diff, lsp.analyze, and test_affected.plan; verify normal compilation and manifest inspection require no repository I/O or live language server.
-- [ ] 4.2 Exercise in-memory and generated execution with an upstream Task that emits once and closes; verify the analysis finishes, exactly one final task invocation occurs, output drains, and a Git-to-plan bypass is rejected as cross-domain.
-- [ ] 4.3 Document and verify a Flow-to-plan command followed by a separate script command from a different working directory; verify context passthrough, output-format compatibility, local dependencies, and exclusion from release examples.
+- [x] 4.1 Add `flows/test-affected.json` using schema `2026-10-03` and stream execution with only git.diff, lsp.analyze, and test_affected.plan; verify normal compilation and manifest inspection require no repository I/O or live language server.
+- [x] 4.2 Exercise in-memory and generated execution with an upstream Task that emits once and closes; verify the analysis finishes, exactly one final task invocation occurs, output drains, and a Git-to-plan bypass is rejected as cross-domain.
+- [x] 4.3 Document and verify a Flow-to-plan command followed by a separate script command from a different working directory; verify context passthrough, output-format compatibility, local dependencies, and exclusion from release examples.
 
 ## 5. Integration and evaluation
 

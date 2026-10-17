@@ -1797,7 +1797,9 @@ name = "mfn-test-affected"
 version = "0.1.0"
 dependencies = [
  "inventory",
+ "mf-compiler",
  "mf-runtime",
+ "mf-tui",
  "mfn-lsp",
  "proc-macro2",
  "quote",
