@@ -15,7 +15,10 @@ use mf_telemetry::{
     identity::{RunId, WorkflowId},
 };
 use mf_tui::{
-    graph::{EdgeKind, GraphLayout, GraphView, routing::crossing_cells},
+    graph::{
+        EdgeKind, GraphLayout, GraphView,
+        routing::{crossing_cells, line_symbols},
+    },
     state::SessionState,
 };
 use ratatui::{
@@ -338,7 +341,7 @@ fn preview_crossings() {
         for vertical in [EdgeKind::Data, EdgeKind::Control] {
             for upper_horizontal in [true, false] {
                 println!(
-                    "Underpass: H={horizontal:?}, V={vertical:?}, upper={}",
+                    "Crossing: H={horizontal:?}, V={vertical:?}, upper={}",
                     if upper_horizontal {
                         "horizontal"
                     } else {
@@ -346,16 +349,8 @@ fn preview_crossings() {
                     }
                 );
                 let mut cells = [[(" ", false); 9]; 9];
-                let h = if horizontal == EdgeKind::Data {
-                    "═"
-                } else {
-                    "─"
-                };
-                let v = if vertical == EdgeKind::Data {
-                    "║"
-                } else {
-                    "│"
-                };
+                let h = line_symbols(horizontal)[0];
+                let v = line_symbols(vertical)[1];
                 cells[4].fill((h, upper_horizontal));
                 for row in &mut cells {
                     row[4] = (v, !upper_horizontal);

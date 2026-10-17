@@ -232,8 +232,24 @@ fn parallel_data_and_control_edges_use_separate_block_rows() {
         ))
         .unwrap()
         .symbol();
-    assert_eq!(data_symbol, "═");
+    assert_eq!(data_symbol, "─");
     assert_eq!(control_symbol, "─");
+    for edge in [data, control] {
+        let target = layout.nodes()[edge.to].rect;
+        let color = match edge.kind {
+            EdgeKind::Data => Color::Cyan,
+            EdgeKind::Control => Color::Blue,
+        };
+        for (x, y, symbol) in [
+            (source.x + source.width - 1, source.y + edge.from_row, "├"),
+            (target.x - 1, target.y + edge.to_row, "▶"),
+            (target.x, target.y + edge.to_row, "┤"),
+        ] {
+            let cell = buffer.cell(Position::new(x as u16, y as u16)).unwrap();
+            assert_eq!(cell.symbol(), symbol);
+            assert_eq!(cell.fg, color);
+        }
+    }
 }
 
 #[test]
@@ -295,7 +311,8 @@ fn graph_renders_blocks_edges_and_running_elapsed_time() {
     assert!(text.contains("router"));
     assert!(text.contains("yes"));
     assert!(text.contains("no"));
-    assert!(text.contains('═'));
+    assert!(text.contains('├'));
+    assert!(text.contains("▶┤"));
     assert!(text.contains('─'));
 
     let mut focused = buffer.clone();
