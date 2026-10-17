@@ -1,6 +1,5 @@
 mod value;
 
-use cel_core::types::{Expr, SpannedExpr};
 use cel_core::{CelType, Env, MapActivation, Program, Value as CelValue};
 use mf_runtime::{
     Inputs, NodeBuildError, NodeExecutionError, NodePortContract, NodePorts, NodeRegistration,
@@ -90,6 +89,10 @@ fn parse_type(value: &Value) -> Result<(ValueType, CelType), String> {
 
 fn cel_type(value_type: &ValueType) -> Result<CelType, String> {
     Ok(match value_type {
+        ValueType::Any => CelType::Dyn,
+        ValueType::Object => CelType::map(CelType::String, CelType::Dyn),
+        ValueType::Array => CelType::list(CelType::Dyn),
+        ValueType::Uint64 => CelType::UInt,
         ValueType::Null => CelType::Null,
         ValueType::Boolean => CelType::Bool,
         ValueType::Int64 => CelType::Int,
@@ -97,12 +100,14 @@ fn cel_type(value_type: &ValueType) -> Result<CelType, String> {
         ValueType::String => CelType::String,
         ValueType::List(inner) => CelType::list(cel_type(inner)?),
         ValueType::Map(inner) => CelType::map(CelType::String, cel_type(inner)?),
-        _ => return Err("type must be a concrete CEL scalar, list, or map descriptor".into()),
+        _ => return Err("unsupported Code input type".into()),
     })
 }
 
 fn result_type(cel_type: &CelType) -> Result<ValueType, String> {
     match cel_type {
+        CelType::Dyn => Ok(ValueType::Any),
+        CelType::UInt => Ok(ValueType::Uint64),
         CelType::Null => Ok(ValueType::Null),
         CelType::Bool => Ok(ValueType::Boolean),
         CelType::Int => Ok(ValueType::Int64),
@@ -121,46 +126,6 @@ fn valid_identifier(name: &str) -> bool {
         return false;
     };
     matches!(&ast.expr().node, cel_core::types::Expr::Ident(parsed) if parsed == name)
-}
-
-fn uses_explicit_dyn(expression: &SpannedExpr) -> bool {
-    match &expression.node {
-        Expr::Call { expr, args } => {
-            matches!(&expr.node, Expr::Ident(name) | Expr::RootIdent(name) if name == "dyn")
-                || uses_explicit_dyn(expr)
-                || args.iter().any(uses_explicit_dyn)
-        }
-        Expr::Unary { expr, .. } | Expr::Member { expr, .. } => uses_explicit_dyn(expr),
-        Expr::Binary { left, right, .. } => uses_explicit_dyn(left) || uses_explicit_dyn(right),
-        Expr::Ternary {
-            cond,
-            then_expr,
-            else_expr,
-        } => {
-            uses_explicit_dyn(cond) || uses_explicit_dyn(then_expr) || uses_explicit_dyn(else_expr)
-        }
-        Expr::Index { expr, index, .. } => uses_explicit_dyn(expr) || uses_explicit_dyn(index),
-        Expr::List(items) => items.iter().any(|item| uses_explicit_dyn(&item.expr)),
-        Expr::Map(entries) => entries
-            .iter()
-            .any(|entry| uses_explicit_dyn(&entry.key) || uses_explicit_dyn(&entry.value)),
-        Expr::Struct { type_name, fields } => {
-            uses_explicit_dyn(type_name)
-                || fields.iter().any(|field| uses_explicit_dyn(&field.value))
-        }
-        Expr::Comprehension(data) => [
-            &data.iter_range,
-            &data.accu_init,
-            &data.loop_condition,
-            &data.loop_step,
-            &data.result,
-        ]
-        .into_iter()
-        .any(|part| uses_explicit_dyn(part)),
-        Expr::MemberTestOnly { expr, .. } => uses_explicit_dyn(expr),
-        Expr::Bind { init, body, .. } => uses_explicit_dyn(init) || uses_explicit_dyn(body),
-        _ => false,
-    }
 }
 
 fn json_size(value: &(impl Serialize + ?Sized)) -> Result<usize, serde_json::Error> {
@@ -306,12 +271,6 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
         let ast = env
             .compile(expression)
             .context(CompileSnafu { output: name })?;
-        // CEL macros can contain internal dynamic types even when the user expression is concrete.
-        if uses_explicit_dyn(ast.expr()) {
-            return Err(invalid(format!(
-                "output `{name}`: explicit dyn(...) is unsupported"
-            )));
-        }
         let inferred = ast
             .result_type()
             .ok_or_else(|| invalid(format!("output `{name}` has no inferred type")))?;
@@ -406,12 +365,28 @@ mod tests {
     }
 
     #[test]
+    fn infers_structured_list_addition_and_nested_dynamic_ports() {
+        for descriptor in [json!({"list": "object"}), json!({"list": {"map": "any"}})] {
+            let node = factory(json!({
+                "language": "cel",
+                "inputs": {"left": descriptor, "right": descriptor},
+                "code": {"value": "left + right"}
+            }))
+            .unwrap();
+            let output_type = &node.metadata.ports.outputs[0].value_type;
+            assert_eq!(
+                output_type,
+                &ValueType::List(Box::new(ValueType::Map(Box::new(ValueType::Any))))
+            );
+            assert!(output_type.is_assignable_to(&ValueType::List(Box::new(ValueType::Object))));
+        }
+    }
+
+    #[test]
     fn rejects_invalid_language_and_config_shapes() {
         for config in [
             json!({"language":"rust","inputs":{},"code":"fn main() {}"}),
             json!({"language":"cel","inputs":{},"code":{}}),
-            json!({"language":"cel","inputs":{"amount":"any"},"code":{"result":"1"}}),
-            json!({"language":"cel","inputs":{"items":{"list":{"map":"any"}}},"code":{"result":"1"}}),
             json!({"language":"cel","inputs":{"a.b":"int"},"code":{"result":"1"}}),
             json!({"language":"cel","inputs":{},"code":{"bad.name":"1"}}),
             json!({"language":"cel","inputs":{},"code":{"result":"  "}}),
@@ -437,12 +412,11 @@ mod tests {
     fn reports_invalid_descriptors_and_names() {
         for (descriptor, expected) in [
             (json!({"set": "int"}), "unsupported type constructor"),
-            (json!("uint"), "type must be a concrete"),
-            (json!("usize"), "type must be a concrete"),
-            (json!({"list": "float"}), "type must be a concrete"),
+            (json!("usize"), "unsupported Code input type"),
+            (json!({"list": "float"}), "unsupported Code input type"),
             (
                 json!({"map": {"nullable": "string"}}),
-                "type must be a concrete",
+                "unsupported Code input type",
             ),
             (json!(["int"]), "type must be"),
             (json!({"list": "int", "map": "int"}), "type must be"),
@@ -474,6 +448,17 @@ mod tests {
             ("null", "value", ValueType::Null),
             ("bool", "value", ValueType::Boolean),
             ("int", "value", ValueType::Int64),
+            ("uint", "value", ValueType::Uint64),
+            ("any", "value", ValueType::Any),
+            ("object", "value", ValueType::Map(Box::new(ValueType::Any))),
+            ("array", "value", ValueType::List(Box::new(ValueType::Any))),
+            ("int", "dyn(value)", ValueType::Any),
+            ("int", "int(dyn(value))", ValueType::Int64),
+            (
+                "int",
+                "[value, 'x']",
+                ValueType::List(Box::new(ValueType::Any)),
+            ),
             ("double", "value", ValueType::Float64),
             ("string", "value", ValueType::String),
         ] {
@@ -535,7 +520,7 @@ mod tests {
 
     #[test]
     fn reports_non_json_result_types() {
-        for expression in ["b'bytes'", "{1: 2}", "dyn(1)"] {
+        for expression in ["b'bytes'", "{1: 2}"] {
             let error = factory(json!({
                 "language": "cel",
                 "inputs": {},
@@ -804,16 +789,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_static_errors_and_explicit_dynamic_calls() {
-        for expression in [
-            "missing + 1",
-            "amount + 'x'",
-            "amount *",
-            "dyn(amount)",
-            "int(dyn(amount))",
-            "[amount, 'x']",
-            "b'bytes'",
-        ] {
+    fn rejects_static_errors_and_non_json_result_types() {
+        for expression in ["missing + 1", "amount + 'x'", "amount *", "b'bytes'"] {
             let error = factory(json!({
                 "language": "cel",
                 "inputs": {"amount": "int"},

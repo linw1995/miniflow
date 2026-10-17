@@ -2,11 +2,11 @@
 
 ## 1. Extend Code JSON contracts
 
-- [ ] 1.1 Extend input and inferred-result mappings for dynamic JSON and uint; verify reflected ports for Any, Object,
+- [x] 1.1 Extend input and inferred-result mappings for dynamic JSON and uint; verify reflected ports for Any, Object,
   Array, nested collections, and `List(Object)` concatenation, retaining existing concrete-type checks.
-- [ ] 1.2 Accept explicit `dyn(...)` and remove obsolete dynamic-type rejection tests; verify unknown names,
+- [x] 1.2 Accept explicit `dyn(...)` and remove obsolete dynamic-type rejection tests; verify unknown names,
   unsupported inferred types, and invalid concrete operations still fail construction, including inactive branches.
-- [ ] 1.3 Document supported descriptors, inferred broad outputs, and deferred dynamic checks in docs/workflows.md;
+- [x] 1.3 Document supported descriptors, inferred broad outputs, and deferred dynamic checks in docs/workflows.md;
   verify examples match actual reflected ports and accepted expressions.
 
 ## 2. Preserve values, sensitivity, and limits
