@@ -1,5 +1,12 @@
 # Node development
 
+## Repository developer tools
+
+Providers used by repository tooling live under `tools/test-affected/nodes/`, not among built-in providers.
+`mfn-lsp` and `mfn-test-affected` use ordinary node contracts, are unpublished workspace members,
+and must not become dependencies of product packages. Their ordinary tests use local protocol fixtures;
+real-server checks require an explicitly configured server from the pinned development environment.
+
 ## Implement a node
 
 Basic nodes share the `mfn-core` crate under `crates/builtin-nodes/core/`. Nodes with distinct dependencies belong in separate packages.

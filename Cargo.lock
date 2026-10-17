@@ -1778,6 +1778,39 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfn-lsp"
+version = "0.1.0"
+dependencies = [
+ "inventory",
+ "libc",
+ "mf-runtime",
+ "opentelemetry",
+ "serde",
+ "serde_json",
+ "snafu",
+ "tempfile",
+ "url",
+]
+
+[[package]]
+name = "mfn-test-affected"
+version = "0.1.0"
+dependencies = [
+ "inventory",
+ "mf-compiler",
+ "mf-runtime",
+ "mf-tui",
+ "mfn-lsp",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_json",
+ "snafu",
+ "syn 3.0.6",
+ "tempfile",
+]
+
+[[package]]
 name = "migrations_internals"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -1,0 +1,24 @@
+[package]
+name = "mfn-test-affected"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Commit comparison and affected-test planning for repository development"
+
+[dependencies]
+mfn-lsp = { path = "../lsp" }
+mf-runtime.workspace = true
+inventory.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+snafu.workspace = true
+syn = { workspace = true, features = ["full", "parsing", "printing", "visit"] }
+proc-macro2 = { workspace = true, features = ["span-locations"] }
+quote.workspace = true
+
+[dev-dependencies]
+mf-tui.workspace = true
+mf-compiler = { workspace = true, features = ["codegen"] }
+tempfile.workspace = true
