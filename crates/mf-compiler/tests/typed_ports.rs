@@ -125,7 +125,7 @@ fn generated_runner_matches_memory_for_checked_connections() {
         .unwrap();
         mf_compiler::resolve_project(&project, &root.path().join("flow.lock"), false).unwrap();
         let build = mf_compiler::cargo_command(&project)
-            .args(["build", "--offline", "--locked"])
+            .args(["build", "--release", "--offline", "--locked"])
             .output()
             .unwrap();
         assert!(
@@ -133,7 +133,7 @@ fn generated_runner_matches_memory_for_checked_connections() {
             "{}",
             String::from_utf8_lossy(&build.stderr)
         );
-        let executable = common::runner_executable(&project, "debug");
+        let executable = common::runner_executable(&project, "release");
         let actual = Command::new(executable).output().unwrap();
         match expected {
             Ok(outputs) => {
@@ -169,7 +169,7 @@ fn skipped_typed_inputs_match_in_memory_and_generated_execution() {
     .unwrap();
     mf_compiler::resolve_project(&project, &root.path().join("flow.lock"), false).unwrap();
     let build = mf_compiler::cargo_command(&project)
-        .args(["build", "--offline", "--locked"])
+        .args(["build", "--release", "--offline", "--locked"])
         .output()
         .unwrap();
     assert!(
@@ -177,7 +177,7 @@ fn skipped_typed_inputs_match_in_memory_and_generated_execution() {
         "{}",
         String::from_utf8_lossy(&build.stderr)
     );
-    let executable = common::runner_executable(&project, "debug");
+    let executable = common::runner_executable(&project, "release");
     let result = Command::new(executable).output().unwrap();
     assert!(
         result.status.success(),

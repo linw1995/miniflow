@@ -79,6 +79,19 @@ case "${1:-}" in
       -E "package(=$2)" --no-tests warn
     exit 0
     ;;
+  --prune-cache)
+    [[ $# -eq 1 ]]
+    # Reporting must finish before its instrumented binaries are removed.
+    test -s "${coverage_dir}/result/lcov.info"
+    targets=("$CARGO_TARGET_DIR")
+    if [[ -n "${MF_TEST_BUILD_CACHE_DIR:-}" ]]; then
+      targets+=("${MF_TEST_BUILD_CACHE_DIR}/target" "${MF_TEST_BUILD_CACHE_DIR}/packaged-target")
+      rm -f "${MF_TEST_BUILD_CACHE_DIR}/prepared-session.json"
+    fi
+    python3 scripts/prune-test-cache.py "${targets[@]}"
+    rm -f "${coverage_dir}/binaries.json" "${coverage_dir}/cargo-metadata.json"
+    exit 0
+    ;;
   --report)
     [[ $# -eq 1 ]]
     report_coverage

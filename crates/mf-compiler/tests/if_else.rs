@@ -157,7 +157,7 @@ fn compiled_branches_match_memory_and_rebuild_when_precedence_changes() {
         .unwrap();
         mf_compiler::resolve_project(&project, &root.path().join("flow.lock"), false).unwrap();
         let build = mf_compiler::cargo_command(&project)
-            .args(["build", "--offline", "--locked"])
+            .args(["build", "--release", "--offline", "--locked"])
             .output()
             .unwrap();
         assert!(
@@ -165,7 +165,7 @@ fn compiled_branches_match_memory_and_rebuild_when_precedence_changes() {
             "{}",
             String::from_utf8_lossy(&build.stderr)
         );
-        let executable = common::runner_executable(&project, "debug");
+        let executable = common::runner_executable(&project, "release");
         assert!(!trace.exists());
         let result = Command::new(executable).output().unwrap();
         assert!(

@@ -20,6 +20,9 @@ class BuildCacheTests(unittest.TestCase):
             root = Path(directory)
             package_target = root / "cache/packaged-target"
             package_target.mkdir(parents=True)
+            obsolete = root / "cache/target/debug"
+            obsolete.mkdir(parents=True)
+            (obsolete / "dependency.rlib").write_text("old profile")
             metadata = {"packages": [{
                 "name": "mf-compiler",
                 "dependencies": [{"name": "serde_json", "req": "^1", "kind": None}],
@@ -31,10 +34,10 @@ class BuildCacheTests(unittest.TestCase):
                 (call.kwargs["env"]["CARGO_TARGET_DIR"], call.args[0][-1]) for call in clean
             ], [
                 (str(root / "cache/target"), "release"),
-                (str(root / "cache/target"), "dev"),
                 (str(package_target), "release"),
             ])
             self.assertTrue(all("--workspace" in call.args[0] for call in clean))
+            self.assertFalse(obsolete.exists())
 
     def test_session_reuse_invalidation_and_failed_preparation(self):
         with tempfile.TemporaryDirectory() as directory:

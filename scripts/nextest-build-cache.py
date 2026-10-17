@@ -7,6 +7,8 @@ from pathlib import Path
 import shutil
 import subprocess
 
+from cargo_cache import clean_workspace
+
 
 def main():
     # Behavior fixtures need release semantics, but not optimizer throughput.
@@ -150,26 +152,22 @@ def prepare_cache(workspace, cargo, metadata, directory, persistent):
     env = dict(os.environ, CARGO_TARGET_DIR=str(target))
     if persistent:
         # Checkout mtimes can precede restored artifacts. Keep dependencies, never old workspace code.
-        targets = [(target, ["release", "dev"])]
+        targets = [(target, ["release"])]
         package_target = directory / "packaged-target"
         if package_target.exists():
             targets.append((package_target, ["release"]))
         for build_target, profiles in targets:
-            for profile in profiles:
-                subprocess.run(
-                    [cargo, "clean", "--workspace", "--profile", profile],
-                    cwd=workspace,
-                    env=dict(env, CARGO_TARGET_DIR=str(build_target)),
-                    check=True,
-                )
+            clean_workspace(cargo, workspace, build_target, profiles, metadata)
+    # Older caches prewarmed a second profile that no selected fixture uses now.
+    if (target / "debug").exists():
+        shutil.rmtree(target / "debug")
     # Preserve wrappers, flags, and coverage instrumentation used by the tests.
-    for profile in ["release", "dev"]:
-        subprocess.run(
-            [cargo, "build", "--offline", "--profile", profile, "--config", str(source_config)],
-            cwd=project,
-            env=env,
-            check=True,
-        )
+    subprocess.run(
+        [cargo, "build", "--offline", "--release", "--config", str(source_config)],
+        cwd=project,
+        env=env,
+        check=True,
+    )
 
 
 if __name__ == "__main__":
