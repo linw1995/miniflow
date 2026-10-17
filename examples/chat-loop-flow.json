@@ -8,6 +8,10 @@
     "llm": {
       "package": "mfn-llm",
       "path": "../crates/builtin-nodes/llm"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
     }
   },
   "nodes": [
@@ -152,8 +156,21 @@
             },
             {
               "id": "collect",
-              "kind": "builtin.concat",
-              "config": {}
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "left": {
+                    "list": "object"
+                  },
+                  "right": {
+                    "list": "object"
+                  }
+                },
+                "code": {
+                  "value": "left + right"
+                }
+              }
             },
             {
               "id": "save_history",

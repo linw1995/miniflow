@@ -21,13 +21,13 @@
 
 ## 3. Verify workflow integration and migrate concat
 
-- [ ] 3.1 Verify in-memory and generated runner execution with a structured-list fixture, including an empty seed,
+- [x] 3.1 Verify in-memory and generated runner execution with a structured-list fixture, including an empty seed,
   `List(Map(Any))` to `List(Object)` compatibility, and a failing Any-to-concrete consumer binding.
-- [ ] 3.2 Integrate the chat prerequisite through the normal repository workflow before removal; confirm concat,
+- [x] 3.2 Integrate the chat prerequisite through the normal repository workflow before removal; confirm concat,
   chat-loop-flow.json, and the exact core requirement exist, then reconcile this delta with the integrated base.
-- [ ] 3.3 Replace all concat consumers with Code and update package declarations, workflow locks, and migration docs;
+- [x] 3.3 Replace all concat consumers with Code and update package declarations, workflow locks, and migration docs;
   verify multi-node and repeated-loop usage collection preserves IDs, paths, omitted counts, errors, and order.
-- [ ] 3.4 Remove concat registration, implementation, exports, and exclusive tests after migration passes; verify no
+- [x] 3.4 Remove concat registration, implementation, exports, and exclusive tests after migration passes; verify no
   active workflow or code references remain, keeping archived specs as history. Include a bounded loop accumulation
   regression proving over-limit execution fails without publishing a partial list.
 
@@ -38,7 +38,9 @@
   redundant abstractions/tests, and keep experiment artifacts only under ignored target/.
 - [ ] 4.2 Run `nix develop --command prek install`, `nix develop --command prek -a`, and
   `nix develop --command python3 scripts/affected_tests.py --worktree --run`; verify all required checks pass and
-  honor the selector's conservative fallback and empty-selection behavior. Run affected non-Rust checks separately.
+  honor the selector's conservative fallback and empty-selection behavior. For the separately committed task groups,
+  also run selection with `--base c26c9da --head HEAD --run` from a clean checkout to cover the complete change.
+  Run affected non-Rust checks separately.
 - [ ] 4.3 Validate the final implementation against every changed requirement and run
   `openspec validate support-code-json-values --strict --no-interactive`; confirm migration prerequisites are resolved
   and the removal delta can be applied to the integrated main specs before marking implementation complete.
