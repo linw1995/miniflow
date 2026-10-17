@@ -278,3 +278,53 @@ LLM `usage` output remains available to other workflows, but `mf_chat::Reply` us
 reply writes leave legacy scalar token columns empty. Existing successful single-model records with
 reported scalar counters are upgraded to one usage entry using their stored call ID; explicit lists
 and unknown counters are preserved. Legacy columns remain compatibility data. No terminal interface or implicit runtime usage collector is installed.
+
+## Executable chat terminal
+
+Compile either conversation example above, then launch it with explicit local storage:
+
+```bash
+mf run ./chat-flow --tui --chat --chat-db ./chat.sqlite --chat-profile default --params.model your-model
+```
+
+Every turn executes the complete workflow, including preprocessing, branches, and repeated model calls.
+The terminal reuses the shared executable contract and recovery APIs; actual models and usage come from reported call facts.
+The profile is a stored session label. Provider configuration comes from the executable and its declared parameters.
+The terminal rejects externally supplied conversation inputs before acquiring database ownership.
+
+The controller admits one unresolved turn per session and at most four concurrent or retained unsaved turns. Session
+queries and persistence operations run on a background worker; each conversation runs in its own supervised process
+group with fresh telemetry identity and independent stdout/stderr capture. Switching sessions leaves active work intact.
+
+Press `n` to create a session, `Enter` to edit a prompt, `Enter` to submit, and `Alt-Enter` (or reported `Shift-Enter`) to
+insert a newline. `Esc` returns to navigation. Use `j`/`k` to select sessions, `c` to cancel, `g` to inspect the latest
+selected-session observation, and `Esc` to return from inspection. The graph and OTEL views retain their existing keys.
+The application retains at most 64 completed observations plus active runs. Eviction only removes transient inspection
+history; transcripts remain in SQLite. `q` in navigation or `Ctrl-C` quits and reaps children without printing turn JSON.
+
+Session creation first accepts optional system instructions: press `n`, edit the instructions, and press `Enter` to create
+(or submit an empty field). The new session opens its prompt editor. Each session keeps its own draft, including edits
+made while submission is pending. Arrow keys, Home/End, Backspace/Delete, and bracketed paste preserve Unicode text.
+Prompt editors accept up to 256 KiB. The application forwards at most 1 MiB of workflow arguments and captures each chat
+result within the 16 MiB recovery budget. Capacity errors preserve the draft and never queue a model call implicitly.
+
+In navigation, `r` edits the selected session's manual title, `a` archives or restores it, and `A` toggles the archived
+session list. `N` advances the session page and `B` returns to the first page. Transcript pages use `p` for next and `o`
+for previous, with PageUp/PageDown scrolling. Archived history stays readable and in-flight completion remains allowed.
+
+Use `t` to explicitly retry the latest unsuccessful turn on the displayed transcript page. A model retry creates fresh
+linked identities and reuses the original prompt. An uncommitted assistant reply instead offers `s` to retry its database
+save with the original identities or `x` to abandon it. Save failure keeps the reply available. Use `u` for session usage
+or `U` for overall usage; reported, missing, partial, and unknown counters remain distinct, and pending title calls are
+excluded. Unreported invocations are shown separately from reported call attempts. Automatic title scheduling and dispatch
+are deferred for supplied executables; manual names remain available.
+
+`[` and `]` choose older or newer retained observations for the selected session, then `g` opens inspection. Transcript,
+process exit, output diagnostics, and observation completeness remain separate facts. `Esc` returns to chat navigation.
+Normal quit returns status 0 after cleanup, including handled turn failures; fatal display or shutdown failure returns 1.
+Active work is cancelled and reaped, and retained unsaved replies are abandoned before database ownership is released.
+
+If the first post-exit database reconciliation fails, the controller reserves the invocation and keeps its private
+captured model result. The UI displays reconciliation pending with separate process/output diagnostics. `s` rechecks committed
+facts and retries saving; `x` rechecks facts and abandons unresolved work. Neither action launches the workflow. Shutdown
+also attempts reconciliation before abandoning retained replies, and reports unsuccessful cleanup with exit status 1.

@@ -33,7 +33,7 @@ If those packages are not yet available, use the [repository development command
 
 - [Compiling workflows](docs/compiling.md): CLI build, usage, and build failures.
 - [Embedding workflows](docs/embedding.md): source generation and host-side preparation for Rust programs.
-- [Embedded chat](docs/chat.md): persistent sessions, conversation and title workflows, and usage statistics.
+- [Chat](docs/chat.md): persistent executable chat in the terminal, embedded conversation/title workflows, and usage statistics.
 - [Workflow definitions](docs/workflows.md): JSON format, built-in nodes, and validation.
 - [Node development](docs/node-development.md): node registration and dependency selection.
 - [Observation contracts](docs/observability.md): lifecycle schema, identity, loss semantics, and package boundaries.
