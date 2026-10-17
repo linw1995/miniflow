@@ -7,7 +7,7 @@ use crate::{
         BeginTurnInputs, Changed, CompletionOutputs, FailTurnInputs, RecoveryInputs,
         RecoveryOutputs,
     },
-    operation,
+    operation, turn,
 };
 use mf_runtime::{
     ContextValue, ExecutionContext, FlowRuntime, NodeValue, StreamCancellation, StreamError,
@@ -15,6 +15,7 @@ use mf_runtime::{
 };
 use mf_telemetry::{identity::RunId, observation::Observer};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -31,6 +32,7 @@ mod title;
 
 #[derive(Clone, Debug)]
 pub struct ModelProfile {
+    name: String,
     config: Value,
     identity: ModelIdentity,
 }
@@ -54,11 +56,20 @@ impl ModelProfile {
                 reason: "must be a string",
             })?
             .to_owned();
+        let encoded = serde_json::to_vec(&config).context(JsonSnafu)?;
         let identity = ModelIdentity {
-            profile: name,
-            model: Some(model),
+            profile: name.clone(),
+            model,
+            config_id: Sha256::digest(encoded)
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect(),
         };
-        Ok(Self { config, identity })
+        Ok(Self {
+            name,
+            config,
+            identity,
+        })
     }
 
     pub fn identity(&self) -> &ModelIdentity {
@@ -79,7 +90,7 @@ pub struct HostConfig {
 impl HostConfig {
     pub fn new(profile: ModelProfile) -> Self {
         Self {
-            profiles: BTreeMap::from([(profile.identity.profile.clone(), profile)]),
+            profiles: BTreeMap::from([(profile.name.clone(), profile)]),
             max_active: 4,
             max_history_bytes: crate::DEFAULT_HISTORY_BYTES,
             observer: None,
@@ -207,7 +218,7 @@ impl ChatHost {
         );
         for (key, profile) in &config.profiles {
             ensure!(
-                key == &profile.identity.profile,
+                key == &profile.name,
                 InvalidSnafu {
                     field: "profiles",
                     reason: "keys must match profile names"
@@ -243,8 +254,29 @@ impl ChatHost {
     }
 
     pub fn retry(&self, turn_id: &str) -> Result<ChatJob, ChatError> {
-        let (original, prompt) = self.database().retry_prompt(turn_id)?;
-        self.start(&original.session_id, &prompt, Some(turn_id.into()))
+        let original: turn::TurnRequestOutputs = operation::execute(
+            self.database().path(),
+            "mf_chat.turn.request",
+            turn::RecordInputs {
+                database_path: String::new(),
+                id: turn_id.into(),
+            },
+        )?;
+        ensure!(
+            matches!(
+                original.turn.state.as_str(),
+                "failed" | "cancelled" | "interrupted"
+            ),
+            InvalidSnafu {
+                field: "retry_of",
+                reason: "must identify an unsuccessful turn",
+            }
+        );
+        self.start(
+            &original.turn.session_id,
+            &original.prompt,
+            Some(turn_id.into()),
+        )
     }
 
     fn start(
@@ -405,6 +437,20 @@ impl ChatHost {
         pending: UncommittedCompletion,
     ) -> Result<Completion, ChatError> {
         ensure!(
+            pending.purpose == CallPurpose::Conversation,
+            InvalidSnafu {
+                field: "purpose",
+                reason: "use retry_title_completion for a title response",
+            }
+        );
+        ensure!(
+            pending.database_path == self.database().path(),
+            InvalidSnafu {
+                field: "database_path",
+                reason: "completion belongs to another host database"
+            }
+        );
+        ensure!(
             !self
                 .inner
                 .workers
@@ -413,11 +459,21 @@ impl ChatHost {
                 .closed,
             ClosedSnafu
         );
-        let completion = self.database().save_recovered(pending)?;
-        if self.inner.config.automatic_titles {
-            let _ = self.inner.dispatch_titles();
+        match self.database().complete_turn(
+            pending.completion.invocation.clone(),
+            pending.completion.reply.clone(),
+        ) {
+            Ok(completion) => {
+                if self.inner.config.automatic_titles {
+                    let _ = self.inner.dispatch_titles();
+                }
+                Ok(completion)
+            }
+            Err(source) => Err(UncommittedSnafu {
+                pending: Box::new(pending),
+            }
+            .into_error(Box::new(source))),
         }
-        Ok(completion)
     }
 
     pub fn abandon_completion(&self, invocation: Invocation) -> Result<bool, ChatError> {
@@ -554,7 +610,6 @@ impl Inner {
                             self.database.path(),
                             "mf_chat.turn.fail",
                             FailTurnInputs {
-                                usages: crate::model::failure_usages(&source),
                                 database_path: String::new(),
                                 invocation: invocation.clone(),
                                 state: state.into(),

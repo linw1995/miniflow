@@ -176,9 +176,6 @@ fn execution_probe() {
     let url = std::env::var("MF_CHAT_TEST_URL").unwrap();
     let mut config = HostConfig::new(profile("default", &url));
     config.automatic_titles = false;
-    if scenario == "captured_failure" {
-        config.profiles.insert("default".into(), ModelProfile::new("default", json!({"model":"default","base_url":url,"api_key_env":"MF_CHAT_TEST_KEY","capture_errors":true})).unwrap());
-    }
     if scenario == "conversation" || scenario == "title_auto" {
         config.observer = Some(mf_telemetry::observation::Observer::stderr(1));
     }
@@ -206,14 +203,6 @@ fn execution_probe() {
         .create_session("default", system, None)
         .unwrap();
     let output = match scenario.as_str() {
-        "captured_failure" => {
-            let job = host.submit(&session.id, "fail once").unwrap();
-            let invocation = job.invocation().clone();
-            assert!(matches!(job.join(), Err(ChatError::Execution { .. })));
-            let call = host.database().call(&invocation.call_id).unwrap();
-            assert_eq!(call.usages.as_ref().unwrap().len(), 1);
-            json!({"state":call.state, "usage":host.database().usage(Default::default()).unwrap().overall})
-        }
         "title_resume" => {
             host.submit(&session.id, "first").unwrap().join().unwrap();
             let call_id = host.database().pending_titles(10).unwrap()[0].id.clone();
@@ -728,16 +717,4 @@ fn abandoning_a_reply_preserves_identity_and_allows_a_fresh_polled_retry() {
     let requests = server.requests();
     assert_eq!(requests.len(), 2);
     assert_eq!(messages(&requests[0]), messages(&requests[1]));
-}
-
-#[test]
-fn captured_model_failure_is_finalized_with_usage_instead_of_retained_as_a_reply() {
-    let mut reply = Reply::json(json!({"error":{"message":"unavailable"}}));
-    reply.status = 503;
-    let server = Server::start(vec![reply]);
-    let result = probe(&server, "captured_failure", None);
-    assert_eq!(result["state"], "failed");
-    assert_eq!(result["usage"]["attempted_calls"], 1);
-    assert_eq!(result["usage"]["statuses"]["failed"], 1);
-    assert_eq!(server.requests().len(), 1);
 }

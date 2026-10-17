@@ -1,6 +1,7 @@
 mod value;
 
-use cel_core::{CelType, Env, MapActivation, Program};
+use cel_core::types::{Expr, SpannedExpr};
+use cel_core::{CelType, Env, MapActivation, Program, Value as CelValue};
 use mf_runtime::{
     Inputs, NodeBuildError, NodeExecutionError, NodePortContract, NodePorts, NodeRegistration,
     Outputs, PortSpec, TaskNode, ValueType, deserialize_config,
@@ -53,15 +54,10 @@ enum CodeExecutionError {
         output: String,
         source: serde_json::Error,
     },
-    #[snafu(display("input `{input}`: {source}"))]
-    ConvertInput {
-        input: String,
-        source: value::ConversionError,
-    },
     #[snafu(display("output `{output}`: {source}"))]
-    ConvertOutput {
+    Evaluate {
         output: String,
-        source: value::ConversionError,
+        source: cel_core::EvalError,
     },
 }
 
@@ -94,10 +90,6 @@ fn parse_type(value: &Value) -> Result<(ValueType, CelType), String> {
 
 fn cel_type(value_type: &ValueType) -> Result<CelType, String> {
     Ok(match value_type {
-        ValueType::Any => CelType::Dyn,
-        ValueType::Object => CelType::map(CelType::String, CelType::Dyn),
-        ValueType::Array => CelType::list(CelType::Dyn),
-        ValueType::Uint64 => CelType::UInt,
         ValueType::Null => CelType::Null,
         ValueType::Boolean => CelType::Bool,
         ValueType::Int64 => CelType::Int,
@@ -105,14 +97,12 @@ fn cel_type(value_type: &ValueType) -> Result<CelType, String> {
         ValueType::String => CelType::String,
         ValueType::List(inner) => CelType::list(cel_type(inner)?),
         ValueType::Map(inner) => CelType::map(CelType::String, cel_type(inner)?),
-        _ => return Err("unsupported Code input type".into()),
+        _ => return Err("type must be a concrete CEL scalar, list, or map descriptor".into()),
     })
 }
 
 fn result_type(cel_type: &CelType) -> Result<ValueType, String> {
     match cel_type {
-        CelType::Dyn => Ok(ValueType::Any),
-        CelType::UInt => Ok(ValueType::Uint64),
         CelType::Null => Ok(ValueType::Null),
         CelType::Bool => Ok(ValueType::Boolean),
         CelType::Int => Ok(ValueType::Int64),
@@ -131,6 +121,46 @@ fn valid_identifier(name: &str) -> bool {
         return false;
     };
     matches!(&ast.expr().node, cel_core::types::Expr::Ident(parsed) if parsed == name)
+}
+
+fn uses_explicit_dyn(expression: &SpannedExpr) -> bool {
+    match &expression.node {
+        Expr::Call { expr, args } => {
+            matches!(&expr.node, Expr::Ident(name) | Expr::RootIdent(name) if name == "dyn")
+                || uses_explicit_dyn(expr)
+                || args.iter().any(uses_explicit_dyn)
+        }
+        Expr::Unary { expr, .. } | Expr::Member { expr, .. } => uses_explicit_dyn(expr),
+        Expr::Binary { left, right, .. } => uses_explicit_dyn(left) || uses_explicit_dyn(right),
+        Expr::Ternary {
+            cond,
+            then_expr,
+            else_expr,
+        } => {
+            uses_explicit_dyn(cond) || uses_explicit_dyn(then_expr) || uses_explicit_dyn(else_expr)
+        }
+        Expr::Index { expr, index, .. } => uses_explicit_dyn(expr) || uses_explicit_dyn(index),
+        Expr::List(items) => items.iter().any(|item| uses_explicit_dyn(&item.expr)),
+        Expr::Map(entries) => entries
+            .iter()
+            .any(|entry| uses_explicit_dyn(&entry.key) || uses_explicit_dyn(&entry.value)),
+        Expr::Struct { type_name, fields } => {
+            uses_explicit_dyn(type_name)
+                || fields.iter().any(|field| uses_explicit_dyn(&field.value))
+        }
+        Expr::Comprehension(data) => [
+            &data.iter_range,
+            &data.accu_init,
+            &data.loop_condition,
+            &data.loop_step,
+            &data.result,
+        ]
+        .into_iter()
+        .any(|part| uses_explicit_dyn(part)),
+        Expr::MemberTestOnly { expr, .. } => uses_explicit_dyn(expr),
+        Expr::Bind { init, body, .. } => uses_explicit_dyn(init) || uses_explicit_dyn(body),
+        _ => false,
+    }
 }
 
 fn json_size(value: &(impl Serialize + ?Sized)) -> Result<usize, serde_json::Error> {
@@ -191,7 +221,7 @@ impl TaskNode for CodeNode {
                 .get(name)
                 .ok_or_else(|| execution_error(format!("missing input `{name}`")))?;
             let converted = json_to_cel(value, value_type, &mut budget, "", 1)
-                .context(ConvertInputSnafu { input: name })?;
+                .map_err(|error| execution_error(format!("input `{name}`: {error}")))?;
             activation.insert(name, converted);
         }
         let mut outputs = Outputs::new();
@@ -199,8 +229,11 @@ impl TaskNode for CodeNode {
         for (name, output) in &self.outputs {
             let name = name.as_str();
             let result = output.program.eval(&activation);
+            if let CelValue::Error(error) = &result {
+                Err(error.as_ref().clone()).context(EvaluateSnafu { output: name })?;
+            }
             let converted = cel_to_json(&result, &output.value_type, &mut budget, "", 1)
-                .context(ConvertOutputSnafu { output: name })?;
+                .map_err(|error| execution_error(format!("output `{name}`: {error}")))?;
             let encoded_name = json_size(name).context(MeasureOutputSnafu { output: name })?;
             let encoded_value =
                 json_size(&converted).context(MeasureOutputSnafu { output: name })?;
@@ -210,7 +243,7 @@ impl TaskNode for CodeNode {
                     "output `{name}`: outputs exceed the {MAX_JSON_BYTES}-byte JSON limit"
                 )));
             }
-            outputs.insert(name.to_owned(), converted.inherit_secrets(inputs.values()));
+            outputs.insert(name.to_owned(), converted);
         }
         Ok(outputs.into())
     }
@@ -273,6 +306,12 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
         let ast = env
             .compile(expression)
             .context(CompileSnafu { output: name })?;
+        // CEL macros can contain internal dynamic types even when the user expression is concrete.
+        if uses_explicit_dyn(ast.expr()) {
+            return Err(invalid(format!(
+                "output `{name}`: explicit dyn(...) is unsupported"
+            )));
+        }
         let inferred = ast
             .result_type()
             .ok_or_else(|| invalid(format!("output `{name}` has no inferred type")))?;
@@ -367,28 +406,12 @@ mod tests {
     }
 
     #[test]
-    fn infers_structured_list_addition_and_nested_dynamic_ports() {
-        for descriptor in [json!({"list": "object"}), json!({"list": {"map": "any"}})] {
-            let node = factory(json!({
-                "language": "cel",
-                "inputs": {"left": descriptor, "right": descriptor},
-                "code": {"value": "left + right"}
-            }))
-            .unwrap();
-            let output_type = &node.metadata.ports.outputs[0].value_type;
-            assert_eq!(
-                output_type,
-                &ValueType::List(Box::new(ValueType::Map(Box::new(ValueType::Any))))
-            );
-            assert!(output_type.is_assignable_to(&ValueType::List(Box::new(ValueType::Object))));
-        }
-    }
-
-    #[test]
     fn rejects_invalid_language_and_config_shapes() {
         for config in [
             json!({"language":"rust","inputs":{},"code":"fn main() {}"}),
             json!({"language":"cel","inputs":{},"code":{}}),
+            json!({"language":"cel","inputs":{"amount":"any"},"code":{"result":"1"}}),
+            json!({"language":"cel","inputs":{"items":{"list":{"map":"any"}}},"code":{"result":"1"}}),
             json!({"language":"cel","inputs":{"a.b":"int"},"code":{"result":"1"}}),
             json!({"language":"cel","inputs":{},"code":{"bad.name":"1"}}),
             json!({"language":"cel","inputs":{},"code":{"result":"  "}}),
@@ -414,11 +437,12 @@ mod tests {
     fn reports_invalid_descriptors_and_names() {
         for (descriptor, expected) in [
             (json!({"set": "int"}), "unsupported type constructor"),
-            (json!("usize"), "unsupported Code input type"),
-            (json!({"list": "float"}), "unsupported Code input type"),
+            (json!("uint"), "type must be a concrete"),
+            (json!("usize"), "type must be a concrete"),
+            (json!({"list": "float"}), "type must be a concrete"),
             (
                 json!({"map": {"nullable": "string"}}),
-                "unsupported Code input type",
+                "type must be a concrete",
             ),
             (json!(["int"]), "type must be"),
             (json!({"list": "int", "map": "int"}), "type must be"),
@@ -450,17 +474,6 @@ mod tests {
             ("null", "value", ValueType::Null),
             ("bool", "value", ValueType::Boolean),
             ("int", "value", ValueType::Int64),
-            ("uint", "value", ValueType::Uint64),
-            ("any", "value", ValueType::Any),
-            ("object", "value", ValueType::Map(Box::new(ValueType::Any))),
-            ("array", "value", ValueType::List(Box::new(ValueType::Any))),
-            ("int", "dyn(value)", ValueType::Any),
-            ("int", "int(dyn(value))", ValueType::Int64),
-            (
-                "int",
-                "[value, 'x']",
-                ValueType::List(Box::new(ValueType::Any)),
-            ),
             ("double", "value", ValueType::Float64),
             ("string", "value", ValueType::String),
         ] {
@@ -517,6 +530,21 @@ mod tests {
             for text in invalid {
                 assert!(execute(text).is_err(), "{expression}: {text}");
             }
+        }
+    }
+
+    #[test]
+    fn reports_non_json_result_types() {
+        for expression in ["b'bytes'", "{1: 2}", "dyn(1)"] {
+            let error = factory(json!({
+                "language": "cel",
+                "inputs": {},
+                "code": {"result": expression}
+            }))
+            .err()
+            .unwrap()
+            .to_string();
+            assert!(error.contains("output `result`"), "{expression}: {error}");
         }
     }
 
@@ -636,111 +664,6 @@ mod tests {
     }
 
     #[test]
-    fn concatenates_structured_and_heterogeneous_lists() {
-        let record = json!({"call_id": "same", "node": {"path": [{"index": 1}]}, "usage": null});
-        for (descriptor, left, right) in [
-            (
-                json!({"list": "object"}),
-                json!([]),
-                json!([record.clone(), {}]),
-            ),
-            (
-                json!({"list": "object"}),
-                json!([record.clone()]),
-                json!([record]),
-            ),
-            (
-                json!({"list": "any"}),
-                json!([null, true, "text"]),
-                json!([[], {}, u64::MAX]),
-            ),
-            (json!("array"), json!([]), json!([])),
-        ] {
-            let node = factory(json!({
-                "language":"cel", "inputs":{"left":descriptor,"right":descriptor},
-                "code":{"value":"left + right"}
-            }))
-            .unwrap();
-            let mut expected = left.as_array().unwrap().clone();
-            expected.extend(right.as_array().unwrap().iter().cloned());
-            let result = node
-                .execution
-                .as_task_node()
-                .unwrap()
-                .execute(
-                    Inputs::from([("left".into(), left.into()), ("right".into(), right.into())]),
-                    &mut Default::default(),
-                )
-                .unwrap();
-            assert_eq!(result.outputs["value"], json!(expected));
-        }
-    }
-
-    #[test]
-    fn dynamic_failures_preserve_output_context_and_atomicity() {
-        for (expression, typed_source) in [
-            ("value + 1", true),
-            ("dyn([{'a~/b': b'bytes'}])", false),
-            ("dyn({1: value})", false),
-        ] {
-            let node = factory(json!({
-                "language":"cel", "inputs":{"value":"any"},
-                "code":{"first":"1", "second":expression}
-            }))
-            .unwrap();
-            let error = node
-                .execution
-                .as_task_node()
-                .unwrap()
-                .execute(
-                    Inputs::from([("value".into(), "text".into())]),
-                    &mut Default::default(),
-                )
-                .unwrap_err();
-            assert!(error.to_string().contains("output `second`"), "{error}");
-            if typed_source {
-                assert!(find_source::<cel_core::EvalError>(&error).is_some());
-            } else {
-                assert!(find_source::<value::ConversionError>(&error).is_some());
-            }
-            if expression.contains("a~/b") {
-                assert!(error.to_string().contains("/0/a~0~1b"), "{error}");
-            }
-        }
-    }
-
-    #[test]
-    fn explicitly_propagates_nested_secrets_to_all_outputs() {
-        let node = factory(json!({
-            "language":"cel", "inputs":{"value":"object"},
-            "code":{"derived":"value.token + '-suffix'", "independent":"42", "nested":"[value]"}
-        }))
-        .unwrap();
-        for secret in [false, true] {
-            let token = mf_runtime::ValueRef::from("synthetic-token");
-            let token = if secret { token.into_secret() } else { token };
-            let input = mf_runtime::ValueRef::object([("token".into(), token)]);
-            let result = node
-                .execution
-                .as_task_node()
-                .unwrap()
-                .execute(
-                    Inputs::from([("value".into(), input)]),
-                    &mut Default::default(),
-                )
-                .unwrap();
-            assert_eq!(result.outputs["derived"], json!("synthetic-token-suffix"));
-            assert_eq!(result.outputs["independent"], json!(42));
-            for value in result.outputs.values() {
-                assert_eq!(value.is_secret(), secret);
-                if secret {
-                    assert_eq!(value.redacted(), json!("[REDACTED]"));
-                }
-            }
-        }
-    }
-
-    #[test]
     fn enforces_expression_payload_and_collection_limits() {
         let expression = format!("1{}", " ".repeat(MAX_EXPRESSION_BYTES));
         let error = factory(json!({
@@ -816,15 +739,10 @@ mod tests {
                 "x".repeat(bytes % encoded)
             )
         };
-        for (input, output, input_limited, descriptor) in [
-            ("payload", "out", true, "string"),
-            ("x", "result", false, "string"),
-            ("payload", "out", true, "any"),
-            ("x", "result", false, "any"),
-        ] {
+        for (input, output, input_limited) in [("payload", "out", true), ("x", "result", false)] {
             let node = factory(json!({
                 "language": "cel",
-                "inputs": BTreeMap::from([(input, descriptor)]),
+                "inputs": BTreeMap::from([(input, "string")]),
                 "code": BTreeMap::from([(output, input)])
             }))
             .unwrap();
@@ -886,13 +804,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_static_errors_and_non_json_result_types() {
+    fn rejects_static_errors_and_explicit_dynamic_calls() {
         for expression in [
             "missing + 1",
             "amount + 'x'",
             "amount *",
+            "dyn(amount)",
+            "int(dyn(amount))",
+            "[amount, 'x']",
             "b'bytes'",
-            "{1: 2}",
         ] {
             let error = factory(json!({
                 "language": "cel",
@@ -904,6 +824,14 @@ mod tests {
             .to_string();
             assert!(error.contains("output `result`"), "{expression}: {error}");
         }
+        assert!(
+            factory(json!({
+                "language": "cel",
+                "inputs": {"items": {"list": "int"}},
+                "code": {"result": "items.map(x, x * 2)"}
+            }))
+            .is_ok()
+        );
     }
 
     #[test]

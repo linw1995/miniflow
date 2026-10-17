@@ -22,7 +22,7 @@ The package SHALL embed conversation, session title, and usage statistics defini
 
 ### Requirement: Prepare the configured flow before beginning work
 
-The host SHALL apply the selected nonsecret model configuration during flow preparation and validate node contracts before creating running work. Conversation and title configurations SHALL be independently selectable. Preparation MUST NOT read credentials, open the database, or contact providers. Each call SHALL retain its selected profile and actual model attribution.
+The host SHALL apply the selected nonsecret model configuration during flow preparation and validate node contracts before creating running work. Conversation and title configurations SHALL be independently selectable. Preparation MUST NOT read credentials, open the database, or contact providers. Each call SHALL retain its actual configuration identity.
 
 #### Scenario: Select a different title model
 
