@@ -88,13 +88,14 @@ pub fn schedule(
     profile: &str,
 ) -> Result<ModelCall, ChatError> {
     let call = ModelCall {
+        usages: None,
+        metadata: None,
         id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.into(),
         turn_id: Some(turn_id.into()),
         purpose: "title".into(),
         profile: profile.into(),
-        model: String::new(),
-        config_id: String::new(),
+        model: None,
         state: "pending".into(),
         title_revision: Some(revision),
         started_at: None,
@@ -108,7 +109,7 @@ pub fn schedule(
         disposition: None,
     };
     diesel::insert_into(model_calls::table)
-        .values(&call)
+        .values(call.clone())
         .execute(connection)
         .context(DatabaseSnafu {
             operation: "schedule session title",
@@ -147,7 +148,7 @@ pub fn prepare(input: PrepareTitleInputs) -> Result<TitleStarted, ChatError> {
         ensure!(prompt.len() <= input.max_bytes, HistoryTooLargeSnafu { limit: input.max_bytes });
         diesel::update(model_calls::table.find(&call.id)).set((model_calls::state.eq("running"),
             model_calls::started_at.eq(Some(session::now()?)), model_calls::profile.eq(&input.model.profile),
-            model_calls::model.eq(&input.model.model), model_calls::config_id.eq(&input.model.config_id)))
+            model_calls::model.eq(&input.model.model)))
             .execute(connection).context(DatabaseSnafu { operation: "begin session title call" })?;
         Ok(TitleStarted { database_path: input.database_path.clone(), invocation, title_revision: revision,
             request: Some(mfn_llm::LlmInputs { prompt,

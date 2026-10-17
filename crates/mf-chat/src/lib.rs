@@ -1,6 +1,7 @@
 //! Persistent chat operations implemented as application-owned workflow nodes.
 
 mod error;
+pub mod executable;
 pub mod flows;
 mod host;
 mod model;
@@ -25,3 +26,5 @@ pub use turn::{Completion, Invocation, ModelIdentity, Reply};
 pub use usage::{
     TokenCounter, UsageGroup, UsageGrouping, UsageQuery, UsageStatistics, UsageSummary,
 };
+
+pub use mfn_llm::{CallUsage, MessageMetadata, UsageNode, UsageScope};

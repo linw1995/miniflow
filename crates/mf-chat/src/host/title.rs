@@ -328,7 +328,12 @@ impl Inner {
                         };
                         let cleanup = self
                             .database
-                            .fail_call(&invocation.call_id, state, &source.to_string())
+                            .fail_call_with_usages(
+                                &invocation.call_id,
+                                state,
+                                &source.to_string(),
+                                crate::model::failure_usages(&source),
+                            )
                             .err()
                             .map(Box::new);
                         Err(ExecutionSnafu {

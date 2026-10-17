@@ -10,7 +10,7 @@ description = "Persistent multi-session chat through embedded miniflow workflows
 # Application node contracts and host-side workflow preparation.
 mf-runtime.workspace = true
 mf-telemetry.workspace = true
-mf-compiler = { workspace = true, default-features = false }
+mf-compiler.workspace = true
 mfn-llm.workspace = true
 inventory.workspace = true
 
@@ -20,17 +20,21 @@ diesel_migrations.workspace = true
 libsqlite3-sys = { workspace = true, features = ["bundled"] }
 fs2.workspace = true
 
-# Typed values, configuration identities, and diagnostics.
+# Typed values and diagnostics.
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 snafu.workspace = true
-sha2.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
-toml.workspace = true
-tempfile.workspace = true
+# Built-in node fixtures.
+mfn-core.workspace = true
 mfn-llm = { workspace = true, features = ["test-support"] }
 
+# Isolated databases and packaging fixtures.
+tempfile.workspace = true
+toml.workspace = true
+
 [build-dependencies]
+# Workflow embedding at build time.
 mf-compiler = { workspace = true, features = ["codegen"] }

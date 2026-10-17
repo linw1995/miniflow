@@ -150,7 +150,7 @@ fn two_turns_reuse_the_node_and_preserve_explicit_history() {
         Reply::text("first reply"),
         Reply::text("second reply"),
     ]);
-    let initial = json!([{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "prior reply"}]);
+    let initial = json!([{"role": "user", "content": "earlier"}, {"role": "assistant", "content": "prior reply", "metadata": {"note":"local-annotation"}}]);
     let result = probe(
         &server,
         json!({"inputs": [{"prompt": "first", "system": "be brief", "history": initial}, {"prompt": "second", "system": "be brief"}], "carry_history": true, "fresh_contexts": true}),
@@ -161,8 +161,17 @@ fn two_turns_reuse_the_node_and_preserve_explicit_history() {
     assert_eq!(turns[0]["outputs"]["history"].as_array().unwrap().len(), 4);
     assert_eq!(turns[1]["outputs"]["history"].as_array().unwrap().len(), 6);
     assert_eq!(result["original_inputs"][0]["history"], initial);
+    assert_eq!(
+        turns[1]["outputs"]["history"][1]["metadata"],
+        initial[1]["metadata"]
+    );
     let requests = server.requests();
     assert_eq!(requests.len(), 2);
+    assert!(
+        requests
+            .iter()
+            .all(|request| !request.body.to_string().contains("local-annotation"))
+    );
     for request in &requests {
         assert!(
             request
@@ -413,6 +422,7 @@ fn sparse_usage_unknown_finish_and_token_truncation_are_preserved() {
     for (usage, reason) in [
         (json!({"completion_tokens": 0}), "service_stop"),
         (Value::Null, "length"),
+        (json!({"prompt_tokens":2,"completion_tokens":1}), "stop"),
     ] {
         let mut reply = serde_json::from_str::<Value>(&Reply::text("partial").body).unwrap();
         if usage.is_null() {
@@ -428,6 +438,12 @@ fn sparse_usage_unknown_finish_and_token_truncation_are_preserved() {
         assert_eq!(outputs["finish_reason"], reason);
         if reason == "service_stop" {
             assert_eq!(outputs["usage"], json!({"output_tokens": 0}));
+        } else if reason == "stop" {
+            assert_eq!(
+                outputs["usage"],
+                json!({"input_tokens":2,"output_tokens":1})
+            );
+            assert_eq!(outputs["usages"][0]["usage"], outputs["usage"]);
         } else {
             assert!(outputs.get("usage").is_none());
         }
@@ -488,4 +504,48 @@ fn error_sources_remain_typed_without_raw_diagnostic_display() {
         .downcast_ref::<Box<rig_core::error::ProviderError>>()
         .unwrap();
     assert_eq!(source.provider_response_status().unwrap().as_u16(), 401);
+}
+
+#[test]
+fn captured_provider_failures_and_timeouts_return_explicit_call_facts() {
+    let mut failed = Reply::json(json!({"error":{"message":"remote-secret"}}));
+    failed.status = 503;
+    let mut timed_out = Reply::text("too late");
+    timed_out.header_delay = Duration::from_millis(300);
+    for response in [failed, timed_out] {
+        let server = Server::start(vec![response]);
+        let result = probe(
+            &server,
+            json!({"inputs":[{"prompt":"hello"}]}),
+            json!({"capture_errors":true,"timeout_ms":100}),
+        );
+        let outputs = &result["results"][0]["outputs"];
+        assert_eq!(result["results"][0]["ok"], true, "{result}");
+        assert_eq!(outputs["status"], "failed");
+        assert_eq!(outputs["text"], "");
+        assert_eq!(outputs["usages"].as_array().unwrap().len(), 1);
+        assert_eq!(outputs["usages"][0]["model"], "example-model");
+        assert!(!outputs["usages"][0]["call_id"].as_str().unwrap().is_empty());
+        assert!(outputs["usages"][0].get("usage").is_none());
+        assert_eq!(outputs["usages"][0]["error"], outputs["error"]);
+        assert!(!outputs.to_string().contains("remote-secret"));
+        assert_eq!(server.requests().len(), 1);
+    }
+}
+
+#[test]
+fn captured_response_validation_failure_keeps_reported_tokens() {
+    let server = Server::start(vec![Reply::text("")]);
+    let result = probe(
+        &server,
+        json!({"inputs":[{"prompt":"hello"}]}),
+        json!({"capture_errors":true}),
+    );
+    let outputs = &result["results"][0]["outputs"];
+    assert_eq!(outputs["status"], "failed");
+    assert_eq!(
+        outputs["usages"][0]["usage"],
+        json!({"input_tokens":2,"output_tokens":1,"total_tokens":3})
+    );
+    assert_eq!(server.requests().len(), 1);
 }

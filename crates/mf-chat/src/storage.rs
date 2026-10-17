@@ -14,6 +14,69 @@ use std::{
     path::{Path, PathBuf},
 };
 
+#[derive(Debug, diesel::expression::AsExpression, diesel::deserialize::FromSqlRow)]
+#[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+pub struct StoredJson<T>(Option<T>);
+
+impl<T> From<Option<T>> for StoredJson<T> {
+    fn from(value: Option<T>) -> Self {
+        Self(value)
+    }
+}
+
+impl<T> From<StoredJson<T>> for Option<T> {
+    fn from(value: StoredJson<T>) -> Self {
+        value.0
+    }
+}
+
+impl<T: serde::de::DeserializeOwned>
+    diesel::deserialize::FromSql<
+        diesel::sql_types::Nullable<diesel::sql_types::Text>,
+        diesel::sqlite::Sqlite,
+    > for StoredJson<T>
+{
+    fn from_sql(
+        value: diesel::sqlite::SqliteValue<'_, '_, '_>,
+    ) -> diesel::deserialize::Result<Self> {
+        Self::from_nullable_sql(Some(value))
+    }
+
+    fn from_nullable_sql(
+        value: Option<diesel::sqlite::SqliteValue<'_, '_, '_>>,
+    ) -> diesel::deserialize::Result<Self> {
+        let encoded = <Option<String> as diesel::deserialize::FromSql<
+            diesel::sql_types::Nullable<diesel::sql_types::Text>,
+            diesel::sqlite::Sqlite,
+        >>::from_nullable_sql(value)?;
+        Ok(Self(
+            encoded
+                .map(|value| serde_json::from_str(&value))
+                .transpose()?,
+        ))
+    }
+}
+
+impl<T: serde::Serialize + std::fmt::Debug>
+    diesel::serialize::ToSql<
+        diesel::sql_types::Nullable<diesel::sql_types::Text>,
+        diesel::sqlite::Sqlite,
+    > for StoredJson<T>
+{
+    fn to_sql<'b>(
+        &'b self,
+        output: &mut diesel::serialize::Output<'b, '_, diesel::sqlite::Sqlite>,
+    ) -> diesel::serialize::Result {
+        match &self.0 {
+            Some(value) => {
+                output.set_value(serde_json::to_string(value)?);
+                Ok(diesel::serialize::IsNull::No)
+            }
+            None => Ok(diesel::serialize::IsNull::Yes),
+        }
+    }
+}
+
 pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
 const CONNECTION_PRAGMAS: &str = "PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;";
 
@@ -153,6 +216,85 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn upgrading_existing_records_preserves_usage_metadata_and_legacy_fingerprints() {
+        use crate::schema::model_calls;
+        use std::collections::BTreeMap;
+
+        for previous_version in [1, 2] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("chat.sqlite");
+            let database = ChatDatabase::open(&path).unwrap();
+            let session = database
+                .create_session("default", None, Some("Existing".into()))
+                .unwrap();
+            let begun = database
+                .begin_turn(
+                    &session.id,
+                    "question",
+                    crate::ModelIdentity {
+                        profile: "default".into(),
+                        model: Some("old-model".into()),
+                    },
+                    None,
+                    1024,
+                )
+                .unwrap();
+            let counters = BTreeMap::from([("input_tokens".into(), 4)]);
+            let metadata = (previous_version == 2)
+                .then(|| BTreeMap::from([("source".into(), "retained".into())]));
+            let usages = (previous_version == 2).then(|| {
+                vec![mfn_llm::CallUsage {
+                    started_at: Some(1),
+                    call_id: "reported-call".into(),
+                    node: None,
+                    model: "old-model".into(),
+                    usage: Some(counters.clone()),
+                    error: None,
+                }]
+            });
+            database
+                .complete_turn(
+                    begun.invocation.clone(),
+                    crate::Reply {
+                        text: "old reply".into(),
+                        usage: Some(counters),
+                        usages,
+                        metadata: metadata.clone(),
+                        finish_reason: None,
+                    },
+                )
+                .unwrap();
+            let original = database.call(&begun.invocation.call_id).unwrap();
+            let mut connection = connect(&path).unwrap();
+            for _ in previous_version..3 {
+                connection.revert_last_migration(MIGRATIONS).unwrap();
+            }
+            connection
+                .batch_execute("UPDATE model_calls SET config_id = 'legacy-config';")
+                .unwrap();
+            drop(connection);
+            drop(database);
+            let reopened = ChatDatabase::open(path).unwrap();
+            assert_eq!(reopened.call(&begun.invocation.call_id).unwrap(), original);
+            assert_eq!(
+                reopened.history(&session.id, 1024).unwrap().history[1].metadata,
+                metadata
+            );
+            assert_eq!(
+                model_calls::table
+                    .find(&begun.invocation.call_id)
+                    .select(diesel::dsl::sql::<diesel::sql_types::Text>("config_id"))
+                    .get_result::<String>(&mut connect(reopened.path()).unwrap())
+                    .unwrap(),
+                "legacy-config"
+            );
+            let usage = reopened.usage(Default::default()).unwrap();
+            assert_eq!(usage.overall.attempted_calls, 1);
+            assert_eq!(usage.overall.input_tokens.known_subtotal, Some(4));
+        }
     }
 
     #[test]
