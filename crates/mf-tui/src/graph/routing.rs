@@ -253,8 +253,7 @@ pub struct MarkerCell {
 
 pub fn line_symbols(kind: EdgeKind) -> [&'static str; 6] {
     match kind {
-        EdgeKind::Data => ["═", "║", "╔", "╗", "╚", "╝"],
-        EdgeKind::Control => ["─", "│", "┌", "┐", "└", "┘"],
+        EdgeKind::Data | EdgeKind::Control => ["─", "│", "┌", "┐", "└", "┘"],
     }
 }
 
@@ -263,12 +262,12 @@ pub fn crossing_cells(
     vertical: EdgeKind,
     upper_horizontal: bool,
 ) -> [MarkerCell; 3] {
-    let kind = if upper_horizontal {
-        horizontal
-    } else {
+    let lower = if upper_horizontal {
         vertical
+    } else {
+        horizontal
     };
-    let line = line_symbols(kind)[usize::from(!upper_horizontal)];
+    let line = line_symbols(lower)[usize::from(upper_horizontal)];
     let cell = |along, symbol, upper| MarkerCell {
         dx: if upper == upper_horizontal { along } else { 0 },
         dy: if upper == upper_horizontal { 0 } else { along },
@@ -276,9 +275,10 @@ pub fn crossing_cells(
         upper,
     };
     [
-        cell(0, line, true),
-        cell(-1, " ", false),
-        cell(1, " ", false),
+        // Only the crossing doubles the upper stroke, keeping both paths continuous.
+        cell(0, if upper_horizontal { "╪" } else { "╫" }, true),
+        cell(-1, line, false),
+        cell(1, line, false),
     ]
 }
 
