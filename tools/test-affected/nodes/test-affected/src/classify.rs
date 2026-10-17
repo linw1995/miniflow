@@ -266,6 +266,23 @@ mod tests {
             )
             .is_none()
         );
+        assert!(
+            isolated_changes(
+                source,
+                &source.replace("fn isolated()", "fn renamed()"),
+                false
+            )
+            .is_none()
+        );
+        let qualified = source.replace(
+            "assert_eq!(1, 1)",
+            "assert!(serde_json::json!({\"x\":1}).is_object())",
+        );
+        assert!(
+            isolated_changes(&qualified, &qualified.replace("\"x\":1", "\"x\":2"), false).is_some()
+        );
+        let guarded = source.replace("#[cfg(test)]", "#[custom]");
+        assert!(isolated_changes(&guarded, &guarded.replace("1, 1", "2, 2"), false).is_none());
         for extra in [
             "fn shared() { isolated(); }",
             "mod hidden;",
@@ -273,6 +290,10 @@ mod tests {
             "#[test] fn another() { custom!(); }",
             "#[test] fn another() { assert!(custom!()); }",
             "#[derive(Custom)] struct Hidden;",
+            "fn shared() { std::env::set_var(\"X\", \"1\"); }",
+            "fn shared() { unsafe { hidden(); } }",
+            "static SHARED: u32 = 1;",
+            "#[test] fn another() { assert!(hidden::custom!()); }",
         ] {
             let modified = source.replacen("mod tests {", &format!("mod tests {{ {extra}"), 1);
             assert!(

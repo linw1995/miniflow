@@ -156,7 +156,7 @@ jobs:
         run: nix develop --command bash scripts/run-cov.sh --test-package mfn-llm
       - name: Coverage tests (mfn-lsp)
         if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mfn-lsp')
-        run: nix develop --command bash scripts/run-cov.sh --test-package mfn-lsp
+        run: nix develop --command env MF_LSP_SMOKE_SERVER=rust-analyzer bash scripts/run-cov.sh --test-package mfn-lsp --run-ignored all
       - name: Coverage tests (mfn-test-affected)
         if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mfn-test-affected')
         run: nix develop --command bash scripts/run-cov.sh --test-package mfn-test-affected

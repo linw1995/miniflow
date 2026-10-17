@@ -108,7 +108,8 @@ There is no Git-to-plan bypass edge: context crosses the producer boundary with 
 
 ## Explicit real-server verification
 
-The real-server smoke test is ignored by ordinary suites. Enable it only with an explicitly selected
+The real-server smoke test is ignored by ordinary suites. CI and nightly coverage explicitly select
+the pinned server and run this check alongside the protocol fixtures. To run it locally, select a
 server from the pinned development environment:
 
 ```sh

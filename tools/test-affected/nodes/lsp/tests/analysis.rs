@@ -181,7 +181,15 @@ fn position_conversion_rejects_split_unicode_and_handles_all_encodings() {
             5
         );
     }
-    assert!(byte_offset(source, &json!({"line":0,"character":1}), "utf-16").is_err());
+    for (position, encoding) in [
+        (json!({"line":0,"character":1}), "utf-16"),
+        (json!({"line":0,"character":0}), "unknown"),
+        (json!({}), "utf-16"),
+        (json!({"line":5,"character":0}), "utf-16"),
+        (json!({"line":0,"character":100}), "utf-16"),
+    ] {
+        assert!(byte_offset(source, &position, encoding).is_err());
+    }
     assert_eq!(
         byte_offset(source, &json!({"line":1,"character":0}), "utf-16").unwrap(),
         13
@@ -238,4 +246,210 @@ fn request_budget_and_missing_servers_preserve_incomplete_status() {
             .iter()
             .any(|g| g.kind == GapKind::AnalyzerFailure)
     );
+}
+
+#[test]
+fn invalid_configuration_and_inputs_preserve_typed_failures_without_starting_servers() {
+    use std::error::Error as _;
+    let (directory, config, request) = fixture("normal");
+    let registration = inventory::iter::<mf_runtime::NodeRegistration>
+        .into_iter()
+        .find(|node| node.kind == KIND)
+        .unwrap();
+    for (field, value) in [
+        ("command", json!("")),
+        ("deadline_ms", json!(0)),
+        ("max_requests", json!(3)),
+        ("max_bytes", json!(0)),
+    ] {
+        let mut value_config = serde_json::to_value(&config).unwrap();
+        value_config[field] = value;
+        let error = registration.instantiate(value_config).err().unwrap();
+        assert!(error.source().unwrap().downcast_ref::<Error>().is_some());
+    }
+    for case in [
+        "identity",
+        "relative_root",
+        "duplicate",
+        "reversed",
+        "request_limit",
+    ] {
+        let mut invalid = request.clone();
+        match case {
+            "identity" => invalid.snapshots[0].id.clear(),
+            "relative_root" => invalid.snapshots[0].root = "relative".into(),
+            "duplicate" => invalid.snapshots.push(invalid.snapshots[0].clone()),
+            "reversed" => {
+                invalid.snapshots[0].documents[0].ranges[0] = SourceRange { start: 9, end: 1 }
+            }
+            _ => invalid.initialization_options = json!("x".repeat(config.max_bytes)),
+        }
+        assert!(
+            matches!(
+                analyze(&config, invalid, Default::default()),
+                Err(Error::Invalid { .. })
+            ),
+            "{case}"
+        );
+    }
+    let mut node = AnalyzeNode::new(config).unwrap();
+    let error = node
+        .execute(
+            AnalyzeInput {
+                request: json!(null).into(),
+                context: json!(null).into(),
+            },
+            &mut ExecutionContext::default(),
+            &mut |_| panic!("invalid input must not emit"),
+        )
+        .unwrap_err();
+    assert!(error.source().unwrap().downcast_ref::<Error>().is_some());
+    assert!(!directory.path().join("requests.pid").exists());
+}
+
+#[test]
+fn document_contracts_reject_escaping_or_invalid_sources_and_close_sessions() {
+    for case in ["escape", "directory", "range", "utf8", "document_limit"] {
+        let (directory, mut config, mut request) = fixture("normal");
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let source = directory.path().join("source.txt");
+        match case {
+            "escape" => {
+                fs::remove_file(&source).unwrap();
+                std::os::unix::fs::symlink(outside.path(), &source).unwrap();
+            }
+            "directory" => {
+                fs::remove_file(&source).unwrap();
+                fs::create_dir(&source).unwrap();
+            }
+            "range" => request.snapshots[0].documents[0].ranges[0].end = 100,
+            "utf8" => fs::write(&source, [0xff]).unwrap(),
+            _ => {
+                config.max_bytes = 1024;
+                fs::write(&source, "x".repeat(2048)).unwrap();
+            }
+        }
+        let result = analyze(&config, request, Default::default());
+        if matches!(case, "utf8" | "document_limit") {
+            let outcome = result.unwrap();
+            assert_eq!(outcome.status, Status::Incomplete);
+            assert_eq!(
+                outcome.gaps[0].kind,
+                if case == "utf8" {
+                    GapKind::AnalyzerFailure
+                } else {
+                    GapKind::Limit
+                }
+            );
+        } else {
+            assert!(matches!(result, Err(Error::Invalid { .. })), "{case}");
+        }
+        reaped(directory.path());
+    }
+}
+
+#[test]
+fn accepts_standard_symbol_shapes_and_services_read_only_client_requests() {
+    for mode in [
+        "flat",
+        "children",
+        "null_symbols",
+        "null_references",
+        "client_requests",
+        "no_symbols",
+    ] {
+        let (directory, config, mut request) = fixture(mode);
+        request.initialization_options = json!({"fixture":{"enabled":true}});
+        let outcome = analyze(&config, request, Default::default()).unwrap();
+        if mode == "no_symbols" {
+            assert_eq!(outcome.status, Status::Incomplete);
+            assert_eq!(outcome.gaps[0].operation, "textDocument/documentSymbol");
+            assert_eq!(outcome.gaps[0].kind, GapKind::Unsupported);
+        } else {
+            assert_eq!(
+                outcome.status,
+                Status::Analyzed,
+                "{mode}: {:?}",
+                outcome.gaps
+            );
+            let symbols = &outcome.evidence[0].documents[0].symbols;
+            assert_eq!(
+                symbols.len(),
+                match mode {
+                    "null_symbols" => 0,
+                    "children" => 2,
+                    _ => 1,
+                }
+            );
+            if mode == "null_references" {
+                assert!(symbols[0].references.is_empty());
+            }
+        }
+        reaped(directory.path());
+    }
+}
+
+#[test]
+fn malformed_queries_and_exhausted_result_budgets_are_explicit_gaps() {
+    for mode in [
+        "eof",
+        "invalid_json",
+        "bad_capabilities",
+        "bad_encoding",
+        "unhealthy",
+        "bad_symbols",
+        "missing_range",
+        "reversed_range",
+        "rpc_error",
+        "missing_result",
+        "bad_array",
+        "large_header",
+        "unterminated_header",
+        "large_message",
+        "partial_limit",
+        "document_limit",
+        "snapshot_limit",
+        "aggregate_limit",
+        "write_blocked",
+    ] {
+        let (directory, mut config, mut request) = fixture(mode);
+        if mode == "unhealthy" {
+            config.profile = Profile::RustAnalyzer;
+        }
+        if mode == "snapshot_limit" {
+            fs::copy(
+                directory.path().join("source.txt"),
+                directory.path().join("other.txt"),
+            )
+            .unwrap();
+            let mut document = request.snapshots[0].documents[0].clone();
+            document.path = "other.txt".into();
+            request.snapshots[0].documents.push(document);
+        }
+        if mode == "aggregate_limit" {
+            config.max_bytes = 1500;
+            request.initialization_options = json!({"padding":"x".repeat(700)});
+        }
+        if mode == "write_blocked" {
+            config.max_bytes = 1024 * 1024;
+            config.deadline_ms = 500;
+            request.initialization_options = json!({"padding":"x".repeat(700_000)});
+        }
+        let outcome = analyze(&config, request, Default::default()).unwrap();
+        assert_eq!(outcome.status, Status::Incomplete, "{mode}");
+        assert!(
+            outcome.gaps.iter().any(|gap| gap.kind
+                == if mode.starts_with("large_")
+                    || mode.ends_with("_limit")
+                    || matches!(mode, "unterminated_header" | "write_blocked")
+                {
+                    GapKind::Limit
+                } else {
+                    GapKind::AnalyzerFailure
+                }),
+            "{mode}: {:?}",
+            outcome.gaps
+        );
+        reaped(directory.path());
+    }
 }

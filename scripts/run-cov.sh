@@ -69,14 +69,16 @@ report_coverage() {
 # CI keeps one instrumented build and accumulates profiles across package steps.
 case "${1:-}" in
   --test-package)
-    [[ $# -eq 2 && -n "$2" ]]
+    [[ $# -ge 2 && -n "$2" ]]
+    selected_package="$2"
+    shift 2
     MF_TEST_BUILD_CACHE_SESSION="$(cat "${coverage_dir}/build-cache-session")"
     export MF_TEST_BUILD_CACHE_SESSION
     # Some packages, such as derive macros, are tested only by their consumers.
     cargo nextest run \
       --cargo-metadata "${coverage_dir}/cargo-metadata.json" \
       --binaries-metadata "${coverage_dir}/binaries.json" \
-      -E "package(=$2)" --no-tests warn
+      -E "package(=$selected_package)" --no-tests warn "$@"
     exit 0
     ;;
   --prune-cache)

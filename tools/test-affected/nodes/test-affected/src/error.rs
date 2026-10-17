@@ -25,11 +25,6 @@ pub enum Error {
     Invalid { message: String },
 }
 
-impl From<Error> for mf_runtime::NodeBuildError {
-    fn from(source: Error) -> Self {
-        Box::<dyn std::error::Error + Send + Sync>::from(source).into()
-    }
-}
 impl From<Error> for mf_runtime::NodeExecutionError {
     fn from(source: Error) -> Self {
         Box::<dyn std::error::Error + Send + Sync>::from(source).into()

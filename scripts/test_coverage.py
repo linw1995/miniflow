@@ -31,7 +31,10 @@ class CoverageTests(unittest.TestCase):
                 self.assertLess(workflow.index("name: Prune coverage build cache"),
                                 workflow.index("name: Upload coverage artifact"))
                 for name, body in steps:
-                    self.assertIn(f"scripts/run-cov.sh --test-package {name}\n", body)
+                    suffix = " --run-ignored all" if name == "mfn-lsp" else ""
+                    self.assertIn(f"scripts/run-cov.sh --test-package {name}{suffix}\n", body)
+                    if name == "mfn-lsp":
+                        self.assertIn("env MF_LSP_SMOKE_SERVER=rust-analyzer", body)
                     if filename == "CI.yaml":
                         self.assertIn(
                             "if: github.event_name != 'pull_request' || "
@@ -122,6 +125,11 @@ mod tests {{
     fn value_matches() {{
         assert_eq!(super::value(), {value});
     }}
+    #[test]
+    #[ignore]
+    fn explicit_check() {{
+        assert_eq!(super::value(), {value});
+    }}
 }}
 ''')
             result = execute("cargo", "generate-lockfile", "--offline")
@@ -167,6 +175,10 @@ mod tests {{
                 result = execute("bash", "scripts/run-cov.sh", "--test-package", package)
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 self.assertFalse(report.exists())
+            result = execute("bash", "scripts/run-cov.sh", "--test-package", "coverage-fixture", "--run-ignored", "only")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("explicit_check", result.stdout + result.stderr)
+            self.assertIn("2 passed", result.stdout + result.stderr)
             self.assertEqual(session.read_text(), prepared_session)
             other_source.write_text(original_source)
             result = execute("bash", "scripts/run-cov.sh", "--report")

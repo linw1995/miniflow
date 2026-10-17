@@ -171,6 +171,7 @@ fn resolves_merge_base_and_rejects_changed_snapshots_and_analysis_identities() {
     let advanced = commit(root);
     let comparison = compare(root, &advanced, &head);
     assert_eq!(comparison.base, base);
+    assert!(git::verify_snapshot(&comparison.head_root, &base).is_err());
     assert_eq!(
         comparison
             .changes
@@ -249,13 +250,45 @@ fn script_verifies_selection_runs_cases_and_preserves_empty_stale_and_failed_pla
         &comparison,
         &outcome(&comparison),
         &PlanOptions {
-            inventory: Some(inventory),
+            inventory: Some(inventory.clone()),
             ..Default::default()
         },
     )
     .unwrap();
     assert_eq!(counted.baseline_count, Some(4));
     assert_eq!(counted.selected_count, Some(1));
+    let original: serde_json::Value =
+        serde_json::from_slice(&fs::read(&inventory).unwrap()).unwrap();
+    for case in ["identity", "shape", "missing_case"] {
+        let mut supplied = original.clone();
+        match case {
+            "identity" => supplied["head"] = json!("another-head"),
+            "shape" => supplied["inventory"] = json!({}),
+            _ => {
+                supplied["inventory"]["rust-suites"]["sample-core"]["testcases"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("tests::changed");
+            }
+        }
+        fs::write(&inventory, supplied.to_string()).unwrap();
+        let result = make_plan(
+            &comparison,
+            &outcome(&comparison),
+            &PlanOptions {
+                inventory: Some(inventory.clone()),
+                ..Default::default()
+            },
+        );
+        if case == "missing_case" {
+            let fallback = result.unwrap();
+            assert_eq!(fallback.packages, fallback.baseline_packages);
+            assert!(fallback.tests.is_empty());
+            assert_eq!(fallback.selected_count, fallback.baseline_count);
+        } else {
+            assert!(result.is_err(), "{case}");
+        }
+    }
     plan.tests[0].name = "missing_generated_case".into();
     let output = run(&plan, &["--list-only"]);
     assert!(
@@ -318,4 +351,180 @@ fn rejects_feature_configuration_drift_and_partial_inventories() {
     .unwrap();
     options.inventory = Some(inventory);
     assert!(make_plan(&comparison, &analysis, &options).is_err());
+}
+
+#[test]
+fn maps_conventional_modules_and_integration_targets_but_retains_ambiguous_paths() {
+    let (directory, _) = fixture();
+    let root = directory.path();
+    write(root, "core/src/lib.rs", "mod flat; mod nested;\n");
+    write(root, "core/src/flat.rs", SOURCE);
+    write(root, "core/src/nested/mod.rs", SOURCE);
+    write(
+        root,
+        "core/tests/external.rs",
+        "#[test] fn external() { assert_eq!(1, 1); }\n",
+    );
+    let base = commit(root);
+    for path in [
+        "core/src/flat.rs",
+        "core/src/nested/mod.rs",
+        "core/tests/external.rs",
+    ] {
+        let text = fs::read_to_string(root.join(path)).unwrap();
+        write(root, path, &text.replace("1, 1", "2, 2"));
+    }
+    let head = commit(root);
+    let comparison = compare(root, &base, &head);
+    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    assert!(plan.packages.is_empty());
+    assert_eq!(
+        plan.tests
+            .iter()
+            .map(|t| (t.binary.as_str(), t.name.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("sample-core", "flat::tests::changed"),
+            ("sample-core", "nested::tests::changed"),
+            ("sample-core::external", "external"),
+        ]
+    );
+
+    // Two candidate module files cannot establish one executable identity.
+    write(root, "core/src/flat/mod.rs", SOURCE);
+    let ambiguous_base = commit(root);
+    write(root, "core/src/flat.rs", &SOURCE.replace("1, 1", "3, 3"));
+    let head = commit(root);
+    let comparison = compare(root, &ambiguous_base, &head);
+    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    assert_eq!(plan.packages, ["sample-app", "sample-core"]);
+    assert!(plan.tests.is_empty());
+}
+
+#[test]
+fn feature_profiles_must_match_the_execution_configuration() {
+    let (directory, base) = fixture();
+    let root = directory.path();
+    write(root, "core/src/lib.rs", &SOURCE.replace("1, 1", "2, 2"));
+    let head = commit(root);
+    let mut comparison = compare(root, &base, &head);
+    let mut options = PlanOptions::default();
+    options.configuration.all_features = false;
+    options.configuration.features = vec!["selected".into()];
+    options.configuration.no_default_features = true;
+    for (cargo, valid) in [
+        (
+            json!({"features":["selected"],"noDefaultFeatures":true}),
+            true,
+        ),
+        (
+            json!({"features":["other"],"noDefaultFeatures":true}),
+            false,
+        ),
+        (
+            json!({"features":["selected"],"noDefaultFeatures":false}),
+            false,
+        ),
+        (
+            json!({"features":["selected"],"noDefaultFeatures":true,"target":"other-target"}),
+            false,
+        ),
+    ] {
+        comparison.request.initialization_options = json!({"cargo":cargo});
+        let mut analysis = outcome(&comparison);
+        analysis.server.profile = Profile::RustAnalyzer;
+        assert_eq!(make_plan(&comparison, &analysis, &options).is_ok(), valid);
+    }
+    options.configuration.all_features = true;
+    assert!(make_plan(&comparison, &outcome(&comparison), &options).is_err());
+    options.configuration.features.clear();
+    options.configuration.no_default_features = false;
+    let mut analysis = outcome(&comparison);
+    analysis.server.profile = Profile::RustAnalyzer;
+    analysis.request.initialization_options = json!({"cargo":{"features":[]}});
+    comparison.request = analysis.request.clone();
+    assert!(make_plan(&comparison, &analysis, &options).is_err());
+}
+
+#[test]
+fn additions_deletions_and_manifest_changes_preserve_conservative_scope() {
+    let (directory, _) = fixture();
+    let root = directory.path();
+    write(root, "core/src/old.rs", "pub fn old() {}\n");
+    let base = commit(root);
+    git::command(root, "git", &["mv", "core/src/old.rs", "core/src/new.rs"]).unwrap();
+    write(root, "core/data.txt", "fixture\n");
+    let head = commit(root);
+    let comparison = compare(root, &base, &head);
+    assert_eq!(comparison.changes.len(), 3);
+    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    assert_eq!(plan.packages, ["sample-app", "sample-core"]);
+    assert!(plan.tests.is_empty());
+    assert!(git::compare(root, &base, &head, Some(Path::new("relative")), json!({})).is_err());
+    let manifest = fs::read_to_string(root.join("core/Cargo.toml")).unwrap();
+    write(
+        root,
+        "core/Cargo.toml",
+        &(manifest + "\n[features]\nselected = []\n"),
+    );
+    let next = commit(root);
+    let comparison = compare(root, &head, &next);
+    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    assert_eq!(plan.packages.len(), 3);
+    assert!(
+        plan.fallback_reasons
+            .iter()
+            .any(|r| r.contains("Dependency configuration"))
+    );
+}
+
+#[test]
+fn task_boundaries_preserve_error_sources_and_reject_cancelled_work() {
+    use mf_runtime::{ExecutionContext, TypedTaskNode};
+    use std::error::Error as _;
+    let node = mfn_test_affected::GitNode {
+        config: Default::default(),
+    };
+    let input = || mfn_test_affected::GitInput {
+        repository: "/missing-test-affected-repository".into(),
+        base: "HEAD".into(),
+        head: None,
+        artifacts: None,
+        options: None,
+    };
+    let mut context = ExecutionContext::default();
+    let error = node.execute(input(), &mut context).err().unwrap();
+    assert!(
+        error
+            .source()
+            .unwrap()
+            .downcast_ref::<mfn_test_affected::Error>()
+            .is_some()
+    );
+    let plan_input = || mfn_lsp::AnalyzeOutput {
+        outcome: json!(null).into(),
+        context: json!({}).into(),
+    };
+    let error = mfn_test_affected::PlanNode
+        .execute(plan_input(), &mut context)
+        .err()
+        .unwrap();
+    assert!(
+        error
+            .source()
+            .unwrap()
+            .downcast_ref::<mfn_test_affected::Error>()
+            .is_some()
+    );
+    context
+        .cancellation()
+        .cancel(mf_runtime::StreamError::Execution {
+            message: "cancel fixture".into(),
+        });
+    assert!(node.execute(input(), &mut context).is_err());
+    assert!(
+        mfn_test_affected::PlanNode
+            .execute(plan_input(), &mut context)
+            .is_err()
+    );
 }
