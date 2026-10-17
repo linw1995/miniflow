@@ -1,17 +1,17 @@
 //! Parent-owned chat invocation state and executable contracts.
 
-use crate::{ChatError, Completion, Invocation, ModelIdentity, error::*, turn};
+use crate::{ChatError, Completion, Invocation, error::*, turn};
 use mf_runtime::{NodeValue, WorkflowArguments, WorkflowInputSchema, WorkflowManifest};
-use sha2::{Digest, Sha256};
-use snafu::{ResultExt, ensure};
+use snafu::ensure;
 use std::collections::BTreeMap;
 
 mod recovery;
-pub use recovery::{CompletionState, ConversationExit, MAX_RECOVERY_BYTES, ReconciledCompletion};
+pub use recovery::{
+    CompletionState, ConversationExit, MAX_RECOVERY_BYTES, ReconciledCompletion, decode_completion,
+};
 
 #[derive(Clone, Debug)]
 pub struct ChatContract {
-    pub config_id: String,
     pub parameters: WorkflowInputSchema,
     inputs: BTreeMap<String, String>,
 }
@@ -76,38 +76,9 @@ impl ChatContract {
                 }
             );
         }
-        let config_id =
-            Sha256::digest(serde_json::to_vec(&manifest.definition).context(JsonSnafu)?)
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect();
         Ok(Self {
-            config_id,
             parameters: configuration,
             inputs,
-        })
-    }
-
-    pub fn model_identity(
-        &self,
-        profile: &str,
-        parameters: &WorkflowArguments,
-    ) -> Result<ModelIdentity, ChatError> {
-        self.parameters.validate(parameters)?;
-        let public: BTreeMap<_, _> = parameters
-            .0
-            .iter()
-            .filter(|(_, value)| !value.contains_secret())
-            .collect();
-        let config_id =
-            Sha256::digest(serde_json::to_vec(&(&self.config_id, public)).context(JsonSnafu)?)
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect();
-        Ok(ModelIdentity {
-            profile: profile.into(),
-            model: None,
-            config_id,
         })
     }
 

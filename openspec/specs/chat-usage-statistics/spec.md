@@ -8,7 +8,7 @@ Account for model calls from conversation and title workflows and expose reprodu
 
 ### Requirement: Preserve call identity and purpose
 
-Each begun model-call record SHALL retain its stable call identity, session identity, actual model configuration identity, purpose, and lifecycle timestamps. Conversation calls SHALL link to their turn. Title calls SHALL be distinguishable from conversation calls. A scheduled call that has not begun MUST NOT count as an attempted model call.
+Each begun model-call record SHALL retain its stable call identity, session identity, profile and actual model identity, purpose, and lifecycle timestamps. Conversation calls SHALL link to their turn. Title calls SHALL be distinguishable from conversation calls. A scheduled call that has not begun MUST NOT count as an attempted model call.
 
 #### Scenario: Count both application call types
 
@@ -64,7 +64,7 @@ Statistics SHALL include reported model attempts by terminal status and preserve
 
 ### Requirement: Query consistent scoped aggregates
 
-The statistics flow SHALL support all sessions or one session, an optional model configuration and purpose filter, and an optional UTC time range based on call start time. It SHALL return consistent aggregates from one storage snapshot, with bounded grouping by session, model configuration, purpose, or UTC day. Numeric overflow MUST fail explicitly.
+The statistics flow SHALL support all sessions or one session, optional profile, model, and purpose filters, and an optional UTC time range based on call start time. It SHALL return consistent aggregates from one storage snapshot, with bounded grouping by session, profile, model, purpose, or UTC day. Numeric overflow MUST fail explicitly.
 
 #### Scenario: Scope to one session and purpose
 
@@ -121,3 +121,15 @@ MUST NOT duplicate call facts.
 
 - **WHEN** model calls in one workflow execution start on different UTC days
 - **THEN** time filtering and grouping use their individual reported start timestamps
+
+### Requirement: Retire configuration fingerprints
+
+Call APIs and usage queries SHALL NOT require or expose configuration fingerprints. Upgrading an
+existing database SHALL preserve historical fingerprints as inert storage data, call identities,
+lifecycle state, message metadata, reported usage lists, and legacy token counters. New calls SHALL
+omit fingerprints, and statistics SHALL NOT group or filter by them.
+
+#### Scenario: Upgrade a database with configuration fingerprints
+
+- **WHEN** an existing database is opened by the updated backend
+- **THEN** its calls and usage totals remain available without configuration hashing or grouping

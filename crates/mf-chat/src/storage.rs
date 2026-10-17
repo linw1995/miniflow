@@ -219,63 +219,82 @@ mod tests {
     }
 
     #[test]
-    fn upgrading_existing_records_preserves_legacy_usage_and_empty_metadata() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("chat.sqlite");
-        let database = ChatDatabase::open(&path).unwrap();
-        let session = database
-            .create_session("default", None, Some("Existing".into()))
-            .unwrap();
-        let begun = database
-            .begin_turn(
-                &session.id,
-                "question",
-                crate::ModelIdentity {
-                    profile: "default".into(),
-                    model: Some("old-model".into()),
-                    config_id: "old-config".into(),
-                },
-                None,
-                1024,
-            )
-            .unwrap();
-        database
-            .complete_turn(
-                begun.invocation.clone(),
-                crate::Reply {
-                    text: "old reply".into(),
-                    usage: Some(std::collections::BTreeMap::from([(
-                        "input_tokens".into(),
-                        4,
-                    )])),
-                    usages: None,
-                    metadata: None,
-                    finish_reason: None,
-                },
-            )
-            .unwrap();
-        let mut connection = connect(&path).unwrap();
-        connection.revert_last_migration(MIGRATIONS).unwrap();
-        drop(connection);
-        drop(database);
-        let reopened = ChatDatabase::open(path).unwrap();
-        let call = reopened.call(&begun.invocation.call_id).unwrap();
-        assert_eq!(call.model.as_deref(), Some("old-model"));
-        assert!(call.usages.is_none() && call.metadata.is_none());
-        assert!(
-            reopened.history(&session.id, 1024).unwrap().history[1]
-                .metadata
-                .is_none()
-        );
-        assert_eq!(
-            reopened
-                .usage(Default::default())
-                .unwrap()
-                .overall
-                .input_tokens
-                .known_subtotal,
-            Some(4)
-        );
+    fn upgrading_existing_records_preserves_usage_metadata_and_legacy_fingerprints() {
+        use crate::schema::model_calls;
+        use std::collections::BTreeMap;
+
+        for previous_version in [1, 2] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("chat.sqlite");
+            let database = ChatDatabase::open(&path).unwrap();
+            let session = database
+                .create_session("default", None, Some("Existing".into()))
+                .unwrap();
+            let begun = database
+                .begin_turn(
+                    &session.id,
+                    "question",
+                    crate::ModelIdentity {
+                        profile: "default".into(),
+                        model: Some("old-model".into()),
+                    },
+                    None,
+                    1024,
+                )
+                .unwrap();
+            let counters = BTreeMap::from([("input_tokens".into(), 4)]);
+            let metadata = (previous_version == 2)
+                .then(|| BTreeMap::from([("source".into(), "retained".into())]));
+            let usages = (previous_version == 2).then(|| {
+                vec![mfn_llm::CallUsage {
+                    started_at: Some(1),
+                    call_id: "reported-call".into(),
+                    node: None,
+                    model: "old-model".into(),
+                    usage: Some(counters.clone()),
+                    error: None,
+                }]
+            });
+            database
+                .complete_turn(
+                    begun.invocation.clone(),
+                    crate::Reply {
+                        text: "old reply".into(),
+                        usage: Some(counters),
+                        usages,
+                        metadata: metadata.clone(),
+                        finish_reason: None,
+                    },
+                )
+                .unwrap();
+            let original = database.call(&begun.invocation.call_id).unwrap();
+            let mut connection = connect(&path).unwrap();
+            for _ in previous_version..3 {
+                connection.revert_last_migration(MIGRATIONS).unwrap();
+            }
+            connection
+                .batch_execute("UPDATE model_calls SET config_id = 'legacy-config';")
+                .unwrap();
+            drop(connection);
+            drop(database);
+            let reopened = ChatDatabase::open(path).unwrap();
+            assert_eq!(reopened.call(&begun.invocation.call_id).unwrap(), original);
+            assert_eq!(
+                reopened.history(&session.id, 1024).unwrap().history[1].metadata,
+                metadata
+            );
+            assert_eq!(
+                model_calls::table
+                    .find(&begun.invocation.call_id)
+                    .select(diesel::dsl::sql::<diesel::sql_types::Text>("config_id"))
+                    .get_result::<String>(&mut connect(reopened.path()).unwrap())
+                    .unwrap(),
+                "legacy-config"
+            );
+            let usage = reopened.usage(Default::default()).unwrap();
+            assert_eq!(usage.overall.attempted_calls, 1);
+            assert_eq!(usage.overall.input_tokens.known_subtotal, Some(4));
+        }
     }
 
     #[test]

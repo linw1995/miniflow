@@ -1614,7 +1614,6 @@ dependencies = [
  "mfn-llm",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "snafu",
  "tempfile",
  "toml",

@@ -32,7 +32,6 @@ impl Invocation {
 pub struct ModelIdentity {
     pub profile: String,
     pub model: Option<String>,
-    pub config_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
@@ -201,11 +200,10 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
             .model
             .model
             .as_ref()
-            .is_none_or(|model| !model.trim().is_empty())
-            && !input.model.config_id.is_empty(),
+            .is_none_or(|model| !model.trim().is_empty()),
         InvalidSnafu {
             field: "model",
-            reason: "requires model and configuration identity"
+            reason: "model must be nonblank when supplied"
         }
     );
     let mut connection = storage::connect(Path::new(&input.database_path))?;
@@ -280,7 +278,6 @@ pub fn begin(input: BeginTurnInputs) -> Result<TurnStarted, ChatError> {
             purpose: "conversation".into(),
             profile: input.model.profile.clone(),
             model: input.model.model.clone(),
-            config_id: input.model.config_id.clone(),
             state: "running".into(),
             title_revision: None,
             started_at: Some(timestamp),
@@ -965,7 +962,6 @@ mod tests {
         ModelIdentity {
             profile: "default".into(),
             model: Some("test-model".into()),
-            config_id: "test-config".into(),
         }
     }
     fn reply(text: &str) -> Reply {

@@ -3,7 +3,6 @@ fn identity() -> ModelIdentity {
     ModelIdentity {
         profile: "default".into(),
         model: Some("model".into()),
-        config_id: "config".into(),
     }
 }
 fn reply(text: &str) -> Reply {

@@ -33,8 +33,6 @@ pub enum UsageGrouping {
     Session,
     #[value(rename = "model")]
     Model,
-    #[value(rename = "configuration")]
-    Configuration,
     #[value(rename = "profile")]
     Profile,
     #[value(rename = "purpose")]
@@ -48,7 +46,6 @@ pub struct UsageQuery {
     pub session_id: Option<String>,
     pub profile: Option<String>,
     pub model: Option<String>,
-    pub config_id: Option<String>,
     pub purpose: Option<CallPurpose>,
     pub start_ms: Option<i64>,
     pub end_ms: Option<i64>,
@@ -64,7 +61,6 @@ impl Default for UsageQuery {
             session_id: None,
             profile: None,
             model: None,
-            config_id: None,
             purpose: None,
             start_ms: None,
             end_ms: None,
@@ -144,9 +140,6 @@ macro_rules! filtered {
         if let Some(value) = &filter.model {
             statement = statement.filter($source::model.eq(value));
         }
-        if let Some(value) = &filter.config_id {
-            statement = statement.filter($source::config_id.eq(value));
-        }
         if let Some(value) = filter.purpose {
             statement = statement.filter($source::purpose.eq(value.as_str()));
         }
@@ -215,7 +208,6 @@ fn key_expression(grouping: UsageGrouping) -> &'static str {
     match grouping {
         UsageGrouping::Session => "session_id",
         UsageGrouping::Model => "model",
-        UsageGrouping::Configuration => "config_id",
         UsageGrouping::Profile => "profile",
         UsageGrouping::Purpose => "purpose",
         UsageGrouping::Day => "strftime('%Y-%m-%d', started_at / 1000.0, 'unixepoch')",

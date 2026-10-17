@@ -96,7 +96,6 @@ pub fn schedule(
         purpose: "title".into(),
         profile: profile.into(),
         model: None,
-        config_id: String::new(),
         state: "pending".into(),
         title_revision: Some(revision),
         started_at: None,
@@ -149,7 +148,7 @@ pub fn prepare(input: PrepareTitleInputs) -> Result<TitleStarted, ChatError> {
         ensure!(prompt.len() <= input.max_bytes, HistoryTooLargeSnafu { limit: input.max_bytes });
         diesel::update(model_calls::table.find(&call.id)).set((model_calls::state.eq("running"),
             model_calls::started_at.eq(Some(session::now()?)), model_calls::profile.eq(&input.model.profile),
-            model_calls::model.eq(&input.model.model), model_calls::config_id.eq(&input.model.config_id)))
+            model_calls::model.eq(&input.model.model)))
             .execute(connection).context(DatabaseSnafu { operation: "begin session title call" })?;
         Ok(TitleStarted { database_path: input.database_path.clone(), invocation, title_revision: revision,
             request: Some(mfn_llm::LlmInputs { prompt,

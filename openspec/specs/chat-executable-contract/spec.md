@@ -67,8 +67,7 @@ be absent on failure. Metadata, error, and finish_reason outputs are optional.
 The workflow SHALL explicitly return one usage record per reported model attempt, including repeated
 calls and calls without counters. Records SHALL contain unique call identities, resolved public model
 names, and node/loop identity when available. The backend MUST NOT infer a model from graph topology or
-collect hidden node outputs. Admission configuration identity SHALL fingerprint the workflow and public
-resolved parameters, excluding resolved secrets.
+collect hidden node outputs. Admission SHALL NOT require configuration fingerprints.
 
 #### Scenario: Combine multiple models
 
@@ -84,11 +83,6 @@ resolved parameters, excluding resolved secrets.
 
 - **WHEN** a public model parameter overrides its default
 - **THEN** accounting records the same resolved model forwarded to the runner
-
-#### Scenario: Rotate credentials
-
-- **WHEN** resolved credentials change while public configuration remains unchanged
-- **THEN** the accounting fingerprint remains unchanged and built-in LLMs continue to require public model identifiers
 
 ### Requirement: Preserve caller-owned invocation identity
 
@@ -164,3 +158,14 @@ finalize unfinished work without model execution or overwriting committed succes
 
 - **WHEN** the owning application crashes before persisting its in-memory reply
 - **THEN** reopening storage interrupts abandoned work without automatically resending a model request
+
+### Requirement: Recover without executable metadata
+
+Decoding and reconciling captured output SHALL require only the admitted invocation and result bytes,
+without rebuilding an executable manifest or conversation input contract. Existing bounded parsing,
+ownership checks, and idempotent persistence SHALL remain in effect.
+
+#### Scenario: Retry saving after the executable is unavailable
+
+- **WHEN** the application retains result bytes and the admitted invocation
+- **THEN** it can decode and save the result without loading the original executable or manifest

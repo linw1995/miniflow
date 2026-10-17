@@ -15,7 +15,6 @@ use mf_runtime::{
 };
 use mf_telemetry::{identity::RunId, observation::Observer};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -32,7 +31,6 @@ mod title;
 
 #[derive(Clone, Debug)]
 pub struct ModelProfile {
-    name: String,
     config: Value,
     identity: ModelIdentity,
 }
@@ -56,20 +54,11 @@ impl ModelProfile {
                 reason: "must be a string",
             })?
             .to_owned();
-        let encoded = serde_json::to_vec(&config).context(JsonSnafu)?;
         let identity = ModelIdentity {
-            profile: name.clone(),
+            profile: name,
             model: Some(model),
-            config_id: Sha256::digest(encoded)
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect(),
         };
-        Ok(Self {
-            name,
-            config,
-            identity,
-        })
+        Ok(Self { config, identity })
     }
 
     pub fn identity(&self) -> &ModelIdentity {
@@ -90,7 +79,7 @@ pub struct HostConfig {
 impl HostConfig {
     pub fn new(profile: ModelProfile) -> Self {
         Self {
-            profiles: BTreeMap::from([(profile.name.clone(), profile)]),
+            profiles: BTreeMap::from([(profile.identity.profile.clone(), profile)]),
             max_active: 4,
             max_history_bytes: crate::DEFAULT_HISTORY_BYTES,
             observer: None,
@@ -218,7 +207,7 @@ impl ChatHost {
         );
         for (key, profile) in &config.profiles {
             ensure!(
-                key == &profile.name,
+                key == &profile.identity.profile,
                 InvalidSnafu {
                     field: "profiles",
                     reason: "keys must match profile names"

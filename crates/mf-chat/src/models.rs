@@ -105,7 +105,6 @@ pub struct ModelCall {
     pub purpose: String,
     pub profile: String,
     pub model: Option<String>,
-    pub config_id: String,
     pub state: String,
     pub title_revision: Option<i64>,
     pub started_at: Option<i64>,

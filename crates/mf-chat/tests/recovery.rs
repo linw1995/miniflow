@@ -1,25 +1,11 @@
 use diesel::{Connection, connection::SimpleConnection};
 use mf_chat::executable::{
-    ChatContract, CompletionState, ConversationExit, MAX_RECOVERY_BYTES, TurnExit,
+    CompletionState, ConversationExit, MAX_RECOVERY_BYTES, TurnExit, decode_completion,
 };
 use mf_chat::{ChatDatabase, ModelProfile, Reply};
 use mf_runtime::NodeValue;
 use serde_json::json;
 
-fn contract() -> ChatContract {
-    let definition = mf_runtime::WorkflowDefinition::from_json(
-        &json!({
-            "version":"2026-10-03", "dependencies":{},
-            "nodes":[{"id":"model", "kind":"builtin.llm", "config":{"model":"fixture-model"}}],
-            "outputs":[{"name":"text", "node":"model", "port":"text"}, {"name":"status", "node":"model", "port":"status"}, {"name":"usages", "node":"model", "port":"usages"}]
-        })
-        .to_string(),
-    )
-    .unwrap();
-    let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
-    let plan = mf_compiler::compile_definition(&definition, &registry).unwrap();
-    ChatContract::from_manifest(&plan.manifest(&registry).unwrap()).unwrap()
-}
 fn begin(database: &ChatDatabase) -> mf_chat::Invocation {
     let session = database.create_session("default", None, None).unwrap();
     let profile = ModelProfile::new("default", json!({"model":"fixture-model"})).unwrap();
@@ -92,14 +78,12 @@ fn failure(database: &ChatDatabase, enabled: bool) {
 fn parent_save_retry_retains_the_original_reply_without_starting_another_call() {
     let root = tempfile::tempdir().unwrap();
     let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
-    let contract = contract();
     let invocation = begin(&database);
     let bytes = stdout("paid reply");
     failure(&database, true);
     assert!(database.complete_turn(invocation.clone(), reply()).is_err());
     let resolution = database
         .reconcile_completion(ConversationExit {
-            contract: &contract,
             invocation: &invocation,
             stdout: Some(&bytes),
             outcome: TurnExit::Failed,
@@ -167,7 +151,6 @@ fn parent_save_retry_retains_the_original_reply_without_starting_another_call() 
 fn committed_reply_wins_over_broken_output_and_late_cancellation() {
     let root = tempfile::tempdir().unwrap();
     let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
-    let contract = contract();
     let invocation = begin(&database);
     let saved = database.complete_turn(invocation.clone(), reply()).unwrap();
     for (bytes, has_diagnostics) in [
@@ -178,7 +161,6 @@ fn committed_reply_wins_over_broken_output_and_late_cancellation() {
     ] {
         let resolution = database
             .reconcile_completion(ConversationExit {
-                contract: &contract,
                 invocation: &invocation,
                 stdout: bytes.as_deref(),
                 outcome: TurnExit::Cancelled,
@@ -194,12 +176,10 @@ fn committed_reply_wins_over_broken_output_and_late_cancellation() {
 fn retained_replies_keep_database_and_purpose_ownership_until_abandoned() {
     let root = tempfile::tempdir().unwrap();
     let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
-    let contract = contract();
     let invocation = begin(&database);
     let bytes = stdout("paid reply");
     let resolution = database
         .reconcile_completion(ConversationExit {
-            contract: &contract,
             invocation: &invocation,
             stdout: Some(&bytes),
             outcome: TurnExit::Interrupted,
@@ -229,7 +209,6 @@ fn retained_replies_keep_database_and_purpose_ownership_until_abandoned() {
 fn malformed_or_missing_model_output_finalizes_only_the_admitted_invocation() {
     let root = tempfile::tempdir().unwrap();
     let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
-    let contract = contract();
     let untouched = begin(&database);
     for bytes in [
         None,
@@ -242,7 +221,6 @@ fn malformed_or_missing_model_output_finalizes_only_the_admitted_invocation() {
         let invocation = begin(&database);
         let resolution = database
             .reconcile_completion(ConversationExit {
-                contract: &contract,
                 invocation: &invocation,
                 stdout: bytes.as_deref(),
                 outcome: TurnExit::Interrupted,
@@ -262,7 +240,6 @@ fn malformed_or_missing_model_output_finalizes_only_the_admitted_invocation() {
 fn late_output_cannot_admit_or_revive_a_conversation() {
     let root = tempfile::tempdir().unwrap();
     let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
-    let contract = contract();
     let cancelled = begin(&database);
     database
         .fail_turn(cancelled.clone(), "cancelled", "cancelled before reply")
@@ -274,7 +251,6 @@ fn late_output_cannot_admit_or_revive_a_conversation() {
     ] {
         let resolution = database
             .reconcile_completion(ConversationExit {
-                contract: &contract,
                 invocation: &invocation,
                 stdout: Some(&bytes),
                 outcome: TurnExit::Failed,
@@ -319,7 +295,6 @@ fn failed_workflow_persists_all_reported_calls_atomically_without_an_assistant_m
     let path = root.path().join("chat.sqlite");
     let database = ChatDatabase::open(&path).unwrap();
     let invocation = begin(&database);
-    let contract = contract();
     let mut reported = usages();
     reported[0].usage = Some(std::collections::BTreeMap::from([(
         "input_tokens".into(),
@@ -337,7 +312,6 @@ fn failed_workflow_persists_all_reported_calls_atomically_without_an_assistant_m
     )
     .unwrap();
     let exit = || ConversationExit {
-        contract: &contract,
         invocation: &invocation,
         stdout: Some(&bytes),
         outcome: TurnExit::Failed,
@@ -411,7 +385,6 @@ fn failed_workflow_persists_all_reported_calls_atomically_without_an_assistant_m
 
 #[test]
 fn response_validation_rejects_ambiguous_or_invalid_usage_facts() {
-    let contract = contract();
     let invocation = mf_chat::Invocation::new("session");
     let first = usages().remove(0);
     let mut invalid = first.clone();
@@ -423,18 +396,14 @@ fn response_validation_rejects_ambiguous_or_invalid_usage_facts() {
         let bytes =
             serde_json::to_vec(&json!({"status":"succeeded", "text":"reply", "usages":reported}))
                 .unwrap();
-        assert!(contract.decode_completion(&bytes, &invocation).is_err());
+        assert!(decode_completion(&bytes, &invocation).is_err());
     }
     for result in [
         json!({"status":"succeeded", "text":"reply"}),
         json!({"status":"unknown", "text":"reply", "usages":[]}),
         json!({"status":"succeeded", "text":"reply", "metadata":[], "usages":[]}),
     ] {
-        assert!(
-            contract
-                .decode_completion(&serde_json::to_vec(&result).unwrap(), &invocation)
-                .is_err()
-        );
+        assert!(decode_completion(&serde_json::to_vec(&result).unwrap(), &invocation).is_err());
     }
 }
 
@@ -462,9 +431,8 @@ fn returned_history_cannot_rewrite_saved_message_metadata() {
     output["history"] =
         json!([{"role":"assistant","content":"rewritten","metadata":{"changed":true}}]);
     output["metadata"] = json!({"current":true});
-    let completion = contract()
-        .decode_completion(&serde_json::to_vec(&output).unwrap(), &second.invocation)
-        .unwrap();
+    let completion =
+        decode_completion(&serde_json::to_vec(&output).unwrap(), &second.invocation).unwrap();
     database
         .complete_turn(completion.invocation, completion.reply)
         .unwrap();
@@ -487,7 +455,6 @@ fn unreported_workflow_invocations_are_not_counted_as_zero_model_calls() {
     let identity = mf_chat::ModelIdentity {
         profile: "default".into(),
         model: None,
-        config_id: "workflow".into(),
     };
     let begun = database
         .begin_turn(&owner.id, "first", identity.clone(), None, 1024)

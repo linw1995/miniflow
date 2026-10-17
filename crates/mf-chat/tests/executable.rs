@@ -27,12 +27,10 @@ fn parameters(contract: &ChatContract) -> WorkflowArguments {
 }
 
 #[test]
-fn external_inputs_and_public_configuration_define_the_contract() {
+fn conversation_inputs_are_bound_separately_from_parameters() {
     let manifest = manifest();
     let contract = ChatContract::from_manifest(&manifest).unwrap();
     let parameters = parameters(&contract);
-    let identity = contract.model_identity("default", &parameters).unwrap();
-    assert_eq!(identity.model, None);
     let input = mfn_llm::LlmInputs {
         prompt: "hello".into(),
         system: None,
@@ -57,25 +55,6 @@ fn external_inputs_and_public_configuration_define_the_contract() {
                 &arguments
             )
             .is_err()
-    );
-    let mut changed = parameters.clone();
-    changed.0.insert(
-        "params.api_key".into(),
-        mf_runtime::ValueRef::from("rotated-key").into_secret(),
-    );
-    assert_eq!(
-        contract.model_identity("default", &changed).unwrap(),
-        identity
-    );
-    changed
-        .0
-        .insert("params.model".into(), "another-model".into());
-    assert_ne!(
-        contract
-            .model_identity("default", &changed)
-            .unwrap()
-            .config_id,
-        identity.config_id
     );
 }
 
@@ -254,7 +233,10 @@ fn workflow_explicitly_combines_multiple_model_calls_on_success_and_failure() {
             .begin_turn(
                 &session.id,
                 "hello",
-                contract.model_identity("default", &parameters).unwrap(),
+                mf_chat::ModelIdentity {
+                    profile: "default".into(),
+                    model: None,
+                },
                 None,
                 1024,
             )
@@ -275,7 +257,6 @@ fn workflow_explicitly_combines_multiple_model_calls_on_success_and_failure() {
         let bytes = serde_json::to_vec(&outputs).unwrap();
         let resolution = database
             .reconcile_completion(mf_chat::executable::ConversationExit {
-                contract: &contract,
                 invocation: &begun.invocation,
                 stdout: Some(&bytes),
                 outcome: mf_chat::executable::TurnExit::Failed,
@@ -352,12 +333,11 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
             assert!(!result["error"].as_str().unwrap().is_empty());
         } else {
             assert_ne!(calls[0]["call_id"], calls[1]["call_id"]);
-            let completion = contract
-                .decode_completion(
-                    &serde_json::to_vec(&outputs).unwrap(),
-                    &mf_chat::Invocation::new("session"),
-                )
-                .unwrap();
+            let completion = mf_chat::executable::decode_completion(
+                &serde_json::to_vec(&outputs).unwrap(),
+                &mf_chat::Invocation::new("session"),
+            )
+            .unwrap();
             assert_eq!(completion.reply.usages.unwrap().len(), 2);
             assert_eq!(
                 completion.reply.metadata.unwrap()["strategy"].as_str(),

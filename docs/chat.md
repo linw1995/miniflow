@@ -68,7 +68,7 @@ host.close()?;
 
 `poll` is nonblocking, `join` waits for a result, and `cancel` requests cooperative cancellation. Dropping a job cancels that job; dropping or closing the host cancels and joins all its workers before releasing database ownership. The default host admits four active workflows, separately from the runtime's internal domain limit. A busy session or full host returns an explicit admission error.
 
-Profiles contain validated nonsecret LLM configuration. Credentials are read through the configured environment reference only during execution. Sessions keep their profile and system instructions; each call records the profile, model, and configuration fingerprint actually selected. An optional observer receives each configured flow's preparation and execution lifecycle.
+Profiles contain validated nonsecret LLM configuration. Credentials are read through the configured environment reference only during execution. Sessions keep their profile and system instructions; each call records the profile and model actually selected. An optional observer receives each configured flow's preparation and execution lifecycle.
 
 Provider failures finalize begun work through failure nodes in fresh contexts. If cleanup also fails, `ChatError::Execution` retains both typed errors and invocation identities. A reply whose storage write fails returns `ChatError::Uncommitted`; pass its retained value to `retry_completion` or explicitly abandon it. Repeated persistence failures return the retained reply again and never resend a model request. `retry` starts a fresh model call for an unsuccessful original turn.
 
@@ -100,13 +100,13 @@ Reopening resumes never-started pending requests. Interrupted provider attempts 
 let statistics = host.usage(mf_chat::UsageQuery {
     session_id: Some(session.id.clone()),
     purpose: Some(mf_chat::CallPurpose::Conversation),
-    group_by: Some(mf_chat::UsageGrouping::Configuration),
+    group_by: Some(mf_chat::UsageGrouping::Model),
     limit: 50,
     ..Default::default()
 })?;
 ```
 
-Filters accept session, profile, actual model name, configuration fingerprint, purpose, and call start times in UTC Unix milliseconds. Start is inclusive and end is exclusive. Group by session, model, configuration, profile, purpose, or UTC day. Pass `next_after` to fetch the next group page; the overall summary always covers the complete filter.
+Filters accept session, profile, actual model name, purpose, and call start times in UTC Unix milliseconds. Start is inclusive and end is exclusive. Group by session, model, profile, purpose, or UTC day. Pass `next_after` to fetch the next group page; the overall summary always covers the complete filter.
 
 Each token counter exposes `known_subtotal`, `reported_calls`, and `missing_calls`. A missing observation is not zero; an explicit zero is a reported observation. No observations yield an unknown subtotal. Treat a subtotal with missing observations as partial coverage. Attempt and status counts include begun failed, cancelled, and interrupted calls, but exclude never-started title requests.
 
@@ -218,9 +218,10 @@ through its chosen branches and accumulators. Successful status permits absent o
 ## Persistence and recovery
 
 Allocate an `Invocation`, durably begin its turn, and pass the resulting request to `contract.arguments`.
-`model_identity` provides the admission profile and a fingerprint of the workflow and public parameters;
-its model is absent because actual model identities arrive in `usages`. Capture stdout within
-`MAX_RECOVERY_BYTES` (16 MiB) and pass it to `reconcile_completion`.
+Supply `ModelIdentity { profile, model: None }` for workflow admission; actual model identities arrive
+in `usages`. New calls do not compute or require configuration fingerprints. Capture stdout within
+`MAX_RECOVERY_BYTES` (16 MiB) and pass it to `reconcile_completion`. Recovery and `decode_completion`
+only need the admitted invocation and output bytes; they do not require a manifest or `ChatContract`.
 
 Successful results become `CompletionState::Uncommitted`; `save_recovered` atomically saves the assistant
 message, metadata, usages, and successful turn state. Failed results atomically save their usages and the
