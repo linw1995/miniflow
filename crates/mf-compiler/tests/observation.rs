@@ -692,7 +692,7 @@ fn main() {
 "#).unwrap();
         mf_compiler::resolve_project(&project, &root.path().join("flow.lock"), false).unwrap();
         let build = mf_compiler::cargo_command(&project)
-            .args(["build", "--offline", "--locked"])
+            .args(["build", "--release", "--offline", "--locked"])
             .output()
             .unwrap();
         if matches!(
@@ -710,7 +710,7 @@ fn main() {
             "{}",
             String::from_utf8_lossy(&build.stderr)
         );
-        let result = Command::new(common::runner_executable(&project, "debug"))
+        let result = Command::new(common::runner_executable(&project, "release"))
             .output()
             .unwrap();
         assert!(
