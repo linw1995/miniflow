@@ -1,6 +1,6 @@
 mod value;
 
-use cel_core::{CelType, Env, MapActivation, Program, Value as CelValue};
+use cel_core::{CelType, Env, MapActivation, Program};
 use mf_runtime::{
     Inputs, NodeBuildError, NodeExecutionError, NodePortContract, NodePorts, NodeRegistration,
     Outputs, PortSpec, TaskNode, ValueType, deserialize_config,
@@ -53,10 +53,15 @@ enum CodeExecutionError {
         output: String,
         source: serde_json::Error,
     },
+    #[snafu(display("input `{input}`: {source}"))]
+    ConvertInput {
+        input: String,
+        source: value::ConversionError,
+    },
     #[snafu(display("output `{output}`: {source}"))]
-    Evaluate {
+    ConvertOutput {
         output: String,
-        source: cel_core::EvalError,
+        source: value::ConversionError,
     },
 }
 
@@ -186,7 +191,7 @@ impl TaskNode for CodeNode {
                 .get(name)
                 .ok_or_else(|| execution_error(format!("missing input `{name}`")))?;
             let converted = json_to_cel(value, value_type, &mut budget, "", 1)
-                .map_err(|error| execution_error(format!("input `{name}`: {error}")))?;
+                .context(ConvertInputSnafu { input: name })?;
             activation.insert(name, converted);
         }
         let mut outputs = Outputs::new();
@@ -194,11 +199,8 @@ impl TaskNode for CodeNode {
         for (name, output) in &self.outputs {
             let name = name.as_str();
             let result = output.program.eval(&activation);
-            if let CelValue::Error(error) = &result {
-                Err(error.as_ref().clone()).context(EvaluateSnafu { output: name })?;
-            }
             let converted = cel_to_json(&result, &output.value_type, &mut budget, "", 1)
-                .map_err(|error| execution_error(format!("output `{name}`: {error}")))?;
+                .context(ConvertOutputSnafu { output: name })?;
             let encoded_name = json_size(name).context(MeasureOutputSnafu { output: name })?;
             let encoded_value =
                 json_size(&converted).context(MeasureOutputSnafu { output: name })?;
@@ -208,7 +210,7 @@ impl TaskNode for CodeNode {
                     "output `{name}`: outputs exceed the {MAX_JSON_BYTES}-byte JSON limit"
                 )));
             }
-            outputs.insert(name.to_owned(), converted);
+            outputs.insert(name.to_owned(), converted.inherit_secrets(inputs.values()));
         }
         Ok(outputs.into())
     }
@@ -649,6 +651,111 @@ mod tests {
     }
 
     #[test]
+    fn concatenates_structured_and_heterogeneous_lists() {
+        let record = json!({"call_id": "same", "node": {"path": [{"index": 1}]}, "usage": null});
+        for (descriptor, left, right) in [
+            (
+                json!({"list": "object"}),
+                json!([]),
+                json!([record.clone(), {}]),
+            ),
+            (
+                json!({"list": "object"}),
+                json!([record.clone()]),
+                json!([record]),
+            ),
+            (
+                json!({"list": "any"}),
+                json!([null, true, "text"]),
+                json!([[], {}, u64::MAX]),
+            ),
+            (json!("array"), json!([]), json!([])),
+        ] {
+            let node = factory(json!({
+                "language":"cel", "inputs":{"left":descriptor,"right":descriptor},
+                "code":{"value":"left + right"}
+            }))
+            .unwrap();
+            let mut expected = left.as_array().unwrap().clone();
+            expected.extend(right.as_array().unwrap().iter().cloned());
+            let result = node
+                .execution
+                .as_task_node()
+                .unwrap()
+                .execute(
+                    Inputs::from([("left".into(), left.into()), ("right".into(), right.into())]),
+                    &mut Default::default(),
+                )
+                .unwrap();
+            assert_eq!(result.outputs["value"], json!(expected));
+        }
+    }
+
+    #[test]
+    fn dynamic_failures_preserve_output_context_and_atomicity() {
+        for (expression, typed_source) in [
+            ("value + 1", true),
+            ("dyn([{'a~/b': b'bytes'}])", false),
+            ("dyn({1: value})", false),
+        ] {
+            let node = factory(json!({
+                "language":"cel", "inputs":{"value":"any"},
+                "code":{"first":"1", "second":expression}
+            }))
+            .unwrap();
+            let error = node
+                .execution
+                .as_task_node()
+                .unwrap()
+                .execute(
+                    Inputs::from([("value".into(), "text".into())]),
+                    &mut Default::default(),
+                )
+                .unwrap_err();
+            assert!(error.to_string().contains("output `second`"), "{error}");
+            if typed_source {
+                assert!(find_source::<cel_core::EvalError>(&error).is_some());
+            } else {
+                assert!(find_source::<value::ConversionError>(&error).is_some());
+            }
+            if expression.contains("a~/b") {
+                assert!(error.to_string().contains("/0/a~0~1b"), "{error}");
+            }
+        }
+    }
+
+    #[test]
+    fn explicitly_propagates_nested_secrets_to_all_outputs() {
+        let node = factory(json!({
+            "language":"cel", "inputs":{"value":"object"},
+            "code":{"derived":"value.token + '-suffix'", "independent":"42", "nested":"[value]"}
+        }))
+        .unwrap();
+        for secret in [false, true] {
+            let token = mf_runtime::ValueRef::from("synthetic-token");
+            let token = if secret { token.into_secret() } else { token };
+            let input = mf_runtime::ValueRef::object([("token".into(), token)]);
+            let result = node
+                .execution
+                .as_task_node()
+                .unwrap()
+                .execute(
+                    Inputs::from([("value".into(), input)]),
+                    &mut Default::default(),
+                )
+                .unwrap();
+            assert_eq!(result.outputs["derived"], json!("synthetic-token-suffix"));
+            assert_eq!(result.outputs["independent"], json!(42));
+            for value in result.outputs.values() {
+                assert_eq!(value.is_secret(), secret);
+                if secret {
+                    assert_eq!(value.redacted(), json!("[REDACTED]"));
+                }
+            }
+        }
+    }
+
+    #[test]
     fn enforces_expression_payload_and_collection_limits() {
         let expression = format!("1{}", " ".repeat(MAX_EXPRESSION_BYTES));
         let error = factory(json!({
@@ -724,10 +831,15 @@ mod tests {
                 "x".repeat(bytes % encoded)
             )
         };
-        for (input, output, input_limited) in [("payload", "out", true), ("x", "result", false)] {
+        for (input, output, input_limited, descriptor) in [
+            ("payload", "out", true, "string"),
+            ("x", "result", false, "string"),
+            ("payload", "out", true, "any"),
+            ("x", "result", false, "any"),
+        ] {
             let node = factory(json!({
                 "language": "cel",
-                "inputs": BTreeMap::from([(input, "string")]),
+                "inputs": BTreeMap::from([(input, descriptor)]),
                 "code": BTreeMap::from([(output, input)])
             }))
             .unwrap();

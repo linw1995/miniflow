@@ -71,6 +71,38 @@ fn checks_inactive_code_and_known_input_conflicts() {
 }
 
 #[test]
+fn code_outputs_retain_secrets_in_workflow_observations() {
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-10-03", "dependencies":{},
+        "nodes":[
+            {"id":"params", "kind":"builtin.parameters", "config":{"parameters":{
+                "record":{"type":"object", "default":{"token":"synthetic-token"}}
+            }}},
+            {"id":"transform", "kind":"builtin.code", "config":{
+                "language":"cel", "inputs":{"record":"object"},
+                "code":{"derived":"record.token + '-suffix'", "independent":"42"}
+            }}
+        ],
+        "edges":[{"from_node":"params", "from_output":"record", "to_node":"transform", "to_input":"record"}],
+        "outputs":[{"name":"result", "node":"transform", "port":"derived"}]
+    })).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let flow = instantiate_compiled(&plan, &registry).unwrap();
+    let recording = mf_runtime::SnapshotRecording::memory();
+    let mut context = mf_runtime::ExecutionContext::default();
+    context.set_snapshot_recorder(recording.recorder());
+    let result = flow.execute_in_context(&mut context).unwrap();
+    assert_eq!(result["result"], json!("synthetic-token-suffix"));
+    assert!(result["result"].is_secret());
+    let snapshot = recording.current();
+    let node = snapshot.node(&[], "transform").unwrap();
+    assert_eq!(node.inputs["record"], json!("[REDACTED]"));
+    assert_eq!(node.outputs["derived"], json!("[REDACTED]"));
+    assert_eq!(node.outputs["independent"], json!("[REDACTED]"));
+}
+
+#[test]
 fn build_rejects_inactive_code_without_replacing_output() {
     let root = tempfile::tempdir().unwrap();
     let definition = root.path().join("flow.json");

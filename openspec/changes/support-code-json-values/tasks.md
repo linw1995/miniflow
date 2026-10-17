@@ -11,11 +11,11 @@
 
 ## 2. Preserve values, sensitivity, and limits
 
-- [ ] 2.1 Extend recursive conversions with dynamic dispatch and UInt support; verify nested heterogeneous values,
+- [x] 2.1 Extend recursive conversions with dynamic dispatch and UInt support; verify nested heterogeneous values,
   empty containers, null versus absent fields, unsigned maximum, large integers, and negative floating zero.
-- [ ] 2.2 Reuse budgets and contextual failures for dynamic descendants; verify non-JSON results, non-string keys,
+- [x] 2.2 Reuse budgets and contextual failures for dynamic descendants; verify non-JSON results, non-string keys,
   nested errors, depth/entry/byte limits, and atomic failure of a multi-output invocation.
-- [ ] 2.3 Explicitly inherit input sensitivity in the Code provider; verify direct execution and workflow observations
+- [x] 2.3 Explicitly inherit input sensitivity in the Code provider; verify direct execution and workflow observations
   redact outputs derived from secret descendants, independent outputs follow the conservative policy, and public
   inputs remain public. Document the policy without changing the shared runtime contract.
 
