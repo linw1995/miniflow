@@ -7,6 +7,7 @@ use mf_compiler::{
     NodeRegistry, WorkflowCompileError, WorkflowDefinition, compile_definition,
     instantiate_compiled, plan_definition,
 };
+use mf_runtime::WorkflowArguments;
 use serde_json::{Value, json};
 use std::process::Command;
 
@@ -49,12 +50,15 @@ fn skipped_graph() -> WorkflowDefinition {
     .unwrap()
 }
 
-fn run_in_memory(definition: &WorkflowDefinition) -> Result<mf_compiler::FlowOutputs, String> {
+fn run_in_memory(
+    definition: &WorkflowDefinition,
+    inputs: Value,
+) -> Result<mf_compiler::FlowOutputs, String> {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(definition, &registry).map_err(|error| error.to_string())?;
     instantiate_compiled(&plan, &registry)
         .unwrap()
-        .execute()
+        .execute_with_inputs(WorkflowArguments::try_from(inputs).unwrap())
         .map_err(|error| error.to_string())
 }
 
@@ -63,7 +67,10 @@ fn classifies_refined_and_dynamic_connections() {
     let mut static_source = graph("int64", json!(7), "int64");
     static_source.nodes[0].kind = "fixture.integer_source".into();
     static_source.nodes[0].config = json!({});
-    assert_eq!(run_in_memory(&static_source).unwrap()["result"], json!(7));
+    assert_eq!(
+        run_in_memory(&static_source, json!({})).unwrap()["result"],
+        json!(7)
+    );
 
     for (source_type, value, sink_type, expected) in [
         ("int64", json!(7), "number", json!(7)),
@@ -79,7 +86,7 @@ fn classifies_refined_and_dynamic_connections() {
         ),
     ] {
         assert_eq!(
-            run_in_memory(&graph(source_type, value, sink_type)).unwrap()["result"],
+            run_in_memory(&graph(source_type, value, sink_type), json!({})).unwrap()["result"],
             expected
         );
     }
@@ -96,7 +103,11 @@ fn classifies_refined_and_dynamic_connections() {
         assert!(message.contains("source") && message.contains("sink"));
     }
 
-    let error = run_in_memory(&graph("array", json!([1, "wrong"]), "list_int64")).unwrap_err();
+    let error = run_in_memory(
+        &graph("array", json!([1, "wrong"]), "list_int64"),
+        json!({}),
+    )
+    .unwrap_err();
     assert!(error.contains("sink") && error.contains("/1"));
 }
 
@@ -104,16 +115,15 @@ fn classifies_refined_and_dynamic_connections() {
 fn generated_runner_matches_memory_for_checked_connections() {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("build");
-    for (source, value, target) in [
-        ("any", json!(42), "int64"),
-        ("any", json!("wrong"), "int64"),
-        ("float64", json!(42.0), "int64"),
-        ("float64", json!(1.5), "int64"),
-        ("int64", json!(42), "float64"),
-        ("int64", json!((1_i64 << 53) + 1), "float64"),
+    for (source, target, values) in [
+        ("any", "int64", [json!(42), json!("wrong")]),
+        ("float64", "int64", [json!(42.0), json!(1.5)]),
+        ("int64", "float64", [json!(42), json!((1_i64 << 53) + 1)]),
     ] {
-        let definition = graph(source, value, target);
-        let expected = run_in_memory(&definition);
+        // Values vary at runtime; only the connection types require new generated code.
+        let mut definition = graph(source, Value::Null, target);
+        definition.nodes[0].kind = "fixture.typed_echo".into();
+        definition.nodes[0].config = json!({"type": source});
         let plan = plan_definition(&definition).unwrap();
         mf_compiler::write_dependency_project(
             &project,
@@ -134,18 +144,31 @@ fn generated_runner_matches_memory_for_checked_connections() {
             String::from_utf8_lossy(&build.stderr)
         );
         let executable = common::runner_executable(&project, "release");
-        let actual = Command::new(executable).output().unwrap();
-        match expected {
-            Ok(outputs) => {
-                assert!(actual.status.success());
-                assert_eq!(
-                    serde_json::from_slice::<Value>(&actual.stdout).unwrap(),
-                    serde_json::to_value(outputs).unwrap()
-                );
-            }
-            Err(error) => {
-                assert!(!actual.status.success());
-                assert_eq!(String::from_utf8_lossy(&actual.stderr).trim(), error);
+        for (index, value) in values.into_iter().enumerate() {
+            let inputs = json!({"source.input": value});
+            let expected = run_in_memory(&definition, inputs.clone());
+            assert_eq!(
+                expected.is_ok(),
+                index == 0,
+                "{source} -> {target}: {inputs}"
+            );
+            let actual = Command::new(&executable)
+                .args(["--inputs", &inputs.to_string()])
+                .output()
+                .unwrap();
+            match expected {
+                Ok(outputs) => {
+                    assert!(actual.status.success());
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&actual.stdout).unwrap(),
+                        serde_json::to_value(outputs).unwrap()
+                    );
+                }
+                Err(error) => {
+                    assert!(error.contains("sink"), "{error}");
+                    assert!(!actual.status.success());
+                    assert_eq!(String::from_utf8_lossy(&actual.stderr).trim(), error);
+                }
             }
         }
     }
@@ -154,7 +177,7 @@ fn generated_runner_matches_memory_for_checked_connections() {
 #[test]
 fn skipped_typed_inputs_match_in_memory_and_generated_execution() {
     let definition = skipped_graph();
-    let expected = run_in_memory(&definition).unwrap();
+    let expected = run_in_memory(&definition, json!({})).unwrap();
     assert!(expected.is_empty());
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("build");
