@@ -34,7 +34,9 @@ jobs:
             --skip actionlint \
             --skip third-party-notices
       - name: Check CI scripts
-        run: nix develop --command python3 -m unittest discover -s scripts -p 'test_*.py'
+        run: |
+          nix develop --command python3 -m unittest discover -s scripts -p 'test_*.py'
+          nix develop --command python3 -m unittest discover -s tools/test-affected -p test_runner.py
 
   check:
     strategy:

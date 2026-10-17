@@ -30,10 +30,10 @@
 
 ## 5. Integration and evaluation
 
-- [ ] 5.1 Include the packages in regular development/coverage paths while retaining current CI selection and coverage policy; verify mock-backed tests require no installed server and release validation excludes the tools.
-- [ ] 5.2 Run a pinned real-server smoke test and portable conservative-selection fixtures; replay available pinned #131, #151, #152, #157, and #159 snapshots and independently verify exact nextest identities without automatic history fetches.
-- [ ] 5.3 Measure the new Flow with warm-up and repeated serial trials; separately measure baseline, LSP, build/list, and test execution time, verify empty analysis batches start no server and record the cost of late full-fallback decisions, and retain raw artifacts only under `target/`.
-- [ ] 5.4 Run installed hooks with `prek -a`, the affected-package selector and selected suites through `nix develop`, and strict OpenSpec validation; review the final diff and release boundaries without local `nix flake check -L`.
+- [x] 5.1 Include the packages in regular development/coverage paths while retaining current CI selection and coverage policy; verify mock-backed tests require no installed server and release validation excludes the tools.
+- [x] 5.2 Run a pinned real-server smoke test and portable conservative-selection fixtures; replay available pinned #131, #151, #152, #157, and #159 snapshots and independently verify exact nextest identities without automatic history fetches.
+- [x] 5.3 Measure the new Flow with warm-up and repeated serial trials; separately measure baseline, LSP, build/list, and test execution time, verify empty analysis batches start no server and record the cost of late full-fallback decisions, and retain raw artifacts only under `target/`.
+- [x] 5.4 Run installed hooks with `prek -a`, the affected-package selector and selected suites through `nix develop`, and strict OpenSpec validation; review the final diff and release boundaries without local `nix flake check -L`.
 
 ## Workflow follow-up
 

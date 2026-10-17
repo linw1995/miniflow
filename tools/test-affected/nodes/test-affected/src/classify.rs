@@ -91,24 +91,77 @@ impl<'ast> Visit<'ast> for ScopeCheck {
     fn visit_item_static(&mut self, _: &'ast syn::ItemStatic) {
         self.valid = false;
     }
+    fn visit_attribute(&mut self, item: &'ast syn::Attribute) {
+        self.valid &= plain_attributes(std::slice::from_ref(item));
+        syn::visit::visit_attribute(self, item);
+    }
     fn visit_macro(&mut self, item: &'ast syn::Macro) {
         let path = item.path.to_token_stream().to_string().replace(' ', "");
-        if !matches!(
-            path.as_str(),
-            "assert"
-                | "assert_eq"
-                | "assert_ne"
-                | "matches"
-                | "vec"
-                | "format"
-                | "panic"
-                | "serde_json::json"
-        ) && !(path == "json" && self.json_imported)
-        {
-            self.valid = false;
-        }
+        self.valid &= known_macro(&path, self.json_imported)
+            && known_nested_macros(item.tokens.clone(), self.json_imported);
         syn::visit::visit_macro(self, item);
     }
+}
+
+pub fn plain_attributes(attributes: &[syn::Attribute]) -> bool {
+    attributes.iter().all(|a| {
+        a.path().get_ident().is_some_and(|name| {
+            matches!(
+                name.to_string().as_str(),
+                "cfg" | "test" | "ignore" | "doc" | "allow" | "deny" | "warn" | "forbid"
+            )
+        })
+    })
+}
+
+fn known_macro(path: &str, json_imported: bool) -> bool {
+    matches!(
+        path,
+        "assert"
+            | "assert_eq"
+            | "assert_ne"
+            | "matches"
+            | "vec"
+            | "format"
+            | "panic"
+            | "serde_json::json"
+    ) || path == "json" && json_imported
+}
+
+fn known_nested_macros(tokens: TokenStream, json_imported: bool) -> bool {
+    let tokens: Vec<_> = tokens.into_iter().collect();
+    for (index, token) in tokens.iter().enumerate() {
+        if let TokenTree::Group(group) = token
+            && !known_nested_macros(group.stream(), json_imported)
+        {
+            return false;
+        }
+        if let TokenTree::Ident(name) = token
+            && matches!(tokens.get(index + 1), Some(TokenTree::Punct(p)) if p.as_char() == '!')
+            && matches!(tokens.get(index + 2), Some(TokenTree::Group(_)))
+        {
+            let mut start = index;
+            while start >= 3
+                && matches!(&tokens[start - 1], TokenTree::Punct(p) if p.as_char() == ':')
+                && matches!(&tokens[start - 2], TokenTree::Punct(p) if p.as_char() == ':')
+                && matches!(&tokens[start - 3], TokenTree::Ident(_))
+            {
+                start -= 3;
+            }
+            let path = if start == index {
+                name.to_string()
+            } else {
+                tokens[start..=index]
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<String>()
+            };
+            if !known_macro(&path, json_imported) {
+                return false;
+            }
+        }
+    }
+    true
 }
 
 fn tests(source: &str, integration: bool) -> Option<BTreeMap<String, TestBody>> {
@@ -127,7 +180,7 @@ fn collect(
 ) -> Option<()> {
     if test_scope {
         let tokens: TokenStream = items.iter().map(ToTokens::to_token_stream).collect();
-        let json_imported = items.iter().any(|item| matches!(item, Item::Use(u) if u.to_token_stream().to_string().replace(' ', "").contains("serde_json::json")));
+        let json_imported = items.iter().any(|item| matches!(item, Item::Use(u) if u.to_token_stream().to_string().replace(' ', "") == "useserde_json::json;"));
         let mut check = ScopeCheck {
             valid: true,
             json_imported,
@@ -171,6 +224,9 @@ fn collect(
                         .parse_args::<syn::Path>()
                         .is_ok_and(|path| path.is_ident("test"))
             });
+            if !plain_attributes(&module.attrs) {
+                return None;
+            }
             collect(
                 children,
                 source,
@@ -215,6 +271,8 @@ mod tests {
             "mod hidden;",
             "register!();",
             "#[test] fn another() { custom!(); }",
+            "#[test] fn another() { assert!(custom!()); }",
+            "#[derive(Custom)] struct Hidden;",
         ] {
             let modified = source.replacen("mod tests {", &format!("mod tests {{ {extra}"), 1);
             assert!(

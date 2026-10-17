@@ -60,13 +60,14 @@ fn negotiates_positions_collects_partial_results_and_closes_before_emission() {
     let mut emissions = 0;
     node.execute(
         AnalyzeInput {
-            request: serde_json::to_value(&request).unwrap().into(),
+            request: ValueRef::from(serde_json::to_value(&request).unwrap()).into_secret(),
             context: original.clone(),
         },
         &mut ExecutionContext::default(),
         &mut |result| {
             emissions += 1;
             reaped(directory.path());
+            assert!(result.outputs.outcome.is_secret());
             let outcome: AnalysisOutcome =
                 serde_json::from_value(serde_json::to_value(&result.outputs.outcome).unwrap())
                     .unwrap();

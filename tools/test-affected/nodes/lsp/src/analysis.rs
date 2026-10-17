@@ -46,6 +46,12 @@ pub fn analyze(
     cancellation: StreamCancellation,
 ) -> Result<AnalysisOutcome, Error> {
     validate_config(config)?;
+    ensure!(
+        serde_json::to_vec(&request).context(JsonSnafu)?.len() <= config.max_bytes,
+        InvalidSnafu {
+            message: "analysis request exceeds its byte budget"
+        }
+    );
     let start = Instant::now();
     let deadline = start + Duration::from_millis(config.deadline_ms);
     let mut identities = BTreeSet::new();
@@ -238,6 +244,21 @@ fn query_snapshot(
             path.starts_with(root),
             InvalidSnafu {
                 message: "document symlink escapes snapshot"
+            }
+        );
+        let metadata = std::fs::metadata(&path).context(IoSnafu {
+            action: "inspect analysis document",
+        })?;
+        ensure!(
+            metadata.is_file(),
+            InvalidSnafu {
+                message: "analysis documents must be regular files"
+            }
+        );
+        ensure!(
+            metadata.len() <= config.max_bytes as u64,
+            LimitSnafu {
+                message: "analysis document exceeds its byte budget"
             }
         );
         let source = std::fs::read_to_string(&path).context(IoSnafu {

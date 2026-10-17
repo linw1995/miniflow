@@ -1,5 +1,5 @@
 use crate::{
-    classify::isolated_changes,
+    classify::{isolated_changes, plain_attributes},
     error::*,
     git::{command, verify_snapshot},
     model::*,
@@ -251,6 +251,12 @@ fn validate_configuration(
                 }
             );
         } else {
+            ensure!(
+                cargo["features"].is_null() || cargo["features"].is_array(),
+                InvalidSnafu {
+                    message: "LSP and test feature configurations differ"
+                }
+            );
             let features: Vec<String> = cargo["features"]
                 .as_array()
                 .into_iter()
@@ -310,7 +316,7 @@ fn isolated_tests(
         let mut module_directory = source_root.clone();
         for component in &components {
             let parsed = syn::parse_file(&fs::read_to_string(&module_file).ok()?).ok()?;
-            parsed.items.iter().find(|item| matches!(item, syn::Item::Mod(m) if m.ident == component && m.content.is_none() && !m.attrs.iter().any(|a| a.path().is_ident("path"))))?;
+            parsed.items.iter().find(|item| matches!(item, syn::Item::Mod(m) if m.ident == component && m.content.is_none() && plain_attributes(&m.attrs)))?;
             let flat = module_directory.join(format!("{component}.rs"));
             let nested = module_directory.join(component).join("mod.rs");
             module_file = if flat.is_file() && !nested.exists() {

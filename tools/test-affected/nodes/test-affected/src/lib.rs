@@ -121,7 +121,7 @@ impl TypedTaskNode for PlanNode {
         .context(error::JsonSnafu {
             action: "decode plan options",
         })?;
-        let outcome = serde_json::from_value(serde_json::to_value(input.outcome).context(
+        let outcome = serde_json::from_value(serde_json::to_value(&input.outcome).context(
             error::JsonSnafu {
                 action: "decode analysis value",
             },
@@ -134,11 +134,10 @@ impl TypedTaskNode for PlanNode {
             return Err(error.into());
         }
         Ok(PlanOutput {
-            plan: serde_json::to_value(plan)
-                .context(error::JsonSnafu {
-                    action: "encode test plan",
-                })?
-                .into(),
+            plan: ValueRef::from(serde_json::to_value(plan).context(error::JsonSnafu {
+                action: "encode test plan",
+            })?)
+            .inherit_secrets([&input.context, &input.outcome]),
         }
         .into())
     }

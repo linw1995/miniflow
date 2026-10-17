@@ -53,14 +53,13 @@ impl TypedStreamNode for AnalyzeNode {
         emit: &mut dyn FnMut(TypedNodeResult<Self::Output>) -> Result<(), NodeExecutionError>,
     ) -> Result<(), NodeExecutionError> {
         let request =
-            serde_json::from_value(serde_json::to_value(input.request).context(error::JsonSnafu)?)
+            serde_json::from_value(serde_json::to_value(&input.request).context(error::JsonSnafu)?)
                 .context(error::JsonSnafu)?;
         let outcome = analyze(&self.config, request, context.cancellation())?;
         emit(
             AnalyzeOutput {
-                outcome: serde_json::to_value(outcome)
-                    .context(error::JsonSnafu)?
-                    .into(),
+                outcome: ValueRef::from(serde_json::to_value(outcome).context(error::JsonSnafu)?)
+                    .inherit_secrets([&input.request]),
                 context: input.context,
             }
             .into(),

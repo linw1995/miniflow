@@ -39,6 +39,18 @@ pub fn revision(root: &Path, reference: &str) -> Result<String, Error> {
 }
 
 pub fn verify_snapshot(root: &Path, commit: &str) -> Result<(), Error> {
+    let top = command(root, "git", &["rev-parse", "--show-toplevel"])?;
+    ensure!(
+        Path::new(top.trim()).canonicalize().context(IoSnafu {
+            action: "resolve worktree root"
+        })? == root.canonicalize().context(IoSnafu {
+            action: "resolve snapshot root"
+        })?,
+        InvalidSnafu {
+            message: "snapshot is not an independent worktree root"
+        }
+    );
+
     ensure!(
         root.is_dir() && revision(root, "HEAD")? == commit,
         InvalidSnafu {

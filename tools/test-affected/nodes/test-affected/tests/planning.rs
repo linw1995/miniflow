@@ -94,6 +94,19 @@ print(json.dumps(sorted(packages if fallback else a.select(direct, graph))))
     assert_eq!(plan.tests[0].name, "tests::changed");
     assert_eq!(plan.tests[0].binary, "sample-core");
     assert!(plan.selected_count.is_none());
+    let input = mfn_lsp::AnalyzeOutput {
+        outcome: serde_json::to_value(outcome(&comparison)).unwrap().into(),
+        context: mf_runtime::ValueRef::from(json!({"comparison":comparison,"options":{}}))
+            .into_secret(),
+    };
+    let result = mf_runtime::TypedTaskNode::execute(
+        &mfn_test_affected::PlanNode,
+        input,
+        &mut mf_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    assert!(result.outputs.plan.is_secret());
+
     assert_eq!(git::revision(root, "HEAD").unwrap(), head);
     assert_eq!(
         git::command(root, "git", &["branch", "--show-current"])
@@ -174,6 +187,9 @@ fn resolves_merge_base_and_rejects_changed_snapshots_and_analysis_identities() {
     write(&comparison.head_root, "core/src/lib.rs", "changed\n");
     assert!(make_plan(&comparison, &analysis, &PlanOptions::default()).is_err());
     assert!(git::compare(root, "missing", &head, None, json!({})).is_err());
+    let nested = root.join("target/not-a-worktree");
+    fs::create_dir_all(&nested).unwrap();
+    assert!(git::verify_snapshot(&nested, &git::revision(root, "HEAD").unwrap()).is_err());
 }
 
 #[test]
@@ -250,4 +266,37 @@ fn script_verifies_selection_runs_cases_and_preserves_empty_stale_and_failed_pla
     let output = run(&plan, &[]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("FAIL"));
+}
+
+#[test]
+fn rejects_feature_configuration_drift_and_partial_inventories() {
+    let (directory, base) = fixture();
+    let root = directory.path();
+    write(root, "core/src/lib.rs", &SOURCE.replace("1, 1", "2, 2"));
+    let head = commit(root);
+    let comparison = git::compare(
+        root,
+        &base,
+        &head,
+        None,
+        json!({"cargo":{"features":"all"}}),
+    )
+    .unwrap();
+    let mut analysis = outcome(&comparison);
+    analysis.server.profile = Profile::RustAnalyzer;
+    let mut options = PlanOptions::default();
+    options.configuration.all_features = false;
+    assert!(make_plan(&comparison, &analysis, &options).is_err());
+    options.configuration.all_features = true;
+    let plan = make_plan(&comparison, &analysis, &options).unwrap();
+    let inventory = root.join("target/partial.json");
+    fs::write(
+        &inventory,
+        json!({"head":head,"configuration":plan.configuration,"toolchain":plan.toolchain,
+        "build_environment":plan.build_environment,"inventory":{"rust-suites":{}}})
+        .to_string(),
+    )
+    .unwrap();
+    options.inventory = Some(inventory);
+    assert!(make_plan(&comparison, &analysis, &options).is_err());
 }

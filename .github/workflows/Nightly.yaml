@@ -45,6 +45,8 @@ jobs:
       - uses: ./.github/actions/setup-nix
         with:
           cache-key-name: test
+      - name: Check developer-tool scripts
+        run: nix develop --command python3 -m unittest discover -s tools/test-affected -p test_runner.py
       - name: Run full flake checks
         run: nix flake check -L
 

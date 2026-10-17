@@ -88,6 +88,8 @@ def verify(plan):
     root = Path(plan["snapshot"])
     if not root.is_dir():
         raise PlanError("snapshot has been removed")
+    if Path(execute(["git", "rev-parse", "--show-toplevel"], root).strip()).resolve() != root.resolve():
+        raise PlanError("snapshot is not an independent worktree root")
     if execute(["git", "rev-parse", "HEAD"], root).strip() != plan["head"]:
         raise PlanError("snapshot revision changed")
     if execute(["git", "rev-parse", "HEAD^{tree}"], root).strip() != plan["tree"]:

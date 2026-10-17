@@ -101,3 +101,17 @@ The supplied definition configures rust-analyzer with all features, no sysroot, 
 and disabled proc macros. These settings expose evidence gaps; they do not certify a complete graph.
 To use another server, configure the `lsp.analyze` node and initialization options explicitly.
 There is no Git-to-plan bypass edge: context crosses the producer boundary with its terminal outcome.
+
+## Explicit real-server verification
+
+The real-server smoke test is ignored by ordinary suites. Enable it only with an explicitly selected
+server from the pinned development environment:
+
+```sh
+nix develop --command env MF_LSP_SMOKE_SERVER=rust-analyzer \
+  cargo nextest run -p mfn-lsp --test smoke --run-ignored all
+```
+
+The planning Flow remains opt-in; regular CI still uses `scripts/affected_tests.py`. Its full-fallback
+policy runs after semantic analysis, so some full-suite plans still pay for LSP work. Measure Flow time
+and script build/list/test time independently before considering CI adoption.
