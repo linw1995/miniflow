@@ -1778,6 +1778,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mfn-lsp"
+version = "0.1.0"
+
+[[package]]
+name = "mfn-test-affected"
+version = "0.1.0"
+
+[[package]]
 name = "migrations_internals"
 version = "2.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

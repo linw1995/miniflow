@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mf-*", "crates/builtin-nodes/*"]
+members = ["crates/mf-*", "crates/builtin-nodes/*", "tools/test-affected/nodes/*"]
 default-members = ["crates/mf-cli"]
 resolver = "3"
 

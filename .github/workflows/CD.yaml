@@ -45,12 +45,12 @@ jobs:
       - name: Test and build
         run: |
           cargo fetch --locked
-          cargo test --locked --workspace --all-targets --all-features
+          cargo test --locked --workspace --exclude mfn-lsp --exclude mfn-test-affected --all-targets --all-features
           cargo build --locked --release
       - name: Generate third-party notices
         run: |
           cargo install cargo-about --version 0.9.0 --locked --features cli
-          bash scripts/generate-third-party-notices.sh
+          bash scripts/generate-third-party-notices.sh --release
       - name: Package archive
         shell: bash
         env:

@@ -2,9 +2,9 @@
 
 ## 1. Developer-tool boundaries
 
-- [ ] 1.1 Add `mfn-lsp` and `mfn-test-affected` under `tools/test-affected/nodes/` as unpublished workspace members; verify metadata, independent versions, unchanged CLI defaults, and no product-to-tool dependency path.
-- [ ] 1.2 Narrow existing CD, support-package, notice-generation, and Nix release entry points to exclude the tools without adding a new release-policy configuration; verify existing release-support tests, shared dependency notices, and workspace-wide development auditing.
-- [ ] 1.3 Document the tool layout, release boundary, and explicitly configured server in contributor/release guidance and the tool README; verify package paths and ordinary validation without an installed language server.
+- [x] 1.1 Add `mfn-lsp` and `mfn-test-affected` under `tools/test-affected/nodes/` as unpublished workspace members; verify metadata, independent versions, unchanged CLI defaults, and no product-to-tool dependency path.
+- [x] 1.2 Narrow existing CD, support-package, notice-generation, and Nix release entry points to exclude the tools without adding a new release-policy configuration; verify existing release-support tests, shared dependency notices, and workspace-wide development auditing.
+- [x] 1.3 Document the tool layout, release boundary, and explicitly configured server in contributor/release guidance and the tool README; verify package paths and ordinary validation without an installed language server.
 
 ## 2. LSP Stream provider
 

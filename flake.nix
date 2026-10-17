@@ -59,15 +59,16 @@
           strictDeps = true;
           nativeBuildInputs = [ pkgs.cmake ];
         };
-        cargoArtifacts = craneLib.buildDepsOnly cargoArgs;
+        cargoArtifacts = craneLib.buildDepsOnly (cargoArgs // { cargoExtraArgs = "-p mf-cli"; });
         miniflow = craneLib.buildPackage (cargoArgs // {
+          cargoExtraArgs = "-p mf-cli";
           inherit cargoArtifacts;
           nativeBuildInputs = [ pkgs.cmake pkgs.cargo-about ];
           # The dedicated nextest check runs the complete suite, including acceptance.
           doCheck = false;
           postInstall = ''
             notices="$TMPDIR/miniflow-third-party-notices.html"
-            CARGO_ABOUT_OFFLINE=1 bash scripts/generate-third-party-notices.sh "$notices"
+            CARGO_ABOUT_OFFLINE=1 bash scripts/generate-third-party-notices.sh --release "$notices"
             install -Dm644 LICENSE "$out/share/licenses/miniflow/LICENSE"
             install -Dm644 "$notices" "$out/share/licenses/miniflow/THIRD_PARTY_NOTICES.html"
           '';

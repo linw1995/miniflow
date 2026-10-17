@@ -6,6 +6,14 @@ A distributed CLI resolves exact-version `mf-runtime` and `mf-compiler` packages
 
 The refined port-type API changes `ValueType` from `Copy` to `Clone` and enforces declared output types during execution. Publish matching runtime and compiler versions before rebuilding node packages; review plugin port declarations before distributing runners built with the new runtime.
 
+## Developer-tool exclusion
+
+`mfn-lsp` and `mfn-test-affected` are unpublished repository tools. Release tests exclude them,
+they are absent from the support-package prerequisites, and product packages must not depend on them.
+Release archives contain only the CLI and its licensing files. `generate-third-party-notices.sh --release`
+audits the CLI dependency closure, including shared product dependencies; its default mode continues
+to audit the entire development workspace. The tool package versions do not govern release branches.
+
 ## Verify packages through nextest
 
 ```sh

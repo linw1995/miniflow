@@ -96,6 +96,10 @@ jobs:
         run: nix develop --command bash scripts/run-cov.sh --test-package mfn-core
       - name: Coverage tests (mfn-llm)
         run: nix develop --command bash scripts/run-cov.sh --test-package mfn-llm
+      - name: Coverage tests (mfn-lsp)
+        run: nix develop --command bash scripts/run-cov.sh --test-package mfn-lsp
+      - name: Coverage tests (mfn-test-affected)
+        run: nix develop --command bash scripts/run-cov.sh --test-package mfn-test-affected
       - name: Generate coverage reports
         run: nix develop --command bash scripts/run-cov.sh --report
       - name: Prune coverage build cache
