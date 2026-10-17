@@ -111,7 +111,7 @@ impl Diagnostics {
         let worker = Arc::clone(&shared);
         if let Err(error) = thread::Builder::new()
             .name("mf-verbose".into())
-            .spawn(move || reminders(&worker, interval, verbosity))
+            .spawn(move || reminders(&worker, interval, verbosity, || std::io::stderr().lock()))
         {
             shared.state.lock().unwrap().closed = true;
             let _ = writeln!(
@@ -155,7 +155,12 @@ impl Drop for Diagnostics {
     }
 }
 
-fn reminders(shared: &Shared, interval: Duration, verbosity: u8) {
+fn reminders<W: Write>(
+    shared: &Shared,
+    interval: Duration,
+    verbosity: u8,
+    mut lock_output: impl FnMut() -> W,
+) {
     loop {
         let mut state = shared.state.lock().unwrap();
         loop {
@@ -177,7 +182,7 @@ fn reminders(shared: &Shared, interval: Duration, verbosity: u8) {
         }
         drop(state);
         // Recheck under the output lock so reminders cannot follow a completed node's diagnostic line.
-        let mut output = std::io::stderr().lock();
+        let mut output = lock_output();
         let now = Instant::now();
         let mut state = shared.state.lock().unwrap();
         if state.closed {
@@ -438,6 +443,29 @@ mod tests {
 
     fn fixture(source: &str) -> WireRecord {
         serde_json::from_str(source).unwrap()
+    }
+
+    #[test]
+    fn reminder_worker_rechecks_shutdown_after_acquiring_output() {
+        let shared = Shared::default();
+        let interval = Duration::from_secs(60);
+        let due = Instant::now();
+        let started = fixture(include_str!("../tests/fixtures/node-started.json"));
+        shared
+            .state
+            .lock()
+            .unwrap()
+            .observe(&started, due - interval, interval);
+        let mut output_locks = 0;
+        reminders(&shared, interval, 1, || {
+            output_locks += 1;
+            // Model shutdown while the worker waits for the output lock.
+            shared.state.lock().unwrap().closed = true;
+            std::io::sink()
+        });
+        assert_eq!(output_locks, 1);
+        let state = shared.state.lock().unwrap();
+        assert_eq!(state.active.values().next().unwrap().next_reminder, due);
     }
 
     #[test]
