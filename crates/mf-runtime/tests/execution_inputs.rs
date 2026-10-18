@@ -27,6 +27,7 @@ fn schema() -> WorkflowInputSchema {
 
 fn dependency<'a>(input: Option<&'a str>, source: &'a str) -> ExecutionDependency<'a> {
     ExecutionDependency {
+        exclusive: false,
         input,
         source_node: source,
         source_output: "value",

@@ -61,6 +61,8 @@ impl FlowNode {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlowConnection {
+    /// Candidates with the same target input form one exclusive group.
+    pub exclusive: bool,
     pub from_node: NodeId,
     pub from_output: Cow<'static, str>,
     pub to_node: NodeId,

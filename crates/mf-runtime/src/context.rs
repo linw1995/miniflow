@@ -990,6 +990,8 @@ fn state_error(id: &str, message: impl Into<String>) -> WorkflowRunError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ExecutionDependency<'a> {
+    /// Candidates with the same target input form one exclusive group.
+    pub exclusive: bool,
     pub input: Option<&'a str>,
     pub source_node: &'a str,
     pub source_output: &'a str,
@@ -1493,11 +1495,13 @@ mod tests {
             );
             let mut dependencies = vec![
                 crate::FlowDependency {
+                    exclusive: false,
                     input: Some("value".into()),
                     source_node: "source".into(),
                     source_output: "value".into(),
                 },
                 crate::FlowDependency {
+                    exclusive: false,
                     input: None,
                     source_node: "gate".into(),
                     source_output: "value".into(),
@@ -1505,6 +1509,7 @@ mod tests {
             ];
             if case == "missing" {
                 dependencies.push(crate::FlowDependency {
+                    exclusive: false,
                     input: None,
                     source_node: "absent".into(),
                     source_output: "value".into(),
@@ -1702,6 +1707,7 @@ mod tests {
             Some(json!([{"count": 1}, {"count": "two"}]).into()),
         );
         let dependency = ExecutionDependency {
+            exclusive: false,
             input: Some("payload"),
             source_node: "source",
             source_output: "value",
@@ -1747,6 +1753,7 @@ mod tests {
             .outputs
             .insert("source.value".into(), Some(json!(1).into()));
         let dependency = ExecutionDependency {
+            exclusive: false,
             input: Some("unexpected"),
             source_node: "source",
             source_output: "value",
@@ -1783,6 +1790,7 @@ mod tests {
                 let result = execute_node_in_context(
                     &node,
                     &[ExecutionDependency {
+                        exclusive: false,
                         input: Some("value"),
                         source_node: "source",
                         source_output: "value",
@@ -1851,6 +1859,7 @@ mod tests {
         .into_task()
         .unwrap();
         let skipped = ExecutionDependency {
+            exclusive: false,
             input: Some("payload"),
             source_node: "branch",
             source_output: "off",
@@ -1859,6 +1868,7 @@ mod tests {
         context.outputs.insert("branch.off".into(), None);
         for input in [None, Some("payload")] {
             let missing = ExecutionDependency {
+                exclusive: false,
                 input,
                 source_node: "source",
                 source_output: "missing",
@@ -1992,6 +2002,7 @@ mod tests {
                 .collect(),
                 crate::FlowPlan {
                     connections: vec![crate::FlowConnection {
+                        exclusive: false,
                         from_node: crate::NodeId::new(0),
                         from_output: "value".into(),
                         to_node: crate::NodeId::new(1),
@@ -2001,6 +2012,7 @@ mod tests {
                     dependencies: vec![
                         std::borrow::Cow::Owned(vec![]),
                         std::borrow::Cow::Owned(vec![crate::FlowDependency {
+                            exclusive: false,
                             input: Some("payload".into()),
                             source_node: "source".into(),
                             source_output: "value".into(),

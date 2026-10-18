@@ -42,6 +42,7 @@ fn definition(count: usize, payload: usize) -> WorkflowDefinition {
         execution: None,
         dependencies: BTreeMap::new(),
         nodes,
+        exclusive_inputs: Vec::new(),
         edges,
         control_edges: Vec::new(),
         outputs: vec![WorkflowOutputDefinition {

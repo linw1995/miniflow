@@ -248,3 +248,152 @@ fn rejects_excessively_nested_instance_port_types() {
     assert!(message.contains("output port `value`"));
     assert!(message.contains("type nesting depth"));
 }
+
+fn exclusive_definition() -> Value {
+    let mut value = valid_definition();
+    value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"id":"alternative", "kind":"source.number"}));
+    value["edges"] = json!([]);
+    value["exclusive_inputs"] = json!([{
+        "to_node":"sink", "to_input":"input", "sources":[
+            {"from_node":"source", "from_output":"value"},
+            {"from_node":"alternative", "from_output":"value"}
+        ]
+    }]);
+    value
+}
+
+#[test]
+fn exclusive_bindings_preserve_groups_and_validate_all_predecessors() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let definition: WorkflowDefinition = serde_json::from_value(exclusive_definition()).unwrap();
+    let plan = mf_compiler::compile_definition(&definition, &registry).unwrap();
+    assert_eq!(plan.execution_order.last().unwrap().as_str(), "sink");
+    let flow = mf_compiler::instantiate_compiled(&plan, &registry).unwrap();
+    assert_eq!(flow.connections().len(), 2);
+    assert!(flow.connections().iter().all(|edge| edge.exclusive));
+    assert!(
+        flow.plan()
+            .dependencies
+            .last()
+            .unwrap()
+            .iter()
+            .all(|dependency| dependency.exclusive)
+    );
+    let mut reordered = definition.clone();
+    reordered.exclusive_inputs[0].sources.reverse();
+    assert_eq!(
+        plan,
+        mf_compiler::compile_definition(&reordered, &registry).unwrap()
+    );
+    let nodes = mf_compiler::resolve_nodes(&definition, &registry).unwrap();
+    let order = plan.execution_order.clone();
+    mf_compiler::FlowBuilder::prepare_with_exclusive_inputs(
+        nodes,
+        vec![],
+        definition.exclusive_inputs.clone(),
+        order,
+        definition.outputs.clone(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn exclusive_bindings_reject_conflicts_and_invalid_candidates() {
+    for case in [
+        "single",
+        "duplicate",
+        "edge",
+        "group",
+        "source",
+        "target",
+        "port",
+        "type",
+        "cycle",
+    ] {
+        let mut value = exclusive_definition();
+        match case {
+            "single" => {
+                value["exclusive_inputs"][0]["sources"]
+                    .as_array_mut()
+                    .unwrap()
+                    .pop();
+            }
+            "duplicate" => {
+                value["exclusive_inputs"][0]["sources"][1] =
+                    value["exclusive_inputs"][0]["sources"][0].clone();
+            }
+            "edge" => {
+                value["edges"] = valid_definition()["edges"].clone();
+            }
+            "group" => {
+                let group = value["exclusive_inputs"][0].clone();
+                value["exclusive_inputs"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(group);
+            }
+            "source" => value["exclusive_inputs"][0]["sources"][1]["from_node"] = json!("missing"),
+            "target" => value["exclusive_inputs"][0]["to_node"] = json!("missing"),
+            "port" => value["exclusive_inputs"][0]["sources"][1]["from_output"] = json!("missing"),
+            "type" => value["nodes"][2]["kind"] = json!("source.string"),
+            "cycle" => {
+                value["exclusive_inputs"][0]["sources"][1] =
+                    json!({"from_node":"sink", "from_output":"result"});
+            }
+            _ => unreachable!(),
+        }
+        let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
+        assert!(
+            validate_definition(&definition, &NodeRegistry::from_inventory().unwrap()).is_err(),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn exclusive_syntax_is_strict_and_omitted_when_empty() {
+    let ordinary: WorkflowDefinition = serde_json::from_value(valid_definition()).unwrap();
+    assert!(
+        serde_json::to_value(ordinary)
+            .unwrap()
+            .get("exclusive_inputs")
+            .is_none()
+    );
+    let definition: WorkflowDefinition = serde_json::from_value(exclusive_definition()).unwrap();
+    assert_eq!(
+        definition,
+        serde_json::from_value(serde_json::to_value(&definition).unwrap()).unwrap()
+    );
+    for field in ["group", "source"] {
+        let mut value = exclusive_definition();
+        if field == "group" {
+            value["exclusive_inputs"][0]["policy"] = json!("first");
+        } else {
+            value["exclusive_inputs"][0]["sources"][0]["optional"] = json!(true);
+        }
+        assert!(serde_json::from_value::<WorkflowDefinition>(value).is_err());
+    }
+}
+
+#[test]
+fn exclusive_candidates_cannot_cross_message_domains() {
+    use mfn_core as _;
+    let value = json!({
+        "version":"2026-10-03", "dependencies":{}, "execution":{"mode":"stream"},
+        "nodes":[
+            {"id":"source", "kind":"source.number"},
+            {"id":"batch", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":100}},
+            {"id":"sink", "kind":"sink.any"}
+        ],
+        "edges":[{"from_node":"source", "from_output":"value", "to_node":"batch", "to_input":"item"}],
+        "exclusive_inputs":[{"to_node":"sink", "to_input":"input", "sources":[
+            {"from_node":"source", "from_output":"value"},
+            {"from_node":"batch", "from_output":"items"}
+        ]}]
+    });
+    let error = validation_error(value).to_string();
+    assert!(error.contains("domain"), "{error}");
+}

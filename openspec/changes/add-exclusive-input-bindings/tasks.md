@@ -1,9 +1,9 @@
 ## 1. Definition and prepared binding contract
 
-- [ ] 1.1 Add default-empty exclusive groups to workflow, loop, and iteration definitions; verify round trips, unknown-field rejection, and unchanged serialization for existing definitions.
-- [ ] 1.2 Add explicit prepared input groups and equivalent programmatic construction support; verify duplicate sources, fewer than two sources, ordinary/group conflicts, unknown endpoints, and required-input connectivity.
-- [ ] 1.3 Include every candidate in dependency, cycle, scope, context-ancestry, worker visibility, and message-domain analysis; verify cycles and cross-domain references are rejected while legal scope sources remain accepted.
-- [ ] 1.4 Document the binding syntax and low-level Rust API additions in workflow and embedding documentation; verify examples parse through definition preparation.
+- [x] 1.1 Add default-empty exclusive groups to workflow, loop, and iteration definitions; verify round trips, unknown-field rejection, and unchanged serialization for existing definitions.
+- [x] 1.2 Add explicit prepared input groups and equivalent programmatic construction support; verify duplicate sources, fewer than two sources, ordinary/group conflicts, unknown endpoints, and required-input connectivity.
+- [x] 1.3 Include every candidate in dependency, cycle, scope, context-ancestry, worker visibility, and message-domain analysis; verify cycles and cross-domain references are rejected while legal scope sources remain accepted.
+- [x] 1.4 Document the binding syntax and low-level Rust API additions in workflow and embedding documentation; verify examples parse through definition preparation.
 
 ## 2. Shared resolution and type evidence
 

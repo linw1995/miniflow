@@ -1822,6 +1822,7 @@ mod tests {
             vec![
                 Vec::new(),
                 vec![crate::FlowDependency {
+                    exclusive: false,
                     input: None,
                     source_node: "start".into(),
                     source_output: "item".into(),

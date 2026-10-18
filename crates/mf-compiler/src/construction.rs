@@ -16,6 +16,10 @@ use std::{
 #[derive(Debug, Snafu)]
 pub enum FlowBuildError {
     #[snafu(transparent)]
+    ExclusiveInput {
+        source: mf_runtime::ExclusiveInputError,
+    },
+    #[snafu(transparent)]
     WorkflowInputs { source: crate::WorkflowInputError },
     #[snafu(display("node `{definition_id}` cannot execute in a synchronous flow"))]
     NonTaskNode { definition_id: DefinitionId },
@@ -209,6 +213,35 @@ impl FlowBuilder {
         execution_order: Vec<DefinitionId>,
         outputs: Vec<WorkflowOutputDefinition>,
     ) -> Result<Self, FlowBuildError> {
+        Self::prepare_with_exclusive_inputs(
+            nodes,
+            connections,
+            Vec::new(),
+            execution_order,
+            outputs,
+        )
+    }
+
+    pub fn prepare_with_exclusive_inputs(
+        nodes: Vec<FlowNode>,
+        connections: Vec<EdgeDefinition>,
+        exclusive_inputs: Vec<crate::ExclusiveInputDefinition>,
+        execution_order: Vec<DefinitionId>,
+        outputs: Vec<WorkflowOutputDefinition>,
+    ) -> Result<Self, FlowBuildError> {
+        crate::validate_exclusive_inputs(&connections, &exclusive_inputs)?;
+        let exclusive_targets: BTreeSet<_> = exclusive_inputs
+            .iter()
+            .map(|group| (group.to_node.clone(), group.to_input.clone()))
+            .collect();
+        let connections: Vec<_> = connections
+            .into_iter()
+            .chain(
+                exclusive_inputs
+                    .iter()
+                    .flat_map(crate::ExclusiveInputDefinition::edges),
+            )
+            .collect();
         let mut definition_indices = BTreeMap::new();
         for (index, node) in nodes.iter().enumerate() {
             if definition_indices
@@ -296,7 +329,9 @@ impl FlowBuilder {
                 .fail();
             }
 
-            if !connected_inputs.insert((to_node, connection.to_input.clone())) {
+            let exclusive = exclusive_targets
+                .contains(&(connection.to_node.clone(), connection.to_input.clone()));
+            if !connected_inputs.insert((to_node, connection.to_input.clone())) && !exclusive {
                 return DuplicateInputConnectionSnafu {
                     target_definition_id: connection.to_node,
                     target_input: connection.to_input,
@@ -332,6 +367,7 @@ impl FlowBuilder {
             );
 
             resolved_connections.push(FlowConnection {
+                exclusive,
                 from_node,
                 from_output: connection.from_output.into(),
                 to_node,
@@ -453,6 +489,7 @@ impl FlowBuilder {
             let source = &self.nodes[edge.from_node.index()];
             let target = &self.nodes[edge.to_node.index()];
             incoming[positions[target.definition_id.as_str()]].push(crate::FlowDependency {
+                exclusive: edge.exclusive,
                 input: Some(edge.to_input.clone()),
                 source_node: source.definition_id.to_string().into(),
                 source_output: edge.from_output.clone(),
@@ -460,6 +497,7 @@ impl FlowBuilder {
         }
         for edge in self.controls.iter() {
             incoming[positions[edge.to_node.as_str()]].push(crate::FlowDependency {
+                exclusive: false,
                 input: None,
                 source_node: edge.from_node.to_string().into(),
                 source_output: edge.from_output.clone(),

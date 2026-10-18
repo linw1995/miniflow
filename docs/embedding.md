@@ -150,3 +150,15 @@ CARGO_TARGET_DIR="$PWD/target/embedded-example" nix develop --command \
 ```
 
 After building, the executable prepares and runs without workflow JSON, generated sources, or build tools.
+
+## Programmatic exclusive bindings
+
+`FlowBuilder::prepare_with_exclusive_inputs` accepts ordinary edges followed by a vector of
+`ExclusiveInputDefinition` groups, then execution order and output selections. Existing
+`FlowBuilder::prepare` calls retain single-source behavior. A group contains a target node and
+input plus `InputSourceDefinition` candidates; all producers must precede their consumer.
+
+Rust literals for workflow and body definitions must initialize the new `exclusive_inputs`
+field (an empty vector retains the previous behavior). Prepared dependency and connection
+literals carry an `exclusive` marker; candidates with the same consumer input form one group.
+Graph algorithms visit every candidate, while input resolution preserves that group identity.

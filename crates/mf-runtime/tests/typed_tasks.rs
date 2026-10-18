@@ -73,6 +73,7 @@ fn source(result: NodeResult, ctx: &mut ExecutionContext) {
 
 fn dependency() -> ExecutionDependency<'static> {
     ExecutionDependency {
+        exclusive: false,
         input: Some("input"),
         source_node: "source",
         source_output: "value",
@@ -194,6 +195,7 @@ fn skip_missing_dependencies_and_input_checks_precede_typed_decoding() {
         &mut ctx,
     );
     let missing = ExecutionDependency {
+        exclusive: false,
         input: None,
         source_node: "missing",
         source_output: "value",

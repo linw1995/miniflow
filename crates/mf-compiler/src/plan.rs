@@ -368,23 +368,22 @@ impl CompiledWorkflow {
 
         for (from_node, to_node) in self
             .definition
-            .edges
-            .iter()
-            .map(|edge| (&edge.from_node, &edge.to_node))
+            .data_edges()
+            .map(|edge| (edge.from_node, edge.to_node))
             .chain(
                 self.definition
                     .control_edges
                     .iter()
-                    .map(|edge| (&edge.from_node, &edge.to_node)),
+                    .map(|edge| (edge.from_node.clone(), edge.to_node.clone())),
             )
         {
-            let Some(&source_index) = indices.get(from_node) else {
+            let Some(&source_index) = indices.get(&from_node) else {
                 return UnknownNodeSnafu {
                     definition_id: from_node.clone(),
                 }
                 .fail();
             };
-            let Some(&target_index) = indices.get(to_node) else {
+            let Some(&target_index) = indices.get(&to_node) else {
                 return UnknownNodeSnafu {
                     definition_id: to_node.clone(),
                 }
@@ -742,7 +741,8 @@ fn dependency_tokens(dependencies: &[mf_runtime::ExecutionDependency<'_>]) -> Ve
             }
             None => quote! { None },
         };
-        quote! { mf_runtime::ExecutionDependency { input: #input, source_node: #source, source_output: #port } }
+        let exclusive = dependency.exclusive;
+        quote! { mf_runtime::ExecutionDependency { exclusive: #exclusive, input: #input, source_node: #source, source_output: #port } }
     }).collect()
 }
 
@@ -924,9 +924,10 @@ impl CompiledWorkflow {
         }
         let node_targets_json =
             serde_json::to_string(&self.node_targets(&nodes)?).context(SerializeSnafu)?;
-        let flow = crate::FlowBuilder::prepare(
+        let flow = crate::FlowBuilder::prepare_with_exclusive_inputs(
             nodes,
             self.definition.edges.clone(),
+            self.definition.exclusive_inputs.clone(),
             order.clone(),
             self.definition.outputs.clone(),
         )
@@ -944,8 +945,7 @@ impl CompiledWorkflow {
         if let Some(execution) = &self.definition.execution {
             typed_plan.connections = self
                 .definition
-                .edges
-                .iter()
+                .data_edges()
                 .map(|edge| crate::TypedConnectionReport {
                     source: edge.from_node.to_string(),
                     output: edge.from_output.clone(),
@@ -1039,7 +1039,8 @@ fn dependency_layout_tokens(
                     }
                     None => quote! { None },
                 };
-                quote! { mf_runtime::FlowDependency {
+                let exclusive = dependency.exclusive;
+                quote! { mf_runtime::FlowDependency { exclusive: #exclusive,
                     input: #input,
                     source_node: std::borrow::Cow::Borrowed(#source),
                     source_output: std::borrow::Cow::Borrowed(#output),
@@ -1377,12 +1378,13 @@ fn task_layout_tokens(
         .map(|(index, id)| (id, index))
         .collect();
     let dependencies = dependency_layout_tokens(definition, order);
-    let connections = definition.edges.iter().map(|edge| {
+    let connections = definition.data_edges().map(|edge| {
+        let exclusive = definition.exclusive_inputs.iter().any(|group| group.to_node == edge.to_node && group.to_input == edge.to_input);
         let from = indices[&edge.from_node];
         let to = indices[&edge.to_node];
         let output = LitStr::new(&edge.from_output, Span::call_site());
         let input = LitStr::new(&edge.to_input, Span::call_site());
-        quote! { mf_runtime::FlowConnection {
+        quote! { mf_runtime::FlowConnection { exclusive: #exclusive,
             from_node: mf_runtime::NodeId::new(#from), to_node: mf_runtime::NodeId::new(#to),
             from_output: std::borrow::Cow::Borrowed(#output), to_input: std::borrow::Cow::Borrowed(#input),
         } }

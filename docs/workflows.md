@@ -510,6 +510,31 @@ Context references use qualified IDs such as `load_order.value`. A reference mus
 
 A produced control output activates its target regardless of whether its JSON value is false or null. All incoming data and control dependencies must be available; any explicit skip skips execution and propagates to downstream nodes. Unexpected missing outputs remain errors, including when another dependency is skipped. Independent nodes still execute, and connecting both mutually exclusive outputs to one node does not merge branches.
 
+## Exclusive input bindings
+
+Use `exclusive_inputs` to bind alternative branch outputs to one input. Each group names
+`to_node`, `to_input`, and at least two distinct `sources` with `from_node` and `from_output`.
+A target input cannot also have an ordinary edge or another group. Every candidate participates
+in dependency ordering and type checks, including branches expected to skip.
+
+```json
+{
+  "exclusive_inputs": [{
+    "to_node": "consume",
+    "to_input": "input",
+    "sources": [
+      {"from_node": "local", "from_output": "value"},
+      {"from_node": "remote", "from_output": "value"}
+    ]
+  }]
+}
+```
+
+The same syntax is available in loop and iteration bodies. Candidates must be in the consumer's
+scope and input message domain. Ordinary inputs and control edges retain their AND behavior;
+this declaration does not mix independent streams or select the first completed producer.
+Omitting the field preserves existing workflows. New syntax requires updated support packages.
+
 ## Optional workflow results
 
 A selection such as `{"name":"result","node":"branch","port":"value","optional":true}` omits its key when the source port or node is explicitly skipped. A produced null remains `"result": null`. Missing outputs without a skip marker remain errors. Output selections are required by default, so selecting a skipped required output fails with its name and source ID. All omitted selections produce `{}`.

@@ -37,7 +37,7 @@ This keeps grouping explicit without adding policy flags to every edge or teachi
 
 ### 2. Preserve groups in the prepared input plan
 
-Represent single-source bindings and exclusive source groups explicitly in the shared prepared plan, with control dependencies remaining separate mandatory gates. Flatten candidate source references only when a graph algorithm needs predecessor adjacency, never when deciding whether a consumer should skip.
+Represent group membership explicitly on prepared dependency and connection entries with an `exclusive` marker, keyed by consumer and input port. The definition owns the group and validation rejects competing declarations. This compact representation lets existing graph algorithms visit every source while the shared input resolver groups candidates before applying skip rules. Control dependencies remain separate mandatory gates.
 
 Every candidate participates in topological ordering, cycle and endpoint validation, context ancestry, worker-domain visibility, message-domain analysis, and connected-input accounting. Use the same preparation path for definition-based and programmatic construction. Carry groups through nested body preparation and generated plans; do not introduce hidden nodes with new execution identities.
 
