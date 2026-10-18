@@ -3,13 +3,16 @@
 import argparse
 from datetime import datetime
 import html
+import io
 import json
 import os
 from pathlib import Path
 import re
+import subprocess
 from statistics import median
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+import zipfile
 
 
 MARKER = "<!-- miniflow-ci-timing -->"
@@ -157,17 +160,22 @@ def coverage_summary(jobs, current_wall):
 
 
 def validation_record(api, repository, run, pr):
-    import subprocess
-    import zipfile
-    from pr_validation import artifact_name, download_artifact, read_record
     if run["conclusion"] != "success":
         return None
     try:
         artifacts = api.request(f"/actions/runs/{run['id']}/artifacts?per_page=100")["artifacts"]
-        matches = [a for a in artifacts if a["name"] == artifact_name(run) and not a["expired"]]
+        name = f"pr-validation-{run['id']}-{run['run_attempt']}"
+        matches = [a for a in artifacts if a["name"] == name and not a["expired"]]
         if len(matches) != 1:
             return None
-        record = read_record(download_artifact(repository, matches[0]["id"]))
+        archive = subprocess.run(
+            ["gh", "api", f"/repos/{repository}/actions/artifacts/{matches[0]['id']}/zip"],
+            check=True, capture_output=True, timeout=30,
+        ).stdout
+        with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
+            if zipped.namelist() != ["validation.json"] or zipped.getinfo("validation.json").file_size > 1024 * 1024:
+                return None
+            record = json.loads(zipped.read("validation.json"))
         if (record["repository"] != repository or record["pr"] != pr or record["head"] != run["head_sha"]
                 or record["run_id"] != run["id"] or record["run_attempt"] != run["run_attempt"]):
             return None

@@ -1,4 +1,7 @@
+import io
+import json
 import unittest
+import zipfile
 from unittest.mock import Mock, patch
 
 import ci_monitor as monitor
@@ -209,7 +212,13 @@ class ValidationSummaryTests(unittest.TestCase):
                   'coverage': {'covered': 95, 'total': 100, 'status': 'passed'}}
         api = Mock()
         api.request.return_value = {'artifacts': [{'id': 7, 'name': 'pr-validation-10-1', 'expired': False}]}
-        with patch('pr_validation.download_artifact', return_value=b'fixture'), patch('pr_validation.read_record', return_value=record):
+        def download(*args, **kwargs):
+            archive = io.BytesIO()
+            with zipfile.ZipFile(archive, 'w') as zipped:
+                zipped.writestr('validation.json', json.dumps(record))
+            return Mock(stdout=archive.getvalue())
+
+        with patch('ci_monitor.subprocess.run', side_effect=download):
             loaded = monitor.validation_record(api, 'owner/repo', current, 12)
             report = monitor.render_report(current, {'coverage': job('coverage')}, [], 'main', loaded)
             self.assertIn('Current increment coverage:', report)
