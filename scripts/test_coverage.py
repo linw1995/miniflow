@@ -198,6 +198,8 @@ mod tests {{
             backup = root / "target/coverage/build/debug/deps/.kache-prestage-fixture"
             shutil.copyfile(stale_binary, backup)
             alpha.write_text("// Shift current executable lines.\n" * 20 + alpha.read_text())
+            old_profile = root / "default_123_0_456.profraw"
+            old_profile.write_text("Profiles from an earlier session must not be consumed.")
             # Separate steps must accumulate profiles without cleaning earlier crates.
             result = execute("bash", "scripts/run-cov.sh", "--prepare")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -207,6 +209,12 @@ mod tests {{
             session = root / "target/coverage/build-cache-session"
             prepared_session = session.read_text()
             self.assertTrue(prepared_session.strip())
+            isolated_env = dict(env)
+            isolated_env.pop("LLVM_PROFILE_FILE", None)
+            result = subprocess.run([str(binary), "--exact", "alpha::tests::value_matches"],
+                                    cwd=root, env=isolated_env, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertGreater(len(list(root.glob("default*.profraw"))), 1)
             # Package steps must reuse the shared build, never compile again.
             original_source = other_source.read_text()
             other_source.write_text('compile_error!("Package steps must reuse binaries");\n')
@@ -239,6 +247,9 @@ mod tests {{
             self.assertTrue(all(int(line[3:].split(",")[0]) > 20
                                 for line in alpha_block.splitlines() if line.startswith("DA:")))
             self.assertFalse((root / "target/coverage/report-binaries").exists())
+            self.assertEqual(list(root.glob("default*.profraw")), [old_profile])
+            self.assertTrue(list((root / "target/coverage/data").glob("subprocess-*.profraw")))
+            old_profile.unlink()
 
             # A package outside the plan must not even compile, and its old
             # coverage mappings must not leak from the preceding full run.

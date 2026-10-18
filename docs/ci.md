@@ -33,6 +33,10 @@ Reporting uses a temporary hard-linked binary view that omits `.kache-prestage-*
 compiler-cache backups. These backups can survive Cargo cleanup and contain old
 source mappings; source files and coverage thresholds are not excluded or changed.
 The temporary view is removed after report generation without modifying the cache.
+Preparation records pre-existing untracked profile paths. Package execution and
+reporting collect only new default LLVM profiles left by credential-isolated
+subprocesses into the current session's data directory. Pre-existing profiles are
+never merged, and generated outputs do not leave a clean tested checkout dirty.
 The packaged CLI fixture keeps a separate target beside the generated-runner
 cache. Its registry dependencies survive subsequent runs, while preparation
 cleans checkout packages before rebuilding the CLI. Packaged source digests also

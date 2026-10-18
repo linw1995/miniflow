@@ -258,7 +258,7 @@ def evaluate_coverage(root, current, comparison, plan, report):
     changes = {p: lines for p, lines in changes.items() if p not in plan["ignored_files"]}
     if plan["packages"]:
         provenance = json.loads(report.with_name("source.json").read_text())
-        expected = {"head": current["merge"], "tree": current["tree"], "dirty": False,
+        expected = {"head": current["merge"], "tree": current["tree"], "dirty": False, "initial_profiles": [],
                     "input_environment": current["signature"]["environment"],
                     "toolchain": current["signature"]["toolchain"], "features": "all",
                     "target": current["signature"]["target"], "profile": current["signature"]["profile"]}

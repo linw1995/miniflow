@@ -170,7 +170,7 @@ class ValidationTests(unittest.TestCase):
                 'packages': ['sample'], 'ignored_files': []}
         report = self.root / 'target/result/lcov.info'
         report.parent.mkdir(parents=True, exist_ok=True)
-        identity = {'head': current['merge'], 'tree': current['tree'], 'dirty': False, 'input_environment': {},
+        identity = {'head': current['merge'], 'tree': current['tree'], 'dirty': False, 'initial_profiles': [], 'input_environment': {},
                     'toolchain': 'fixture', 'features': 'all', 'target': None, 'profile': 'ci'}
         report.with_name('source.json').write_text(json.dumps(identity))
         return current, comparison, plan, report
