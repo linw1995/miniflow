@@ -19,6 +19,8 @@ Local users and CI should obtain test plans by executing the same Flow through `
 
 ### Modified Capabilities
 
+- `core-nodes`: an explicit boolean assertion guard identified by the composition gate.
+
 - `test-affected`: one conditional local/CI planning Flow with immutable local snapshots.
 - `ci-test-selection`: baseline selection expressed with existing Flow nodes and CI selection executed through `mf`.
 
@@ -26,6 +28,6 @@ Local users and CI should obtain test plans by executing the same Flow through `
 
 First integrate origin/main through `01e5e1c` (#165 exclusive inputs), which includes `3f42ae6` (#161 structured JSON Code). Reuse their contracts without adding merge machinery or copying their test matrix.
 
-No new `validation.baseline`, record-eligibility, environment-router, retry, or request-transform kind is planned. Any new kinds are limited to I/O capabilities demonstrated missing by the executable composition. Their concrete names and ports are a deliverable of the first design gate, not a preselected number of providers. Keep developer tooling outside product releases and reuse existing workspace dependencies.
+No new `validation.baseline`, record-eligibility, environment-router, retry, or request-transform kind is planned. The executable gate identified `github.read`, `git.inspect`, and `git.fetch` as missing I/O capabilities, plus the reusable `builtin.assert` guard needed for explicit fatal invariants. Keep developer tooling outside product releases and reuse existing workspace dependencies.
 
 Invocation remains `mf compile <definition> --output <runner>` then `mf run <runner>`. Automatic execution of JSON definitions and test-execution nodes are outside scope.

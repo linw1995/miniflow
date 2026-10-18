@@ -117,3 +117,14 @@ Use the same recorded histories and Git fixtures to compare selection, baseline 
 Reuse existing integration fixtures for local worktree preservation, root commits, missing refs, secret handling, current identity, failed/cancelled attempts, target-base reset, retries, expiry, no usable record, force-push ancestry, explicit cumulative mode, and empty plans. Cover changed Flow integration rather than copying upstream Code/exclusive-edge tests.
 
 Ablate compatibility checks, ancestor ordering, early-stop wiring, explicit error propagation, and local branch isolation. Remove redundant graph steps, wrappers, and tests. Keep evidence under ignored `target/`. Run the pinned toolchain and required hooks, review AGENTS.md compliance, and archive only after implementation and integration validation complete.
+
+## Executable gate decisions
+
+The existing Code/Loop/exclusive-edge composition supports local routing, empty-candidate bypass, nearest candidate choice, configuration rejection, deterministic ties, and early stopping. A dedicated policy provider is unnecessary.
+
+The core lacks a declarative failure guard. Add `builtin.assert` with a boolean `condition` input, a static configured diagnostic, and a `passed` output that forwards the original true value and sensitivity. False fails without exposing input payloads. This is a reusable invariant guard, not a baseline node.
+
+The minimal external kinds are `github.read`, `git.inspect`, and `git.fetch`, implemented in unpublished tooling.
+`github.read` performs an explicit read-only API request or bounded artifact-member JSON read; JSON Pointer projection can keep responses within Code input budgets without implementing policy. `git.inspect` exposes current/revision parents, trees, availability, and ancestry/distance without fetching. `git.fetch` retrieves one explicitly requested commit from a configured remote and preserves the checkout. Neither Git kind evaluates workflow or coverage policy.
+
+External operations carry one absolute search deadline across invocations, enforce a monotonic per-operation timeout and bounded capture, and return ordinary historical unavailability as data. Required current acquisition and cancellation fail. Candidate selection and fallback remain Code/Loop decisions.

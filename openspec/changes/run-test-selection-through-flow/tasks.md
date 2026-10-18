@@ -1,10 +1,10 @@
 ## 1. Integrate upstream and prove existing-node composition
 
-- [ ] 1.1 Integrate origin/main through #165 and #161 without rewriting published history; preserve the current PR's tooling and CI changes.
-- [ ] 1.2 Build a minimal single-definition fixture Flow using parameters, if-else, Code, Loop/state, and exclusive inputs; verify both local and CI paths through `mf`.
-- [ ] 1.3 Prove compatibility predicates, ancestor ordering/ties, empty-candidate handling, early stopping, cumulative fallback, cancellation, and fatal current-identity handling using actual supported contracts.
-- [ ] 1.4 Specify concrete external I/O ports, availability/error semantics, elapsed/item bounds, and the smallest required kind inventory; resolve any discovered reusable-contract gaps in the spec before production implementation.
-- [ ] 1.5 Record design-gate evidence under target/ and commit upstream integration and the verified design separately.
+- [x] 1.1 Integrate origin/main through #165 and #161 without rewriting published history; preserve the current PR's tooling and CI changes.
+- [x] 1.2 Build a minimal single-definition fixture Flow using parameters, if-else, Code, Loop/state, and exclusive inputs; verify both local and CI paths through `mf`.
+- [x] 1.3 Prove compatibility predicates, ancestor ordering/ties, empty-candidate handling, early stopping, cumulative fallback, cancellation, and fatal current-identity handling using actual supported contracts.
+- [x] 1.4 Specify concrete external I/O ports, availability/error semantics, elapsed/item bounds, and the smallest required kind inventory; resolve any discovered reusable-contract gaps in the spec before production implementation.
+- [x] 1.5 Record design-gate evidence under target/ and commit upstream integration and the verified design separately.
 
 ## 2. Implement only the missing external capabilities
 
