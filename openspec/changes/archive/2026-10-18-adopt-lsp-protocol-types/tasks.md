@@ -7,4 +7,4 @@
 
 - [x] 2.1 Update existing fixtures and run affected suites plus the real-server smoke check.
 - [x] 2.2 Review AGENTS.md compliance, run required hooks, and perform focused ablation.
-- [ ] 2.3 Commit implementation and archive the reviewed specification.
+- [x] 2.3 Commit implementation and archive the reviewed specification.
