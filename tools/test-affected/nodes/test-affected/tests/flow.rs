@@ -628,6 +628,44 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
         if case == "incremental" {
             assert!(!server.requests().contains("/runs/11/artifacts"));
         }
+        if matches!(case, "incremental" | "reset" | "manual") {
+            let handoff = root.join("target/handoff");
+            fs::create_dir_all(&handoff).unwrap();
+            fs::write(handoff.join("flow.json"), &result.stdout).unwrap();
+            fs::write(
+                handoff.join("event.json"),
+                json!({"number":1,"inputs":{"pr":"1"}}).to_string(),
+            )
+            .unwrap();
+            let accepted = Command::new("python3")
+                .arg(
+                    Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("../../../../scripts/pr_validation.py"),
+                )
+                .args(["accept", "--coverage-target", "95", "--directory"])
+                .arg(&handoff)
+                .arg("--flow-output")
+                .arg(handoff.join("flow.json"))
+                .current_dir(root)
+                .env("GITHUB_EVENT_PATH", handoff.join("event.json"))
+                .env("GITHUB_EVENT_NAME", args["params.event"].as_str().unwrap())
+                .env("GITHUB_REPOSITORY", "fixture/repo")
+                .env("GITHUB_RUN_ID", "99")
+                .env("GITHUB_RUN_ATTEMPT", "1")
+                .env("NEXTEST_PROFILE", "ci")
+                .env_remove("GITHUB_OUTPUT")
+                .env_remove("GITHUB_STEP_SUMMARY")
+                .output()
+                .unwrap();
+            assert!(
+                accepted.status.success(),
+                "{case}: {}",
+                String::from_utf8_lossy(&accepted.stderr)
+            );
+            let accepted: Value =
+                serde_json::from_slice(&fs::read(handoff.join("plan.json")).unwrap()).unwrap();
+            assert_eq!(accepted, generated["plan"]);
+        }
         if matches!(case, "failed_run" | "pending_run" | "unrelated_head") {
             assert!(!server.requests().contains("/runs/17/artifacts"));
         }

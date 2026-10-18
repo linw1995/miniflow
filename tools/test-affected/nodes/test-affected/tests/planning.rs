@@ -32,55 +32,6 @@ fn compare(root: &Path, base: &str, head: &str) -> mfn_test_affected::Comparison
     git::compare(root, base, head, None, json!({})).unwrap()
 }
 
-fn assert_baseline_parity(
-    comparison: &mfn_test_affected::Comparison,
-    plan: &mfn_test_affected::TestPlan,
-) {
-    let legacy = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../scripts");
-    let check = Command::new("python3")
-        .arg("-c")
-        .arg(
-            r#"
-import json, pathlib, sys
-sys.dont_write_bytecode = True
-sys.path.insert(0, sys.argv[1])
-import affected_tests as a
-root = pathlib.Path(sys.argv[2])
-packages = a.workspace_packages(root)
-direct, ignored, fallback = a.classify(root, json.loads(sys.argv[3]), packages)
-lines = ['digraph rust_analyzer_crate_graph {']
-for index, package in enumerate(packages.values()):
-    name = package['targets'][0]['name'].replace('-', '_')
-    lines.append(f'_n{index}[label="{name}"][shape="box"];')
-lines.append('}')
-graph, _ = a.package_graph('\n'.join(lines), packages)
-print(json.dumps({"packages": sorted(packages if fallback else a.select(direct, graph)), "ignored_files": ignored}))
-"#,
-        )
-        .arg(legacy)
-        .arg(&comparison.head_root)
-        .arg(
-            serde_json::to_string(
-                &comparison
-                    .changes
-                    .iter()
-                    .map(|c| &c.path)
-                    .collect::<Vec<_>>(),
-            )
-            .unwrap(),
-        )
-        .output()
-        .unwrap();
-    assert!(
-        check.status.success(),
-        "{}",
-        String::from_utf8_lossy(&check.stderr)
-    );
-    let baseline: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
-    assert_eq!(json!(plan.baseline_packages), baseline["packages"]);
-    assert_eq!(json!(plan.ignored_files), baseline["ignored_files"]);
-}
-
 #[test]
 fn combines_isolated_tests_with_production_consumers_and_keeps_caller_checkout() {
     let (directory, base) = fixture();
@@ -95,7 +46,6 @@ fn combines_isolated_tests_with_production_consumers_and_keeps_caller_checkout()
     let comparison = compare(root, &base, &head);
     let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
     assert_eq!(plan.baseline_packages, ["sample-app", "sample-core"]);
-    assert_baseline_parity(&comparison, &plan);
 
     assert_eq!(plan.packages, ["sample-app"]);
     assert_eq!(plan.tests.len(), 1);
@@ -505,7 +455,6 @@ fn additions_deletions_and_manifest_changes_preserve_conservative_scope() {
     let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
     assert_eq!(plan.packages, ["sample-app", "sample-core"]);
     assert!(plan.fallback_reasons.is_empty());
-    assert_baseline_parity(&comparison, &plan);
 }
 
 #[test]
@@ -561,7 +510,7 @@ fn task_boundaries_preserve_error_sources_and_reject_cancelled_work() {
 }
 
 #[test]
-fn shared_input_policy_matches_selector_and_scopes_consumers() {
+fn shared_input_policy_scopes_known_consumers() {
     let (directory, _) = fixture();
     let root = directory.path();
     for package in ["core", "app", "other"] {
@@ -636,7 +585,6 @@ fn shared_input_policy_matches_selector_and_scopes_consumers() {
                 vec![]
             }
         );
-        assert_baseline_parity(&comparison, &plan);
     }
     let (directory, base) = fixture();
     write(directory.path(), "examples/unknown.json", "{}\n");
@@ -645,7 +593,6 @@ fn shared_input_policy_matches_selector_and_scopes_consumers() {
     let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
     assert_eq!(plan.packages.len(), 3);
     assert!(!plan.fallback_reasons.is_empty());
-    assert_baseline_parity(&comparison, &plan);
 }
 
 #[test]
@@ -700,7 +647,6 @@ fn snapshot_mode_preserves_incremental_base_and_plan_provenance() {
     let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
     assert_eq!(plan.comparison_mode, ComparisonMode::Snapshot);
     assert_eq!(plan.packages, ["sample-app"]);
-    assert_baseline_parity(&comparison, &plan);
     let cumulative = compare(root, first_merge.trim(), second_merge.trim());
     assert_ne!(cumulative.base, comparison.base);
     assert_eq!(cumulative.changes.len(), 2);

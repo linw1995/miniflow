@@ -27,10 +27,10 @@
 
 ## 5. Migrate CI and remove duplicated ownership
 
-- [ ] 5.1 Invoke the compiled Flow through `mf` for CI selection; preserve summaries, outputs, and comparison/context artifacts using thin adapters.
-- [ ] 5.2 Define migration compatibility/policy version and verify the required first-run cumulative reset and later incremental reuse.
-- [ ] 5.3 Update AGENTS.md and local entry points; remove duplicate Python selection/discovery logic and superseded tests only after parity evidence passes.
-- [ ] 5.4 Preserve package-only coverage, empty plans, failed-gate behavior, and final attempt-bound success publication; commit this group.
+- [x] 5.1 Invoke the compiled Flow through `mf` for CI selection; preserve summaries, outputs, and comparison/context artifacts using thin adapters.
+- [x] 5.2 Define migration compatibility/policy version and verify the required first-run cumulative reset and later incremental reuse.
+- [x] 5.3 Update AGENTS.md and local entry points; remove duplicate Python selection/discovery logic and superseded tests only after parity evidence passes.
+- [x] 5.4 Preserve package-only coverage, empty plans, failed-gate behavior, and final attempt-bound success publication; commit this group.
 
 ## 6. Review, ablate, and archive
 

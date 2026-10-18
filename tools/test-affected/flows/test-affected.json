@@ -219,6 +219,16 @@
       }
     },
     {
+      "id": "validation_policy",
+      "kind": "builtin.constant",
+      "config": {
+        "value": {
+          "record_version": 1,
+          "id": "flow-pr-v2"
+        }
+      }
+    },
+    {
       "id": "environment",
       "kind": "builtin.if_else",
       "config": {
@@ -327,11 +337,12 @@
           "encoded_rustflags": "any",
           "incremental": "any",
           "dev_debug": "any",
-          "test_debug": "any"
+          "test_debug": "any",
+          "policy": "object"
         },
         "code": {
           "valid": "github_repository.matches('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') && run_id>0 && attempt>0 && pr>0 && size(branch)>0 && event in ['pull_request','workflow_dispatch'] && coverage_target>=0.0 && coverage_target<=100.0 && profile=='ci' && size(toolchain)>0",
-          "settings": "{'repository':github_repository,'run_id':run_id,'attempt':attempt,'pr':pr,'branch':branch,'manual':event=='workflow_dispatch','event':event,'expected_head':expected_head,'expected_merge':expected_merge,'cumulative':cumulative,'signature':{'policy':'flow-pr-v2','coverage_target':coverage_target,'toolchain':toolchain.endsWith('\\n')?toolchain:toolchain+'\\n','features':'all','profile':profile,'target':target,'environment':{'RUSTFLAGS':rustflags,'CARGO_ENCODED_RUSTFLAGS':encoded_rustflags,'CARGO_INCREMENTAL':incremental,'CARGO_PROFILE_DEV_DEBUG':dev_debug,'CARGO_PROFILE_TEST_DEBUG':test_debug}}}",
+          "settings": "{'record_version':policy.record_version,'repository':github_repository,'run_id':run_id,'attempt':attempt,'pr':pr,'branch':branch,'manual':event=='workflow_dispatch','event':event,'expected_head':expected_head,'expected_merge':expected_merge,'cumulative':cumulative,'signature':{'policy':policy.id,'coverage_target':coverage_target,'toolchain':toolchain.endsWith('\\n')?toolchain:toolchain+'\\n','features':'all','profile':profile,'target':target,'environment':{'RUSTFLAGS':rustflags,'CARGO_ENCODED_RUSTFLAGS':encoded_rustflags,'CARGO_INCREMENTAL':incremental,'CARGO_PROFILE_DEV_DEBUG':dev_debug,'CARGO_PROFILE_TEST_DEBUG':test_debug}}}",
           "path": "'/repos/'+github_repository+'/actions/runs/'+string(run_id)+'/attempts/'+string(attempt)"
         }
       }
@@ -368,7 +379,7 @@
         },
         "code": {
           "valid": "run.available && run.value.data.id==s.run_id && run.value.data.run_attempt==s.attempt && type(run.value.data.workflow_id)==int && run.value.data.workflow_id>0 && run.value.data.head_sha==git.value.current.parents[1] && run.value.data.event==s.event && (s.manual || s.expected_head==git.value.current.parents[1])",
-          "current": "{'version':1,'repository':s.repository,'pr':s.pr,'run_id':s.run_id,'run_attempt':s.attempt,'workflow_id':run.value.data.workflow_id,'head':git.value.current.parents[1],'base':git.value.current.parents[0],'merge':git.value.current.commit,'tree':git.value.current.tree,'signature':s.signature}"
+          "current": "{'version':s.record_version,'repository':s.repository,'pr':s.pr,'run_id':s.run_id,'run_attempt':s.attempt,'workflow_id':run.value.data.workflow_id,'head':git.value.current.parents[1],'base':git.value.current.parents[0],'merge':git.value.current.commit,'tree':git.value.current.tree,'signature':s.signature}"
         }
       }
     },
@@ -2012,6 +2023,12 @@
       "from_output": "context",
       "to_node": "plan",
       "to_input": "context"
+    },
+    {
+      "from_node": "validation_policy",
+      "from_output": "value",
+      "to_node": "ci_settings",
+      "to_input": "policy"
     }
   ],
   "control_edges": [

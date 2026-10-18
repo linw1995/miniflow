@@ -297,10 +297,12 @@ mod tests {{
                 self.assertFalse(report.exists())
                 self.assertFalse((root / "target/coverage/binaries.json").exists())
 
-            plan.write_text("{}")
-            result = execute("bash", "scripts/run-cov.sh", "--affected-plan", str(plan))
-            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertFalse(report.exists())
+            for invalid in [{}, {"packages": [], "tests": [{"name": "selected"}]},
+                            {"packages": ["coverage-fixture"], "tests": None}]:
+                plan.write_text(json.dumps(invalid))
+                result = execute("bash", "scripts/run-cov.sh", "--affected-plan", str(plan))
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(report.exists())
 
 
 if __name__ == "__main__":

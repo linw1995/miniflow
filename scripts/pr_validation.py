@@ -1,26 +1,41 @@
 #!/usr/bin/env python3
-"""Resolve and record successful incremental PR validation."""
+"""Accept Flow plans, evaluate coverage, and record successful PR validation."""
 
 import argparse
-import io
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
 import sys
-import time
-from urllib.parse import urlencode
-import zipfile
-
-import affected_tests as affected
-from affected_tests import AnalysisError, command, revision
 
 
-VERSION = 1
-POLICY = "incremental-pr-v1"
+FLOW = Path(__file__).resolve().parent.parent / "tools/test-affected/flows/test-affected.json"
+POLICY_SETTINGS = next(node["config"]["value"] for node in json.loads(FLOW.read_text())["nodes"]
+                       if node["id"] == "validation_policy")
+VERSION, POLICY = POLICY_SETTINGS["record_version"], POLICY_SETTINGS["id"]
 RECORD_FILE = "validation.json"
 SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
+
+
+class AnalysisError(ValueError):
+    pass
+
+
+def command(root, *args):
+    result = subprocess.run(args, cwd=root, capture_output=True, text=True,
+                            env=os.environ | {"GIT_OPTIONAL_LOCKS": "0", "GIT_NO_LAZY_FETCH": "1"})
+    if result.returncode:
+        raise AnalysisError(f"{args[0]} failed: {result.stderr.strip()}")
+    return result.stdout
+
+
+def revision(root, ref):
+    return command(root, "git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}").strip()
+
+
+def input_environment(signature):
+    return {key: value for key, value in signature["environment"].items() if value is not None}
 
 
 def execution_signature(root, target):
@@ -29,11 +44,11 @@ def execution_signature(root, target):
     return {
         "policy": POLICY, "coverage_target": target,
         "toolchain": command(root, "rustc", "-vV"),
-        "features": "all", "profile": "ci", "target": os.environ.get("CARGO_BUILD_TARGET"),
-        "environment": {key: os.environ[key] for key in (
+        "features": "all", "profile": os.environ.get("NEXTEST_PROFILE", "ci"), "target": os.environ.get("CARGO_BUILD_TARGET"),
+        "environment": {key: os.environ.get(key) for key in (
             "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL",
             "CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG",
-        ) if key in os.environ},
+        )},
     }
 
 
@@ -53,15 +68,6 @@ def current_context(root, repository, pr, run, signature):
     }
 
 
-def artifact_name(run):
-    return f"pr-validation-{run['id']}-{run['run_attempt']}"
-
-
-def cumulative(current, reason):
-    return {"base": current["base"], "head": current["merge"], "scope": "cumulative",
-            "previous": None, "reason": reason}
-
-
 def valid_coverage(record):
     coverage = record["coverage"]
     total, covered = coverage["total"], coverage["covered"]
@@ -75,115 +81,6 @@ def valid_coverage(record):
         and ((total > 0 and coverage["status"] == "passed" and covered * 100 >= target * total)
              or (total == 0 and coverage["status"] == "not_applicable"))
     )
-
-
-def eligible(root, current, run, record):
-    try:
-        if run["status"] != "completed" or run["conclusion"] != "success":
-            return False
-        for field in ("id", "run_attempt", "workflow_id"):
-            if record[{"id": "run_id"}.get(field, field)] != run[field]:
-                return False
-        if run["head_sha"] != record["head"]:
-            return False
-        for field in ("version", "repository", "pr", "workflow_id", "base", "signature"):
-            if record[field] != current[field]:
-                return False
-        if not all(isinstance(record[key], str) and SHA.fullmatch(record[key]) for key in ("head", "base", "merge", "tree")):
-            return False
-        if record["title_check"]["head_sha"] != record["head"] or record["title_check"]["conclusion"] != "success":
-            return False
-        comparison = record["comparison"]
-        if (comparison["head"] != record["merge"] or comparison["scope"] not in {"incremental", "cumulative"}
-                or not isinstance(comparison["base"], str) or not SHA.fullmatch(comparison["base"])
-                or not isinstance(comparison["reason"], str) or not valid_coverage(record)):
-            return False
-        if not isinstance(record["packages"], list) or not all(isinstance(p, str) and p for p in record["packages"]):
-            return False
-        parents = command(root, "git", "rev-list", "--parents", "-n", "1", record["merge"]).split()[1:]
-        if parents != [record["base"], record["head"]]:
-            return False
-        if command(root, "git", "rev-parse", record["merge"] + "^{tree}").strip() != record["tree"]:
-            return False
-        return command(root, "git", "merge-base", record["head"], current["head"]).strip() == record["head"]
-    except (KeyError, TypeError, ValueError, AnalysisError):
-        return False
-
-
-def ancestry_order(root, head, run):
-    return (int(command(root, "git", "rev-list", "--count", run["head_sha"] + ".." + head)),
-            -run["id"], -run["run_attempt"])
-
-
-def choose_baseline(root, current, candidates):
-    eligible_records = [(run, record) for run, record in candidates if eligible(root, current, run, record)]
-    if not eligible_records:
-        return cumulative(current, "No compatible completed successful validation record")
-    # Completion order is unrelated to source ancestry, especially after reruns.
-    run, record = min(eligible_records, key=lambda pair: ancestry_order(root, current["head"], pair[0]))
-    return {"base": record["merge"], "head": current["merge"], "scope": "incremental",
-            "previous": {"run_id": run["id"], "run_attempt": run["run_attempt"], "merge": record["merge"]},
-            "reason": "Reusing the nearest compatible successful PR-head ancestor"}
-
-
-def read_record(archive):
-    with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
-        if zipped.namelist() != [RECORD_FILE] or zipped.getinfo(RECORD_FILE).file_size > 1024 * 1024:
-            raise ValueError("unexpected validation artifact contents")
-        record = json.loads(zipped.read(RECORD_FILE))
-        if not isinstance(record, dict):
-            raise ValueError("Validation artifact must contain an object")
-        return record
-
-
-def discover_baseline(root, current, api, branch, download):
-    started = time.monotonic()
-    try:
-        query = urlencode({"branch": branch, "status": "success", "per_page": 100})
-        runs = api.request(f"/actions/workflows/{current['workflow_id']}/runs?{query}")["workflow_runs"]
-        if len(runs) >= 100:
-            return cumulative(current, "Validation discovery limit reached")
-        rejection = None
-        ancestors = set(command(root, "git", "rev-list", current["head"]).splitlines())
-        runs = [run for run in runs if run["head_sha"] in ancestors]
-        for run in sorted(runs, key=lambda r: ancestry_order(root, current["head"], r)):
-            if time.monotonic() - started > 60:
-                return cumulative(current, "Validation discovery deadline reached")
-            if run["id"] == current["run_id"] or run["workflow_id"] != current["workflow_id"]:
-                continue
-            if run["status"] != "completed" or run["conclusion"] != "success":
-                continue
-            artifacts = api.request(f"/actions/runs/{run['id']}/artifacts?per_page=100")["artifacts"]
-            matches = [a for a in artifacts if a["name"] == artifact_name(run) and not a["expired"]]
-            if len(matches) != 1:
-                continue
-            try:
-                record = read_record(download(matches[0]["id"]))
-                if record.get("repository") != current["repository"] or record.get("pr") != current["pr"]:
-                    continue
-                if record.get("base") != current["base"]:
-                    rejection = rejection or "Target base changed since the successful validation"
-                    continue
-                if record.get("signature") != current["signature"]:
-                    rejection = rejection or "Execution settings changed since the successful validation"
-                    continue
-                merge = record.get("merge", "")
-                if not isinstance(merge, str) or not SHA.fullmatch(merge):
-                    continue
-                # Fetching is explicit CI orchestration; local selectors never fetch.
-                present = subprocess.run(["git", "cat-file", "-e", merge + "^{commit}"], cwd=root, capture_output=True)
-                if present.returncode:
-                    subprocess.run(["git", "fetch", "--no-tags", "origin", merge], cwd=root,
-                                   capture_output=True, check=True, timeout=30)
-                result = choose_baseline(root, current, [(run, record)])
-                if result["scope"] == "incremental":
-                    return result
-            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
-                # An unusable record cannot invalidate another proven ancestor.
-                rejection = rejection or f"Recorded validation unavailable: {error}"
-        return cumulative(current, rejection or "No compatible completed successful validation record")
-    except (OSError, ValueError, KeyError, TypeError, AnalysisError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
-        return cumulative(current, f"Validation history unavailable: {error}")
 
 
 def changed_lines(root, base, head):
@@ -278,7 +175,7 @@ def evaluate_coverage(root, current, comparison, plan, report):
     if plan["packages"]:
         provenance = json.loads(report.with_name("source.json").read_text())
         expected = {"head": current["merge"], "tree": current["tree"], "dirty": False, "initial_profiles": [],
-                    "input_environment": current["signature"]["environment"],
+                    "input_environment": input_environment(current["signature"]),
                     "toolchain": current["signature"]["toolchain"], "features": "all",
                     "target": current["signature"]["target"], "profile": current["signature"]["profile"]}
         if provenance != expected:
@@ -316,11 +213,6 @@ def evaluate_coverage(root, current, comparison, plan, report):
             "status": "not_applicable" if total == 0 else "passed" if covered * 100 >= target * total else "failed"}
 
 
-def download_artifact(repository, artifact_id):
-    return subprocess.run(["gh", "api", f"/repos/{repository}/actions/artifacts/{artifact_id}/zip"],
-                          check=True, capture_output=True, timeout=30).stdout
-
-
 def make_record(root, current, comparison, plan, coverage, needs, run, title_check):
     if set(needs) != {"lint", "check", "coverage"} or any(job["result"] != "success" for job in needs.values()):
         raise ValueError("All required CI jobs must succeed before publishing validation")
@@ -350,51 +242,77 @@ def summarize(comparison, plan, coverage=None):
             "coverage": coverage}
 
 
+def accept_plan(root, output, repository, pr, run_id, attempt, target):
+    if not isinstance(output, dict) or set(output) != {"plan", "validation"}:
+        raise ValueError("Expected one complete Flow result")
+    plan, validation = output["plan"], output["validation"]
+    if not isinstance(validation, dict) or set(validation) != {"context", "comparison"}:
+        raise ValueError("CI requires Flow validation provenance")
+    current, comparison = validation["context"], validation["comparison"]
+    for field in ("version", "pr", "run_id", "run_attempt", "workflow_id"):
+        if type(current[field]) is not int or current[field] <= 0:
+            raise ValueError("Invalid validation identity")
+    signature = execution_signature(root, target)
+    expected = current_context(root, repository, pr,
+        {"id": run_id, "run_attempt": attempt, "workflow_id": current["workflow_id"]}, signature)
+    if current != expected:
+        raise ValueError("Flow provenance does not match this execution")
+    verify_current(root, current)
+    for field in ("base", "head"):
+        if not isinstance(comparison[field], str) or not SHA.fullmatch(comparison[field]):
+            raise ValueError("Comparison requires resolved commit identities")
+    if (comparison["head"] != current["merge"] or plan["base"] != comparison["base"]
+            or plan["head"] != current["merge"] or plan["tree"] != current["tree"]
+            or plan["comparison_mode"] != "snapshot"):
+        raise ValueError("Flow plan and comparison identities differ")
+    if comparison["scope"] == "cumulative":
+        if comparison["base"] != current["base"] or comparison["previous"] is not None:
+            raise ValueError("Invalid cumulative comparison")
+    elif comparison["scope"] == "incremental":
+        previous = comparison["previous"]
+        if (not isinstance(previous, dict) or previous["merge"] != comparison["base"]
+                or any(type(previous[k]) is not int or previous[k] <= 0 for k in ("run_id", "run_attempt"))):
+            raise ValueError("Invalid incremental comparison provenance")
+    else:
+        raise ValueError("Unknown comparison scope")
+    if not isinstance(comparison["reason"], str) or not comparison["reason"]:
+        raise ValueError("Comparison requires an explanation")
+    configuration = {"target": signature["target"], "all_features": True, "features": [], "no_default_features": False}
+    environment = input_environment(signature)
+    if signature["target"] is not None:
+        environment["CARGO_BUILD_TARGET"] = signature["target"]
+    if (plan["tests"] != [] or plan["configuration"] != configuration
+            or plan["toolchain"] != signature["toolchain"] or plan["build_environment"] != environment):
+        raise ValueError("CI requires a matching package-only Flow plan")
+    if (not isinstance(plan["packages"], list)
+            or not all(isinstance(p, str) and p for p in plan["packages"])
+            or not isinstance(plan["ignored_files"], list)):
+        raise ValueError("Invalid Flow selection shape")
+    return current, comparison, plan
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("phase", choices=("select", "evaluate", "record"))
+    parser.add_argument("phase", choices=("accept", "evaluate", "record"))
     parser.add_argument("--directory", type=Path, required=True)
+    parser.add_argument("--flow-output", type=Path)
     parser.add_argument("--coverage-target", type=float)
     parser.add_argument("--report", type=Path, default=Path("target/coverage/result/lcov.info"))
-    parser.add_argument("--cumulative", action="store_true")
     args = parser.parse_args()
     try:
         root = Path(command(Path.cwd(), "git", "rev-parse", "--show-toplevel").strip()).resolve()
         directory = args.directory.resolve()
         directory.mkdir(parents=True, exist_ok=True)
-        if args.phase in {"select", "record"}:
-            from ci_monitor import GitHub
-            repository = os.environ["GITHUB_REPOSITORY"]
-            api = GitHub(repository, os.environ["GH_TOKEN"], os.environ.get("GITHUB_API_URL", "https://api.github.com"))
-            run_id, attempt = int(os.environ["GITHUB_RUN_ID"]), int(os.environ["GITHUB_RUN_ATTEMPT"])
-            run = api.request(f"/actions/runs/{run_id}/attempts/{attempt}")
-            if run["id"] != run_id or run["run_attempt"] != attempt:
-                raise ValueError("Workflow attempt metadata does not match the current run")
-        if args.phase == "select":
-            if args.coverage_target is None:
-                parser.error("select requires --coverage-target")
+        if args.phase == "accept":
+            if args.flow_output is None or args.coverage_target is None:
+                parser.error("accept requires --flow-output and --coverage-target")
             event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
-            manual = os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch"
-            pr = int(event["inputs"]["pr"] if manual else event["number"])
-            pull = api.request(f"/pulls/{pr}") if manual else event["pull_request"]
-            current = current_context(root, repository, pr, run, execution_signature(root, args.coverage_target))
-            if current["head"] != pull["head"]["sha"] or current["head"] != run["head_sha"]:
-                raise ValueError("Tested merge and workflow must identify the requested PR head")
-            if manual and (revision(root, event["inputs"]["merge_sha"]) != current["merge"]
-                           or pull["merge_commit_sha"] != current["merge"]):
-                raise ValueError("Manual PR validation requires the current pinned PR merge SHA")
-            if manual or args.cumulative:
-                comparison = cumulative(current, "Cumulative PR validation explicitly requested")
-            else:
-                comparison = discover_baseline(root, current, api, pull["head"]["ref"],
-                                               lambda identifier: download_artifact(repository, identifier))
-            options = argparse.Namespace(base=comparison["base"], head=current["merge"], comparison="snapshot",
-                                         worktree=False, commit=None, target=current["signature"]["target"],
-                                         rust_analyzer="rust-analyzer", timeout=120)
-            plan = affected.make_plan(root, options)
-            write_json(directory / "context.json", current)
-            write_json(directory / "comparison.json", comparison)
-            write_json(directory / "plan.json", plan)
+            pr = int(event["inputs"]["pr"] if os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch" else event["number"])
+            current, comparison, plan = accept_plan(root, json.loads(args.flow_output.read_text()),
+                os.environ["GITHUB_REPOSITORY"], pr, int(os.environ["GITHUB_RUN_ID"]),
+                int(os.environ["GITHUB_RUN_ATTEMPT"]), args.coverage_target)
+            for name, value in (("context", current), ("comparison", comparison), ("plan", plan)):
+                write_json(directory / f"{name}.json", value)
             if os.environ.get("GITHUB_OUTPUT"):
                 with open(os.environ["GITHUB_OUTPUT"], "a") as output:
                     output.write(f"scoped=true\nrun={str(bool(plan['packages'])).lower()}\npackages={json.dumps(plan['packages'])}\n")
@@ -407,6 +325,13 @@ def main():
                 write_json(directory / "coverage.json", coverage)
                 summary = summarize(comparison, plan, coverage)
             else:
+                from ci_monitor import GitHub
+                repository = os.environ["GITHUB_REPOSITORY"]
+                api = GitHub(repository, os.environ["GH_TOKEN"], os.environ.get("GITHUB_API_URL", "https://api.github.com"))
+                run_id, attempt = int(os.environ["GITHUB_RUN_ID"]), int(os.environ["GITHUB_RUN_ATTEMPT"])
+                run = api.request(f"/actions/runs/{run_id}/attempts/{attempt}")
+                if run["id"] != run_id or run["run_attempt"] != attempt:
+                    raise ValueError("Workflow attempt metadata does not match the current run")
                 event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
                 pr = int(event["number"] if os.environ["GITHUB_EVENT_NAME"] == "pull_request" else event["inputs"]["pr"])
                 if current["repository"] != repository or current["pr"] != pr:
@@ -425,7 +350,7 @@ def main():
             with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
                 output.write("### PR validation\n\n```json\n" + json.dumps(summary, indent=2) + "\n```\n")
         return 1 if args.phase == "evaluate" and coverage["status"] == "failed" else 0
-    except (AnalysisError, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
 

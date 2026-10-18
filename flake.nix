@@ -47,7 +47,6 @@
               ./crates/mf-chat/tests/fixtures
               ./crates/mf-telemetry/tests/fixtures
               ./crates/mf-compiler/tests/fixtures/embedding-host
-              ./scripts/affected_tests.py
               ./scripts/check-release-support.sh
               ./scripts/nextest-build-cache.py
               ./scripts/cargo_cache.py

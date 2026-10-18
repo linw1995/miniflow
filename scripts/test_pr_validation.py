@@ -7,7 +7,6 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
-import zipfile
 
 import pr_validation as validation
 
@@ -42,115 +41,11 @@ class ValidationTests(unittest.TestCase):
         self.git('commit', '-qm', 'test(ci): fixture')
         return self.git('rev-parse', 'HEAD')
 
-    def candidate(self, index, run_id=1, attempt=1):
-        run = {'id': run_id, 'run_attempt': attempt, 'workflow_id': 2, 'head_sha': self.heads[index],
-               'status': 'completed', 'conclusion': 'success'}
-        record = self.current | {'run_id': run_id, 'run_attempt': attempt, 'head': self.heads[index],
-                                'merge': self.merges[index], 'tree': self.git('rev-parse', self.merges[index] + '^{tree}')}
-        record['title_check'] = {'id': 11, 'head_sha': record['head'], 'conclusion': 'success'}
-        record['comparison'] = validation.cumulative(record, 'First validation')
-        record['packages'] = ['sample']
-        record['coverage'] = {'status': 'passed', 'base': self.base, 'head': record['merge'], 'tree': record['tree'],
-                              'target': 95, 'total': 100, 'covered': 95}
-        return run, record
-
-    def test_nearest_ancestor_ignores_completion_order_and_unsuccessful_intermediates(self):
-        a, b = self.candidate(0, 10), self.candidate(1, 5)
-        result = validation.choose_baseline(self.root, self.current, [a, b])
-        self.assertEqual(result['base'], self.merges[1])
-        for status, conclusion in [('completed', 'failure'), ('completed', 'cancelled'), ('in_progress', None)]:
-            b[0].update(status=status, conclusion=conclusion)
-            self.assertEqual(validation.choose_baseline(self.root, self.current, [b, a])['base'], self.merges[0])
-        self.assertEqual(validation.choose_baseline(self.root, self.current, [self.candidate(2)])['base'], self.merges[2])
-
-    def test_rejects_identity_policy_attempt_and_coverage_mismatches(self):
-        candidate = self.candidate(1)
-        mutations = [
-            ('repository', 'other/repo'), ('pr', 8), ('version', 2), ('workflow_id', 3),
-            ('run_attempt', 2), ('head', self.heads[0]), ('base', self.heads[0]),
-            ('merge', 'f' * 40), ('tree', self.base), ('signature', {'coverage_target': 90}),
-            ('packages', None), ('coverage', {}),
-        ]
-        for field, value in mutations:
-            with self.subTest(field=field):
-                run, record = copy.deepcopy(candidate)
-                record[field] = value
-                self.assertFalse(validation.eligible(self.root, self.current, run, record))
-        for field, value in [('covered', 94), ('status', 'failed'), ('head', self.base), ('total', -1), ('target', 90)]:
-            with self.subTest(coverage=field):
-                run, record = copy.deepcopy(candidate)
-                record['coverage'][field] = value
-                self.assertFalse(validation.eligible(self.root, self.current, run, record))
-        run, record = copy.deepcopy(candidate)
-        record['coverage'].update(covered=0, total=0, status='not_applicable')
-        self.assertTrue(validation.eligible(self.root, self.current, run, record))
-        record['coverage']['status'] = 'passed'
-        self.assertFalse(validation.eligible(self.root, self.current, run, record))
-
-    def test_rewritten_history_and_target_base_reset_to_cumulative_scope(self):
-        candidate = self.candidate(1)
-        other = self.git('commit-tree', self.git('rev-parse', 'HEAD^{tree}'), '-p', self.base, '-m', 'rewritten')
-        current = self.current | {'head': other}
-        self.assertEqual(validation.choose_baseline(self.root, current, [candidate])['scope'], 'cumulative')
-        for override in [{'base': self.heads[0]}, {'signature': {'coverage_target': 96}}]:
-            current = self.current | override
-            result = validation.choose_baseline(self.root, current, [candidate])
-            self.assertEqual(result['base'], current['base'])
-            self.assertEqual(result['scope'], 'cumulative')
-
-    def test_artifact_discovery_is_bounded_and_attempt_specific(self):
-        run, record = self.candidate(1, attempt=2)
-        def archive(record, name=validation.RECORD_FILE):
-            stream = io.BytesIO()
-            with zipfile.ZipFile(stream, 'w') as zipped:
-                zipped.writestr(name, json.dumps(record))
-            return stream.getvalue()
-        api = Mock()
-        api.request.side_effect = [{'workflow_runs': [run]}, {'artifacts': [
-            {'id': 1, 'name': 'pr-validation-1-1', 'expired': False},
-            {'id': 2, 'name': validation.artifact_name(run), 'expired': False},
-        ]}]
-        download = Mock(return_value=archive(record))
-        result = validation.discover_baseline(self.root, self.current, api, 'feature', download)
-        self.assertEqual(result['base'], self.merges[1])
-        download.assert_called_once_with(2)
-        api = Mock()
-        api.request.side_effect = [{'workflow_runs': [run]}, {'artifacts': [
-            {'id': 2, 'name': validation.artifact_name(run), 'expired': False}]}]
-        reset = validation.discover_baseline(self.root, self.current | {'base': self.heads[0]}, api,
-                                            'feature', lambda _: archive(record))
-        self.assertIn('Target base changed', reset['reason'])
-        orphan = run | {'id': 3, 'head_sha': 'f' * 40}
-        api = Mock()
-        api.request.side_effect = [{'workflow_runs': [orphan, run]},
-                                  {'artifacts': [{'id': 2, 'name': validation.artifact_name(run), 'expired': False}]}]
-        self.assertEqual(validation.discover_baseline(self.root, self.current, api, 'feature', download)['base'], self.merges[1])
-        orphan = orphan | {'head_sha': self.current['head']}
-        api = Mock()
-        api.request.side_effect = [{'workflow_runs': [orphan, run]},
-                                  {'artifacts': [{'id': 3, 'name': validation.artifact_name(orphan), 'expired': False}]},
-                                  {'artifacts': [{'id': 2, 'name': validation.artifact_name(run), 'expired': False}]}]
-        self.assertEqual(validation.discover_baseline(self.root, self.current, api, 'feature',
-                         lambda identifier: b'broken' if identifier == 3 else archive(record))['base'], self.merges[1])
-        for response in [OSError('offline'), {'workflow_runs': [run] * 100}, {'workflow_runs': []}]:
-            api = Mock()
-            if isinstance(response, Exception): api.request.side_effect = response
-            else: api.request.return_value = response
-            self.assertEqual(validation.discover_baseline(self.root, self.current, api, 'feature', download)['scope'], 'cumulative')
-        api = Mock()
-        api.request.return_value = {'workflow_runs': [run]}
-        with patch.object(validation.time, 'monotonic', side_effect=[0, 61]):
-            self.assertEqual(validation.discover_baseline(self.root, self.current, api, 'feature', download)['scope'], 'cumulative')
-        for expired, payload in [(True, archive(record)), (False, b'invalid'), (False, archive(record, '../other')), (False, archive(record | {'merge': 'f' * 40}))]:
-            api = Mock()
-            api.request.side_effect = [{'workflow_runs': [run]}, {'artifacts': [
-                {'id': 2, 'name': validation.artifact_name(run), 'expired': expired}]}]
-            self.assertEqual(validation.discover_baseline(self.root, self.current, api, 'feature', lambda _: payload)['scope'], 'cumulative')
-
     def test_current_snapshot_and_signature_require_valid_execution_identity(self):
         with patch.object(validation, 'command', return_value='rustc fixture'), patch.dict(validation.os.environ, {}, clear=True):
             signature = validation.execution_signature(self.root, 95)
-            self.assertEqual(signature['environment'], {})
+            self.assertEqual(len(signature['environment']), 5)
+            self.assertTrue(all(value is None for value in signature['environment'].values()))
             self.assertNotIn('Cargo.lock', signature)
             for invalid in [-1, 101, float('nan')]:
                 with self.assertRaises(ValueError): validation.execution_signature(self.root, invalid)
@@ -165,7 +60,7 @@ class ValidationTests(unittest.TestCase):
     def coverage_inputs(self):
         current = copy.deepcopy(self.current)
         current['signature'].update(toolchain='fixture', features='all', target=None, profile='ci', environment={})
-        comparison = validation.cumulative(current, 'fixture')
+        comparison = {'base': current['base'], 'head': current['merge'], 'scope': 'cumulative', 'previous': None, 'reason': 'fixture'}
         plan = {'base': comparison['base'], 'head': comparison['head'], 'comparison_mode': 'snapshot',
                 'packages': ['sample'], 'ignored_files': []}
         report = self.root / 'target/result/lcov.info'
@@ -263,12 +158,31 @@ class ValidationTests(unittest.TestCase):
         ]:
             with self.assertRaises(ValueError):
                 validation.make_record(self.root, current, comparison, plan, changed_coverage, needs, changed_run, changed_title)
-        completed = run | {'status': 'completed', 'conclusion': 'failure'}
-        self.assertFalse(validation.eligible(self.root, current, completed, record))
-        completed['conclusion'] = 'success'
-        self.assertTrue(validation.eligible(self.root, current, completed, record))
 
-    def test_cli_bootstrap_empty_evaluation_record_and_manual_cumulative_reset(self):
+    def test_accept_binds_flow_output_without_discarding_exact_tests(self):
+        current, comparison, plan, _ = self.coverage_inputs()
+        signature = current['signature']
+        plan.update(tree=current['tree'], tests=[], toolchain=signature['toolchain'], build_environment={},
+                    configuration={'target': None, 'all_features': True, 'features': [], 'no_default_features': False})
+        output = {'plan': plan, 'validation': {'context': current, 'comparison': comparison}}
+        def accept(value):
+            with patch.object(validation, 'execution_signature', return_value=signature):
+                return validation.accept_plan(self.root, value, 'owner/repo', 7, 9, 1, 95)
+        self.assertEqual(accept(output), (current, comparison, plan))
+        for change in ['attempt', 'source', 'exact', 'features', 'toolchain', 'environment', 'scope', 'local']:
+            invalid = copy.deepcopy(output)
+            if change == 'attempt': invalid['validation']['context']['run_attempt'] = 2
+            elif change == 'source': invalid['plan']['tree'] = '0' * 40
+            elif change == 'exact': invalid['plan']['tests'] = [{'package': 'sample', 'binary': 'sample', 'name': 'test'}]
+            elif change == 'features': invalid['plan']['configuration']['all_features'] = False
+            elif change == 'toolchain': invalid['plan']['toolchain'] = 'other'
+            elif change == 'environment': invalid['plan']['build_environment'] = {'RUSTFLAGS': 'other'}
+            elif change == 'scope': invalid['validation']['comparison']['base'] = self.heads[0]
+            else: invalid['validation'] = None
+            with self.subTest(change=change), self.assertRaises((ValueError, TypeError, KeyError)):
+                accept(invalid)
+
+    def test_cli_accept_empty_evaluate_and_record_require_one_matching_flow_result(self):
         self.base = self.current['merge']
         (self.root / 'docs').mkdir()
         (self.root / 'docs/guide.md').write_text('documentation\n')
@@ -277,51 +191,43 @@ class ValidationTests(unittest.TestCase):
         head = self.git('rev-parse', 'HEAD')
         merge = self.git('commit-tree', self.git('rev-parse', 'HEAD^{tree}'), '-p', self.base, '-p', head, '-m', 'merge')
         self.git('checkout', '-q', '--detach', merge)
-        self.current = validation.current_context(self.root, 'owner/repo', 7,
-            {'id': 9, 'run_attempt': 1, 'workflow_id': 2}, {'coverage_target': 95, 'policy': validation.POLICY})
+        signature = {'policy': validation.POLICY, 'coverage_target': 95, 'target': None, 'environment': {},
+                     'toolchain': 'fixture', 'profile': 'ci', 'features': 'all'}
+        run = {'id': 9, 'run_attempt': 1, 'workflow_id': 2, 'head_sha': head}
+        current = validation.current_context(self.root, 'owner/repo', 7, run, signature)
+        comparison = {'base': self.base, 'head': merge, 'scope': 'cumulative', 'previous': None, 'reason': 'fixture'}
+        plan = {'base': self.base, 'head': merge, 'tree': current['tree'], 'comparison_mode': 'snapshot',
+                'packages': [], 'tests': [], 'ignored_files': ['docs/guide.md'], 'reasons': {}, 'fallback_reasons': [],
+                'toolchain': 'fixture', 'build_environment': {},
+                'configuration': {'target': None, 'all_features': True, 'features': [], 'no_default_features': False}}
         directory = self.root / 'target/validation'
         directory.mkdir(parents=True)
+        flow = directory / 'flow.json'
+        flow.write_text(json.dumps({'plan': plan, 'validation': {'context': current, 'comparison': comparison}}))
         event = self.root / 'target/event.json'
-        pull = {'head': {'sha': self.current['head'], 'ref': 'feature'}, 'merge_commit_sha': self.current['merge']}
-        event.write_text(json.dumps({'number': 7, 'pull_request': pull}))
-        run = {'id': 9, 'run_attempt': 1, 'workflow_id': 2, 'head_sha': self.current['head']}
-        plan = {'base': self.base, 'head': self.current['merge'], 'comparison_mode': 'snapshot',
-                'packages': [], 'ignored_files': ['docs/guide.md'], 'reasons': {}, 'fallback_reasons': []}
-        signature = {'policy': validation.POLICY, 'coverage_target': 95, 'target': None}
+        event.write_text(json.dumps({'number': 7}))
         env = {'GITHUB_REPOSITORY': 'owner/repo', 'GITHUB_RUN_ID': '9', 'GITHUB_RUN_ATTEMPT': '1',
                'GITHUB_EVENT_PATH': str(event), 'GITHUB_EVENT_NAME': 'pull_request', 'GH_TOKEN': 'fixture',
                'GITHUB_OUTPUT': str(self.root / 'target/output'), 'GITHUB_STEP_SUMMARY': str(self.root / 'target/summary')}
         def invoke(phase, api, extra=()):
             with patch.dict(validation.os.environ, env, clear=True), patch.object(validation.Path, 'cwd', return_value=self.root), \
                     patch('ci_monitor.GitHub', return_value=api), patch.object(validation, 'execution_signature', return_value=signature), \
-                    patch.object(validation.affected, 'make_plan', return_value=plan) as selector, \
                     patch.object(validation.sys, 'argv', ['pr_validation.py', phase, '--directory', str(directory), *extra]), \
                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
-                return validation.main(), selector
+                return validation.main()
         api = Mock()
-        api.request.side_effect = [run, {'workflow_runs': []}]
-        result, selector = invoke('select', api, ['--coverage-target', '95'])
-        self.assertEqual(result, 0)
-        self.assertEqual(selector.call_args.args[1].comparison, 'snapshot')
-        self.assertEqual(json.loads((directory / 'comparison.json').read_text())['scope'], 'cumulative')
-        self.assertEqual(invoke('evaluate', Mock())[0], 0)
+        self.assertEqual(invoke('accept', api, ['--flow-output', str(flow), '--coverage-target', '95']), 0)
+        api.request.assert_not_called()
+        self.assertIn('run=false', (self.root / 'target/output').read_text())
+        self.assertEqual(invoke('evaluate', api), 0)
         self.assertEqual(json.loads((directory / 'coverage.json').read_text())['status'], 'not_applicable')
         env['VALIDATION_NEEDS'] = json.dumps({name: {'result': 'success'} for name in ['lint', 'check', 'coverage']})
-        title = {'id': 11, 'head_sha': self.current['head'], 'conclusion': 'success', 'name': 'pr-title', 'app': {'slug': 'github-actions'}}
-        api = Mock()
+        title = {'id': 11, 'head_sha': head, 'conclusion': 'success', 'name': 'pr-title', 'app': {'slug': 'github-actions'}}
         api.request.side_effect = [run, {'check_runs': [title]}]
-        self.assertEqual(invoke('record', api)[0], 0)
+        self.assertEqual(invoke('record', api), 0)
         self.assertTrue((directory / 'validation.json').is_file())
-        env['GITHUB_EVENT_NAME'] = 'workflow_dispatch'
-        event.write_text(json.dumps({'inputs': {'pr': '7', 'merge_sha': self.current['merge']}}))
-        api = Mock()
-        api.request.side_effect = [run, pull]
-        self.assertEqual(invoke('select', api, ['--coverage-target', '95'])[0], 0)
-        self.assertIn('explicitly', json.loads((directory / 'comparison.json').read_text())['reason'])
-        event.write_text(json.dumps({'inputs': {'pr': '7', 'merge_sha': self.base}}))
-        api = Mock()
-        api.request.side_effect = [run, pull]
-        self.assertEqual(invoke('select', api, ['--coverage-target', '95'])[0], 1)
+        flow.write_text(flow.read_text() + '\n{}')
+        self.assertEqual(invoke('accept', Mock(), ['--flow-output', str(flow), '--coverage-target', '95']), 1)
 
 
 if __name__ == '__main__':

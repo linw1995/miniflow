@@ -99,14 +99,56 @@ jobs:
       - uses: ./.github/actions/setup-nix
         with:
           cache-key-name: coverage
+      - name: Cache planning executables
+        id: planner-cache
+        if: github.event_name == 'pull_request' || inputs.pr != ''
+        uses: actions/cache@v6
+        with:
+          path: target/test-affected-ci/bin
+          key: planning-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', 'crates/**', 'tools/test-affected/**', '.github/workflows/CI.yaml') }}
+      - name: Build planning Flow
+        if: github.event_name == 'pull_request' || inputs.pr != ''
+        env:
+          PLANNER_CACHE_HIT: ${{ steps.planner-cache.outputs.cache-hit }}
+        run: |
+          if [[ "$PLANNER_CACHE_HIT" == true && -x target/test-affected-ci/bin/mf && -x target/test-affected-ci/bin/runner ]]; then
+            exit 0
+          fi
+          nix develop --command bash -euo pipefail <<'SCRIPT'
+            unset CARGO_BUILD_TARGET RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+            export CARGO_TARGET_DIR="$PWD/target/test-affected-ci/cargo"
+            export CARGO_PROFILE_DEV_DEBUG=0
+            export CARGO_PROFILE_RELEASE_OPT_LEVEL=0
+            export MF_DEV_SUPPORT_ROOT="$PWD/crates"
+            mkdir -p target/test-affected-ci/bin
+            cargo fetch --locked
+            cargo build --locked -p mf-cli --features development-support
+            cp Cargo.lock tools/test-affected/flows/test-affected.lock
+            CARGO_NET_OFFLINE=true "$CARGO_TARGET_DIR/debug/mf" compile tools/test-affected/flows/test-affected.json \
+              --output target/test-affected-ci/bin/runner --build-dir target/test-affected-ci/project --no-telemetry
+            cp "$CARGO_TARGET_DIR/debug/mf" target/test-affected-ci/bin/mf
+          SCRIPT
       - name: Select incremental PR tests
         id: selection
         if: github.event_name == 'pull_request' || inputs.pr != ''
+        timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
+          MF_PR_NUMBER: ${{ github.event.pull_request.number || inputs.pr }}
+          MF_PR_BRANCH: ${{ github.head_ref || github.ref_name }}
+          MF_PR_HEAD: ${{ github.event.pull_request.head.sha }}
+          MF_MERGE_SHA: ${{ inputs.merge_sha }}
+          MF_COVERAGE_TARGET: ${{ env.PR_COVERAGE_TARGET }}
         run: |
-          nix develop --command python3 scripts/pr_validation.py select \
-            --directory "$RUNNER_TEMP/pr-validation" --coverage-target "$PR_COVERAGE_TARGET"
+          nix develop --command bash -euo pipefail <<'SCRIPT'
+            MF_TOOLCHAIN="$(rustc -vV)"
+            export MF_TOOLCHAIN
+            mkdir -p "$RUNNER_TEMP/pr-validation"
+            target/test-affected-ci/bin/mf run ./target/test-affected-ci/bin/runner \
+              --params.ci true --params.repository "$PWD" > "$RUNNER_TEMP/pr-validation/flow.json"
+            python3 scripts/pr_validation.py accept --flow-output "$RUNNER_TEMP/pr-validation/flow.json" \
+              --directory "$RUNNER_TEMP/pr-validation" --coverage-target "$PR_COVERAGE_TARGET"
+          SCRIPT
       - name: Cache coverage dependencies
         if: steps.selection.outputs.scoped != 'true' || steps.selection.outputs.run == 'true'
         uses: actions/cache@v6

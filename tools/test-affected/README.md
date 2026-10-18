@@ -190,6 +190,7 @@ nix develop --command env MF_LSP_SMOKE_SERVER=rust-analyzer \
   cargo nextest run -p mfn-lsp --test smoke --run-ignored all
 ```
 
-The planning Flow remains opt-in; regular CI still uses `scripts/affected_tests.py`. Its full-fallback
-policy runs after semantic analysis, so some full-suite plans still pay for LSP work. Measure Flow time
-and script build/list/test time independently before considering CI adoption.
+CI invokes this same Flow and consumes package-only plans. Local semantic fallback is decided
+after analysis, so some local full-suite plans still pay for LSP work. Measure compilation,
+initialization, evidence discovery, analysis/planning, and script build/list/test time separately.
+The policy identifier and validation record version live in the `validation_policy` constant.

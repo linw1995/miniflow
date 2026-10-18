@@ -13,7 +13,12 @@ Before submitting changes, run:
 
 ```sh
 prek -a
-nix develop --command python3 scripts/affected_tests.py --worktree --run
+cargo run -p mf-cli --features development-support -- compile \
+  tools/test-affected/flows/test-affected.json --output target/test-affected-runner \
+  --build-dir target/test-affected-build --no-telemetry
+cargo run -p mf-cli --features development-support -- run ./target/test-affected-runner \
+  --params.ci false --params.mode worktree --params.precision packages > target/test-plan.json
+python3 tools/test-affected/run-tests.py target/test-plan.json
 ```
 
 These checks cover formatting, Rust diagnostics, affected package tests, workflow configuration, Markdown, and the [dependency license audit](docs/licensing.md).

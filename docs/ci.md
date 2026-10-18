@@ -148,69 +148,62 @@ suite already run by CI coverage.
 
 ### Affected package tests
 
-The selector uses rust-analyzer's `rust-analyzer/viewCrateGraph` LSP request
-to discover workspace target dependencies, maps targets to Cargo packages,
-and selects changed packages plus their transitive reverse dependencies.
-It selects whole package suites, including integration tests, rather than
-individual test functions. PR CI uses this selector; main and nightly retain
-full-suite runs.
+One planning Flow serves local and PR CI execution. `builtin.if_else` selects the local
+comparison path or the CI success-history path; exclusive input edges converge before
+Git comparison, optional LSP analysis, and the shared Rust planner. Cargo metadata supplies
+package ownership and every declared local dependency kind, including inactive optional,
+platform, test, and build dependencies. CI selects whole packages; local callers may request
+semantic test refinement. Main and nightly retain full suites.
 
-Run from the checkout using the pinned tools:
-
-```bash
-# Inspect staged, unstaged, and untracked changes against HEAD.
-nix develop --command python3 scripts/affected_tests.py --worktree
-
-# Analyze the checked-out commit against its first parent.
-nix develop --command python3 scripts/affected_tests.py --commit HEAD
-
-# Analyze a checked-out PR head against its merge base with a local base ref.
-nix develop --command python3 scripts/affected_tests.py --base origin/main --head HEAD --json
-
-# Execute the selected package suites, propagating nextest's exit status.
-nix develop --command python3 scripts/affected_tests.py --worktree --run
-```
-
-Commit and PR modes require a clean checkout at the requested head. The caller
-must provide the base and head commits locally; the script does not fetch refs,
-query GitHub, or switch branches. CI callers need sufficient checkout history
-for `git merge-base`. A root commit compares against an empty tree; merge commits
-compare against their first parent. Renames include both old and new paths.
-
-`--json` produces a plan with `packages`, per-package `reasons`, `dependencies`,
-`changed_files`, `fallback_reasons`, and a `command` argument array. An empty
-selection has an empty command: callers must skip execution instead of invoking
-nextest without package arguments. `--run` handles that case automatically.
-`--target <triple>` applies to both rust-analyzer and the resulting nextest command.
-The selector's `--run` command uses `--locked --all-targets --all-features`.
-Coverage retains its existing target selection and changes only the package scope.
-
-To reproduce selected test execution, pass the saved CI plan to the coverage
-script. The following local example selects cumulative PR scope; it does not
-resolve a successful CI baseline or reproduce an incremental gate:
+From the repository root, compile once with pinned tools:
 
 ```bash
-nix develop --command python3 scripts/affected_tests.py --base origin/main --json > /tmp/affected-tests.json
-nix develop --command bash scripts/run-cov.sh --affected-plan /tmp/affected-tests.json
+nix develop --command cargo run -p mf-cli --features development-support -- compile \
+  tools/test-affected/flows/test-affected.json --output target/test-affected-runner \
+  --build-dir target/test-affected-build --no-telemetry
+
+# Snapshot staged, unstaged, and nonignored untracked files without changing the index.
+nix develop --command cargo run -p mf-cli --features development-support -- run \
+  ./target/test-affected-runner --params.ci false --params.mode worktree \
+  --params.precision packages > target/test-plan.json
+
+# Execute the snapshot-bound selection, preserving empty and failed plans.
+nix develop --command python3 tools/test-affected/run-tests.py target/test-plan.json
 ```
 
-`--affected-plan` must be the first coverage-script argument (or follow
-`--prepare` for phased execution). It replaces the
-default workspace selection with explicit package arguments. Empty plans clear
-stale reports and exit without running Cargo; malformed plans fail. Other nextest
-arguments can follow the plan path.
+Use `--params.mode commit --params.head HEAD` for a first-parent comparison, including
+root commits. Use `--params.mode merge-base --params.base origin/main --params.head HEAD`
+for a branch comparison, or `snapshot` to compare supplied local revisions directly.
+Local modes do not query GitHub or fetch refs. Worktree mode creates an immutable runnable
+snapshot; committed comparisons do not include uncommitted edits. CI requires a clean
+checkout of the actual tested merge.
 
-Cargo metadata supplies package paths, target ownership, and declared local
-dependencies. The analyzer graph includes test and build-script targets;
-declarations disambiguate duplicate target names. All declared workspace
-dependency kinds, including optional and platform-specific dependencies, are
-retained even when rust-analyzer's current target configuration omits them.
-Such additions appear in `supplemented_edges`. This favors extra tests over
-missing a consumer on a different platform. It does not replace testing on
-that platform or with other feature combinations.
+The output contains `plan` and optional CI `validation` provenance. Plans report whole
+`packages`, exact `tests`, conservative `baseline_packages`, reasons, deferred
+`ignored_files`, and source/configuration identity. `packages` precision skips semantic
+LSP work. `tests` precision may narrow verified isolated test changes. The consumer handles
+both scopes and never turns an empty plan into unfiltered nextest execution.
 
-Input classification follows this order in both the CI selector and the opt-in
-Flow planner:
+The coverage script accepts package-only selection and executes its current checkout;
+it does not implement the snapshot consumer or exact-case filters. To reproduce a saved
+CI selection, use its `plan.json` with the matching clean tested checkout. For a local
+committed comparison, generate a package-only plan and extract it:
+
+```bash
+nix develop --command cargo run -p mf-cli --features development-support -- run \
+  ./target/test-affected-runner --params.ci false --params.mode merge-base \
+  --params.base origin/main --params.head HEAD --params.precision packages > target/test-plan.json
+jq '.plan' target/test-plan.json > target/affected-packages.json
+nix develop --command bash scripts/run-cov.sh --affected-plan target/affected-packages.json
+```
+
+`--affected-plan` must be the first coverage-script argument (or follow `--prepare`).
+It replaces workspace selection with explicit packages. Empty selections clear stale reports
+and do not invoke Cargo. Malformed plans or exact-test filters fail instead of being discarded.
+Other nextest arguments can follow the path. For mutable local source, use the snapshot-aware
+test consumer or run local coverage explicitly after choosing its package scope.
+
+Input classification has one owner in the shared Flow planner:
 
 | Input | PR Rust selection |
 | --- | --- |
@@ -219,10 +212,10 @@ Flow planner:
 | `docs/`, `openspec/`, `.github/`, known root documentation, lint/release metadata, and CI-only scripts | No additional packages; run relevant non-Rust checks separately |
 | `examples/`, `scripts/nextest-build-cache.py`, `scripts/nextest-cargo.sh`, `scripts/cargo_cache.py` | `mf-cli`, `mf-compiler`, and reverse dependencies |
 | `scripts/check-release-support.sh` | `mf-cli` and reverse dependencies |
-| `scripts/affected_tests.py`, `tools/test-affected/flows/`, `tools/test-affected/run-tests.py` | `mfn-test-affected` and reverse dependencies |
+| `tools/test-affected/flows/`, `tools/test-affected/run-tests.py`, and removal of the legacy selector | `mfn-test-affected` and reverse dependencies |
 | Other inputs, including removed package sources, or missing all expected shared consumers | Full workspace |
 
-The bounded deferred-file list lives in each selector's `deferred_input` helper;
+The bounded deferred-file list lives in the Rust planner's `deferred_input` helper;
 plans expose matched paths in `ignored_files`. Package ownership takes priority,
 so a package fixture named `Cargo.toml` or `README.md` is not ignored. Main and
 nightly still execute full suites. Deferring dependency and execution configuration
@@ -233,13 +226,12 @@ mappings when shared executable inputs gain new users.
 Build scripts and generated runners can consume inputs beyond Cargo's declared
 graph, so selected scope is not a proof of semantic independence.
 
-The analyzer loads all features with compilation checks, build-script execution,
-proc-macro expansion, and cache priming disabled. It must finish loading with a
-healthy status before the graph is used. A missing analyzer, timeout (120 seconds
-by default, configurable with `--timeout`), incomplete graph, or unsupported
-graph format selects all workspace packages with an explicit fallback reason.
-Invalid Git refs, a mismatched checkout, and failed Cargo metadata stop with an
-error rather than emitting an unreliable plan.
+Package-level planning does not start an LSP server. Local semantic refinement uses
+standard LSP queries with configured features and a bounded analysis deadline. Analyzer
+failures retain conservative fallback; unsupported capabilities are evidence gaps. Invalid
+Git refs, missing required local history, mismatched snapshots, and failed Cargo metadata
+stop execution rather than produce an unreliable plan. Declared dependency closure is
+conservative, not a proof of arbitrary program effects or cross-platform independence.
 
 For repeated local CLI runs, reuse an isolated generated-project build cache:
 
@@ -264,8 +256,8 @@ checks supplement the required hooks and affected tests.
 
 ### Incremental validation records
 
-`scripts/pr_validation.py` resolves reusable validation from completed successful
-CI attempts. A record binds repository/PR, workflow run and attempt, PR head,
+The CI branch resolves reusable validation using existing Code, Loop, and conditional
+nodes, backed by bounded GitHub/Git evidence providers. A record binds repository/PR, workflow run and attempt, PR head,
 actual merge base, tested merge commit/tree, execution signature, comparison,
 selected packages, and successful coverage disposition. Artifacts are named
 `pr-validation-<run-id>-<attempt>` and contain only `validation.json`.
@@ -280,21 +272,29 @@ affected scope. This reset does not force workspace-wide tests or change the
 existing root dependency/configuration deferrals. Local selectors never fetch;
 only CI orchestration may retrieve a recorded merge object.
 
-CI uses this helper for baseline resolution. The final `validation` job checks all
+CI invokes the compiled Flow through `mf`. Its native planning executables are cached by
+source, manifest, definition, and pinned-toolchain identity; cache misses rebuild them and
+cannot alter selected scope. `pr_validation.py accept` only binds the returned plan to the
+current execution and writes handoff artifacts. The `flow-pr-v2` policy resets incompatible
+pre-migration records to cumulative scope. The policy identifier and record version live
+in the Flow's `validation_policy` constant and are read by the publication guard.
+
+The final `validation` job checks all
 required job results before publishing a record; future discovery also verifies the
 producing workflow attempt ultimately completed successfully.
 
 For a validated prior merge snapshot, direct comparison is explicit:
 
 ```bash
-nix develop --command python3 scripts/affected_tests.py --base "$VALIDATED_MERGE" --comparison snapshot --head HEAD --json
+nix develop --command cargo run -p mf-cli --features development-support -- run \
+  ./target/test-affected-runner --params.ci false --params.mode snapshot \
+  --params.base "$VALIDATED_MERGE" --params.head HEAD --params.precision packages
 ```
 
-This requires a clean checkout of the tested head and local comparison history.
-The returned `comparison_mode` distinguishes direct snapshots from ordinary
-merge-base selection. Keep `--commit HEAD` for initial cumulative PR selection;
-`--base <branch>` retains its merge-base default. A CI resolver chooses a reusable
-successful snapshot; the local selector never infers CI success or fetches refs.
+Local history must already be available. The returned `comparison_mode` records how the
+range was resolved; the local branch never infers CI success. Only the explicitly selected
+CI branch may retrieve missing recorded merge objects. Initial/cumulative PR comparison
+uses the tested merge's actual first parent.
 
 ### Incremental coverage gate
 
@@ -329,7 +329,7 @@ Dispatch CI on the PR branch with its number and exact current tested merge SHA:
 gh workflow run CI.yaml --ref "$PR_BRANCH" -f pr="$PR_NUMBER" -f merge_sha="$TESTED_MERGE"
 ```
 
-All jobs check out the supplied merge SHA. The helper verifies its PR head against
+All jobs check out the supplied merge SHA. The Flow verifies its PR head against
 the requested PR and workflow run; selection and coverage both use the cumulative
 PR diff. A successful run can establish a new baseline. Omit both inputs for the
 existing full-suite manual run. An unavailable or mismatched merge is an error.

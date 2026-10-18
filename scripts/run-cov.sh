@@ -190,7 +190,8 @@ test_packages=(--workspace)
 if [[ "${1:-}" == "--affected-plan" ]]; then
   plan="${2:?--affected-plan requires a JSON plan path}"
   shift 2
-  jq -e '(.packages | type == "array") and all(.packages[]; type == "string" and length > 0)' "$plan" > /dev/null
+  jq -e '(.packages | type == "array") and all(.packages[]; type == "string" and length > 0)
+    and ((has("tests") | not) or .tests == [])' "$plan" > /dev/null
   test_packages=()
   while IFS= read -r package; do
     test_packages+=(-p "$package")
