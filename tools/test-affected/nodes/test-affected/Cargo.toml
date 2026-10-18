@@ -36,3 +36,5 @@ syn = { workspace = true, features = ["full", "parsing", "printing", "visit"] }
 # Compiled and in-memory Flow verification.
 mf-compiler = { workspace = true, features = ["codegen"] }
 mf-tui.workspace = true
+mfn-code.workspace = true
+mfn-core.workspace = true

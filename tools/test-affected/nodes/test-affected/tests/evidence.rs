@@ -65,6 +65,11 @@ impl Server {
                 let (status, body) = match path.as_str() {
                     "/missing" => (404, b"missing".to_vec()),
                     "/invalid" => (200, b"not-json".to_vec()),
+                    "/wide" => (200, json!(vec![0; 5000]).to_string().into_bytes()),
+                    "/deep" => {
+                        let value = (0..20).fold(json!(0), |inner, _| json!({"nested":inner}));
+                        (200, value.to_string().into_bytes())
+                    }
                     "/large" => (200, vec![b'x'; 4096]),
                     "/artifact" | "/large-member" => {
                         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
@@ -172,7 +177,7 @@ fn reads_bounded_projected_evidence_and_distinguishes_history_gaps() {
     let record = read(
         &server,
         json!({"member":"validation.json"}),
-        json!({"path":"/artifact"}),
+        json!({"path":"/artifact","token":null}),
         &mut ExecutionContext::default(),
     )
     .unwrap();
@@ -187,6 +192,8 @@ fn reads_bounded_projected_evidence_and_distinguishes_history_gaps() {
     for (path, config, reason) in [
         ("/missing", json!({}), "response"),
         ("/invalid", json!({}), "invalid_data"),
+        ("/deep", json!({}), "limit"),
+        ("/wide", json!({}), "limit"),
         ("/large", json!({"max_bytes":1024}), "limit"),
         (
             "/large-member",
@@ -267,6 +274,7 @@ fn cancellation_is_fatal_and_deadlines_are_preserved_across_reads() {
     )
     .unwrap();
     assert_eq!(expired.outputs["deadline"], json!(1));
+    assert_eq!(expired.outputs["result"]["remaining_ms"], json!(0));
     assert_eq!(expired.outputs["result"]["reason"], json!("limit"));
     let timeout = read(
         &server,

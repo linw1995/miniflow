@@ -46,7 +46,7 @@ impl Default for Config {
 struct Input {
     path: String,
     query: Option<ValueRef>,
-    token: Option<String>,
+    token: Option<mf_runtime::Nullable<String>>,
     deadline: Option<u64>,
 }
 
@@ -66,7 +66,9 @@ impl GithubRead {
             ))
             .header("Accept", "application/vnd.github+json")
             .header("X-GitHub-Api-Version", "2022-11-28");
-        if let Some(token) = input.token.as_ref().filter(|s| !s.is_empty()) {
+        if let Some(mf_runtime::Nullable::Value(token)) = &input.token
+            && !token.is_empty()
+        {
             request = request.bearer_auth(token);
         }
         if let Some(query) = &input.query {

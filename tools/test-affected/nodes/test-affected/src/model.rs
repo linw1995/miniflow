@@ -86,6 +86,8 @@ pub struct ComparisonRequest {
     #[serde(default)]
     pub require_checkout: bool,
     #[serde(default)]
+    pub initialization_options: Option<Value>,
+    #[serde(default)]
     pub options: PlanOptions,
     #[serde(default)]
     pub validation: Value,

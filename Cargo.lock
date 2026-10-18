@@ -1835,6 +1835,8 @@ dependencies = [
  "mf-compiler",
  "mf-runtime",
  "mf-tui",
+ "mfn-code",
+ "mfn-core",
  "mfn-lsp",
  "proc-macro2",
  "quote",

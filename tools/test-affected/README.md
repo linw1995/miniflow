@@ -4,8 +4,12 @@ Repository developer tooling for [issue #91](https://github.com/linw1995/miniflo
 The unpublished `mfn-lsp` and `mfn-test-affected` packages share workspace checks but are not
 product release dependencies, support packages, or bundled examples.
 
-The Flow is `git.diff` (Task) -> `lsp.analyze` (Stream) -> `test_affected.plan` (Task).
-It produces a test plan; a separate script consumes that plan. LSP servers are explicitly configured,
+One Flow routes local and CI inputs through `builtin.parameters` and `builtin.if_else`.
+The local branch builds a comparison request with Code. The CI branch uses Code, Loop,
+and bounded GitHub/Git reads to find the nearest compatible successful validation.
+Exclusive input edges converge both requests before the shared `git.diff` (Task) ->
+`lsp.analyze` (Stream) -> `test_affected.plan` (Task) path.
+It produces a test plan and optional validation provenance; a separate script consumes the plan. LSP servers are explicitly configured,
 never downloaded automatically. Ordinary tests use a local fake server. Use `nix develop` for tools
 and the pinned rust-analyzer when running real-server checks.
 
@@ -49,7 +53,8 @@ nix develop --command cargo nextest run -p mfn-lsp
 optional scalar `query` object, optional secret `token`, and optional absolute Unix-millisecond
 `deadline`. Configuration selects `api_base`, `required`, `timeout_ms`, byte limits, an optional
 ZIP `member`, and JSON Pointer `pointer`/`fields` projection. The result contains `available`,
-`value` (`data` and archive `members`), and a categorical `reason`, plus the shared `deadline`.
+`value` (`data` and archive `members`), a categorical `reason`, and `remaining_ms`, plus the shared
+`deadline`. Evidence also has structural limits to fit downstream Code budgets.
 Required acquisition errors fail; optional historical errors remain explicit unavailable evidence.
 Cancellation always fails. The node neither chooses records nor interprets validation policy.
 
@@ -73,7 +78,7 @@ outside the node; the node never fetches missing historical merge objects.
 
 Alternatively, supply `request` with `mode` (`worktree`, `commit`, `merge-base`, or `snapshot`),
 optional `base`, `head` (default `HEAD`), `analyze` (default true), `require_checkout`, `options`,
-and opaque `validation` provenance. Do not combine it with legacy `base`/`head`/`options` inputs.
+optional opaque `initialization_options`, and opaque `validation` provenance. Do not combine it with legacy `base`/`head`/`options` inputs.
 Worktree mode snapshots current files through a temporary copy of the caller's index,
 including staged ignored files and nonignored untracked files, without changing the original
 index or branch. Commit mode uses the first parent, or an empty snapshot for a root commit.
@@ -122,27 +127,57 @@ accepts package-only selection and must not be used to silently discard exact-ca
 
 ## Compile and run the Flow
 
-From the repository root, compile using local product support crates. The output is a planning runner,
-not a test runner; stdout contains one `{"plan": ...}` record and can be saved directly for the script.
-The same definition also runs through the in-memory streaming API.
+Compile once and run the same executable locally or in CI. In this checkout, use the
+CLI's development support feature so generated projects use local support crates.
+An installed `mf` with the appropriate support packages uses the same compile/run commands.
 
 ```sh
 nix develop --command cargo run -p mf-cli --features development-support -- \
   compile tools/test-affected/flows/test-affected.json \
   --output target/test-affected-runner --build-dir target/test-affected-build --no-telemetry
-nix develop --command target/test-affected-runner \
-  --changes.repository "$PWD" --changes.base HEAD --changes.head HEAD > target/test-plan.json
+nix develop --command cargo run -p mf-cli --features development-support -- \
+  run ./target/test-affected-runner --params.ci false --params.repository "$PWD" \
+  --params.mode worktree > target/test-plan.json
 nix develop --command python3 tools/test-affected/run-tests.py target/test-plan.json
 ```
 
-Replace `HEAD` with the locally available revisions to compare. The example above intentionally produces
-an empty plan and starts no server. Relative provider paths resolve against the Flow file, not the caller's
-working directory. Snapshot roots and the repository argument are recorded as absolute paths.
+Local parameters:
 
-The supplied definition configures rust-analyzer with all features, no sysroot, disabled build scripts,
-and disabled proc macros. These settings expose evidence gaps; they do not certify a complete graph.
-To use another server, configure the `lsp.analyze` node and initialization options explicitly.
-There is no Git-to-plan bypass edge: context crosses the producer boundary with its terminal outcome.
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `ci` | `GITHUB_ACTIONS`, otherwise false | Choose the branch explicitly when needed |
+| `repository` | `.` | Repository to analyze |
+| `mode` | `worktree` | `worktree`, `commit`, `merge-base`, or `snapshot` |
+| `base` | null | Local base ref for merge-base or snapshot comparison |
+| `head` | `HEAD` | Commit or head ref to analyze |
+| `precision` | `tests` | `tests` permits semantic refinement; `packages` skips LSP work |
+| `configuration` | `{}` | Local target/features/all-features/no-default-features settings |
+| `inventory` | null | Optional matching nextest inventory |
+| `artifacts` | null | Optional absolute snapshot directory |
+
+For one commit, set `--params.mode commit --params.head HEAD`. For branch comparison,
+set `--params.mode merge-base --params.base main --params.head HEAD`. Snapshot mode compares
+supplied refs directly. Worktree snapshots preserve caller files and index, and remain available
+for the consumer. Relative dependency paths resolve against the definition, not the invocation directory.
+The `--inputs` and `--inputs-file` interfaces also accept these qualified parameter names.
+
+The CI branch binds repository/run/attempt and event parameters from GitHub environment variables.
+The caller supplies `MF_PR_NUMBER`, `MF_PR_BRANCH`, `MF_PR_HEAD`, `MF_TOOLCHAIN` (`rustc -vV`),
+and optionally `MF_COVERAGE_TARGET` (95 by default). `GH_TOKEN` is a secret parameter supplied
+only to GitHub reads. Manual PR dispatch supplies `MF_MERGE_SHA` and must identify the current
+pinned merge. `MF_CUMULATIVE=true` bypasses historical candidate discovery. Local execution
+needs none of these CI values and performs no GitHub request.
+
+CI retains package-level scope and an explicit `flow-pr-v2` compatibility policy. Candidate
+metadata is inspected first; artifacts and missing merge objects are read lazily in source
+ancestry order. A usable record stops the Loop immediately. Incompatible or unavailable
+history produces a cumulative affected comparison, while invalid current identity fails.
+All comparison provenance crosses the LSP boundary through its context output.
+
+The output is one `{"plan": ..., "validation": ...}` record. Local validation is null; CI
+validation contains the current execution context and comparison for coverage and final recording.
+The Flow never runs tests or publishes a success record. Source compilation/build-cache preparation,
+Flow evidence/analysis/planning, and actual test execution are separate costs.
 
 ## Explicit real-server verification
 

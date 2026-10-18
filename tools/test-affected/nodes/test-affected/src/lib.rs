@@ -35,7 +35,7 @@ pub struct GitInput {
     pub base: Option<String>,
     pub head: Option<String>,
     pub request: Option<ValueRef>,
-    pub artifacts: Option<String>,
+    pub artifacts: Option<mf_runtime::Nullable<String>>,
     pub options: Option<ValueRef>,
 }
 
@@ -83,6 +83,7 @@ impl TypedTaskNode for GitNode {
                 head: input.head.unwrap_or_else(|| "HEAD".into()),
                 analyze: true,
                 require_checkout: false,
+                initialization_options: None,
                 options: input
                     .options
                     .map(|value| {
@@ -103,8 +104,14 @@ impl TypedTaskNode for GitNode {
         let comparison = git::compare_request(
             Path::new(&input.repository),
             &normalized,
-            input.artifacts.as_deref().map(Path::new),
-            self.config.initialization_options.clone(),
+            match &input.artifacts {
+                Some(mf_runtime::Nullable::Value(path)) => Some(Path::new(path)),
+                _ => None,
+            },
+            normalized
+                .initialization_options
+                .clone()
+                .unwrap_or_else(|| self.config.initialization_options.clone()),
         )?;
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());

@@ -20,10 +20,10 @@
 
 ## 4. Compose the production Flow
 
-- [ ] 4.1 Build both branches in the existing single Flow definition, using Code for policy and bounded Loop/if-else for lazy candidate search.
-- [ ] 4.2 Converge complete comparison requests through proven exclusive edges into the shared Git/LSP/planner path.
-- [ ] 4.3 Verify the same compiled executable works locally without CI setup and in CI with exactly one explicit plan; validate early-stop I/O counts and failure propagation.
-- [ ] 4.4 Update invocation/configuration documentation and commit the Flow integration.
+- [x] 4.1 Build both branches in the existing single Flow definition, using Code for policy and bounded Loop/if-else for lazy candidate search.
+- [x] 4.2 Converge complete comparison requests through proven exclusive edges into the shared Git/LSP/planner path.
+- [x] 4.3 Verify the same compiled executable works locally without CI setup and in CI with exactly one explicit plan; validate early-stop I/O counts and failure propagation.
+- [x] 4.4 Update invocation/configuration documentation and commit the Flow integration.
 
 ## 5. Migrate CI and remove duplicated ownership
 
