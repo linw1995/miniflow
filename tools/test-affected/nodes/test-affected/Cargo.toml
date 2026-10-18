@@ -8,17 +8,25 @@ publish = false
 description = "Commit comparison and affected-test planning for repository development"
 
 [dependencies]
-mfn-lsp = { path = "../lsp" }
-mf-runtime.workspace = true
+# Node contracts, registration, and semantic evidence.
 inventory.workspace = true
+mf-runtime.workspace = true
+mfn-lsp.workspace = true
+
+# Comparison facts, test plans, and typed diagnostics.
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 snafu.workspace = true
-syn = { workspace = true, features = ["full", "parsing", "printing", "visit"] }
+
+# Rust source ownership and isolated test-body analysis.
 proc-macro2 = { workspace = true, features = ["span-locations"] }
 quote.workspace = true
+syn = { workspace = true, features = ["full", "parsing", "printing", "visit"] }
 
 [dev-dependencies]
-mf-tui.workspace = true
+# Compiled and in-memory Flow verification.
 mf-compiler = { workspace = true, features = ["codegen"] }
+mf-tui.workspace = true
+
+# Isolated repositories and generated test projects.
 tempfile.workspace = true
