@@ -14,7 +14,12 @@
 
 ### Requirement: Execute selected PR suites and complete main suites
 
-PR CI SHALL select affected packages and reverse dependencies using the current selector. Package manifests SHALL retain owner scope; documented repository configuration exceptions SHALL defer to main/nightly. Known shared inputs SHALL select consumers, while unknown inputs and analyzer failures SHALL select the workspace. Main and manual runs SHALL execute the full suite. Tests SHALL use the pinned toolchain; failures SHALL prevent report publication.
+PR CI SHALL select affected packages and reverse dependencies from the tested merge commit against its first parent. Package manifests SHALL retain owner scope; documented repository configuration exceptions SHALL defer to main/nightly. Known shared inputs SHALL select consumers, while unknown inputs and analyzer failures SHALL select the workspace. Main and manual runs SHALL execute the full suite. Tests SHALL use the pinned toolchain; failures SHALL prevent report publication.
+
+#### Scenario: The event base is older than the tested merge base
+
+- **WHEN** the event payload names an older base SHA than the merge commit's first parent
+- **THEN** selection compares against the first parent, excluding unrelated main-branch changes while analyzing and testing the merged tree
 
 #### Scenario: A pull request changes one source file
 

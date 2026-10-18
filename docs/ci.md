@@ -3,10 +3,11 @@
 Pull requests use rust-analyzer's crate graph and Cargo metadata to select
 changed packages and their transitive reverse dependencies. The coverage job
 checks out GitHub's PR merge commit with comparison history and compares it
-with the event's base commit. Both dependency analysis and tests therefore
-include changes already on the base branch. The job records the selection and
-reasons in its summary. It runs those
-package suites with coverage; an empty selection skips the coverage cache,
+with its first parent, the actual base snapshot used for that merge. An older
+base SHA in the event payload must not add unrelated main-branch changes to the
+PR selection. Dependency analysis and tests still use the complete merged tree.
+The job records the selection and reasons in its summary. It runs those package
+suites with coverage; an empty selection skips the coverage cache,
 tests, and uploads. Known repository configuration is deferred to full main/nightly
 verification; unknown shared inputs or analyzer failures select the full workspace.
 

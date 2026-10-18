@@ -214,6 +214,7 @@ class GitTests(unittest.TestCase):
             affected.changes(self.root, options(commit="HEAD"))
 
     def test_merge_commit_uses_first_parent(self):
+        event_base = self.git("rev-parse", "HEAD")
         self.git("checkout", "-b", "feature")
         self.write("feature.rs", "feature")
         self.commit()
@@ -221,6 +222,8 @@ class GitTests(unittest.TestCase):
         self.write("main.rs", "main")
         parent = self.commit()
         self.git("merge", "--no-ff", "feature", "-m", "test(ci): merge fixture")
+        _, _, stale_paths = affected.changes(self.root, options(base=event_base, head="HEAD"))
+        self.assertEqual(stale_paths, ["feature.rs", "main.rs"])
         base, _, paths = affected.changes(self.root, options(commit="HEAD"))
         self.assertEqual((base, paths), (parent, ["feature.rs"]))
         # PR CI analyzes the tested merge snapshot while excluding changes
