@@ -1,10 +1,22 @@
 use cel_core::{MapKey, Value as CelValue};
 use mf_runtime::{ValueKind, ValueRef, ValueType};
 use serde_json::Number;
+use snafu::{ResultExt, Snafu, ensure};
 use std::{fmt, sync::Arc};
 
 pub const MAX_JSON_BYTES: usize = 1024 * 1024;
 pub const MAX_COLLECTION_ENTRIES: usize = 10_000;
+
+#[derive(Debug, Snafu)]
+pub enum ConversionError {
+    #[snafu(display("path `{path}`: {message}"))]
+    InvalidValue { path: String, message: String },
+    #[snafu(display("path `{path}`: {source}"))]
+    Evaluate {
+        path: String,
+        source: cel_core::EvalError,
+    },
+}
 
 #[derive(Default)]
 pub struct Budget {
@@ -12,12 +24,14 @@ pub struct Budget {
 }
 
 impl Budget {
-    fn consume(&mut self, count: usize, path: &Path<'_>) -> Result<(), String> {
-        if count > MAX_COLLECTION_ENTRIES - self.entries {
-            return Err(format!(
-                "path `{path}` exceeds the collection entry limit of {MAX_COLLECTION_ENTRIES}"
-            ));
-        }
+    fn consume(&mut self, count: usize, path: &Path<'_>) -> Result<(), ConversionError> {
+        ensure!(
+            count <= MAX_COLLECTION_ENTRIES - self.entries,
+            InvalidValueSnafu {
+                path: path.to_string(),
+                message: format!("exceeds the collection entry limit of {MAX_COLLECTION_ENTRIES}"),
+            }
+        );
         self.entries += count;
         Ok(())
     }
@@ -50,15 +64,23 @@ impl fmt::Display for Path<'_> {
     }
 }
 
-fn check_depth(depth: usize, path: &Path<'_>) -> Result<(), String> {
-    if depth > ValueType::MAX_DEPTH {
-        Err(format!(
-            "path `{path}` exceeds nesting depth {}",
-            ValueType::MAX_DEPTH
-        ))
-    } else {
-        Ok(())
+fn invalid(path: &Path<'_>, message: impl Into<String>) -> ConversionError {
+    InvalidValueSnafu {
+        path: path.to_string(),
+        message: message.into(),
     }
+    .build()
+}
+
+fn check_depth(depth: usize, path: &Path<'_>) -> Result<(), ConversionError> {
+    ensure!(
+        depth <= ValueType::MAX_DEPTH,
+        InvalidValueSnafu {
+            path: path.to_string(),
+            message: format!("exceeds nesting depth {}", ValueType::MAX_DEPTH),
+        }
+    );
+    Ok(())
 }
 
 pub fn json_to_cel(
@@ -67,7 +89,7 @@ pub fn json_to_cel(
     budget: &mut Budget,
     path: &str,
     depth: usize,
-) -> Result<CelValue, String> {
+) -> Result<CelValue, ConversionError> {
     json_to_cel_at(value, value_type, budget, &Path::Root(path), depth)
 }
 
@@ -77,19 +99,39 @@ fn json_to_cel_at(
     budget: &mut Budget,
     path: &Path<'_>,
     depth: usize,
-) -> Result<CelValue, String> {
+) -> Result<CelValue, ConversionError> {
     check_depth(depth, path)?;
     match (value_type, value.kind()) {
-        (ValueType::Null, ValueKind::Null) => Ok(CelValue::Null),
-        (ValueType::Boolean, ValueKind::Bool(value)) => Ok(CelValue::Bool(*value)),
+        (ValueType::Any | ValueType::Null, ValueKind::Null) => Ok(CelValue::Null),
+        (ValueType::Any | ValueType::Boolean, ValueKind::Bool(value)) => Ok(CelValue::Bool(*value)),
+        (ValueType::Any, ValueKind::Number(value)) => {
+            if let Some(value) = value.as_i64() {
+                Ok(CelValue::Int(value))
+            } else if let Some(value) = value.as_u64() {
+                Ok(CelValue::UInt(value))
+            } else {
+                mf_runtime::number_to_f64(value)
+                    .map(CelValue::Double)
+                    .ok_or_else(|| invalid(path, "expected finite JSON number"))
+            }
+        }
+        (ValueType::Uint64, ValueKind::Number(value)) => mf_runtime::number_to_u64(value)
+            .map(CelValue::UInt)
+            .ok_or_else(|| invalid(path, "expected uint64")),
         (ValueType::Int64, ValueKind::Number(value)) => mf_runtime::number_to_i64(value)
             .map(CelValue::Int)
-            .ok_or_else(|| format!("path `{path}`: expected int64")),
+            .ok_or_else(|| invalid(path, "expected int64")),
         (ValueType::Float64, ValueKind::Number(value)) => mf_runtime::number_to_f64(value)
             .map(CelValue::Double)
-            .ok_or_else(|| format!("path `{path}`: expected finite float64")),
-        (ValueType::String, ValueKind::String(value)) => Ok(CelValue::String(Arc::clone(value))),
-        (ValueType::List(inner), ValueKind::Array(items)) => {
+            .ok_or_else(|| invalid(path, "expected finite float64")),
+        (ValueType::Any | ValueType::String, ValueKind::String(value)) => {
+            Ok(CelValue::String(Arc::clone(value)))
+        }
+        (ValueType::Any | ValueType::Array | ValueType::List(_), ValueKind::Array(items)) => {
+            let inner = match value_type {
+                ValueType::List(inner) => inner.as_ref(),
+                _ => &ValueType::Any,
+            };
             budget.consume(items.len(), path)?;
             let values = items
                 .iter()
@@ -100,7 +142,11 @@ fn json_to_cel_at(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(CelValue::list(values))
         }
-        (ValueType::Map(inner), ValueKind::Object(entries)) => {
+        (ValueType::Any | ValueType::Object | ValueType::Map(_), ValueKind::Object(entries)) => {
+            let inner = match value_type {
+                ValueType::Map(inner) => inner.as_ref(),
+                _ => &ValueType::Any,
+            };
             budget.consume(entries.len(), path)?;
             let values = entries
                 .iter()
@@ -111,7 +157,7 @@ fn json_to_cel_at(
                 .collect::<Result<Vec<_>, _>>()?;
             Ok(CelValue::map(values))
         }
-        _ => Err(format!("path `{path}`: expected {value_type}")),
+        _ => Err(invalid(path, format!("expected {value_type}"))),
     }
 }
 
@@ -135,7 +181,7 @@ pub fn cel_to_json(
     budget: &mut Budget,
     path: &str,
     depth: usize,
-) -> Result<ValueRef, String> {
+) -> Result<ValueRef, ConversionError> {
     cel_to_json_at(value, value_type, budget, &Path::Root(path), depth)
 }
 
@@ -145,19 +191,29 @@ fn cel_to_json_at(
     budget: &mut Budget,
     path: &Path<'_>,
     depth: usize,
-) -> Result<ValueRef, String> {
+) -> Result<ValueRef, ConversionError> {
     check_depth(depth, path)?;
+    if let CelValue::Error(error) = value {
+        return Err(error.as_ref().clone()).context(EvaluateSnafu {
+            path: path.to_string(),
+        });
+    }
     match (value_type, value) {
-        (ValueType::Null, CelValue::Null) => Ok(ValueRef::null()),
-        (ValueType::Boolean, CelValue::Bool(value)) => Ok(ValueRef::from(*value)),
-        (ValueType::Int64, CelValue::Int(value)) => Ok(ValueRef::from(*value)),
-        (ValueType::Float64, CelValue::Double(value)) => Number::from_f64(*value)
+        (ValueType::Any | ValueType::Null, CelValue::Null) => Ok(ValueRef::null()),
+        (ValueType::Any | ValueType::Boolean, CelValue::Bool(value)) => Ok(ValueRef::from(*value)),
+        (ValueType::Any | ValueType::Int64, CelValue::Int(value)) => Ok(ValueRef::from(*value)),
+        (ValueType::Any | ValueType::Uint64, CelValue::UInt(value)) => Ok(ValueRef::from(*value)),
+        (ValueType::Any | ValueType::Float64, CelValue::Double(value)) => Number::from_f64(*value)
             .map(|number| ValueRef::new(ValueKind::Number(number)))
-            .ok_or_else(|| format!("path `{path}`: non-finite float64 result")),
-        (ValueType::String, CelValue::String(value)) => {
+            .ok_or_else(|| invalid(path, "non-finite float64 result")),
+        (ValueType::Any | ValueType::String, CelValue::String(value)) => {
             Ok(ValueRef::new(ValueKind::String(Arc::clone(value))))
         }
-        (ValueType::List(inner), CelValue::List(items)) => {
+        (ValueType::Any | ValueType::Array | ValueType::List(_), CelValue::List(items)) => {
+            let inner = match value_type {
+                ValueType::List(inner) => inner.as_ref(),
+                _ => &ValueType::Any,
+            };
             budget.consume(items.len(), path)?;
             items
                 .iter()
@@ -168,12 +224,16 @@ fn cel_to_json_at(
                 .collect::<Result<Vec<_>, _>>()
                 .map(ValueRef::array)
         }
-        (ValueType::Map(inner), CelValue::Map(entries)) => {
+        (ValueType::Any | ValueType::Object | ValueType::Map(_), CelValue::Map(entries)) => {
+            let inner = match value_type {
+                ValueType::Map(inner) => inner.as_ref(),
+                _ => &ValueType::Any,
+            };
             budget.consume(entries.len(), path)?;
             let mut result = Vec::new();
             for (key, item) in entries.iter() {
                 let MapKey::String(key) = key else {
-                    return Err(format!("path `{path}`: map key must be a string"));
+                    return Err(invalid(path, "map key must be a string"));
                 };
                 let path = Path::Key(path, key);
                 result.push((
@@ -183,9 +243,9 @@ fn cel_to_json_at(
             }
             Ok(ValueRef::object(result))
         }
-        _ => Err(format!(
-            "path `{path}`: expected {value_type}, found {}",
-            actual_cel_type(value)
+        _ => Err(invalid(
+            path,
+            format!("expected {value_type}, found {}", actual_cel_type(value)),
         )),
     }
 }
@@ -200,6 +260,8 @@ mod tests {
         for (descriptor, input, expected) in [
             (ValueType::Int64, json!(42.0), json!(42)),
             (ValueType::Float64, json!(42), json!(42.0)),
+            (ValueType::Uint64, json!(42.0), json!(42)),
+            (ValueType::Uint64, json!(u64::MAX), json!(u64::MAX)),
         ] {
             let native =
                 json_to_cel(&input.into(), &descriptor, &mut Budget::default(), "", 1).unwrap();
@@ -214,6 +276,10 @@ mod tests {
             (ValueType::Int64, json!(i64::MAX as f64)),
             (ValueType::Float64, json!((1_u64 << 53) + 1)),
             (ValueType::Float64, json!(u64::MAX)),
+            (ValueType::Uint64, json!(-1)),
+            (ValueType::Uint64, json!(0.5)),
+            (ValueType::Uint64, json!(-0.0)),
+            (ValueType::Uint64, json!(u64::MAX as f64)),
         ] {
             assert!(
                 json_to_cel(&input.into(), &descriptor, &mut Budget::default(), "", 1).is_err()
@@ -238,19 +304,135 @@ mod tests {
     }
 
     #[test]
+    fn round_trips_dynamic_json_without_losing_number_representations() {
+        let original = json!({
+            "records": [{"id": "call", "path": [{"index": 0}], "usage": null}, {}],
+            "mixed": [true, null, "text", [], {}],
+            "numbers": [i64::MIN, (1_u64 << 53) + 1, u64::MAX, 42.0, -0.0]
+        });
+        for descriptor in [
+            ValueType::Any,
+            ValueType::Object,
+            ValueType::Map(Box::new(ValueType::Any)),
+        ] {
+            let native = json_to_cel(
+                &original.clone().into(),
+                &descriptor,
+                &mut Budget::default(),
+                "",
+                1,
+            )
+            .unwrap();
+            let result = cel_to_json(&native, &descriptor, &mut Budget::default(), "", 1).unwrap();
+            assert_eq!(result, original);
+            assert_eq!(
+                result["numbers"][4].as_f64().unwrap().to_bits(),
+                (-0.0_f64).to_bits()
+            );
+            assert!(serde_json::to_value(&result).unwrap()["numbers"][3].is_f64());
+            assert!(result["records"][1].as_object().unwrap().is_empty());
+        }
+        for descriptor in [
+            ValueType::Any,
+            ValueType::Array,
+            ValueType::List(Box::new(ValueType::Any)),
+        ] {
+            let original = original["mixed"].clone();
+            let native = json_to_cel(
+                &original.clone().into(),
+                &descriptor,
+                &mut Budget::default(),
+                "",
+                1,
+            )
+            .unwrap();
+            assert_eq!(
+                cel_to_json(&native, &descriptor, &mut Budget::default(), "", 1).unwrap(),
+                original
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_nested_dynamic_non_json_values_with_paths_and_sources() {
+        use std::error::Error;
+        for value in [
+            CelValue::Double(f64::INFINITY),
+            CelValue::Bytes(Arc::from(b"bytes".as_slice())),
+            CelValue::timestamp(0, 0),
+            CelValue::duration(1, 0),
+            CelValue::map([(1_i64, CelValue::Null)]),
+            CelValue::error(cel_core::EvalError::division_by_zero()),
+        ] {
+            let is_error = matches!(value, CelValue::Error(_));
+            let nested = CelValue::list([CelValue::map([("a~/b", value)])]);
+            let error =
+                cel_to_json(&nested, &ValueType::Any, &mut Budget::default(), "", 1).unwrap_err();
+            assert!(error.to_string().contains("/0/a~0~1b"), "{error}");
+            if is_error {
+                assert!(error.source().unwrap().is::<cel_core::EvalError>());
+            }
+        }
+    }
+
+    #[test]
+    fn dynamic_descendants_share_depth_and_entry_budgets() {
+        let mut json = json!(null);
+        let mut cel = CelValue::Null;
+        for depth in 1..=ValueType::MAX_DEPTH + 1 {
+            let input = json_to_cel(
+                &json.clone().into(),
+                &ValueType::Any,
+                &mut Budget::default(),
+                "",
+                1,
+            );
+            let output = cel_to_json(&cel, &ValueType::Any, &mut Budget::default(), "", 1);
+            if depth <= ValueType::MAX_DEPTH {
+                assert!(input.is_ok());
+                assert!(output.is_ok());
+            } else {
+                assert!(input.unwrap_err().to_string().contains("nesting depth"));
+                assert!(output.unwrap_err().to_string().contains("nesting depth"));
+            }
+            json = json!({"nested": json});
+            cel = CelValue::map([("nested", cel)]);
+        }
+        for count in [MAX_COLLECTION_ENTRIES / 2, MAX_COLLECTION_ENTRIES / 2 + 1] {
+            let input = json!(vec![serde_json::Value::Null; count]);
+            let mut budget = Budget::default();
+            let native = json_to_cel(&input.into(), &ValueType::Any, &mut budget, "", 1).unwrap();
+            let result = cel_to_json(&native, &ValueType::Any, &mut budget, "", 1);
+            if count == MAX_COLLECTION_ENTRIES / 2 {
+                assert!(result.is_ok());
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("collection entry limit")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn preserves_root_prefix_and_escaped_paths_in_both_directions() {
         let value_type = ValueType::List(Box::new(ValueType::Map(Box::new(ValueType::Int64))));
         let value = ValueRef::from(json!([{"ok": 1}, {"a~/b": false}]));
         let error =
             json_to_cel(&value, &value_type, &mut Budget::default(), "root", 1).unwrap_err();
-        assert_eq!(error, "path `root/1/a~0~1b`: expected int64");
+        assert_eq!(error.to_string(), "path `root/1/a~0~1b`: expected int64");
         let value = CelValue::list([
             CelValue::map([("ok", CelValue::Int(1))]),
             CelValue::map([("a~/b", CelValue::Bool(false))]),
         ]);
         let error =
             cel_to_json(&value, &value_type, &mut Budget::default(), "root", 1).unwrap_err();
-        assert_eq!(error, "path `root/1/a~0~1b`: expected int64, found boolean");
+        assert_eq!(
+            error.to_string(),
+            "path `root/1/a~0~1b`: expected int64, found boolean"
+        );
     }
 
     #[test]
@@ -264,6 +446,7 @@ mod tests {
                 1
             )
             .unwrap_err()
+            .to_string()
             .contains("non-finite")
         );
         assert!(
@@ -275,6 +458,7 @@ mod tests {
                 1
             )
             .unwrap_err()
+            .to_string()
             .contains("map key must be a string")
         );
         assert!(
@@ -286,6 +470,7 @@ mod tests {
                 1
             )
             .unwrap_err()
+            .to_string()
             .contains("expected int64")
         );
     }
@@ -303,6 +488,7 @@ mod tests {
                 1
             )
             .unwrap_err()
+            .to_string()
             .contains("collection entry limit")
         );
         let mut nested_type = ValueType::Int64;
@@ -320,6 +506,7 @@ mod tests {
                 1
             )
             .unwrap_err()
+            .to_string()
             .contains("nesting depth")
         );
     }

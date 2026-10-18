@@ -62,16 +62,17 @@ pub use embedding::{EmbedRequest, EmbeddingError, embed_workflows};
 pub use inputs::{BuildInputs, InputError};
 pub use mf_runtime::{
     ContextReference, ContextValue, ControlEdgeDefinition, DefinitionId, DefinitionParseError,
-    EXIT_LOOP_KIND, EdgeDefinition, ExecutionContext, ExecutionDependency, Flow, FlowConnection,
-    FlowNode, FlowOutput, FlowOutputs, Inputs, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID,
-    LoopBodyDefinition, LoopComparisonOperator, LoopConditionDefinition, LoopDefinition,
-    LoopVariableDefinition, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS,
-    NodeBuildError, NodeDefinition, NodeDependency, NodeExecutionError, NodeFactory, NodeId,
-    NodeMetadata, NodePorts, NodeRegistration, NodeRegistry, NodeRegistryError, NodeResult,
-    OutputDerivation, OutputDerivationError, Outputs, PortSpec, PreparedNode, RunObservation,
-    TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch, ValueKind, ValueRef, ValueType,
-    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition, WorkflowRunError,
-    deserialize_config, execute_node_in_context, output_id, select_context_output,
+    EXIT_LOOP_KIND, EdgeDefinition, ExclusiveInputError, ExecutionContext, ExecutionDependency,
+    Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, Inputs, LOOP_ASSIGN_KIND, LOOP_KIND,
+    LOOP_SOURCE_ID, LoopBodyDefinition, LoopComparisonOperator, LoopConditionDefinition,
+    LoopDefinition, LoopVariableDefinition, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS,
+    MAX_SCHEDULED_STEPS, NodeBuildError, NodeDefinition, NodeDependency, NodeExecutionError,
+    NodeFactory, NodeId, NodeMetadata, NodePorts, NodeRegistration, NodeRegistry,
+    NodeRegistryError, NodeResult, OutputDerivation, OutputDerivationError, Outputs, PortSpec,
+    PreparedNode, RunObservation, TaskNode, TypeCompatibility, TypeDepthError, TypeMismatch,
+    ValueKind, ValueRef, ValueType, WorkflowDefinition, WorkflowDefinitionVersion,
+    WorkflowOutputDefinition, WorkflowRunError, deserialize_config, execute_node_in_context,
+    output_id, select_context_output, validate_exclusive_inputs,
 };
 pub use mf_runtime::{
     FlowDependency, NodeExecution, PreparedStream, StreamExecution, StreamLimits, StreamMode,

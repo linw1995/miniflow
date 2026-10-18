@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Provide durable, independent chat sessions with ordered messages and recoverable turn state through application-owned workflow nodes.
+Provide durable, independent chat sessions with ordered messages and recoverable turn state through shared storage handlers and application-owned workflow nodes.
 
 ## Requirements
 
@@ -28,12 +28,17 @@ The chat host SHALL initialize SQLite storage and apply bundled pending migratio
 
 ### Requirement: Expose application storage operations as nodes
 
-The `mf-chat` package SHALL expose typed `mf_chat.*` nodes for initialization, session management, turn transitions, title persistence, and usage queries. The host SHALL use these nodes for persisted application operations. Preparing or inspecting these nodes MUST NOT open storage, apply migrations, or execute queries.
+The `mf-chat` package SHALL expose typed `mf_chat.*` nodes for initialization, session management, turn transitions, title persistence, and usage queries. Direct database APIs and node adapters SHALL call the same storage handlers. Host storage operations MUST NOT construct or execute wrapper workflows. Preparing or inspecting these nodes MUST NOT open storage, apply migrations, or execute queries.
 
 #### Scenario: Prepare without a database
 
 - **WHEN** a structurally valid chat workflow is prepared or inspected with a nonexistent database path
 - **THEN** its node contracts are available without creating database files or applying migrations
+
+#### Scenario: Return a direct storage error
+
+- **WHEN** a database API fails to find a turn or execute a storage query
+- **THEN** it returns the typed storage error directly without runtime error wrapping
 
 #### Scenario: Attribute a storage failure
 
@@ -90,7 +95,7 @@ Beginning a turn SHALL atomically persist its user message, running state, and m
 
 ### Requirement: Commit replies and call facts atomically
 
-Successful completion SHALL save the assistant message, reported model-call metadata, and successful turn state in one transaction. The host MUST NOT report a turn as committed until this transaction succeeds. A failed transaction SHALL leave no partial completed reply or usage update.
+Successful completion SHALL save the assistant message, reported model-call metadata, and successful turn state in one transaction. The host MUST NOT report a turn as committed until this transaction succeeds. A failed transaction SHALL leave no partial completed reply or usage update. This transaction MUST NOT schedule title work.
 
 #### Scenario: Fail partway through completion
 
@@ -149,3 +154,40 @@ One database SHALL have at most one active owning chat host. Ownership SHALL be 
 
 - **WHEN** the owner finishes or finalizes its active work and closes
 - **THEN** another host can acquire ownership and reopen the preserved database
+
+### Requirement: Persist opaque message metadata and execution call facts
+
+Messages SHALL support optional object-valued metadata without rewriting prior messages. Successful
+completion SHALL persist assistant metadata and the returned usage list in the same transaction as text
+and terminal state. Failed workflow results SHALL persist usage lists and failure state without adding
+assistant messages. History size accounting SHALL include metadata. Existing databases SHALL migrate
+forward without losing messages, legacy usage facts, or ownership constraints.
+
+#### Scenario: Reopen annotated history
+
+- **WHEN** a saved assistant reply has metadata and storage is reopened
+- **THEN** subsequent history retains the same annotations
+
+#### Scenario: Ignore rewritten returned history
+
+- **WHEN** a workflow returns changed metadata for an earlier history message
+- **THEN** saved history remains unchanged and only the new reply's metadata is persisted
+
+#### Scenario: Upgrade an existing database
+
+- **WHEN** storage predates metadata and usage-list columns
+- **THEN** migration preserves legacy call counters and old messages have absent metadata
+
+### Requirement: Derive successful conversation state from turns
+
+The backend SHALL use persisted successful turns to determine whether a session has completed a conversation. It SHALL NOT expose or maintain a separate conversation_revision counter. Forward migration SHALL remove that derived counter without changing stored turns or messages; development rollback SHALL reconstruct it from successful turns.
+
+#### Scenario: Complete and replay a turn
+
+- **WHEN** a successful completion is saved and then replayed
+- **THEN** one successful turn and one assistant message remain, without updating a separate completion counter
+
+#### Scenario: Reject title scheduling after a reply commits
+
+- **WHEN** title request insertion fails after a successful conversation
+- **THEN** the reply, usages, and successful turn remain committed and title scheduling can be attempted separately

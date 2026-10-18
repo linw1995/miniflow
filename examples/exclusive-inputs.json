@@ -1,0 +1,105 @@
+{
+  "version": "2026-10-03",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "ci": {
+            "type": "bool",
+            "default": false,
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "ci",
+            "condition": {
+              "source": {
+                "output": "params.ci",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "local",
+      "kind": "builtin.constant",
+      "config": {
+        "value": {
+          "mode": "local"
+        }
+      }
+    },
+    {
+      "id": "ci",
+      "kind": "builtin.constant",
+      "config": {
+        "value": {
+          "mode": "ci"
+        }
+      }
+    },
+    {
+      "id": "consume",
+      "kind": "builtin.identity"
+    }
+  ],
+  "control_edges": [
+    {
+      "from_node": "params",
+      "from_output": "ci",
+      "to_node": "route"
+    },
+    {
+      "from_node": "route",
+      "from_output": "ci",
+      "to_node": "ci"
+    },
+    {
+      "from_node": "route",
+      "from_output": "else",
+      "to_node": "local"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "result",
+      "node": "consume",
+      "port": "value"
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "local",
+      "from_output": "value",
+      "to_node": "consume",
+      "to_input": "input",
+      "exclusive": true
+    },
+    {
+      "from_node": "ci",
+      "from_output": "value",
+      "to_node": "consume",
+      "to_input": "input",
+      "exclusive": true
+    }
+  ]
+}

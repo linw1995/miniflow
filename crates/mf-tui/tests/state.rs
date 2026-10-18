@@ -113,6 +113,7 @@ fn graph() -> WorkflowDescription {
             },
         ],
         data_edges: vec![DataEdge {
+            exclusive: false,
             from_node: "a".into(),
             from_output: "value".into(),
             to_node: "b".into(),
@@ -160,6 +161,7 @@ fn node_start(sequence: i64, id: &str, kind: &str, position: i64) -> LifecycleEv
     event(
         sequence,
         Event::NodeStarted {
+            selected_inputs: Vec::new(),
             node: node(id, kind),
             position: count(position),
             elapsed_ns: count(sequence * 10),
@@ -228,6 +230,7 @@ fn loop_graph() -> WorkflowDescription {
                 },
             ],
             data_edges: vec![DataEdge {
+                exclusive: false,
                 from_node: "%loop".into(),
                 from_output: "count".into(),
                 to_node: "step".into(),
@@ -260,6 +263,7 @@ fn complete_loop_events() -> Vec<LifecycleEvent> {
         event(
             2,
             Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: node("repeat", "workflow.loop"),
                 position: count(0),
                 elapsed_ns: count(1),
@@ -275,6 +279,7 @@ fn complete_loop_events() -> Vec<LifecycleEvent> {
         event(
             4,
             Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: body_node("%loop", "%loop"),
                 position: count(0),
                 elapsed_ns: count(3),
@@ -297,6 +302,7 @@ fn complete_loop_events() -> Vec<LifecycleEvent> {
         event(
             6,
             Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: body_node("step", "fixture.sink"),
                 position: count(1),
                 elapsed_ns: count(5),
@@ -455,6 +461,7 @@ fn final_step_count_cannot_hide_an_unreported_pass() {
         .apply(event(
             2,
             Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: node("repeat", "workflow.loop"),
                 position: count(0),
                 elapsed_ns: count(1),
@@ -548,6 +555,7 @@ fn live_body_start_shows_running_in_the_active_pass() {
         event(
             2,
             Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: node("repeat", "workflow.loop"),
                 position: Count::ZERO,
                 elapsed_ns: count(1),
@@ -563,6 +571,7 @@ fn live_body_start_shows_running_in_the_active_pass() {
         event(
             4,
             Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: NodeIdentity {
                     id: "step".into(),
                     kind: "fixture.sink".into(),
@@ -645,6 +654,7 @@ fn conflicting_body_event_does_not_mark_a_same_named_root_node() {
         .apply(event(
             2,
             Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: identity.clone(),
                 position: count(1),
                 elapsed_ns: count(1),
@@ -1017,6 +1027,7 @@ fn missing_ranges_and_diagnostic_history_have_fixed_display_budgets() {
                 run_id: run_id(),
                 sequence: count(position * 2 + 3),
                 event: Event::NodeStarted {
+                    selected_inputs: Vec::new(),
                     node: node(&format!("node_{position}"), "fixture.empty"),
                     position: count(position),
                     elapsed_ns: count(position),
@@ -1076,6 +1087,7 @@ fn conditional_skip_keeps_its_cause_and_inactive_port_outcome() {
     let skip = event(
         4,
         Event::NodeSkipped {
+            selected_inputs: Vec::new(),
             node: node("b", "fixture.sink"),
             position: count(1),
             elapsed_ns: count(40),

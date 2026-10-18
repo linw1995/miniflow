@@ -12,6 +12,8 @@ type OperatorStates = Vec<Option<NodeExecution>>;
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct FlowDependency {
+    /// Candidates with the same target input form one exclusive group.
+    pub exclusive: bool,
     pub input: Option<Cow<'static, str>>,
     pub source_node: Cow<'static, str>,
     pub source_output: Cow<'static, str>,
@@ -20,6 +22,7 @@ pub struct FlowDependency {
 impl FlowDependency {
     pub fn borrowed(&self) -> ExecutionDependency<'_> {
         ExecutionDependency {
+            exclusive: self.exclusive,
             input: self.input.as_deref(),
             source_node: self.source_node.as_ref(),
             source_output: self.source_output.as_ref(),

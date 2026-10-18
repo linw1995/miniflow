@@ -5,7 +5,7 @@ use crate::{
     graph::{GraphError, GraphLayout, GraphView},
     logs::LogSnapshot,
     manifest::{ManifestReadError, read_manifest},
-    receiver::{LoopbackReceiver, ReceiverError},
+    receiver::{LoopbackReceiver, ObservationReader, ReceiverError},
     state::{LoopPassObservation, NodeObservation, StateSnapshot},
     traces::{TraceSnapshot, TraceView, TraceViewSnapshot},
 };
@@ -54,7 +54,6 @@ const MAX_STDOUT_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_STDERR_BYTES: usize = 1024 * 1024;
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(2);
-const FRAME_INTERVAL: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Snafu)]
 pub enum RunError {
@@ -132,35 +131,43 @@ fn open_input_file(path: &Path) -> Result<File, RunError> {
     })
 }
 
+impl RunOptions {
+    pub fn workflow_arguments(
+        &self,
+        schema: &mf_runtime::WorkflowInputSchema,
+    ) -> Result<WorkflowArguments, RunError> {
+        if self.inputs.is_some() && self.inputs_file.is_some() {
+            return option_error("--inputs and --inputs-file are mutually exclusive");
+        }
+        if !self.arguments.is_empty() && (self.inputs.is_some() || self.inputs_file.is_some()) {
+            return option_error(
+                "named workflow inputs cannot be combined with --inputs or --inputs-file",
+            );
+        }
+        let arguments = if !self.arguments.is_empty() {
+            WorkflowArguments::parse(self.arguments.clone(), schema)?
+        } else if let Some(json) = &self.inputs {
+            WorkflowArguments::from_json(json.as_bytes())?
+        } else if let Some(path) = &self.inputs_file {
+            let mut bytes = Vec::new();
+            open_input_file(path)?
+                .take(MAX_WORKFLOW_INPUT_BYTES as u64 + 1)
+                .read_to_end(&mut bytes)
+                .context(InputFileSnafu { path: path.clone() })?;
+            WorkflowArguments::from_json(&bytes)?
+        } else {
+            WorkflowArguments::default()
+        };
+        schema.validate(&arguments)?;
+        Ok(arguments)
+    }
+}
+
 fn prepare_launch(path: &Path, options: &RunOptions) -> Result<PreparedLaunch, RunError> {
-    if options.inputs.is_some() && options.inputs_file.is_some() {
-        return option_error("--inputs and --inputs-file are mutually exclusive");
-    }
     let manifest = read_manifest(path).context(ManifestSnafu)?;
-    if !options.arguments.is_empty() && (options.inputs.is_some() || options.inputs_file.is_some())
-    {
-        return option_error(
-            "named workflow inputs cannot be combined with --inputs or --inputs-file",
-        );
-    }
-    let arguments = if !options.arguments.is_empty() {
-        WorkflowArguments::parse(options.arguments.clone(), &manifest.input_schema)?
-    } else if let Some(json) = &options.inputs {
-        WorkflowArguments::from_json(json.as_bytes())?
-    } else if let Some(path) = &options.inputs_file {
-        let mut bytes = Vec::new();
-        open_input_file(path)?
-            .take(MAX_WORKFLOW_INPUT_BYTES as u64 + 1)
-            .read_to_end(&mut bytes)
-            .context(InputFileSnafu { path: path.clone() })?;
-        WorkflowArguments::from_json(&bytes)?
-    } else {
-        WorkflowArguments::default()
-    };
+    let arguments = options.workflow_arguments(&manifest.input_schema)?;
     let description = manifest.description()?;
-    let schema = &manifest.input_schema;
-    schema.validate(&arguments)?;
-    let needs_stdin = schema.stdin_owner(&arguments)?.is_some();
+    let needs_stdin = manifest.input_schema.stdin_owner(&arguments)?.is_some();
     if needs_stdin {
         return option_error(
             "TUI execution cannot supply workflow stdin; provide source parameters or run the executable directly",
@@ -201,20 +208,9 @@ pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<
         description,
         arguments,
     } = prepare_launch(path, options)?;
-    let layout = GraphLayout::new(&description).context(GraphSnafu)?;
-    let mut body_layouts = BTreeMap::new();
-    for body in &description.loop_bodies {
-        let body_layout =
-            GraphLayout::from_loop_body(&description, &body.path).context(GraphSnafu)?;
-        body_layouts.insert(body.path.clone(), body_layout);
-    }
-    let capture = Arc::new(Mutex::new(Capture::new().context(SpoolSnafu)?));
-    let mut capture_worker = None;
-    let run_id = RunId::new();
-    let mut receiver = LoopbackReceiver::bind(description, run_id).context(ReceiverSnafu)?;
+    let mut view = ObservationView::new(&description)?;
     let signal = SignalGuard::register().context(TerminalSnafu)?;
     let guard = TerminalGuard::enter().context(TerminalSnafu)?;
-    // The backend's global size lookup can consult redirected stdout without a controlling TTY.
     let mut terminal = Terminal::with_options(
         CrosstermBackend::new(Box::new(io::stderr()) as Box<dyn Write>),
         TerminalOptions {
@@ -224,16 +220,98 @@ pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<
     .context(TerminalSnafu)?;
     let result = (|| {
         let mut command = Command::new(path);
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
         for _ in 0..options.verbose.min(3) {
             command.arg("--verbose");
         }
         if let Some(arguments) = &arguments {
             command.arg("--inputs-file").arg(arguments.path());
         }
+        let mut run = LocalRun::start(command, description, RunId::new(), MAX_STDOUT_BYTES)?;
+        supervise(&mut run, &mut view, &mut terminal, &signal)
+    })();
+    *terminal.backend_mut() = CrosstermBackend::new(Box::new(io::sink()));
+    drop(terminal);
+    drop(guard);
+    drop(signal);
+    let outcome = result?;
+    if let Some(error) = &outcome.capture_error {
+        report(&format!("workflow stdout capture incomplete: {error}"));
+    }
+    let mut stdout = io::stdout().lock();
+    let delivery = stdout
+        .write_all(&outcome.stdout)
+        .and_then(|()| stdout.flush());
+    if let Err(error) = &delivery {
+        report(&format!(
+            "could not deliver captured workflow stdout: {error}"
+        ));
+    }
+    if outcome.interrupted {
+        return Ok(130);
+    }
+    let code = exit_code(outcome.status);
+    Ok(if outcome.capture_error.is_some() || delivery.is_err() {
+        if outcome.status.success() { 1 } else { code }
+    } else {
+        code
+    })
+}
+
+#[derive(Clone)]
+pub struct LocalObservation {
+    pub reader: ObservationReader,
+    capture: Arc<Mutex<Capture>>,
+    started: Instant,
+    status: Arc<Mutex<Option<ExitStatus>>>,
+}
+impl LocalObservation {
+    pub fn status(&self) -> Option<ExitStatus> {
+        *self.status.lock().expect("run status was not poisoned")
+    }
+    pub fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+    pub fn capture_view(&self) -> CaptureView {
+        self.capture
+            .lock()
+            .expect("capture lock was not poisoned")
+            .view()
+    }
+}
+pub struct LocalOutcome {
+    pub status: ExitStatus,
+    pub interrupted: bool,
+    pub stdout: Vec<u8>,
+    pub stderr: String,
+    pub capture_error: Option<String>,
+}
+pub struct LocalRun {
+    child: ChildGuard,
+    capture: CaptureWorker,
+    receiver: LoopbackReceiver,
+    started: Instant,
+    exited: Option<(ExitStatus, Instant)>,
+    interrupted_at: Option<Instant>,
+    killed: bool,
+    finished: bool,
+    status: Arc<Mutex<Option<ExitStatus>>>,
+}
+impl LocalRun {
+    pub fn start(
+        mut command: Command,
+        description: WorkflowDescription,
+        run_id: RunId,
+        stdout_limit: u64,
+    ) -> Result<Self, RunError> {
+        let receiver =
+            LoopbackReceiver::bind(description.clone(), run_id).context(ReceiverSnafu)?;
+        let capture = Arc::new(Mutex::new(Capture::new().context(SpoolSnafu)?));
+        capture.lock().expect("capture lock was not poisoned").limit =
+            stdout_limit.min(MAX_STDOUT_BYTES);
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         for (name, _) in env::vars_os() {
             if name.to_string_lossy().starts_with("OTEL_EXPORTER_OTLP_") {
                 command.env_remove(name);
@@ -243,69 +321,109 @@ pub fn run_executable_with_options(path: &Path, options: &RunOptions) -> Result<
             .env("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.endpoint())
             .env("MF_RUN_ID", run_id.to_string())
             .env(mf_telemetry::SNAPSHOT_CAPTURE_ENV, "1");
+        let path = PathBuf::from(command.get_program());
         let mut command = CommandWrap::from(command);
         command.wrap(ProcessGroup::leader());
-        let child = command.spawn().context(SpawnSnafu {
-            path: path.to_owned(),
-        })?;
-        let mut child = ChildGuard::new(child);
+        let mut child = ChildGuard::new(command.spawn().context(SpawnSnafu { path })?);
         capture
             .lock()
             .expect("capture lock was not poisoned")
             .attach(&mut child.child)
             .context(SuperviseSnafu)?;
-        capture_worker = Some(CaptureWorker::start(Arc::clone(&capture)));
-        supervise(
-            &mut child,
-            capture_worker.as_mut().expect("capture worker was started"),
-            &mut receiver,
-            &layout,
-            &body_layouts,
-            &mut terminal,
-            &signal,
-        )
-    })();
-    if let Some(worker) = capture_worker.as_mut() {
-        worker.stop();
+        Ok(Self {
+            child,
+            capture: CaptureWorker::start(capture),
+            receiver,
+            started: Instant::now(),
+            exited: None,
+            interrupted_at: None,
+            killed: false,
+            finished: false,
+            status: Arc::new(Mutex::new(None)),
+        })
     }
-    // TerminalGuard restores the cursor; Ratatui's destructor can panic when stderr is broken.
-    *terminal.backend_mut() = CrosstermBackend::new(Box::new(io::sink()));
-    drop(terminal);
-    drop(guard);
-    drop(signal);
-
-    let mut capture = capture.lock().expect("capture lock was not poisoned");
-    if let Some(error) = capture.error.as_deref() {
-        report(&format!("workflow stdout capture incomplete: {error}"));
+    pub fn observation(&self) -> LocalObservation {
+        LocalObservation {
+            reader: self.receiver.reader(),
+            capture: Arc::clone(&self.capture.capture),
+            started: self.started,
+            status: Arc::clone(&self.status),
+        }
     }
-    if capture.stderr_dropped != 0 {
-        report(&format!(
-            "workflow stderr history dropped {} bytes",
-            capture.stderr_dropped
-        ));
+    pub fn cancel(&mut self) {
+        if !self.finished && self.interrupted_at.is_none() {
+            let _ = nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(self.child.child.id() as i32),
+                Signal::SIGINT,
+            );
+            self.interrupted_at = Some(Instant::now());
+        }
     }
-    let delivery = capture.deliver();
-    if let Err(error) = delivery.as_ref() {
-        report(&format!(
-            "could not deliver captured workflow stdout: {error}"
-        ));
-    }
-    let (status, interrupted, capture_forced) = result?;
-    if interrupted {
-        return Ok(130);
-    }
-    if capture_forced {
-        return Ok(1);
-    }
-    let code = exit_code(status);
-    if capture.error.is_some() || delivery.is_err() {
-        Ok(if status.success() { 1 } else { code })
-    } else {
-        Ok(code)
+    pub fn poll(&mut self) -> Result<Option<LocalOutcome>, RunError> {
+        if self.finished {
+            return Ok(None);
+        }
+        if self.exited.is_none()
+            && let Some(status) = self.child.child.try_wait().context(SuperviseSnafu)?
+        {
+            self.exited = Some((status, Instant::now()));
+        }
+        let view = self.capture.view();
+        if (view.error.is_some()
+            || self
+                .interrupted_at
+                .is_some_and(|at| at.elapsed() >= INTERRUPT_TIMEOUT))
+            && !self.killed
+        {
+            self.child.child.start_kill().context(SuperviseSnafu)?;
+            self.killed = true;
+        }
+        let Some((status, at)) = self.exited else {
+            return Ok(None);
+        };
+        if (view.stdout_open || view.stderr_open) && at.elapsed() < DRAIN_TIMEOUT {
+            return Ok(None);
+        }
+        // Reap descendants even when they have already closed their inherited streams.
+        let _ = self.child.child.start_kill();
+        self.capture.stop();
+        let mut capture = self
+            .capture
+            .capture
+            .lock()
+            .expect("capture lock was not poisoned");
+        if capture.stdout.is_some() {
+            capture
+                .error
+                .get_or_insert_with(|| "stdout pipe remained open after the drain deadline".into());
+        }
+        capture.stdout = None;
+        capture.stderr = None;
+        capture
+            .spool
+            .seek(SeekFrom::Start(0))
+            .context(SuperviseSnafu)?;
+        let mut stdout = Vec::new();
+        capture
+            .spool
+            .read_to_end(&mut stdout)
+            .context(SuperviseSnafu)?;
+        let outcome = LocalOutcome {
+            status,
+            interrupted: self.interrupted_at.is_some(),
+            stdout,
+            stderr: capture.stderr_display(),
+            capture_error: capture.error.clone(),
+        };
+        self.child.running = false;
+        self.receiver.finish();
+        *self.status.lock().expect("run status was not poisoned") = Some(status);
+        self.finished = true;
+        Ok(Some(outcome))
     }
 }
 
-fn terminal_area() -> io::Result<Rect> {
+pub fn terminal_area() -> io::Result<Rect> {
     let size = rustix::termios::tcgetwinsize(io::stderr()).map_err(io::Error::from)?;
     if size.ws_col == 0 || size.ws_row == 0 {
         return Err(io::Error::new(
@@ -328,13 +446,13 @@ fn exit_code(status: ExitStatus) -> u8 {
         .unwrap_or(1)
 }
 
-struct SignalGuard {
-    interrupted: Arc<AtomicBool>,
+pub struct SignalGuard {
+    pub interrupted: Arc<AtomicBool>,
     id: SigId,
 }
 
 impl SignalGuard {
-    fn register() -> io::Result<Self> {
+    pub fn register() -> io::Result<Self> {
         let interrupted = Arc::new(AtomicBool::new(false));
         let id = flag::register(SIGINT, Arc::clone(&interrupted))?;
         Ok(Self { interrupted, id })
@@ -347,10 +465,10 @@ impl Drop for SignalGuard {
     }
 }
 
-struct TerminalGuard;
+pub struct TerminalGuard;
 
 impl TerminalGuard {
-    fn enter() -> io::Result<Self> {
+    pub fn enter() -> io::Result<Self> {
         enable_raw_mode()?;
         let guard = Self;
         execute!(io::stderr(), EnterAlternateScreen, Hide)?;
@@ -393,17 +511,19 @@ struct Capture {
     stderr: Option<std::process::ChildStderr>,
     spool: File,
     written: u64,
+    limit: u64,
     stderr_tail: VecDeque<u8>,
     stderr_dropped: u64,
     error: Option<String>,
 }
 
-struct CaptureView {
-    stdout_open: bool,
-    stderr_open: bool,
-    stderr_tail: String,
-    stderr_dropped: u64,
-    error: Option<String>,
+#[derive(Clone, Debug)]
+pub struct CaptureView {
+    pub stdout_open: bool,
+    pub stderr_open: bool,
+    pub stderr_tail: String,
+    pub stderr_dropped: u64,
+    pub error: Option<String>,
 }
 
 struct CaptureWorker {
@@ -440,14 +560,10 @@ impl CaptureWorker {
     }
 
     fn view(&self) -> CaptureView {
-        let capture = self.capture.lock().expect("capture lock was not poisoned");
-        CaptureView {
-            stdout_open: capture.stdout.is_some(),
-            stderr_open: capture.stderr.is_some(),
-            stderr_tail: capture.stderr_display(),
-            stderr_dropped: capture.stderr_dropped,
-            error: capture.error.clone(),
-        }
+        self.capture
+            .lock()
+            .expect("capture lock was not poisoned")
+            .view()
     }
 
     fn stop(&mut self) {
@@ -465,12 +581,23 @@ impl Drop for CaptureWorker {
 }
 
 impl Capture {
+    fn view(&self) -> CaptureView {
+        CaptureView {
+            stdout_open: self.stdout.is_some(),
+            stderr_open: self.stderr.is_some(),
+            stderr_tail: self.stderr_display(),
+            stderr_dropped: self.stderr_dropped,
+            error: self.error.clone(),
+        }
+    }
+
     fn new() -> io::Result<Self> {
         Ok(Self {
             stdout: None,
             stderr: None,
             spool: tempfile::tempfile()?,
             written: 0,
+            limit: MAX_STDOUT_BYTES,
             stderr_tail: VecDeque::new(),
             stderr_dropped: 0,
             error: None,
@@ -534,7 +661,7 @@ impl Capture {
         if self.error.is_some() {
             return;
         }
-        let allowed = (MAX_STDOUT_BYTES - self.written).min(bytes.len() as u64) as usize;
+        let allowed = (self.limit - self.written).min(bytes.len() as u64) as usize;
         if let Err(error) = self.spool.write_all(&bytes[..allowed]) {
             self.error = Some(format!("stdout spool write failed: {error}"));
             return;
@@ -542,7 +669,8 @@ impl Capture {
         self.written += allowed as u64;
         if allowed < bytes.len() {
             self.error = Some(format!(
-                "stdout exceeded the {MAX_STDOUT_BYTES}-byte spool limit"
+                "stdout exceeded the {}-byte spool limit",
+                self.limit
             ));
         }
     }
@@ -571,13 +699,6 @@ impl Capture {
         text.chars()
             .filter(|c| !c.is_control() || *c == '\n' || *c == '\t')
             .collect()
-    }
-
-    fn deliver(&mut self) -> io::Result<()> {
-        self.spool.seek(SeekFrom::Start(0))?;
-        let mut stdout = io::stdout().lock();
-        io::copy(&mut self.spool, &mut stdout)?;
-        stdout.flush()
     }
 }
 
@@ -625,7 +746,31 @@ impl ViewState {
         matching.get(matching.len() - offset - 1).copied()
     }
 
-    fn handle_key(
+    fn handle_observation_key(
+        &mut self,
+        key: KeyCode,
+        root: &GraphLayout,
+        bodies: &BTreeMap<Vec<String>, GraphLayout>,
+        reader: &ObservationReader,
+    ) {
+        let snapshot = reader.snapshot_shared();
+        let traces = reader.trace_snapshot();
+        if !self
+            .traces
+            .handle_data_key(key, &traces, &reader.data_snapshot())
+        {
+            self.handle_key(
+                key,
+                &snapshot,
+                root,
+                bodies,
+                &traces,
+                &reader.log_snapshot(),
+            );
+        }
+    }
+
+    pub fn handle_key(
         &mut self,
         key: KeyCode,
         snapshot: &StateSnapshot,
@@ -690,208 +835,56 @@ impl ViewState {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn supervise(
-    child: &mut ChildGuard,
-    capture: &mut CaptureWorker,
-    receiver: &mut LoopbackReceiver,
-    layout: &GraphLayout,
-    body_layouts: &BTreeMap<Vec<String>, GraphLayout>,
+    run: &mut LocalRun,
+    view: &mut ObservationView,
     terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
     signal: &SignalGuard,
-) -> Result<(ExitStatus, bool, bool), RunError> {
-    let started = Instant::now();
-    let mut exited: Option<(ExitStatus, Instant)> = None;
-    let mut interrupted_at: Option<Instant> = None;
-    let mut killed = false;
-    let mut capture_forced = false;
-    let mut view_state = ViewState::default();
-    let mut last_frame = Instant::now() - FRAME_INTERVAL;
+) -> Result<LocalOutcome, RunError> {
+    let mut outcome = None;
+    let observation = run.observation();
     loop {
-        let view = capture.view();
-        if exited.is_none()
-            && let Some(status) = child.child.try_wait().context(SuperviseSnafu)?
-        {
-            exited = Some((status, Instant::now()));
+        if outcome.is_none() {
+            outcome = run.poll()?;
         }
-        if exited.is_none()
-            && signal.interrupted.swap(false, Ordering::Relaxed)
-            && interrupted_at.is_none()
-        {
-            interrupt(child, &mut interrupted_at);
-        }
-        if view.error.is_some() && !killed {
-            capture_forced = exited.is_none();
-            let _ = child.child.start_kill();
-            killed = true;
-        }
-        if interrupted_at.is_some_and(|at| at.elapsed() >= INTERRUPT_TIMEOUT) && !killed {
-            let _ = child.child.start_kill();
-            killed = true;
-        }
-        if let Some((status, at)) = exited
-            && ((!view.stdout_open && !view.stderr_open) || at.elapsed() >= DRAIN_TIMEOUT)
-        {
-            if view.stdout_open || view.stderr_open {
-                let _ = child.child.start_kill();
+        if signal.interrupted.swap(false, Ordering::Relaxed) {
+            if let Some(outcome) = outcome {
+                return Ok(outcome);
             }
-            capture.stop();
-            {
-                let mut captured = capture
-                    .capture
-                    .lock()
-                    .expect("capture lock was not poisoned");
-                if captured.stdout.is_some() {
-                    captured.error.get_or_insert_with(|| {
-                        "stdout pipe remained open after the drain deadline".into()
-                    });
-                }
-                captured.stdout = None;
-                captured.stderr = None;
-            }
-            let final_view = capture.view();
-            child.running = false;
-            let snapshot = receiver.finish();
-            let completed_elapsed = started.elapsed();
-            draw(
-                terminal,
-                layout,
-                body_layouts,
-                &snapshot,
-                &final_view,
-                completed_elapsed,
-                &mut view_state,
-                receiver,
-                Some(status),
-            )?;
-            loop {
-                if signal.interrupted.swap(false, Ordering::Relaxed) {
-                    return Ok((status, interrupted_at.is_some(), capture_forced));
-                }
-                if event::poll(Duration::from_millis(100)).context(TerminalSnafu)? {
-                    match event::read().context(TerminalSnafu)? {
-                        Event::Key(key)
-                            if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
-                        {
-                            match key.code {
-                                KeyCode::Char('q') | KeyCode::Enter => {
-                                    return Ok((status, interrupted_at.is_some(), capture_forced));
-                                }
-                                KeyCode::Esc
-                                    if view_state.path.is_empty() && !view_state.traces.visible =>
-                                {
-                                    return Ok((status, interrupted_at.is_some(), capture_forced));
-                                }
-                                KeyCode::Char('c')
-                                    if key.modifiers.contains(KeyModifiers::CONTROL) =>
-                                {
-                                    return Ok((status, interrupted_at.is_some(), capture_forced));
-                                }
-                                _ => {
-                                    let traces = receiver.trace_snapshot();
-                                    if !view_state.traces.handle_data_key(
-                                        key.code,
-                                        &traces,
-                                        &receiver.data_snapshot(),
-                                    ) {
-                                        view_state.handle_key(
-                                            key.code,
-                                            &snapshot,
-                                            layout,
-                                            body_layouts,
-                                            &traces,
-                                            &receiver.log_snapshot(),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        Event::Resize(width, height) => {
-                            terminal
-                                .resize(Rect::new(0, 0, width, height))
-                                .context(TerminalSnafu)?;
-                        }
-                        _ => continue,
-                    }
-                    draw(
-                        terminal,
-                        layout,
-                        body_layouts,
-                        &snapshot,
-                        &final_view,
-                        completed_elapsed,
-                        &mut view_state,
-                        receiver,
-                        Some(status),
-                    )?;
-                }
-            }
+            run.cancel();
         }
-        if last_frame.elapsed() >= FRAME_INTERVAL {
-            let snapshot = receiver.snapshot_shared();
-            let view = capture.view();
-            draw(
-                terminal,
-                layout,
-                body_layouts,
-                &snapshot,
-                &view,
-                started.elapsed(),
-                &mut view_state,
-                receiver,
-                None,
-            )?;
-            last_frame = Instant::now();
-        }
-        if event::poll(Duration::from_millis(20)).context(TerminalSnafu)? {
+        view.draw(terminal, &observation)?;
+        if event::poll(Duration::from_millis(100)).context(TerminalSnafu)? {
             match event::read().context(TerminalSnafu)? {
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
+                    let quit = matches!(key.code, KeyCode::Char('q') | KeyCode::Enter)
+                        || (key.code == KeyCode::Esc
+                            && view.state.path.is_empty()
+                            && !view.state.traces.visible)
+                        || (key.code == KeyCode::Char('c')
+                            && key.modifiers.contains(KeyModifiers::CONTROL));
+                    if quit && let Some(outcome) = outcome.take() {
+                        return Ok(outcome);
+                    }
                     if key.code == KeyCode::Char('c')
                         && key.modifiers.contains(KeyModifiers::CONTROL)
                     {
-                        if interrupted_at.is_some() {
-                            let _ = child.child.start_kill();
-                            killed = true;
-                        } else {
-                            interrupt(child, &mut interrupted_at);
-                        }
+                        run.cancel();
                     } else {
-                        let snapshot = receiver.snapshot_shared();
-                        let traces = receiver.trace_snapshot();
-                        if !view_state.traces.handle_data_key(
-                            key.code,
-                            &traces,
-                            &receiver.data_snapshot(),
-                        ) {
-                            view_state.handle_key(
-                                key.code,
-                                &snapshot,
-                                layout,
-                                body_layouts,
-                                &traces,
-                                &receiver.log_snapshot(),
-                            );
-                        }
+                        view.handle_key(key.code, &observation);
                     }
-                    last_frame = Instant::now() - FRAME_INTERVAL;
                 }
                 Event::Resize(width, height) => {
                     terminal
                         .resize(Rect::new(0, 0, width, height))
                         .context(TerminalSnafu)?;
-                    last_frame = Instant::now() - FRAME_INTERVAL;
                 }
                 _ => {}
             }
         }
     }
-}
-
-fn interrupt(child: &ChildGuard, interrupted_at: &mut Option<Instant>) {
-    let _ = child.child.signal(Signal::SIGINT as i32);
-    *interrupted_at = Some(Instant::now());
 }
 
 fn navigate(key: KeyCode, offset: &mut (u32, u32), selected: &mut usize, nodes: usize) {
@@ -918,7 +911,7 @@ fn draw(
     capture: &CaptureView,
     elapsed: Duration,
     view_state: &mut ViewState,
-    receiver: &LoopbackReceiver,
+    receiver: &ObservationReader,
     status: Option<ExitStatus>,
 ) -> Result<(), RunError> {
     if view_state.traces.visible {
@@ -1277,6 +1270,50 @@ fn details_text(
         .collect()
 }
 
+pub struct ObservationView {
+    root: GraphLayout,
+    bodies: BTreeMap<Vec<String>, GraphLayout>,
+    state: ViewState,
+}
+impl ObservationView {
+    pub fn new(description: &WorkflowDescription) -> Result<Self, RunError> {
+        let root = GraphLayout::new(description).context(GraphSnafu)?;
+        let mut bodies = BTreeMap::new();
+        for body in &description.loop_bodies {
+            bodies.insert(
+                body.path.clone(),
+                GraphLayout::from_loop_body(description, &body.path).context(GraphSnafu)?,
+            );
+        }
+        Ok(Self {
+            root,
+            bodies,
+            state: ViewState::default(),
+        })
+    }
+    pub fn handle_key(&mut self, key: KeyCode, observation: &LocalObservation) {
+        self.state
+            .handle_observation_key(key, &self.root, &self.bodies, &observation.reader);
+    }
+    pub fn draw(
+        &mut self,
+        terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
+        observation: &LocalObservation,
+    ) -> Result<(), RunError> {
+        draw(
+            terminal,
+            &self.root,
+            &self.bodies,
+            &observation.reader.snapshot_shared(),
+            &observation.capture_view(),
+            observation.elapsed(),
+            &mut self.state,
+            &observation.reader,
+            observation.status(),
+        )
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1360,6 +1397,7 @@ mod tests {
         description
             .data_edges
             .push(mf_telemetry::description::DataEdge {
+                exclusive: false,
                 from_node: "source".into(),
                 from_output: "value".into(),
                 to_node: "target".into(),
@@ -1560,6 +1598,7 @@ mod tests {
                     },
                 ],
                 data_edges: vec![mf_telemetry::description::DataEdge {
+                    exclusive: false,
                     from_node: "%loop".into(),
                     from_output: "value".into(),
                     to_node: "child".into(),

@@ -1,7 +1,6 @@
 use crate::{
     ChatDatabase, ChatError, Invocation, ModelCall, ModelIdentity, Reply,
     error::*,
-    operation,
     schema::{messages, model_calls, sessions, turns},
     session, storage, turn,
 };
@@ -80,7 +79,7 @@ pub struct PendingTitles {
     pub calls: Vec<ModelCall>,
 }
 
-pub fn schedule(
+fn insert_pending(
     connection: &mut SqliteConnection,
     session_id: &str,
     turn_id: &str,
@@ -88,13 +87,14 @@ pub fn schedule(
     profile: &str,
 ) -> Result<ModelCall, ChatError> {
     let call = ModelCall {
+        usages: None,
+        metadata: None,
         id: uuid::Uuid::new_v4().to_string(),
         session_id: session_id.into(),
         turn_id: Some(turn_id.into()),
         purpose: "title".into(),
         profile: profile.into(),
-        model: String::new(),
-        config_id: String::new(),
+        model: None,
         state: "pending".into(),
         title_revision: Some(revision),
         started_at: None,
@@ -108,12 +108,59 @@ pub fn schedule(
         disposition: None,
     };
     diesel::insert_into(model_calls::table)
-        .values(&call)
+        .values(call.clone())
         .execute(connection)
         .context(DatabaseSnafu {
             operation: "schedule session title",
         })?;
     Ok(call)
+}
+
+fn schedule(input: PendingTitleInputs) -> Result<turn::Changed, ChatError> {
+    session::validate_page(input.limit)?;
+    let mut connection = storage::connect(Path::new(&input.database_path))?;
+    connection.immediate_transaction(|connection| {
+        let candidates = sessions::table
+            .filter(sessions::title_source.eq("provisional"))
+            .filter(diesel::dsl::exists(
+                turns::table
+                    .filter(turns::session_id.eq(sessions::id))
+                    .filter(turns::state.eq("succeeded")),
+            ))
+            .filter(diesel::dsl::not(diesel::dsl::exists(
+                model_calls::table
+                    .filter(model_calls::session_id.eq(sessions::id))
+                    .filter(model_calls::purpose.eq("title")),
+            )))
+            .order((sessions::created_at.asc(), sessions::id.asc()))
+            .limit(input.limit as i64)
+            .select(crate::Session::as_select())
+            .load::<crate::Session>(connection)
+            .context(DatabaseSnafu {
+                operation: "find sessions awaiting title scheduling",
+            })?;
+        for owner in &candidates {
+            let first = turns::table
+                .filter(turns::session_id.eq(&owner.id))
+                .filter(turns::state.eq("succeeded"))
+                .order(turns::sequence.asc())
+                .select(turns::id)
+                .first::<String>(connection)
+                .context(DatabaseSnafu {
+                    operation: "load first successful title source",
+                })?;
+            insert_pending(
+                connection,
+                &owner.id,
+                &first,
+                owner.title_revision,
+                &owner.profile,
+            )?;
+        }
+        Ok(turn::Changed {
+            changed: !candidates.is_empty(),
+        })
+    })
 }
 
 pub fn prepare(input: PrepareTitleInputs) -> Result<TitleStarted, ChatError> {
@@ -147,7 +194,7 @@ pub fn prepare(input: PrepareTitleInputs) -> Result<TitleStarted, ChatError> {
         ensure!(prompt.len() <= input.max_bytes, HistoryTooLargeSnafu { limit: input.max_bytes });
         diesel::update(model_calls::table.find(&call.id)).set((model_calls::state.eq("running"),
             model_calls::started_at.eq(Some(session::now()?)), model_calls::profile.eq(&input.model.profile),
-            model_calls::model.eq(&input.model.model), model_calls::config_id.eq(&input.model.config_id)))
+            model_calls::model.eq(&input.model.model)))
             .execute(connection).context(DatabaseSnafu { operation: "begin session title call" })?;
         Ok(TitleStarted { database_path: input.database_path.clone(), invocation, title_revision: revision,
             request: Some(mfn_llm::LlmInputs { prompt,
@@ -294,7 +341,7 @@ fn retry(input: crate::nodes::SessionInputs) -> Result<crate::nodes::CallOutputs
                 operation: "load first successful title source",
             })?;
         Ok(crate::nodes::CallOutputs {
-            call: schedule(
+            call: insert_pending(
                 connection,
                 &owner.id,
                 &first.id,
@@ -323,6 +370,13 @@ impl mf_runtime::TypedTaskNode for PrepareTitle {
         Ok(result)
     }
 }
+register_operation!(
+    "mf_chat.title.schedule",
+    ScheduleTitles,
+    PendingTitleInputs,
+    turn::Changed,
+    schedule
+);
 register_task!("mf_chat.title.prepare", PrepareTitle);
 register_operation!(
     "mf_chat.title.complete",
@@ -347,26 +401,38 @@ register_operation!(
 );
 
 impl ChatDatabase {
+    pub fn schedule_titles(&self, limit: usize) -> Result<bool, ChatError> {
+        let result: turn::Changed = schedule(PendingTitleInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            limit,
+        })?;
+        Ok(result.changed)
+    }
+
     pub fn pending_titles(&self, limit: usize) -> Result<Vec<ModelCall>, ChatError> {
-        let result: PendingTitles = operation::execute(
-            self.path(),
-            "mf_chat.title.pending",
-            PendingTitleInputs {
-                database_path: String::new(),
-                limit,
-            },
-        )?;
+        let result: PendingTitles = pending(PendingTitleInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            limit,
+        })?;
         Ok(result.calls)
     }
     pub fn retry_title(&self, session_id: &str) -> Result<ModelCall, ChatError> {
-        let result: crate::nodes::CallOutputs = operation::execute(
-            self.path(),
-            "mf_chat.title.retry",
-            crate::nodes::SessionInputs {
-                database_path: String::new(),
-                session_id: session_id.into(),
-            },
-        )?;
+        let result: crate::nodes::CallOutputs = retry(crate::nodes::SessionInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            session_id: session_id.into(),
+        })?;
         Ok(result.call)
     }
     pub fn complete_title(
@@ -375,16 +441,16 @@ impl ChatDatabase {
         title_revision: i64,
         response: Reply,
     ) -> Result<TitleCompletion, ChatError> {
-        let result: TitleCompletionOutputs = operation::execute(
-            self.path(),
-            "mf_chat.title.complete",
-            CompleteTitleInputs {
-                database_path: String::new(),
-                invocation,
-                title_revision,
-                response,
-            },
-        )?;
+        let result: TitleCompletionOutputs = complete(CompleteTitleInputs {
+            database_path: self
+                .path()
+                .to_str()
+                .context(PathSnafu { path: self.path() })?
+                .into(),
+            invocation,
+            title_revision,
+            response,
+        })?;
         Ok(result.result)
     }
 }

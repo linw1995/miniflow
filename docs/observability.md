@@ -451,17 +451,17 @@ route coordinate limit. These limits govern optional route planning, independent
 10,000-node description admission limit. Routing counters and deterministic fixtures are available
 through `benchmark_routes`; performance reports remain local under `target/edge-routing/`.
 
-`GraphView` draws data and control edges with distinct line symbols, clips to a caller-owned viewport, and renders node status and elapsed time from a state snapshot. Confirmed produced or skipped output ports change the associated edge style; possible lifecycle loss remains visibly uncertain.
+`GraphView` draws data and control edges with thin orthogonal lines, clips to a caller-owned viewport, and renders node status and elapsed time from a state snapshot. Data edges default to cyan, control edges default to blue and retain output-port labels. Connections join node borders through `├` output ports and `▶┤` input ports. Confirmed produced or skipped output ports change the associated edge style; possible lifecycle loss remains visibly uncertain.
 
 Edges use ordered integer channel tracks and reserved passages for connections spanning multiple layers.
 Obstacle-aware search and bounded local retries handle blocked routes. Completed routes avoid boxes,
 labels, arrows, and shared collinear segments. Remaining perpendicular crossings have an explicit
-upper/lower marker: the upper edge stays continuous and the lower edge has a blank cell on each side
-of the crossing instead of end caps. Each edge retains its single or double line outside the gap.
+upper/lower marker: both edges stay continuous, with only the upper stroke doubled at the crossing
+(`╪` for a horizontal upper edge, `╫` for a vertical upper edge).
 
 Data edges pass above control edges; equal kinds use stable connection identities. Crossing layers
 and glyphs do not change when observation colors change. Crossings indicate independent connections,
-not junctions. Each marker reserves only the lower edge's three-cell gap: one column by three rows
+not junctions. Each marker reserves a three-cell footprint along the lower edge: one column by three rows
 when the upper edge is horizontal, or three columns by one row when it is vertical. Panning and
 resizing clip the same planned geometry, including partially visible node text and Unicode labels. A wide text glyph that cannot fit completely at the viewport boundary is blanked so it cannot overwrite an adjacent pane.
 
@@ -676,3 +676,13 @@ invalid definitions, or an absent end record produce explicit capture diagnostic
 changing workflow outcomes or lifecycle integrity. A gap waits for ordered reconstruction
 rather than exposing a value whose definitions have not arrived. Already reconstructed
 history remains available after collection finishes.
+
+## Exclusive input provenance
+
+Descriptions mark each candidate data edge with `exclusive: true`; candidates sharing a target
+input form one group. The graph renders these edges in magenta with an `exclusive` label.
+`mf.node.started` and `mf.node.skipped` may include `selected_inputs`, containing only `input`,
+`source_node`, and `source_output` identities. Empty selections are omitted for compatibility.
+Iteration body logs carry the same identities in `mf.input.selections`. Values and secrets are
+not copied into these records. Selection belongs to the consumer's frame or body invocation.
+An unselected candidate is not a skip cause when another candidate successfully binds the input.

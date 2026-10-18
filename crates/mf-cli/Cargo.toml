@@ -23,7 +23,11 @@ clap = { workspace = true, features = ["derive"] }
 snafu.workspace = true
 
 [dev-dependencies]
+# Chat persistence assertions and model fixtures.
+diesel = { workspace = true, features = ["sqlite"] }
+mf-chat.workspace = true
 mfn-llm = { workspace = true, features = ["test-support"] }
+
 # Package fixtures and artifact verification.
 flate2.workspace = true
 serde_json.workspace = true

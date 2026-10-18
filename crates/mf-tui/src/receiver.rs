@@ -126,6 +126,76 @@ impl LoopbackReceiver {
         &self.endpoint
     }
 
+    pub fn reader(&self) -> ObservationReader {
+        ObservationReader {
+            context: Arc::clone(&self.context),
+        }
+    }
+    pub fn snapshot(&self) -> StateSnapshot {
+        self.reader().snapshot()
+    }
+    pub fn snapshot_shared(&self) -> Arc<StateSnapshot> {
+        self.reader().snapshot_shared()
+    }
+    pub fn trace_snapshot(&self) -> Arc<TraceSnapshot> {
+        self.reader().trace_snapshot()
+    }
+    pub fn log_snapshot(&self) -> Arc<LogSnapshot> {
+        self.reader().log_snapshot()
+    }
+    pub fn data_snapshot(&self) -> Arc<HistorySnapshot> {
+        self.reader().data_snapshot()
+    }
+    pub fn span_data(&self, trace_id: &[u8], span_id: &[u8]) -> SpanData {
+        self.reader().span_data(trace_id, span_id)
+    }
+    pub fn history_snapshot(&self, selected: Option<usize>, rows: usize) -> HistorySnapshot {
+        self.reader().history_snapshot(selected, rows)
+    }
+    pub fn history_len(&self) -> usize {
+        self.reader().history_len()
+    }
+
+    pub fn finish(&mut self) -> StateSnapshot {
+        self.stop();
+        self.context
+            .snapshots
+            .lock()
+            .expect("snapshot capture was not poisoned")
+            .finish();
+        let mut state = self
+            .context
+            .state
+            .lock()
+            .expect("receiver state was not poisoned");
+        state.close();
+        state.snapshot()
+    }
+
+    fn stop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
+}
+
+impl Drop for LoopbackReceiver {
+    fn drop(&mut self) {
+        if self.worker.is_some() {
+            self.finish();
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct ObservationReader {
+    context: Arc<Context>,
+}
+
+impl ObservationReader {
     pub fn snapshot(&self) -> StateSnapshot {
         self.context
             .state
@@ -190,37 +260,6 @@ impl LoopbackReceiver {
             .store
             .history()
             .len()
-    }
-
-    pub fn finish(&mut self) -> StateSnapshot {
-        self.stop();
-        self.context
-            .snapshots
-            .lock()
-            .expect("snapshot capture was not poisoned")
-            .finish();
-        let mut state = self
-            .context
-            .state
-            .lock()
-            .expect("receiver state was not poisoned");
-        state.close();
-        state.snapshot()
-    }
-
-    fn stop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            let _ = stop.send(());
-        }
-        if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
-        }
-    }
-}
-
-impl Drop for LoopbackReceiver {
-    fn drop(&mut self) {
-        self.stop();
     }
 }
 

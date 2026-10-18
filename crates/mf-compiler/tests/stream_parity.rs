@@ -73,11 +73,76 @@ fn definition(scenario: &str) -> WorkflowDefinition {
         }
         _ => unreachable!(),
     }
+    if scenario == "nested" {
+        add_body_join(
+            &mut nodes[0]["loop"]["body"],
+            ("%loop", "x"),
+            ("increment", "value"),
+            ("assign", "value"),
+        );
+        nodes[2]["config"]["body"]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"join", "kind":"builtin.identity"}));
+        add_body_join(
+            &mut nodes[2]["config"]["body"],
+            ("%iteration", "item"),
+            ("double", "value"),
+            ("join", "input"),
+        );
+        nodes[2]["config"]["body"]["result"] = json!({"node":"join", "port":"value"});
+    }
+    if scenario == "windows" {
+        nodes.push(json!({"id":"alternative", "kind":"builtin.identity"}));
+        edges.retain(|edge| edge["to_node"] != "collect");
+        edges.push(edge("join", "value", "alternative", "input"));
+        controls.retain(|edge| edge["to_node"] != "collect");
+        nodes[3]["config"]["branches"].as_array_mut().unwrap().insert(0, json!({"id":"large", "condition":{"source":{"output":"join.value", "path":""}, "operator":"gt", "value":10}}));
+        controls.push(json!({"from_node":"route", "from_output":"large", "to_node":"alternative"}));
+        edges.extend([
+            json!({"from_node":"primary", "from_output":"value", "to_node":"collect", "to_input":"item", "exclusive":true}),
+            json!({"from_node":"alternative", "from_output":"value", "to_node":"collect", "to_input":"item", "exclusive":true})
+        ]);
+        // Negative messages skip both candidates; larger values switch to the alternative.
+        nodes.push(json!({"id":"primary", "kind":"builtin.identity"}));
+        edges.push(edge("join", "value", "primary", "input"));
+        controls.push(json!({"from_node":"route", "from_output":"positive", "to_node":"primary"}));
+    }
     nodes.push(json!({"id":"feed", "kind":"test.controlled_source", "config":{"item_type":"int"}}));
     serde_json::from_value(json!({"version":"2026-10-03", "execution":{"mode":"stream"},
         "dependencies":{"core":{"package":"mfn-core", "path":common::crates_dir().join("builtin-nodes/core")}, "code":{"package":"mfn-code", "path":common::crates_dir().join("builtin-nodes/code")}},
         "nodes":nodes, "edges":edges, "control_edges":controls, "outputs":[{"name":"value", "node":"consume", "port":result_port}]
     })).unwrap()
+}
+
+fn add_body_join(
+    body: &mut Value,
+    source: (&str, &str),
+    winner: (&str, &str),
+    target: (&str, &str),
+) {
+    body["nodes"].as_array_mut().unwrap().extend([
+        json!({"id":"route", "kind":"builtin.if_else", "config":{"branches":[{"id":"present", "condition":{"source":{"output":format!("{}.{}", source.0, source.1), "path":""}, "operator":"exists"}}]}}),
+        json!({"id":"unused", "kind":"builtin.identity"}),
+        json!({"id":"selected", "kind":"builtin.identity"})
+    ]);
+    body["edges"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|edge| edge["to_node"] != target.0);
+    body["edges"].as_array_mut().unwrap().extend([
+        edge(winner.0, winner.1, "unused", "input"),
+        edge(winner.0, winner.1, "selected", "input"),
+    ]);
+    body["control_edges"] = json!([
+        {"from_node":source.0, "from_output":source.1, "to_node":"route"},
+        {"from_node":"route", "from_output":"else", "to_node":"unused"},
+        {"from_node":"route", "from_output":"present", "to_node":"selected"}
+    ]);
+    body["edges"].as_array_mut().unwrap().extend([
+        json!({"from_node":"selected", "from_output":"value", "to_node":target.0, "to_input":target.1, "exclusive":true}),
+        json!({"from_node":"unused", "from_output":"value", "to_node":target.0, "to_input":target.1, "exclusive":true})
+    ]);
 }
 
 #[test]

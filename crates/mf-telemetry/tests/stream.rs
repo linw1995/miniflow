@@ -22,6 +22,7 @@ fn record() -> StreamRecord {
             }),
         }),
         payload: StreamPayload::Execution(Event::NodeStarted {
+            selected_inputs: Vec::new(),
             node: NodeIdentity {
                 id: "consume".into(),
                 kind: "builtin.identity".into(),

@@ -477,6 +477,9 @@ pub struct StreamCallback {
     step: Option<NodeObservation>,
 }
 impl StreamCallback {
+    pub fn set_input_selections(&mut self, selections: Vec<crate::event::InputSelection>) {
+        self.step.as_mut().unwrap().set_input_selections(selections);
+    }
     pub fn enter(&self) -> ContextGuard {
         self.step.as_ref().unwrap().enter()
     }

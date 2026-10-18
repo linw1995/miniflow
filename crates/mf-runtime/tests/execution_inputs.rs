@@ -27,6 +27,7 @@ fn schema() -> WorkflowInputSchema {
 
 fn dependency<'a>(input: Option<&'a str>, source: &'a str) -> ExecutionDependency<'a> {
     ExecutionDependency {
+        exclusive: false,
         input,
         source_node: source,
         source_output: "value",
@@ -98,4 +99,125 @@ fn node_resolution_combines_startup_values_and_dependencies_without_copying_payl
     assert_eq!(inputs.len(), 1);
     assert!(inputs["value"].ptr_eq(&value));
     assert!(inputs["value"].is_secret());
+}
+
+fn candidate(source: &str) -> ExecutionDependency<'_> {
+    ExecutionDependency {
+        exclusive: true,
+        ..dependency(Some("value"), source)
+    }
+}
+
+#[test]
+fn exclusive_resolution_preserves_payloads_and_metadata() {
+    let mut target = node();
+    target.metadata.ports.inputs[0].value_type = ValueType::Any;
+    let state = ExecutionInputs::default();
+    for value in [
+        ValueRef::from(false),
+        ValueRef::null(),
+        ValueRef::from(json!({"token":"sensitive"})).into_secret(),
+    ] {
+        for selected in ["left", "right"] {
+            let mut inputs = Inputs::new();
+            let causes = state
+                .resolve_node(
+                    &target,
+                    false,
+                    [candidate("left"), candidate("right")],
+                    |source| {
+                        Ok(Some(if source.source_node == selected {
+                            ContextValue::Value(&value)
+                        } else {
+                            ContextValue::Skipped
+                        }))
+                    },
+                    &mut inputs,
+                )
+                .unwrap();
+            assert!(causes.is_empty());
+            assert!(inputs["value"].ptr_eq(&value));
+            assert_eq!(inputs["value"].redacted(), value.redacted());
+        }
+    }
+}
+
+#[test]
+fn exclusive_errors_precede_skips_and_input_type_checks() {
+    let state = ExecutionInputs::default();
+    let bad = ValueRef::from("sentinel-secret").into_secret();
+    for reversed in [false, true] {
+        for (case, required) in [("one", true), ("none", false), ("missing", true)] {
+            let mut dependencies = vec![
+                candidate("left"),
+                candidate("right"),
+                candidate("third"),
+                dependency(None, "gate"),
+            ];
+            if reversed {
+                dependencies.reverse();
+            }
+            let mut inputs = Inputs::new();
+            let mut target = node();
+            target.metadata.ports.inputs[0].required = required;
+            let result = state.resolve_node(
+                &target,
+                false,
+                dependencies,
+                |source| {
+                    if source.source_node == "gate" {
+                        return Ok(Some(ContextValue::Skipped));
+                    }
+                    if source.source_node == "third" && case == "missing" {
+                        return mf_runtime::NodeExecutionFailedSnafu {
+                            message: "missing third.value",
+                        }
+                        .fail();
+                    }
+                    let produced = source.source_node == "left" && case != "none";
+                    Ok(Some(if produced {
+                        ContextValue::Value(&bad)
+                    } else {
+                        ContextValue::Skipped
+                    }))
+                },
+                &mut inputs,
+            );
+            match case {
+                "one" => {
+                    let causes = result.unwrap();
+                    assert_eq!(causes.len(), 1);
+                    assert_eq!(causes.first().unwrap().source_node, "gate");
+                }
+                "none" => {
+                    assert_eq!(result.unwrap().len(), 4);
+                    assert!(inputs.is_empty());
+                }
+                _ => assert!(matches!(
+                    result.unwrap_err(),
+                    mf_runtime::WorkflowRunError::Dependency { .. }
+                )),
+            }
+        }
+    }
+    let mut inputs = Inputs::new();
+    let error = state
+        .resolve_node(
+            &node(),
+            false,
+            [candidate("left"), candidate("right")],
+            |source| {
+                Ok(Some(if source.source_node == "left" {
+                    ContextValue::Value(&bad)
+                } else {
+                    ContextValue::Skipped
+                }))
+            },
+            &mut inputs,
+        )
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        mf_runtime::WorkflowRunError::InputType { .. }
+    ));
 }

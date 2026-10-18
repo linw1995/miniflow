@@ -173,10 +173,56 @@ fn empty_object() -> Value {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EdgeDefinition {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub exclusive: bool,
     pub from_node: DefinitionId,
     pub from_output: String,
     pub to_node: DefinitionId,
     pub to_input: String,
+}
+
+#[derive(Debug, Snafu)]
+#[snafu(display("invalid exclusive input `{node}`.`{input}`: {reason}"))]
+pub struct ExclusiveInputError {
+    pub node: DefinitionId,
+    pub input: String,
+    pub reason: &'static str,
+}
+
+pub fn validate_exclusive_inputs(edges: &[EdgeDefinition]) -> Result<(), ExclusiveInputError> {
+    let mut groups: BTreeMap<_, std::collections::BTreeSet<_>> = BTreeMap::new();
+    for edge in edges.iter().filter(|edge| edge.exclusive) {
+        let sources = groups.entry((&edge.to_node, &edge.to_input)).or_default();
+        snafu::ensure!(
+            sources.insert((&edge.from_node, &edge.from_output)),
+            ExclusiveInputSnafu {
+                node: edge.to_node.clone(),
+                input: edge.to_input.clone(),
+                reason: "duplicate candidate source",
+            }
+        );
+    }
+    for edge in edges.iter().filter(|edge| !edge.exclusive) {
+        snafu::ensure!(
+            !groups.contains_key(&(&edge.to_node, &edge.to_input)),
+            ExclusiveInputSnafu {
+                node: edge.to_node.clone(),
+                input: edge.to_input.clone(),
+                reason: "cannot mix ordinary and exclusive edges for one input",
+            }
+        );
+    }
+    for ((node, input), sources) in groups {
+        snafu::ensure!(
+            sources.len() >= 2,
+            ExclusiveInputSnafu {
+                node: node.clone(),
+                input: input.clone(),
+                reason: "at least two sources are required",
+            }
+        );
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

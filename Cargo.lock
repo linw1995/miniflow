@@ -1638,10 +1638,11 @@ dependencies = [
  "mf-compiler",
  "mf-runtime",
  "mf-telemetry",
+ "mfn-code",
+ "mfn-core",
  "mfn-llm",
  "serde",
  "serde_json",
- "sha2 0.11.0",
  "snafu",
  "tempfile",
  "toml",
@@ -1653,7 +1654,9 @@ name = "mf-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "diesel",
  "flate2",
+ "mf-chat",
  "mf-compiler",
  "mf-runtime",
  "mf-telemetry",
@@ -1746,6 +1749,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "mf-chat",
  "mf-runtime",
  "mf-telemetry",
  "nix",
@@ -1803,6 +1807,7 @@ dependencies = [
  "serde_json",
  "snafu",
  "url",
+ "uuid",
 ]
 
 [[package]]

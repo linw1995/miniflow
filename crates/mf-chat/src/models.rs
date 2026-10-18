@@ -22,7 +22,6 @@ pub struct Session {
     pub title: String,
     pub title_source: String,
     pub title_revision: i64,
-    pub conversation_revision: i64,
     pub profile: String,
     pub system: Option<String>,
     pub archived: bool,
@@ -78,6 +77,10 @@ pub struct Message {
     pub role: String,
     pub content: String,
     pub created_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[diesel(deserialize_as = crate::storage::StoredJson<mfn_llm::MessageMetadata>)]
+    #[diesel(serialize_as = crate::storage::StoredJson<mfn_llm::MessageMetadata>)]
+    pub metadata: Option<mfn_llm::MessageMetadata>,
 }
 
 #[derive(
@@ -100,12 +103,12 @@ pub struct ModelCall {
     pub turn_id: Option<String>,
     pub purpose: String,
     pub profile: String,
-    pub model: String,
-    pub config_id: String,
+    pub model: Option<String>,
     pub state: String,
     pub title_revision: Option<i64>,
     pub started_at: Option<i64>,
     pub finished_at: Option<i64>,
+    /// Legacy scalar counters; new replies persist call facts in usages.
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub total_tokens: Option<i64>,
@@ -113,4 +116,12 @@ pub struct ModelCall {
     pub error: Option<String>,
     pub result_text: Option<String>,
     pub disposition: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[diesel(deserialize_as = crate::storage::StoredJson<Vec<mfn_llm::CallUsage>>)]
+    #[diesel(serialize_as = crate::storage::StoredJson<Vec<mfn_llm::CallUsage>>)]
+    pub usages: Option<Vec<mfn_llm::CallUsage>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[diesel(deserialize_as = crate::storage::StoredJson<mfn_llm::MessageMetadata>)]
+    #[diesel(serialize_as = crate::storage::StoredJson<mfn_llm::MessageMetadata>)]
+    pub metadata: Option<mfn_llm::MessageMetadata>,
 }

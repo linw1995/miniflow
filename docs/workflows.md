@@ -78,7 +78,7 @@ body because an ordinary node invocation does not schedule a subgraph. Body node
 declared by the enclosing workflow.
 
 `builtin.code` requires an explicit `language` field; the supported value is
-`cel`. Input names have concrete type declarations, while output names and expressions live in `code`. The CEL checker
+`cel`. Input names have explicit type declarations, while output names and expressions live in `code`. The CEL checker
 infers each output port type from its expression:
 
 ```json
@@ -90,22 +90,41 @@ infers each output port type from its expression:
 ```
 
 The common input and output port contract is language-independent. A future backend can interpret its `code` payload
-without changing existing CEL definitions. CEL input types include `int`, `double`, `bool`, `string`, `null`, and nested
-`{"list": T}` or `{"map": T}` descriptors; maps have string keys and homogeneous values.
+without changing existing CEL definitions.
+CEL input types include `int`, `uint`, `double`, `bool`, `string`, `null`, `any`, `object`, `array`, and nested
+`{"list": T}` or `{"map": T}` descriptors. Maps have string keys; values must satisfy the declared element type.
+`any` accepts any JSON value, `object` accepts JSON objects, and `array` accepts JSON arrays. Dynamic contents may be
+heterogeneous. For example, `{"list":"object"}` supports records containing nested objects, lists, and scalars.
+The checker reflects dynamic results as `Any`, `List(Any)`, or `Map(Any)` while retaining concrete types where known.
+Concatenating two `List(Object)` inputs with `left + right` infers `List(Map(Any))`, compatible with `List(Object)`.
+`number`, `nullable`, `usize`, and `float` remain unsupported Code input descriptors.
 
 Build validation parses and type-checks every CEL output expression, including nodes on inactive branches, without
 evaluating it. Output port types are inferred from the checked expression. Unknown names, incompatible operations,
-explicit `dyn(...)` calls, and result types outside the JSON port contract fail before executable installation. CEL
-compilation produces a checked AST for in-process evaluation; it does not generate native machine code.
+and result types outside the JSON port contract fail before executable installation. Explicit `dyn(...)` is accepted;
+dynamic operations and broad-to-concrete connections retain runtime checks. A dynamic result is not proof that its
+contents satisfy a downstream record's field contract. CEL compilation produces a checked AST for in-process evaluation; it does not generate native machine code.
 
 At execution, Code converts each declared JSON input to its CEL type using the runtime's lossless numeric rules.
 `int` accepts signed 64-bit values, including exactly integral floating inputs; `double` accepts finite floating values
 and integers exactly representable in `f64`. Fractions, range overflow, precision loss, and negative-zero-to-integer
 conversion fail instead of silently rounding. `null` requires a present null value. Lists
-and maps are recursive and homogeneous; map keys are strings. Each output expression uses the same input bindings,
+and maps are recursive and follow their declared types; dynamic members may be heterogeneous, and map keys are strings.
+Each output expression uses the same input bindings,
 and outputs cannot refer to one another. CEL evaluation errors and values that cannot be represented as the inferred
 JSON type fail the node. Errors identify the Code input or output and a JSON Pointer path for nested values. The
 workflow publishes no Code outputs if any expression fails. A skipped Code node does not evaluate expressions.
+
+Dynamic conversion preserves stored JSON numbers: signed-range integers use CEL Int, larger unsigned integers use
+CEL UInt, and floating-point numbers retain their representation, including negative zero. Declared `uint` inputs
+use the runtime's lossless unsigned conversion rules. Missing object fields stay absent; null remains explicit data.
+Dynamic results are checked recursively and cannot contain bytes, timestamps, durations, non-finite numbers,
+non-string map keys, or embedded evaluation errors.
+
+Code explicitly marks every output secret when any supplied input contains a secret, including nested secrets.
+This conservative policy also marks independent or constant outputs secret. Business JSON values remain unchanged;
+snapshots and diagnostic value formatting use existing redaction. Public inputs alone produce public outputs.
+Code does not preserve internal payload identity or provide fine-grained field sensitivity tracking through CEL.
 
 To convert text explicitly, declare a string input and call `int(text)` or `double(text)` in the expression.
 The checker infers `Int64` or `Float64` outputs. Integers must fit signed 64-bit range; doubles can use decimal
@@ -370,7 +389,9 @@ including when initializing a nested Loop.
 
 The surrounding graph binds the initial `count` input and may bind the final `count` output.
 Variable types use the shared port descriptor grammar: `any`, `null`, `bool`, `number`, `int`, `uint`, `usize`, `float`, `double`, `string`, `array`, `object`, and nested `{"list": T}`, `{"map": T}`, or `{"nullable": T}`.
-`builtin.code` continues to accept only its concrete subset. Initial values, assignments, and final outputs are checked against each variable's declared type; a broad source is checked at runtime when necessary.
+`builtin.code` supports the descriptors documented under [built-in nodes](#built-in-nodes), excluding `number`,
+`nullable`, `usize`, and `float`. Initial values, assignments, and final outputs are checked against each variable's
+declared type; a broad source is checked at runtime when necessary.
 
 `workflow.loop_assign` takes one required `value` input and produces a `done` control output. A
 reached assignment overwrites its target variable; a skipped assignment leaves it unchanged. A later
@@ -487,7 +508,64 @@ The optional `control_edges` array contains entries with `from_node`, `from_outp
 
 Context references use qualified IDs such as `load_order.value`. A reference must name an output on an explicit predecessor, directly or transitively. Merely sorting earlier by node ID does not establish a dependency. Node IDs and local output names may contain dots if their combined IDs remain unique.
 
-A produced control output activates its target regardless of whether its JSON value is false or null. All incoming data and control dependencies must be available; any explicit skip skips execution and propagates to downstream nodes. Unexpected missing outputs remain errors, including when another dependency is skipped. Independent nodes still execute, and connecting both mutually exclusive outputs to one node does not merge branches.
+A produced control output activates its target regardless of whether its JSON value is false or
+null. All ordinary data inputs, resolved exclusive groups, and control dependencies must be
+available; a skipped logical input or control dependency skips execution and propagates to
+downstream nodes. Unexpected missing outputs remain errors, including when another dependency is
+skipped. Independent nodes still execute, and ordinary connections to both mutually exclusive
+outputs do not merge branches; use an explicit exclusive input group for alternatives.
+
+## Exclusive input bindings
+
+Set `exclusive: true` on each candidate data edge targeting the same `to_node` and `to_input`.
+That target pair defines the group. At least two distinct candidate outputs are required;
+ordinary and exclusive edges cannot bind the same input. An omitted or false marker retains
+ordinary single-source binding. Every candidate participates in ordering and type checks.
+
+Compilation must prove every pair of candidates mutually exclusive. Use different outputs of
+the same `builtin.if_else`, either directly or through data and control dependencies, to gate
+the candidate producers. An `exclusive` marker alone is insufficient: unguarded sources,
+producers on the same branch, and unrelated routers are rejected before execution, even if
+runtime values would happen to select only one. After convergence, only branch constraints
+shared by every candidate remain available for proving downstream groups.
+
+```json
+{
+  "edges": [
+    {"from_node":"local","from_output":"value","to_node":"consume","to_input":"input","exclusive":true},
+    {"from_node":"remote","from_output":"value","to_node":"consume","to_input":"input","exclusive":true}
+  ]
+}
+```
+
+The same syntax is available in loop and iteration bodies. Candidates must be in the consumer's
+scope and input message domain. Ordinary inputs and control edges retain their AND behavior;
+this declaration does not mix independent streams or select the first completed producer.
+Omitting the marker preserves existing workflows. New syntax requires updated support packages.
+
+Resolution waits for all candidate outcomes in the current frame. Exactly one produced value
+binds the input; all skipped candidates skip the consumer. False and null count as values.
+Unexpected absence remains an error even behind another skipped dependency. Runtime resolution
+relies on the compiler's exclusivity proof without repeating the check. A selected dynamic value is type-checked
+before an active consumer executes. Failure and cancellation do not select fallback candidates.
+
+Selection retains shared payloads and secret metadata. Different input groups resolve independently;
+carry correlated fields together in one structured value when they must come from one branch.
+A connected optional group whose candidates all skip still skips its consumer. Collection nodes
+retain their existing behavior: a skipped input adds no item and does not reset a batch deadline.
+
+The [exclusive-input example](../examples/exclusive-inputs.json) converges local and CI branches
+into one shared consumer. Compile it once and select either branch through startup arguments:
+
+```sh
+mf compile examples/exclusive-inputs.json --output ./exclusive-inputs
+mf run ./exclusive-inputs
+mf run ./exclusive-inputs --inputs '{"params.ci":true}'
+```
+
+These runs produce `{"result":{"mode":"local"}}` and `{"result":{"mode":"ci"}}` respectively.
+To replace separate branch consumers, keep the branch control edges, add a common consumer, and
+bind its input with one exclusive group. Multiple ordinary inputs are still jointly required.
 
 ## Optional workflow results
 

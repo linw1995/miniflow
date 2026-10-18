@@ -278,6 +278,7 @@ fn forwarded_known_output_values_preserve_typed_mismatches() {
         .resolve_node(
             &mut forward,
             &[ExecutionDependency {
+                exclusive: false,
                 source_node: "source",
                 source_output: "value",
                 input: Some("input"),

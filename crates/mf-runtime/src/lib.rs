@@ -40,13 +40,14 @@ pub use context::{
 };
 pub use definition::{
     ControlEdgeDefinition, DefinitionId, DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition,
-    LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition, LoopComparisonOperator,
-    LoopConditionDefinition, LoopDefinition, LoopVariableDefinition, MAX_LOOP_DEPTH,
-    MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition, NodeDependency, WorkflowDefinition,
-    WorkflowDefinitionVersion, WorkflowOutputDefinition,
+    ExclusiveInputError, LOOP_ASSIGN_KIND, LOOP_KIND, LOOP_SOURCE_ID, LoopBodyDefinition,
+    LoopComparisonOperator, LoopConditionDefinition, LoopDefinition, LoopVariableDefinition,
+    MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS, NodeDefinition, NodeDependency,
+    WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
+    validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
-pub use execution_inputs::{ExecutionInputs, resolve_workflow_inputs};
+pub use execution_inputs::{ExecutionInputs, InputResolution, resolve_workflow_inputs};
 pub use flow::{
     Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowPlan, FlowRuntime,
     GeneratedDomainExecutor, NodeId, RuntimeOptions, TaskFlowNode,
@@ -85,7 +86,7 @@ pub use node::{
 pub use node_target::{
     NodeTarget, NodeTargetError, NodeTargetKind, PreparedTaskTarget, target_ports,
 };
-pub use number::{compare_json_numbers, number_to_f64, number_to_i64};
+pub use number::{compare_json_numbers, number_to_f64, number_to_i64, number_to_u64};
 pub use registry::{NodeRegistry, NodeRegistryError};
 pub use runner::WorkflowRunError;
 pub use stream::{

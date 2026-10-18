@@ -94,6 +94,17 @@ impl Drop for ScopeGuard<'_> {
     }
 }
 
+struct NodeInvocationGuard<'a> {
+    context: &'a mut ExecutionContext,
+    previous: Option<crate::DefinitionId>,
+}
+
+impl Drop for NodeInvocationGuard<'_> {
+    fn drop(&mut self) {
+        self.context.current_node = self.previous.take();
+    }
+}
+
 /// Dynamic task results retain the map-based execution contract.
 pub type NodeResult = TypedNodeResult<Outputs>;
 
@@ -196,10 +207,11 @@ pub struct ExecutionContext {
     scopes: Vec<ExecutionScope>,
     pending_loop_write: Option<(String, Value)>,
     current_position: Option<usize>,
+    current_node: Option<crate::DefinitionId>,
     scope_exit_cutoff: Arc<AtomicUsize>,
     remaining_steps: StepBudget,
     snapshots: Option<crate::SnapshotRecorder>,
-    snapshot_prefix: Vec<LoopPathEntry>,
+    scope_prefix: Vec<LoopPathEntry>,
     inputs: crate::ExecutionInputs,
     stdin: Option<std::sync::Arc<std::sync::Mutex<crate::TextInput>>>,
     cancellation: crate::StreamCancellation,
@@ -219,10 +231,11 @@ impl Default for ExecutionContext {
             scopes: Vec::new(),
             pending_loop_write: None,
             current_position: None,
+            current_node: None,
             scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
             remaining_steps: StepBudget::new(crate::MAX_SCHEDULED_STEPS),
             snapshots: None,
-            snapshot_prefix: Vec::new(),
+            scope_prefix: Vec::new(),
             inputs: crate::ExecutionInputs::default(),
             stdin: None,
             cancellation: crate::StreamCancellation::default(),
@@ -235,6 +248,11 @@ impl Default for ExecutionContext {
 }
 
 impl ExecutionContext {
+    /// Identifies the executing node independently of optional observation.
+    pub fn current_node(&self) -> Option<&str> {
+        self.current_node.as_ref().map(crate::DefinitionId::as_str)
+    }
+
     /// Checks an operation's limits between synchronous setup or conversion phases.
     #[cfg(feature = "async")]
     pub fn check_future_limits(
@@ -293,9 +311,10 @@ impl ExecutionContext {
             scopes: Vec::new(),
             pending_loop_write: None,
             current_position: None,
+            current_node: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             snapshots: self.snapshots.clone(),
-            snapshot_prefix: self.snapshot_prefix.clone(),
+            scope_prefix: self.scope_prefix.clone(),
             inputs: crate::ExecutionInputs::default(),
             worker_handle: self.worker_handle.clone(),
             worker_limit: self.worker_limit,
@@ -465,10 +484,11 @@ impl ExecutionContext {
             scopes: self.scopes.clone(),
             pending_loop_write: None,
             current_position: None,
+            current_node: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             remaining_steps: self.remaining_steps.clone(),
             snapshots: self.snapshots.clone(),
-            snapshot_prefix: self.snapshot_prefix.clone(),
+            scope_prefix: self.scope_prefix.clone(),
             inputs: self.inputs.clone(),
             stdin: self.stdin.clone(),
             cancellation: self.cancellation.clone(),
@@ -516,9 +536,18 @@ impl ExecutionContext {
         node: &FlowNode<N>,
         dependencies: &[crate::FlowDependency],
     ) -> Result<Option<Inputs>, WorkflowRunError> {
+        let (inputs, resolution) = self.event_input_resolution(node, dependencies)?;
+        Ok(resolution.causes.is_empty().then_some(inputs))
+    }
+
+    pub fn event_input_resolution<N>(
+        &mut self,
+        node: &FlowNode<N>,
+        dependencies: &[crate::FlowDependency],
+    ) -> Result<(Inputs, crate::InputResolution), WorkflowRunError> {
         self.reserve_step(node.definition_id.as_str())?;
         let mut inputs = Inputs::new();
-        let causes = self.inputs.resolve_node(
+        let resolution = self.inputs.resolve_node_inputs(
             node,
             !self.scopes.is_empty(),
             dependencies.iter().map(crate::FlowDependency::borrowed),
@@ -528,7 +557,7 @@ impl ExecutionContext {
             },
             &mut inputs,
         )?;
-        Ok(causes.is_empty().then_some(inputs))
+        Ok((inputs, resolution))
     }
 
     pub fn set_snapshot_recorder(&mut self, recorder: crate::SnapshotRecorder) {
@@ -548,15 +577,14 @@ impl ExecutionContext {
         {
             child.future_executor = self.future_executor.clone();
         }
-        if self.snapshots.is_some() {
-            child.snapshots = self.snapshots.clone();
-            child.snapshot_prefix = self.snapshot_path();
-        }
+        child.snapshots = self.snapshots.clone();
+        child.scope_prefix = self.invocation_path();
         child
     }
 
-    fn snapshot_path(&self) -> Vec<LoopPathEntry> {
-        let mut path = self.snapshot_prefix.clone();
+    /// Includes enclosing body scopes even when observation and snapshots are disabled.
+    pub fn invocation_path(&self) -> Vec<LoopPathEntry> {
+        let mut path = self.scope_prefix.clone();
         path.extend(self.scope_path());
         path
     }
@@ -571,7 +599,7 @@ impl ExecutionContext {
     ) {
         if let Some(recorder) = &self.snapshots {
             recorder.record(crate::SnapshotEvent {
-                scope: self.snapshot_path(),
+                scope: self.invocation_path(),
                 node: node.definition_id.as_str().into(),
                 snapshot: crate::NodeSnapshot {
                     inputs: crate::snapshot::ports_snapshot(inputs),
@@ -971,6 +999,8 @@ fn state_error(id: &str, message: impl Into<String>) -> WorkflowRunError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ExecutionDependency<'a> {
+    /// Candidates with the same target input form one exclusive group.
+    pub exclusive: bool,
     pub input: Option<&'a str>,
     pub source_node: &'a str,
     pub source_output: &'a str,
@@ -982,6 +1012,12 @@ enum StepObservation {
 }
 
 impl StepObservation {
+    fn set_input_selections(&mut self, selected: Vec<mf_telemetry::event::InputSelection>) {
+        match self {
+            Self::Root(step) => step.set_input_selections(selected),
+            Self::Body(step) => step.set_input_selections(selected),
+        }
+    }
     fn started(&mut self, ctx: &mut ExecutionContext) {
         match self {
             Self::Root(step) => ctx.observation.as_mut().unwrap().node_started(step),
@@ -1125,7 +1161,7 @@ fn execute_ordered_call_in_context<'a, N>(
         _ => None,
     };
     let mut inputs = Inputs::new();
-    let resolution = ctx.inputs.resolve_node(
+    let resolution = ctx.inputs.resolve_node_inputs(
         node,
         !ctx.scopes.is_empty(),
         dependencies,
@@ -1143,7 +1179,12 @@ fn execute_ordered_call_in_context<'a, N>(
         &mut inputs,
     );
     let causes = match resolution {
-        Ok(causes) => causes,
+        Ok(resolution) => {
+            if let Some(step) = step.as_mut() {
+                step.set_input_selections(resolution.selected);
+            }
+            resolution.causes
+        }
         Err(error) => {
             if let Some(step) = step.take() {
                 step.failed(ctx, FailurePhase::Dependency, error.to_string());
@@ -1167,9 +1208,16 @@ fn execute_ordered_call_in_context<'a, N>(
         if let Some(step) = step.as_mut() {
             step.started(ctx);
         }
-        let result = invoke(inputs, ctx).with_context(|_| NodeExecutionSnafu {
-            definition_id: node.definition_id.clone(),
-        });
+        let result = {
+            let previous = ctx.current_node.replace(node.definition_id.clone());
+            let guard = NodeInvocationGuard {
+                context: ctx,
+                previous,
+            };
+            invoke(inputs, guard.context).with_context(|_| NodeExecutionSnafu {
+                definition_id: node.definition_id.clone(),
+            })
+        };
         match result {
             Ok(result) => Some(result),
             Err(error) => {
@@ -1312,6 +1360,74 @@ mod tests {
     }
 
     #[test]
+    fn invocation_paths_preserve_parent_scopes_in_unobserved_bodies() {
+        let mut context = ExecutionContext::default();
+        let outer =
+            ExecutionScope::new("outer", "%loop", 2, Outputs::new(), BTreeMap::new()).unwrap();
+        context
+            .run_scope(outer, |parent| {
+                let mut child = parent.fork_body(None);
+                let inner =
+                    ExecutionScope::new("inner", "%iteration", 3, Outputs::new(), BTreeMap::new())
+                        .unwrap();
+                child.run_scope(inner, |child| {
+                    let path = child.invocation_path();
+                    assert_eq!(
+                        path.iter()
+                            .map(|entry| (entry.loop_id.as_str(), entry.index.get()))
+                            .collect::<Vec<_>>(),
+                        [("outer", 2), ("inner", 3)]
+                    );
+                    assert_eq!(child.scope_path().len(), 1);
+                    Ok::<_, WorkflowRunError>(())
+                })
+            })
+            .unwrap();
+        assert!(context.invocation_path().is_empty());
+    }
+
+    #[test]
+    fn executing_node_identity_is_nested_and_restored_after_failure_or_panic() {
+        let outer = FlowNode {
+            definition_id: "outer".into(),
+            node: (),
+            metadata: Default::default(),
+        };
+        let inner = FlowNode {
+            definition_id: "inner".into(),
+            node: (),
+            metadata: Default::default(),
+        };
+        let mut context = ExecutionContext::default();
+        for panic in [false, true] {
+            execute_generated_node_in_context(&outer, [], &mut context, &[], |_, context| {
+                assert_eq!(context.current_node(), Some("outer"));
+                assert!(
+                    context
+                        .fork_domain_with_observation(None)
+                        .current_node()
+                        .is_none()
+                );
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    execute_generated_node_in_context(&inner, [], context, &[], |_, context| {
+                        assert_eq!(context.current_node(), Some("inner"));
+                        assert!(!panic, "synthetic panic");
+                        crate::NodeExecutionFailedSnafu {
+                            message: "synthetic failure",
+                        }
+                        .fail()
+                    })
+                }));
+                assert!(result.is_err() || result.unwrap().is_err());
+                assert_eq!(context.current_node(), Some("outer"));
+                Ok(GeneratedNodeResult::Dynamic(Outputs::new().into()))
+            })
+            .unwrap();
+            assert!(context.current_node().is_none());
+        }
+    }
+
+    #[test]
     fn startup_inputs_follow_context_fork_and_scope_boundaries() {
         let node = FlowNode {
             definition_id: "target".into(),
@@ -1399,11 +1515,13 @@ mod tests {
             );
             let mut dependencies = vec![
                 crate::FlowDependency {
+                    exclusive: false,
                     input: Some("value".into()),
                     source_node: "source".into(),
                     source_output: "value".into(),
                 },
                 crate::FlowDependency {
+                    exclusive: false,
                     input: None,
                     source_node: "gate".into(),
                     source_output: "value".into(),
@@ -1411,6 +1529,7 @@ mod tests {
             ];
             if case == "missing" {
                 dependencies.push(crate::FlowDependency {
+                    exclusive: false,
                     input: None,
                     source_node: "absent".into(),
                     source_output: "value".into(),
@@ -1608,6 +1727,7 @@ mod tests {
             Some(json!([{"count": 1}, {"count": "two"}]).into()),
         );
         let dependency = ExecutionDependency {
+            exclusive: false,
             input: Some("payload"),
             source_node: "source",
             source_output: "value",
@@ -1653,6 +1773,7 @@ mod tests {
             .outputs
             .insert("source.value".into(), Some(json!(1).into()));
         let dependency = ExecutionDependency {
+            exclusive: false,
             input: Some("unexpected"),
             source_node: "source",
             source_output: "value",
@@ -1689,6 +1810,7 @@ mod tests {
                 let result = execute_node_in_context(
                     &node,
                     &[ExecutionDependency {
+                        exclusive: false,
                         input: Some("value"),
                         source_node: "source",
                         source_output: "value",
@@ -1757,6 +1879,7 @@ mod tests {
         .into_task()
         .unwrap();
         let skipped = ExecutionDependency {
+            exclusive: false,
             input: Some("payload"),
             source_node: "branch",
             source_output: "off",
@@ -1765,6 +1888,7 @@ mod tests {
         context.outputs.insert("branch.off".into(), None);
         for input in [None, Some("payload")] {
             let missing = ExecutionDependency {
+                exclusive: false,
                 input,
                 source_node: "source",
                 source_output: "missing",
@@ -1898,6 +2022,7 @@ mod tests {
                 .collect(),
                 crate::FlowPlan {
                     connections: vec![crate::FlowConnection {
+                        exclusive: false,
                         from_node: crate::NodeId::new(0),
                         from_output: "value".into(),
                         to_node: crate::NodeId::new(1),
@@ -1907,6 +2032,7 @@ mod tests {
                     dependencies: vec![
                         std::borrow::Cow::Owned(vec![]),
                         std::borrow::Cow::Owned(vec![crate::FlowDependency {
+                            exclusive: false,
                             input: Some("payload".into()),
                             source_node: "source".into(),
                             source_output: "value".into(),

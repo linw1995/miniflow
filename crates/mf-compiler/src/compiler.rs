@@ -38,6 +38,10 @@ impl fmt::Display for CyclePath {
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
     #[snafu(transparent)]
+    ExclusiveInput {
+        source: mf_runtime::ExclusiveInputError,
+    },
+    #[snafu(transparent)]
     InterfaceDescription { source: DescriptionError },
     #[snafu(transparent)]
     WorkflowInputs {
@@ -276,7 +280,7 @@ impl TypeInferenceState {
                 definition_id: id.clone(),
             })?;
 
-        let mut inputs = BTreeMap::new();
+        let mut inputs: BTreeMap<&str, TypeFact> = BTreeMap::new();
         for dependency in dependencies {
             let Some(input_name) = dependency.input else {
                 continue;
@@ -329,13 +333,24 @@ impl TypeInferenceState {
             } else {
                 input.value_type.clone()
             };
-            inputs.insert(
-                input_name,
-                TypeFact {
-                    value_type,
-                    exact: source.exact.clone(),
-                },
-            );
+            if dependency.exclusive
+                && let Some(fact) = inputs.get_mut(input_name)
+            {
+                if fact.value_type != value_type {
+                    fact.value_type = input.value_type.clone();
+                }
+                if fact.exact != source.exact {
+                    fact.exact = None;
+                }
+            } else {
+                inputs.insert(
+                    input_name,
+                    TypeFact {
+                        value_type,
+                        exact: source.exact.clone(),
+                    },
+                );
+            }
         }
 
         let derivations: BTreeMap<_, _> = derivations
@@ -513,6 +528,13 @@ fn prepare_graph(
         let dependencies = incoming.get(id.as_str()).map_or(&[][..], Vec::as_slice);
         inference.resolve_node(&mut nodes[indices[id]], dependencies)?;
     }
+    crate::construction::validate_exclusive_branches(order.iter().map(|id| {
+        (
+            &nodes[indices[id]],
+            incoming.get(id.as_str()).into_iter().flatten().copied(),
+        )
+    }))
+    .context(FlowConstructionSnafu)?;
     Ok((nodes, order))
 }
 
@@ -525,6 +547,7 @@ pub fn incoming_dependencies(
             .entry(edge.to_node.as_str())
             .or_default()
             .push(ExecutionDependency {
+                exclusive: edge.exclusive,
                 input: Some(&edge.to_input),
                 source_node: edge.from_node.as_str(),
                 source_output: &edge.from_output,
@@ -535,6 +558,7 @@ pub fn incoming_dependencies(
             .entry(edge.to_node.as_str())
             .or_default()
             .push(ExecutionDependency {
+                exclusive: false,
                 input: None,
                 source_node: edge.from_node.as_str(),
                 source_output: &edge.from_output,
@@ -654,7 +678,7 @@ fn validate_base_metadata(
     }
 
     let mut connected_inputs = BTreeSet::new();
-    for edge in &definition.edges {
+    for edge in definition.edges.iter() {
         let source = registrations[&edge.from_node];
         let target = registrations[&edge.to_node];
         let Some(_) = source
@@ -740,8 +764,9 @@ fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCom
             .fail();
         }
     }
+    crate::validate_exclusive_inputs(&definition.edges)?;
     let mut connected = BTreeSet::new();
-    for edge in &definition.edges {
+    for edge in definition.edges.iter() {
         if !ids.contains(&edge.from_node) {
             return UnknownEdgeSourceSnafu {
                 from_node: edge.from_node.clone(),
@@ -760,7 +785,7 @@ fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCom
             }
             .fail();
         }
-        if !connected.insert((&edge.to_node, &edge.to_input)) {
+        if !connected.insert((&edge.to_node, &edge.to_input)) && !edge.exclusive {
             return DuplicateInputConnectionSnafu {
                 node_id: edge.to_node.clone(),
                 port: edge.to_input.clone(),

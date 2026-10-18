@@ -4,8 +4,8 @@ use crate::{
     ContractError, Count, EVENT_SCHEMA_VERSION, INSTRUMENTATION_SCOPE, LOOP_EVENT_SCHEMA_VERSION,
     description::WorkflowDescription,
     event::{
-        Event, EventSequence, Failure, FailurePhase, LifecycleEvent, LoopPassOutcome,
-        LoopPathEntry, LoopSummary, NodeIdentity, Outcome, SkipCause,
+        Event, EventSequence, Failure, FailurePhase, InputSelection, LifecycleEvent,
+        LoopPassOutcome, LoopPathEntry, LoopSummary, NodeIdentity, Outcome, SkipCause,
     },
     identity::{RunId, WorkflowId},
     wire::{TraceContext, WireRecord},
@@ -393,6 +393,7 @@ impl RunObservation {
             context = stream.attach(context);
         }
         NodeObservation {
+            selected_inputs: Vec::new(),
             node,
             position,
             context,
@@ -448,6 +449,7 @@ impl RunObservation {
         step.invoked = Some(Instant::now());
         self.record(
             Event::NodeStarted {
+                selected_inputs: step.selected_inputs.clone(),
                 node: step.node.clone(),
                 position: step.position,
                 elapsed_ns: self.elapsed(),
@@ -505,6 +507,7 @@ impl RunObservation {
             .set_attribute(KeyValue::new("mf.outcome", "skipped"));
         self.record(
             Event::NodeSkipped {
+                selected_inputs: step.selected_inputs.clone(),
                 node: step.node.clone(),
                 position: step.position,
                 elapsed_ns: self.elapsed(),
@@ -748,6 +751,7 @@ impl Drop for RunObservation {
 }
 
 pub struct NodeObservation {
+    selected_inputs: Vec<InputSelection>,
     node: NodeIdentity,
     position: Count,
     context: Context,
@@ -756,6 +760,9 @@ pub struct NodeObservation {
 }
 
 impl NodeObservation {
+    pub fn set_input_selections(&mut self, selections: Vec<InputSelection>) {
+        self.selected_inputs = selections;
+    }
     pub fn enter(&self) -> ContextGuard {
         self.context.clone().attach()
     }
@@ -946,6 +953,7 @@ impl BodyObservation {
             context = parent.child_context(context);
         }
         Some(BodyNodeObservation {
+            selected_inputs: Vec::new(),
             backend: Arc::clone(&self.backend),
             workflow_id: self.workflow_id.clone(),
             run_id: self.run_id,
@@ -960,6 +968,7 @@ impl BodyObservation {
 }
 
 pub struct BodyNodeObservation {
+    selected_inputs: Vec<InputSelection>,
     backend: Arc<Backend>,
     workflow_id: WorkflowId,
     run_id: RunId,
@@ -972,6 +981,9 @@ pub struct BodyNodeObservation {
 }
 
 impl BodyNodeObservation {
+    pub fn set_input_selections(&mut self, selections: Vec<InputSelection>) {
+        self.selected_inputs = selections;
+    }
     pub fn enter(&self) -> ContextGuard {
         self.context.clone().attach()
     }
@@ -1078,6 +1090,36 @@ impl BodyNodeObservation {
             "mf.node.kind".into(),
             AnyValue::String(self.node.kind.clone().into()),
         ));
+        if !self.selected_inputs.is_empty() {
+            common.push((
+                "mf.input.selections".into(),
+                AnyValue::ListAny(Box::new(
+                    self.selected_inputs
+                        .iter()
+                        .map(|selection| {
+                            AnyValue::Map(Box::new(
+                                [
+                                    (
+                                        "input".into(),
+                                        AnyValue::String(selection.input.clone().into()),
+                                    ),
+                                    (
+                                        "source_node".into(),
+                                        AnyValue::String(selection.source_node.clone().into()),
+                                    ),
+                                    (
+                                        "source_output".into(),
+                                        AnyValue::String(selection.source_output.clone().into()),
+                                    ),
+                                ]
+                                .into_iter()
+                                .collect(),
+                            ))
+                        })
+                        .collect(),
+                )),
+            ));
+        }
         common.extend(attributes);
         (self.backend.emit_nested)(NestedLog {
             name,

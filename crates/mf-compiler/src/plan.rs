@@ -742,7 +742,8 @@ fn dependency_tokens(dependencies: &[mf_runtime::ExecutionDependency<'_>]) -> Ve
             }
             None => quote! { None },
         };
-        quote! { mf_runtime::ExecutionDependency { input: #input, source_node: #source, source_output: #port } }
+        let exclusive = dependency.exclusive;
+        quote! { mf_runtime::ExecutionDependency { exclusive: #exclusive, input: #input, source_node: #source, source_output: #port } }
     }).collect()
 }
 
@@ -1039,7 +1040,8 @@ fn dependency_layout_tokens(
                     }
                     None => quote! { None },
                 };
-                quote! { mf_runtime::FlowDependency {
+                let exclusive = dependency.exclusive;
+                quote! { mf_runtime::FlowDependency { exclusive: #exclusive,
                     input: #input,
                     source_node: std::borrow::Cow::Borrowed(#source),
                     source_output: std::borrow::Cow::Borrowed(#output),
@@ -1378,11 +1380,12 @@ fn task_layout_tokens(
         .collect();
     let dependencies = dependency_layout_tokens(definition, order);
     let connections = definition.edges.iter().map(|edge| {
+        let exclusive = edge.exclusive;
         let from = indices[&edge.from_node];
         let to = indices[&edge.to_node];
         let output = LitStr::new(&edge.from_output, Span::call_site());
         let input = LitStr::new(&edge.to_input, Span::call_site());
-        quote! { mf_runtime::FlowConnection {
+        quote! { mf_runtime::FlowConnection { exclusive: #exclusive,
             from_node: mf_runtime::NodeId::new(#from), to_node: mf_runtime::NodeId::new(#to),
             from_output: std::borrow::Cow::Borrowed(#output), to_input: std::borrow::Cow::Borrowed(#input),
         } }

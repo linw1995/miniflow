@@ -4,7 +4,7 @@ use crate::{
     StreamNode, StreamPlan, TimerUpdate, WorkerPool,
 };
 use mf_telemetry::{
-    event::{FailurePhase, SkipCause},
+    event::FailurePhase,
     observation::{StreamCallback, StreamObservation},
     stream::{StreamCounts, StreamFailure, StreamMessage, StreamTrigger},
 };
@@ -1165,7 +1165,7 @@ fn tick<'a>(
                 }
                 let is_producer = matches!(&operator.executor, OperatorExecutor::Producer(_));
                 let _ = operator;
-                let callback;
+                let mut callback;
                 (guard, callback) = event_callback(
                     guard,
                     shared,
@@ -1179,9 +1179,9 @@ fn tick<'a>(
                     },
                 )?;
                 let _context = callback.as_ref().map(StreamCallback::enter);
-                let inputs = match frame
+                let (inputs, resolution) = match frame
                     .context
-                    .event_inputs(&plan.nodes()[index], plan.dependencies(index))
+                    .event_input_resolution(&plan.nodes()[index], plan.dependencies(index))
                 {
                     Ok(inputs) => inputs,
                     Err(error) => {
@@ -1197,7 +1197,10 @@ fn tick<'a>(
                         });
                     }
                 };
-                if let Some(inputs) = inputs {
+                if let Some(callback) = callback.as_mut() {
+                    callback.set_input_selections(resolution.selected);
+                }
+                if resolution.causes.is_empty() {
                     if is_producer {
                         let observation = shared.observation.as_ref().map(|observation| {
                             if message_domain == 0 {
@@ -1245,25 +1248,8 @@ fn tick<'a>(
                         callback,
                     )?;
                 } else if let Some(callback) = callback {
-                    let causes: std::collections::BTreeSet<_> = plan
-                        .dependencies(index)
-                        .iter()
-                        .filter(|dependency| {
-                            matches!(
-                                frame.context.output(&crate::output_id(
-                                    &dependency.source_node,
-                                    &dependency.source_output
-                                )),
-                                Ok(crate::ContextValue::Skipped)
-                            )
-                        })
-                        .map(|dependency| SkipCause {
-                            source_node: dependency.source_node.clone().into_owned(),
-                            source_output: dependency.source_output.clone().into_owned(),
-                        })
-                        .collect();
                     drop(guard);
-                    callback.skipped(causes.into_iter().collect());
+                    callback.skipped(resolution.causes.into_iter().collect());
                     guard = shared.state.lock().unwrap();
                     check_failure(&mut guard, shared)?;
                 }
@@ -1822,6 +1808,7 @@ mod tests {
             vec![
                 Vec::new(),
                 vec![crate::FlowDependency {
+                    exclusive: false,
                     input: None,
                     source_node: "start".into(),
                     source_output: "item".into(),

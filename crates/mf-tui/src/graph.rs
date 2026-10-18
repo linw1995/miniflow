@@ -63,6 +63,7 @@ pub struct GraphNode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EdgeKind {
     Data,
+    Exclusive,
     Control,
 }
 
@@ -203,6 +204,11 @@ impl GraphLayout {
             Vec::with_capacity(description.data_edges.len() + description.control_edges.len());
         let mut topology = BTreeSet::new();
         for edge in &description.data_edges {
+            let kind = if edge.exclusive {
+                EdgeKind::Exclusive
+            } else {
+                EdgeKind::Data
+            };
             let from = positions[edge.from_node.as_str()];
             let to = positions[edge.to_node.as_str()];
             topology.insert((from as u32, to as u32));
@@ -212,13 +218,13 @@ impl GraphLayout {
                     destination: nodes[to].id.clone(),
                     output: edge.from_output.clone(),
                     input: Some(edge.to_input.clone()),
-                    kind: EdgeKind::Data,
+                    kind,
                 },
                 from,
                 to,
                 from_output: edge.from_output.clone(),
                 to_input: Some(edge.to_input.clone()),
-                kind: EdgeKind::Data,
+                kind,
                 from_row: 0,
                 to_row: 0,
             });
@@ -658,6 +664,25 @@ impl<'a> GraphView<'a> {
         }
     }
 
+    fn draw_ports(&self, area: Rect, buffer: &mut Buffer, index: usize) {
+        if self.layout.routes[index].unresolved.is_some() {
+            return;
+        }
+        let edge = &self.layout.edges[index];
+        let source = self.layout.nodes[edge.from].rect;
+        let target = self.layout.nodes[edge.to].rect;
+        let style = self.edge_style(edge);
+        self.put(
+            area,
+            buffer,
+            source.x + source.width - 1,
+            source.y + edge.from_row,
+            "├",
+            style,
+        );
+        self.put(area, buffer, target.x, target.y + edge.to_row, "┤", style);
+    }
+
     fn text(&self, area: Rect, buffer: &mut Buffer, rect: GraphRect, text: &str, style: Style) {
         if rect.y < self.offset.1
             || rect.y >= self.offset.1.saturating_add(u32::from(area.height))
@@ -744,6 +769,7 @@ impl<'a> GraphView<'a> {
     fn edge_style(&self, edge: &GraphEdge) -> Style {
         let default = match edge.kind {
             EdgeKind::Data => Color::Cyan,
+            EdgeKind::Exclusive => Color::Magenta,
             EdgeKind::Control => Color::Blue,
         };
         let Some(source) = self
@@ -871,6 +897,9 @@ impl Widget for GraphView<'_> {
         }
         for (index, node) in self.layout.nodes.iter().enumerate() {
             self.draw_node(area, buffer, index, node);
+        }
+        for index in 0..self.layout.edges.len() {
+            self.draw_ports(area, buffer, index);
         }
     }
 }
@@ -1020,7 +1049,7 @@ mod rendering_tests {
     }
 
     #[test]
-    fn crossings_preserve_each_strokes_kind_color_and_modifier() {
+    fn continuous_crossings_preserve_each_strokes_color_and_modifier() {
         for horizontal in [EdgeKind::Data, EdgeKind::Control] {
             for vertical in [EdgeKind::Data, EdgeKind::Control] {
                 for upper_horizontal in [true, false] {
@@ -1043,26 +1072,18 @@ mod rendering_tests {
                             if along == 0 && !is_upper {
                                 continue;
                             }
-                            let kind = if horizontal_axis {
-                                horizontal
-                            } else {
-                                vertical
-                            };
                             let rendered = buffer
                                 .cell(Position::new(
                                     (10 + if horizontal_axis { along } else { 0 }) as u16,
                                     (10 + if horizontal_axis { 0 } else { along }) as u16,
                                 ))
                                 .unwrap();
-                            let expected = if !is_upper && along.abs() == 1 {
-                                " "
+                            let expected = if along == 0 {
+                                if upper_horizontal { "╪" } else { "╫" }
+                            } else if horizontal_axis {
+                                "─"
                             } else {
-                                match (kind, horizontal_axis) {
-                                    (EdgeKind::Data, true) => "═",
-                                    (EdgeKind::Data, false) => "║",
-                                    (EdgeKind::Control, true) => "─",
-                                    (EdgeKind::Control, false) => "│",
-                                }
+                                "│"
                             };
                             assert_eq!(rendered.symbol(), expected);
                             assert_eq!(

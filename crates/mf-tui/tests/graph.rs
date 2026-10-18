@@ -32,18 +32,21 @@ fn description() -> WorkflowDescription {
             .collect(),
         data_edges: vec![
             DataEdge {
+                exclusive: false,
                 from_node: "source".into(),
                 from_output: "value".into(),
                 to_node: "router".into(),
                 to_input: "input".into(),
             },
             DataEdge {
+                exclusive: false,
                 from_node: "left".into(),
                 from_output: "value".into(),
                 to_node: "join".into(),
                 to_input: "left".into(),
             },
             DataEdge {
+                exclusive: false,
                 from_node: "right".into(),
                 from_output: "value".into(),
                 to_node: "join".into(),
@@ -92,6 +95,7 @@ fn loop_body_layout_renders_the_selected_pass_independently() {
             },
         ],
         data_edges: vec![DataEdge {
+            exclusive: false,
             from_node: "%loop".into(),
             from_output: "count".into(),
             to_node: "child".into(),
@@ -232,8 +236,25 @@ fn parallel_data_and_control_edges_use_separate_block_rows() {
         ))
         .unwrap()
         .symbol();
-    assert_eq!(data_symbol, "═");
+    assert_eq!(data_symbol, "─");
     assert_eq!(control_symbol, "─");
+    for edge in [data, control] {
+        let target = layout.nodes()[edge.to].rect;
+        let color = match edge.kind {
+            EdgeKind::Data => Color::Cyan,
+            EdgeKind::Exclusive => Color::Magenta,
+            EdgeKind::Control => Color::Blue,
+        };
+        for (x, y, symbol) in [
+            (source.x + source.width - 1, source.y + edge.from_row, "├"),
+            (target.x - 1, target.y + edge.to_row, "▶"),
+            (target.x, target.y + edge.to_row, "┤"),
+        ] {
+            let cell = buffer.cell(Position::new(x as u16, y as u16)).unwrap();
+            assert_eq!(cell.symbol(), symbol);
+            assert_eq!(cell.fg, color);
+        }
+    }
 }
 
 #[test]
@@ -273,6 +294,7 @@ fn graph_renders_blocks_edges_and_running_elapsed_time() {
             run_id,
             sequence: count(2),
             event: Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: NodeIdentity {
                     id: "source".into(),
                     kind: "source".into(),
@@ -295,7 +317,8 @@ fn graph_renders_blocks_edges_and_running_elapsed_time() {
     assert!(text.contains("router"));
     assert!(text.contains("yes"));
     assert!(text.contains("no"));
-    assert!(text.contains('═'));
+    assert!(text.contains('├'));
+    assert!(text.contains("▶┤"));
     assert!(text.contains('─'));
 
     let mut focused = buffer.clone();
@@ -382,6 +405,7 @@ fn known_sequence_gap_marks_last_seen_running_state_as_uncertain() {
             run_id,
             sequence: count(2),
             event: Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: NodeIdentity {
                     id: "source".into(),
                     kind: "source".into(),
@@ -454,6 +478,7 @@ fn fan_graph(count: usize) -> WorkflowDescription {
     graph.control_edges.clear();
     graph.data_edges = (0..count)
         .map(|index| DataEdge {
+            exclusive: false,
             from_node: "source".into(),
             from_output: "value".into(),
             to_node: format!("sink-{index:04}"),
@@ -534,12 +559,14 @@ fn crowded_attachments_expand_nodes_and_channels_without_reusing_rows() {
 fn long_edges_use_passages_and_keep_isolated_components_disjoint() {
     let mut graph = fan_graph(3);
     graph.data_edges.push(DataEdge {
+        exclusive: false,
         from_node: "sink-0000".into(),
         from_output: "value".into(),
         to_node: "sink-0001".into(),
         to_input: "extra".into(),
     });
     graph.data_edges.push(DataEdge {
+        exclusive: false,
         from_node: "sink-0001".into(),
         from_output: "value".into(),
         to_node: "sink-0002".into(),
@@ -589,6 +616,7 @@ fn crowded_inputs_have_distinct_rows_and_disjoint_boxes() {
     graph.execution_order.rotate_left(1);
     graph.data_edges = (0..9)
         .map(|index| DataEdge {
+            exclusive: false,
             from_node: format!("sink-{index:04}"),
             from_output: "value".into(),
             to_node: "source".into(),
@@ -691,6 +719,7 @@ fn sparse_ten_thousand_node_chain_uses_linear_conflict_work() {
     let mut graph = fan_graph(9_999);
     graph.data_edges = (1..graph.execution_order.len())
         .map(|index| DataEdge {
+            exclusive: false,
             from_node: graph.execution_order[index - 1].clone(),
             from_output: "value".into(),
             to_node: graph.execution_order[index].clone(),
@@ -718,6 +747,7 @@ fn local_rerouting_never_replaces_a_better_valid_arrangement() {
         let first = if from < 3 { 3 } else { 6 };
         for to in first..9 {
             graph.data_edges.push(DataEdge {
+                exclusive: false,
                 from_node: graph.execution_order[from].clone(),
                 from_output: "value".into(),
                 to_node: graph.execution_order[to].clone(),
@@ -847,6 +877,7 @@ fn crowded_graph(width: usize, control: bool) -> WorkflowDescription {
             width * 2..width * 3
         } {
             graph.data_edges.push(DataEdge {
+                exclusive: false,
                 from_node: graph.execution_order[from].clone(),
                 from_output: "value".into(),
                 to_node: graph.execution_order[to].clone(),
@@ -991,4 +1022,39 @@ fn a_wide_label_fragment_cannot_overwrite_the_next_pane() {
         .render(Rect::new(0, 0, 1, 1), &mut buffer);
     assert_eq!(buffer.cell(Position::new(0, 0)).unwrap().symbol(), " ");
     assert_eq!(buffer.cell(Position::new(1, 0)).unwrap().symbol(), "#");
+}
+
+#[test]
+fn exclusive_candidates_have_distinct_edges_and_visible_labels() {
+    let mut graph = description();
+    for edge in graph
+        .data_edges
+        .iter_mut()
+        .filter(|edge| edge.to_node == "join")
+    {
+        edge.exclusive = true;
+        edge.to_input = "input".into();
+    }
+    graph.validate().unwrap();
+    let layout = GraphLayout::new(&graph).unwrap();
+    assert_eq!(layout.nodes().len(), graph.nodes.len());
+    assert_eq!(
+        layout
+            .edges()
+            .iter()
+            .filter(|edge| edge.kind == EdgeKind::Exclusive)
+            .count(),
+        2
+    );
+    assert_eq!(
+        layout
+            .routes()
+            .iter()
+            .filter_map(|route| route.label.as_ref())
+            .filter(|label| label.text.contains("exclusive input"))
+            .count(),
+        2
+    );
+    graph.data_edges.last_mut().unwrap().exclusive = false;
+    assert!(graph.validate().is_err());
 }

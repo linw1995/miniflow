@@ -655,6 +655,17 @@ fn validate_graph(
                 {
                     return Err(invalid("Loop summary belongs to a Loop node"));
                 }
+                for selection in event.selected_inputs() {
+                    if !data.iter().any(|edge| {
+                        edge.exclusive
+                            && edge.to_node == node.id
+                            && edge.to_input == selection.input
+                            && edge.from_node == selection.source_node
+                            && edge.from_output == selection.source_output
+                    }) {
+                        return Err(invalid("selected input is not an exclusive candidate"));
+                    }
+                }
                 if let Event::NodeSkipped { causes, .. } = event {
                     for cause in causes {
                         if !data.iter().any(|edge| {
@@ -1339,6 +1350,7 @@ mod tests {
             control_edges: Vec::new(),
             loop_bodies: Vec::new(),
             data_edges: vec![DataEdge {
+                exclusive: false,
                 from_node: "source".into(),
                 from_output: "item".into(),
                 to_node: "consume".into(),
@@ -1417,6 +1429,7 @@ mod tests {
             }
         } else {
             Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node,
                 position: count(i64::from(!source)),
                 elapsed_ns: count(sequence),
@@ -1664,6 +1677,7 @@ mod tests {
                 sequence,
                 Some(identity.clone()),
                 StreamPayload::Execution(Event::NodeStarted {
+                    selected_inputs: Vec::new(),
                     node: root.clone(),
                     position: count(1),
                     elapsed_ns: count(sequence),
@@ -1691,6 +1705,7 @@ mod tests {
                             ..identity.clone()
                         },
                         Event::NodeStarted {
+                            selected_inputs: Vec::new(),
                             node: NodeIdentity {
                                 id: "%loop".into(),
                                 kind: "%loop".into(),

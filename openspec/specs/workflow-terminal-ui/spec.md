@@ -17,23 +17,28 @@ The system SHALL provide terminal presentation through a separate `mf-tui` crate
 
 ### Requirement: Launch and observe an existing local executable
 
-`mf run <executable> --tui` SHALL read the supported embedded manifest without starting an inspection process.
-Executables lacking a manifest section SHALL be rejected with a recompilation diagnostic. Corrupt or unsupported
-manifest data MUST prevent launch without command fallback.
+Ordinary single-run observation through `mf run <executable> --tui` SHALL read the supported embedded manifest without
+starting an inspection process. Executables lacking a manifest section SHALL be rejected with a recompilation
+diagnostic. Corrupt or unsupported manifest data MUST prevent launch without command fallback.
 
-The CLI SHALL accept named workflow parameters after its TUI options and reject unexpected positional arguments before entering terminal mode. It SHALL validate supplied startup arguments, resource availability, and observation compatibility before launch,
-establish a loopback OTLP/HTTP receiver, and then launch the actual executable with the same arguments and session-specific
-observation configuration. It MUST NOT reimplement workflow execution. The receiver SHALL accept protobuf logs and traces
-at `/v1/logs` and `/v1/traces` and associate observations with the expected workflow and run. Configuration changes MUST be
-limited to the child environment; inherited remote exporter credentials MUST NOT be sent to the local receiver.
+Outside chat mode, the CLI SHALL accept named workflow parameters after its TUI options and reject unexpected positional arguments before
+entering terminal mode. It SHALL validate supplied startup arguments, resource availability, and observation
+compatibility before launch, establish a loopback OTLP/HTTP receiver, and then launch the actual executable with the
+same arguments and session-specific observation configuration. It MUST NOT reimplement workflow execution. The receiver
+SHALL accept protobuf logs and traces at `/v1/logs` and `/v1/traces` and associate observations with the expected
+workflow and run. Configuration changes MUST be limited to the child environment; inherited remote exporter credentials
+MUST NOT be sent to the local receiver.
 
-Each TUI session SHALL observe only its own launched local child. The interface MUST NOT provide remote or
-existing-process attachment, session resumption, or historical replay. A new invocation SHALL create a new run;
-missing observations MUST NOT trigger workflow restart.
+Each ordinary observation session SHALL observe only its own launched local child. The interface MUST NOT provide remote
+or existing-process attachment, observation-session resumption, or telemetry historical replay. Explicit chat mode SHALL
+restore persisted chat sessions without attaching to previous processes or replaying old telemetry; each submitted turn
+creates a fresh local run. A new invocation SHALL create a new run; missing observations MUST NOT trigger workflow
+restart.
 
 #### Scenario: Observe an executable without build inputs
 
-- **WHEN** the user invokes TUI mode with a compatible runner but no workflow source, lockfile, plugin sources, or Rust toolchain
+- **WHEN** the user invokes TUI mode with a compatible runner but no workflow source, lockfile, plugin sources, or Rust
+  toolchain
 - **THEN** the CLI loads its metadata and displays events from execution of that runner
 
 #### Scenario: Prevent a startup race
@@ -54,7 +59,8 @@ missing observations MUST NOT trigger workflow restart.
 #### Scenario: Isolate a local observation session
 
 - **WHEN** the parent environment contains remote signal endpoints and exporter credentials
-- **THEN** the launched session sends its telemetry to the local receiver without those credentials and leaves the parent environment unchanged
+- **THEN** the launched session sends its telemetry to the local receiver without those credentials and leaves the
+  parent environment unchanged
 
 #### Scenario: Start a fresh session
 
@@ -73,18 +79,21 @@ missing observations MUST NOT trigger workflow restart.
 
 #### Scenario: Inspect another supported architecture
 
-- **WHEN** a valid supported-format executable has a manifest but targets an architecture different from the inspection host
+- **WHEN** a valid supported-format executable has a manifest but targets an architecture different from the inspection
+  host
 - **THEN** metadata discovery succeeds without executing it and does not claim the executable can run on that host
 
 #### Scenario: Resolve conditional stdin from the manifest
 
 - **WHEN** a manifest declares stdin ownership unless a particular optional input is supplied
-- **THEN** preflight evaluates that condition against the validated arguments and rejects active stdin requirements before launching the child
+- **THEN** preflight evaluates that condition against the validated arguments and rejects active stdin requirements
+  before launching the child
 
 #### Scenario: Observe a source with direct parameters
 
 - **WHEN** the user invokes `mf run workflow --tui --read.path data.txt`
-- **THEN** preflight parses the declared string parameter, checks resource ownership, and forwards the canonical flat arguments through private transport
+- **THEN** preflight parses the declared string parameter, checks resource ownership, and forwards the canonical flat
+  arguments through private transport
 
 ### Requirement: Present graph structure and execution state
 
@@ -147,20 +156,26 @@ Missing terminal evidence SHALL be displayed as an unverified tail with unknown 
 ### Requirement: Preserve process outcomes and terminal ownership
 
 The CLI SHALL drain child stdout and stderr concurrently without allowing their content to corrupt terminal rendering.
-It SHALL preserve workflow stdout for delivery after terminal restoration and retain bounded diagnostic history for
-display. The child exit status SHALL determine workflow command success/failure independently of observation
-completeness. The receiver SHALL remain available during bounded post-exit draining. The final view SHALL remain
-inspectable until closed, after which the CLI restores the terminal and returns the child result when CLI capture and output succeeded. Capture or output-delivery failure SHALL be reported as a separate CLI error while preserving the actual child outcome for display.
+In ordinary single-run observation mode, it SHALL preserve workflow stdout for delivery after terminal restoration and
+retain bounded diagnostic history for display. In ordinary single-run observation mode, the child exit status SHALL
+determine workflow command success/failure independently of observation completeness. The receiver SHALL remain
+available during bounded post-exit draining. The ordinary single-run final view SHALL remain inspectable until closed,
+after which the CLI restores the terminal and returns the child result when CLI capture and output succeeded. Capture or
+output-delivery failure SHALL be reported as a separate CLI error while preserving the actual child outcome for display.
+Chat mode SHALL consume each turn's structured result for display and storage reconciliation, retain its process outcome
+separately, and MUST NOT concatenate turn result objects onto stdout when the interactive session closes.
 
 #### Scenario: Run a noisy plugin
 
 - **WHEN** a node writes enough output to both standard streams to fill a pipe if unread
-- **THEN** execution continues, the terminal remains usable, and child output is handled without unbounded in-memory accumulation
+- **THEN** execution continues, the terminal remains usable, and child output is handled without unbounded in-memory
+  accumulation
 
 #### Scenario: Exit successfully with incomplete telemetry
 
 - **WHEN** the child exits successfully but its terminal telemetry remains incomplete after draining
-- **THEN** the CLI preserves successful process completion and marks unresolved node states as unknown instead of inventing success
+- **THEN** the CLI preserves successful process completion and marks unresolved node states as unknown instead of
+  inventing success
 
 #### Scenario: Inspect a completed failure
 
@@ -169,7 +184,10 @@ inspectable until closed, after which the CLI restores the terminal and returns 
 
 ### Requirement: Handle interruption and unavailable terminals explicitly
 
-The CLI SHALL reject TUI mode without the required interactive terminal before workflow execution. Ctrl-C during execution SHALL request child termination, apply bounded escalation if needed, and restore the terminal on recoverable exit paths. Abrupt child death or disagreement between telemetry and process exit MUST leave unresolved states unknown or interrupted and MUST NOT be represented as ordinary conditional skips or successful node completion.
+The CLI SHALL reject noninteractive TUI launches before execution. Ctrl-C SHALL stop ordinary runs with bounded
+escalation and restore the terminal. Chat cancellation SHALL stop the selected turn and keep chat usable; quit SHALL
+cancel active work and restore the terminal. Both SHALL use bounded cleanup. Abrupt death or conflicting telemetry
+MUST leave unresolved states unknown or interrupted, never skipped or successful.
 
 #### Scenario: Invoke through a noninteractive terminal
 
@@ -179,7 +197,8 @@ The CLI SHALL reject TUI mode without the required interactive terminal before w
 #### Scenario: Interrupt a running workflow
 
 - **WHEN** the user interrupts while a node is executing
-- **THEN** the CLI terminates the launched child within the configured deadline, restores the terminal, and does not mark the unresolved node successful
+- **THEN** the CLI terminates the launched child within the configured deadline, restores the terminal, and does not
+  mark the unresolved node successful
 
 #### Scenario: Detect process death after an apparent completion event
 
@@ -675,3 +694,162 @@ caller-owned without stream-only eviction or omission policies.
 
 - **WHEN** a snapshot lacks native context or exceeds preview limits
 - **THEN** it remains in session history without guessed association or truncating stored values
+
+### Requirement: Launch chat mode explicitly
+
+`mf run <executable> --tui --chat --chat-db <path>` SHALL validate the shared chat contract, terminal-owned
+inputs, and terminal requirements before opening storage. Each turn SHALL run the complete supplied executable
+with fresh invocation and run identities, using shared storage and recovery APIs. The CLI MUST NOT substitute
+an embedded flow, infer model identities from the graph, or override provider configuration.
+
+#### Scenario: Execute repeated model calls
+
+- **WHEN** a compatible conversation workflow contains a loop with multiple model calls
+- **THEN** chat mode executes the entire workflow and persists its reported message metadata and individual usage facts
+
+#### Scenario: Reject chat without terminal mode
+
+- **WHEN** the user supplies `--chat` without `--tui`
+- **THEN** CLI validation fails before opening storage or starting a runner
+
+#### Scenario: Keep ordinary observation available
+
+- **WHEN** the user runs a compatible chat executable with ordinary `--tui` and its required startup arguments
+- **THEN** the CLI retains single-run observation semantics instead of entering chat mode implicitly
+
+#### Scenario: Reserve model context inputs
+
+- **WHEN** startup arguments attempt to override prompt, system, or history owned by chat mode
+- **THEN** preflight rejects the conflicting binding before launch
+
+### Requirement: Present persistent sessions and editable prompts
+
+Chat mode SHALL present a full-width conversation, a content-sized Unicode input, contextual shortcuts, and
+command/session overlays. It SHALL create sessions on first submission and retain drafts when switching idle
+conversations. New names SHALL derive from the first prompt. The terminal SHALL omit rename, archive/restore,
+usage-dashboard, and system-instruction forms.
+
+#### Scenario: Open without creating an empty session
+
+- **WHEN** the user opens chat mode and has not submitted a prompt
+- **THEN** the editor is ready and no new session record is created
+
+#### Scenario: Start a named conversation
+
+- **WHEN** the user sends the first nonempty prompt in a new chat
+- **THEN** the terminal creates a session named from that prompt and starts one execution
+
+#### Scenario: Resume a stored conversation
+
+- **WHEN** the user chooses a saved conversation from the session overlay
+- **THEN** its latest bounded message page opens, stored system instructions apply, and the next prompt continues it
+
+#### Scenario: Edit multiline text without accidental submission
+
+- **WHEN** the editor has focus and the user presses Enter
+- **THEN** a newline is inserted; Alt+Enter or Esc followed by Enter submits the complete prompt
+
+#### Scenario: Preserve a draft during session switching
+
+- **WHEN** the user switches between idle conversations with unsent edits
+- **THEN** each draft is restored when its conversation is selected again
+
+#### Scenario: Read older messages
+
+- **WHEN** the user requests an earlier message page
+- **THEN** the terminal loads bounded nonoverlapping history and can return to the latest page
+
+### Requirement: Present distinct retry and cancellation actions
+
+The command menu SHALL distinguish retrying the latest unsuccessful turn from saving or discarding a retained
+reply. Retry SHALL allocate fresh linked identities; save-only recovery SHALL reuse the original identities without
+executing the workflow. Ctrl+C SHALL cancel the current child group. Ctrl+Q SHALL quit through supervised cleanup.
+
+#### Scenario: Retry the latest failed turn
+
+- **WHEN** the latest turn failed and the user selects Retry failed turn
+- **THEN** a new execution reuses its prompt with fresh identities linked to the failed turn
+
+#### Scenario: Avoid offering stale retries
+
+- **WHEN** the latest turn succeeded or the user is browsing an older history page
+- **THEN** the menu does not offer an earlier failure as the current retry action
+
+#### Scenario: Recover an unsaved reply
+
+- **WHEN** a decoded reply or raw outcome needs persistence recovery
+- **THEN** the menu offers explicit save and discard actions without silently resending the workflow
+
+#### Scenario: Cancel after durable success
+
+- **WHEN** cancellation races with an already committed reply
+- **THEN** reconciliation preserves saved success while process and observation facts remain separate
+
+### Requirement: Associate observations with each chat turn
+
+Each launched turn SHALL have its own workflow/run identity and receiver. The terminal SHALL retain only the
+current turn's observation and open the existing graph, trace, log, and data views on demand. Starting another turn
+or changing conversation SHALL release the previous observation. Missing telemetry MUST NOT alter persisted messages
+or trigger another workflow execution.
+
+#### Scenario: Inspect the current run
+
+- **WHEN** the user opens Inspect current run from the command menu
+- **THEN** the shared observation UI shows that run and Esc returns to the conversation
+
+#### Scenario: Replace a completed observation
+
+- **WHEN** the user starts another turn or changes conversation
+- **THEN** the earlier transient observation is released while saved messages remain available
+
+#### Scenario: Complete without telemetry
+
+- **WHEN** a turn commits but its telemetry is absent or incomplete
+- **THEN** the reply remains available and the observation view independently reports uncertainty
+
+#### Scenario: Retain a reader after early teardown
+
+- **WHEN** supervision ends without an exit status and a reader survives
+- **THEN** the receiver closes its observation stream and reports any unverified tail
+
+### Requirement: Close the chat application after supervised cleanup
+
+Quitting SHALL stop admission, cancel and reap the current child, reconcile retained results, and join the worker
+before releasing database ownership. Normal exit and recoverable display failure SHALL restore the terminal.
+Handled turn failures SHALL allow exit status 0 when cleanup succeeds; display or cleanup failures SHALL return 1.
+
+#### Scenario: Quit with a running turn
+
+- **WHEN** the user quits during execution
+- **THEN** the child is cancelled and reaped and its invocation is reconciled before ownership is released
+
+#### Scenario: Disconnect the display
+
+- **WHEN** terminal display I/O fails during execution
+- **THEN** bounded child cleanup and terminal restoration are attempted without a restoration panic
+
+#### Scenario: Fail storage access during shutdown
+
+- **WHEN** shutdown cannot finalize the invocation because storage is unavailable
+- **THEN** close reports a typed failure and reopening can recover the interrupted turn without resending it
+
+### Requirement: Run one chat turn at a time
+
+The terminal SHALL reserve one execution lane before accepting a submission. A running turn or retained reply
+SHALL block additional submissions, new chats, and session switching. Extra submissions MUST be rejected instead
+of queued. Storage and supervision SHALL run off the terminal rendering thread, with independent cancellation.
+
+#### Scenario: Reject a second submission
+
+- **WHEN** another prompt arrives while admission, execution, or reply recovery is unresolved
+- **THEN** the terminal reports busy without creating a session or starting another child
+
+#### Scenario: Keep the selected conversation stable
+
+- **WHEN** the user requests a new chat or session switch during unresolved work
+- **THEN** the current conversation remains selected and the UI explains how to cancel or recover it
+
+#### Scenario: Keep editing responsive
+
+- **WHEN** storage or the child workflow is pending
+- **THEN** terminal input and rendering remain responsive and edits made after submission are preserved

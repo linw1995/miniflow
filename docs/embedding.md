@@ -150,3 +150,31 @@ CARGO_TARGET_DIR="$PWD/target/embedded-example" nix develop --command \
 ```
 
 After building, the executable prepares and runs without workflow JSON, generated sources, or build tools.
+
+## Programmatic exclusive bindings
+
+`FlowBuilder::prepare` and `build_flow` accept marked `EdgeDefinition` values through their
+existing connection argument. Set `exclusive: true` on all candidates targeting the same node
+and input; no separate group list or specialized constructor is needed. All producers must
+precede their consumer, and mixing ordinary and exclusive edges for one input is rejected.
+Attach any control edges with `with_control_edges` before calling `into_tasks` or `into_stream`;
+executable construction rejects groups whose candidates cannot be proven mutually exclusive.
+
+Task providers can declare `NodeMetadata::exclusive_outputs`: at least two distinct declared
+output names, of which at most one may produce a value per invocation. `builtin.if_else`
+declares its branch outputs, including `else`. The compiler propagates these branch facts
+through mandatory dependencies and retains only common facts across alternative inputs.
+The contract is not supported on stateful Event or Stream nodes, whose emissions can outlive
+an input invocation; their outputs do not inherit per-invocation branch facts. Loop and
+iteration bodies are checked within their own scopes. Structural-only `plan_definition`
+defers metadata checks, but executable preparation and code generation require proof.
+
+Rust `EdgeDefinition` literals must initialize the new `exclusive` field; `false` preserves
+ordinary binding. Workflow and body definition structs retain their existing shape. Prepared
+dependencies and connections preserve the marker through graph planning and input resolution.
+
+Exclusive candidates use shared-value input resolution in generated and embedded execution.
+Typed ownership transfer into such a consumer reports `exclusive_input` as its fallback reason;
+unrelated safe segments remain eligible for optimization. Isolated node execution accepts the
+already resolved input and does not run or select predecessors. Loop rounds and iteration items
+resolve independently, including parallel iterations; candidate values cannot cross message domains.

@@ -21,6 +21,7 @@ filter = '''
 binary_id(=mfn-test-affected::flow) |
 (binary_id(=mf-chat::packaging) &
     test(=source_free_host_preserves_multi_session_retry_title_and_statistics)) |
+(binary_id(=mf-cli::chat_tui) & test(=executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart)) |
 (binary_id(=mf-cli::compile) & (
     test(=compiles_a_runner_without_telemetry_and_preserves_execution) |
     test(=compiled_runner_preserves_build_cache_and_installation_contracts) |
@@ -82,8 +83,10 @@ binary_id(=mf-compiler::single_node_runner) |
     test(=standalone_sources_describe_parameters_and_run_without_stdin_or_build_inputs)) |
 (binary_id(=mf-compiler::workflow_inputs) &
     test(=generated_tasks_share_startup_binding_and_validation)) |
-(binary_id(=mf-compiler::code_validation) &
-    test(=build_rejects_inactive_code_without_replacing_output)) |
+(binary_id(=mf-compiler::code_validation) & (
+    test(=build_rejects_inactive_code_without_replacing_output) |
+    test(=structured_json_matches_in_memory_and_generated_runner_checks)
+)) |
 (binary_id(=mf-compiler::loop_planning) &
     test(=generated_loop_matches_in_memory_without_build_inputs)) |
 (binary_id(=mf-compiler::iteration) & (
@@ -107,6 +110,7 @@ filter = '''
 binary_id(=mfn-test-affected::flow) |
 (binary_id(=mf-chat::packaging) &
     test(=source_free_host_preserves_multi_session_retry_title_and_statistics)) |
+(binary_id(=mf-cli::chat_tui) & test(=executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart)) |
 (binary_id(=mf-cli::compile) & (
     test(=compiles_a_runner_without_telemetry_and_preserves_execution) |
     test(=compiled_runner_preserves_build_cache_and_installation_contracts) |
@@ -168,8 +172,10 @@ binary_id(=mf-compiler::single_node_runner) |
     test(=standalone_sources_describe_parameters_and_run_without_stdin_or_build_inputs)) |
 (binary_id(=mf-compiler::workflow_inputs) &
     test(=generated_tasks_share_startup_binding_and_validation)) |
-(binary_id(=mf-compiler::code_validation) &
-    test(=build_rejects_inactive_code_without_replacing_output)) |
+(binary_id(=mf-compiler::code_validation) & (
+    test(=build_rejects_inactive_code_without_replacing_output) |
+    test(=structured_json_matches_in_memory_and_generated_runner_checks)
+)) |
 (binary_id(=mf-compiler::loop_planning) &
     test(=generated_loop_matches_in_memory_without_build_inputs)) |
 (binary_id(=mf-compiler::iteration) & (

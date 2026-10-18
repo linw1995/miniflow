@@ -26,6 +26,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         return Err("expected the synthetic provider failure".into());
     }
     host.retry(&original.turn_id)?.join()?;
+    host.database().schedule_titles(10)?;
     let call_a = host
         .database()
         .pending_titles(10)?
