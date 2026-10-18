@@ -8,6 +8,9 @@ on:
     branches:
       - main
 
+env:
+  PR_COVERAGE_TARGET: "95"
+
 permissions:
   contents: read
 

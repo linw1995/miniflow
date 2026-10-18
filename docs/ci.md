@@ -275,3 +275,25 @@ The returned `comparison_mode` distinguishes direct snapshots from ordinary
 merge-base selection. Keep `--commit HEAD` for initial cumulative PR selection;
 `--base <branch>` retains its merge-base default. A CI resolver chooses a reusable
 successful snapshot; the local selector never infers CI success or fetches refs.
+
+### Incremental coverage gate
+
+The local gate uses the exact selection diff and current LCOV executable-line
+mappings. Coverage preparation writes `result/source.json` with the source
+commit/tree, clean-checkout state, toolchain, target, features, and profile. A
+mismatched identity or missing/malformed expected report fails validation.
+Duplicate LCOV records are unioned by source line, so repeated compilation cannot
+inflate the denominator. New and renamed files participate at their current paths;
+deletions still select tests but add no current executable lines.
+
+An absent source mapping is not a coverage exemption. Only independently proven
+non-executable input, such as an entirely blank/line-comment file, can pass without
+a mapping. Other unmapped Rust source needs a suitable instrumented build or an
+explicit diagnosis; cumulative reruns do not automatically waive this condition.
+A confirmed zero denominator is `not_applicable`, not 100% coverage.
+
+The incremental target is configured once as `PR_COVERAGE_TARGET` in CI. The
+migration sets 95%, above the verified effective 94.89% Codecov auto target on
+`b1135c0`; it does not lower the gate when selection shrinks. Records include the
+target in compatibility identity. Main/nightly project coverage keeps its current
+policy. The evaluator is staged for workflow integration with the final record job.

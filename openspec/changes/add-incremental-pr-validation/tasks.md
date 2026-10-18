@@ -18,10 +18,10 @@ Implement and commit each numbered group in order with its focused tests and doc
 
 ## 3. Incremental coverage evaluation
 
-- [ ] 3.1 Implement current-side changed executable-line coverage using the exact comparison and current LCOV; verify new/renamed/deleted files, zero-hit lines, duplicate records, and correct numerator/denominator on small compiled fixtures.
-- [ ] 3.2 Implement explicit failure for missing, malformed, stale, or uncertain executable mappings and explicit not-applicable results for confirmed zero denominators; verify report absence cannot masquerade as a coverage pass.
-- [ ] 3.3 Establish one explicit PR target no lower than the verified effective pre-migration requirement, record it in compatibility metadata, and document the migration; verify boundary percentages and target changes cannot silently weaken or reuse incompatible validation.
-- [ ] 3.4 Integrate evaluation with the existing single coverage build and package execution phases; verify selected tests are not rerun solely to collect coverage and that test/report failures preserve unsuccessful status.
+- [x] 3.1 Implement current-side changed executable-line coverage using the exact comparison and current LCOV; verify new/renamed/deleted files, zero-hit lines, duplicate records, and correct numerator/denominator on small compiled fixtures.
+- [x] 3.2 Implement explicit failure for missing, malformed, stale, or uncertain executable mappings and explicit not-applicable results for confirmed zero denominators; verify report absence cannot masquerade as a coverage pass.
+- [x] 3.3 Establish one explicit PR target no lower than the verified effective pre-migration requirement, record it in compatibility metadata, and document the migration; verify boundary percentages and target changes cannot silently weaken or reuse incompatible validation.
+- [x] 3.4 Integrate evaluation with the existing single coverage build and package execution phases; verify selected tests are not rerun solely to collect coverage and that test/report failures preserve unsuccessful status.
 
 ## 4. CI orchestration, reporting, and gate migration
 

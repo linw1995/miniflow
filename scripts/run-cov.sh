@@ -47,6 +47,29 @@ prepare_coverage() {
 
   # grcov scans every binary in its search directory. Remove old workspace mappings while retaining dependencies.
   cargo clean --workspace --profile dev
+  python3 - <<'PYTHON'
+import json
+import os
+from pathlib import Path
+import subprocess
+
+def git(*args):
+    return subprocess.check_output(["git", *args], stderr=subprocess.DEVNULL, text=True).strip()
+
+head = tree = None
+dirty = True
+try:
+    if Path(git("rev-parse", "--show-toplevel")).resolve() == Path.cwd().resolve():
+        head, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+        dirty = bool(git("status", "--porcelain", "--untracked-files=all"))
+except subprocess.CalledProcessError:
+    pass
+identity = {"head": head, "tree": tree, "dirty": dirty,
+            "toolchain": subprocess.check_output(["rustc", "-vV"], text=True),
+            "features": "all", "target": os.environ.get("CARGO_BUILD_TARGET"),
+            "profile": os.environ.get("NEXTEST_PROFILE", "default")}
+Path("target/coverage/result/source.json").write_text(json.dumps(identity) + "\n")
+PYTHON
 }
 
 report_coverage() {

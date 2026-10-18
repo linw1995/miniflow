@@ -142,6 +142,75 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'two-parent'):
             validation.current_context(self.root, 'owner/repo', 7, {'id': 9}, {})
 
+    def coverage_inputs(self):
+        current = copy.deepcopy(self.current)
+        current['signature'].update(toolchain='fixture', features='all', target=None, profile='ci')
+        comparison = validation.cumulative(current, 'fixture')
+        plan = {'base': comparison['base'], 'head': comparison['head'], 'comparison_mode': 'snapshot',
+                'packages': ['sample'], 'ignored_files': []}
+        report = self.root / 'target/result/lcov.info'
+        report.parent.mkdir(parents=True, exist_ok=True)
+        identity = {'head': current['merge'], 'tree': current['tree'], 'dirty': False,
+                    'toolchain': 'fixture', 'features': 'all', 'target': None, 'profile': 'ci'}
+        report.with_name('source.json').write_text(json.dumps(identity))
+        return current, comparison, plan, report
+
+    def test_incremental_coverage_counts_only_changed_lines_and_merges_duplicate_records(self):
+        current, comparison, plan, report = self.coverage_inputs()
+        report.write_text('SF:source.rs\nDA:1,0\nLF:1\nend_of_record\n')
+        result = validation.evaluate_coverage(self.root, current, comparison, plan, report)
+        self.assertEqual((result['status'], result['covered'], result['total']), ('failed', 0, 1))
+        report.write_text(report.read_text() + 'SF:source.rs\nDA:1,2\nLF:1\nend_of_record\n')
+        result = validation.evaluate_coverage(self.root, current, comparison, plan, report)
+        self.assertEqual((result['status'], result['covered'], result['total']), ('passed', 1, 1))
+        comparison['base'] = plan['base'] = current['merge']
+        self.assertEqual(validation.evaluate_coverage(self.root, current, comparison, plan, report)['status'], 'not_applicable')
+        plan['packages'] = []
+        report.unlink()
+        self.assertEqual(validation.evaluate_coverage(self.root, current, comparison, plan, report)['total'], 0)
+
+    def test_missing_stale_and_malformed_coverage_cannot_pass(self):
+        current, comparison, plan, report = self.coverage_inputs()
+        for content in ['', 'DA:1,1\n', 'SF:source.rs\nDA:1,1\n',
+                        'SF:source.rs\nDA:1,-1\nend_of_record\n',
+                        'SF:source.rs\nDA:1,1\nLF:2\nend_of_record\n',
+                        'SF:other.rs\nDA:1,1\nend_of_record\n']:
+            with self.subTest(content=content), self.assertRaises(ValueError):
+                report.write_text(content)
+                validation.evaluate_coverage(self.root, current, comparison, plan, report)
+        report.unlink()
+        with self.assertRaises(OSError): validation.evaluate_coverage(self.root, current, comparison, plan, report)
+        report.write_text('SF:source.rs\nDA:1,1\nend_of_record\n')
+        identity = json.loads(report.with_name('source.json').read_text())
+        report.with_name('source.json').write_text(json.dumps(identity | {'head': self.base}))
+        with self.assertRaisesRegex(ValueError, 'stale'): validation.evaluate_coverage(self.root, current, comparison, plan, report)
+        report.with_name('source.json').write_text(json.dumps(identity))
+        with self.assertRaisesRegex(ValueError, 'identities'):
+            validation.evaluate_coverage(self.root, current, comparison, plan | {'base': self.heads[0]}, report)
+        with self.assertRaisesRegex(ValueError, 'no selected'):
+            validation.evaluate_coverage(self.root, current, comparison, plan | {'packages': []}, report)
+        (self.root / 'source.rs').write_text('dirty')
+        with self.assertRaisesRegex(ValueError, 'checkout'):
+            validation.evaluate_coverage(self.root, current, comparison, plan, report)
+
+    def test_new_renamed_deleted_and_comment_only_sources(self):
+        previous = self.current['merge']
+        self.git('mv', 'source.rs', 'renamed source.rs')
+        (self.root / 'comment.rs').write_text('// No executable code.\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'test(ci): rename and delete')
+        head = self.git('rev-parse', 'HEAD')
+        merge = self.git('commit-tree', self.git('rev-parse', 'HEAD^{tree}'), '-p', self.base, '-p', head, '-m', 'merge')
+        self.git('checkout', '-q', '--detach', merge)
+        self.current = validation.current_context(self.root, 'owner/repo', 7,
+            {'id': 9, 'run_attempt': 1, 'workflow_id': 2}, {'coverage_target': 95, 'policy': validation.POLICY})
+        current, comparison, plan, report = self.coverage_inputs()
+        comparison['base'] = plan['base'] = previous
+        report.write_text('SF:renamed source.rs\nDA:1,1\nend_of_record\n')
+        result = validation.evaluate_coverage(self.root, current, comparison, plan, report)
+        self.assertEqual((result['covered'], result['total']), (1, 1))
+        self.assertNotIn('source.rs', validation.changed_lines(self.root, previous, merge))
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -8,6 +8,8 @@ import tempfile
 import tomllib
 import unittest
 
+import pr_validation
+
 
 class CoverageTests(unittest.TestCase):
     def test_workflows_cover_every_workspace_package_and_skip_unselected_steps(self):
@@ -134,6 +136,24 @@ mod tests {{
 ''')
             result = execute("cargo", "generate-lockfile", "--offline")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            def git(*args):
+                result = execute("git", *args)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                return result.stdout.strip()
+
+            git("init", "-q", "-b", "main")
+            for key, value in [("user.name", "Fixture"), ("user.email", "fixture@example.com"),
+                               ("commit.gpgsign", "false"), ("core.hooksPath", "/dev/null")]:
+                git("config", key, value)
+            (root / ".gitignore").write_text("/target/\n/plan.json\n")
+            git("add", ".")
+            git("commit", "-qm", "test(ci): coverage base")
+            base = git("rev-parse", "HEAD")
+            alpha = root / "src/alpha.rs"
+            alpha.write_text(alpha.read_text().replace("    1\n", "    1 + 0\n"))
+            git("add", ".")
+            git("commit", "-qm", "test(ci): executable increment")
+            head = git("rev-parse", "HEAD")
             result = execute("bash", "scripts/run-cov.sh")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             report = root / "target/coverage/result/lcov.info"
@@ -149,6 +169,16 @@ mod tests {{
                 ), block)
             self.assertGreater((root / "target/coverage/result/cobertura.xml").stat().st_size, 0)
             self.assertIn("other/src/lib.rs", report.read_text())
+            provenance = json.loads(report.with_name("source.json").read_text())
+            context = {"merge": head, "tree": git("rev-parse", "HEAD^{tree}"),
+                       "signature": {key: provenance[key] for key in ("toolchain", "target", "profile")}}
+            context["signature"]["coverage_target"] = 95
+            comparison = {"base": base, "head": head}
+            plan = comparison | {"comparison_mode": "snapshot", "packages": ["coverage-fixture"], "ignored_files": []}
+            coverage = pr_validation.evaluate_coverage(root, context, comparison, plan, report)
+            self.assertEqual(coverage["status"], "passed")
+            self.assertGreater(coverage["total"], 0)
+            self.assertEqual(coverage["covered"], coverage["total"])
 
             dependencies = list((root / "target/coverage/build/debug/deps").glob("libcoverage_dependency-*.rlib"))
             self.assertTrue(dependencies)

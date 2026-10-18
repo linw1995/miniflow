@@ -160,3 +160,112 @@ def discover_baseline(root, current, api, branch, download):
         return choose_baseline(root, current, candidates)
     except (OSError, ValueError, KeyError, TypeError, AnalysisError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
         return cumulative(current, f"Validation history unavailable: {error}")
+
+
+def changed_lines(root, base, head):
+    paths = command(root, "git", "diff", "--no-renames", "--name-only", "-z", base, head, "--").split("\0")
+    result = {}
+    for path in paths:
+        if not path.endswith(".rs"):
+            continue
+        patch = command(root, "git", "diff", "--no-ext-diff", "--no-textconv", "--no-color",
+                        "--no-renames", "--unified=0", base, head, "--", path)
+        if "Binary files " in patch:
+            raise ValueError(f"Cannot map binary Rust source: {path}")
+        lines = set()
+        for start, count in re.findall(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@", patch, re.MULTILINE):
+            start, count = int(start), int(count) if count else 1
+            lines.update(range(start, start + count))
+        if lines:
+            result[path] = lines
+    return result
+
+
+def read_lcov(root, path):
+    root = root.resolve()
+    mappings = {}
+    source, lines, declared = None, {}, None
+    for line in path.read_text().splitlines():
+        if line.startswith("SF:"):
+            if source is not None:
+                raise ValueError("LCOV source record is unterminated")
+            source, lines, declared = line[3:], {}, None
+            if not source:
+                raise ValueError("LCOV source path is empty")
+        elif line.startswith("DA:"):
+            if source is None:
+                raise ValueError("LCOV executable line has no source")
+            fields = line[3:].split(",")
+            if len(fields) not in (2, 3):
+                raise ValueError("Malformed LCOV executable line")
+            number, hits = int(fields[0]), int(fields[1])
+            if number <= 0 or hits < 0:
+                raise ValueError("Invalid LCOV executable line")
+            lines[number] = lines.get(number, False) or hits > 0
+        elif line.startswith("LF:"):
+            declared = int(line[3:])
+        elif line == "end_of_record":
+            if source is None or (declared is not None and declared != len(lines)):
+                raise ValueError("LCOV line count does not match its record")
+            absolute = (root / source).resolve()
+            if absolute.is_relative_to(root):
+                destination = mappings.setdefault(absolute.relative_to(root).as_posix(), {})
+                for number, hit in lines.items():
+                    destination[number] = destination.get(number, False) or hit
+            source, lines, declared = None, {}, None
+    if source is not None or not mappings:
+        raise ValueError("LCOV report is incomplete or has no workspace mappings")
+    return mappings
+
+
+def verify_current(root, current):
+    if (revision(root, "HEAD") != current["merge"]
+            or command(root, "git", "rev-parse", "HEAD^{tree}").strip() != current["tree"]
+            or command(root, "git", "status", "--porcelain", "--untracked-files=all")):
+        raise ValueError("Current checkout no longer matches the validation source")
+
+
+def evaluate_coverage(root, current, comparison, plan, report):
+    verify_current(root, current)
+    if (comparison["head"] != current["merge"] or plan["head"] != comparison["head"]
+            or plan["base"] != comparison["base"] or plan["comparison_mode"] != "snapshot"):
+        raise ValueError("Coverage and selection comparison identities differ")
+    changes = changed_lines(root, comparison["base"], comparison["head"])
+    changes = {p: lines for p, lines in changes.items() if p not in plan["ignored_files"]}
+    if plan["packages"]:
+        provenance = json.loads(report.with_name("source.json").read_text())
+        expected = {"head": current["merge"], "tree": current["tree"], "dirty": False,
+                    "toolchain": current["signature"]["toolchain"], "features": "all",
+                    "target": current["signature"]["target"], "profile": current["signature"]["profile"]}
+        if provenance != expected:
+            raise ValueError("Coverage report source or execution configuration is stale")
+        mappings = read_lcov(root, report)
+    else:
+        if changes:
+            raise ValueError("Rust source changes have no selected test scope")
+        mappings = {}
+    missing, uncovered = [], {}
+    total = covered = 0
+    for path, changed in sorted(changes.items()):
+        contents = command(root, "git", "show", f"{current['merge']}:{path}").splitlines()
+        if path not in mappings:
+            # A wholly blank/comment-only file is independent evidence. Missing
+            # compiler mappings for other source are uncertainty, not a pass.
+            if not all(not line.strip() or line.lstrip().startswith("//") for line in contents):
+                missing.append(path)
+            continue
+        executable = mappings[path]
+        if any(number > len(contents) for number in executable):
+            raise ValueError(f"Coverage mapping exceeds current source: {path}")
+        selected = changed & executable.keys()
+        total += len(selected)
+        covered += sum(executable[number] for number in selected)
+        misses = sorted(number for number in selected if not executable[number])
+        if misses:
+            uncovered[path] = misses
+    if missing:
+        raise ValueError("No executable mapping or non-executable proof for: " + ", ".join(missing))
+    target = current["signature"]["coverage_target"]
+    return {"base": comparison["base"], "head": current["merge"], "tree": current["tree"],
+            "covered": covered, "total": total, "target": target, "uncovered": uncovered,
+            "status": "not_applicable" if total == 0 else "passed" if covered * 100 >= target * total else "failed"}
