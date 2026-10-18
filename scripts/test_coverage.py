@@ -183,6 +183,10 @@ mod tests {{
 
             dependencies = list((root / "target/coverage/build/debug/deps").glob("libcoverage_dependency-*.rlib"))
             self.assertTrue(dependencies)
+            stale_binary = root / "target/stale-binary"
+            binary = next(path for path in (root / "target/coverage/build/debug/deps").glob("coverage_fixture-*")
+                          if path.is_file() and not path.suffix)
+            shutil.copyfile(binary, stale_binary)
             before_pruning = report.read_bytes()
             result = execute("bash", "scripts/run-cov.sh", "--prune-cache")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -190,6 +194,10 @@ mod tests {{
             self.assertTrue(all(path.is_file() for path in dependencies))
             self.assertFalse(list((root / "target/coverage/build/debug/deps").glob("libcoverage_fixture-*.rlib")))
 
+            # A compiler-cache backup is not a current published Cargo artifact.
+            backup = root / "target/coverage/build/debug/deps/.kache-prestage-fixture"
+            shutil.copyfile(stale_binary, backup)
+            alpha.write_text("// Shift current executable lines.\n" * 20 + alpha.read_text())
             # Separate steps must accumulate profiles without cleaning earlier crates.
             result = execute("bash", "scripts/run-cov.sh", "--prepare")
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -224,6 +232,13 @@ mod tests {{
                     line.startswith("DA:") and int(line.split(",")[1]) > 0
                     for line in block.splitlines()
                 ), block)
+
+            self.assertTrue(backup.exists())
+            alpha_block = next(block for block in blocks if any(
+                line.startswith("SF:") and line.endswith("src/alpha.rs") for line in block.splitlines()))
+            self.assertTrue(all(int(line[3:].split(",")[0]) > 20
+                                for line in alpha_block.splitlines() if line.startswith("DA:")))
+            self.assertFalse((root / "target/coverage/report-binaries").exists())
 
             # A package outside the plan must not even compile, and its old
             # coverage mappings must not leak from the preceding full run.

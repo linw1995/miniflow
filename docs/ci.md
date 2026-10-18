@@ -29,6 +29,10 @@ complete macOS test execution runs in nightly.
 Coverage dependencies and generated-project builds use persistent caches.
 The script removes previous workspace binaries and report data while retaining
 dependencies, so stale coverage mappings cannot contribute to a new report.
+Reporting uses a temporary hard-linked binary view that omits `.kache-prestage-*`
+compiler-cache backups. These backups can survive Cargo cleanup and contain old
+source mappings; source files and coverage thresholds are not excluded or changed.
+The temporary view is removed after report generation without modifying the cache.
 The packaged CLI fixture keeps a separate target beside the generated-runner
 cache. Its registry dependencies survive subsequent runs, while preparation
 cleans checkout packages before rebuilding the CLI. Packaged source digests also

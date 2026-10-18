@@ -83,6 +83,16 @@ PYTHON
 }
 
 report_coverage() {
+  # Compiler-cache backups can contain coverage maps from older source revisions.
+  # Keep the build cache intact and expose only published Cargo artifacts to grcov.
+  rm -rf "${coverage_dir}/report-binaries"
+  python3 - "${CARGO_TARGET_DIR}/debug/deps" "${coverage_dir}/report-binaries" <<'PYTHON'
+import os
+import shutil
+import sys
+shutil.copytree(sys.argv[1], sys.argv[2], copy_function=os.link,
+                ignore=shutil.ignore_patterns(".kache-prestage-*"))
+PYTHON
   grcov "${coverage_dir}/data" \
     --llvm \
     --branch \
@@ -90,13 +100,14 @@ report_coverage() {
     --ignore-not-existing \
     --ignore '../*' \
     --ignore '/*' \
-    --binary-path "${CARGO_TARGET_DIR}/debug/deps" \
+    --binary-path "${coverage_dir}/report-binaries" \
     --output-types html,cobertura,lcov,markdown \
     --output-path "${coverage_dir}/result"
 
   test -s "${coverage_dir}/result/lcov"
   test -s "${coverage_dir}/result/cobertura.xml"
   cp "${coverage_dir}/result/lcov" "${coverage_dir}/result/lcov.info"
+  rm -rf "${coverage_dir}/report-binaries"
 }
 
 # CI keeps one instrumented build and accumulates profiles across package steps.
