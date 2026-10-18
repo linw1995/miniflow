@@ -156,7 +156,31 @@ def coverage_summary(jobs, current_wall):
     return lines
 
 
-def render_report(run, jobs, samples, branch):
+def validation_record(api, repository, run, pr):
+    import subprocess
+    import zipfile
+    from pr_validation import artifact_name, download_artifact, read_record
+    if run["conclusion"] != "success":
+        return None
+    try:
+        artifacts = api.request(f"/actions/runs/{run['id']}/artifacts?per_page=100")["artifacts"]
+        matches = [a for a in artifacts if a["name"] == artifact_name(run) and not a["expired"]]
+        if len(matches) != 1:
+            return None
+        record = read_record(download_artifact(repository, matches[0]["id"]))
+        if (record["repository"] != repository or record["pr"] != pr or record["head"] != run["head_sha"]
+                or record["run_id"] != run["id"] or record["run_attempt"] != run["run_attempt"]):
+            return None
+        if not {"scope", "base", "head", "previous", "reason"} <= record["comparison"].keys():
+            return None
+        if not {"covered", "total", "status"} <= record["coverage"].keys():
+            return None
+        return record
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError, zipfile.BadZipFile):
+        return None
+
+
+def render_report(run, jobs, samples, branch, validation=None):
     complete = run["conclusion"] == "success"
     baseline_wall = median([wall_time(candidate, sample) for candidate, sample in samples]) if samples else None
     current_wall = wall_time(run, jobs)
@@ -169,6 +193,17 @@ def render_report(run, jobs, samples, branch):
         f"for `{run['head_sha'][:12]}`: **{label(run['conclusion'])}**.",
         "",
     ]
+    if validation is not None:
+        comparison, coverage = validation["comparison"], validation["coverage"]
+        lines.extend([
+            "### Validation range", "",
+            f"Scope: {label(comparison['scope'])}.",
+            f"Comparison: {label(comparison['base'])} to {label(comparison['head'])}.",
+            f"Inherited validation: {label(comparison['previous'])}.",
+            f"Selection reason: {label(comparison['reason'])}.",
+            f"Current increment coverage: {label(coverage['covered'])}/{label(coverage['total'])} executable lines; {label(coverage['status'])}.",
+            "Inherited validation does not contribute historical LCOV hits to this measurement.", "",
+        ])
     lines.extend(coverage_summary(jobs, current_wall))
     lines.extend([
         "### Timing comparison",
@@ -258,7 +293,8 @@ def main():
         return
     for pull in current_pull_requests(api, run):
         samples = baseline_runs(api, run, pull["base"]["ref"], jobs)
-        body = render_report(run, jobs, samples, pull["base"]["ref"])
+        validation = validation_record(api, os.environ["GITHUB_REPOSITORY"], run, pull["number"])
+        body = render_report(run, jobs, samples, pull["base"]["ref"], validation)
         if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
             with Path(summary).open("a") as output:
                 output.write(body)

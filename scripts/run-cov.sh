@@ -4,6 +4,14 @@ set -euo pipefail
 
 workspace_root="$(pwd -P)"
 coverage_dir="${workspace_root}/target/coverage"
+coverage_input_environment="$(python3 - <<'PYTHON'
+import json, os
+print(json.dumps({name: os.environ[name] for name in (
+    "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL",
+    "CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG",
+) if name in os.environ}))
+PYTHON
+)"
 export CARGO_INCREMENTAL=0
 export CARGO_TARGET_DIR="${coverage_dir}/build"
 export RUSTFLAGS="-Cinstrument-coverage -Ccodegen-units=1 -Copt-level=0"
@@ -47,11 +55,12 @@ prepare_coverage() {
 
   # grcov scans every binary in its search directory. Remove old workspace mappings while retaining dependencies.
   cargo clean --workspace --profile dev
-  python3 - <<'PYTHON'
+  python3 - "$coverage_input_environment" <<'PYTHON'
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 def git(*args):
     return subprocess.check_output(["git", *args], stderr=subprocess.DEVNULL, text=True).strip()
@@ -65,6 +74,7 @@ try:
 except subprocess.CalledProcessError:
     pass
 identity = {"head": head, "tree": tree, "dirty": dirty,
+            "input_environment": json.loads(sys.argv[1]),
             "toolchain": subprocess.check_output(["rustc", "-vV"], text=True),
             "features": "all", "target": os.environ.get("CARGO_BUILD_TARGET"),
             "profile": os.environ.get("NEXTEST_PROFILE", "default")}

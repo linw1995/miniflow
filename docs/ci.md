@@ -1,21 +1,26 @@
 # CI tests
 
-Pull requests use rust-analyzer's crate graph and Cargo metadata to select
-changed packages and their transitive reverse dependencies. The coverage job
-checks out GitHub's PR merge commit with comparison history and compares it
-with its first parent, the actual base snapshot used for that merge. An older
-base SHA in the event payload must not add unrelated main-branch changes to the
-PR selection. Dependency analysis and tests still use the complete merged tree.
-The job records the selection and reasons in its summary. It runs those package
-suites with coverage; an empty selection skips the coverage cache,
-tests, and uploads. Known repository configuration is deferred to full main/nightly
-verification; unknown shared inputs or analyzer failures select the full workspace.
+Pull requests select packages from changes since the nearest compatible successful
+validation. CI compares the previous tested merge snapshot directly with the current
+merge snapshot. Reuse requires the same actual target-base commit, an ancestor PR
+head, compatible execution settings, and a completed successful workflow attempt.
+Without that evidence, CI selects from the entire PR diff against the current
+merge's actual first parent. Stale base metadata from the event is never used.
 
-Pushes to `main` and manual CI dispatches run the complete Linux suite through
-the same coverage script as local runs. Both full and selected runs use
-the pinned toolchain, instrument workspace binaries, and write reports to
-`target/coverage/result/`, including `lcov.info`. Test failures stop report
-generation and fail CI.
+All analysis, compilation, and execution use the current merged tree. The selection
+retains changed packages and every declared reverse dependency. Known repository
+configuration is deferred to full main/nightly verification; unknown inputs or
+analyzer failures select the workspace. An empty plan skips Rust tests and reports
+coverage as not applicable, while lint and build checks still apply.
+
+Selected tests run once with coverage. The local gate measures changed executable
+lines over the same comparison and enforces `PR_COVERAGE_TARGET`. The final
+`validation` job requires lint, build, and coverage success, verifies the PR title
+check, and publishes an attempt-bound success record. Failed, cancelled, incomplete,
+or unpublishable validation cannot advance the reusable baseline.
+
+Pushes to `main` and manual dispatch without PR inputs run complete Linux coverage.
+Nightly retains complete Linux/macOS verification. Test or report failures fail CI.
 
 Formatting, package builds, Clippy, repository hooks, and CI script tests
 also run in CI. Main additionally builds and checks the macOS package;
@@ -98,15 +103,18 @@ without a phase argument still prepare, test, and report in one command.
 
 ## Codecov reports
 
-Main, nightly, and full-workspace PR fallback runs upload LCOV with the `rust`
-flag. Selected PR runs use `rust-affected`. Automatic report discovery and
-carryforward are disabled; reports describe tests executed for the current
-source tree.
+Main, nightly, and manual full-suite runs upload LCOV with the `rust` flag for
+project coverage. Automatic report discovery and carry-forward remain disabled.
+PR runs retain their measured LCOV and incremental gate result as Actions artifacts;
+they do not upload a partial increment as cumulative PR patch coverage. The old
+Codecov patch status is disabled and the required local `coverage`/`validation`
+checks provide the incremental coverage decision.
 
-Project coverage considers only full `rust` reports, and is excluded when that
-flag is not uploaded. PR patch coverage accepts either flag. Codecov comments
-hide project-wide coverage so a partial run is not presented as a complete
-project measurement. See Codecov's [flag status rules](https://docs.codecov.com/docs/commit-status#flags).
+The `coverage` artifact contains current LCOV and source provenance. The
+`pr-validation-input-<run>-<attempt>` artifact contains context, comparison, selected
+plan, and gate result. Only the final successful aggregate job publishes
+`pr-validation-<run>-<attempt>` for future reuse. Failed gates retain report artifacts
+when report generation succeeded, but never publish a successful validation record.
 
 ## Scheduled full tests
 
@@ -169,8 +177,9 @@ nextest without package arguments. `--run` handles that case automatically.
 The selector's `--run` command uses `--locked --all-targets --all-features`.
 Coverage retains its existing target selection and changes only the package scope.
 
-To reproduce PR coverage, save the plan outside the checkout and pass it to
-the coverage script:
+To reproduce selected test execution, pass the saved CI plan to the coverage
+script. The following local example selects cumulative PR scope; it does not
+resolve a successful CI baseline or reproduce an incremental gate:
 
 ```bash
 nix develop --command python3 scripts/affected_tests.py --base origin/main --json > /tmp/affected-tests.json
@@ -261,8 +270,9 @@ affected scope. This reset does not force workspace-wide tests or change the
 existing root dependency/configuration deferrals. Local selectors never fetch;
 only CI orchestration may retrieve a recorded merge object.
 
-The helper is staged for workflow integration; current CI still uses cumulative
-PR selection until the incremental coverage gate and final record job are wired.
+CI uses this helper for baseline resolution. The final `validation` job checks all
+required job results before publishing a record; future discovery also verifies the
+producing workflow attempt ultimately completed successfully.
 
 For a validated prior merge snapshot, direct comparison is explicit:
 
@@ -296,4 +306,21 @@ The incremental target is configured once as `PR_COVERAGE_TARGET` in CI. The
 migration sets 95%, above the verified effective 94.89% Codecov auto target on
 `b1135c0`; it does not lower the gate when selection shrinks. Records include the
 target in compatibility identity. Main/nightly project coverage keeps its current
-policy. The evaluator is staged for workflow integration with the final record job.
+policy. The evaluator and final record job enforce the same recorded target.
+
+### Explicit cumulative PR reruns
+
+Dispatch CI on the PR branch with its number and exact current tested merge SHA:
+
+```bash
+gh workflow run CI.yaml --ref "$PR_BRANCH" -f pr="$PR_NUMBER" -f merge_sha="$TESTED_MERGE"
+```
+
+All jobs check out the supplied merge SHA. The helper verifies its PR head against
+the requested PR and workflow run; selection and coverage both use the cumulative
+PR diff. A successful run can establish a new baseline. Omit both inputs for the
+existing full-suite manual run. An unavailable or mismatched merge is an error.
+
+The main-branch ruleset retains coverage, lint, title, and Ubuntu build checks.
+Add the demonstrated `validation` status to the required checks during rollout;
+there is no required Codecov patch status to remove in the current ruleset.

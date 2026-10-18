@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import Mock, patch
 
 import ci_monitor as monitor
 
@@ -196,6 +197,28 @@ class CoverageSummaryTests(unittest.TestCase):
         report = self.summary([("unsafe|<img>\n`name`", 10, 70, "skipped")])
         self.assertIn("<code>unsafe&#124;&lt;img&gt; &#96;name&#96;</code>", report)
         self.assertNotIn("<img>", report)
+
+
+class ValidationSummaryTests(unittest.TestCase):
+    def test_record_is_bound_to_the_attempt_and_report_separates_inherited_validation(self):
+        current = run()
+        record = {'repository': 'owner/repo', 'pr': 12, 'head': current['head_sha'],
+                  'run_id': current['id'], 'run_attempt': 1,
+                  'comparison': {'scope': 'incremental', 'base': 'b' * 40, 'head': 'c' * 40,
+                                 'previous': {'run_id': 9, 'run_attempt': 1}, 'reason': 'reuse <unsafe>'},
+                  'coverage': {'covered': 95, 'total': 100, 'status': 'passed'}}
+        api = Mock()
+        api.request.return_value = {'artifacts': [{'id': 7, 'name': 'pr-validation-10-1', 'expired': False}]}
+        with patch('pr_validation.download_artifact', return_value=b'fixture'), patch('pr_validation.read_record', return_value=record):
+            loaded = monitor.validation_record(api, 'owner/repo', current, 12)
+            report = monitor.render_report(current, {'coverage': job('coverage')}, [], 'main', loaded)
+            self.assertIn('Current increment coverage:', report)
+            self.assertIn('Inherited validation:', report)
+            self.assertIn('&lt;unsafe&gt;', report)
+            record['run_attempt'] = 2
+            self.assertIsNone(monitor.validation_record(api, 'owner/repo', current, 12))
+        api.request.side_effect = OSError('artifact expired')
+        self.assertIsNone(monitor.validation_record(api, 'owner/repo', current, 12))
 
 
 class CommentTests(unittest.TestCase):

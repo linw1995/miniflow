@@ -4,6 +4,15 @@ on:
   pull_request:
     types: [opened, reopened, synchronize]
   workflow_dispatch:
+    inputs:
+      pr:
+        description: "PR number for cumulative validation (empty runs the full suite)"
+        type: string
+        default: ""
+      merge_sha:
+        description: "Exact tested PR merge SHA; dispatch on the PR branch"
+        type: string
+        default: ""
   push:
     branches:
       - main
@@ -13,6 +22,8 @@ env:
 
 permissions:
   contents: read
+  actions: read
+  checks: read
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.run_id }}
@@ -23,6 +34,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.merge_sha || github.sha }}
       - uses: ./.github/actions/setup-nix
         with:
           cache-key-name: lint
@@ -49,6 +62,8 @@ jobs:
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.merge_sha || github.sha }}
       - uses: ./.github/actions/setup-nix
       - name: Check formatting and workflows
         if: matrix.runner == 'ubuntu-latest'
@@ -79,32 +94,21 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.merge_sha || github.sha }}
           fetch-depth: 0
       - uses: ./.github/actions/setup-nix
         with:
           cache-key-name: coverage
-      - name: Select affected PR tests
+      - name: Select incremental PR tests
         id: selection
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' || inputs.pr != ''
         env:
-          TEST_HEAD_SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
         run: |
-          nix develop --command python3 scripts/affected_tests.py \
-            --commit "$TEST_HEAD_SHA" --json > "$RUNNER_TEMP/affected-tests.json"
-          {
-            printf 'run=%s\n' "$(jq '.packages | length > 0' "$RUNNER_TEMP/affected-tests.json")"
-            printf 'packages=%s\n' "$(jq -c '.packages' "$RUNNER_TEMP/affected-tests.json")"
-            printf 'coverage_flag=%s\n' "$(jq -r 'if .mode == "all" then "rust" else "rust-affected" end' "$RUNNER_TEMP/affected-tests.json")"
-          } >> "$GITHUB_OUTPUT"
-          {
-            echo '### Affected Rust tests'
-            echo '```json'
-            jq '{mode, packages, reasons, fallback_reasons, ignored_files}' "$RUNNER_TEMP/affected-tests.json"
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          nix develop --command python3 scripts/pr_validation.py select \
+            --directory "$RUNNER_TEMP/pr-validation" --coverage-target "$PR_COVERAGE_TARGET"
       - name: Cache coverage dependencies
-        if: github.event_name != 'pull_request' || steps.selection.outputs.run == 'true'
+        if: steps.selection.outputs.scoped != 'true' || steps.selection.outputs.run == 'true'
         uses: actions/cache@v6
         with:
           path: |
@@ -117,70 +121,115 @@ jobs:
             coverage-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.lock', 'scripts/run-cov.sh') }}-
             coverage-${{ runner.os }}-${{ runner.arch }}-
       - name: Prepare and build coverage tests
-        if: github.event_name != 'pull_request' || steps.selection.outputs.run == 'true'
+        if: steps.selection.outputs.scoped != 'true' || steps.selection.outputs.run == 'true'
         env:
-          EVENT_NAME: ${{ github.event_name }}
+          SCOPED_VALIDATION: ${{ steps.selection.outputs.scoped }}
         run: |
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            nix develop --command bash scripts/run-cov.sh --prepare --affected-plan "$RUNNER_TEMP/affected-tests.json"
+          if [[ "$SCOPED_VALIDATION" == "true" ]]; then
+            nix develop --command bash scripts/run-cov.sh --prepare --affected-plan "$RUNNER_TEMP/pr-validation/plan.json"
           else
             nix develop --command bash scripts/run-cov.sh --prepare
           fi
       - name: Coverage tests (mf-chat)
-        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-chat')
+        if: steps.selection.outputs.scoped != 'true' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-chat')
         run: nix develop --command bash scripts/run-cov.sh --test-package mf-chat
       - name: Coverage tests (mf-cli)
-        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-cli')
+        if: steps.selection.outputs.scoped != 'true' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-cli')
         run: nix develop --command bash scripts/run-cov.sh --test-package mf-cli
       - name: Coverage tests (mf-compiler)
-        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-compiler')
+        if: steps.selection.outputs.scoped != 'true' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-compiler')
         run: nix develop --command bash scripts/run-cov.sh --test-package mf-compiler
       - name: Coverage tests (mf-runtime)
-        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-runtime')
+        if: steps.selection.outputs.scoped != 'true' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-runtime')
         run: nix develop --command bash scripts/run-cov.sh --test-package mf-runtime
       - name: Coverage tests (mf-runtime-derive)
-        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-runtime-derive')
+        if: steps.selection.outputs.scoped != 'true' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-runtime-derive')
         run: nix develop --command bash scripts/run-cov.sh --test-package mf-runtime-derive
       - name: Coverage tests (mf-telemetry)
-        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-telemetry')
+        if: steps.selection.outputs.scoped != 'true' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-telemetry')
         run: nix develop --command bash scripts/run-cov.sh --test-package mf-telemetry
       - name: Coverage tests (mf-tui)
-        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-tui')
+        if: steps.selection.outputs.scoped != 'true' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mf-tui')
         run: nix develop --command bash scripts/run-cov.sh --test-package mf-tui
       - name: Coverage tests (mfn-code)
-        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mfn-code')
+        if: steps.selection.outputs.scoped != 'true' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mfn-code')
         run: nix develop --command bash scripts/run-cov.sh --test-package mfn-code
       - name: Coverage tests (mfn-core)
-        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mfn-core')
+        if: steps.selection.outputs.scoped != 'true' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mfn-core')
         run: nix develop --command bash scripts/run-cov.sh --test-package mfn-core
       - name: Coverage tests (mfn-llm)
-        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mfn-llm')
+        if: steps.selection.outputs.scoped != 'true' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mfn-llm')
         run: nix develop --command bash scripts/run-cov.sh --test-package mfn-llm
       - name: Coverage tests (mfn-lsp)
-        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mfn-lsp')
+        if: steps.selection.outputs.scoped != 'true' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mfn-lsp')
         run: nix develop --command env MF_LSP_SMOKE_SERVER=rust-analyzer bash scripts/run-cov.sh --test-package mfn-lsp --run-ignored all
       - name: Coverage tests (mfn-test-affected)
-        if: github.event_name != 'pull_request' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mfn-test-affected')
+        if: steps.selection.outputs.scoped != 'true' || contains(fromJSON(steps.selection.outputs.packages || '[]'), 'mfn-test-affected')
         run: nix develop --command bash scripts/run-cov.sh --test-package mfn-test-affected
       - name: Generate coverage reports
-        if: github.event_name != 'pull_request' || steps.selection.outputs.run == 'true'
+        id: report
+        if: steps.selection.outputs.scoped != 'true' || steps.selection.outputs.run == 'true'
         run: nix develop --command bash scripts/run-cov.sh --report
+      - name: Check incremental coverage
+        if: steps.selection.outputs.scoped == 'true'
+        run: |
+          nix develop --command python3 scripts/pr_validation.py evaluate \
+            --directory "$RUNNER_TEMP/pr-validation"
+      - name: Upload validation inputs
+        if: steps.selection.outputs.scoped == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr-validation-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr-validation/
+          if-no-files-found: error
       - name: Prune coverage build cache
-        if: github.event_name != 'pull_request' || steps.selection.outputs.run == 'true'
+        if: steps.selection.outputs.scoped != 'true' || steps.selection.outputs.run == 'true'
         run: nix develop --command bash scripts/run-cov.sh --prune-cache
       - name: Upload coverage artifact
-        if: github.event_name != 'pull_request' || steps.selection.outputs.run == 'true'
+        if: always() && steps.report.outcome == 'success'
         uses: actions/upload-artifact@v7
         with:
           name: coverage
           path: target/coverage/result/
+          if-no-files-found: error
           overwrite: true
       - name: Upload coverage to Codecov
-        if: github.event_name != 'pull_request' || steps.selection.outputs.run == 'true'
+        if: steps.selection.outputs.scoped != 'true'
         uses: codecov/codecov-action@v7
         with:
           files: target/coverage/result/lcov.info
           disable_search: true
-          flags: ${{ steps.selection.outputs.coverage_flag || 'rust' }}
-          fail_ci_if_error: false
+          flags: rust
+          fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}
+
+  validation:
+    if: always()
+    needs: [lint, check, coverage]
+    runs-on: ubuntu-latest
+    env:
+      VALIDATION_NEEDS: ${{ toJSON(needs) }}
+    steps:
+      - name: Require all validation jobs
+        run: jq -e 'all(.[]; .result == "success")' <<< "$VALIDATION_NEEDS"
+      - uses: actions/checkout@v7
+        if: github.event_name == 'pull_request' || inputs.pr != ''
+        with:
+          ref: ${{ inputs.merge_sha || github.sha }}
+          fetch-depth: 2
+      - uses: actions/download-artifact@v8
+        if: github.event_name == 'pull_request' || inputs.pr != ''
+        with:
+          name: pr-validation-input-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr-validation/
+      - name: Record successful PR validation
+        if: github.event_name == 'pull_request' || inputs.pr != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/pr_validation.py record --directory "$RUNNER_TEMP/pr-validation"
+      - uses: actions/upload-artifact@v7
+        if: github.event_name == 'pull_request' || inputs.pr != ''
+        with:
+          name: pr-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr-validation/validation.json
+          if-no-files-found: error

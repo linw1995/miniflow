@@ -111,6 +111,7 @@ jobs:
         with:
           name: coverage
           path: target/coverage/result/
+          if-no-files-found: error
           overwrite: true
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
@@ -118,5 +119,5 @@ jobs:
           files: target/coverage/result/lcov.info
           disable_search: true
           flags: rust
-          fail_ci_if_error: false
+          fail_ci_if_error: true
           token: ${{ secrets.CODECOV_TOKEN }}

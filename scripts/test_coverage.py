@@ -39,7 +39,7 @@ class CoverageTests(unittest.TestCase):
                         self.assertIn("env MF_LSP_SMOKE_SERVER=rust-analyzer", body)
                     if filename == "CI.yaml":
                         self.assertIn(
-                            "if: github.event_name != 'pull_request' || "
+                            "if: steps.selection.outputs.scoped != 'true' || "
                             f"contains(fromJSON(steps.selection.outputs.packages || '[]'), '{name}')",
                             body,
                         )
@@ -173,6 +173,7 @@ mod tests {{
             context = {"merge": head, "tree": git("rev-parse", "HEAD^{tree}"),
                        "signature": {key: provenance[key] for key in ("toolchain", "target", "profile")}}
             context["signature"]["coverage_target"] = 95
+            context["signature"]["environment"] = provenance["input_environment"]
             comparison = {"base": base, "head": head}
             plan = comparison | {"comparison_mode": "snapshot", "packages": ["coverage-fixture"], "ignored_files": []}
             coverage = pr_validation.evaluate_coverage(root, context, comparison, plan, report)

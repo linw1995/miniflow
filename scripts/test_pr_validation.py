@@ -1,3 +1,4 @@
+import contextlib
 import copy
 import io
 import json
@@ -46,6 +47,7 @@ class ValidationTests(unittest.TestCase):
                'status': 'completed', 'conclusion': 'success'}
         record = self.current | {'run_id': run_id, 'run_attempt': attempt, 'head': self.heads[index],
                                 'merge': self.merges[index], 'tree': self.git('rev-parse', self.merges[index] + '^{tree}')}
+        record['title_check'] = {'id': 11, 'head_sha': record['head'], 'conclusion': 'success'}
         record['comparison'] = validation.cumulative(record, 'First validation')
         record['packages'] = ['sample']
         record['coverage'] = {'status': 'passed', 'base': self.base, 'head': record['merge'], 'tree': record['tree'],
@@ -144,13 +146,13 @@ class ValidationTests(unittest.TestCase):
 
     def coverage_inputs(self):
         current = copy.deepcopy(self.current)
-        current['signature'].update(toolchain='fixture', features='all', target=None, profile='ci')
+        current['signature'].update(toolchain='fixture', features='all', target=None, profile='ci', environment={})
         comparison = validation.cumulative(current, 'fixture')
         plan = {'base': comparison['base'], 'head': comparison['head'], 'comparison_mode': 'snapshot',
                 'packages': ['sample'], 'ignored_files': []}
         report = self.root / 'target/result/lcov.info'
         report.parent.mkdir(parents=True, exist_ok=True)
-        identity = {'head': current['merge'], 'tree': current['tree'], 'dirty': False,
+        identity = {'head': current['merge'], 'tree': current['tree'], 'dirty': False, 'input_environment': {},
                     'toolchain': 'fixture', 'features': 'all', 'target': None, 'profile': 'ci'}
         report.with_name('source.json').write_text(json.dumps(identity))
         return current, comparison, plan, report
@@ -210,6 +212,86 @@ class ValidationTests(unittest.TestCase):
         result = validation.evaluate_coverage(self.root, current, comparison, plan, report)
         self.assertEqual((result['covered'], result['total']), (1, 1))
         self.assertNotIn('source.rs', validation.changed_lines(self.root, previous, merge))
+
+    def test_final_record_requires_all_jobs_title_coverage_and_exact_attempt(self):
+        current, comparison, plan, report = self.coverage_inputs()
+        report.write_text('SF:source.rs\nDA:1,1\nend_of_record\n')
+        coverage = validation.evaluate_coverage(self.root, current, comparison, plan, report)
+        needs = {name: {'result': 'success'} for name in ['lint', 'check', 'coverage']}
+        run = {'id': 9, 'run_attempt': 1, 'workflow_id': 2, 'head_sha': current['head']}
+        title = {'id': 3, 'head_sha': current['head'], 'conclusion': 'success', 'name': 'pr-title', 'app': {'slug': 'github-actions'}}
+        record = validation.make_record(self.root, current, comparison, plan, coverage, needs, run, title)
+        self.assertEqual(record['title_check']['id'], 3)
+        for job in needs:
+            for result in ['failure', 'cancelled', 'skipped']:
+                with self.subTest(job=job, result=result), self.assertRaises(ValueError):
+                    validation.make_record(self.root, current, comparison, plan, coverage, needs | {job: {'result': result}}, run, title)
+        for changed_run, changed_title, changed_coverage in [
+            (run | {'run_attempt': 2}, title, coverage),
+            (run, title | {'conclusion': 'failure'}, coverage),
+            (run, title, coverage | {'status': 'failed'}),
+        ]:
+            with self.assertRaises(ValueError):
+                validation.make_record(self.root, current, comparison, plan, changed_coverage, needs, changed_run, changed_title)
+        completed = run | {'status': 'completed', 'conclusion': 'failure'}
+        self.assertFalse(validation.eligible(self.root, current, completed, record))
+        completed['conclusion'] = 'success'
+        self.assertTrue(validation.eligible(self.root, current, completed, record))
+
+    def test_cli_bootstrap_empty_evaluation_record_and_manual_cumulative_reset(self):
+        self.base = self.current['merge']
+        (self.root / 'docs').mkdir()
+        (self.root / 'docs/guide.md').write_text('documentation\n')
+        self.git('add', '.')
+        self.git('commit', '-qm', 'test(ci): docs increment')
+        head = self.git('rev-parse', 'HEAD')
+        merge = self.git('commit-tree', self.git('rev-parse', 'HEAD^{tree}'), '-p', self.base, '-p', head, '-m', 'merge')
+        self.git('checkout', '-q', '--detach', merge)
+        self.current = validation.current_context(self.root, 'owner/repo', 7,
+            {'id': 9, 'run_attempt': 1, 'workflow_id': 2}, {'coverage_target': 95, 'policy': validation.POLICY})
+        directory = self.root / 'target/validation'
+        directory.mkdir(parents=True)
+        event = self.root / 'target/event.json'
+        pull = {'head': {'sha': self.current['head'], 'ref': 'feature'}, 'merge_commit_sha': self.current['merge']}
+        event.write_text(json.dumps({'number': 7, 'pull_request': pull}))
+        run = {'id': 9, 'run_attempt': 1, 'workflow_id': 2, 'head_sha': self.current['head']}
+        plan = {'base': self.base, 'head': self.current['merge'], 'comparison_mode': 'snapshot',
+                'packages': [], 'ignored_files': ['docs/guide.md'], 'reasons': {}, 'fallback_reasons': []}
+        signature = {'policy': validation.POLICY, 'coverage_target': 95, 'target': None}
+        env = {'GITHUB_REPOSITORY': 'owner/repo', 'GITHUB_RUN_ID': '9', 'GITHUB_RUN_ATTEMPT': '1',
+               'GITHUB_EVENT_PATH': str(event), 'GITHUB_EVENT_NAME': 'pull_request', 'GH_TOKEN': 'fixture',
+               'GITHUB_OUTPUT': str(self.root / 'target/output'), 'GITHUB_STEP_SUMMARY': str(self.root / 'target/summary')}
+        def invoke(phase, api, extra=()):
+            with patch.dict(validation.os.environ, env, clear=True), patch.object(validation.Path, 'cwd', return_value=self.root), \
+                    patch('ci_monitor.GitHub', return_value=api), patch.object(validation, 'execution_signature', return_value=signature), \
+                    patch.object(validation.affected, 'make_plan', return_value=plan) as selector, \
+                    patch.object(validation.sys, 'argv', ['pr_validation.py', phase, '--directory', str(directory), *extra]), \
+                    contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return validation.main(), selector
+        api = Mock()
+        api.request.side_effect = [run, {'workflow_runs': []}]
+        result, selector = invoke('select', api, ['--coverage-target', '95'])
+        self.assertEqual(result, 0)
+        self.assertEqual(selector.call_args.args[1].comparison, 'snapshot')
+        self.assertEqual(json.loads((directory / 'comparison.json').read_text())['scope'], 'cumulative')
+        self.assertEqual(invoke('evaluate', Mock())[0], 0)
+        self.assertEqual(json.loads((directory / 'coverage.json').read_text())['status'], 'not_applicable')
+        env['VALIDATION_NEEDS'] = json.dumps({name: {'result': 'success'} for name in ['lint', 'check', 'coverage']})
+        title = {'id': 11, 'head_sha': self.current['head'], 'conclusion': 'success', 'name': 'pr-title', 'app': {'slug': 'github-actions'}}
+        api = Mock()
+        api.request.side_effect = [run, {'check_runs': [title]}]
+        self.assertEqual(invoke('record', api)[0], 0)
+        self.assertTrue((directory / 'validation.json').is_file())
+        env['GITHUB_EVENT_NAME'] = 'workflow_dispatch'
+        event.write_text(json.dumps({'inputs': {'pr': '7', 'merge_sha': self.current['merge']}}))
+        api = Mock()
+        api.request.side_effect = [run, pull]
+        self.assertEqual(invoke('select', api, ['--coverage-target', '95'])[0], 0)
+        self.assertIn('explicitly', json.loads((directory / 'comparison.json').read_text())['reason'])
+        event.write_text(json.dumps({'inputs': {'pr': '7', 'merge_sha': self.base}}))
+        api = Mock()
+        api.request.side_effect = [run, pull]
+        self.assertEqual(invoke('select', api, ['--coverage-target', '95'])[0], 1)
 
 
 if __name__ == '__main__':

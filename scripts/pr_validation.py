@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Resolve and record successful incremental PR validation."""
 
+import argparse
 import io
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 import time
 from urllib.parse import urlencode
 import zipfile
 
+import affected_tests as affected
 from affected_tests import AnalysisError, command, revision
 
 
@@ -88,6 +91,8 @@ def eligible(root, current, run, record):
                 return False
         if not all(isinstance(record[key], str) and SHA.fullmatch(record[key]) for key in ("head", "base", "merge", "tree")):
             return False
+        if record["title_check"]["head_sha"] != record["head"] or record["title_check"]["conclusion"] != "success":
+            return False
         comparison = record["comparison"]
         if (comparison["head"] != record["merge"] or comparison["scope"] not in {"incremental", "cumulative"}
                 or not isinstance(comparison["base"], str) or not SHA.fullmatch(comparison["base"])
@@ -123,7 +128,10 @@ def read_record(archive):
     with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
         if zipped.namelist() != [RECORD_FILE] or zipped.getinfo(RECORD_FILE).file_size > 1024 * 1024:
             raise ValueError("unexpected validation artifact contents")
-        return json.loads(zipped.read(RECORD_FILE))
+        record = json.loads(zipped.read(RECORD_FILE))
+        if not isinstance(record, dict):
+            raise ValueError("Validation artifact must contain an object")
+        return record
 
 
 def discover_baseline(root, current, api, branch, download):
@@ -235,6 +243,7 @@ def evaluate_coverage(root, current, comparison, plan, report):
     if plan["packages"]:
         provenance = json.loads(report.with_name("source.json").read_text())
         expected = {"head": current["merge"], "tree": current["tree"], "dirty": False,
+                    "input_environment": current["signature"]["environment"],
                     "toolchain": current["signature"]["toolchain"], "features": "all",
                     "target": current["signature"]["target"], "profile": current["signature"]["profile"]}
         if provenance != expected:
@@ -269,3 +278,121 @@ def evaluate_coverage(root, current, comparison, plan, report):
     return {"base": comparison["base"], "head": current["merge"], "tree": current["tree"],
             "covered": covered, "total": total, "target": target, "uncovered": uncovered,
             "status": "not_applicable" if total == 0 else "passed" if covered * 100 >= target * total else "failed"}
+
+
+def download_artifact(repository, artifact_id):
+    return subprocess.run(["gh", "api", f"/repos/{repository}/actions/artifacts/{artifact_id}/zip"],
+                          check=True, capture_output=True, timeout=30).stdout
+
+
+def make_record(root, current, comparison, plan, coverage, needs, run, title_check):
+    if set(needs) != {"lint", "check", "coverage"} or any(job["result"] != "success" for job in needs.values()):
+        raise ValueError("All required CI jobs must succeed before publishing validation")
+    expected = current_context(root, current["repository"], current["pr"], run, current["signature"])
+    if current != expected or run["head_sha"] != current["head"] or current["signature"]["policy"] != POLICY:
+        raise ValueError("Validation input belongs to another source or workflow attempt")
+    if (title_check["head_sha"] != current["head"] or title_check["conclusion"] != "success"
+            or title_check["name"] != "pr-title" or title_check["app"]["slug"] != "github-actions"):
+        raise ValueError("The required PR title check has not succeeded")
+    if (comparison["head"] != current["merge"] or plan["base"] != comparison["base"]
+            or plan["head"] != current["merge"] or plan["comparison_mode"] != "snapshot"):
+        raise ValueError("Selection belongs to another comparison")
+    record = current | {"comparison": comparison, "packages": plan["packages"], "coverage": coverage,
+                        "title_check": {"id": title_check["id"], "head_sha": title_check["head_sha"], "conclusion": "success"}}
+    if not valid_coverage(record):
+        raise ValueError("Incremental coverage did not succeed")
+    return record
+
+
+def write_json(path, value):
+    path.write_text(json.dumps(value, indent=2) + "\n")
+
+
+def summarize(comparison, plan, coverage=None):
+    return {"comparison": comparison, "packages": plan["packages"], "reasons": plan["reasons"],
+            "fallback_reasons": plan["fallback_reasons"], "ignored_files": plan["ignored_files"],
+            "coverage": coverage}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("phase", choices=("select", "evaluate", "record"))
+    parser.add_argument("--directory", type=Path, required=True)
+    parser.add_argument("--coverage-target", type=float)
+    parser.add_argument("--report", type=Path, default=Path("target/coverage/result/lcov.info"))
+    parser.add_argument("--cumulative", action="store_true")
+    args = parser.parse_args()
+    try:
+        root = Path(command(Path.cwd(), "git", "rev-parse", "--show-toplevel").strip()).resolve()
+        directory = args.directory.resolve()
+        directory.mkdir(parents=True, exist_ok=True)
+        if args.phase in {"select", "record"}:
+            from ci_monitor import GitHub
+            repository = os.environ["GITHUB_REPOSITORY"]
+            api = GitHub(repository, os.environ["GH_TOKEN"], os.environ.get("GITHUB_API_URL", "https://api.github.com"))
+            run_id, attempt = int(os.environ["GITHUB_RUN_ID"]), int(os.environ["GITHUB_RUN_ATTEMPT"])
+            run = api.request(f"/actions/runs/{run_id}/attempts/{attempt}")
+            if run["id"] != run_id or run["run_attempt"] != attempt:
+                raise ValueError("Workflow attempt metadata does not match the current run")
+        if args.phase == "select":
+            if args.coverage_target is None:
+                parser.error("select requires --coverage-target")
+            event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+            manual = os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch"
+            pr = int(event["inputs"]["pr"] if manual else event["number"])
+            pull = api.request(f"/pulls/{pr}") if manual else event["pull_request"]
+            current = current_context(root, repository, pr, run, execution_signature(root, args.coverage_target))
+            if current["head"] != pull["head"]["sha"] or current["head"] != run["head_sha"]:
+                raise ValueError("Tested merge and workflow must identify the requested PR head")
+            if manual and (revision(root, event["inputs"]["merge_sha"]) != current["merge"]
+                           or pull["merge_commit_sha"] != current["merge"]):
+                raise ValueError("Manual PR validation requires the current pinned PR merge SHA")
+            if manual or args.cumulative:
+                comparison = cumulative(current, "Cumulative PR validation explicitly requested")
+            else:
+                comparison = discover_baseline(root, current, api, pull["head"]["ref"],
+                                               lambda identifier: download_artifact(repository, identifier))
+            options = argparse.Namespace(base=comparison["base"], head=current["merge"], comparison="snapshot",
+                                         worktree=False, commit=None, target=current["signature"]["target"],
+                                         rust_analyzer="rust-analyzer", timeout=120)
+            plan = affected.make_plan(root, options)
+            write_json(directory / "context.json", current)
+            write_json(directory / "comparison.json", comparison)
+            write_json(directory / "plan.json", plan)
+            if os.environ.get("GITHUB_OUTPUT"):
+                with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+                    output.write(f"scoped=true\nrun={str(bool(plan['packages'])).lower()}\npackages={json.dumps(plan['packages'])}\n")
+            summary = summarize(comparison, plan)
+        else:
+            current, comparison, plan = [json.loads((directory / f"{name}.json").read_text())
+                                         for name in ("context", "comparison", "plan")]
+            if args.phase == "evaluate":
+                coverage = evaluate_coverage(root, current, comparison, plan, args.report)
+                write_json(directory / "coverage.json", coverage)
+                summary = summarize(comparison, plan, coverage)
+            else:
+                event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+                pr = int(event["number"] if os.environ["GITHUB_EVENT_NAME"] == "pull_request" else event["inputs"]["pr"])
+                if current["repository"] != repository or current["pr"] != pr:
+                    raise ValueError("Validation record belongs to another repository or PR")
+                checks = api.request(f"/commits/{current['head']}/check-runs?check_name=pr-title&per_page=100")["check_runs"]
+                checks = [c for c in checks if c["name"] == "pr-title" and c["app"]["slug"] == "github-actions"]
+                if not checks:
+                    raise ValueError("The required PR title check is unavailable")
+                coverage = json.loads((directory / "coverage.json").read_text())
+                record = make_record(root, current, comparison, plan, coverage,
+                                     json.loads(os.environ["VALIDATION_NEEDS"]), run, max(checks, key=lambda c: c["id"]))
+                write_json(directory / RECORD_FILE, record)
+                summary = summarize(comparison, plan, coverage)
+        print(json.dumps(summary, indent=2))
+        if os.environ.get("GITHUB_STEP_SUMMARY"):
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as output:
+                output.write("### PR validation\n\n```json\n" + json.dumps(summary, indent=2) + "\n```\n")
+        return 1 if args.phase == "evaluate" and coverage["status"] == "failed" else 0
+    except (AnalysisError, OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
