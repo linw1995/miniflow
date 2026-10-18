@@ -2,7 +2,7 @@
 
 ### Requirement: Validate standard semantic payloads
 
-The client SHALL use shared LSP protocol types for standard semantic request parameters, results, and capability declarations. Malformed standard results SHALL produce an incomplete analysis outcome rather than usable semantic evidence. Opaque extension data and the serialized Flow evidence contract SHALL remain preserved.
+The client SHALL use shared LSP protocol types for standard semantic request parameters, results, and capability declarations. Malformed standard results SHALL produce an incomplete analysis outcome rather than usable semantic evidence. Opaque call-hierarchy `data` and the serialized Flow evidence contract SHALL remain preserved.
 
 #### Scenario: Reject malformed semantic evidence
 

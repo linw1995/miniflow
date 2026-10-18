@@ -90,10 +90,12 @@ while True:
         source_range = {'start': {'line': 0, 'character': 3}, 'end': {'line': 0, 'character': 9}}
         symbol = {'name': 'chosen', 'kind': 12, 'range': source_range, 'selectionRange': source_range}
         result = [symbol]
+        if mode == 'missing_name':
+            del symbol['name']
         if mode == 'flat':
             result = [{'name': 'chosen', 'kind': 12, 'location': {'uri': request['params']['textDocument']['uri'], 'range': source_range}}]
         elif mode == 'children':
-            symbol['children'] = [dict(symbol)]
+            symbol['children'] = [{**symbol, 'name': 'child'}]
         elif mode == 'null_symbols':
             result = None
         elif mode == 'bad_symbols':
@@ -118,20 +120,31 @@ while True:
             send({'id': request['id'], 'result': None})
             continue
         if mode in ('document_limit', 'snapshot_limit'):
-            send({'id': request['id'], 'result': ['x' * 40000]})
+            send({'id': request['id'], 'result': [{'uri': 'file:///' + 'x' * 40000, 'range': source_range}]})
             continue
         if mode == 'partial_limit':
             for _ in range(2):
                 send({'method': '$/progress', 'params': {'token': request['params']['partialResultToken'], 'value': ['x' * 40000]}})
             continue
+        if mode == 'bad_reference':
+            send({'id': request['id'], 'result': [{'uri': 'file:///missing-range'}]})
+            continue
         send({'method': '$/progress', 'params': {'token': request['params']['partialResultToken'],
              'value': [{'uri': 'file:///partial', 'range': {'start': {'line': 0, 'character': 0}, 'end': {'line': 0, 'character': 1}}}]}})
-        send({'id': request['id'], 'result': [{'uri': 'file:///final', 'range': {'start': {'line': 0, 'character': 0}, 'end': {'line': 0, 'character': 1}}}]})
+        send({'id': request['id'], 'result': {} if mode == 'bad_partial_final' else [{'uri': 'file:///final', 'range': {'start': {'line': 0, 'character': 0}, 'end': {'line': 0, 'character': 1}}}]})
     elif method == 'textDocument/prepareCallHierarchy':
-        send({'id': request['id'], 'result': [{'name': 'chosen', 'data': {'opaque': 42}}]})
+        call = {**symbol, 'uri': request['params']['textDocument']['uri'], 'data': {'opaque': 42}}
+        call.pop('children', None)
+        if mode == 'bad_call_item':
+            del call['selectionRange']
+        send({'id': request['id'], 'result': [call]})
     elif method == 'callHierarchy/incomingCalls':
         assert request['params']['item']['data'] == {'opaque': 42}
-        send({'id': request['id'], 'result': [{'from': {'name': 'test_chosen'}, 'fromRanges': []}]})
+        caller = {**request['params']['item'], 'name': 'test_chosen'}
+        incoming = {'from': caller, 'fromRanges': []}
+        if mode == 'bad_incoming':
+            del incoming['fromRanges']
+        send({'id': request['id'], 'result': [incoming]})
     elif method == 'shutdown':
         send({'id': request['id'], 'result': None})
     elif method == 'exit':

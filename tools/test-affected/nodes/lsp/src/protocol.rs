@@ -1,4 +1,9 @@
 use crate::{error::*, model::ServerConfig};
+use lsp_types::{
+    self as lsp,
+    notification::{Notification, Progress},
+    request::{self, Request},
+};
 use mf_runtime::StreamCancellation;
 use serde_json::{Value, json};
 use snafu::{ResultExt, ensure};
@@ -36,7 +41,6 @@ pub struct Session {
     root_uri: String,
     pub status: Option<Value>,
     pub progress: usize,
-    pub capabilities: Value,
 }
 
 impl Session {
@@ -91,7 +95,6 @@ impl Session {
             root_uri,
             status: None,
             progress: 0,
-            capabilities: Value::Null,
         };
         session.nonblocking().context(IoSnafu {
             action: "configure language-server pipes",
@@ -126,7 +129,7 @@ impl Session {
         Ok(())
     }
 
-    pub fn send(&mut self, mut message: Value) -> Result<(), Error> {
+    fn send(&mut self, mut message: Value) -> Result<(), Error> {
         message["jsonrpc"] = json!("2.0");
         let body = serde_json::to_vec(&message).context(JsonSnafu)?;
         ensure!(
@@ -231,7 +234,7 @@ impl Session {
         if let Some(method) = message["method"].as_str() {
             match method {
                 "experimental/serverStatus" => self.status = Some(message["params"].clone()),
-                "$/progress" => {
+                Progress::METHOD => {
                     use opentelemetry::trace::TraceContextExt;
                     self.progress += 1;
                     opentelemetry::Context::current()
@@ -242,28 +245,30 @@ impl Session {
             }
             if message.get("id").is_some() {
                 let result = match method {
-                    "window/workDoneProgress/create" => Value::Null,
-                    "workspace/configuration" => Value::Array(
-                        message["params"]["items"]
-                            .as_array()
-                            .into_iter()
-                            .flatten()
-                            .map(|item| {
-                                let section = item["section"].as_str().unwrap_or("");
-                                if section.is_empty() || section == "rust-analyzer" {
-                                    return self.options.clone();
-                                }
-                                section
-                                    .split('.')
-                                    .fold(&self.options, |value, key| &value[key])
-                                    .clone()
-                            })
-                            .collect(),
+                    request::WorkDoneProgressCreate::METHOD => Value::Null,
+                    request::WorkspaceConfiguration::METHOD => Value::Array(
+                        serde_json::from_value::<lsp::ConfigurationParams>(
+                            message["params"].clone(),
+                        )
+                        .context(JsonSnafu)?
+                        .items
+                        .into_iter()
+                        .map(|item| {
+                            let section = item.section.as_deref().unwrap_or("");
+                            if section.is_empty() || section == "rust-analyzer" {
+                                return self.options.clone();
+                            }
+                            section
+                                .split('.')
+                                .fold(&self.options, |value, key| &value[key])
+                                .clone()
+                        })
+                        .collect(),
                     ),
-                    "workspace/workspaceFolders" => {
+                    request::WorkspaceFoldersRequest::METHOD => {
                         json!([{ "uri": self.root_uri, "name": "snapshot" }])
                     }
-                    "workspace/applyEdit" => json!({"applied": false}),
+                    request::ApplyWorkspaceEdit::METHOD => json!({"applied": false}),
                     _ => {
                         self.send(json!({"id":message["id"],"error":{"code":-32601,"message":"unsupported client request"}}))?;
                         return Ok(message);
@@ -275,7 +280,14 @@ impl Session {
         Ok(message)
     }
 
-    pub fn request(&mut self, method: &str, mut params: Value) -> Result<Value, Error> {
+    pub fn notify<N: Notification>(&mut self, params: N::Params) -> Result<(), Error> {
+        let params = serde_json::to_value(params).context(JsonSnafu)?;
+        self.send(json!({"method": N::METHOD, "params": params}))
+    }
+
+    pub fn request<R: Request>(&mut self, params: R::Params) -> Result<R::Result, Error> {
+        let method = R::METHOD;
+        let mut params = serde_json::to_value(params).context(JsonSnafu)?;
         ensure!(
             (self.sequence as usize) < self.max_requests,
             LimitSnafu {
@@ -287,9 +299,9 @@ impl Session {
         let token = format!("analysis-{id}");
         if matches!(
             method,
-            "textDocument/documentSymbol"
-                | "textDocument/references"
-                | "callHierarchy/incomingCalls"
+            request::DocumentSymbolRequest::METHOD
+                | request::References::METHOD
+                | request::CallHierarchyIncomingCalls::METHOD
         ) {
             params["partialResultToken"] = json!(token);
         }
@@ -298,7 +310,7 @@ impl Session {
         let mut partial_bytes = 0;
         loop {
             let message = self.receive()?;
-            if message["method"] == "$/progress"
+            if message["method"] == Progress::METHOD
                 && message["params"]["token"] == token
                 && let Some(values) = message["params"]["value"].as_array()
             {
@@ -325,21 +337,24 @@ impl Session {
                     }
                 );
                 let result = message["result"].clone();
-                if partial.is_empty() {
-                    return Ok(result);
-                }
-                if let Some(values) = result.as_array() {
-                    partial.extend(values.iter().cloned());
-                }
-                return Ok(Value::Array(partial));
+                let result = if partial.is_empty() {
+                    result
+                } else {
+                    match result {
+                        Value::Null => {}
+                        Value::Array(values) => partial.extend(values),
+                        _ => {
+                            return ProtocolSnafu {
+                                message: "invalid final partial result",
+                            }
+                            .fail();
+                        }
+                    }
+                    Value::Array(partial)
+                };
+                return serde_json::from_value(result).context(JsonSnafu);
             }
         }
-    }
-
-    pub fn supports(&self, name: &str) -> bool {
-        self.capabilities
-            .get(name)
-            .is_some_and(|value| !value.is_null() && value != false)
     }
 
     pub fn finish(&mut self) -> Result<(), Error> {

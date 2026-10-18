@@ -3,6 +3,14 @@ use crate::{
     model::*,
     protocol::{Session, check},
 };
+use lsp_types::{
+    self as lsp,
+    notification::{Exit, Initialized},
+    request::{
+        CallHierarchyIncomingCalls, CallHierarchyPrepare, DocumentSymbolRequest, Initialize,
+        References, Request, Shutdown,
+    },
+};
 use mf_runtime::StreamCancellation;
 use serde_json::{Value, json};
 use snafu::{ResultExt, ensure};
@@ -181,27 +189,40 @@ fn query_snapshot(
     gaps: &mut Vec<Gap>,
 ) -> Result<SnapshotEvidence, Error> {
     let root_uri = file_uri(root)?;
-    let initialized = session.request(
-        "initialize",
-        json!({
-            "processId": std::process::id(), "rootUri":root_uri,
-            "capabilities": {
-                "general":{"positionEncodings":["utf-8","utf-16","utf-32"]},
-                "textDocument":{"documentSymbol":{"hierarchicalDocumentSymbolSupport":true}},
-                "experimental":{"serverStatusNotification":config.profile == Profile::RustAnalyzer}
-            }, "initializationOptions":options,
-        }),
-    )?;
-    session.capabilities = initialized["capabilities"].clone();
-    ensure!(
-        session.capabilities.is_object(),
-        ProtocolSnafu {
-            message: "server capabilities must be an object"
-        }
-    );
-    let encoding = session.capabilities["positionEncoding"]
-        .as_str()
-        .unwrap_or("utf-16")
+    // Keep rootUri for servers that predate workspace-folder support.
+    #[allow(deprecated)]
+    let initialized = session.request::<Initialize>(lsp::InitializeParams {
+        process_id: Some(std::process::id()),
+        root_uri: Some(root_uri),
+        capabilities: lsp::ClientCapabilities {
+            general: Some(lsp::GeneralClientCapabilities {
+                position_encodings: Some(vec![
+                    lsp::PositionEncodingKind::UTF8,
+                    lsp::PositionEncodingKind::UTF16,
+                    lsp::PositionEncodingKind::UTF32,
+                ]),
+                ..Default::default()
+            }),
+            text_document: Some(lsp::TextDocumentClientCapabilities {
+                document_symbol: Some(lsp::DocumentSymbolClientCapabilities {
+                    hierarchical_document_symbol_support: Some(true),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            experimental: Some(
+                json!({"serverStatusNotification": config.profile == Profile::RustAnalyzer}),
+            ),
+            ..Default::default()
+        },
+        initialization_options: Some(options.clone()),
+        ..Default::default()
+    })?;
+    let capabilities = initialized.capabilities;
+    let encoding = capabilities
+        .position_encoding
+        .as_ref()
+        .map_or("utf-16", |value| value.as_str())
         .to_owned();
     ensure!(
         matches!(encoding.as_str(), "utf-8" | "utf-16" | "utf-32"),
@@ -209,7 +230,7 @@ fn query_snapshot(
             message: "unsupported position encoding"
         }
     );
-    session.send(json!({"method":"initialized","params":{}}))?;
+    session.notify::<Initialized>(lsp::InitializedParams {})?;
     if config.profile == Profile::RustAnalyzer {
         while !session
             .status
@@ -227,7 +248,7 @@ fn query_snapshot(
     }
     let mut result = SnapshotEvidence {
         snapshot: snapshot.id.clone(),
-        server_info: initialized["serverInfo"].clone(),
+        server_info: serde_json::to_value(initialized.server_info).context(JsonSnafu)?,
         position_encoding: encoding.clone(),
         progress_notifications: 0,
         documents: Vec::new(),
@@ -273,60 +294,72 @@ fn query_snapshot(
             }
         );
         let uri = file_uri(&path)?;
-        if !session.supports("documentSymbolProvider") {
-            unsupported(gaps, snapshot, "textDocument/documentSymbol");
+        if !matches!(
+            capabilities.document_symbol_provider,
+            Some(lsp::OneOf::Left(true) | lsp::OneOf::Right(_))
+        ) {
+            unsupported(gaps, snapshot, DocumentSymbolRequest::METHOD);
             continue;
         }
-        let symbols = session.request(
-            "textDocument/documentSymbol",
-            json!({"textDocument":{"uri":uri}}),
-        )?;
+        let symbols = session.request::<DocumentSymbolRequest>(lsp::DocumentSymbolParams {
+            text_document: lsp::TextDocumentIdentifier::new(uri.clone()),
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        })?;
         let mut definitions = Vec::new();
-        flatten(&symbols, &source, &encoding, &mut definitions)?;
+        flatten(symbols, &source, &encoding, &mut definitions)?;
         let mut evidence = DocumentEvidence {
             path: document.path.clone(),
             symbols: Vec::new(),
         };
-        for (symbol, range) in definitions {
-            if !document.ranges.iter().any(|r| intersects(r, &range)) {
+        for (mut item, position) in definitions {
+            if !document.ranges.iter().any(|r| intersects(r, &item.range)) {
                 continue;
             }
-            let position = symbol
-                .get("selectionRange")
-                .or_else(|| symbol.get("range"))
-                .or_else(|| symbol.pointer("/location/range"))
-                .and_then(|r| r.get("start"))
-                .cloned();
-            let Some(position) = position else {
-                return ProtocolSnafu {
-                    message: "symbol has no position",
-                }
-                .fail();
+            let text_document_position = lsp::TextDocumentPositionParams {
+                text_document: lsp::TextDocumentIdentifier::new(uri.clone()),
+                position,
             };
-            let params = json!({"textDocument":{"uri":uri},"position":position,"context":{"includeDeclaration":false}});
-            let mut item = SymbolEvidence {
-                name: symbol["name"].as_str().unwrap_or("").into(),
-                kind: symbol["kind"].as_u64().unwrap_or(0),
-                range,
-                references: Vec::new(),
-                incoming_calls: Vec::new(),
-            };
-            if session.supports("referencesProvider") {
-                item.references =
-                    array(session.request("textDocument/references", params.clone())?)?;
+            if matches!(
+                capabilities.references_provider,
+                Some(lsp::OneOf::Left(true) | lsp::OneOf::Right(_))
+            ) {
+                item.references = values(session.request::<References>(lsp::ReferenceParams {
+                    text_document_position: text_document_position.clone(),
+                    context: lsp::ReferenceContext {
+                        include_declaration: false,
+                    },
+                    work_done_progress_params: Default::default(),
+                    partial_result_params: Default::default(),
+                })?)?;
             } else {
-                unsupported(gaps, snapshot, "textDocument/references");
+                unsupported(gaps, snapshot, References::METHOD);
             }
-            if session.supports("callHierarchyProvider") {
+            if matches!(
+                capabilities.call_hierarchy_provider,
+                Some(
+                    lsp::CallHierarchyServerCapability::Simple(true)
+                        | lsp::CallHierarchyServerCapability::Options(_)
+                )
+            ) {
                 let prepared =
-                    array(session.request("textDocument/prepareCallHierarchy", params.clone())?)?;
-                for call in prepared {
-                    item.incoming_calls.extend(array(
-                        session.request("callHierarchy/incomingCalls", json!({"item":call}))?,
+                    session.request::<CallHierarchyPrepare>(lsp::CallHierarchyPrepareParams {
+                        text_document_position_params: text_document_position,
+                        work_done_progress_params: Default::default(),
+                    })?;
+                for call in prepared.into_iter().flatten() {
+                    item.incoming_calls.extend(values(
+                        session.request::<CallHierarchyIncomingCalls>(
+                            lsp::CallHierarchyIncomingCallsParams {
+                                item: call,
+                                work_done_progress_params: Default::default(),
+                                partial_result_params: Default::default(),
+                            },
+                        )?,
                     )?);
                 }
             } else {
-                unsupported(gaps, snapshot, "callHierarchy/incomingCalls");
+                unsupported(gaps, snapshot, CallHierarchyIncomingCalls::METHOD);
             }
             evidence.symbols.push(item);
             ensure!(
@@ -345,8 +378,8 @@ fn query_snapshot(
         );
     }
     result.progress_notifications = session.progress;
-    session.request("shutdown", Value::Null)?;
-    session.send(json!({"method":"exit","params":null}))?;
+    session.request::<Shutdown>(())?;
+    session.notify::<Exit>(())?;
     Ok(result)
 }
 
@@ -364,20 +397,17 @@ fn unsupported(gaps: &mut Vec<Gap>, snapshot: &Snapshot, operation: &str) {
     }
 }
 
-fn array(value: Value) -> Result<Vec<Value>, Error> {
-    match value {
-        Value::Null => Ok(Vec::new()),
-        Value::Array(values) => Ok(values),
-        _ => ProtocolSnafu {
-            message: "expected an array result",
-        }
-        .fail(),
-    }
+fn values<T: serde::Serialize>(items: Option<Vec<T>>) -> Result<Vec<Value>, Error> {
+    items
+        .into_iter()
+        .flatten()
+        .map(|item| serde_json::to_value(item).context(JsonSnafu))
+        .collect()
 }
 
-fn file_uri(path: &Path) -> Result<String, Error> {
+fn file_uri(path: &Path) -> Result<lsp::Uri, Error> {
     match url::Url::from_file_path(path) {
-        Ok(uri) => Ok(uri.to_string()),
+        Ok(uri) => serde_json::from_value(Value::String(uri.into())).context(JsonSnafu),
         Err(()) => InvalidSnafu {
             message: "cannot encode absolute file URI",
         }
@@ -386,42 +416,63 @@ fn file_uri(path: &Path) -> Result<String, Error> {
 }
 
 fn flatten(
-    value: &Value,
+    symbols: Option<lsp::DocumentSymbolResponse>,
     source: &str,
     encoding: &str,
-    output: &mut Vec<(Value, SourceRange)>,
+    output: &mut Vec<(SymbolEvidence, lsp::Position)>,
 ) -> Result<(), Error> {
-    if value.is_null() {
-        return Ok(());
-    }
-    let Some(values) = value.as_array() else {
-        return ProtocolSnafu {
-            message: "expected document symbols",
+    let mut definitions = Vec::new();
+    match symbols {
+        None => return Ok(()),
+        Some(lsp::DocumentSymbolResponse::Flat(symbols)) => {
+            definitions.extend(symbols.into_iter().map(|s| {
+                (
+                    s.name,
+                    s.kind,
+                    s.location.range,
+                    s.location.range.start,
+                    None,
+                )
+            }));
         }
-        .fail();
-    };
-    for symbol in values {
-        let range = symbol
-            .get("range")
-            .or_else(|| symbol.pointer("/location/range"));
-        let Some(range) = range else {
-            return ProtocolSnafu {
-                message: "symbol has no range",
+        Some(lsp::DocumentSymbolResponse::Nested(symbols)) => {
+            for symbol in symbols {
+                definitions.push((
+                    symbol.name,
+                    symbol.kind,
+                    symbol.range,
+                    symbol.selection_range.start,
+                    symbol.children,
+                ));
             }
-            .fail();
-        };
-        let start = byte_offset(source, &range["start"], encoding)?;
-        let end = byte_offset(source, &range["end"], encoding)?;
+        }
+    }
+    for (name, kind, range, position, children) in definitions {
+        let start = position_offset(source, range.start, encoding)?;
+        let end = position_offset(source, range.end, encoding)?;
         ensure!(
             start <= end,
             ProtocolSnafu {
                 message: "reversed symbol range"
             }
         );
-        output.push((symbol.clone(), SourceRange { start, end }));
-        if let Some(children) = symbol.get("children") {
-            flatten(children, source, encoding, output)?;
-        }
+        output.push((
+            SymbolEvidence {
+                name,
+                kind: serde_json::from_value(serde_json::to_value(kind).context(JsonSnafu)?)
+                    .context(JsonSnafu)?,
+                range: SourceRange { start, end },
+                references: Vec::new(),
+                incoming_calls: Vec::new(),
+            },
+            position,
+        ));
+        flatten(
+            children.map(lsp::DocumentSymbolResponse::Nested),
+            source,
+            encoding,
+            output,
+        )?;
     }
     Ok(())
 }
@@ -441,13 +492,12 @@ pub fn byte_offset(source: &str, position: &Value, encoding: &str) -> Result<usi
             message: "unsupported position encoding"
         }
     );
-    let (Some(line), Some(character)) = (position["line"].as_u64(), position["character"].as_u64())
-    else {
-        return ProtocolSnafu {
-            message: "invalid LSP position",
-        }
-        .fail();
-    };
+    let position = serde_json::from_value(position.clone()).context(JsonSnafu)?;
+    position_offset(source, position, encoding)
+}
+
+fn position_offset(source: &str, position: lsp::Position, encoding: &str) -> Result<usize, Error> {
+    let lsp::Position { line, character } = position;
     let mut start = 0;
     for _ in 0..line {
         let Some(newline) = source[start..].find('\n') else {
@@ -463,14 +513,14 @@ pub fn byte_offset(source: &str, position: &Value, encoding: &str) -> Result<usi
         .next()
         .unwrap_or("")
         .trim_end_matches('\r');
-    let mut units = 0u64;
+    let mut units = 0u32;
     for (offset, ch) in text.char_indices() {
         if units == character {
             return Ok(start + offset);
         }
         units += match encoding {
-            "utf-8" => ch.len_utf8() as u64,
-            "utf-16" => ch.len_utf16() as u64,
+            "utf-8" => ch.len_utf8() as u32,
+            "utf-16" => ch.len_utf16() as u32,
             _ => 1,
         };
     }

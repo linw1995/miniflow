@@ -381,6 +381,12 @@ fn accepts_standard_symbol_shapes_and_services_read_only_client_requests() {
                     _ => 1,
                 }
             );
+            if mode == "children" {
+                assert_eq!(
+                    symbols.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+                    ["chosen", "child"]
+                );
+            }
             if mode == "null_references" {
                 assert!(symbols[0].references.is_empty());
             }
@@ -398,6 +404,11 @@ fn malformed_queries_and_exhausted_result_budgets_are_explicit_gaps() {
         "bad_encoding",
         "unhealthy",
         "bad_symbols",
+        "missing_name",
+        "bad_reference",
+        "bad_call_item",
+        "bad_incoming",
+        "bad_partial_final",
         "missing_range",
         "reversed_range",
         "rpc_error",
