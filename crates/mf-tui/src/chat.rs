@@ -373,10 +373,12 @@ impl Controller {
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(source) => {
-                let outcome = if matches!(source, ChatRunError::Cancelled) {
-                    TurnExit::Cancelled
-                } else {
-                    TurnExit::Failed
+                let outcome = match &source {
+                    ChatRunError::Cancelled => TurnExit::Cancelled,
+                    ChatRunError::Observation {
+                        source: RunError::Supervise { .. },
+                    } => TurnExit::Interrupted,
+                    _ => TurnExit::Failed,
                 };
                 return match self.database.finalize_invocation(
                     invocation,
@@ -498,23 +500,8 @@ impl Controller {
             if self.cancel.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
                 run.cancel();
             }
-            match run.poll() {
-                Ok(Some(outcome)) => return Ok(outcome),
-                Ok(None) => {}
-                Err(error) => {
-                    drop(run);
-                    return match self.database.finalize_invocation(
-                        invocation.clone(),
-                        TurnExit::Interrupted,
-                        "runner supervision failed",
-                    ) {
-                        Ok(_) => Err(error.into()),
-                        Err(cleanup) => Err(CleanupSnafu {
-                            cleanup: Box::new(cleanup),
-                        }
-                        .into_error(Box::new(error.into()))),
-                    };
-                }
+            if let Some(outcome) = run.poll()? {
+                return Ok(outcome);
             }
             thread::sleep(Duration::from_millis(10));
         }

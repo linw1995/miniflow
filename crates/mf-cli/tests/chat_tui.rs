@@ -128,7 +128,7 @@ fn interact(binary: &Path, database: &Path, restart: bool) -> String {
                 } else {
                     match stage {
                         0 if text.contains("What would you like") => {
-                            Some("hello 🦀\rsecond line\x1b\r".as_bytes())
+                            Some("\x1b[200~hello 🦀\r\nsecond line\x1b[201~\x1b\r".as_bytes())
                         }
                         1 if text.contains("first reply") => Some(b"\x0e"),
                         2 if text.contains("New chat") => Some(b"session B prompt\x1b\r"),
@@ -222,6 +222,17 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
     let root = tempfile::tempdir().unwrap();
     let binary = compiled(root.path(), &server, "chat-flow.json");
     let path = root.path().join("chat.sqlite");
+    let nonterminal = Command::new(env!("CARGO_BIN_EXE_mf"))
+        .args(["run", "--tui", "--chat", "--chat-db"])
+        .arg(&path)
+        .arg(&binary)
+        .args(["--params.api_key", "synthetic-key"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert!(!nonterminal.status.success());
+    assert!(String::from_utf8_lossy(&nonterminal.stderr).contains("requires terminal"));
+    assert!(!path.exists());
     let observed = interact(&binary, &path, false);
     assert!(!observed.contains("synthetic-key"));
     assert_eq!(server.requests().len(), 5);

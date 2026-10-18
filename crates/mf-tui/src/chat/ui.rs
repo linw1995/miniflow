@@ -848,6 +848,8 @@ mod tests {
         let launch = super::super::tests::launch(root.path());
         let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
         let controller = ChatController::open(launch).unwrap();
+        view.submit(&controller);
+        assert!(!controller.busy());
         view.editor.insert("hello 🦀");
         view.key(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
@@ -863,6 +865,8 @@ mod tests {
         view.editor.insert(" + new draft");
         pump(&mut view, &controller, |view| view.active.is_some());
         assert!(view.editor.text.ends_with(" + new draft"));
+        view.submit(&controller);
+        assert!(view.notice.contains("current turn"));
         let session = view.session.as_ref().unwrap().id.clone();
         view.key(
             KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
@@ -985,6 +989,16 @@ mod tests {
         editor.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
         editor.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
         assert_eq!(editor.text, "A🦀e\nB");
+        editor.cursor = 1;
+        editor.key(KeyEvent::new(KeyCode::Right, KeyModifiers::NONE));
+        assert_eq!(editor.cursor, "A🦀".len());
+        editor.key(KeyEvent::new(KeyCode::End, KeyModifiers::NONE));
+        editor.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        editor.key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
+        assert_eq!(editor.text, "A🦀\nB");
+        let before = editor.text.clone();
+        editor.insert(&"x".repeat(MAX_EDITOR_BYTES));
+        assert_eq!(editor.text, before);
         editor.insert("\x1b[31m");
         assert!(!safe(&editor.text).contains('\x1b'));
         let root = tempfile::tempdir().unwrap();
@@ -1000,5 +1014,267 @@ mod tests {
         view.editor.insert("replacement");
         assert_ne!(view.editor.revision, submitted);
         controller.close().unwrap();
+    }
+
+    fn choose(view: &mut ChatView, controller: &ChatController, action: Action) -> bool {
+        view.key(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            controller,
+        );
+        view.selected = view
+            .actions()
+            .iter()
+            .position(|(candidate, _)| *candidate == action)
+            .unwrap();
+        view.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            controller,
+        )
+    }
+
+    #[test]
+    fn session_and_history_navigation_preserve_drafts_and_exclude_stale_retries() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let controller = ChatController::open(launch).unwrap();
+        view.act(Action::Switch, &controller);
+        view.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+        );
+        pump(&mut view, &controller, |v| v.sessions.is_some());
+        assert!(
+            view.session_rows()
+                .iter()
+                .any(|row| row == "No saved chats yet")
+        );
+        view.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &controller);
+        let database = &controller._database;
+        let first = database
+            .create_session("default", None, Some("History".into()))
+            .unwrap();
+        for index in 0..55 {
+            database
+                .create_session("default", None, Some(format!("chat-{index}")))
+                .unwrap();
+        }
+        for index in 0..28 {
+            let started = database
+                .begin_turn(
+                    &first.id,
+                    &format!("prompt-{index}"),
+                    mf_chat::ModelIdentity {
+                        profile: "default".into(),
+                        model: None,
+                    },
+                    None,
+                    8192,
+                )
+                .unwrap();
+            if index == 0 {
+                database
+                    .fail_turn(started.invocation, "failed", "old failure")
+                    .unwrap();
+            } else {
+                database
+                    .complete_turn(
+                        started.invocation,
+                        mf_chat::Reply {
+                            text: format!("reply-{index}"),
+                            metadata: None,
+                            usages: Some(vec![]),
+                            finish_reason: None,
+                        },
+                    )
+                    .unwrap();
+            }
+        }
+        view.editor.insert("new chat draft");
+        choose(&mut view, &controller, Action::Switch);
+        pump(&mut view, &controller, |v| v.sessions.is_some());
+        assert!(view.session_rows().iter().any(|row| row == "More chats..."));
+        view.selected = view.sessions.as_ref().unwrap().sessions.len();
+        view.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+        );
+        pump(&mut view, &controller, |v| v.sessions.is_some());
+        assert!(view.session_rows().iter().any(|row| row == "First page"));
+        view.selected = view.session_rows().len() - 1;
+        view.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+        );
+        pump(&mut view, &controller, |v| v.sessions.is_some());
+        view.selected = view
+            .sessions
+            .as_ref()
+            .unwrap()
+            .sessions
+            .iter()
+            .position(|s| s.id == first.id)
+            .unwrap();
+        view.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+        );
+        pump(&mut view, &controller, |v| v.page.is_some());
+        assert_eq!(
+            view.page
+                .as_ref()
+                .unwrap()
+                .messages
+                .last()
+                .unwrap()
+                .message
+                .content,
+            "reply-27"
+        );
+        assert!(view.retry_turn().is_none());
+        choose(&mut view, &controller, Action::Earlier);
+        pump(&mut view, &controller, |v| {
+            v.page.as_ref().unwrap().messages[0].message.sequence == 0
+        });
+        assert!(view.earlier && view.retry_turn().is_none());
+        choose(&mut view, &controller, Action::Latest);
+        pump(&mut view, &controller, |v| {
+            v.page
+                .as_ref()
+                .unwrap()
+                .messages
+                .last()
+                .unwrap()
+                .message
+                .content
+                == "reply-27"
+        });
+        view.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &controller);
+        for key in [
+            KeyCode::Up,
+            KeyCode::Down,
+            KeyCode::PageUp,
+            KeyCode::PageDown,
+        ] {
+            view.key(KeyEvent::new(key, KeyModifiers::NONE), &controller);
+        }
+        assert_eq!(view.scroll, 0);
+        assert!(render(&view, 80, 24).contains("Enter send"));
+        view.key(
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+            &controller,
+        );
+        for key in [KeyCode::PageUp, KeyCode::PageDown] {
+            view.key(KeyEvent::new(key, KeyModifiers::NONE), &controller);
+        }
+        choose(&mut view, &controller, Action::New);
+        assert_eq!(view.editor.text, "new chat draft");
+        view.key(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        view.key(
+            KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+            &controller,
+        );
+        view.key(KeyEvent::new(KeyCode::Up, KeyModifiers::NONE), &controller);
+        assert_eq!(view.selected, 0);
+        view.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &controller);
+        assert!(choose(&mut view, &controller, Action::Quit));
+        controller.close().unwrap();
+    }
+
+    #[test]
+    fn failed_launch_restores_the_prompt_and_query_errors_do_not_clear_pending_admission() {
+        let root = tempfile::tempdir().unwrap();
+        let mut launch = super::super::tests::launch(root.path());
+        std::fs::remove_file(&launch.executable).unwrap();
+        launch.options.run.verbose = 1;
+        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let controller = ChatController::open(launch).unwrap();
+        controller
+            .send(ChatCommand::Load {
+                session_id: "missing".into(),
+                before: None,
+            })
+            .unwrap();
+        view.editor.insert("keep this prompt");
+        view.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE), &controller);
+        view.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+        );
+        let event = super::super::tests::next(&controller);
+        assert!(matches!(
+            &event,
+            ChatEvent::Error {
+                admission: false,
+                ..
+            }
+        ));
+        view.event(event, &controller);
+        assert!(view.pending.is_some());
+        pump(&mut view, &controller, |v| {
+            v.notice.contains("could not launch") && v.page.is_some()
+        });
+        assert_eq!(view.editor.text, "keep this prompt");
+        assert!(view.retry_turn().is_some());
+        assert!(!controller.busy());
+        controller
+            .send(ChatCommand::Submit {
+                session_id: None,
+                prompt: "  ".into(),
+            })
+            .unwrap();
+        pump(&mut view, &controller, |v| {
+            v.notice.contains("prompt must not be empty")
+        });
+        assert_eq!(
+            controller
+                ._database
+                .list_sessions(false, 50, None)
+                .unwrap()
+                .sessions
+                .len(),
+            1
+        );
+        assert_eq!(view.editor.text, "keep this prompt");
+        controller.close().unwrap();
+    }
+
+    #[test]
+    fn raw_result_recovery_keeps_discard_available_after_storage_queries_fail() {
+        let root = tempfile::tempdir().unwrap();
+        let mut launch = super::super::tests::launch(root.path());
+        let state = root.path().join("state");
+        let offline = root.path().join("offline");
+        launch.options.database_path = state.join("chat.sqlite");
+        let path = launch.options.database_path.clone();
+        std::fs::write(&launch.executable, "#!/bin/sh\nsleep 0.3\nprintf '%s' '{\"status\":\"succeeded\",\"text\":\"paid reply\",\"usages\":[]}'\necho 'runner diagnostic' >&2\nkill -TERM $$\n").unwrap();
+        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let controller = ChatController::open(launch).unwrap();
+        view.editor.insert("question");
+        view.submit(&controller);
+        pump(&mut view, &controller, |v| v.observation.is_some());
+        std::fs::rename(&state, &offline).unwrap();
+        std::fs::write(&state, "unavailable").unwrap();
+        pump(&mut view, &controller, |v| v.retained);
+        assert!(controller.busy());
+        assert!(view.outcome.contains("runner diagnostic"));
+        assert!(render(&view, 80, 24).contains("recover reply"));
+        choose(&mut view, &controller, Action::New);
+        assert!(view.session.is_some());
+        std::fs::remove_file(&state).unwrap();
+        std::fs::rename(&offline, &state).unwrap();
+        choose(&mut view, &controller, Action::Discard);
+        pump(&mut view, &controller, |v| {
+            !v.retained && v.notice.contains("cancelled")
+        });
+        let session = view.session.as_ref().unwrap().id.clone();
+        controller.close().unwrap();
+        let database = ChatDatabase::open(path).unwrap();
+        let messages = database.messages(&session, 50, None).unwrap().messages;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].turn_state, "cancelled");
     }
 }

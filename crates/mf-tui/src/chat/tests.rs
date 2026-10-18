@@ -36,7 +36,7 @@ pub fn launch(directory: &Path) -> ChatLaunch {
         },
     }
 }
-fn next(controller: &ChatController) -> ChatEvent {
+pub fn next(controller: &ChatController) -> ChatEvent {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if let Some(event) = controller.try_event() {
@@ -343,4 +343,87 @@ fn history_pages_start_at_the_tail_and_do_not_overlap_across_failed_turns() {
             .all(|record| record.message.sequence < first)
     );
     controller.close().unwrap();
+}
+
+#[test]
+fn event_backpressure_does_not_prevent_cancellation_or_shutdown_before_launch() {
+    for shutdown in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let prepared = launch(root.path());
+        let path = prepared.options.database_path.clone();
+        let marker = root.path().join("started");
+        fs::write(
+            &prepared.executable,
+            format!("#!/bin/sh\ntouch '{}'\nsleep 20\n", marker.display()),
+        )
+        .unwrap();
+        let controller = ChatController::open(prepared).unwrap();
+        for _ in 0..QUEUE_CAPACITY {
+            controller
+                .send(ChatCommand::ListSessions { after: None })
+                .unwrap();
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match controller.send(ChatCommand::Submit {
+                session_id: None,
+                prompt: "cancel before launch".into(),
+            }) {
+                Ok(()) => break,
+                Err(ChatRunError::QueueFull) => {
+                    assert!(!controller.busy());
+                    assert!(Instant::now() < deadline);
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("unexpected admission: {error}"),
+            }
+        }
+        let turn_id = loop {
+            if let Some(session) = controller
+                ._database
+                .list_sessions(false, 50, None)
+                .unwrap()
+                .sessions
+                .first()
+                && let Some(message) = controller
+                    ._database
+                    .messages(&session.id, 10, None)
+                    .unwrap()
+                    .messages
+                    .first()
+            {
+                break message.message.turn_id.clone();
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        };
+        assert!(!marker.exists());
+        if !shutdown {
+            controller.cancel();
+            loop {
+                match next(&controller) {
+                    ChatEvent::Sessions(_) | ChatEvent::Submitted { .. } => {}
+                    ChatEvent::Error {
+                        admission,
+                        source: ChatRunError::Cancelled,
+                    } => {
+                        assert!(admission);
+                        break;
+                    }
+                    _ => panic!("cancelled submission must not launch a child"),
+                }
+            }
+            assert!(!controller.busy());
+        }
+        controller.close().unwrap();
+        assert!(!marker.exists());
+        assert_eq!(
+            ChatDatabase::open(path)
+                .unwrap()
+                .turn(&turn_id)
+                .unwrap()
+                .state,
+            "cancelled"
+        );
+    }
 }
