@@ -22,17 +22,27 @@ The Flow SHALL connect `git.diff` as a Task to `lsp.analyze` as a Stream produce
 
 ### Requirement: Keep Git output factual
 
-The Git node SHALL resolve local base/head revisions, their merge base, old/new file paths and ranges, and clean snapshot locations. It SHALL NOT compute test-selection policy or launch LSP. Missing revisions and dirty or mismatched snapshots SHALL fail without fetching history or switching the caller's checkout.
+The Git node SHALL resolve local revisions, old/new file paths and ranges, and clean snapshots. Default comparison SHALL use the merge base; explicit snapshot comparison SHALL compare the resolved supplied trees directly and report its mode. The node SHALL NOT decide CI baseline eligibility, test-selection policy, or launch LSP. Missing revisions and dirty or mismatched snapshots SHALL fail without fetching history or switching the caller's checkout.
 
 #### Scenario: Compare a diverged branch
 
-- **WHEN** base contains commits absent from head
+- **WHEN** default comparison uses a base containing commits absent from head
 - **THEN** the change set excludes base-only changes through merge-base comparison
 
 #### Scenario: Change dependency configuration
 
 - **WHEN** a Cargo manifest changes
 - **THEN** the Git node reports the file change without deciding which tests must run
+
+#### Scenario: Compare successive tested snapshots
+
+- **WHEN** explicit snapshot mode supplies two local merge snapshots whose shared parent is not the intended incremental base
+- **THEN** the Git output retains the supplied resolved base and reports the direct tree diff rather than substituting their merge base
+
+#### Scenario: Receive invalid snapshot inputs
+
+- **WHEN** the requested comparison mode is unsupported or a required local revision cannot be resolved
+- **THEN** the Git node fails without fetching history or silently choosing another comparison mode
 
 ### Requirement: Preserve snapshot lifetime for plan consumers
 
@@ -125,7 +135,7 @@ The planner SHALL verify outcome snapshot/configuration identities against forwa
 
 ### Requirement: Emit a structured selection artifact
 
-The plan SHALL identify source/configuration snapshots, retained package or binary scopes, exact test selectors where justified, baseline fallback, reasons, and `ignored_files` for deferred inputs. A supplied matching head inventory SHALL allow concrete case enumeration; otherwise unenumerated scopes SHALL be explicit. The Flow SHALL NOT compile or execute tests to obtain counts.
+The plan SHALL identify source/configuration snapshots, comparison mode and resolved base/head, retained package or binary scopes, exact test selectors where justified, baseline fallback, reasons, and deferred `ignored_files`. A matching head inventory SHALL allow concrete case enumeration; otherwise unenumerated scopes SHALL be explicit. The Flow SHALL NOT compile or execute tests to obtain counts. Saved plans SHALL remain consumable with defaults for absent comparison metadata.
 
 #### Scenario: Plan without compiled tests
 
@@ -134,8 +144,13 @@ The plan SHALL identify source/configuration snapshots, retained package or bina
 
 #### Scenario: Consume an existing saved plan
 
-- **WHEN** a previously produced plan omits `ignored_files`
-- **THEN** the consumer treats the field as empty and preserves its execution selection
+- **WHEN** a previously produced plan omits `ignored_files` or comparison mode
+- **THEN** the consumer treats ignored files as empty and the comparison mode as the previous merge-base default while preserving its execution selection and source checks
+
+#### Scenario: Preserve the explicit incremental comparison
+
+- **WHEN** the planner receives analysis for an explicit snapshot comparison
+- **THEN** the resulting plan retains that mode and exact comparison identities without resolving a new base
 
 ### Requirement: Execute through a separate script
 
@@ -176,7 +191,7 @@ Reports SHALL separate Flow analysis/planning time from script inventory/build a
 
 ### Requirement: Keep rollout opt-in
 
-The planning Flow and consumer script SHALL NOT replace the current CI selector, change coverage flags, or weaken scheduled full verification in the initial delivery. Their own tests SHALL participate in development validation independently of future CI adoption.
+The planning Flow and consumer script SHALL remain optional development tools and SHALL NOT replace the Python CI selector through this change. CI validation and coverage policy SHALL be governed by the ci-test-selection capability. Scheduled full verification SHALL remain intact, and tool tests SHALL participate in development validation independently of future Flow adoption.
 
 #### Scenario: Add the tool to the workspace
 
