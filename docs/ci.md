@@ -307,8 +307,11 @@ inflate the denominator. New and renamed files participate at their current path
 deletions still select tests but add no current executable lines.
 
 An absent source mapping is not a coverage exemption. Only independently proven
-non-executable input, such as an entirely blank/line-comment file, can pass without
-a mapping. Other unmapped Rust source needs a suitable instrumented build or an
+non-executable input can pass without a mapping: blank/line-comment files, or a
+restricted grammar of imports and out-of-line module declarations with known
+`cfg`, `path`, or `macro_use` attributes. Executable items, inline modules, unknown
+attributes, and macro invocations do not qualify. The allowed built-in attributes
+cannot be shadowed by user-defined attributes; see the [Rust name-resolution rules](https://doc.rust-lang.org/reference/names/name-resolution.html). Other unmapped Rust source needs a suitable instrumented build or an
 explicit diagnosis; cumulative reruns do not automatically waive this condition.
 A confirmed zero denominator is `not_applicable`, not 100% coverage.
 

@@ -135,6 +135,11 @@ Missing, malformed, stale, or unmappable expected coverage SHALL fail validation
 - **WHEN** a changed Rust file is absent from executable mappings and has no independently supported non-executable classification
 - **THEN** validation reports the uncertainty and fails instead of silently excluding the file
 
+#### Scenario: Change a declaration-only module entry point
+
+- **WHEN** an unmapped file contains only independently recognized non-executable imports and out-of-line module declarations
+- **THEN** those declarations do not enter the coverage denominator, while affected package tests still run and unknown attributes or executable items remain rejected
+
 #### Scenario: Delete code without adding executable lines
 
 - **WHEN** the increment deletes source but has no current changed executable lines

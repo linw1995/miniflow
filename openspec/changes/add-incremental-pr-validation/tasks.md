@@ -33,10 +33,10 @@ Implement and commit each numbered group in order with its focused tests and doc
 
 ## 5. Integrated replay and ablation
 
-- [ ] 5.1 Replay successive fixed revisions from PR #143 and the current tool PR, including successful, unsuccessful, and reset transitions; verify both chosen baselines and nextest case identities, with reports only under ignored `target/`.
-- [ ] 5.2 Compare cumulative versus incremental selection, analysis cost, build cost, execution time, and coverage on matching head/configurations; verify any savings claim is tied to recorded measurements rather than case counts alone.
+- [x] 5.1 Replay successive fixed revisions from PR #143 and the current tool PR, including successful, unsuccessful, and reset transitions; verify both chosen baselines and nextest case identities, with reports only under ignored `target/`.
+- [x] 5.2 Compare cumulative versus incremental selection, analysis cost, build cost, execution time, and coverage on matching head/configurations; verify any savings claim is tied to recorded measurements rather than case counts alone.
 - [x] 5.3 Ablate success eligibility, attempt identity, direct snapshot comparison, and missing-report guards; verify meaningful regressions fail, then remove duplicated tests and unnecessary abstraction while preserving those boundaries.
-- [ ] 5.4 Run affected checks, relevant Python/Rust/coverage regressions, `prek -a`, and strict change validation; review the complete diff and record remaining limitations before archival.
+- [x] 5.4 Run affected checks, relevant Python/Rust/coverage regressions, `prek -a`, and strict change validation; review the complete diff and record remaining limitations before archival.
 
 ## Workflow follow-up
 

@@ -249,6 +249,25 @@ def verify_current(root, current):
         raise ValueError("Current checkout no longer matches the validation source")
 
 
+def declarations_only(contents):
+    # Prove a deliberately small Rust grammar: imports and out-of-line modules.
+    # Unknown attributes, macros, inline modules, and executable items stay unmapped.
+    source = re.sub(r"(?m)^[ \t]*//[^\n]*$", "", contents)
+    attribute = r'(?m)^[ \t]*#!?\[(?:macro_use|cfg\((?:[A-Za-z0-9_, ()=]|"[^"\\\r\n]*")*\)|path[ \t]*=[ \t]*"[^"\\\r\n]*")\][ \t]*$'
+    source = re.sub(attribute, "", source)
+    visibility = r"(?:pub(?:\((?:crate|super|self)\))?\s+)?"
+    declaration = re.compile(r"\s*(?:" + visibility + r"mod\s+[A-Za-z_]\w*\s*;|"
+                             + visibility + r"use\s+[A-Za-z_:][A-Za-z0-9_:,*{}\s]*;|"
+                             + visibility + r"extern\s+crate\s+[A-Za-z_]\w*(?:\s+as\s+[A-Za-z_]\w*)?\s*;)")
+    offset = 0
+    while source[offset:].strip():
+        item = declaration.match(source, offset)
+        if item is None:
+            return False
+        offset = item.end()
+    return True
+
+
 def evaluate_coverage(root, current, comparison, plan, report):
     verify_current(root, current)
     if (comparison["head"] != current["merge"] or plan["head"] != comparison["head"]
@@ -269,14 +288,14 @@ def evaluate_coverage(root, current, comparison, plan, report):
         if changes:
             raise ValueError("Rust source changes have no selected test scope")
         mappings = {}
-    missing, uncovered = [], {}
+    missing, uncovered, non_executable = [], {}, []
     total = covered = 0
     for path, changed in sorted(changes.items()):
         contents = command(root, "git", "show", f"{current['merge']}:{path}").splitlines()
         if path not in mappings:
-            # A wholly blank/comment-only file is independent evidence. Missing
-            # compiler mappings for other source are uncertainty, not a pass.
-            if not all(not line.strip() or line.lstrip().startswith("//") for line in contents):
+            if declarations_only("\n".join(contents)):
+                non_executable.append(path)
+            else:
                 missing.append(path)
             continue
         executable = mappings[path]
@@ -293,6 +312,7 @@ def evaluate_coverage(root, current, comparison, plan, report):
     target = current["signature"]["coverage_target"]
     return {"base": comparison["base"], "head": current["merge"], "tree": current["tree"],
             "covered": covered, "total": total, "target": target, "uncovered": uncovered,
+            "non_executable_files": non_executable,
             "status": "not_applicable" if total == 0 else "passed" if covered * 100 >= target * total else "failed"}
 
 

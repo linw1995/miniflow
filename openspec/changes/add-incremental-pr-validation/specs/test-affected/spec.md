@@ -42,3 +42,12 @@ The plan SHALL identify source/configuration snapshots, comparison mode and reso
 
 - **WHEN** the planner receives analysis for an explicit snapshot comparison
 - **THEN** the resulting plan retains that mode and exact comparison identities without resolving a new base
+
+### Requirement: Keep rollout opt-in
+
+The planning Flow and consumer script SHALL remain optional development tools and SHALL NOT replace the Python CI selector through this change. CI validation and coverage policy SHALL be governed by the ci-test-selection capability. Scheduled full verification SHALL remain intact, and tool tests SHALL participate in development validation independently of future Flow adoption.
+
+#### Scenario: Add the tool to the workspace
+
+- **WHEN** the tool packages become workspace members
+- **THEN** current CI selection remains authoritative and developers can inspect or execute tool plans separately

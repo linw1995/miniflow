@@ -189,6 +189,17 @@ class ValidationTests(unittest.TestCase):
         report.unlink()
         self.assertEqual(validation.evaluate_coverage(self.root, current, comparison, plan, report)['total'], 0)
 
+    def test_nonexecutable_proof_does_not_hide_functions_or_custom_macros(self):
+        for source in ['// Documentation\n', 'mod model;\npub use model::{Item, Other as Alias};',
+                       '#[cfg(all(test, unix))]\n#[path = "../tests/common.rs"]\nmod support;',
+                       '#[macro_use]\npub mod nodes;\nextern crate sample as _;']:
+            with self.subTest(source=source): self.assertTrue(validation.declarations_only(source))
+        for source in ['fn execute() {}', 'pub mod inner { pub fn execute() {} }',
+                       '#[custom_attribute]\npub mod model;', 'inventory::submit! { Item }',
+                       '#[doc = r#"[ \" //"#]\nfn hidden() {}',
+                       '#[path = "//"] fn hidden() {}', 'pub static VALUE: u32 = run();']:
+            with self.subTest(source=source): self.assertFalse(validation.declarations_only(source))
+
     def test_missing_stale_and_malformed_coverage_cannot_pass(self):
         current, comparison, plan, report = self.coverage_inputs()
         for content in ['', 'DA:1,1\n', 'SF:source.rs\nDA:1,1\n',
@@ -229,6 +240,7 @@ class ValidationTests(unittest.TestCase):
         report.write_text('SF:renamed source.rs\nDA:1,1\nend_of_record\n')
         result = validation.evaluate_coverage(self.root, current, comparison, plan, report)
         self.assertEqual((result['covered'], result['total']), (1, 1))
+        self.assertEqual(result['non_executable_files'], ['comment.rs'])
         self.assertNotIn('source.rs', validation.changed_lines(self.root, previous, merge))
 
     def test_final_record_requires_all_jobs_title_coverage_and_exact_attempt(self):

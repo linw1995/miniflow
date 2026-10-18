@@ -151,6 +151,8 @@ mod tests {{
             base = git("rev-parse", "HEAD")
             alpha = root / "src/alpha.rs"
             alpha.write_text(alpha.read_text().replace("    1\n", "    1 + 0\n"))
+            library = root / "src/lib.rs"
+            library.write_text(library.read_text() + "pub use alpha::value as exported_value;\n")
             git("add", ".")
             git("commit", "-qm", "test(ci): executable increment")
             head = git("rev-parse", "HEAD")
@@ -197,7 +199,11 @@ mod tests {{
             # A compiler-cache backup is not a current published Cargo artifact.
             backup = root / "target/coverage/build/debug/deps/.kache-prestage-fixture"
             shutil.copyfile(stale_binary, backup)
-            alpha.write_text("// Shift current executable lines.\n" * 20 + alpha.read_text())
+            changed = alpha.read_text().replace(
+                "assert_eq!(super::value(), 1);",
+                "assert_eq!(super::value(), 1); assert_eq!(super::mapping_marker(), 2);", 1)
+            alpha.write_text("// Shift current executable lines.\n" * 20 + changed
+                             + "\npub fn mapping_marker() -> u32 { 2 }\n")
             old_profile = root / "default_123_0_456.profraw"
             old_profile.write_text("Profiles from an earlier session must not be consumed.")
             # Separate steps must accumulate profiles without cleaning earlier crates.
