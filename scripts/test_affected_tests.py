@@ -81,15 +81,27 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(ignored, ["docs/guide.md"])
         self.assertEqual(fallback, [])
 
-    def test_unknown_shared_and_dependency_inputs_select_full_suite(self):
-        for path in ["Cargo.toml", "Cargo.lock", "crates/app/Cargo.toml", "flake.lock",
-                     ".cargo/config.toml", "examples/example.json", "scripts/helper.py",
-                     "crates/removed/src/lib.rs", ".config/nextest.toml"]:
+    def test_unknown_inputs_and_missing_shared_consumers_select_full_suite(self):
+        for path in ["scripts/helper.py", "crates/removed/src/lib.rs", "examples/example.json",
+                     "scripts/check-release-support.sh", "tools/test-affected/flows/new.json"]:
             with self.subTest(path=path):
                 self.assertTrue(affected.classify(self.root, [path], self.packages)[2])
 
-    def test_nested_fixture_manifest_forces_full_suite(self):
-        self.assertTrue(affected.classify(self.root, ["crates/app/tests/fixture/Cargo.toml"], self.packages)[2])
+    def test_dependency_configuration_is_owned_or_deferred(self):
+        for path in ["crates/app/Cargo.toml", "crates/app/tests/fixture/Cargo.toml",
+                     "crates/app/tests/fixture/Cargo.lock"]:
+            with self.subTest(path=path):
+                self.assertEqual(affected.classify(self.root, [path], self.packages), ({"app": [path]}, [], []))
+        paths = ["Cargo.toml", "Cargo.lock", "flake.lock", ".cargo/config.toml", ".config/nextest.toml",
+                 ".github/workflows/CI.yaml", "scripts/run-cov.sh", "scripts/test_affected_tests.py"]
+        with patch.object(affected, "changes", return_value=("base", "head", paths)), \
+                patch.object(affected, "workspace_packages", return_value=self.packages), \
+                patch.object(affected, "analyzer_graph") as analyzer:
+            plan = affected.make_plan(self.root, options())
+        analyzer.assert_not_called()
+        self.assertEqual(plan["ignored_files"], paths)
+        self.assertEqual(plan["mode"], "none")
+        self.assertEqual(plan["command"], [])
 
     def test_analyzer_failure_produces_full_plan_not_empty_selection(self):
         with patch.object(affected, "changes", return_value=("base", "head", ["crates/app/src/main.rs"])), \

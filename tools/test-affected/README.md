@@ -48,8 +48,10 @@ they remain available after the Flow finishes. Missing refs are errors, not auto
 The node's configured `initialization_options` are forwarded to analysis without Rust-specific policy.
 
 `test_affected.plan` consumes only the analysis output and its opaque comparison context. It uses
-Cargo metadata for all declared dependency kinds, retaining full fallback for shared inputs,
-dependency configuration, and analyzer failures. Source diffs remain the impact seed even when
+Cargo metadata for all declared dependency kinds and the same [input policy](../../docs/ci.md#affected-package-tests)
+as the current selector. Package manifests retain owner/consumer scope; known repository configuration
+is deferred to full main/nightly verification. Known shared executables select their consumers, while
+unknown inputs and analyzer failures retain full fallback. Source diffs remain the impact seed even when
 call edges do not change. LSP evidence alone never excludes unobserved tests.
 
 The initial narrowing rule accepts directly declared private `#[test]` functions in conventional
@@ -59,7 +61,8 @@ resource access in the test scope. Unknown patterns retain package scope. This i
 source ownership rule, not a proof of arbitrary program effects or test independence.
 
 The plan records source/tree/toolchain and build-environment identity, conservative `baseline_packages`,
-retained whole `packages`, exact `tests` (`package`, `binary`, `name`), and reasons. Counts remain null
+retained whole `packages`, exact `tests` (`package`, `binary`, `name`), reasons, and deferred
+`ignored_files`. Older saved plans without `ignored_files` remain accepted by the consumer. Counts remain null
 without a supplied matching inventory. Options accept `configuration` (`target`, `all_features`,
 `features`, `no_default_features`) and an optional `inventory` path. Default test configuration is
 all features on the host target. No tests or test builds run inside the Flow.

@@ -32,20 +32,10 @@ fn compare(root: &Path, base: &str, head: &str) -> mfn_test_affected::Comparison
     git::compare(root, base, head, None, json!({})).unwrap()
 }
 
-#[test]
-fn combines_isolated_tests_with_production_consumers_and_keeps_caller_checkout() {
-    let (directory, base) = fixture();
-    let root = directory.path();
-    write(root, "core/src/lib.rs", &SOURCE.replace("1, 1", "2, 2"));
-    write(
-        root,
-        "app/src/lib.rs",
-        &SOURCE.replace("-> u32 { 1 }", "-> u32 { 2 }"),
-    );
-    let head = commit(root);
-    let comparison = compare(root, &base, &head);
-    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
-    assert_eq!(plan.baseline_packages, ["sample-app", "sample-core"]);
+fn assert_baseline_parity(
+    comparison: &mfn_test_affected::Comparison,
+    plan: &mfn_test_affected::TestPlan,
+) {
     let legacy = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../scripts");
     let check = Command::new("python3")
         .arg("-c")
@@ -57,14 +47,14 @@ sys.path.insert(0, sys.argv[1])
 import affected_tests as a
 root = pathlib.Path(sys.argv[2])
 packages = a.workspace_packages(root)
-direct, _, fallback = a.classify(root, json.loads(sys.argv[3]), packages)
+direct, ignored, fallback = a.classify(root, json.loads(sys.argv[3]), packages)
 lines = ['digraph rust_analyzer_crate_graph {']
 for index, package in enumerate(packages.values()):
     name = package['targets'][0]['name'].replace('-', '_')
     lines.append(f'_n{index}[label="{name}"][shape="box"];')
 lines.append('}')
 graph, _ = a.package_graph('\n'.join(lines), packages)
-print(json.dumps(sorted(packages if fallback else a.select(direct, graph))))
+print(json.dumps({"packages": sorted(packages if fallback else a.select(direct, graph)), "ignored_files": ignored}))
 "#,
         )
         .arg(legacy)
@@ -86,8 +76,26 @@ print(json.dumps(sorted(packages if fallback else a.select(direct, graph))))
         "{}",
         String::from_utf8_lossy(&check.stderr)
     );
-    let baseline: Vec<String> = serde_json::from_slice(&check.stdout).unwrap();
-    assert_eq!(plan.baseline_packages, baseline);
+    let baseline: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
+    assert_eq!(json!(plan.baseline_packages), baseline["packages"]);
+    assert_eq!(json!(plan.ignored_files), baseline["ignored_files"]);
+}
+
+#[test]
+fn combines_isolated_tests_with_production_consumers_and_keeps_caller_checkout() {
+    let (directory, base) = fixture();
+    let root = directory.path();
+    write(root, "core/src/lib.rs", &SOURCE.replace("1, 1", "2, 2"));
+    write(
+        root,
+        "app/src/lib.rs",
+        &SOURCE.replace("-> u32 { 1 }", "-> u32 { 2 }"),
+    );
+    let head = commit(root);
+    let comparison = compare(root, &base, &head);
+    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    assert_eq!(plan.baseline_packages, ["sample-app", "sample-core"]);
+    assert_baseline_parity(&comparison, &plan);
 
     assert_eq!(plan.packages, ["sample-app"]);
     assert_eq!(plan.tests.len(), 1);
@@ -150,13 +158,16 @@ fn retains_behavior_changes_shared_inputs_and_analyzer_failures() {
     write(root, ".config/nextest.toml", "[profile.default]\n");
     let next = commit(root);
     let comparison = compare(root, &base, &next);
-    assert_eq!(
-        make_plan(&comparison, &outcome(&comparison), &PlanOptions::default())
-            .unwrap()
-            .packages
-            .len(),
-        3
-    );
+    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    assert_eq!(plan.packages, ["sample-app", "sample-core"]);
+    assert_eq!(plan.ignored_files, [".config/nextest.toml"]);
+    assert!(plan.fallback_reasons.is_empty());
+    write(root, "scripts/unknown.sh", "exit 0\n");
+    let next = commit(root);
+    let comparison = compare(root, &base, &next);
+    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    assert_eq!(plan.packages.len(), 3);
+    assert!(plan.fallback_reasons[0].contains("scripts/unknown.sh"));
 }
 
 #[test]
@@ -226,6 +237,27 @@ fn script_verifies_selection_runs_cases_and_preserves_empty_stale_and_failed_pla
             .unwrap()
     };
     let output = run(&plan, &[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("\"selected_count\": 1"));
+    let mut legacy = serde_json::to_value(&plan).unwrap();
+    legacy.as_object_mut().unwrap().remove("ignored_files");
+    assert!(
+        serde_json::from_value::<mfn_test_affected::TestPlan>(legacy.clone())
+            .unwrap()
+            .ignored_files
+            .is_empty()
+    );
+    fs::write(&path, legacy.to_string()).unwrap();
+    let output = Command::new("python3")
+        .arg(&script)
+        .arg(&path)
+        .arg("--list-only")
+        .output()
+        .unwrap();
     assert!(
         output.status.success(),
         "{}",
@@ -470,12 +502,9 @@ fn additions_deletions_and_manifest_changes_preserve_conservative_scope() {
     let next = commit(root);
     let comparison = compare(root, &head, &next);
     let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
-    assert_eq!(plan.packages.len(), 3);
-    assert!(
-        plan.fallback_reasons
-            .iter()
-            .any(|r| r.contains("Dependency configuration"))
-    );
+    assert_eq!(plan.packages, ["sample-app", "sample-core"]);
+    assert!(plan.fallback_reasons.is_empty());
+    assert_baseline_parity(&comparison, &plan);
 }
 
 #[test]
@@ -527,4 +556,91 @@ fn task_boundaries_preserve_error_sources_and_reject_cancelled_work() {
             .execute(plan_input(), &mut context)
             .is_err()
     );
+}
+
+#[test]
+fn shared_input_policy_matches_selector_and_scopes_consumers() {
+    let (directory, _) = fixture();
+    let root = directory.path();
+    for package in ["core", "app", "other"] {
+        let path = format!("{package}/Cargo.toml");
+        let manifest = fs::read_to_string(root.join(&path))
+            .unwrap()
+            .replace("sample-core", "mf-compiler")
+            .replace("sample-app", "mf-cli")
+            .replace("sample-other", "mfn-test-affected");
+        write(root, &path, &manifest);
+    }
+    git::command(root, "cargo", &["generate-lockfile", "--offline"]).unwrap();
+    let base = commit(root);
+    write(root, "docs/policy.md", "policy\n");
+    let head = commit(root);
+    let mut comparison = compare(root, &base, &head);
+    // Exercise classification against real package metadata without invalidating snapshots.
+    for (path, expected) in [
+        ("Cargo.toml", vec![]),
+        ("Cargo.lock", vec![]),
+        (".config/nextest.toml", vec![]),
+        (".github/workflows/CI.yaml", vec![]),
+        ("docs/guide.md", vec![]),
+        ("openspec/specs/example/spec.md", vec![]),
+        ("scripts/run-cov.sh", vec![]),
+        ("tools/test-affected/README.md", vec![]),
+        ("core/Cargo.toml", vec!["mf-cli", "mf-compiler"]),
+        (
+            "core/tests/fixture/Cargo.lock",
+            vec!["mf-cli", "mf-compiler"],
+        ),
+        ("core/README.md", vec!["mf-cli", "mf-compiler"]),
+        ("examples/example.json", vec!["mf-cli", "mf-compiler"]),
+        (
+            "scripts/nextest-build-cache.py",
+            vec!["mf-cli", "mf-compiler"],
+        ),
+        ("scripts/nextest-cargo.sh", vec!["mf-cli", "mf-compiler"]),
+        ("scripts/cargo_cache.py", vec!["mf-cli", "mf-compiler"]),
+        ("scripts/check-release-support.sh", vec!["mf-cli"]),
+        ("scripts/affected_tests.py", vec!["mfn-test-affected"]),
+        (
+            "tools/test-affected/run-tests.py",
+            vec!["mfn-test-affected"],
+        ),
+        (
+            "tools/test-affected/flows/plan.json",
+            vec!["mfn-test-affected"],
+        ),
+        (
+            "scripts/unknown.py",
+            vec!["mf-cli", "mf-compiler", "mfn-test-affected"],
+        ),
+        (
+            "removed/src/lib.rs",
+            vec!["mf-cli", "mf-compiler", "mfn-test-affected"],
+        ),
+    ] {
+        comparison.changes = vec![mfn_test_affected::Change {
+            path: path.into(),
+            before: vec![],
+            after: vec![],
+        }];
+        let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+        assert_eq!(plan.packages, expected, "{path}");
+        assert_eq!(
+            plan.ignored_files,
+            if expected.is_empty() {
+                vec![path]
+            } else {
+                vec![]
+            }
+        );
+        assert_baseline_parity(&comparison, &plan);
+    }
+    let (directory, base) = fixture();
+    write(directory.path(), "examples/unknown.json", "{}\n");
+    let head = commit(directory.path());
+    let comparison = compare(directory.path(), &base, &head);
+    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    assert_eq!(plan.packages.len(), 3);
+    assert!(!plan.fallback_reasons.is_empty());
+    assert_baseline_parity(&comparison, &plan);
 }

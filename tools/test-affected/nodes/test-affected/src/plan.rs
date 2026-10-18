@@ -121,15 +121,9 @@ pub fn make_plan(
     let mut production = BTreeSet::new();
     let mut tests = BTreeSet::new();
     let mut fallback = Vec::new();
+    let mut ignored_files = Vec::new();
     for change in &comparison.changes {
         let path = Path::new(&change.path);
-        if matches!(
-            path.file_name().and_then(|p| p.to_str()),
-            Some("Cargo.toml" | "Cargo.lock")
-        ) {
-            fallback.push(format!("Dependency configuration changed: {}", change.path));
-            continue;
-        }
         let absolute = comparison.head_root.join(path);
         let owner = roots
             .iter()
@@ -146,19 +140,27 @@ pub fn make_plan(
             } else {
                 production.insert(owner.clone());
             }
-        } else if change.path.starts_with("docs/")
-            || change.path.starts_with("openspec/")
-            || matches!(
-                change.path.as_str(),
-                "README.md" | "CONTRIBUTING.md" | "AGENTS.md"
-            )
-        {
-            continue;
+        } else if deferred_input(&change.path) {
+            ignored_files.push(change.path.clone());
         } else {
-            fallback.push(format!(
-                "Shared or unclassified input changed: {}",
-                change.path
-            ));
+            let consumers: Vec<_> = shared_consumers(&change.path)
+                .iter()
+                .filter(|name| packages.contains_key(**name))
+                .collect();
+            if consumers.is_empty() {
+                fallback.push(format!(
+                    "Shared or unclassified input changed: {}",
+                    change.path
+                ));
+            }
+            for owner in consumers {
+                direct.insert((*owner).to_string());
+                production.insert((*owner).to_string());
+                reasons
+                    .entry((*owner).to_string())
+                    .or_default()
+                    .push(format!("Consumes shared input: {}", change.path));
+            }
         }
     }
     let baseline = closure(&direct, &dependencies);
@@ -217,6 +219,7 @@ pub fn make_plan(
         tests: tests.into_iter().collect(),
         reasons,
         fallback_reasons: fallback,
+        ignored_files,
         analysis_status: outcome.status.clone(),
         baseline_count: None,
         selected_count: None,
@@ -235,6 +238,74 @@ pub fn make_plan(
     }
     plan.planning_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     Ok(plan)
+}
+
+fn deferred_input(path: &str) -> bool {
+    // Full main/nightly runs cover repository-wide configuration changes.
+    path.starts_with("docs/")
+        || path.starts_with("openspec/")
+        || path.starts_with(".github/")
+        || matches!(
+            path,
+            "Cargo.toml"
+                | "Cargo.lock"
+                | "flake.nix"
+                | "flake.lock"
+                | "rust-toolchain"
+                | "rust-toolchain.toml"
+                | ".cargo/config"
+                | ".cargo/config.toml"
+                | ".config/nextest.toml"
+                | ".gitignore"
+                | ".gitattributes"
+                | ".editorconfig"
+                | ".pre-commit-config.yaml"
+                | ".markdownlint.yaml"
+                | "rustfmt.toml"
+                | "codecov.yml"
+                | "LICENSE"
+                | "about.toml"
+                | "about.hbs"
+                | "README.md"
+                | "CONTRIBUTING.md"
+                | "AGENTS.md"
+                | "CHANGELOG.md"
+                | "tools/test-affected/README.md"
+                | "tools/test-affected/test_runner.py"
+                | "scripts/ci_monitor.py"
+                | "scripts/test_ci_monitor.py"
+                | "scripts/nightly_tests.py"
+                | "scripts/test_nightly_tests.py"
+                | "scripts/check_semantic_title.py"
+                | "scripts/run-cov.sh"
+                | "scripts/test_coverage.py"
+                | "scripts/prune-test-cache.py"
+                | "scripts/test_prune_test_cache.py"
+                | "scripts/generate-third-party-notices.sh"
+                | "scripts/check-third-party-notices.sh"
+                | "scripts/test_tool_boundaries.py"
+                | "scripts/test_affected_tests.py"
+                | "scripts/test_cargo_cache.py"
+                | "scripts/test_nextest_build_cache.py"
+        )
+}
+
+fn shared_consumers(path: &str) -> &'static [&'static str] {
+    if path.starts_with("examples/") {
+        return &["mf-cli", "mf-compiler"];
+    }
+    if path.starts_with("tools/test-affected/flows/") {
+        return &["mfn-test-affected"];
+    }
+    match path {
+        "scripts/nextest-build-cache.py" => &["mf-cli", "mf-compiler"],
+        "scripts/nextest-cargo.sh" => &["mf-cli", "mf-compiler"],
+        "scripts/cargo_cache.py" => &["mf-cli", "mf-compiler"],
+        "scripts/check-release-support.sh" => &["mf-cli"],
+        "scripts/affected_tests.py" => &["mfn-test-affected"],
+        "tools/test-affected/run-tests.py" => &["mfn-test-affected"],
+        _ => &[],
+    }
 }
 
 fn validate_configuration(

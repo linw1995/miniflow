@@ -98,7 +98,7 @@ jobs:
           {
             echo '### Affected Rust tests'
             echo '```json'
-            jq '{mode, packages, reasons, fallback_reasons}' "$RUNNER_TEMP/affected-tests.json"
+            jq '{mode, packages, reasons, fallback_reasons, ignored_files}' "$RUNNER_TEMP/affected-tests.json"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Cache coverage dependencies

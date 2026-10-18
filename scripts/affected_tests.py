@@ -191,6 +191,67 @@ def package_graph(dot, packages):
     return dependencies, supplements
 
 
+def deferred_input(filename):
+    # Full main/nightly runs cover repository-wide configuration changes.
+    return filename.startswith(("docs/", "openspec/", ".github/")) or filename in {
+        "Cargo.toml",
+        "Cargo.lock",
+        "flake.nix",
+        "flake.lock",
+        "rust-toolchain",
+        "rust-toolchain.toml",
+        ".cargo/config",
+        ".cargo/config.toml",
+        ".config/nextest.toml",
+        ".gitignore",
+        ".gitattributes",
+        ".editorconfig",
+        ".pre-commit-config.yaml",
+        ".markdownlint.yaml",
+        "rustfmt.toml",
+        "codecov.yml",
+        "LICENSE",
+        "about.toml",
+        "about.hbs",
+        "README.md",
+        "CONTRIBUTING.md",
+        "AGENTS.md",
+        "CHANGELOG.md",
+        "tools/test-affected/README.md",
+        "tools/test-affected/test_runner.py",
+        "scripts/ci_monitor.py",
+        "scripts/test_ci_monitor.py",
+        "scripts/nightly_tests.py",
+        "scripts/test_nightly_tests.py",
+        "scripts/check_semantic_title.py",
+        "scripts/run-cov.sh",
+        "scripts/test_coverage.py",
+        "scripts/prune-test-cache.py",
+        "scripts/test_prune_test_cache.py",
+        "scripts/generate-third-party-notices.sh",
+        "scripts/check-third-party-notices.sh",
+        "scripts/test_tool_boundaries.py",
+        "scripts/test_affected_tests.py",
+        "scripts/test_cargo_cache.py",
+        "scripts/test_nextest_build_cache.py",
+    }
+
+
+def shared_consumers(filename):
+    if filename.startswith("examples/"):
+        return ("mf-cli", "mf-compiler")
+    if filename.startswith("tools/test-affected/flows/"):
+        return ("mfn-test-affected",)
+    return {
+        "scripts/nextest-build-cache.py": ("mf-cli", "mf-compiler"),
+        "scripts/nextest-cargo.sh": ("mf-cli", "mf-compiler"),
+        "scripts/cargo_cache.py": ("mf-cli", "mf-compiler"),
+        "scripts/check-release-support.sh": ("mf-cli",),
+        "scripts/affected_tests.py": ("mfn-test-affected",),
+        "tools/test-affected/run-tests.py": ("mfn-test-affected",),
+    }.get(filename, ())
+
+
 def classify(root, paths, packages):
     roots = sorted(
         ((Path(p["manifest_path"]).parent.relative_to(root), name) for name, p in packages.items()),
@@ -199,14 +260,14 @@ def classify(root, paths, packages):
     direct, ignored, full = defaultdict(list), [], []
     for filename in paths:
         path = Path(filename)
-        if path.name in {"Cargo.toml", "Cargo.lock"}:
-            full.append(f"Dependency configuration changed: {filename}")
-            continue
         owner = next((name for directory, name in roots if path.is_relative_to(directory)), None)
         if owner:
             direct[owner].append(filename)
-        elif filename.startswith(("docs/", "openspec/")) or filename in {"README.md", "CONTRIBUTING.md", "AGENTS.md"}:
+        elif deferred_input(filename):
             ignored.append(filename)
+        elif consumers := [name for name in shared_consumers(filename) if name in packages]:
+            for name in consumers:
+                direct[name].append(filename)
         else:
             # Shared fixtures, build inputs and unknown paths may be consumed
             # outside the declared crate graph, including by generated runners.

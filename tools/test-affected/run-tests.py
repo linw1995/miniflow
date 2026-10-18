@@ -45,7 +45,9 @@ def load_plan(path):
     data = json.loads(Path(path).read_text())
     if isinstance(data, dict) and set(data) == {"plan"}:
         data = data["plan"]
-    required = {"repository", "base", "head", "snapshot", "tree", "configuration", "toolchain", "build_environment",
+    if isinstance(data, dict):
+        data.setdefault("ignored_files", [])
+    required = {"ignored_files", "repository", "base", "head", "snapshot", "tree", "configuration", "toolchain", "build_environment",
                 "baseline_packages", "packages", "tests", "reasons", "fallback_reasons", "analysis_status",
                 "baseline_count", "selected_count", "observed_relationships", "analysis_ms", "planning_ms"}
     if not isinstance(data, dict) or set(data) != required:

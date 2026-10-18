@@ -7,8 +7,8 @@ with the event's base commit. Both dependency analysis and tests therefore
 include changes already on the base branch. The job records the selection and
 reasons in its summary. It runs those
 package suites with coverage; an empty selection skips the coverage cache,
-tests, and uploads. Dependency configuration, shared inputs, or analyzer failures
-conservatively select the full workspace.
+tests, and uploads. Known repository configuration is deferred to full main/nightly
+verification; unknown shared inputs or analyzer failures select the full workspace.
 
 Pushes to `main` and manual CI dispatches run the complete Linux suite through
 the same coverage script as local runs. Both full and selected runs use
@@ -191,14 +191,29 @@ Such additions appear in `supplemented_edges`. This favors extra tests over
 missing a consumer on a different platform. It does not replace testing on
 that platform or with other feature combinations.
 
-Files within a package, including fixtures, migrations, and deleted sources,
-select that package. Dependency manifests or lockfiles, shared inputs such as
-`examples/`, and unclassified paths select the entire workspace. This also
-covers removed packages and dependency edges that no longer exist in the head.
-Changes confined to `docs/`, `openspec/`, or the root README, contributing guide,
-and agent instructions do not select Rust tests. Build scripts or generated
-runners can consume inputs beyond Cargo's declared graph, so this is a
-conservative package-level selector, not a proof of semantic independence.
+Input classification follows this order in both the CI selector and the opt-in
+Flow planner:
+
+| Input | PR Rust selection |
+| --- | --- |
+| Files inside a workspace package, including manifests, fixture lockfiles, documentation, and deleted sources | Owner and transitive reverse dependencies |
+| Root `Cargo.toml` / `Cargo.lock`, Flake/toolchain, Cargo and nextest configuration | No additional packages; full main/nightly runs provide the backstop |
+| `docs/`, `openspec/`, `.github/`, known root documentation, lint/release metadata, and CI-only scripts | No additional packages; run relevant non-Rust checks separately |
+| `examples/`, `scripts/nextest-build-cache.py`, `scripts/nextest-cargo.sh`, `scripts/cargo_cache.py` | `mf-cli`, `mf-compiler`, and reverse dependencies |
+| `scripts/check-release-support.sh` | `mf-cli` and reverse dependencies |
+| `scripts/affected_tests.py`, `tools/test-affected/flows/`, `tools/test-affected/run-tests.py` | `mfn-test-affected` and reverse dependencies |
+| Other inputs, including removed package sources, or missing all expected shared consumers | Full workspace |
+
+The bounded deferred-file list lives in each selector's `deferred_input` helper;
+plans expose matched paths in `ignored_files`. Package ownership takes priority,
+so a package fixture named `Cargo.toml` or `README.md` is not ignored. Main and
+nightly still execute full suites. Deferring dependency and execution configuration
+can delay detection of cross-package regressions until those runs; this is an
+explicit PR coverage tradeoff. Unknown paths remain conservative. Update consumer
+mappings when shared executable inputs gain new users.
+
+Build scripts and generated runners can consume inputs beyond Cargo's declared
+graph, so selected scope is not a proof of semantic independence.
 
 The analyzer loads all features with compilation checks, build-script execution,
 proc-macro expansion, and cache priming disabled. It must finish loading with a

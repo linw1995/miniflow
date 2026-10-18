@@ -73,6 +73,8 @@ pub struct TestPlan {
     pub tests: Vec<TestCase>,
     pub reasons: BTreeMap<String, Vec<String>>,
     pub fallback_reasons: Vec<String>,
+    #[serde(default)]
+    pub ignored_files: Vec<String>,
     pub analysis_status: mfn_lsp::Status,
     pub baseline_count: Option<usize>,
     pub selected_count: Option<usize>,
