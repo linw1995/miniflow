@@ -126,11 +126,11 @@ fn compiled_branches_match_memory_and_rebuild_when_precedence_changes() {
             .as_array_mut()
             .unwrap()
             .push(json!({"id":"joined", "kind":"builtin.identity"}));
-        value["exclusive_inputs"] = json!([{"to_node":"joined", "to_input":"input", "sources":[
-            {"from_node":"large", "from_output":"value"},
-            {"from_node":"medium", "from_output":"value"},
-            {"from_node":"fallback", "from_output":"value"}
-        ]}]);
+        value["edges"] = json!([
+            {"from_node":"large", "from_output":"value", "to_node":"joined", "to_input":"input", "exclusive":true},
+            {"from_node":"medium", "from_output":"value", "to_node":"joined", "to_input":"input", "exclusive":true},
+            {"from_node":"fallback", "from_output":"value", "to_node":"joined", "to_input":"input", "exclusive":true}
+        ]);
         value["outputs"]
             .as_array_mut()
             .unwrap()

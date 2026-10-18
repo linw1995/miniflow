@@ -517,28 +517,24 @@ outputs do not merge branches; use an explicit exclusive input group for alterna
 
 ## Exclusive input bindings
 
-Use `exclusive_inputs` to bind alternative branch outputs to one input. Each group names
-`to_node`, `to_input`, and at least two distinct `sources` with `from_node` and `from_output`.
-A target input cannot also have an ordinary edge or another group. Every candidate participates
-in dependency ordering and type checks, including branches expected to skip.
+Set `exclusive: true` on each candidate data edge targeting the same `to_node` and `to_input`.
+That target pair defines the group. At least two distinct candidate outputs are required;
+ordinary and exclusive edges cannot bind the same input. An omitted or false marker retains
+ordinary single-source binding. Every candidate participates in ordering and type checks.
 
 ```json
 {
-  "exclusive_inputs": [{
-    "to_node": "consume",
-    "to_input": "input",
-    "sources": [
-      {"from_node": "local", "from_output": "value"},
-      {"from_node": "remote", "from_output": "value"}
-    ]
-  }]
+  "edges": [
+    {"from_node":"local","from_output":"value","to_node":"consume","to_input":"input","exclusive":true},
+    {"from_node":"remote","from_output":"value","to_node":"consume","to_input":"input","exclusive":true}
+  ]
 }
 ```
 
 The same syntax is available in loop and iteration bodies. Candidates must be in the consumer's
 scope and input message domain. Ordinary inputs and control edges retain their AND behavior;
 this declaration does not mix independent streams or select the first completed producer.
-Omitting the field preserves existing workflows. New syntax requires updated support packages.
+Omitting the marker preserves existing workflows. New syntax requires updated support packages.
 
 Resolution waits for all candidate outcomes in the current frame. Exactly one produced value
 binds the input; all skipped candidates skip the consumer; multiple produced candidates fail,

@@ -58,8 +58,6 @@ pub struct WorkflowDefinition {
     #[serde(default)]
     pub edges: Vec<EdgeDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub exclusive_inputs: Vec<ExclusiveInputDefinition>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub control_edges: Vec<ControlEdgeDefinition>,
     #[serde(default)]
     pub outputs: Vec<WorkflowOutputDefinition>,
@@ -72,14 +70,6 @@ fn deserialize_execution<'de, D: serde::Deserializer<'de>>(
 }
 
 impl WorkflowDefinition {
-    pub fn data_edges(&self) -> impl Iterator<Item = EdgeDefinition> + '_ {
-        self.edges.iter().cloned().chain(
-            self.exclusive_inputs
-                .iter()
-                .flat_map(ExclusiveInputDefinition::edges),
-        )
-    }
-
     pub fn from_json(input: &str) -> Result<Self, DefinitionParseError> {
         let value: Value = serde_json::from_str(input).context(JsonParseSnafu)?;
         if value.get("version").and_then(Value::as_str) == Some("2026-09-24") {
@@ -154,8 +144,6 @@ pub struct LoopBodyDefinition {
     #[serde(default)]
     pub edges: Vec<EdgeDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub exclusive_inputs: Vec<ExclusiveInputDefinition>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub control_edges: Vec<ControlEdgeDefinition>,
 }
 
@@ -185,36 +173,12 @@ fn empty_object() -> Value {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EdgeDefinition {
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub exclusive: bool,
     pub from_node: DefinitionId,
     pub from_output: String,
     pub to_node: DefinitionId,
     pub to_input: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InputSourceDefinition {
-    pub from_node: DefinitionId,
-    pub from_output: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExclusiveInputDefinition {
-    pub to_node: DefinitionId,
-    pub to_input: String,
-    pub sources: Vec<InputSourceDefinition>,
-}
-
-impl ExclusiveInputDefinition {
-    pub fn edges(&self) -> impl Iterator<Item = EdgeDefinition> + '_ {
-        self.sources.iter().map(|source| EdgeDefinition {
-            from_node: source.from_node.clone(),
-            from_output: source.from_output.clone(),
-            to_node: self.to_node.clone(),
-            to_input: self.to_input.clone(),
-        })
-    }
 }
 
 #[derive(Debug, Snafu)]
@@ -225,43 +189,38 @@ pub struct ExclusiveInputError {
     pub reason: &'static str,
 }
 
-pub fn validate_exclusive_inputs(
-    edges: &[EdgeDefinition],
-    groups: &[ExclusiveInputDefinition],
-) -> Result<(), ExclusiveInputError> {
-    let mut bound: std::collections::BTreeSet<_> = edges
-        .iter()
-        .map(|edge| (&edge.to_node, &edge.to_input))
-        .collect();
-    for group in groups {
-        for (valid, reason) in [
-            (
-                group.sources.len() >= 2,
-                "at least two sources are required",
-            ),
-            (
-                group
-                    .sources
-                    .iter()
-                    .collect::<std::collections::BTreeSet<_>>()
-                    .len()
-                    == group.sources.len(),
-                "duplicate candidate source",
-            ),
-            (
-                bound.insert((&group.to_node, &group.to_input)),
-                "target input is already bound",
-            ),
-        ] {
-            snafu::ensure!(
-                valid,
-                ExclusiveInputSnafu {
-                    node: group.to_node.clone(),
-                    input: group.to_input.clone(),
-                    reason
-                }
-            );
-        }
+pub fn validate_exclusive_inputs(edges: &[EdgeDefinition]) -> Result<(), ExclusiveInputError> {
+    let mut groups: BTreeMap<_, std::collections::BTreeSet<_>> = BTreeMap::new();
+    for edge in edges.iter().filter(|edge| edge.exclusive) {
+        let sources = groups.entry((&edge.to_node, &edge.to_input)).or_default();
+        snafu::ensure!(
+            sources.insert((&edge.from_node, &edge.from_output)),
+            ExclusiveInputSnafu {
+                node: edge.to_node.clone(),
+                input: edge.to_input.clone(),
+                reason: "duplicate candidate source",
+            }
+        );
+    }
+    for edge in edges.iter().filter(|edge| !edge.exclusive) {
+        snafu::ensure!(
+            !groups.contains_key(&(&edge.to_node, &edge.to_input)),
+            ExclusiveInputSnafu {
+                node: edge.to_node.clone(),
+                input: edge.to_input.clone(),
+                reason: "cannot mix ordinary and exclusive edges for one input",
+            }
+        );
+    }
+    for ((node, input), sources) in groups {
+        snafu::ensure!(
+            sources.len() >= 2,
+            ExclusiveInputSnafu {
+                node: node.clone(),
+                input: input.clone(),
+                reason: "at least two sources are required",
+            }
+        );
     }
     Ok(())
 }

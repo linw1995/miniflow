@@ -31,10 +31,9 @@ pub fn instantiate_stream(
         })?;
     let (nodes, order) = crate::compiler::prepare_definition(&plan.definition, registry)?;
     ensure!(order == plan.execution_order, NonCanonicalPlanOrderSnafu);
-    let flow = crate::FlowBuilder::prepare_with_exclusive_inputs(
+    let flow = crate::FlowBuilder::prepare(
         nodes,
         plan.definition.edges.clone(),
-        plan.definition.exclusive_inputs.clone(),
         order,
         plan.definition.outputs.clone(),
     )

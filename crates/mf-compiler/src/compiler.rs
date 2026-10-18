@@ -493,7 +493,8 @@ fn prepare_graph(
                 .map(|node| (node, !incoming.contains_key(node.definition_id.as_str()))),
             |node, input| {
                 definition
-                    .data_edges()
+                    .edges
+                    .iter()
                     .any(|edge| edge.to_node.as_str() == node && edge.to_input == input)
             },
         )?;
@@ -539,24 +540,11 @@ pub fn incoming_dependencies(
             .entry(edge.to_node.as_str())
             .or_default()
             .push(ExecutionDependency {
-                exclusive: false,
+                exclusive: edge.exclusive,
                 input: Some(&edge.to_input),
                 source_node: edge.from_node.as_str(),
                 source_output: &edge.from_output,
             });
-    }
-    for group in &definition.exclusive_inputs {
-        for source in &group.sources {
-            incoming
-                .entry(group.to_node.as_str())
-                .or_default()
-                .push(ExecutionDependency {
-                    exclusive: true,
-                    input: Some(&group.to_input),
-                    source_node: source.from_node.as_str(),
-                    source_output: &source.from_output,
-                });
-        }
     }
     for edge in &definition.control_edges {
         incoming
@@ -683,7 +671,7 @@ fn validate_base_metadata(
     }
 
     let mut connected_inputs = BTreeSet::new();
-    for edge in definition.data_edges() {
+    for edge in definition.edges.iter() {
         let source = registrations[&edge.from_node];
         let target = registrations[&edge.to_node];
         let Some(_) = source
@@ -769,14 +757,9 @@ fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCom
             .fail();
         }
     }
-    crate::validate_exclusive_inputs(&definition.edges, &definition.exclusive_inputs)?;
-    let exclusive_targets: BTreeSet<_> = definition
-        .exclusive_inputs
-        .iter()
-        .map(|group| (group.to_node.clone(), group.to_input.clone()))
-        .collect();
+    crate::validate_exclusive_inputs(&definition.edges)?;
     let mut connected = BTreeSet::new();
-    for edge in definition.data_edges() {
+    for edge in definition.edges.iter() {
         if !ids.contains(&edge.from_node) {
             return UnknownEdgeSourceSnafu {
                 from_node: edge.from_node.clone(),
@@ -795,9 +778,7 @@ fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCom
             }
             .fail();
         }
-        if !connected.insert((edge.to_node.clone(), edge.to_input.clone()))
-            && !exclusive_targets.contains(&(edge.to_node.clone(), edge.to_input.clone()))
-        {
+        if !connected.insert((&edge.to_node, &edge.to_input)) && !edge.exclusive {
             return DuplicateInputConnectionSnafu {
                 node_id: edge.to_node.clone(),
                 port: edge.to_input.clone(),
@@ -844,8 +825,9 @@ fn control_error(edge: &crate::ControlEdgeDefinition, message: &str) -> Workflow
 
 fn dependency_pairs(definition: &WorkflowDefinition) -> BTreeSet<(DefinitionId, DefinitionId)> {
     definition
-        .data_edges()
-        .map(|edge| (edge.from_node, edge.to_node))
+        .edges
+        .iter()
+        .map(|edge| (edge.from_node.clone(), edge.to_node.clone()))
         .chain(
             definition
                 .control_edges
@@ -955,10 +937,9 @@ pub fn compile_definition(
     registry: &NodeRegistry,
 ) -> Result<CompiledWorkflow, WorkflowCompileError> {
     let (nodes, execution_order) = prepare_definition(definition, registry)?;
-    let flow = crate::FlowBuilder::prepare_with_exclusive_inputs(
+    let flow = crate::FlowBuilder::prepare(
         nodes,
         definition.edges.clone(),
-        definition.exclusive_inputs.clone(),
         execution_order.clone(),
         definition.outputs.clone(),
     )
@@ -1027,11 +1008,6 @@ pub fn normalize_plan(
     });
     let mut control_edges = definition.control_edges.clone();
     control_edges.sort();
-    let mut exclusive_inputs = definition.exclusive_inputs.clone();
-    for group in &mut exclusive_inputs {
-        group.sources.sort();
-    }
-    exclusive_inputs.sort();
     let mut outputs = definition.outputs.clone();
     outputs.sort_by(|left, right| {
         (&left.name, &left.node, &left.port).cmp(&(&right.name, &right.node, &right.port))
@@ -1043,7 +1019,6 @@ pub fn normalize_plan(
             execution: definition.execution.clone(),
             dependencies: definition.dependencies.clone(),
             nodes,
-            exclusive_inputs,
             edges,
             control_edges,
             outputs,
@@ -1066,7 +1041,6 @@ fn normalize_loop_node(
         .retain(|node| node.id.as_str() != crate::LOOP_SOURCE_ID);
     loop_definition.body.nodes = normalized.nodes;
     loop_definition.body.edges = normalized.edges;
-    loop_definition.body.exclusive_inputs = normalized.exclusive_inputs;
     loop_definition.body.control_edges = normalized.control_edges;
     Ok(())
 }
@@ -1085,10 +1059,9 @@ pub fn instantiate_compiled(
     if plan.execution_order != canonical_order {
         return NonCanonicalPlanOrderSnafu.fail();
     }
-    let builder = crate::FlowBuilder::prepare_with_exclusive_inputs(
+    let builder = crate::FlowBuilder::prepare(
         nodes,
         plan.definition.edges.clone(),
-        plan.definition.exclusive_inputs.clone(),
         plan.execution_order.clone(),
         plan.definition.outputs.clone(),
     )
@@ -1349,16 +1322,10 @@ fn bind_subgraph_node(
             path: Vec::new(),
         })
         .collect();
-    let flow = crate::FlowBuilder::prepare_with_exclusive_inputs(
-        nodes,
-        body.edges.clone(),
-        body.exclusive_inputs.clone(),
-        order,
-        body.outputs.clone(),
-    )
-    .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
-    .and_then(|flow| flow.into_tasks())
-    .context(FlowConstructionSnafu)?;
+    let flow = crate::FlowBuilder::prepare(nodes, body.edges.clone(), order, body.outputs.clone())
+        .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
+        .and_then(|flow| flow.into_tasks())
+        .context(FlowConstructionSnafu)?;
     let body = PreparedSubgraph::new(identities, outputs, move |state| {
         flow.execute_in_context(state)
     });

@@ -8,7 +8,7 @@ Bind one node input to explicitly declared alternative outputs while preserving 
 
 ### Requirement: Declare an exclusive input group
 
-Workflow, loop body, and iteration body definitions SHALL accept an optional `exclusive_inputs` array, defaulting to empty. Each entry SHALL contain `to_node`, `to_input`, and `sources`; each source SHALL contain `from_node` and `from_output`. A group MUST name at least two distinct candidate outputs and one existing input. A target input MUST have exactly one binding declaration across ordinary edges and exclusive groups.
+Data edges SHALL accept an optional boolean `exclusive`, defaulting to false. Marked edges sharing `to_node` and `to_input` SHALL form one exclusive group with at least two distinct source outputs. All edges binding that input MUST be marked; mixed ordinary and exclusive edges MUST be rejected. The same edge syntax SHALL apply in workflow, loop, and iteration bodies.
 
 #### Scenario: Bind alternative requests
 
@@ -17,7 +17,7 @@ Workflow, loop body, and iteration body definitions SHALL accept an optional `ex
 
 #### Scenario: Reject malformed or competing bindings
 
-- **WHEN** a group has fewer than two sources, duplicate sources, unknown fields or endpoints, or a target already bound by an edge or another group
+- **WHEN** an exclusive target has fewer than two sources, duplicate candidates, unknown fields or endpoints, or a mixture of ordinary and exclusive edges
 - **THEN** compilation rejects the declaration with the target and offending source or field
 
 #### Scenario: Preserve ordinary duplicate rejection
@@ -145,11 +145,11 @@ Workflow descriptions SHALL distinguish candidate groups from mandatory inputs a
 
 ### Requirement: Preserve existing definition behavior
 
-Omitting `exclusive_inputs` SHALL preserve existing behavior, and empty groups arrays SHALL be omitted on serialization. Using the new field SHALL require updated compiler and runtime support; older readers MUST reject unsupported syntax rather than reinterpret it. Isolated node execution SHALL continue to accept resolved inputs without running or selecting workflow predecessors.
+Omitting `exclusive` or setting it to false SHALL preserve ordinary edge behavior; false SHALL be omitted on serialization. Using true SHALL require updated compiler and runtime support; older readers MUST reject unsupported syntax rather than reinterpret it. Isolated node execution SHALL continue to accept resolved inputs without running or selecting workflow predecessors.
 
 #### Scenario: Run an unchanged workflow
 
-- **WHEN** a workflow omits `exclusive_inputs`
+- **WHEN** a workflow omits the `exclusive` edge marker or explicitly sets it to false
 - **THEN** its bindings, activation, skips, and results retain their existing semantics
 
 #### Scenario: Execute a consumer in isolation

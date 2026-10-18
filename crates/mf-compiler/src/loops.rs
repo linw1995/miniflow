@@ -65,7 +65,6 @@ pub fn body_definition(
         execution: None,
         dependencies: dependencies.clone(),
         nodes,
-        exclusive_inputs: body.exclusive_inputs.clone(),
         edges: body.edges.clone(),
         control_edges: body.control_edges.clone(),
         outputs: Vec::new(),

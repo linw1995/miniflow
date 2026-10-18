@@ -79,27 +79,27 @@
       "to_node": "local"
     }
   ],
-  "exclusive_inputs": [
-    {
-      "to_node": "consume",
-      "to_input": "input",
-      "sources": [
-        {
-          "from_node": "local",
-          "from_output": "value"
-        },
-        {
-          "from_node": "ci",
-          "from_output": "value"
-        }
-      ]
-    }
-  ],
   "outputs": [
     {
       "name": "result",
       "node": "consume",
       "port": "value"
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "local",
+      "from_output": "value",
+      "to_node": "consume",
+      "to_input": "input",
+      "exclusive": true
+    },
+    {
+      "from_node": "ci",
+      "from_output": "value",
+      "to_node": "consume",
+      "to_input": "input",
+      "exclusive": true
     }
   ]
 }

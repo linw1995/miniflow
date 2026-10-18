@@ -12,32 +12,34 @@ The earlier test-selection proposal in another worktree proposed `builtin.merge`
 
 ## Decisions
 
-### 1. Declare alternatives separately from ordinary edges
+### 1. Mark alternatives on existing data edges
 
-Add default-empty `exclusive_inputs` to workflow, loop body, and iteration body definitions:
+Use the existing edge structure with a default-false `exclusive` marker:
 
 ```json
 {
-  "exclusive_inputs": [
-    {
-      "to_node": "diff",
-      "to_input": "request",
-      "sources": [
-        { "from_node": "local", "from_output": "value" },
-        { "from_node": "ci", "from_output": "value" }
-      ]
-    }
+  "edges": [
+    {"from_node":"local","from_output":"value","to_node":"diff","to_input":"request","exclusive":true},
+    {"from_node":"ci","from_output":"value","to_node":"diff","to_input":"request","exclusive":true}
   ]
 }
 ```
 
-An entry binds one existing port and owns all its candidates. At least two distinct candidates are required. Reject another group or an ordinary edge targeting that port. Keep ordinary duplicate-edge rejection. Use explicit source pairs, not dotted-string parsing. Empty arrays are omitted on serialization, and unknown fields remain errors.
+The target node and input identify the group. Require at least two distinct candidate outputs,
+reject duplicate candidates, and reject any mixture of ordinary and exclusive edges at one
+input. Ordinary duplicate-edge rejection remains unchanged. False markers are omitted during
+serialization; unknown fields and non-boolean markers remain errors. Existing supported
+versions accept this additive field, while older strict readers reject it.
 
-This keeps grouping explicit without adding policy flags to every edge or teaching providers about workflow branches. The supported definition versions can accept the additive field using the existing optional-field compatibility approach; old readers reject it through strict deserialization. Update Rust struct construction sites and document the low-level API addition.
+One edge collection serves validation, ordering, inference, normalization, manifest generation,
+and body preparation. `FlowBuilder::prepare` accepts marked edges through its existing argument.
+There are no separate candidate/source definition types, group-expansion adapters, or specialized
+builder entry points. Only Rust edge literals need the new marker; workflow and body structs
+retain their original shape.
 
 ### 2. Preserve groups in the prepared input plan
 
-Represent group membership explicitly on prepared dependency and connection entries with an `exclusive` marker, keyed by consumer and input port. The definition owns the group and validation rejects competing declarations. This compact representation lets existing graph algorithms visit every source while the shared input resolver groups candidates before applying skip rules. Control dependencies remain separate mandatory gates.
+Represent group membership explicitly on prepared dependency and connection entries with an `exclusive` marker, keyed by consumer and input port. Edges sharing a target identify the group, and validation rejects mixed binding policies. This compact representation lets existing graph algorithms visit every source while the shared input resolver groups candidates before applying skip rules. Control dependencies remain separate mandatory gates.
 
 Every candidate participates in topological ordering, cycle and endpoint validation, context ancestry, worker-domain visibility, message-domain analysis, and connected-input accounting. Use the same preparation path for definition-based and programmatic construction. Carry groups through nested body preparation and generated plans; do not introduce hidden nodes with new execution identities.
 
@@ -77,7 +79,8 @@ Selection is part of consumer preparation, not another user-visible node or span
 
 - **Explicit merge node:** provides a reusable, visible forwarding result but still requires core support for skipped candidates. Rejected here because the selected design puts this behavior on the consuming input.
 - **Global OR or node-wide any policy:** cannot preserve independent required inputs and control gates and does not identify which value binds each port.
-- **Duplicate ordinary edges with inferred selection:** hides intent and changes previously invalid definitions into executable workflows.
+- **Unmarked duplicate edges with inferred selection:** hides intent and changes previously invalid definitions into executable workflows.
+- **Separate candidate collection:** duplicates edge traversal and definition types even though the target node and input already identify each group.
 - **Compiler-generated merge nodes:** can reuse some single-source structures but add artificial identities, lifecycle events, and provider coupling. Preserve groups directly in the input plan instead.
 - **First-produced selection:** races candidates, misses later ambiguity, and changes the deterministic contract.
 
@@ -86,7 +89,7 @@ Selection is part of consumer preparation, not another user-visible node or span
 - **Single-source assumptions beyond validation** -> Audit inference maps, typed transfers, connectivity, descriptions, cache inputs, and compiled-plan generation; cover reordered candidates in parity tests.
 - **Scope or frame leakage** -> Exercise changing winners across loop rounds, parallel iteration items, and stream frames, including all-skipped frames.
 - **Incorrect skip observations** -> Use resolved logical-input outcomes for Task and operator observations; never infer consumer skipping from raw alternative edges.
-- **Broader plan and description changes** -> Preserve default-empty serialization and old-definition fixtures, and update affected consumers in the same implementation group.
+- **Broader plan and description changes** -> Preserve default-false serialization and old-definition fixtures, and update affected consumers in the same implementation group.
 - **Reduced typed optimization near a group** -> Use an explicit conservative fallback; optimization is a separate concern from correctness.
 
 ## Migration and Validation

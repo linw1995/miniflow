@@ -50,7 +50,6 @@ pub fn body_definition(
         execution: None,
         dependencies: parent.dependencies.clone(),
         nodes,
-        exclusive_inputs: config.body.exclusive_inputs.clone(),
         edges: config.body.edges.clone(),
         control_edges: config.body.control_edges.clone(),
         outputs: vec![WorkflowOutputDefinition {
@@ -87,7 +86,6 @@ pub fn normalize_config(
         .retain(|node| node.id.as_str() != ITERATION_INPUT_ID);
     config.body.nodes = normalized.nodes;
     config.body.edges = normalized.edges;
-    config.body.exclusive_inputs = normalized.exclusive_inputs;
     config.body.control_edges = normalized.control_edges;
     serde_json::to_value(config).context(IterationConfigurationSnafu {
         definition_id: node.id.clone(),

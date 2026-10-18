@@ -291,7 +291,7 @@ pub fn describe_definition(
                 .map(|node| (node.id.as_str(), node.kind.as_str())),
             execution_order,
         )?,
-        data_edges: data_edges(&definition.edges, &definition.exclusive_inputs),
+        data_edges: data_edges(&definition.edges),
         control_edges: control_edges(&definition.control_edges),
         execution_order: execution_order.to_vec(),
         loop_bodies,
@@ -336,31 +336,16 @@ fn ordered_nodes<'a>(
         .collect()
 }
 
-fn data_edges(
-    edges: &[crate::EdgeDefinition],
-    groups: &[crate::ExclusiveInputDefinition],
-) -> Vec<DataEdge> {
+fn data_edges(edges: &[crate::EdgeDefinition]) -> Vec<DataEdge> {
     edges
         .iter()
         .map(|edge| DataEdge {
-            exclusive: false,
+            exclusive: edge.exclusive,
             from_node: edge.from_node.to_string(),
             from_output: edge.from_output.clone(),
             to_node: edge.to_node.to_string(),
             to_input: edge.to_input.clone(),
         })
-        .chain(
-            groups
-                .iter()
-                .flat_map(|group| group.edges())
-                .map(|edge| DataEdge {
-                    exclusive: true,
-                    from_node: edge.from_node.to_string(),
-                    from_output: edge.from_output,
-                    to_node: edge.to_node.to_string(),
-                    to_input: edge.to_input,
-                }),
-        )
         .collect()
 }
 
@@ -400,7 +385,7 @@ fn describe_loops(
         bodies.push(LoopBodyDescription {
             path: path.clone(),
             nodes: ordered_nodes(nodes, order)?,
-            data_edges: data_edges(&body.edges, &body.exclusive_inputs),
+            data_edges: data_edges(&body.edges),
             control_edges: control_edges(&body.control_edges),
             execution_order: order.to_vec(),
         });

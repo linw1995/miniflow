@@ -21,9 +21,10 @@ fn definition(selected: bool, left: Value, right: Value) -> WorkflowDefinition {
             {"from_node":"route", "from_output":"left", "to_node":"left"},
             {"from_node":"route", "from_output":"else", "to_node":"right"}
         ],
-        "exclusive_inputs":[{"to_node":"consume", "to_input":"input", "sources":[
-            {"from_node":"left", "from_output":"value"}, {"from_node":"right", "from_output":"value"}
-        ]}],
+        "edges":[
+            {"from_node":"left", "from_output":"value", "to_node":"consume", "to_input":"input", "exclusive":true},
+            {"from_node":"right", "from_output":"value", "to_node":"consume", "to_input":"input", "exclusive":true}
+        ],
         "outputs":[{"name":"result", "node":"consume", "port":"value", "optional":true}]
     })).unwrap()
 }
@@ -101,11 +102,13 @@ fn loop_rounds_and_parallel_iterations_select_within_each_scope() {
         body["control_edges"][0]["from_output"] = json!(port);
         let definition = if mode == "loop" {
             body["nodes"][3] = json!({"id":"consume", "kind":"workflow.loop_assign", "config":{"variable":"state"}});
-            body["exclusive_inputs"][0]["to_input"] = json!("value");
+            for edge in body["edges"].as_array_mut().unwrap() {
+                edge["to_input"] = json!("value");
+            }
             json!({"version":"2026-10-03", "dependencies":{}, "nodes":[
                 {"id":"start", "kind":"builtin.constant", "config":{"value":false}},
                 {"id":"loop", "kind":"workflow.loop", "loop":{"max_iterations":3, "variables":[{"name":"state", "type":"bool"}], "body":{
-                    "nodes":body["nodes"], "control_edges":body["control_edges"], "exclusive_inputs":body["exclusive_inputs"]
+                    "nodes":body["nodes"], "control_edges":body["control_edges"], "edges":body["edges"]
                 }}}
             ], "edges":[{"from_node":"start", "from_output":"value", "to_node":"loop", "to_input":"state"}],
             "outputs":[{"name":"result", "node":"loop", "port":"state"}]})
@@ -113,7 +116,7 @@ fn loop_rounds_and_parallel_iterations_select_within_each_scope() {
             json!({"version":"2026-10-03", "dependencies":{}, "nodes":[
                 {"id":"start", "kind":"builtin.constant", "config":{"value":[true,false,true,false]}},
                 {"id":"iterate", "kind":"builtin.iteration", "config":{"mode":mode, "body":{
-                    "nodes":body["nodes"], "control_edges":body["control_edges"], "exclusive_inputs":body["exclusive_inputs"], "result":{"node":"consume", "port":"value"}
+                    "nodes":body["nodes"], "control_edges":body["control_edges"], "edges":body["edges"], "result":{"node":"consume", "port":"value"}
                 }}}
             ], "edges":[{"from_node":"start", "from_output":"value", "to_node":"iterate", "to_input":"items"}],
             "outputs":[{"name":"result", "node":"iterate", "port":"results"}]})
@@ -145,7 +148,7 @@ fn typed_plans_fall_back_at_groups_and_isolated_nodes_accept_resolved_inputs() {
         json!({"id":"unrelated_a", "kind":"builtin.identity"}),
         json!({"id":"unrelated_b", "kind":"builtin.identity"}),
     ]);
-    value["edges"] = json!([{"from_node":"unrelated_a", "from_output":"value", "to_node":"unrelated_b", "to_input":"input"}]);
+    value["edges"].as_array_mut().unwrap().push(json!({"from_node":"unrelated_a", "from_output":"value", "to_node":"unrelated_b", "to_input":"input"}));
     let plan = compile_definition(&serde_json::from_value(value).unwrap(), &registry).unwrap();
     let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
     let report: mf_compiler::TypedPlan = serde_json::from_str(&artifacts.typed_plan_json).unwrap();
@@ -272,16 +275,16 @@ fn unresolved_candidates_never_trigger_early_execution_or_fallback() {
                 )
             })
             .collect();
-        let groups = serde_json::from_value(json!([{"to_node":"consume", "to_input":"input", "sources":[
-            {"from_node":"left", "from_output":"value"}, {"from_node":"right", "from_output":"value"}
-        ]}])).unwrap();
+        let edges = serde_json::from_value(json!([
+            {"from_node":"left", "from_output":"value", "to_node":"consume", "to_input":"input", "exclusive":true},
+            {"from_node":"right", "from_output":"value", "to_node":"consume", "to_input":"input", "exclusive":true}
+        ])).unwrap();
         let outputs =
             serde_json::from_value(json!([{"name":"result", "node":"consume", "port":"value"}]))
                 .unwrap();
-        let flow = mf_compiler::FlowBuilder::prepare_with_exclusive_inputs(
+        let flow = mf_compiler::FlowBuilder::prepare(
             nodes,
-            vec![],
-            groups,
+            edges,
             vec!["left".into(), "right".into(), "consume".into()],
             outputs,
         )
@@ -326,9 +329,9 @@ fn observed_selections_and_snapshots_preserve_provenance_without_secret_values()
         value["nodes"][index]["kind"] = json!("builtin.identity");
         value["nodes"][index]["config"] = json!({});
     }
-    value["edges"] = json!([
-        {"from_node":"params", "from_output":"payload", "to_node":"local", "to_input":"input"},
-        {"from_node":"params", "from_output":"payload", "to_node":"ci", "to_input":"input"}
+    value["edges"].as_array_mut().unwrap().extend([
+        json!({"from_node":"params", "from_output":"payload", "to_node":"local", "to_input":"input"}),
+        json!({"from_node":"params", "from_output":"payload", "to_node":"ci", "to_input":"input"})
     ]);
     let registry = NodeRegistry::from_inventory().unwrap();
     for ci in [false, true] {
@@ -397,16 +400,15 @@ fn stream_skip_observations_use_logical_inputs_and_keep_selected_sources() {
         ],
         "edges":[
             {"from_node":"feed", "from_output":"item", "to_node":"active", "to_input":"input"},
-            {"from_node":"feed", "from_output":"item", "to_node":"inactive", "to_input":"input"}
+            {"from_node":"feed", "from_output":"item", "to_node":"inactive", "to_input":"input"},
+            {"from_node":"active", "from_output":"value", "to_node":"collect", "to_input":"item", "exclusive":true},
+            {"from_node":"inactive", "from_output":"value", "to_node":"collect", "to_input":"item", "exclusive":true}
         ],
         "control_edges":[
             {"from_node":"feed", "from_output":"item", "to_node":"route"},
             {"from_node":"route", "from_output":"else", "to_node":"inactive"},
             {"from_node":"route", "from_output":"else", "to_node":"collect"}
         ],
-        "exclusive_inputs":[{"to_node":"collect", "to_input":"item", "sources":[
-            {"from_node":"active", "from_output":"value"}, {"from_node":"inactive", "from_output":"value"}
-        ]}]
     })).unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
@@ -466,16 +468,15 @@ fn exclusive_startup_input_activates_a_stream_producer() {
             "edges":[
                 {"from_node":"params", "from_output":"control", "to_node":"local", "to_input":"input"},
                 {"from_node":"params", "from_output":"control", "to_node":"ci", "to_input":"input"},
-                {"from_node":"feed", "from_output":"item", "to_node":"consume", "to_input":"input"}
+                {"from_node":"feed", "from_output":"item", "to_node":"consume", "to_input":"input"},
+                {"from_node":"local", "from_output":"value", "to_node":"feed", "to_input":"control", "exclusive":true},
+                {"from_node":"ci", "from_output":"value", "to_node":"feed", "to_input":"control", "exclusive":true}
             ],
             "control_edges":[
                 {"from_node":"params", "from_output":"ci", "to_node":"route"},
                 {"from_node":"route", "from_output":"ci", "to_node":"ci"},
                 {"from_node":"route", "from_output":"else", "to_node":"local"}
             ],
-            "exclusive_inputs":[{"to_node":"feed", "to_input":"control", "sources":[
-                {"from_node":"local", "from_output":"value"}, {"from_node":"ci", "from_output":"value"}
-            ]}],
             "outputs":[{"name":"result", "node":"consume", "port":"value"}]
         })).unwrap();
         let plan = compile_definition(&definition, &registry).unwrap();

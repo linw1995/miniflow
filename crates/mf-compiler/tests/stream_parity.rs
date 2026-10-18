@@ -92,7 +92,6 @@ fn definition(scenario: &str) -> WorkflowDefinition {
         );
         nodes[2]["config"]["body"]["result"] = json!({"node":"join", "port":"value"});
     }
-    let mut exclusive_inputs = Vec::new();
     if scenario == "windows" {
         nodes.push(json!({"id":"alternative", "kind":"builtin.identity"}));
         edges.retain(|edge| edge["to_node"] != "collect");
@@ -100,9 +99,10 @@ fn definition(scenario: &str) -> WorkflowDefinition {
         controls.retain(|edge| edge["to_node"] != "collect");
         nodes[3]["config"]["branches"].as_array_mut().unwrap().insert(0, json!({"id":"large", "condition":{"source":{"output":"join.value", "path":""}, "operator":"gt", "value":10}}));
         controls.push(json!({"from_node":"route", "from_output":"large", "to_node":"alternative"}));
-        exclusive_inputs.push(json!({"to_node":"collect", "to_input":"item", "sources":[
-            {"from_node":"primary", "from_output":"value"}, {"from_node":"alternative", "from_output":"value"}
-        ]}));
+        edges.extend([
+            json!({"from_node":"primary", "from_output":"value", "to_node":"collect", "to_input":"item", "exclusive":true}),
+            json!({"from_node":"alternative", "from_output":"value", "to_node":"collect", "to_input":"item", "exclusive":true})
+        ]);
         // Negative messages skip both candidates; larger values switch to the alternative.
         nodes.push(json!({"id":"primary", "kind":"builtin.identity"}));
         edges.push(edge("join", "value", "primary", "input"));
@@ -111,7 +111,7 @@ fn definition(scenario: &str) -> WorkflowDefinition {
     nodes.push(json!({"id":"feed", "kind":"test.controlled_source", "config":{"item_type":"int"}}));
     serde_json::from_value(json!({"version":"2026-10-03", "execution":{"mode":"stream"},
         "dependencies":{"core":{"package":"mfn-core", "path":common::crates_dir().join("builtin-nodes/core")}, "code":{"package":"mfn-code", "path":common::crates_dir().join("builtin-nodes/code")}},
-        "nodes":nodes, "edges":edges, "exclusive_inputs":exclusive_inputs, "control_edges":controls, "outputs":[{"name":"value", "node":"consume", "port":result_port}]
+        "nodes":nodes, "edges":edges, "control_edges":controls, "outputs":[{"name":"value", "node":"consume", "port":result_port}]
     })).unwrap()
 }
 
@@ -137,9 +137,10 @@ fn add_body_join(
         {"from_node":source.0, "from_output":source.1, "to_node":"route"},
         {"from_node":"route", "from_output":"else", "to_node":"unused"}
     ]);
-    body["exclusive_inputs"] = json!([{"to_node":target.0, "to_input":target.1, "sources":[
-        {"from_node":winner.0, "from_output":winner.1}, {"from_node":"unused", "from_output":"value"}
-    ]}]);
+    body["edges"].as_array_mut().unwrap().extend([
+        json!({"from_node":winner.0, "from_output":winner.1, "to_node":target.0, "to_input":target.1, "exclusive":true}),
+        json!({"from_node":"unused", "from_output":"value", "to_node":target.0, "to_input":target.1, "exclusive":true})
+    ]);
 }
 
 #[test]

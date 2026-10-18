@@ -1,6 +1,6 @@
 ## Validation scope
 
-Implementation groups were committed independently on top of main commit `09ee0a5c2f2dbb4f93c8b6aaaaf9cd3bca73f54f`. Final cumulative validation compared that base with implementation commit `ff06e50`; subsequent changes add one focused regression and documentation only.
+Implementation groups were committed independently on top of main commit `09ee0a5c2f2dbb4f93c8b6aaaaf9cd3bca73f54f`. Initial cumulative validation compared that base with implementation commit `ff06e50`. Subsequent verification results are recorded separately below.
 
 ## Results
 
@@ -26,3 +26,12 @@ runner acceptance. The affected-package selector then selected eight packages fr
 changes; all 714 tests passed, with four existing isolated-subprocess entry points skipped by
 direct nextest scheduling. `prek -a` and strict validation of the archived feature's current
 specification passed. No specification behavior changed, and the existing archive remains authoritative.
+
+## Edge marker revision
+
+The final definition uses `exclusive: true` on existing data edges, grouped by target node and
+input. All 25 focused migration tests passed, including generated Task and Stream execution.
+The affected selector conservatively chose all ten packages after the example changed: all
+753 tests passed, with four existing isolated-subprocess entry points skipped by direct
+scheduling. Repository hooks and strict feature-spec validation passed. The archived design,
+proposal, and specification now describe the marked-edge format.

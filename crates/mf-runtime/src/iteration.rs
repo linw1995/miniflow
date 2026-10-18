@@ -41,8 +41,6 @@ pub struct IterationBodyDefinition {
     pub nodes: Vec<NodeDefinition>,
     #[serde(default)]
     pub edges: Vec<EdgeDefinition>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub exclusive_inputs: Vec<crate::ExclusiveInputDefinition>,
     #[serde(default)]
     pub control_edges: Vec<ControlEdgeDefinition>,
     pub result: IterationResultDefinition,

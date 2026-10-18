@@ -213,35 +213,7 @@ impl FlowBuilder {
         execution_order: Vec<DefinitionId>,
         outputs: Vec<WorkflowOutputDefinition>,
     ) -> Result<Self, FlowBuildError> {
-        Self::prepare_with_exclusive_inputs(
-            nodes,
-            connections,
-            Vec::new(),
-            execution_order,
-            outputs,
-        )
-    }
-
-    pub fn prepare_with_exclusive_inputs(
-        nodes: Vec<FlowNode>,
-        connections: Vec<EdgeDefinition>,
-        exclusive_inputs: Vec<crate::ExclusiveInputDefinition>,
-        execution_order: Vec<DefinitionId>,
-        outputs: Vec<WorkflowOutputDefinition>,
-    ) -> Result<Self, FlowBuildError> {
-        crate::validate_exclusive_inputs(&connections, &exclusive_inputs)?;
-        let exclusive_targets: BTreeSet<_> = exclusive_inputs
-            .iter()
-            .map(|group| (group.to_node.clone(), group.to_input.clone()))
-            .collect();
-        let connections: Vec<_> = connections
-            .into_iter()
-            .chain(
-                exclusive_inputs
-                    .iter()
-                    .flat_map(crate::ExclusiveInputDefinition::edges),
-            )
-            .collect();
+        crate::validate_exclusive_inputs(&connections)?;
         let mut definition_indices = BTreeMap::new();
         for (index, node) in nodes.iter().enumerate() {
             if definition_indices
@@ -329,8 +301,7 @@ impl FlowBuilder {
                 .fail();
             }
 
-            let exclusive = exclusive_targets
-                .contains(&(connection.to_node.clone(), connection.to_input.clone()));
+            let exclusive = connection.exclusive;
             if !connected_inputs.insert((to_node, connection.to_input.clone())) && !exclusive {
                 return DuplicateInputConnectionSnafu {
                     target_definition_id: connection.to_node,
@@ -1410,6 +1381,7 @@ mod tests {
 
     fn edge(from_node: &str, from_output: &str, to_node: &str, to_input: &str) -> EdgeDefinition {
         EdgeDefinition {
+            exclusive: false,
             from_node: from_node.into(),
             from_output: from_output.to_owned(),
             to_node: to_node.into(),

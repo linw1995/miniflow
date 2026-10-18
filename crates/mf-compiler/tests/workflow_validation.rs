@@ -255,13 +255,10 @@ fn exclusive_definition() -> Value {
         .as_array_mut()
         .unwrap()
         .push(json!({"id":"alternative", "kind":"source.number"}));
-    value["edges"] = json!([]);
-    value["exclusive_inputs"] = json!([{
-        "to_node":"sink", "to_input":"input", "sources":[
-            {"from_node":"source", "from_output":"value"},
-            {"from_node":"alternative", "from_output":"value"}
-        ]
-    }]);
+    value["edges"] = json!([
+        {"from_node":"source", "from_output":"value", "to_node":"sink", "to_input":"input", "exclusive":true},
+        {"from_node":"alternative", "from_output":"value", "to_node":"sink", "to_input":"input", "exclusive":true}
+    ]);
     value
 }
 
@@ -283,18 +280,16 @@ fn exclusive_bindings_preserve_groups_and_validate_all_predecessors() {
             .all(|dependency| dependency.exclusive)
     );
     let mut reordered = definition.clone();
-    reordered.exclusive_inputs[0].sources.reverse();
+    reordered.edges.reverse();
     assert_eq!(
         plan,
         mf_compiler::compile_definition(&reordered, &registry).unwrap()
     );
     let nodes = mf_compiler::resolve_nodes(&definition, &registry).unwrap();
-    let order = plan.execution_order.clone();
-    mf_compiler::FlowBuilder::prepare_with_exclusive_inputs(
+    mf_compiler::FlowBuilder::prepare(
         nodes,
-        vec![],
-        definition.exclusive_inputs.clone(),
-        order,
+        definition.edges.clone(),
+        plan.execution_order.clone(),
         definition.outputs.clone(),
     )
     .unwrap();
@@ -302,11 +297,16 @@ fn exclusive_bindings_preserve_groups_and_validate_all_predecessors() {
 
 #[test]
 fn exclusive_bindings_reject_conflicts_and_invalid_candidates() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let valid: WorkflowDefinition = serde_json::from_value(exclusive_definition()).unwrap();
+    let order = mf_compiler::plan_definition(&valid)
+        .unwrap()
+        .execution_order;
     for case in [
         "single",
         "duplicate",
-        "edge",
-        "group",
+        "mixed",
+        "mixed_reverse",
         "source",
         "target",
         "port",
@@ -316,32 +316,29 @@ fn exclusive_bindings_reject_conflicts_and_invalid_candidates() {
         let mut value = exclusive_definition();
         match case {
             "single" => {
-                value["exclusive_inputs"][0]["sources"]
-                    .as_array_mut()
-                    .unwrap()
-                    .pop();
+                value["edges"].as_array_mut().unwrap().pop();
             }
-            "duplicate" => {
-                value["exclusive_inputs"][0]["sources"][1] =
-                    value["exclusive_inputs"][0]["sources"][0].clone();
+            "duplicate" => value["edges"][1] = value["edges"][0].clone(),
+            "mixed" | "mixed_reverse" => {
+                let ordinary = valid_definition()["edges"][0].clone();
+                let edges = value["edges"].as_array_mut().unwrap();
+                if case == "mixed_reverse" {
+                    edges.insert(0, ordinary);
+                } else {
+                    edges.push(ordinary);
+                }
             }
-            "edge" => {
-                value["edges"] = valid_definition()["edges"].clone();
+            "source" => value["edges"][1]["from_node"] = json!("missing"),
+            "target" => {
+                for edge in value["edges"].as_array_mut().unwrap() {
+                    edge["to_node"] = json!("missing");
+                }
             }
-            "group" => {
-                let group = value["exclusive_inputs"][0].clone();
-                value["exclusive_inputs"]
-                    .as_array_mut()
-                    .unwrap()
-                    .push(group);
-            }
-            "source" => value["exclusive_inputs"][0]["sources"][1]["from_node"] = json!("missing"),
-            "target" => value["exclusive_inputs"][0]["to_node"] = json!("missing"),
-            "port" => value["exclusive_inputs"][0]["sources"][1]["from_output"] = json!("missing"),
+            "port" => value["edges"][1]["from_output"] = json!("missing"),
             "type" => value["nodes"][2]["kind"] = json!("source.string"),
             "cycle" => {
-                value["exclusive_inputs"][0]["sources"][1] =
-                    json!({"from_node":"sink", "from_output":"result"});
+                value["edges"][1]["from_node"] = json!("sink");
+                value["edges"][1]["from_output"] = json!("result");
             }
             _ => unreachable!(),
         }
@@ -353,35 +350,53 @@ fn exclusive_bindings_reject_conflicts_and_invalid_candidates() {
             );
         }
         assert!(
-            validate_definition(&definition, &NodeRegistry::from_inventory().unwrap()).is_err(),
+            validate_definition(&definition, &registry).is_err(),
             "{case}"
         );
+        if matches!(case, "single" | "duplicate" | "mixed" | "mixed_reverse") {
+            let nodes = mf_compiler::resolve_nodes(&valid, &registry).unwrap();
+            assert!(
+                mf_compiler::FlowBuilder::prepare(
+                    nodes,
+                    definition.edges.clone(),
+                    order.clone(),
+                    valid.outputs.clone()
+                )
+                .is_err(),
+                "programmatic builder accepted {case}"
+            );
+        }
     }
 }
 
 #[test]
-fn exclusive_syntax_is_strict_and_omitted_when_empty() {
+fn exclusive_edge_syntax_is_strict_and_defaults_to_ordinary() {
     let ordinary: WorkflowDefinition = serde_json::from_value(valid_definition()).unwrap();
+    assert!(!ordinary.edges[0].exclusive);
     assert!(
-        serde_json::to_value(ordinary)
-            .unwrap()
-            .get("exclusive_inputs")
+        serde_json::to_value(&ordinary).unwrap()["edges"][0]
+            .get("exclusive")
             .is_none()
+    );
+    let mut explicit = valid_definition();
+    explicit["edges"][0]["exclusive"] = json!(false);
+    assert_eq!(
+        serde_json::from_value::<WorkflowDefinition>(explicit).unwrap(),
+        ordinary
     );
     let definition: WorkflowDefinition = serde_json::from_value(exclusive_definition()).unwrap();
     assert_eq!(
         definition,
         serde_json::from_value(serde_json::to_value(&definition).unwrap()).unwrap()
     );
-    for field in ["group", "source"] {
-        let mut value = exclusive_definition();
-        if field == "group" {
-            value["exclusive_inputs"][0]["policy"] = json!("first");
-        } else {
-            value["exclusive_inputs"][0]["sources"][0]["optional"] = json!(true);
-        }
-        assert!(serde_json::from_value::<WorkflowDefinition>(value).is_err());
+    for value in [json!(null), json!("true"), json!(1)] {
+        let mut invalid = exclusive_definition();
+        invalid["edges"][0]["exclusive"] = value;
+        assert!(serde_json::from_value::<WorkflowDefinition>(invalid).is_err());
     }
+    let mut invalid = exclusive_definition();
+    invalid["edges"][0]["policy"] = json!("first");
+    assert!(serde_json::from_value::<WorkflowDefinition>(invalid).is_err());
 }
 
 #[test]
@@ -394,11 +409,11 @@ fn exclusive_candidates_cannot_cross_message_domains() {
             {"id":"batch", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":100}},
             {"id":"sink", "kind":"sink.any"}
         ],
-        "edges":[{"from_node":"source", "from_output":"value", "to_node":"batch", "to_input":"item"}],
-        "exclusive_inputs":[{"to_node":"sink", "to_input":"input", "sources":[
-            {"from_node":"source", "from_output":"value"},
-            {"from_node":"batch", "from_output":"items"}
-        ]}]
+        "edges":[
+            {"from_node":"source", "from_output":"value", "to_node":"batch", "to_input":"item"},
+            {"from_node":"source", "from_output":"value", "to_node":"sink", "to_input":"input", "exclusive":true},
+            {"from_node":"batch", "from_output":"items", "to_node":"sink", "to_input":"input", "exclusive":true}
+        ]
     });
     let error = validation_error(value).to_string();
     assert!(error.contains("domain"), "{error}");

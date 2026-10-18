@@ -153,15 +153,14 @@ After building, the executable prepares and runs without workflow JSON, generate
 
 ## Programmatic exclusive bindings
 
-`FlowBuilder::prepare_with_exclusive_inputs` accepts ordinary edges followed by a vector of
-`ExclusiveInputDefinition` groups, then execution order and output selections. Existing
-`FlowBuilder::prepare` calls retain single-source behavior. A group contains a target node and
-input plus `InputSourceDefinition` candidates; all producers must precede their consumer.
+`FlowBuilder::prepare` and `build_flow` accept marked `EdgeDefinition` values through their
+existing connection argument. Set `exclusive: true` on all candidates targeting the same node
+and input; no separate group list or specialized constructor is needed. All producers must
+precede their consumer, and mixing ordinary and exclusive edges for one input is rejected.
 
-Rust literals for workflow and body definitions must initialize the new `exclusive_inputs`
-field (an empty vector retains the previous behavior). Prepared dependency and connection
-literals carry an `exclusive` marker; candidates with the same consumer input form one group.
-Graph algorithms visit every candidate, while input resolution preserves that group identity.
+Rust `EdgeDefinition` literals must initialize the new `exclusive` field; `false` preserves
+ordinary binding. Workflow and body definition structs retain their existing shape. Prepared
+dependencies and connections preserve the marker through graph planning and input resolution.
 
 Exclusive candidates use shared-value input resolution in generated and embedded execution.
 Typed ownership transfer into such a consumer reports `exclusive_input` as its fallback reason;

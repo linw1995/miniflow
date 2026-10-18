@@ -1,10 +1,10 @@
 ## Scope
 
-The implementation starts from main commit `09ee0a5c2f2dbb4f93c8b6aaaaf9cd3bca73f54f`. It has no dependency on the separate test-selection PR or its proposed merge node. Candidate groups are definition-level input bindings, carried by explicit membership on prepared dependencies and connections.
+The implementation starts from main commit `09ee0a5c2f2dbb4f93c8b6aaaaf9cd3bca73f54f`. It has no dependency on the separate test-selection PR or its proposed merge node. Marked data edges form candidate groups by target input and preserve the same marker in prepared dependencies and connections.
 
 ## Contract review
 
-- Structural preparation rejects duplicate or competing bindings and includes every candidate in ordering, cycle, connectivity, scope, and message-domain checks. Normalization sorts groups and sources without choosing a winner.
+- Structural planning and the ordinary builder reject undersized groups, duplicate candidates, and mixed ordinary/exclusive edges. Every candidate participates in ordering, cycle, connectivity, scope, and message-domain checks. Normalization sorts edges without choosing a winner.
 - Shared resolution checks dependency presence before cardinality and skip decisions. One value binds, no produced candidates propagate their explicit skips, and multiple values fail. Ordinary inputs and controls remain mandatory.
 - Every candidate receives existing compatibility checks. Forwarded evidence is common to all candidates, and candidate consumers use an explicit typed-transfer fallback.
 - Task, Event, Stream, loop, and iteration execution use the same resolver. Cancellation and producer failures terminate execution without choosing a fallback. Tests hold one candidate pending to verify that consumers cannot start early.
@@ -13,7 +13,7 @@ The implementation starts from main commit `09ee0a5c2f2dbb4f93c8b6aaaaf9cd3bca73
 
 ## Issues resolved during integration
 
-- Generated startup-interface validation originally saw only ordinary edges and misclassified exclusive consumers as initial nodes. Candidate manifest edges were moved into the execution integration group so generated runners use the complete graph.
+- Workflow manifests derive both ordinary and exclusive dependencies from the same edge list, so startup-input detection agrees with execution.
 - Stream skip observation originally reconstructed causes from every raw skipped dependency. It now uses resolved logical-input causes, excluding inactive alternatives when a group has a selected value.
 - Typed-plan lookup originally assumed a single source per input. Consumers with exclusive groups now report `exclusive_input` fallback while unrelated safe segments remain optimized.
 
