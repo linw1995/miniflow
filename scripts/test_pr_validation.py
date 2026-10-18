@@ -114,6 +114,12 @@ class ValidationTests(unittest.TestCase):
         result = validation.discover_baseline(self.root, self.current, api, 'feature', download)
         self.assertEqual(result['base'], self.merges[1])
         download.assert_called_once_with(2)
+        api = Mock()
+        api.request.side_effect = [{'workflow_runs': [run]}, {'artifacts': [
+            {'id': 2, 'name': validation.artifact_name(run), 'expired': False}]}]
+        reset = validation.discover_baseline(self.root, self.current | {'base': self.heads[0]}, api,
+                                            'feature', lambda _: archive(record))
+        self.assertIn('Target base changed', reset['reason'])
         orphan = run | {'id': 3, 'head_sha': 'f' * 40}
         api = Mock()
         api.request.side_effect = [{'workflow_runs': [orphan, run]},

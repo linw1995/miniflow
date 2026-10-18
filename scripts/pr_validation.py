@@ -143,6 +143,7 @@ def discover_baseline(root, current, api, branch, download):
         runs = api.request(f"/actions/workflows/{current['workflow_id']}/runs?{query}")["workflow_runs"]
         if len(runs) >= 100:
             return cumulative(current, "Validation discovery limit reached")
+        rejection = None
         ancestors = set(command(root, "git", "rev-list", current["head"]).splitlines())
         runs = [run for run in runs if run["head_sha"] in ancestors]
         for run in sorted(runs, key=lambda r: ancestry_order(root, current["head"], r)):
@@ -160,6 +161,12 @@ def discover_baseline(root, current, api, branch, download):
                 record = read_record(download(matches[0]["id"]))
                 if record.get("repository") != current["repository"] or record.get("pr") != current["pr"]:
                     continue
+                if record.get("base") != current["base"]:
+                    rejection = rejection or "Target base changed since the successful validation"
+                    continue
+                if record.get("signature") != current["signature"]:
+                    rejection = rejection or "Execution settings changed since the successful validation"
+                    continue
                 merge = record.get("merge", "")
                 if not isinstance(merge, str) or not SHA.fullmatch(merge):
                     continue
@@ -171,10 +178,10 @@ def discover_baseline(root, current, api, branch, download):
                 result = choose_baseline(root, current, [(run, record)])
                 if result["scope"] == "incremental":
                     return result
-            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, zipfile.BadZipFile):
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
                 # An unusable record cannot invalidate another proven ancestor.
-                continue
-        return cumulative(current, "No compatible completed successful validation record")
+                rejection = rejection or f"Recorded validation unavailable: {error}"
+        return cumulative(current, rejection or "No compatible completed successful validation record")
     except (OSError, ValueError, KeyError, TypeError, AnalysisError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
         return cumulative(current, f"Validation history unavailable: {error}")
 
