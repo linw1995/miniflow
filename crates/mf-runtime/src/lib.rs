@@ -47,7 +47,7 @@ pub use definition::{
     WorkflowDefinitionVersion, WorkflowOutputDefinition, validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
-pub use execution_inputs::{ExecutionInputs, resolve_workflow_inputs};
+pub use execution_inputs::{ExecutionInputs, InputResolution, resolve_workflow_inputs};
 pub use flow::{
     Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowPlan, FlowRuntime,
     GeneratedDomainExecutor, NodeId, RuntimeOptions, TaskFlowNode,

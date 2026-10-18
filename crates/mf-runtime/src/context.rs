@@ -536,9 +536,18 @@ impl ExecutionContext {
         node: &FlowNode<N>,
         dependencies: &[crate::FlowDependency],
     ) -> Result<Option<Inputs>, WorkflowRunError> {
+        let (inputs, resolution) = self.event_input_resolution(node, dependencies)?;
+        Ok(resolution.causes.is_empty().then_some(inputs))
+    }
+
+    pub fn event_input_resolution<N>(
+        &mut self,
+        node: &FlowNode<N>,
+        dependencies: &[crate::FlowDependency],
+    ) -> Result<(Inputs, crate::InputResolution), WorkflowRunError> {
         self.reserve_step(node.definition_id.as_str())?;
         let mut inputs = Inputs::new();
-        let causes = self.inputs.resolve_node(
+        let resolution = self.inputs.resolve_node_inputs(
             node,
             !self.scopes.is_empty(),
             dependencies.iter().map(crate::FlowDependency::borrowed),
@@ -548,7 +557,7 @@ impl ExecutionContext {
             },
             &mut inputs,
         )?;
-        Ok(causes.is_empty().then_some(inputs))
+        Ok((inputs, resolution))
     }
 
     pub fn set_snapshot_recorder(&mut self, recorder: crate::SnapshotRecorder) {
@@ -1004,6 +1013,12 @@ enum StepObservation {
 }
 
 impl StepObservation {
+    fn set_input_selections(&mut self, selected: Vec<mf_telemetry::event::InputSelection>) {
+        match self {
+            Self::Root(step) => step.set_input_selections(selected),
+            Self::Body(step) => step.set_input_selections(selected),
+        }
+    }
     fn started(&mut self, ctx: &mut ExecutionContext) {
         match self {
             Self::Root(step) => ctx.observation.as_mut().unwrap().node_started(step),
@@ -1147,7 +1162,7 @@ fn execute_ordered_call_in_context<'a, N>(
         _ => None,
     };
     let mut inputs = Inputs::new();
-    let resolution = ctx.inputs.resolve_node(
+    let resolution = ctx.inputs.resolve_node_inputs(
         node,
         !ctx.scopes.is_empty(),
         dependencies,
@@ -1165,7 +1180,12 @@ fn execute_ordered_call_in_context<'a, N>(
         &mut inputs,
     );
     let causes = match resolution {
-        Ok(causes) => causes,
+        Ok(resolution) => {
+            if let Some(step) = step.as_mut() {
+                step.set_input_selections(resolution.selected);
+            }
+            resolution.causes
+        }
         Err(error) => {
             if let Some(step) = step.take() {
                 step.failed(ctx, FailurePhase::Dependency, error.to_string());

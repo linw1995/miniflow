@@ -16,7 +16,7 @@ fn chat_usage(path: Value) -> Value {
     json!({"started_at":0,"call_id":"generated", "node":{"id":"chat", "kind":"builtin.llm", "path":path}, "model":"example-model", "usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}})
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 13] {
+fn examples() -> [(&'static str, Option<&'static str>, Value); 14] {
     [
         ("cel-list.json", None, json!({"doubled": [2, 4]})),
         ("cel-scalar.json", None, json!({"doubled": 42})),
@@ -31,6 +31,11 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 13] {
             json!({"status":"succeeded", "text":"reply", "error":"", "metadata":{"strategy":"iterative"}, "usages":[chat_usage(json!([{"node":"repeat","index":0}])), chat_usage(json!([{"node":"repeat","index":1}]))]}),
         ),
         ("else-if.json", None, json!({"medium": {"amount": 500}})),
+        (
+            "exclusive-inputs.json",
+            None,
+            json!({"result":{"mode":"local"}}),
+        ),
         ("hello-workflow.json", None, json!({"answer": 42})),
         ("if-else.json", None, json!({"accepted": {"amount": 150}})),
         ("iteration.json", None, json!({"results": [2, 5, 8]})),
@@ -207,5 +212,27 @@ fn documented_examples_compile_and_produce_expected_outputs() {
             }
         }
         assert_eq!(actual, expected, "{name}: unexpected workflow output");
+        if name == "exclusive-inputs.json" {
+            for ci in [false, true] {
+                let output = Command::new(env!("CARGO_BIN_EXE_mf"))
+                    .args([
+                        "run",
+                        executable.to_str().unwrap(),
+                        "--inputs",
+                        &json!({"params.ci":ci}).to_string(),
+                    ])
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(
+                    serde_json::from_slice::<Value>(&output.stdout).unwrap(),
+                    json!({"result":{"mode":if ci {"ci"} else {"local"}}})
+                );
+            }
+        }
     }
 }

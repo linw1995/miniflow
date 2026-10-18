@@ -239,6 +239,7 @@ fn scheduled_events(
             0,
             2,
             Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: node("fetch"),
                 position: count(0),
                 elapsed_ns: count(0),
@@ -263,6 +264,7 @@ fn scheduled_events(
             800,
             4,
             Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: node("transform"),
                 position: count(1),
                 elapsed_ns: count(800_000_000),
@@ -287,6 +289,7 @@ fn scheduled_events(
             2500,
             6,
             Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: node("publish"),
                 position: count(2),
                 elapsed_ns: count(2_500_000_000),
@@ -311,6 +314,7 @@ fn scheduled_events(
             3500,
             8,
             Event::NodeSkipped {
+                selected_inputs: Vec::new(),
                 node: node("archive"),
                 position: count(3),
                 elapsed_ns: count(3_500_000_000),

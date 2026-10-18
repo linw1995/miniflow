@@ -21,9 +21,9 @@
 
 ## 4. Observation and workflow acceptance
 
-- [ ] 4.1 Extend workflow descriptions and consumer input-resolution observations with group and selected-source identities; update manifest/event fixtures and readers together, and verify diagnostics expose no payloads or artificial merge nodes.
-- [ ] 4.2 Use resolved skip causes across Task and operator observation paths; verify an unselected candidate is not reported as a consumer skip cause when the group resolves successfully.
-- [ ] 4.3 Add a runnable core-node conditional convergence example and document migration from separate branch consumers; verify both branches produce one common result in memory and through `mf compile` and `mf run`.
+- [x] 4.1 Extend workflow descriptions and consumer input-resolution observations with group and selected-source identities; update manifest/event fixtures and readers together, and verify diagnostics expose no payloads or artificial merge nodes.
+- [x] 4.2 Use resolved skip causes across Task and operator observation paths; verify an unselected candidate is not reported as a consumer skip cause when the group resolves successfully.
+- [x] 4.3 Add a runnable core-node conditional convergence example and document migration from separate branch consumers; verify both branches produce one common result in memory and through `mf compile` and `mf run`.
 
 ## 5. Integration validation
 

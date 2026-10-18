@@ -1,3 +1,7 @@
+#[path = "fixtures/observation_capture.rs"]
+mod capture;
+#[path = "fixtures/controlled_source.rs"]
+mod controlled;
 extern crate mfn_core as _;
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_compiled};
 use serde_json::{Value, json};
@@ -308,4 +312,137 @@ fn unresolved_candidates_never_trigger_early_execution_or_fallback() {
             assert_eq!(calls.load(Ordering::SeqCst), 0);
         }
     }
+}
+
+#[test]
+fn observed_selections_and_snapshots_preserve_provenance_without_secret_values() {
+    use mf_runtime::{ExecutionContext, SnapshotRecording, WorkflowArguments};
+    use mf_telemetry::{event::Event, identity::RunId};
+    let mut value: Value =
+        serde_json::from_str(include_str!("../../../examples/exclusive-inputs.json")).unwrap();
+    value["nodes"][0]["config"]["parameters"]["payload"] =
+        json!({"type":"object", "default":{"token":"selection-secret-sentinel"}, "secret":true});
+    for index in [2, 3] {
+        value["nodes"][index]["kind"] = json!("builtin.identity");
+        value["nodes"][index]["config"] = json!({});
+    }
+    value["edges"] = json!([
+        {"from_node":"params", "from_output":"payload", "to_node":"local", "to_input":"input"},
+        {"from_node":"params", "from_output":"payload", "to_node":"ci", "to_input":"input"}
+    ]);
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for ci in [false, true] {
+        let plan =
+            compile_definition(&serde_json::from_value(value.clone()).unwrap(), &registry).unwrap();
+        let flow = instantiate_compiled(&plan, &registry).unwrap();
+        let harness = capture::Harness::new(false);
+        let recording = SnapshotRecording::memory();
+        let observation = plan
+            .start_observation(&harness.observer(), RunId::new())
+            .unwrap();
+        let outputs = ExecutionContext::run(Some(observation), |context| {
+            context.set_snapshot_recorder(recording.recorder());
+            context.set_workflow_arguments(
+                WorkflowArguments::try_from(json!({"params.ci":ci})).unwrap(),
+            );
+            flow.execute_in_context(context)
+        })
+        .unwrap();
+        assert!(outputs["result"].is_secret());
+        assert_eq!(
+            recording.current().node(&[], "consume").unwrap().inputs["input"],
+            json!("[REDACTED]")
+        );
+        assert!(harness.spans.get_finished_spans().unwrap().is_empty());
+        let records = harness.records();
+        assert!(
+            !serde_json::to_string(&records)
+                .unwrap()
+                .contains("selection-secret-sentinel")
+        );
+        let selected = records
+            .iter()
+            .map(|record| record.decode().unwrap())
+            .find_map(|record| match record.event {
+                Event::NodeStarted {
+                    node,
+                    selected_inputs,
+                    ..
+                } if node.id == "consume" => Some(selected_inputs),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].input, "input");
+        assert_eq!(selected[0].source_node, if ci { "ci" } else { "local" });
+        assert_eq!(selected[0].source_output, "value");
+    }
+}
+
+#[test]
+fn stream_skip_observations_use_logical_inputs_and_keep_selected_sources() {
+    use mf_telemetry::{
+        event::Event,
+        identity::RunId,
+        stream::{StreamPayload, StreamRecord},
+    };
+    let definition: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-10-03", "dependencies":{}, "execution":{"mode":"stream"},
+        "nodes":[
+            controlled::source(json!("int")),
+            {"id":"route", "kind":"builtin.if_else", "config":{"branches":[{"id":"positive", "condition":{"source":{"output":"feed.item", "path":""}, "operator":"gt", "value":0}}]}},
+            {"id":"active", "kind":"builtin.identity"},
+            {"id":"inactive", "kind":"builtin.identity"},
+            {"id":"collect", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":100}}
+        ],
+        "edges":[
+            {"from_node":"feed", "from_output":"item", "to_node":"active", "to_input":"input"},
+            {"from_node":"feed", "from_output":"item", "to_node":"inactive", "to_input":"input"}
+        ],
+        "control_edges":[
+            {"from_node":"feed", "from_output":"item", "to_node":"route"},
+            {"from_node":"route", "from_output":"else", "to_node":"inactive"},
+            {"from_node":"route", "from_output":"else", "to_node":"collect"}
+        ],
+        "exclusive_inputs":[{"to_node":"collect", "to_input":"item", "sources":[
+            {"from_node":"active", "from_output":"value"}, {"from_node":"inactive", "from_output":"value"}
+        ]}]
+    })).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let harness = capture::Harness::new(false);
+    let observation = plan
+        .start_stream_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let run = controlled::SourceRun::start(
+        mf_compiler::instantiate_stream(&plan, &registry).unwrap(),
+        "feed",
+        mf_runtime::StreamOptions {
+            observation: Some(observation),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    run.source.send(json!(1)).unwrap();
+    run.source.close();
+    assert!(run.recv().unwrap().is_none());
+    run.join().unwrap();
+    let skipped = harness
+        .records()
+        .iter()
+        .filter_map(|wire| StreamRecord::decode(wire).ok())
+        .find_map(|record| match record.payload {
+            StreamPayload::Execution(Event::NodeSkipped {
+                node,
+                causes,
+                selected_inputs,
+                ..
+            }) if node.id == "collect" => Some((causes, selected_inputs)),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(skipped.0.len(), 1);
+    assert_eq!(skipped.0[0].source_node, "route");
+    assert_eq!(skipped.1.len(), 1);
+    assert_eq!(skipped.1[0].source_node, "active");
 }

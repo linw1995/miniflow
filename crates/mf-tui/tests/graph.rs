@@ -242,6 +242,7 @@ fn parallel_data_and_control_edges_use_separate_block_rows() {
         let target = layout.nodes()[edge.to].rect;
         let color = match edge.kind {
             EdgeKind::Data => Color::Cyan,
+            EdgeKind::Exclusive => Color::Magenta,
             EdgeKind::Control => Color::Blue,
         };
         for (x, y, symbol) in [
@@ -293,6 +294,7 @@ fn graph_renders_blocks_edges_and_running_elapsed_time() {
             run_id,
             sequence: count(2),
             event: Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: NodeIdentity {
                     id: "source".into(),
                     kind: "source".into(),
@@ -403,6 +405,7 @@ fn known_sequence_gap_marks_last_seen_running_state_as_uncertain() {
             run_id,
             sequence: count(2),
             event: Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: NodeIdentity {
                     id: "source".into(),
                     kind: "source".into(),
@@ -1019,4 +1022,39 @@ fn a_wide_label_fragment_cannot_overwrite_the_next_pane() {
         .render(Rect::new(0, 0, 1, 1), &mut buffer);
     assert_eq!(buffer.cell(Position::new(0, 0)).unwrap().symbol(), " ");
     assert_eq!(buffer.cell(Position::new(1, 0)).unwrap().symbol(), "#");
+}
+
+#[test]
+fn exclusive_candidates_have_distinct_edges_and_visible_labels() {
+    let mut graph = description();
+    for edge in graph
+        .data_edges
+        .iter_mut()
+        .filter(|edge| edge.to_node == "join")
+    {
+        edge.exclusive = true;
+        edge.to_input = "input".into();
+    }
+    graph.validate().unwrap();
+    let layout = GraphLayout::new(&graph).unwrap();
+    assert_eq!(layout.nodes().len(), graph.nodes.len());
+    assert_eq!(
+        layout
+            .edges()
+            .iter()
+            .filter(|edge| edge.kind == EdgeKind::Exclusive)
+            .count(),
+        2
+    );
+    assert_eq!(
+        layout
+            .routes()
+            .iter()
+            .filter_map(|route| route.label.as_ref())
+            .filter(|label| label.text.contains("exclusive input"))
+            .count(),
+        2
+    );
+    graph.data_edges.last_mut().unwrap().exclusive = false;
+    assert!(graph.validate().is_err());
 }

@@ -72,6 +72,13 @@ pub struct SkipCause {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InputSelection {
+    pub input: String,
+    pub source_node: String,
+    pub source_output: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "event_name", content = "body")]
 pub enum Event {
     #[serde(rename = "mf.workflow.started")]
@@ -81,6 +88,8 @@ pub enum Event {
     },
     #[serde(rename = "mf.node.started")]
     NodeStarted {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        selected_inputs: Vec<InputSelection>,
         node: NodeIdentity,
         position: Count,
         elapsed_ns: Count,
@@ -102,6 +111,8 @@ pub enum Event {
     },
     #[serde(rename = "mf.node.skipped")]
     NodeSkipped {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        selected_inputs: Vec<InputSelection>,
         node: NodeIdentity,
         position: Count,
         elapsed_ns: Count,
@@ -157,7 +168,29 @@ impl Event {
         }
     }
 
+    pub fn selected_inputs(&self) -> &[InputSelection] {
+        match self {
+            Self::NodeStarted {
+                selected_inputs, ..
+            }
+            | Self::NodeSkipped {
+                selected_inputs, ..
+            } => selected_inputs,
+            _ => &[],
+        }
+    }
+
     pub fn validate(&self) -> Result<(), ContractError> {
+        let mut inputs = BTreeSet::new();
+        for selection in self.selected_inputs() {
+            require(
+                !selection.input.is_empty()
+                    && !selection.source_node.is_empty()
+                    && !selection.source_output.is_empty(),
+                "blank selected input identity",
+            )?;
+            require(inputs.insert(&selection.input), "duplicate selected input")?;
+        }
         if let Some((node, _)) = self.node() {
             require(
                 !node.id.trim().is_empty() && !node.kind.trim().is_empty(),
@@ -453,6 +486,18 @@ impl LifecycleEvent {
                 require(
                     summary.pass_count.get() <= i64::from(crate::MAX_LOOP_ITERATIONS),
                     "Loop pass count exceeds limit",
+                )?;
+            }
+            for selection in self.event.selected_inputs() {
+                require(
+                    data_edges.iter().any(|edge| {
+                        edge.exclusive
+                            && edge.to_node == identity.id
+                            && edge.to_input == selection.input
+                            && edge.from_node == selection.source_node
+                            && edge.from_output == selection.source_output
+                    }),
+                    "selected input is not an exclusive candidate",
                 )?;
             }
             if let Event::NodeSkipped { causes, .. } = &self.event {

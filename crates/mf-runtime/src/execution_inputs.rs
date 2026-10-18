@@ -4,12 +4,18 @@ use crate::{
     ContextValue, ExecutionDependency, FlowNode, Inputs, NodeExecutionError, WorkflowArguments,
     WorkflowInputError, WorkflowInputSchema, WorkflowRunError, output_id,
 };
-use mf_telemetry::event::SkipCause;
+use mf_telemetry::event::{InputSelection, SkipCause};
 use snafu::ResultExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
 };
+
+#[derive(Clone, Debug, Default)]
+pub struct InputResolution {
+    pub causes: BTreeSet<SkipCause>,
+    pub selected: Vec<InputSelection>,
+}
 
 #[derive(Default)]
 struct CandidateValues {
@@ -94,14 +100,29 @@ impl ExecutionInputs {
         node: &FlowNode<N>,
         in_scope: bool,
         dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
-        mut lookup: impl FnMut(
+        lookup: impl FnMut(
             ExecutionDependency<'a>,
         ) -> Result<Option<ContextValue<'value>>, NodeExecutionError>,
         inputs: &mut Inputs,
     ) -> Result<BTreeSet<SkipCause>, WorkflowRunError> {
+        self.resolve_node_inputs(node, in_scope, dependencies, lookup, inputs)
+            .map(|resolution| resolution.causes)
+    }
+
+    pub fn resolve_node_inputs<'a, 'value, N>(
+        &self,
+        node: &FlowNode<N>,
+        in_scope: bool,
+        dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
+        mut lookup: impl FnMut(
+            ExecutionDependency<'a>,
+        ) -> Result<Option<ContextValue<'value>>, NodeExecutionError>,
+        inputs: &mut Inputs,
+    ) -> Result<InputResolution, WorkflowRunError> {
         *inputs = self.initial(node, in_scope);
         let id = node.definition_id.as_str();
         let mut causes = BTreeSet::new();
+        let mut selected = Vec::new();
         let mut groups: BTreeMap<&str, CandidateValues> = BTreeMap::new();
         for dependency in dependencies {
             let value = lookup(dependency).with_context(|_| DependencySnafu {
@@ -158,10 +179,13 @@ impl ExecutionInputs {
             match group.produced.len() {
                 0 => causes.extend(group.skipped),
                 1 => {
-                    inputs.insert(
-                        input.to_owned(),
-                        group.produced.into_values().next().unwrap(),
-                    );
+                    let (source, value) = group.produced.into_iter().next().unwrap();
+                    selected.push(InputSelection {
+                        input: input.to_owned(),
+                        source_node: source.source_node,
+                        source_output: source.source_output,
+                    });
+                    inputs.insert(input.to_owned(), value);
                 }
                 _ => {
                     return AmbiguousInputSnafu {
@@ -196,7 +220,7 @@ impl ExecutionInputs {
                     })?;
             }
         }
-        Ok(causes)
+        Ok(InputResolution { causes, selected })
     }
 }
 

@@ -63,6 +63,7 @@ pub struct GraphNode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EdgeKind {
     Data,
+    Exclusive,
     Control,
 }
 
@@ -203,6 +204,11 @@ impl GraphLayout {
             Vec::with_capacity(description.data_edges.len() + description.control_edges.len());
         let mut topology = BTreeSet::new();
         for edge in &description.data_edges {
+            let kind = if edge.exclusive {
+                EdgeKind::Exclusive
+            } else {
+                EdgeKind::Data
+            };
             let from = positions[edge.from_node.as_str()];
             let to = positions[edge.to_node.as_str()];
             topology.insert((from as u32, to as u32));
@@ -212,13 +218,13 @@ impl GraphLayout {
                     destination: nodes[to].id.clone(),
                     output: edge.from_output.clone(),
                     input: Some(edge.to_input.clone()),
-                    kind: EdgeKind::Data,
+                    kind,
                 },
                 from,
                 to,
                 from_output: edge.from_output.clone(),
                 to_input: Some(edge.to_input.clone()),
-                kind: EdgeKind::Data,
+                kind,
                 from_row: 0,
                 to_row: 0,
             });
@@ -763,6 +769,7 @@ impl<'a> GraphView<'a> {
     fn edge_style(&self, edge: &GraphEdge) -> Style {
         let default = match edge.kind {
             EdgeKind::Data => Color::Cyan,
+            EdgeKind::Exclusive => Color::Magenta,
             EdgeKind::Control => Color::Blue,
         };
         let Some(source) = self

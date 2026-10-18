@@ -1,6 +1,6 @@
 //! Integer geometry and ownership for orthogonal terminal routes.
 
-use super::{EdgeKind, GraphRect};
+use super::{EdgeKind, GraphEdge, GraphRect};
 use snafu::Snafu;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -253,7 +253,7 @@ pub struct MarkerCell {
 
 pub fn line_symbols(kind: EdgeKind) -> [&'static str; 6] {
     match kind {
-        EdgeKind::Data | EdgeKind::Control => ["─", "│", "┌", "┐", "└", "┘"],
+        EdgeKind::Data | EdgeKind::Exclusive | EdgeKind::Control => ["─", "│", "┌", "┐", "└", "┘"],
     }
 }
 
@@ -560,9 +560,9 @@ pub fn channel_routes(
         let from_y = nodes[edge.from].rect.y + edge.from_row;
         let to_y = nodes[edge.to].rect.y + edge.to_row;
         let source_column = columns[edge.from];
-        if edge.kind == EdgeKind::Control {
+        if matches!(edge.kind, EdgeKind::Control | EdgeKind::Exclusive) {
             stubs[source_column as usize] = stubs[source_column as usize]
-                .max(ratatui::text::Span::raw(label_text(&edge.from_output)).width() as u32 + 2);
+                .max(ratatui::text::Span::raw(edge_label(edge)).width() as u32 + 2);
         }
         let component = components[edge.from];
         let end = pass_rows[index].unwrap_or(to_y);
@@ -679,8 +679,8 @@ pub fn channel_routes(
                     to,
                 ])
             };
-            if edge.kind == EdgeKind::Control {
-                let text = label_text(&edge.from_output);
+            if matches!(edge.kind, EdgeKind::Control | EdgeKind::Exclusive) {
+                let text = edge_label(edge);
                 let width = ratatui::text::Span::raw(text.as_str()).width() as u32;
                 route.label = Some(EdgeLabel {
                     rect: GraphRect {
@@ -1618,6 +1618,17 @@ pub fn route_all(
     }
     routes.clone_from_slice(&best_routes);
     (best_crossings, router.budget.stats)
+}
+
+fn edge_label(edge: &GraphEdge) -> String {
+    if edge.kind == EdgeKind::Exclusive {
+        format!(
+            "exclusive {}",
+            label_text(edge.to_input.as_deref().unwrap_or_default())
+        )
+    } else {
+        label_text(&edge.from_output)
+    }
 }
 
 #[cfg(test)]
