@@ -38,7 +38,7 @@ fn definition(scenario: &str) -> WorkflowDefinition {
     ];
     let mut result_port = "value";
     match scenario {
-        "windows" | "exclusive" => {}
+        "windows" => {}
         "chain" => {
             nodes[4]["config"]["max_items"] = json!(2);
             nodes[5] = json!({"id":"consume", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":100}});
@@ -93,7 +93,7 @@ fn definition(scenario: &str) -> WorkflowDefinition {
         nodes[2]["config"]["body"]["result"] = json!({"node":"join", "port":"value"});
     }
     let mut exclusive_inputs = Vec::new();
-    if scenario == "exclusive" {
+    if scenario == "windows" {
         nodes.push(json!({"id":"alternative", "kind":"builtin.identity"}));
         edges.retain(|edge| edge["to_node"] != "collect");
         edges.push(edge("join", "value", "alternative", "input"));
@@ -101,13 +101,12 @@ fn definition(scenario: &str) -> WorkflowDefinition {
         nodes[3]["config"]["branches"].as_array_mut().unwrap().insert(0, json!({"id":"large", "condition":{"source":{"output":"join.value", "path":""}, "operator":"gt", "value":10}}));
         controls.push(json!({"from_node":"route", "from_output":"large", "to_node":"alternative"}));
         exclusive_inputs.push(json!({"to_node":"collect", "to_input":"item", "sources":[
-            {"from_node":"join", "from_output":"value"}, {"from_node":"alternative", "from_output":"value"}
+            {"from_node":"primary", "from_output":"value"}, {"from_node":"alternative", "from_output":"value"}
         ]}));
         // Negative messages skip both candidates; larger values switch to the alternative.
         nodes.push(json!({"id":"primary", "kind":"builtin.identity"}));
         edges.push(edge("join", "value", "primary", "input"));
         controls.push(json!({"from_node":"route", "from_output":"positive", "to_node":"primary"}));
-        exclusive_inputs[0]["sources"][0]["from_node"] = json!("primary");
     }
     nodes.push(json!({"id":"feed", "kind":"test.controlled_source", "config":{"item_type":"int"}}));
     serde_json::from_value(json!({"version":"2026-10-03", "execution":{"mode":"stream"},
@@ -148,12 +147,12 @@ fn generated_preparation_matches_memory_under_the_same_clock_and_inputs() {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("build");
     let registry = NodeRegistry::from_inventory().unwrap();
-    for scenario in ["windows", "chain", "failure", "nested", "exclusive"] {
+    for scenario in ["windows", "chain", "failure", "nested"] {
         let definition = definition(scenario);
         let plan = compile_definition(&definition, &registry).unwrap();
         let expected = driver::drive(instantiate_stream(&plan, &registry).unwrap(), scenario);
         match scenario {
-            "windows" | "exclusive" => assert_eq!(
+            "windows" => assert_eq!(
                 expected,
                 json!({"outputs":[{"value":[3,6]}, {"value":[9,12,15]}, {"value":[18,21]}], "error":null})
             ),

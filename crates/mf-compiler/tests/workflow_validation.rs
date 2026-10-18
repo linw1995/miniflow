@@ -346,6 +346,12 @@ fn exclusive_bindings_reject_conflicts_and_invalid_candidates() {
             _ => unreachable!(),
         }
         let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
+        if !matches!(case, "port" | "type") {
+            assert!(
+                mf_compiler::plan_definition(&definition).is_err(),
+                "structural planning accepted {case}"
+            );
+        }
         assert!(
             validate_definition(&definition, &NodeRegistry::from_inventory().unwrap()).is_err(),
             "{case}"

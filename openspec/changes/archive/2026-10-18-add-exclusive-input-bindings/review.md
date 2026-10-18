@@ -20,3 +20,11 @@ The implementation starts from main commit `09ee0a5c2f2dbb4f93c8b6aaaaf9cd3bca73
 ## Remaining boundaries
 
 Cross-message-domain joins, first-completion races, implicit exclusivity, and correlated multi-input selection are not supported. Related fields should travel in one structured candidate value. No throughput or latency improvement is claimed. Adopting the feature in the separate test-selection workflow remains a follow-up.
+
+## Follow-up implementation review
+
+The final implementation was checked against the repository's error-handling, visibility,
+and validation rules. Structural planning is exercised independently of provider preparation,
+so malformed bindings must fail at that public entry point as well as during full compilation.
+Ambiguity diagnostics preserve source ordering when candidate order changes. Existing public
+resolution entry points and module boundaries remain intact. The specification contract is unchanged.

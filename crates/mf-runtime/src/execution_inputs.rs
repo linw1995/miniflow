@@ -19,8 +19,9 @@ pub struct InputResolution {
 
 #[derive(Default)]
 struct CandidateValues {
-    produced: BTreeMap<SkipCause, crate::ValueRef>,
-    skipped: BTreeSet<SkipCause>,
+    // Validated plans have unique candidates; only ambiguity diagnostics need ordering.
+    produced: Vec<(SkipCause, crate::ValueRef)>,
+    skipped: Vec<SkipCause>,
 }
 
 /// Input state for one execution context, including its current startup binding.
@@ -144,10 +145,10 @@ impl ExecutionInputs {
                 };
                 match value {
                     Some(ContextValue::Value(value)) => {
-                        group.produced.insert(source, value.clone());
+                        group.produced.push((source, value.clone()));
                     }
                     Some(ContextValue::Skipped) => {
-                        group.skipped.insert(source);
+                        group.skipped.push(source);
                     }
                     None => {
                         return ContextSnafu {
@@ -188,10 +189,16 @@ impl ExecutionInputs {
                     inputs.insert(input.to_owned(), value);
                 }
                 _ => {
+                    let mut sources: Vec<_> = group
+                        .produced
+                        .into_iter()
+                        .map(|(source, _)| source)
+                        .collect();
+                    sources.sort();
                     return AmbiguousInputSnafu {
                         definition_id: id,
                         input,
-                        sources: group.produced.into_keys().collect::<Vec<_>>(),
+                        sources,
                     }
                     .fail();
                 }

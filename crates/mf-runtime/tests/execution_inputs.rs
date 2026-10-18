@@ -147,7 +147,13 @@ fn exclusive_errors_precede_skips_and_input_type_checks() {
     let state = ExecutionInputs::default();
     let bad = ValueRef::from("sentinel-secret").into_secret();
     for reversed in [false, true] {
-        for case in ["one", "none", "ambiguous", "missing", "missing_ambiguous"] {
+        for (case, required) in [
+            ("one", true),
+            ("none", false),
+            ("ambiguous", true),
+            ("missing", true),
+            ("missing_ambiguous", true),
+        ] {
             let mut dependencies = vec![
                 candidate("left"),
                 candidate("right"),
@@ -158,8 +164,10 @@ fn exclusive_errors_precede_skips_and_input_type_checks() {
                 dependencies.reverse();
             }
             let mut inputs = Inputs::new();
+            let mut target = node();
+            target.metadata.ports.inputs[0].required = required;
             let result = state.resolve_node(
-                &node(),
+                &target,
                 false,
                 dependencies,
                 |source| {
@@ -188,14 +196,23 @@ fn exclusive_errors_precede_skips_and_input_type_checks() {
                     assert_eq!(causes.len(), 1);
                     assert_eq!(causes.first().unwrap().source_node, "gate");
                 }
-                "none" => assert_eq!(result.unwrap().len(), 4),
+                "none" => {
+                    assert_eq!(result.unwrap().len(), 4);
+                    assert!(inputs.is_empty());
+                }
                 "ambiguous" => {
                     let error = result.unwrap_err();
-                    assert!(matches!(
-                        error,
-                        mf_runtime::WorkflowRunError::AmbiguousInput { .. }
-                    ));
                     assert!(!format!("{error:?}").contains("sentinel-secret"));
+                    let mf_runtime::WorkflowRunError::AmbiguousInput { sources, .. } = error else {
+                        panic!("expected ambiguous candidates");
+                    };
+                    assert_eq!(
+                        sources
+                            .iter()
+                            .map(|source| source.source_node.as_str())
+                            .collect::<Vec<_>>(),
+                        ["left", "right"]
+                    );
                 }
                 _ => assert!(matches!(
                     result.unwrap_err(),
@@ -224,22 +241,4 @@ fn exclusive_errors_precede_skips_and_input_type_checks() {
         error,
         mf_runtime::WorkflowRunError::InputType { .. }
     ));
-}
-
-#[test]
-fn all_skipped_optional_group_remains_a_skip() {
-    let mut target = node();
-    target.metadata.ports.inputs[0].required = false;
-    let mut inputs = Inputs::new();
-    let causes = ExecutionInputs::default()
-        .resolve_node(
-            &target,
-            false,
-            [candidate("left"), candidate("right")],
-            |_| Ok(Some(ContextValue::Skipped)),
-            &mut inputs,
-        )
-        .unwrap();
-    assert_eq!(causes.len(), 2);
-    assert!(inputs.is_empty());
 }

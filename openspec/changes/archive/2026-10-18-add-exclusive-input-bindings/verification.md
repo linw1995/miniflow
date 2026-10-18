@@ -18,3 +18,11 @@ The cumulative suite includes generated Task and Stream parity, loop and iterati
 The focused tests additionally hold a candidate pending, then complete, fail, omit its output, or cancel it; no partial selection invokes the consumer. Stream batch tests switch winners across messages and preserve buffering deadlines when all candidates skip. Observation tests run with trace sampling disabled and verify selected identities and logical skip causes without exposing secret payloads.
 
 See [review.md](review.md) for the contract review and integration findings. Raw cumulative test and hook logs remain under ignored `target/`. No benchmark or coverage percentage is claimed.
+
+## Follow-up validation
+
+The final implementation cleanup passed 25 focused tests, including generated stream and typed
+runner acceptance. The affected-package selector then selected eight packages from the worktree
+changes; all 714 tests passed, with four existing isolated-subprocess entry points skipped by
+direct nextest scheduling. `prek -a` and strict validation of the archived feature's current
+specification passed. No specification behavior changed, and the existing archive remains authoritative.

@@ -55,7 +55,9 @@ pub fn plan_typed_segments(flow: &Flow, standard_runner: bool, oneshot: bool) ->
         .map(|edge| ((edge.to_node.index(), edge.to_input.as_ref()), edge))
         .collect();
     let mut moves = BTreeMap::<(usize, usize, &str), usize>::new();
+    let mut exclusive_targets = vec![false; nodes.len()];
     for edge in flow.connections() {
+        exclusive_targets[edge.to_node.index()] |= edge.exclusive;
         *moves
             .entry((
                 edge.from_node.index(),
@@ -107,11 +109,7 @@ pub fn plan_typed_segments(flow: &Flow, standard_runner: bool, oneshot: bool) ->
     }
     let classify = |source: usize, target: usize| -> Option<TypedFallbackReason> {
         use TypedFallbackReason::*;
-        if flow
-            .connections()
-            .iter()
-            .any(|edge| edge.to_node.index() == target && edge.exclusive)
-        {
+        if exclusive_targets[target] {
             return Some(ExclusiveInput);
         }
         if !oneshot {
