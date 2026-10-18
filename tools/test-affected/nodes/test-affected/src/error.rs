@@ -3,6 +3,12 @@ use snafu::Snafu;
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum Error {
+    #[snafu(display("invalid Git evidence: {message}"))]
+    Evidence { message: &'static str },
+    #[snafu(display("invalid Git numeric fact: {source}"))]
+    Number { source: std::num::ParseIntError },
+    #[snafu(display("cannot reap Git operation: {source}"))]
+    Cleanup { source: std::io::Error },
     #[snafu(display("invalid API URL: {source}"))]
     Url { source: url::ParseError },
     #[snafu(transparent)]

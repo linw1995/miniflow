@@ -53,6 +53,14 @@ ZIP `member`, and JSON Pointer `pointer`/`fields` projection. The result contain
 Required acquisition errors fail; optional historical errors remain explicit unavailable evidence.
 Cancellation always fails. The node neither chooses records nor interprets validation policy.
 
+`git.inspect` reads the current commit/tree/parents, clean/shallow state, and optional
+`revisions` relative to `ancestor_of`, reporting availability and ancestor distance.
+It does not fetch. `git.fetch` explicitly obtains one full `commit` ID through a configured
+remote (default `origin`), leaving caller refs, index, and worktree intact. Both accept
+`repository` and optional `deadline`, share the evidence result contract, and bound owned
+process execution and captured output. Required inspection failures stop execution;
+unavailable historical fetches are data for the Flow to interpret.
+
 `git.diff` accepts `repository`, `base`, optional `head` (default `HEAD`), optional absolute
 `artifacts`, and optional `options`. It resolves local revisions and compares their merge base
 with head. Snapshots are detached Git worktrees under `target/test-affected/snapshots/` by default;

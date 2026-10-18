@@ -1,5 +1,7 @@
 extern crate mfn_test_affected as _;
 
+mod common;
+
 use mf_runtime::{ExecutionContext, Inputs, NodeExecutionError, NodeRegistry, NodeResult};
 use serde_json::{Value, json};
 use std::{
@@ -120,9 +122,18 @@ fn read(
 ) -> Result<NodeResult, NodeExecutionError> {
     let mut config = config;
     config["api_base"] = json!(server.base);
+    invoke("github.read", config, input, context)
+}
+
+fn invoke(
+    kind: &str,
+    config: Value,
+    input: Value,
+    context: &mut ExecutionContext,
+) -> Result<NodeResult, NodeExecutionError> {
     let prepared = NodeRegistry::from_inventory()
         .unwrap()
-        .get("github.read")
+        .get(kind)
         .unwrap()
         .instantiate(config)
         .unwrap();
@@ -265,4 +276,166 @@ fn cancellation_is_fatal_and_deadlines_are_preserved_across_reads() {
     )
     .unwrap();
     assert_eq!(timeout.outputs["result"]["reason"], json!("limit"));
+}
+
+#[test]
+fn git_inspection_and_explicit_fetch_preserve_caller_state() {
+    use common::*;
+    use mfn_test_affected::git;
+    use std::fs;
+    let (source, base) = fixture();
+    let checkout = tempfile::tempdir().unwrap();
+    let root = checkout.path();
+    git::command(
+        root,
+        "git",
+        &[
+            "clone",
+            "--quiet",
+            "--no-local",
+            source.path().to_str().unwrap(),
+            ".",
+        ],
+    )
+    .unwrap();
+    write(source.path(), "core/src/lib.rs", "pub fn newer() {}\n");
+    let head = commit(source.path());
+    write(root, "core/src/lib.rs", "pub fn local() {}\n");
+    git::command(root, "git", &["add", "core/src/lib.rs"]).unwrap();
+    write(root, "notes.txt", "untracked\n");
+    let index = fs::read(root.join(".git/index")).unwrap();
+    let refs = git::command(root, "git", &["show-ref"]).unwrap();
+    let fetch_head = fs::read(root.join(".git/FETCH_HEAD")).ok();
+    let before = invoke(
+        "git.inspect",
+        json!({}),
+        json!({"repository":root,"revisions":[base,head],"ancestor_of":base}),
+        &mut ExecutionContext::default(),
+    )
+    .unwrap();
+    let value = &before.outputs["result"]["value"];
+    assert_eq!(value["current"]["commit"], json!(base));
+    assert_eq!(value["current"]["clean"], json!(false));
+    assert_eq!(value["revisions"][0]["distance"], json!(0));
+    assert_eq!(value["revisions"][1]["available"], json!(false));
+    let fetched = invoke(
+        "git.fetch",
+        json!({}),
+        json!({"repository":root,"commit":head}),
+        &mut ExecutionContext::default(),
+    )
+    .unwrap();
+    assert_eq!(fetched.outputs["result"]["available"], json!(true));
+    let after = invoke(
+        "git.inspect",
+        json!({}),
+        json!({"repository":root,"revisions":[base,head],"ancestor_of":head}),
+        &mut ExecutionContext::default(),
+    )
+    .unwrap();
+    let value = &after.outputs["result"]["value"];
+    assert_eq!(value["current"]["commit"], json!(base));
+    assert_eq!(value["revisions"][0]["distance"], json!(1));
+    assert_eq!(value["revisions"][1]["parents"], json!([base]));
+    let missing = invoke(
+        "git.fetch",
+        json!({}),
+        json!({"repository":root,"commit":"0".repeat(40)}),
+        &mut ExecutionContext::default(),
+    )
+    .unwrap();
+    assert_eq!(missing.outputs["result"]["available"], json!(false));
+    assert_eq!(fs::read(root.join(".git/index")).unwrap(), index);
+    assert_eq!(git::command(root, "git", &["show-ref"]).unwrap(), refs);
+    assert_eq!(fs::read(root.join(".git/FETCH_HEAD")).ok(), fetch_head);
+    assert_eq!(
+        fs::read_to_string(root.join("notes.txt")).unwrap(),
+        "untracked\n"
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("core/src/lib.rs")).unwrap(),
+        "pub fn local() {}\n"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn blocked_git_fetch_is_bounded_and_reaps_its_process_group() {
+    use common::*;
+    use mfn_test_affected::git;
+    use std::{fs, os::unix::fs::PermissionsExt};
+    for cancel in [false, true] {
+        let (source, _) = fixture();
+        let checkout = tempfile::tempdir().unwrap();
+        let root = checkout.path();
+        git::command(
+            root,
+            "git",
+            &[
+                "clone",
+                "--quiet",
+                "--no-local",
+                source.path().to_str().unwrap(),
+                ".",
+            ],
+        )
+        .unwrap();
+        let script = root.join("target/upload-pack");
+        let pid_file = root.join("target/upload.pid");
+        write(
+            root,
+            "target/upload-pack",
+            &format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec sleep 60\n",
+                pid_file.display()
+            ),
+        );
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+        git::command(
+            root,
+            "git",
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                script.to_str().unwrap(),
+            ],
+        )
+        .unwrap();
+        let mut context = ExecutionContext::default();
+        let signal = context.cancellation();
+        let marker = pid_file.clone();
+        let canceller = cancel.then(|| {
+            thread::spawn(move || {
+                let end = Instant::now() + Duration::from_secs(2);
+                while !marker.exists() && Instant::now() < end {
+                    thread::sleep(Duration::from_millis(2));
+                }
+                signal.cancel(mf_runtime::StreamError::Execution {
+                    message: "cancel Git evidence".into(),
+                });
+            })
+        });
+        let start = Instant::now();
+        let result = invoke(
+            "git.fetch",
+            json!({"timeout_ms":if cancel {5000}else{500}}),
+            json!({"repository":root,"commit":"0".repeat(40)}),
+            &mut context,
+        );
+        if let Some(canceller) = canceller {
+            canceller.join().unwrap();
+        }
+        assert!(start.elapsed() < Duration::from_secs(3));
+        if cancel {
+            assert!(result.is_err());
+        } else {
+            assert_eq!(result.unwrap().outputs["result"]["reason"], json!("limit"));
+        }
+        let pid: i32 = fs::read_to_string(pid_file).unwrap().parse().unwrap();
+        let end = Instant::now() + Duration::from_secs(2);
+        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < end {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+    }
 }

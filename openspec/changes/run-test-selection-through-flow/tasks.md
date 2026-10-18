@@ -8,9 +8,9 @@
 
 ## 2. Implement only the missing external capabilities
 
-- [ ] 2.1 Reuse or add the GitHub metadata/artifact read operations identified by the gate, with bounded decoding, provenance, cancellation, and isolated credentials.
-- [ ] 2.2 Reuse existing Git helpers and add only the missing revision facts or explicit object-retrieval operations, preserving caller state and offline defaults.
-- [ ] 2.3 Verify current-fatal versus historical-unavailable behavior and ensure no provider contains baseline eligibility, candidate-search, or fallback policy; commit each cohesive capability group separately.
+- [x] 2.1 Reuse or add the GitHub metadata/artifact read operations identified by the gate, with bounded decoding, provenance, cancellation, and isolated credentials.
+- [x] 2.2 Reuse existing Git helpers and add only the missing revision facts or explicit object-retrieval operations, preserving caller state and offline defaults.
+- [x] 2.3 Verify current-fatal versus historical-unavailable behavior and ensure no provider contains baseline eligibility, candidate-search, or fallback policy; commit each cohesive capability group separately.
 
 ## 3. Complete the common comparison and planning contract
 

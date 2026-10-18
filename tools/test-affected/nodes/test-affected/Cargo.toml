@@ -23,6 +23,10 @@ reqwest = { workspace = true, features = ["rustls", "query"] }
 url.workspace = true
 zip = { workspace = true, features = ["deflate-flate2-zlib-rs"] }
 
+# Owned Git processes and bounded output capture.
+libc.workspace = true
+tempfile.workspace = true
+
 # Rust source ownership and isolated test-body analysis.
 proc-macro2 = { workspace = true, features = ["span-locations"] }
 quote.workspace = true
@@ -32,6 +36,3 @@ syn = { workspace = true, features = ["full", "parsing", "printing", "visit"] }
 # Compiled and in-memory Flow verification.
 mf-compiler = { workspace = true, features = ["codegen"] }
 mf-tui.workspace = true
-
-# Isolated repositories and generated test projects.
-tempfile.workspace = true

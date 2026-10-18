@@ -62,7 +62,9 @@ impl Budget {
             Ok(value) => json!({"available":true,"value":value,"reason":null}),
             Err(error) => {
                 let reason = match &error {
-                    Error::Cancelled { .. } | Error::Invalid { .. } => return Err(error.into()),
+                    Error::Cancelled { .. } | Error::Invalid { .. } | Error::Cleanup { .. } => {
+                        return Err(error.into());
+                    }
                     Error::Future {
                         source: FutureExecutionError::DeadlineExceeded,
                     }

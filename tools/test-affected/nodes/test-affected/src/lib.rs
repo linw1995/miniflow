@@ -4,6 +4,7 @@ mod classify;
 mod error;
 mod evidence;
 pub mod git;
+mod git_evidence;
 mod github;
 pub mod model;
 mod plan;
