@@ -7,10 +7,10 @@
 
 ## 2. Shared resolution and type evidence
 
-- [ ] 2.1 Resolve all candidate outcomes before consumer activation using shared values and typed Snafu errors; verify unique, all-skipped, duplicate-active, missing, false/null, equal-value ambiguity, and reordered candidates.
-- [ ] 2.2 Preserve AND gates, connected optional behavior, missing-before-ambiguity-before-skip precedence, and skipped-node type-check behavior; verify no consumer side effect occurs on a skipped or invalid binding.
-- [ ] 2.3 Validate each candidate and aggregate conservative type and exact-value evidence; verify inactive incompatible candidates, dynamic input failures, and forwarding derivations do not select arbitrary source facts.
-- [ ] 2.4 Preserve shared payload identity and secret metadata; verify identity forwarding and redacted snapshots, and document independent groups versus one structured correlated value.
+- [x] 2.1 Resolve all candidate outcomes before consumer activation using shared values and typed Snafu errors; verify unique, all-skipped, duplicate-active, missing, false/null, equal-value ambiguity, and reordered candidates.
+- [x] 2.2 Preserve AND gates, connected optional behavior, missing-before-ambiguity-before-skip precedence, and skipped-node type-check behavior; verify no consumer side effect occurs on a skipped or invalid binding.
+- [x] 2.3 Validate each candidate and aggregate conservative type and exact-value evidence; verify inactive incompatible candidates, dynamic input failures, and forwarding derivations do not select arbitrary source facts.
+- [x] 2.4 Preserve shared payload identity and secret metadata; verify identity forwarding and redacted snapshots, and document independent groups versus one structured correlated value.
 
 ## 3. Generated and scoped execution
 

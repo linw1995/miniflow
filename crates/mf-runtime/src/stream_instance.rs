@@ -533,7 +533,8 @@ fn run_producer(
 
 fn workflow_error_node(error: &crate::WorkflowRunError) -> String {
     match error {
-        crate::WorkflowRunError::Dependency { definition_id, .. }
+        crate::WorkflowRunError::AmbiguousInput { definition_id, .. }
+        | crate::WorkflowRunError::Dependency { definition_id, .. }
         | crate::WorkflowRunError::InputType { definition_id, .. }
         | crate::WorkflowRunError::OutputType { definition_id, .. }
         | crate::WorkflowRunError::OutputSelection { definition_id, .. }

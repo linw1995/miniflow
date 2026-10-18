@@ -280,7 +280,7 @@ impl TypeInferenceState {
                 definition_id: id.clone(),
             })?;
 
-        let mut inputs = BTreeMap::new();
+        let mut inputs: BTreeMap<&str, TypeFact> = BTreeMap::new();
         for dependency in dependencies {
             let Some(input_name) = dependency.input else {
                 continue;
@@ -333,13 +333,24 @@ impl TypeInferenceState {
             } else {
                 input.value_type.clone()
             };
-            inputs.insert(
-                input_name,
-                TypeFact {
-                    value_type,
-                    exact: source.exact.clone(),
-                },
-            );
+            if dependency.exclusive
+                && let Some(fact) = inputs.get_mut(input_name)
+            {
+                if fact.value_type != value_type {
+                    fact.value_type = input.value_type.clone();
+                }
+                if fact.exact != source.exact {
+                    fact.exact = None;
+                }
+            } else {
+                inputs.insert(
+                    input_name,
+                    TypeFact {
+                        value_type,
+                        exact: source.exact.clone(),
+                    },
+                );
+            }
         }
 
         let derivations: BTreeMap<_, _> = derivations

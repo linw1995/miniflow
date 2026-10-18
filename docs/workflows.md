@@ -535,6 +535,17 @@ scope and input message domain. Ordinary inputs and control edges retain their A
 this declaration does not mix independent streams or select the first completed producer.
 Omitting the field preserves existing workflows. New syntax requires updated support packages.
 
+Resolution waits for all candidate outcomes in the current frame. Exactly one produced value
+binds the input; all skipped candidates skip the consumer; multiple produced candidates fail,
+even if their values are equal. False and null count as values. Unexpected absence and ambiguity
+remain errors even behind another skipped dependency. A selected dynamic value is type-checked
+before an active consumer executes. Failure and cancellation do not select fallback candidates.
+
+Selection retains shared payloads and secret metadata. Different input groups resolve independently;
+carry correlated fields together in one structured value when they must come from one branch.
+A connected optional group whose candidates all skip still skips its consumer. Collection nodes
+retain their existing behavior: a skipped input adds no item and does not reset a batch deadline.
+
 ## Optional workflow results
 
 A selection such as `{"name":"result","node":"branch","port":"value","optional":true}` omits its key when the source port or node is explicitly skipped. A produced null remains `"result": null`. Missing outputs without a skip marker remain errors. Output selections are required by default, so selecting a skipped required output fails with its name and source ID. All omitted selections produce `{}`.

@@ -1,4 +1,4 @@
-use crate::runner::{ContextSnafu, DependencySnafu, InputTypeSnafu};
+use crate::runner::{AmbiguousInputSnafu, ContextSnafu, DependencySnafu, InputTypeSnafu};
 use crate::workflow_inputs::{InvalidSnafu, TextValueSnafu, TypeMismatchSnafu, pointer};
 use crate::{
     ContextValue, ExecutionDependency, FlowNode, Inputs, NodeExecutionError, WorkflowArguments,
@@ -6,7 +6,16 @@ use crate::{
 };
 use mf_telemetry::event::SkipCause;
 use snafu::ResultExt;
-use std::{collections::BTreeSet, ffi::OsString};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
+};
+
+#[derive(Default)]
+struct CandidateValues {
+    produced: BTreeMap<SkipCause, crate::ValueRef>,
+    skipped: BTreeSet<SkipCause>,
+}
 
 /// Input state for one execution context, including its current startup binding.
 #[derive(Clone, Debug, Default)]
@@ -93,11 +102,42 @@ impl ExecutionInputs {
         *inputs = self.initial(node, in_scope);
         let id = node.definition_id.as_str();
         let mut causes = BTreeSet::new();
+        let mut groups: BTreeMap<&str, CandidateValues> = BTreeMap::new();
         for dependency in dependencies {
             let value = lookup(dependency).with_context(|_| DependencySnafu {
                 definition_id: id,
                 input: dependency.input.unwrap_or("<control>"),
             })?;
+            if dependency.exclusive {
+                let input = dependency.input.ok_or_else(|| {
+                    ContextSnafu {
+                        definition_id: id,
+                        message: "exclusive dependency requires a target input",
+                    }
+                    .build()
+                })?;
+                let group = groups.entry(input).or_default();
+                let source = SkipCause {
+                    source_node: dependency.source_node.into(),
+                    source_output: dependency.source_output.into(),
+                };
+                match value {
+                    Some(ContextValue::Value(value)) => {
+                        group.produced.insert(source, value.clone());
+                    }
+                    Some(ContextValue::Skipped) => {
+                        group.skipped.insert(source);
+                    }
+                    None => {
+                        return ContextSnafu {
+                            definition_id: id,
+                            message: "exclusive candidate cannot use a transferred typed slot",
+                        }
+                        .fail();
+                    }
+                }
+                continue;
+            }
             match value {
                 Some(ContextValue::Value(value)) => {
                     if let Some(input) = dependency.input {
@@ -111,6 +151,26 @@ impl ExecutionInputs {
                     });
                 }
                 None => {}
+            }
+        }
+        // Inspect every dependency before allowing skips or reporting cardinality errors.
+        for (input, group) in groups {
+            match group.produced.len() {
+                0 => causes.extend(group.skipped),
+                1 => {
+                    inputs.insert(
+                        input.to_owned(),
+                        group.produced.into_values().next().unwrap(),
+                    );
+                }
+                _ => {
+                    return AmbiguousInputSnafu {
+                        definition_id: id,
+                        input,
+                        sources: group.produced.into_keys().collect::<Vec<_>>(),
+                    }
+                    .fail();
+                }
             }
         }
         if causes.is_empty() {
