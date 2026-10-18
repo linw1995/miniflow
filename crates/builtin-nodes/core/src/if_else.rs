@@ -269,6 +269,12 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     }
     let node = IfElse { branches };
     let metadata = mf_runtime::NodeMetadata {
+        exclusive_outputs: node
+            .ports()
+            .outputs
+            .iter()
+            .map(|port| port.name.to_string())
+            .collect(),
         context_references: node.context_references(),
         ..Default::default()
     };

@@ -599,3 +599,24 @@ fn identifier_parsing_preserves_typed_sources() {
     assert!(matches!(error, mf_telemetry::ContractError::SpanId { .. }));
     assert!(error.source().unwrap().is::<std::num::ParseIntError>());
 }
+
+#[test]
+fn selected_inputs_round_trip_and_require_declared_exclusive_sources() {
+    let mut description = serde_json::to_value(branch_graph()).unwrap();
+    description["data_edges"] = json!([
+        {"from_node":"load.order", "from_output":"first", "to_node":"branch/target", "to_input":"value", "exclusive":true},
+        {"from_node":"load.order", "from_output":"second", "to_node":"branch/target", "to_input":"value", "exclusive":true}
+    ]);
+    let description =
+        WorkflowDescription::from_json(&serde_json::to_vec(&description).unwrap()).unwrap();
+    let mut wire = record("skip");
+    wire.body["selected_inputs"] =
+        json!([{"input":"value", "source_node":"load.order", "source_output":"first"}]);
+    let decoded = wire.decode().unwrap();
+    decoded.validate_for(&description).unwrap();
+    assert_eq!(decoded.event.selected_inputs().len(), 1);
+    wire.body["selected_inputs"][0]["source_output"] = json!("unknown");
+    assert!(wire.decode().unwrap().validate_for(&description).is_err());
+    wire.body["selected_inputs"][0]["source_output"] = json!("");
+    assert!(wire.decode().is_err());
+}

@@ -340,6 +340,7 @@ fn data_edges(edges: &[crate::EdgeDefinition]) -> Vec<DataEdge> {
     edges
         .iter()
         .map(|edge| DataEdge {
+            exclusive: edge.exclusive,
             from_node: edge.from_node.to_string(),
             from_output: edge.from_output.clone(),
             to_node: edge.to_node.to_string(),

@@ -508,7 +508,64 @@ The optional `control_edges` array contains entries with `from_node`, `from_outp
 
 Context references use qualified IDs such as `load_order.value`. A reference must name an output on an explicit predecessor, directly or transitively. Merely sorting earlier by node ID does not establish a dependency. Node IDs and local output names may contain dots if their combined IDs remain unique.
 
-A produced control output activates its target regardless of whether its JSON value is false or null. All incoming data and control dependencies must be available; any explicit skip skips execution and propagates to downstream nodes. Unexpected missing outputs remain errors, including when another dependency is skipped. Independent nodes still execute, and connecting both mutually exclusive outputs to one node does not merge branches.
+A produced control output activates its target regardless of whether its JSON value is false or
+null. All ordinary data inputs, resolved exclusive groups, and control dependencies must be
+available; a skipped logical input or control dependency skips execution and propagates to
+downstream nodes. Unexpected missing outputs remain errors, including when another dependency is
+skipped. Independent nodes still execute, and ordinary connections to both mutually exclusive
+outputs do not merge branches; use an explicit exclusive input group for alternatives.
+
+## Exclusive input bindings
+
+Set `exclusive: true` on each candidate data edge targeting the same `to_node` and `to_input`.
+That target pair defines the group. At least two distinct candidate outputs are required;
+ordinary and exclusive edges cannot bind the same input. An omitted or false marker retains
+ordinary single-source binding. Every candidate participates in ordering and type checks.
+
+Compilation must prove every pair of candidates mutually exclusive. Use different outputs of
+the same `builtin.if_else`, either directly or through data and control dependencies, to gate
+the candidate producers. An `exclusive` marker alone is insufficient: unguarded sources,
+producers on the same branch, and unrelated routers are rejected before execution, even if
+runtime values would happen to select only one. After convergence, only branch constraints
+shared by every candidate remain available for proving downstream groups.
+
+```json
+{
+  "edges": [
+    {"from_node":"local","from_output":"value","to_node":"consume","to_input":"input","exclusive":true},
+    {"from_node":"remote","from_output":"value","to_node":"consume","to_input":"input","exclusive":true}
+  ]
+}
+```
+
+The same syntax is available in loop and iteration bodies. Candidates must be in the consumer's
+scope and input message domain. Ordinary inputs and control edges retain their AND behavior;
+this declaration does not mix independent streams or select the first completed producer.
+Omitting the marker preserves existing workflows. New syntax requires updated support packages.
+
+Resolution waits for all candidate outcomes in the current frame. Exactly one produced value
+binds the input; all skipped candidates skip the consumer. False and null count as values.
+Unexpected absence remains an error even behind another skipped dependency. Runtime resolution
+relies on the compiler's exclusivity proof without repeating the check. A selected dynamic value is type-checked
+before an active consumer executes. Failure and cancellation do not select fallback candidates.
+
+Selection retains shared payloads and secret metadata. Different input groups resolve independently;
+carry correlated fields together in one structured value when they must come from one branch.
+A connected optional group whose candidates all skip still skips its consumer. Collection nodes
+retain their existing behavior: a skipped input adds no item and does not reset a batch deadline.
+
+The [exclusive-input example](../examples/exclusive-inputs.json) converges local and CI branches
+into one shared consumer. Compile it once and select either branch through startup arguments:
+
+```sh
+mf compile examples/exclusive-inputs.json --output ./exclusive-inputs
+mf run ./exclusive-inputs
+mf run ./exclusive-inputs --inputs '{"params.ci":true}'
+```
+
+These runs produce `{"result":{"mode":"local"}}` and `{"result":{"mode":"ci"}}` respectively.
+To replace separate branch consumers, keep the branch control edges, add a common consumer, and
+bind its input with one exclusive group. Multiple ordinary inputs are still jointly required.
 
 ## Optional workflow results
 

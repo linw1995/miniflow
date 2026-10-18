@@ -170,12 +170,14 @@ fn description() -> WorkflowDescription {
             .collect(),
         data_edges: vec![
             DataEdge {
+                exclusive: false,
                 from_node: "fetch".into(),
                 from_output: "value".into(),
                 to_node: "transform".into(),
                 to_input: "input".into(),
             },
             DataEdge {
+                exclusive: false,
                 from_node: "transform".into(),
                 from_output: "value".into(),
                 to_node: "publish".into(),
@@ -237,6 +239,7 @@ fn scheduled_events(
             0,
             2,
             Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: node("fetch"),
                 position: count(0),
                 elapsed_ns: count(0),
@@ -261,6 +264,7 @@ fn scheduled_events(
             800,
             4,
             Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: node("transform"),
                 position: count(1),
                 elapsed_ns: count(800_000_000),
@@ -285,6 +289,7 @@ fn scheduled_events(
             2500,
             6,
             Event::NodeStarted {
+                selected_inputs: Vec::new(),
                 node: node("publish"),
                 position: count(2),
                 elapsed_ns: count(2_500_000_000),
@@ -309,6 +314,7 @@ fn scheduled_events(
             3500,
             8,
             Event::NodeSkipped {
+                selected_inputs: Vec::new(),
                 node: node("archive"),
                 position: count(3),
                 elapsed_ns: count(3_500_000_000),
@@ -398,6 +404,7 @@ fn dump_graph() -> PreviewResult<()> {
         for from in 0..4 {
             for to in if from < 2 { 2..6 } else { 4..6 } {
                 fixture.data_edges.push(DataEdge {
+                    exclusive: false,
                     from_node: names[from].into(),
                     from_output: "value".into(),
                     to_node: names[to].into(),

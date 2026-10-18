@@ -42,7 +42,7 @@ Workflow definitions SHALL accept an optional `control_edges` array defaulting t
 `from_node`, `from_output`, and `to_node`. These edges SHALL establish execution dependencies without creating target
 input bindings. Existing data edges SHALL retain their data-binding behavior. The combined dependency graph MUST be
 acyclic. A control dependency SHALL be active when its source output is produced, including false or null values;
-explicit skip state SHALL make it inactive. Multiple incoming dependencies SHALL all be required for activation.
+explicit skip state SHALL make it inactive. Ordinary data inputs, resolved exclusive input groups, and incoming control dependencies SHALL all be required for activation. Candidate skips within a successfully resolved exclusive group MUST NOT independently deactivate the target. Every candidate SHALL still establish a scheduling dependency.
 Condition source references MUST NOT implicitly create dependencies or supply input values.
 
 #### Scenario: Trigger from one node and inspect another
@@ -64,6 +64,11 @@ Condition source references MUST NOT implicitly create dependencies or supply in
 
 - **WHEN** a definition omits `control_edges`
 - **THEN** its existing data bindings and dependency order retain their previous semantics
+
+#### Scenario: Keep a separate gate mandatory after selection
+
+- **WHEN** an exclusive input group resolves one produced value but a separate ordinary input or control dependency is skipped
+- **THEN** the consumer remains skipped without invoking its execution method
 
 ### Requirement: Read prior outputs from an isolated execution context
 
@@ -273,8 +278,8 @@ for all branches, while data-dependent errors SHALL apply only to reached predic
 ### Requirement: Propagate explicit skips without executing downstream nodes
 
 Execution SHALL distinguish produced values, explicitly skipped ports or nodes, and unexpectedly absent outputs. After
-resolving all data bindings and incoming control edges, any unexpected absence MUST cause an error with source and target context. Otherwise,
-any skipped dependency MUST skip the target node without invoking its execution method and MUST propagate skip
+resolving all data bindings, including exclusive input groups, and incoming control edges, any unexpected absence or exclusive-group ambiguity MUST cause an error with source and target context. Otherwise,
+any skipped ordinary input, resolved exclusive input group, or control dependency MUST skip the target node without invoking its execution method and MUST propagate skip
 state through its outputs. This rule SHALL include connected optional inputs. Unconnected optional inputs MUST NOT
 trigger skipping. Independent nodes SHALL remain eligible to execute in the existing deterministic order.
 
@@ -288,7 +293,7 @@ In streaming execution, ordinary skip propagation SHALL remain within the curren
 #### Scenario: Propagate through nested branches and fan-out
 
 - **WHEN** a skipped output feeds several nodes, including another conditional node
-- **THEN** all of those dependent nodes and their dependent descendants are skipped unless execution has already failed
+- **THEN** ordinary dependent nodes and their descendants propagate skips unless execution has already failed; an explicit exclusive input group with one produced alternative resolves successfully and stops that candidate skip from propagating through the group
 
 #### Scenario: Execute an independent node
 
@@ -312,13 +317,18 @@ In streaming execution, ordinary skip propagation SHALL remain within the curren
 
 #### Scenario: Keep ordinary joins conjunctive
 
-- **WHEN** a node has data or control dependencies on two mutually exclusive branch outputs
+- **WHEN** a node has ordinary data or control dependencies on two mutually exclusive branch outputs, without an exclusive input group
 - **THEN** that node is skipped because one connected input is skipped
 
 #### Scenario: Skip one input before a collection boundary
 
 - **WHEN** a conditional branch skips one input while a collector holds earlier accepted values
 - **THEN** the skipped input is excluded, the existing batch remains eligible to emit, and no batch-domain skip is invented
+
+#### Scenario: Resume after an explicit exclusive group
+
+- **WHEN** a group has one produced candidate and one explicitly skipped candidate, with all other consumer dependencies available
+- **THEN** the consumer runs once and the unselected candidate is not reported as a cause for skipping the consumer
 
 ### Requirement: Preserve plugin errors and ordinary plugin compatibility
 

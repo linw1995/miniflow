@@ -35,6 +35,7 @@ fn main() {
         loop_bodies: Vec::new(),
     };
     let edge = |from: usize, to: usize, port: usize| DataEdge {
+        exclusive: false,
         from_node: format!("node-{from:05}"),
         from_output: "value".into(),
         to_node: format!("node-{to:05}"),

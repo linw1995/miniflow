@@ -31,6 +31,7 @@ fn definition(count: usize, payload: usize) -> WorkflowDefinition {
             loop_definition: None,
         });
         edges.push(EdgeDefinition {
+            exclusive: false,
             from_node: id(index - 1).into(),
             from_output: "value".into(),
             to_node: id(index).into(),

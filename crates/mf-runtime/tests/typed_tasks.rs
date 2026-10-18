@@ -73,6 +73,7 @@ fn source(result: NodeResult, ctx: &mut ExecutionContext) {
 
 fn dependency() -> ExecutionDependency<'static> {
     ExecutionDependency {
+        exclusive: false,
         input: Some("input"),
         source_node: "source",
         source_output: "value",
@@ -118,6 +119,7 @@ fn preparation_derives_ports_and_never_decodes_or_executes() {
     let metadata = NodeMetadata {
         typed_generation: None,
         ports: NodePorts::default(),
+        exclusive_outputs: Vec::new(),
         input_bindings: [(
             "input".into(),
             mf_runtime::InputBinding {
@@ -194,6 +196,7 @@ fn skip_missing_dependencies_and_input_checks_precede_typed_decoding() {
         &mut ctx,
     );
     let missing = ExecutionDependency {
+        exclusive: false,
         input: None,
         source_node: "missing",
         source_output: "value",

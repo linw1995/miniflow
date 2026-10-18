@@ -4,9 +4,24 @@ use crate::{
     ContextValue, ExecutionDependency, FlowNode, Inputs, NodeExecutionError, WorkflowArguments,
     WorkflowInputError, WorkflowInputSchema, WorkflowRunError, output_id,
 };
-use mf_telemetry::event::SkipCause;
+use mf_telemetry::event::{InputSelection, SkipCause};
 use snafu::ResultExt;
-use std::{collections::BTreeSet, ffi::OsString};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
+};
+
+#[derive(Clone, Debug, Default)]
+pub struct InputResolution {
+    pub causes: BTreeSet<SkipCause>,
+    pub selected: Vec<InputSelection>,
+}
+
+#[derive(Default)]
+struct CandidateValues {
+    produced: Option<(SkipCause, crate::ValueRef)>,
+    skipped: Vec<SkipCause>,
+}
 
 /// Input state for one execution context, including its current startup binding.
 #[derive(Clone, Debug, Default)]
@@ -85,19 +100,65 @@ impl ExecutionInputs {
         node: &FlowNode<N>,
         in_scope: bool,
         dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
-        mut lookup: impl FnMut(
+        lookup: impl FnMut(
             ExecutionDependency<'a>,
         ) -> Result<Option<ContextValue<'value>>, NodeExecutionError>,
         inputs: &mut Inputs,
     ) -> Result<BTreeSet<SkipCause>, WorkflowRunError> {
+        self.resolve_node_inputs(node, in_scope, dependencies, lookup, inputs)
+            .map(|resolution| resolution.causes)
+    }
+
+    pub fn resolve_node_inputs<'a, 'value, N>(
+        &self,
+        node: &FlowNode<N>,
+        in_scope: bool,
+        dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
+        mut lookup: impl FnMut(
+            ExecutionDependency<'a>,
+        ) -> Result<Option<ContextValue<'value>>, NodeExecutionError>,
+        inputs: &mut Inputs,
+    ) -> Result<InputResolution, WorkflowRunError> {
         *inputs = self.initial(node, in_scope);
         let id = node.definition_id.as_str();
         let mut causes = BTreeSet::new();
+        let mut selected = Vec::new();
+        let mut groups: BTreeMap<&str, CandidateValues> = BTreeMap::new();
         for dependency in dependencies {
             let value = lookup(dependency).with_context(|_| DependencySnafu {
                 definition_id: id,
                 input: dependency.input.unwrap_or("<control>"),
             })?;
+            if dependency.exclusive {
+                let input = dependency.input.ok_or_else(|| {
+                    ContextSnafu {
+                        definition_id: id,
+                        message: "exclusive dependency requires a target input",
+                    }
+                    .build()
+                })?;
+                let group = groups.entry(input).or_default();
+                let source = SkipCause {
+                    source_node: dependency.source_node.into(),
+                    source_output: dependency.source_output.into(),
+                };
+                match value {
+                    Some(ContextValue::Value(value)) => {
+                        group.produced = Some((source, value.clone()));
+                    }
+                    Some(ContextValue::Skipped) => {
+                        group.skipped.push(source);
+                    }
+                    None => {
+                        return ContextSnafu {
+                            definition_id: id,
+                            message: "exclusive candidate cannot use a transferred typed slot",
+                        }
+                        .fail();
+                    }
+                }
+                continue;
+            }
             match value {
                 Some(ContextValue::Value(value)) => {
                     if let Some(input) = dependency.input {
@@ -111,6 +172,18 @@ impl ExecutionInputs {
                     });
                 }
                 None => {}
+            }
+        }
+        for (input, group) in groups {
+            if let Some((source, value)) = group.produced {
+                selected.push(InputSelection {
+                    input: input.to_owned(),
+                    source_node: source.source_node,
+                    source_output: source.source_output,
+                });
+                inputs.insert(input.to_owned(), value);
+            } else {
+                causes.extend(group.skipped);
             }
         }
         if causes.is_empty() {
@@ -136,7 +209,7 @@ impl ExecutionInputs {
                     })?;
             }
         }
-        Ok(causes)
+        Ok(InputResolution { causes, selected })
     }
 }
 

@@ -676,3 +676,13 @@ invalid definitions, or an absent end record produce explicit capture diagnostic
 changing workflow outcomes or lifecycle integrity. A gap waits for ordered reconstruction
 rather than exposing a value whose definitions have not arrived. Already reconstructed
 history remains available after collection finishes.
+
+## Exclusive input provenance
+
+Descriptions mark each candidate data edge with `exclusive: true`; candidates sharing a target
+input form one group. The graph renders these edges in magenta with an `exclusive` label.
+`mf.node.started` and `mf.node.skipped` may include `selected_inputs`, containing only `input`,
+`source_node`, and `source_output` identities. Empty selections are omitted for compatibility.
+Iteration body logs carry the same identities in `mf.input.selections`. Values and secrets are
+not copied into these records. Selection belongs to the consumer's frame or body invocation.
+An unselected candidate is not a skip cause when another candidate successfully binds the input.

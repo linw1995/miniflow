@@ -55,6 +55,7 @@ fn node(
 
 fn dependency(source_node: &str) -> ExecutionDependency<'_> {
     ExecutionDependency {
+        exclusive: false,
         source_node,
         source_output: "value",
         input: Some("input"),

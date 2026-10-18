@@ -536,9 +536,18 @@ impl ExecutionContext {
         node: &FlowNode<N>,
         dependencies: &[crate::FlowDependency],
     ) -> Result<Option<Inputs>, WorkflowRunError> {
+        let (inputs, resolution) = self.event_input_resolution(node, dependencies)?;
+        Ok(resolution.causes.is_empty().then_some(inputs))
+    }
+
+    pub fn event_input_resolution<N>(
+        &mut self,
+        node: &FlowNode<N>,
+        dependencies: &[crate::FlowDependency],
+    ) -> Result<(Inputs, crate::InputResolution), WorkflowRunError> {
         self.reserve_step(node.definition_id.as_str())?;
         let mut inputs = Inputs::new();
-        let causes = self.inputs.resolve_node(
+        let resolution = self.inputs.resolve_node_inputs(
             node,
             !self.scopes.is_empty(),
             dependencies.iter().map(crate::FlowDependency::borrowed),
@@ -548,7 +557,7 @@ impl ExecutionContext {
             },
             &mut inputs,
         )?;
-        Ok(causes.is_empty().then_some(inputs))
+        Ok((inputs, resolution))
     }
 
     pub fn set_snapshot_recorder(&mut self, recorder: crate::SnapshotRecorder) {
@@ -990,6 +999,8 @@ fn state_error(id: &str, message: impl Into<String>) -> WorkflowRunError {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ExecutionDependency<'a> {
+    /// Candidates with the same target input form one exclusive group.
+    pub exclusive: bool,
     pub input: Option<&'a str>,
     pub source_node: &'a str,
     pub source_output: &'a str,
@@ -1001,6 +1012,12 @@ enum StepObservation {
 }
 
 impl StepObservation {
+    fn set_input_selections(&mut self, selected: Vec<mf_telemetry::event::InputSelection>) {
+        match self {
+            Self::Root(step) => step.set_input_selections(selected),
+            Self::Body(step) => step.set_input_selections(selected),
+        }
+    }
     fn started(&mut self, ctx: &mut ExecutionContext) {
         match self {
             Self::Root(step) => ctx.observation.as_mut().unwrap().node_started(step),
@@ -1144,7 +1161,7 @@ fn execute_ordered_call_in_context<'a, N>(
         _ => None,
     };
     let mut inputs = Inputs::new();
-    let resolution = ctx.inputs.resolve_node(
+    let resolution = ctx.inputs.resolve_node_inputs(
         node,
         !ctx.scopes.is_empty(),
         dependencies,
@@ -1162,7 +1179,12 @@ fn execute_ordered_call_in_context<'a, N>(
         &mut inputs,
     );
     let causes = match resolution {
-        Ok(causes) => causes,
+        Ok(resolution) => {
+            if let Some(step) = step.as_mut() {
+                step.set_input_selections(resolution.selected);
+            }
+            resolution.causes
+        }
         Err(error) => {
             if let Some(step) = step.take() {
                 step.failed(ctx, FailurePhase::Dependency, error.to_string());
@@ -1493,11 +1515,13 @@ mod tests {
             );
             let mut dependencies = vec![
                 crate::FlowDependency {
+                    exclusive: false,
                     input: Some("value".into()),
                     source_node: "source".into(),
                     source_output: "value".into(),
                 },
                 crate::FlowDependency {
+                    exclusive: false,
                     input: None,
                     source_node: "gate".into(),
                     source_output: "value".into(),
@@ -1505,6 +1529,7 @@ mod tests {
             ];
             if case == "missing" {
                 dependencies.push(crate::FlowDependency {
+                    exclusive: false,
                     input: None,
                     source_node: "absent".into(),
                     source_output: "value".into(),
@@ -1702,6 +1727,7 @@ mod tests {
             Some(json!([{"count": 1}, {"count": "two"}]).into()),
         );
         let dependency = ExecutionDependency {
+            exclusive: false,
             input: Some("payload"),
             source_node: "source",
             source_output: "value",
@@ -1747,6 +1773,7 @@ mod tests {
             .outputs
             .insert("source.value".into(), Some(json!(1).into()));
         let dependency = ExecutionDependency {
+            exclusive: false,
             input: Some("unexpected"),
             source_node: "source",
             source_output: "value",
@@ -1783,6 +1810,7 @@ mod tests {
                 let result = execute_node_in_context(
                     &node,
                     &[ExecutionDependency {
+                        exclusive: false,
                         input: Some("value"),
                         source_node: "source",
                         source_output: "value",
@@ -1851,6 +1879,7 @@ mod tests {
         .into_task()
         .unwrap();
         let skipped = ExecutionDependency {
+            exclusive: false,
             input: Some("payload"),
             source_node: "branch",
             source_output: "off",
@@ -1859,6 +1888,7 @@ mod tests {
         context.outputs.insert("branch.off".into(), None);
         for input in [None, Some("payload")] {
             let missing = ExecutionDependency {
+                exclusive: false,
                 input,
                 source_node: "source",
                 source_output: "missing",
@@ -1992,6 +2022,7 @@ mod tests {
                 .collect(),
                 crate::FlowPlan {
                     connections: vec![crate::FlowConnection {
+                        exclusive: false,
                         from_node: crate::NodeId::new(0),
                         from_output: "value".into(),
                         to_node: crate::NodeId::new(1),
@@ -2001,6 +2032,7 @@ mod tests {
                     dependencies: vec![
                         std::borrow::Cow::Owned(vec![]),
                         std::borrow::Cow::Owned(vec![crate::FlowDependency {
+                            exclusive: false,
                             input: Some("payload".into()),
                             source_node: "source".into(),
                             source_output: "value".into(),
