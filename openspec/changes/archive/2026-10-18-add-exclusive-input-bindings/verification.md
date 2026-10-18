@@ -35,3 +35,11 @@ The affected selector conservatively chose all ten packages after the example ch
 753 tests passed, with four existing isolated-subprocess entry points skipped by direct
 scheduling. Repository hooks and strict feature-spec validation passed. The archived design,
 proposal, and specification now describe the marked-edge format.
+
+## Iteration provenance verification
+
+The existing scoped-selection regression now compares unobserved and observed execution and
+checks each sequential and parallel iteration item's selected source. The repository coverage
+script, focused on that regression, reports all 28 executable lines of the iteration selection
+log block covered. All 517 selected affected-package tests passed, with three existing isolated
+subprocess entry points skipped by direct scheduling. Repository hooks passed.

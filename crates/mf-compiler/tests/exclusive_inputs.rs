@@ -124,8 +124,15 @@ fn loop_rounds_and_parallel_iterations_select_within_each_scope() {
         let plan =
             compile_definition(&serde_json::from_value(definition).unwrap(), &registry).unwrap();
         let flow = instantiate_compiled(&plan, &registry).unwrap();
-        for _ in 0..2 {
-            let result = flow.execute().unwrap();
+        for observe in [false, true] {
+            let harness = capture::Harness::new(false);
+            let observation = observe.then(|| {
+                plan.start_observation(&harness.observer(), mf_telemetry::identity::RunId::new())
+                    .unwrap()
+            });
+            let result = mf_runtime::FlowRuntime::default()
+                .execute_with_observation(&flow, observation)
+                .unwrap();
             assert_eq!(
                 result["result"],
                 if mode == "loop" {
@@ -134,6 +141,29 @@ fn loop_rounds_and_parallel_iterations_select_within_each_scope() {
                     json!([false, true, false, true])
                 }
             );
+            if observe && mode != "loop" {
+                let records = harness.records();
+                let mut selected: Vec<_> = records
+                    .iter()
+                    .filter(|record| {
+                        record.event_name == "mf.iteration.node.started"
+                            && record.attributes["mf.node.id"] == "consume"
+                    })
+                    .collect();
+                selected.sort_by_key(|record| {
+                    record.attributes["mf.iteration.index"].as_i64().unwrap()
+                });
+                assert_eq!(selected.len(), 4);
+                for (index, record) in selected.iter().enumerate() {
+                    assert_eq!(record.attributes["mf.iteration.index"], json!(index));
+                    assert_eq!(
+                        record.attributes["mf.input.selections"],
+                        json!([{
+                            "input":"input", "source_node":if index % 2 == 0 { "left" } else { "right" }, "source_output":"value"
+                        }])
+                    );
+                }
+            }
         }
     }
 }
