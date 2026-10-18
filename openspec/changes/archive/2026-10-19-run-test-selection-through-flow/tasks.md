@@ -34,6 +34,6 @@
 
 ## 6. Review, ablate, and archive
 
-- [ ] 6.1 Run pinned-toolchain checks and required hooks; compare planning outputs and phase-specific costs on recorded local/CI cases.
-- [ ] 6.2 Ablate policy predicates, candidate order, early stopping, error propagation, and local isolation; remove unnecessary graph steps/abstractions/tests and keep reports under target/.
-- [ ] 6.3 Review repository rules, synchronize formal specs and the obsolete three-node purpose text, and archive the completed change in a separate commit.
+- [x] 6.1 Run pinned-toolchain checks and required hooks; compare planning outputs and phase-specific costs on recorded local/CI cases.
+- [x] 6.2 Ablate policy predicates, candidate order, early stopping, error propagation, and local isolation; remove unnecessary graph steps/abstractions/tests and keep reports under target/.
+- [x] 6.3 Review repository rules, synchronize formal specs and the obsolete three-node purpose text, and archive the completed change in a separate commit.

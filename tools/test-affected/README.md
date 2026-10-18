@@ -87,8 +87,8 @@ Setting `analyze` to false retains Git changes while emitting an empty semantic 
 Set `options.exact_tests` to false for conservative package-only planning.
 
 `test_affected.plan` consumes only the analysis output and its opaque comparison context. It uses
-Cargo metadata for all declared dependency kinds and the same [input policy](../../docs/ci.md#affected-package-tests)
-as the current selector. Package manifests retain owner/consumer scope; known repository configuration
+Cargo metadata for all declared dependency kinds and owns the shared
+[input policy](../../docs/ci.md#affected-package-tests). Package manifests retain owner/consumer scope; known repository configuration
 is deferred to full main/nightly verification. Known shared executables select their consumers, while
 unknown inputs and analyzer failures retain full fallback. Source diffs remain the impact seed even when
 call edges do not change. LSP evidence alone never excludes unobserved tests.

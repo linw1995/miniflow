@@ -64,3 +64,29 @@ Selection-policy compatibility SHALL be explicit across migration. Changed selec
 
 - **WHEN** the Flow selector runs with settings or policy incompatible with prior successes
 - **THEN** it resets to cumulative comparison rather than excluding changes using old evidence
+
+## MODIFIED Requirements
+
+### Requirement: Reset reuse when evidence is unavailable or incompatible
+
+CI SHALL fall back to the cumulative PR affected scope with a reason when no eligible record is available. A reset SHALL NOT itself force the entire workspace or remove documented configuration deferrals. Missing current-source identities SHALL fail validation. Failed, malformed, expired, foreign, or mismatched records SHALL NOT authorize test exclusion.
+
+#### Scenario: First validation or unavailable history
+
+- **WHEN** this PR has no compatible record, or record discovery/history retrieval cannot complete within its bounds
+- **THEN** CI compares the actual merge parent to the current merge and reports why reuse was unavailable
+
+#### Scenario: Target branch or policy advances
+
+- **WHEN** the actual target-base commit or effective validation policy differs from the record
+- **THEN** CI uses cumulative PR affected scope and establishes a new baseline only after success
+
+#### Scenario: Rewrite PR history
+
+- **WHEN** a force push removes the recorded PR head from current ancestry
+- **THEN** that record is rejected even if its run completed successfully
+
+#### Scenario: A recorded merge snapshot is unavailable
+
+- **WHEN** an otherwise eligible record refers to a merge object that cannot be obtained
+- **THEN** CI may try another compatible successful ancestor, and otherwise falls back to cumulative PR affected scope without substituting an unverified source tree

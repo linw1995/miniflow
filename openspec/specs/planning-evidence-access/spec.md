@@ -1,13 +1,19 @@
-## ADDED Requirements
+# planning-evidence-access Specification
+
+## Purpose
+
+Define bounded GitHub and Git evidence operations for repository planning, with explicit availability, cancellation, credential handling, and caller-state preservation. Keep baseline policy in the consuming Flow.
+
+## Requirements
 
 ### Requirement: Expose bounded external evidence independently of policy
 
-Planning I/O providers SHALL expose GitHub execution/artifact facts and Git revision facts or explicitly requested retrieval. They SHALL bind evidence to its repository, run/attempt, artifact, or revision source and enforce decoding and resource bounds. They SHALL NOT implement baseline eligibility, candidate-search order, early stopping, or cumulative fallback policy.
+Planning I/O providers SHALL expose GitHub execution/artifact facts and Git revision facts or explicitly requested retrieval. Each invocation SHALL remain associated with its explicitly requested API path, artifact member, or Git revision through the Flow inputs and outputs, and SHALL enforce decoding and resource bounds. They SHALL NOT implement baseline eligibility, candidate-search order, early stopping, or cumulative fallback policy.
 
 #### Scenario: Read a candidate artifact
 
 - **WHEN** the Flow requests an artifact associated with a particular run and attempt
-- **THEN** the provider returns bounded decoded evidence with its source identity without declaring it a reusable baseline
+- **THEN** the provider returns bounded decoded content for that request, and the Flow checks its claimed identity against the requested run and attempt before considering reuse
 
 #### Scenario: Inspect local revisions
 

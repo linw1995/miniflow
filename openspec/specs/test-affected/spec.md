@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Produce an explainable affected-test plan from commit changes through a three-node Flow, with test execution delegated to a separate script.
+Produce explainable affected-test plans through one conditional local/CI Flow with shared Git comparison, optional LSP analysis, and conservative planning. Keep test execution, coverage evaluation, and successful-validation publication outside the planning Flow.
 
 ## Requirements
 
@@ -55,7 +55,7 @@ Snapshots SHALL remain available through analysis, planning, and later script co
 
 ### Requirement: Build a conservative baseline in the planner
 
-The plan task SHALL retain all declared local dependency kinds and agree with the current selector. Package-owned inputs, including manifests, SHALL select their owner and reverse dependencies. Known shared executables SHALL seed their consumers. Explicit repository configuration and documentation exceptions SHALL defer to full main/nightly runs. Unknown inputs and analyzer failures SHALL retain full fallback; missing metadata SHALL fail planning.
+The plan task SHALL own conservative package selection and retain all declared local dependency kinds. Package-owned inputs, including manifests, SHALL select their owner and reverse dependencies. Known shared executables SHALL seed their consumers. Explicit repository configuration and documentation exceptions SHALL defer to full main/nightly runs. Unknown inputs and analyzer failures SHALL retain full fallback; missing metadata SHALL fail planning.
 
 #### Scenario: Change shared nextest configuration
 
@@ -182,18 +182,60 @@ An empty plan SHALL cause the script to run no test command. Actual compilation 
 
 ### Requirement: Report cost without promising early policy gating
 
-Reports SHALL separate Flow analysis/planning time from script inventory/build and test execution time. Selection comparisons SHALL use the same head/configuration. The three-node Flow SHALL NOT be described as avoiding LSP work for every eventual full fallback; final policy decisions occur after analysis. Reduced case counts SHALL NOT be claimed as measured time savings.
+Reports SHALL separate Flow analysis/planning time from script inventory/build and test execution time. Selection comparisons SHALL use the same head/configuration. The shared semantic analysis path SHALL NOT be described as avoiding LSP work for every eventual full fallback; final policy decisions occur after analysis. Reduced case counts SHALL NOT be claimed as measured time savings.
 
 #### Scenario: Discover full fallback after analysis
 
 - **WHEN** the planner finds unclassified shared-input changes after LSP has already analyzed source edits
 - **THEN** the report retains that analysis cost and the full-workspace plan
 
-### Requirement: Keep rollout opt-in
+### Requirement: Execute one conditional planning Flow
 
-The planning Flow and consumer script SHALL remain optional development tools and SHALL NOT replace the Python CI selector through this change. CI validation and coverage policy SHALL be governed by the ci-test-selection capability. Scheduled full verification SHALL remain intact, and tool tests SHALL participate in development validation independently of future Flow adoption.
+One Flow definition and compiled executable SHALL serve local and CI planning through existing `mf` commands. Parameters and if-else SHALL route to local request construction or CI policy composition using Code and Loop. Both branches SHALL converge at one Git request input through proven exclusive edges, followed by shared LSP and planning. A successful admitted invocation SHALL emit exactly one explicit plan; invalid invocation SHALL fail.
 
-#### Scenario: Add the tool to the workspace
+#### Scenario: Plan locally without CI setup
 
-- **WHEN** the tool packages become workspace members
-- **THEN** current CI selection remains authoritative and developers can inspect or execute tool plans separately
+- **WHEN** a caller selects local planning and supplies no CI identity or credentials
+- **THEN** the local branch completes through the shared analysis path without activating CI resolution
+
+#### Scenario: Plan from a CI success
+
+- **WHEN** the CI branch obtains a compatible prior success
+- **THEN** its comparison and provenance survive the analyzer message boundary into the planning result
+
+### Requirement: Reuse proven exclusive input bindings
+
+The Flow SHALL use the existing exclusive-input contract without adding a merge node or runtime selection policy. Both request producers SHALL depend on distinct outputs of the same if-else router and share the Git consumer's input domain. Correlated comparison fields SHALL travel together in one request value.
+
+#### Scenario: Prove branch convergence
+
+- **WHEN** local and CI request outputs bind the Git request input with exclusive edges under the same router
+- **THEN** compilation proves their mutual exclusion and the consumer receives the selected request once
+
+#### Scenario: Reject unsafe rewiring
+
+- **WHEN** a candidate is detached from the shared router or crosses a producer boundary
+- **THEN** existing compilation rules reject the Flow before either branch executes
+
+### Requirement: Snapshot local comparison inputs
+
+The Git provider SHALL support worktree, first-parent commit, merge-base, and direct-snapshot comparisons. Worktree comparison SHALL include staged, unstaged, and untracked nonignored inputs in an immutable runnable snapshot without altering the caller's files, index, or branch. Root commits SHALL have a defined empty comparison baseline. Existing explicit-ref callers SHALL remain supported.
+
+#### Scenario: Capture a dirty workspace
+
+- **WHEN** tracked and untracked local inputs differ from HEAD
+- **THEN** the plan identifies a snapshot containing those inputs while the original worktree and index remain unchanged
+
+#### Scenario: Compare a root commit
+
+- **WHEN** a selected commit has no parent
+- **THEN** its contents are compared against an empty baseline
+
+### Requirement: Keep planning precision inside existing providers
+
+Planning precision SHALL be an option of the existing Git/analyzer/planner path, not a separate node kind. Package-only requests SHALL retain conservative package scope and may pass an empty analysis batch through the analyzer's existing not-requested outcome. Semantic requests SHALL preserve current evidence-gap and failure behavior.
+
+#### Scenario: Request package-only planning
+
+- **WHEN** CI requests package scope
+- **THEN** the result contains complete selected packages and no exact-case filter that a package-only coverage consumer could discard
