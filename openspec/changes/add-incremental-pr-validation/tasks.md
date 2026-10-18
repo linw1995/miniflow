@@ -27,7 +27,7 @@ Implement and commit each numbered group in order with its focused tests and doc
 
 - [x] 4.1 Wire record discovery and explicit comparisons into PR CI while retaining the current merge checkout; verify recorded actual merge parents rather than stale event base metadata determine eligibility and reset scope.
 - [x] 4.2 Add the final validation-record job after all required checks; verify build/lint/test/cov failures, cancelled attempts, and artifact-publication failures cannot become reusable success, while explicit empty selections can advance after applicable checks pass.
-- [ ] 4.3 Replace cumulative PR Codecov patch gating with the incremental validation check and scoped Actions artifacts; verify full main/nightly uploads retain `rust`, discovery/carry-forward remain disabled, and required-check settings transition without a missing gate or obsolete blocker.
+- [x] 4.3 Replace cumulative PR Codecov patch gating with the incremental validation check and scoped Actions artifacts; verify full main/nightly uploads retain `rust`, discovery/carry-forward remain disabled, and required-check settings transition without a missing gate or obsolete blocker.
 - [x] 4.4 Provide an explicit cumulative-PR rerun for a pinned current merge snapshot and update timing summaries; verify selection and coverage share the requested range and inherited validation is distinguished from measured coverage.
 - [x] 4.5 Update `AGENTS.md`, `docs/ci.md`, and workflow/coverage regressions for the final behavior; verify empty plans, missing expected reports, and unchanged main/nightly full-suite scheduling.
 

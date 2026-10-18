@@ -325,6 +325,8 @@ the requested PR and workflow run; selection and coverage both use the cumulativ
 PR diff. A successful run can establish a new baseline. Omit both inputs for the
 existing full-suite manual run. An unavailable or mismatched merge is an error.
 
-The main-branch ruleset retains coverage, lint, title, and Ubuntu build checks.
-Add the demonstrated `validation` status to the required checks during rollout;
-there is no required Codecov patch status to remove in the current ruleset.
+The main-branch ruleset requires `validation` in addition to coverage, lint, title,
+and Ubuntu build checks. The replacement status was demonstrated successfully
+before being required. Codecov patch was not a required status in this ruleset.
+Re-run all jobs when a failed attempt lacks its own validation-input artifact;
+inputs from a different attempt are never substituted.
