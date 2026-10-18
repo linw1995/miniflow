@@ -15,6 +15,22 @@ use std::{
 };
 #[derive(Debug, Snafu)]
 pub enum FlowBuildError {
+    #[snafu(display("node `{definition_id}` has invalid exclusive outputs: {message}"))]
+    InvalidExclusiveOutputs {
+        definition_id: DefinitionId,
+        message: &'static str,
+    },
+    #[snafu(display(
+        "cannot prove exclusive input `{definition_id}`.`{input}`: `{first_node}`.`{first_output}` and `{second_node}`.`{second_output}` are not proven mutually exclusive"
+    ))]
+    UnprovenExclusiveInput {
+        definition_id: DefinitionId,
+        input: String,
+        first_node: Box<str>,
+        first_output: Box<str>,
+        second_node: Box<str>,
+        second_output: Box<str>,
+    },
     #[snafu(transparent)]
     ExclusiveInput {
         source: mf_runtime::ExclusiveInputError,
@@ -93,6 +109,103 @@ pub enum FlowBuildError {
     },
 }
 
+/// Proves alternatives using necessary branch facts, never runtime values.
+pub fn validate_exclusive_branches<'a, D>(
+    ordered: impl IntoIterator<Item = (&'a FlowNode, D)>,
+) -> Result<(), FlowBuildError>
+where
+    D: IntoIterator<Item = crate::ExecutionDependency<'a>>,
+{
+    type Facts<'a> = BTreeSet<(&'a str, &'a str)>;
+    let mut outputs: BTreeMap<(&str, &str), Facts<'_>> = BTreeMap::new();
+    for (node, dependencies) in ordered {
+        let id = node.definition_id.as_str();
+        let exclusive = &node.metadata.exclusive_outputs;
+        if !exclusive.is_empty() {
+            ensure!(
+                exclusive.len() >= 2 && matches!(node.node, Some(NodeExecution::Task(_))),
+                InvalidExclusiveOutputsSnafu {
+                    definition_id: id,
+                    message: "at least two outputs on a task node are required",
+                }
+            );
+            let mut seen = BTreeSet::new();
+            for port in exclusive {
+                ensure!(
+                    seen.insert(port)
+                        && node
+                            .metadata
+                            .ports
+                            .outputs
+                            .iter()
+                            .any(|output| output.name == *port),
+                    InvalidExclusiveOutputsSnafu {
+                        definition_id: id,
+                        message: "ports must be distinct declared outputs",
+                    }
+                );
+            }
+        }
+        let mut activation = Facts::new();
+        let mut groups: BTreeMap<&str, Vec<(crate::ExecutionDependency<'_>, Facts<'_>)>> =
+            BTreeMap::new();
+        for dependency in dependencies {
+            let facts = outputs
+                .get(&(dependency.source_node, dependency.source_output))
+                .cloned()
+                .unwrap_or_default();
+            if dependency.exclusive {
+                groups
+                    .entry(dependency.input.unwrap_or("<control>"))
+                    .or_default()
+                    .push((dependency, facts));
+            } else {
+                activation.extend(facts);
+            }
+        }
+        for (input, candidates) in groups {
+            for (index, (first, first_facts)) in candidates.iter().enumerate() {
+                for (second, second_facts) in &candidates[index + 1..] {
+                    ensure!(
+                        first_facts.iter().any(|(router, branch)| second_facts
+                            .iter()
+                            .any(|(other_router, other_branch)| router == other_router
+                                && branch != other_branch)),
+                        UnprovenExclusiveInputSnafu {
+                            definition_id: id,
+                            input,
+                            first_node: first.source_node,
+                            first_output: first.source_output,
+                            second_node: second.source_node,
+                            second_output: second.source_output,
+                        }
+                    );
+                }
+            }
+            if let Some((_, first)) = candidates.first() {
+                activation.extend(
+                    first
+                        .iter()
+                        .copied()
+                        .filter(|fact| candidates.iter().all(|(_, facts)| facts.contains(fact))),
+                );
+            }
+        }
+        // Stateful operators can emit buffered values from a different invocation.
+        if !matches!(node.node, Some(NodeExecution::Task(_))) {
+            activation.clear();
+        }
+        for port in &node.metadata.ports.outputs {
+            let mut facts = activation.clone();
+            if exclusive.iter().any(|name| *name == port.name) {
+                facts.insert((id, port.name.as_ref()));
+            }
+            outputs.insert((id, port.name.as_ref()), facts);
+        }
+    }
+    Ok(())
+}
+
 pub struct FlowBuilder {
     nodes: Vec<FlowNode>,
     connections: Vec<FlowConnection>,
@@ -105,6 +218,14 @@ pub struct FlowBuilder {
 
 impl FlowBuilder {
     pub fn into_tasks(self) -> Result<mf_runtime::Flow, FlowBuildError> {
+        validate_exclusive_branches(self.execution_order.iter().zip(&self.dependencies).map(
+            |(id, dependencies)| {
+                (
+                    &self.nodes[id.index()],
+                    dependencies.iter().map(crate::FlowDependency::borrowed),
+                )
+            },
+        ))?;
         let execution_domains = self.build_execution_domains();
         let data = self;
         let nodes = data
@@ -655,6 +776,8 @@ pub fn prepared_loop_assign_from_json(
 }
 #[derive(Debug, Snafu)]
 pub enum StreamBuildError {
+    #[snafu(transparent)]
+    FlowConstruction { source: FlowBuildError },
     #[snafu(display("invalid streaming workflow: {message}"), visibility(pub))]
     InvalidPlan { message: String },
     #[snafu(display("invalid streaming workflow: {source}"), visibility(pub))]
@@ -1163,6 +1286,12 @@ pub fn prepare_stream(
         }
     );
     let domains = build_message_domains(&nodes, &dependencies, &outputs)?;
+    validate_exclusive_branches(nodes.iter().zip(&dependencies).map(|(node, dependencies)| {
+        (
+            node,
+            dependencies.iter().map(crate::FlowDependency::borrowed),
+        )
+    }))?;
     ensure!(
         execution.limits.max_pending_messages >= domains.sources().len(),
         InvalidPlanSnafu {

@@ -1,3 +1,4 @@
+extern crate mfn_core as _;
 use mf_compiler::WorkflowDefinition;
 use mf_compiler::{
     Inputs, NodeBuildError, NodeExecutionError, NodeRegistration, NodeRegistry, Outputs, PortSpec,
@@ -255,6 +256,15 @@ fn exclusive_definition() -> Value {
         .as_array_mut()
         .unwrap()
         .push(json!({"id":"alternative", "kind":"source.number"}));
+    value["nodes"].as_array_mut().unwrap().extend([
+        json!({"id":"condition", "kind":"builtin.constant", "config":{"value":true}}),
+        json!({"id":"route", "kind":"builtin.if_else", "config":{"branches":[{"id":"first", "condition":{"source":{"output":"condition.value", "path":""}, "operator":"eq", "value":true}}]}})
+    ]);
+    value["control_edges"] = json!([
+        {"from_node":"condition", "from_output":"value", "to_node":"route"},
+        {"from_node":"route", "from_output":"first", "to_node":"source"},
+        {"from_node":"route", "from_output":"else", "to_node":"alternative"}
+    ]);
     value["edges"] = json!([
         {"from_node":"source", "from_output":"value", "to_node":"sink", "to_input":"input", "exclusive":true},
         {"from_node":"alternative", "from_output":"value", "to_node":"sink", "to_input":"input", "exclusive":true}
@@ -416,5 +426,5 @@ fn exclusive_candidates_cannot_cross_message_domains() {
         ]
     });
     let error = validation_error(value).to_string();
-    assert!(error.contains("domain"), "{error}");
+    assert!(error.contains("not proven mutually exclusive"), "{error}");
 }

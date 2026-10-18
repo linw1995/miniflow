@@ -123,22 +123,24 @@ fn add_body_join(
 ) {
     body["nodes"].as_array_mut().unwrap().extend([
         json!({"id":"route", "kind":"builtin.if_else", "config":{"branches":[{"id":"present", "condition":{"source":{"output":format!("{}.{}", source.0, source.1), "path":""}, "operator":"exists"}}]}}),
-        json!({"id":"unused", "kind":"builtin.identity"})
+        json!({"id":"unused", "kind":"builtin.identity"}),
+        json!({"id":"selected", "kind":"builtin.identity"})
     ]);
     body["edges"]
         .as_array_mut()
         .unwrap()
         .retain(|edge| edge["to_node"] != target.0);
-    body["edges"]
-        .as_array_mut()
-        .unwrap()
-        .push(edge(winner.0, winner.1, "unused", "input"));
+    body["edges"].as_array_mut().unwrap().extend([
+        edge(winner.0, winner.1, "unused", "input"),
+        edge(winner.0, winner.1, "selected", "input"),
+    ]);
     body["control_edges"] = json!([
         {"from_node":source.0, "from_output":source.1, "to_node":"route"},
-        {"from_node":"route", "from_output":"else", "to_node":"unused"}
+        {"from_node":"route", "from_output":"else", "to_node":"unused"},
+        {"from_node":"route", "from_output":"present", "to_node":"selected"}
     ]);
     body["edges"].as_array_mut().unwrap().extend([
-        json!({"from_node":winner.0, "from_output":winner.1, "to_node":target.0, "to_input":target.1, "exclusive":true}),
+        json!({"from_node":"selected", "from_output":"value", "to_node":target.0, "to_input":target.1, "exclusive":true}),
         json!({"from_node":"unused", "from_output":"value", "to_node":target.0, "to_input":target.1, "exclusive":true})
     ]);
 }

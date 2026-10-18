@@ -798,6 +798,9 @@ impl<N: TypedTaskNode> TaskNode for TypedTaskAdapter<N> {
 #[derive(Clone, Debug, Default, serde::Serialize)]
 pub struct NodeMetadata {
     pub ports: NodePorts,
+    /// At most one listed output may produce a value per task invocation.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub exclusive_outputs: Vec<String>,
     pub input_bindings: std::collections::BTreeMap<String, crate::InputBinding>,
     pub output_derivations: Vec<OutputDerivation>,
     pub context_references: Vec<ContextReference>,

@@ -55,7 +55,7 @@ fn converges_both_branches_without_arbitrary_type_or_constant_inference() {
 }
 
 #[test]
-fn ordinary_gates_remain_mandatory_and_ambiguity_is_not_hidden() {
+fn ordinary_gates_remain_mandatory_and_unproven_groups_fail_compilation() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let mut definition = definition(true, json!(1), json!(1));
     definition.control_edges.push(
@@ -75,12 +75,8 @@ fn ordinary_gates_remain_mandatory_and_ambiguity_is_not_hidden() {
     definition
         .control_edges
         .retain(|edge| edge.to_node.as_str() != "left" && edge.to_node.as_str() != "right");
-    let plan = compile_definition(&definition, &registry).unwrap();
-    let error = instantiate_compiled(&plan, &registry)
-        .unwrap()
-        .execute()
-        .unwrap_err();
-    assert!(error.to_string().contains("multiple produced candidates"));
+    let error = compile_definition(&definition, &registry).unwrap_err();
+    assert!(error.to_string().contains("not proven mutually exclusive"));
 }
 
 #[test]
@@ -121,6 +117,19 @@ fn loop_rounds_and_parallel_iterations_select_within_each_scope() {
             ], "edges":[{"from_node":"start", "from_output":"value", "to_node":"iterate", "to_input":"items"}],
             "outputs":[{"name":"result", "node":"iterate", "port":"results"}]})
         };
+        let mut invalid = definition.clone();
+        let body = if mode == "loop" {
+            &mut invalid["nodes"][1]["loop"]["body"]
+        } else {
+            &mut invalid["nodes"][1]["config"]["body"]
+        };
+        body["control_edges"].as_array_mut().unwrap().truncate(1);
+        let error =
+            compile_definition(&serde_json::from_value(invalid).unwrap(), &registry).unwrap_err();
+        assert!(
+            error.to_string().contains("not proven mutually exclusive"),
+            "{error}"
+        );
         let plan =
             compile_definition(&serde_json::from_value(definition).unwrap(), &registry).unwrap();
         let flow = instantiate_compiled(&plan, &registry).unwrap();
@@ -207,144 +216,6 @@ fn typed_plans_fall_back_at_groups_and_isolated_nodes_accept_resolved_inputs() {
         )
         .unwrap();
     assert_eq!(result["value"], json!(7));
-}
-
-#[test]
-fn unresolved_candidates_never_trigger_early_execution_or_fallback() {
-    use mf_runtime::{
-        FlowNode, Inputs, NodeExecutionError, NodePorts, NodeResult, Outputs, PortSpec,
-        PreparedNode, TaskNode, ValueType,
-    };
-    use std::sync::{
-        Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
-        mpsc,
-    };
-    struct Probe {
-        name: &'static str,
-        outcome: &'static str,
-        ready: mpsc::Sender<&'static str>,
-        release: Option<Mutex<mpsc::Receiver<()>>>,
-        calls: Arc<AtomicUsize>,
-    }
-    impl TaskNode for Probe {
-        fn execute(
-            &self,
-            inputs: Inputs,
-            context: &mut mf_runtime::ExecutionContext,
-        ) -> Result<NodeResult, NodeExecutionError> {
-            if self.name == "consume" {
-                self.calls.fetch_add(1, Ordering::SeqCst);
-                return Ok(Outputs::from([("value".into(), inputs["input"].clone())]).into());
-            }
-            self.ready.send(self.name).unwrap();
-            if let Some(release) = &self.release {
-                release.lock().unwrap().recv().unwrap();
-            }
-            if let Some(failure) = context.cancellation().failure() {
-                return Err(failure.into());
-            }
-            match self.outcome {
-                "skip" => Ok(NodeResult {
-                    skipped: ["value".into()].into(),
-                    ..Default::default()
-                }),
-                "missing" => Ok(NodeResult::default()),
-                "fail" => mf_runtime::NodeExecutionFailedSnafu {
-                    message: "candidate failed",
-                }
-                .fail(),
-                _ => Ok(Outputs::from([("value".into(), 1.into())]).into()),
-            }
-        }
-    }
-    for outcome in ["skip", "produce", "missing", "fail", "cancel"] {
-        let (ready_tx, ready_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-        let calls = Arc::new(AtomicUsize::new(0));
-        let probes = [
-            Probe {
-                name: "left",
-                outcome: "produce",
-                ready: ready_tx.clone(),
-                release: None,
-                calls: calls.clone(),
-            },
-            Probe {
-                name: "right",
-                outcome,
-                ready: ready_tx.clone(),
-                release: Some(Mutex::new(release_rx)),
-                calls: calls.clone(),
-            },
-            Probe {
-                name: "consume",
-                outcome: "produce",
-                ready: ready_tx,
-                release: None,
-                calls: calls.clone(),
-            },
-        ];
-        let nodes = probes
-            .into_iter()
-            .map(|probe| {
-                let ports = NodePorts {
-                    inputs: if probe.name == "consume" {
-                        vec![PortSpec::new("input", ValueType::Int64, true)]
-                    } else {
-                        vec![]
-                    },
-                    outputs: vec![PortSpec::new("value", ValueType::Int64, false)],
-                };
-                FlowNode::new(
-                    probe.name,
-                    PreparedNode::from_parts(
-                        mf_runtime::NodeExecution::Task(Box::new(probe)),
-                        ports,
-                    ),
-                )
-            })
-            .collect();
-        let edges = serde_json::from_value(json!([
-            {"from_node":"left", "from_output":"value", "to_node":"consume", "to_input":"input", "exclusive":true},
-            {"from_node":"right", "from_output":"value", "to_node":"consume", "to_input":"input", "exclusive":true}
-        ])).unwrap();
-        let outputs =
-            serde_json::from_value(json!([{"name":"result", "node":"consume", "port":"value"}]))
-                .unwrap();
-        let flow = mf_compiler::FlowBuilder::prepare(
-            nodes,
-            edges,
-            vec!["left".into(), "right".into(), "consume".into()],
-            outputs,
-        )
-        .unwrap()
-        .into_tasks()
-        .unwrap();
-        let mut context = mf_runtime::ExecutionContext::default();
-        let cancellation = context.cancellation().clone();
-        let thread = std::thread::spawn(move || flow.execute_in_context(&mut context));
-        for _ in 0..2 {
-            ready_rx
-                .recv_timeout(std::time::Duration::from_secs(5))
-                .unwrap();
-        }
-        assert_eq!(calls.load(Ordering::SeqCst), 0);
-        if outcome == "cancel" {
-            cancellation.cancel(mf_runtime::StreamError::Execution {
-                message: "cancelled candidate".into(),
-            });
-        }
-        release_tx.send(()).unwrap();
-        let result = thread.join().unwrap();
-        if outcome == "skip" {
-            assert_eq!(result.unwrap()["result"], json!(1));
-            assert_eq!(calls.load(Ordering::SeqCst), 1);
-        } else {
-            assert!(result.is_err(), "{outcome}");
-            assert_eq!(calls.load(Ordering::SeqCst), 0);
-        }
-    }
 }
 
 #[test]
@@ -436,6 +307,7 @@ fn stream_skip_observations_use_logical_inputs_and_keep_selected_sources() {
         ],
         "control_edges":[
             {"from_node":"feed", "from_output":"item", "to_node":"route"},
+            {"from_node":"route", "from_output":"positive", "to_node":"active"},
             {"from_node":"route", "from_output":"else", "to_node":"inactive"},
             {"from_node":"route", "from_output":"else", "to_node":"collect"}
         ],
@@ -524,5 +396,222 @@ fn exclusive_startup_input_activates_a_stream_producer() {
         );
         assert!(instance.recv().unwrap().is_none());
         instance.join().unwrap();
+    }
+}
+
+#[test]
+fn rejects_unproven_groups_before_execution_and_code_generation() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for case in [
+        "unguarded",
+        "same_branch",
+        "unrelated_router",
+        "reconverged_left",
+        "reconverged_right",
+    ] {
+        let mut value = serde_json::to_value(definition(true, json!(1), json!(2))).unwrap();
+        match case {
+            "unguarded" => value["control_edges"].as_array_mut().unwrap().truncate(1),
+            "same_branch" => value["control_edges"][2]["from_output"] = json!("left"),
+            "unrelated_router" => {
+                let mut route = value["nodes"][1].clone();
+                route["id"] = json!("other_route");
+                value["nodes"].as_array_mut().unwrap().push(route);
+                value["control_edges"][2]["from_node"] = json!("other_route");
+                value["control_edges"].as_array_mut().unwrap().push(json!({
+                    "from_node":"condition", "from_output":"value", "to_node":"other_route"
+                }));
+            }
+            "reconverged_left" | "reconverged_right" => {
+                value["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .push(json!({"id":"after", "kind":"builtin.identity"}));
+                value["edges"].as_array_mut().unwrap().extend([
+                    json!({"from_node":"consume", "from_output":"value", "to_node":"after", "to_input":"input", "exclusive":true}),
+                    json!({"from_node":if case == "reconverged_left" { "left" } else { "right" }, "from_output":"value", "to_node":"after", "to_input":"input", "exclusive":true})
+                ]);
+            }
+            _ => unreachable!(),
+        }
+        let definition: WorkflowDefinition = serde_json::from_value(value).unwrap();
+        for reverse in [false, true] {
+            let mut definition: WorkflowDefinition = definition.clone();
+            if reverse {
+                definition.edges.reverse();
+                definition.control_edges.reverse();
+            }
+            let error = compile_definition(&definition, &registry)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("not proven mutually exclusive"),
+                "{case}: {error}"
+            );
+            assert!(error.contains("`input`"), "{error}");
+            let plan = mf_compiler::plan_definition(&definition).unwrap();
+            assert!(instantiate_compiled(&plan, &registry).is_err(), "{case}");
+            #[cfg(feature = "codegen")]
+            assert!(
+                plan.generate_runner_execution_plans(&registry).is_err(),
+                "{case}"
+            );
+        }
+    }
+}
+
+#[test]
+fn propagates_data_and_control_facts_and_keeps_common_outer_branches() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut value = serde_json::to_value(definition(true, json!(1), json!(2))).unwrap();
+    value["nodes"].as_array_mut().unwrap().extend([
+        json!({"id":"outer", "kind":"builtin.if_else", "config":{"branches":[{"id":"inside", "condition":{"source":{"output":"condition.value", "path":""}, "operator":"eq", "value":true}}]}}),
+        json!({"id":"outside", "kind":"builtin.constant", "config":{"value":3}}),
+        json!({"id":"forward", "kind":"builtin.identity"}),
+        json!({"id":"final", "kind":"builtin.identity"})
+    ]);
+    value["control_edges"].as_array_mut().unwrap().extend([
+        json!({"from_node":"condition", "from_output":"value", "to_node":"outer"}),
+        json!({"from_node":"outer", "from_output":"inside", "to_node":"route"}),
+        json!({"from_node":"outer", "from_output":"else", "to_node":"outside"}),
+    ]);
+    value["edges"].as_array_mut().unwrap().extend([
+        json!({"from_node":"consume", "from_output":"value", "to_node":"forward", "to_input":"input"}),
+        json!({"from_node":"forward", "from_output":"value", "to_node":"final", "to_input":"input", "exclusive":true}),
+        json!({"from_node":"outside", "from_output":"value", "to_node":"final", "to_input":"input", "exclusive":true})
+    ]);
+    value["outputs"] = json!([{"name":"result", "node":"final", "port":"value"}]);
+    for selected in [true, false] {
+        value["nodes"][0]["config"]["value"] = json!(selected);
+        let definition = serde_json::from_value(value.clone()).unwrap();
+        let plan = compile_definition(&definition, &registry).unwrap();
+        let result = instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute()
+            .unwrap();
+        assert_eq!(result["result"], json!(if selected { 1 } else { 3 }));
+    }
+    // Direct data edges from a router also carry its output contract.
+    let mut direct = definition(true, json!(1), json!(2));
+    for (edge, port) in direct.edges.iter_mut().zip(["left", "else"]) {
+        edge.from_node = "route".into();
+        edge.from_output = port.into();
+    }
+    compile_definition(&direct, &registry).unwrap();
+}
+
+#[test]
+fn executable_builders_require_proof_and_valid_task_output_contracts() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let definition = definition(true, json!(1), json!(2));
+    let order = mf_compiler::plan_definition(&definition)
+        .unwrap()
+        .execution_order;
+    for case in [
+        "valid",
+        "no_controls",
+        "missing_contract",
+        "singleton",
+        "duplicate",
+        "unknown",
+        "event",
+        "stream",
+        "stream_valid",
+        "stream_unproven",
+    ] {
+        let mut nodes = mf_compiler::resolve_nodes(&definition, &registry).unwrap();
+        let route = nodes
+            .iter_mut()
+            .find(|node| node.definition_id.as_str() == "route")
+            .unwrap();
+        match case {
+            "missing_contract" => route.metadata.exclusive_outputs.clear(),
+            "singleton" => route.metadata.exclusive_outputs.truncate(1),
+            "duplicate" => route.metadata.exclusive_outputs = vec!["left".into(), "left".into()],
+            "unknown" => route.metadata.exclusive_outputs = vec!["left".into(), "missing".into()],
+            "event" | "stream" => {
+                let replacement = if case == "event" {
+                    json!({"id":"replacement", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":100}})
+                } else {
+                    controlled::source(json!("int"))
+                };
+                let definition = serde_json::from_value(json!({
+                    "version":"2026-10-03", "dependencies":{}, "execution":{"mode":"stream"}, "nodes":[replacement]
+                })).unwrap();
+                route.node = mf_compiler::resolve_nodes(&definition, &registry)
+                    .unwrap()
+                    .pop()
+                    .unwrap()
+                    .node;
+            }
+            _ => {}
+        }
+        let mut builder = mf_compiler::FlowBuilder::prepare(
+            nodes,
+            definition.edges.clone(),
+            order.clone(),
+            definition.outputs.clone(),
+        )
+        .unwrap();
+        if !matches!(case, "no_controls" | "stream_unproven") {
+            builder = builder
+                .with_control_edges(definition.control_edges.clone())
+                .unwrap();
+        }
+        let result = if case.starts_with("stream_") {
+            builder
+                .into_stream(serde_json::from_value(json!({"mode":"stream"})).unwrap())
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        } else {
+            builder
+                .into_tasks()
+                .map(|_| ())
+                .map_err(|error| error.to_string())
+        };
+        if matches!(case, "valid" | "stream_valid") {
+            assert!(result.is_ok());
+        } else {
+            let error = result.err().unwrap().to_string();
+            assert!(
+                error.contains(
+                    if matches!(case, "no_controls" | "missing_contract" | "stream_unproven") {
+                        "not proven mutually exclusive"
+                    } else {
+                        "invalid exclusive outputs"
+                    }
+                ),
+                "{case}: {error}"
+            );
+        }
+    }
+}
+
+#[test]
+fn stateful_boundaries_do_not_export_per_invocation_branch_facts() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for event in [false, true] {
+        let mut value = serde_json::to_value(definition(true, json!(1), json!(2))).unwrap();
+        value["execution"] = json!({"mode":"stream"});
+        value["nodes"][2] = if event {
+            json!({"id":"left", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":100}})
+        } else {
+            let mut source = controlled::source(json!("int"));
+            source["id"] = json!("left");
+            source
+        };
+        value["nodes"].as_array_mut().unwrap().push(
+            json!({"id":"seed", "kind":"builtin.constant", "config":{"value":"source-control"}}),
+        );
+        value["edges"][0]["from_output"] = json!(if event { "items" } else { "item" });
+        value["edges"].as_array_mut().unwrap().push(json!({
+            "from_node":"seed", "from_output":"value", "to_node":"left", "to_input":if event { "item" } else { "control" }
+        }));
+        let definition = serde_json::from_value(value).unwrap();
+        let error = compile_definition(&definition, &registry)
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(error.contains("not proven mutually exclusive"), "{error}");
     }
 }

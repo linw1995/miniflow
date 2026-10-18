@@ -528,6 +528,13 @@ fn prepare_graph(
         let dependencies = incoming.get(id.as_str()).map_or(&[][..], Vec::as_slice);
         inference.resolve_node(&mut nodes[indices[id]], dependencies)?;
     }
+    crate::construction::validate_exclusive_branches(order.iter().map(|id| {
+        (
+            &nodes[indices[id]],
+            incoming.get(id.as_str()).into_iter().flatten().copied(),
+        )
+    }))
+    .context(FlowConstructionSnafu)?;
     Ok((nodes, order))
 }
 

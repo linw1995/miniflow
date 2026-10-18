@@ -119,6 +119,7 @@ fn preparation_derives_ports_and_never_decodes_or_executes() {
     let metadata = NodeMetadata {
         typed_generation: None,
         ports: NodePorts::default(),
+        exclusive_outputs: Vec::new(),
         input_bindings: [(
             "input".into(),
             mf_runtime::InputBinding {
