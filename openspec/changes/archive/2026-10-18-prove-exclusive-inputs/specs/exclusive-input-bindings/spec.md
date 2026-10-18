@@ -33,7 +33,7 @@ Compilation MUST prove every pair of candidates mutually exclusive using declare
 
 ### Requirement: Resolve the unique produced candidate
 
-The core SHALL resolve all candidates for the current frame before invoking the consumer. Exactly one produced candidate SHALL bind its value to the target input. All explicitly skipped candidates SHALL resolve the input as skipped. Executable groups MUST have compile-time mutual-exclusion proof. If a node implementation or unchecked plan violates that contract, resolution MUST fail closed as an internal contract error. Candidate declaration and completion order MUST NOT choose the winner.
+The core SHALL resolve all candidates for the current frame before invoking the consumer. Exactly one produced candidate SHALL bind its value to the target input. All explicitly skipped candidates SHALL resolve the input as skipped. Executable groups MUST have compile-time mutual-exclusion proof. Runtime resolution SHALL rely on that proof without repeating the mutual-exclusion check. Candidate declaration and completion order MUST NOT choose the winner.
 
 #### Scenario: Select one branch
 
@@ -44,11 +44,6 @@ The core SHALL resolve all candidates for the current frame before invoking the 
 
 - **WHEN** every candidate explicitly skips
 - **THEN** the input resolves as skipped and follows the consumer's existing skip behavior, including connected optional inputs and collection boundaries
-
-#### Scenario: Defend against a violated node contract
-
-- **WHEN** a node implementation violates its declared exclusive output contract and multiple candidates produce values
-- **THEN** resolution fails closed before the consumer executes, without exposing payloads
 
 #### Scenario: Preserve false and null
 

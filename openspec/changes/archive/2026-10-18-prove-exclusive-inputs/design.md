@@ -13,7 +13,7 @@ Task outputs inherit activation facts and add their own declared branch fact whe
 
 Run the same proof during definition preparation and before turning a programmatic builder into an executable task or stream plan. Structural-only planning remains node-independent; generated runner preparation must validate before producing an executable.
 
-The runtime still fails closed if an unchecked plan or node violates its contract. This is an internal contract failure, not the validation mechanism for user-authored exclusive edges. Remove the dedicated runtime ambiguity error and tests that intentionally build statically invalid executable workflows.
+Runtime input resolution trusts the compiler proof and node metadata contract. It retains the selected value without tracking conflicting candidates or repeating the mutual-exclusion check. Remove the dedicated runtime ambiguity error, defensive guard, and tests that intentionally build statically invalid executable workflows.
 
 ## Risks
 

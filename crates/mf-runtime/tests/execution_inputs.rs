@@ -147,12 +147,7 @@ fn exclusive_errors_precede_skips_and_input_type_checks() {
     let state = ExecutionInputs::default();
     let bad = ValueRef::from("sentinel-secret").into_secret();
     for reversed in [false, true] {
-        for (case, required) in [
-            ("one", true),
-            ("none", false),
-            ("contract_violation", true),
-            ("missing", true),
-        ] {
+        for (case, required) in [("one", true), ("none", false), ("missing", true)] {
             let mut dependencies = vec![
                 candidate("left"),
                 candidate("right"),
@@ -173,14 +168,13 @@ fn exclusive_errors_precede_skips_and_input_type_checks() {
                     if source.source_node == "gate" {
                         return Ok(Some(ContextValue::Skipped));
                     }
-                    if source.source_node == "third" && case.starts_with("missing") {
+                    if source.source_node == "third" && case == "missing" {
                         return mf_runtime::NodeExecutionFailedSnafu {
                             message: "missing third.value",
                         }
                         .fail();
                     }
-                    let produced = source.source_node == "left" && case != "none"
-                        || source.source_node == "right" && case.contains("contract_violation");
+                    let produced = source.source_node == "left" && case != "none";
                     Ok(Some(if produced {
                         ContextValue::Value(&bad)
                     } else {
@@ -198,19 +192,6 @@ fn exclusive_errors_precede_skips_and_input_type_checks() {
                 "none" => {
                     assert_eq!(result.unwrap().len(), 4);
                     assert!(inputs.is_empty());
-                }
-                "contract_violation" => {
-                    let error = result.unwrap_err();
-                    assert!(!format!("{error:?}").contains("sentinel-secret"));
-                    assert!(matches!(
-                        error,
-                        mf_runtime::WorkflowRunError::Context { .. }
-                    ));
-                    assert!(
-                        error
-                            .to_string()
-                            .contains("exclusive output contract violated")
-                    );
                 }
                 _ => assert!(matches!(
                     result.unwrap_err(),

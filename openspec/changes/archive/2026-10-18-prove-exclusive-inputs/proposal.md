@@ -7,7 +7,7 @@ Exclusive edge markers currently defer conflicting candidates to execution. Work
 - Declare a mutually exclusive output set in task node metadata; publish it for `builtin.if_else`.
 - Prove candidate pairs exclusive using branch facts propagated through mandatory dependencies and intersected at alternative inputs.
 - Reject unproven groups during compilation and programmatic executable construction, including nested scopes.
-- Keep only a defensive runtime invariant for invalid node implementations or unchecked plans; remove runtime ambiguity as a supported workflow outcome.
+- Rely on the compile-time proof during input resolution; remove runtime ambiguity checks and their state.
 
 ## Capabilities
 

@@ -545,9 +545,8 @@ Omitting the marker preserves existing workflows. New syntax requires updated su
 
 Resolution waits for all candidate outcomes in the current frame. Exactly one produced value
 binds the input; all skipped candidates skip the consumer. False and null count as values.
-Unexpected absence remains an error even behind another skipped dependency. The runtime also
-fails closed if a node implementation violates its declared exclusivity contract. Such a
-violation is not a supported workflow outcome. A selected dynamic value is type-checked
+Unexpected absence remains an error even behind another skipped dependency. Runtime resolution
+relies on the compiler's exclusivity proof without repeating the check. A selected dynamic value is type-checked
 before an active consumer executes. Failure and cancellation do not select fallback candidates.
 
 Selection retains shared payloads and secret metadata. Different input groups resolve independently;

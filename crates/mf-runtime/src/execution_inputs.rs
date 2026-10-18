@@ -20,7 +20,6 @@ pub struct InputResolution {
 #[derive(Default)]
 struct CandidateValues {
     produced: Option<(SkipCause, crate::ValueRef)>,
-    conflicting: bool,
     skipped: Vec<SkipCause>,
 }
 
@@ -145,8 +144,7 @@ impl ExecutionInputs {
                 };
                 match value {
                     Some(ContextValue::Value(value)) => {
-                        group.conflicting |=
-                            group.produced.replace((source, value.clone())).is_some();
+                        group.produced = Some((source, value.clone()));
                     }
                     Some(ContextValue::Skipped) => {
                         group.skipped.push(source);
@@ -177,13 +175,6 @@ impl ExecutionInputs {
             }
         }
         for (input, group) in groups {
-            snafu::ensure!(
-                !group.conflicting,
-                ContextSnafu {
-                    definition_id: id,
-                    message: format!("exclusive output contract violated for input `{input}`"),
-                }
-            );
             if let Some((source, value)) = group.produced {
                 selected.push(InputSelection {
                     input: input.to_owned(),
