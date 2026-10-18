@@ -45,6 +45,14 @@ nix develop --command cargo nextest run -p mfn-lsp
 
 ## Git facts and test plans
 
+`github.read` is a Task for bounded read-only GitHub evidence. It accepts an API `path`,
+optional scalar `query` object, optional secret `token`, and optional absolute Unix-millisecond
+`deadline`. Configuration selects `api_base`, `required`, `timeout_ms`, byte limits, an optional
+ZIP `member`, and JSON Pointer `pointer`/`fields` projection. The result contains `available`,
+`value` (`data` and archive `members`), and a categorical `reason`, plus the shared `deadline`.
+Required acquisition errors fail; optional historical errors remain explicit unavailable evidence.
+Cancellation always fails. The node neither chooses records nor interprets validation policy.
+
 `git.diff` accepts `repository`, `base`, optional `head` (default `HEAD`), optional absolute
 `artifacts`, and optional `options`. It resolves local revisions and compares their merge base
 with head. Snapshots are detached Git worktrees under `target/test-affected/snapshots/` by default;

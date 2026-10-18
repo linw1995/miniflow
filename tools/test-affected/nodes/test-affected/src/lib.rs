@@ -2,7 +2,9 @@
 
 mod classify;
 mod error;
+mod evidence;
 pub mod git;
+mod github;
 pub mod model;
 mod plan;
 

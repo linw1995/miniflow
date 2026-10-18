@@ -10,13 +10,18 @@ description = "Commit comparison and affected-test planning for repository devel
 [dependencies]
 # Node contracts, registration, and semantic evidence.
 inventory.workspace = true
-mf-runtime.workspace = true
+mf-runtime = { workspace = true, features = ["tokio"] }
 mfn-lsp.workspace = true
 
 # Comparison facts, test plans, and typed diagnostics.
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 snafu.workspace = true
+
+# Bounded platform reads and artifact decoding.
+reqwest = { workspace = true, features = ["rustls", "query"] }
+url.workspace = true
+zip = { workspace = true, features = ["deflate-flate2-zlib-rs"] }
 
 # Rust source ownership and isolated test-body analysis.
 proc-macro2 = { workspace = true, features = ["span-locations"] }

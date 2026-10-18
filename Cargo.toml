@@ -93,6 +93,7 @@ uuid = "1.26.1"
 flate2 = "1.1.10"
 tar = "0.4.46"
 tempfile = "3.27.0"
+zip = { version = "9.0.5", default-features = false }
 
 # Executable metadata inspection.
 object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "macho", "std"] }
