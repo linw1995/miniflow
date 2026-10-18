@@ -15,6 +15,7 @@ pub enum TypedFallbackReason {
     DifferentRustType,
     DomainBoundary,
     MultiplePredecessors,
+    ExclusiveInput,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -106,6 +107,13 @@ pub fn plan_typed_segments(flow: &Flow, standard_runner: bool, oneshot: bool) ->
     }
     let classify = |source: usize, target: usize| -> Option<TypedFallbackReason> {
         use TypedFallbackReason::*;
+        if flow
+            .connections()
+            .iter()
+            .any(|edge| edge.to_node.index() == target && edge.exclusive)
+        {
+            return Some(ExclusiveInput);
+        }
         if !oneshot {
             return Some(UnsupportedMode);
         }

@@ -38,7 +38,7 @@ fn definition(scenario: &str) -> WorkflowDefinition {
     ];
     let mut result_port = "value";
     match scenario {
-        "windows" => {}
+        "windows" | "exclusive" => {}
         "chain" => {
             nodes[4]["config"]["max_items"] = json!(2);
             nodes[5] = json!({"id":"consume", "kind":"builtin.batch", "config":{"max_items":2, "max_wait_ms":100}});
@@ -73,11 +73,74 @@ fn definition(scenario: &str) -> WorkflowDefinition {
         }
         _ => unreachable!(),
     }
+    if scenario == "nested" {
+        add_body_join(
+            &mut nodes[0]["loop"]["body"],
+            ("%loop", "x"),
+            ("increment", "value"),
+            ("assign", "value"),
+        );
+        nodes[2]["config"]["body"]["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"join", "kind":"builtin.identity"}));
+        add_body_join(
+            &mut nodes[2]["config"]["body"],
+            ("%iteration", "item"),
+            ("double", "value"),
+            ("join", "input"),
+        );
+        nodes[2]["config"]["body"]["result"] = json!({"node":"join", "port":"value"});
+    }
+    let mut exclusive_inputs = Vec::new();
+    if scenario == "exclusive" {
+        nodes.push(json!({"id":"alternative", "kind":"builtin.identity"}));
+        edges.retain(|edge| edge["to_node"] != "collect");
+        edges.push(edge("join", "value", "alternative", "input"));
+        controls.retain(|edge| edge["to_node"] != "collect");
+        nodes[3]["config"]["branches"].as_array_mut().unwrap().insert(0, json!({"id":"large", "condition":{"source":{"output":"join.value", "path":""}, "operator":"gt", "value":10}}));
+        controls.push(json!({"from_node":"route", "from_output":"large", "to_node":"alternative"}));
+        exclusive_inputs.push(json!({"to_node":"collect", "to_input":"item", "sources":[
+            {"from_node":"join", "from_output":"value"}, {"from_node":"alternative", "from_output":"value"}
+        ]}));
+        // Negative messages skip both candidates; larger values switch to the alternative.
+        nodes.push(json!({"id":"primary", "kind":"builtin.identity"}));
+        edges.push(edge("join", "value", "primary", "input"));
+        controls.push(json!({"from_node":"route", "from_output":"positive", "to_node":"primary"}));
+        exclusive_inputs[0]["sources"][0]["from_node"] = json!("primary");
+    }
     nodes.push(json!({"id":"feed", "kind":"test.controlled_source", "config":{"item_type":"int"}}));
     serde_json::from_value(json!({"version":"2026-10-03", "execution":{"mode":"stream"},
         "dependencies":{"core":{"package":"mfn-core", "path":common::crates_dir().join("builtin-nodes/core")}, "code":{"package":"mfn-code", "path":common::crates_dir().join("builtin-nodes/code")}},
-        "nodes":nodes, "edges":edges, "control_edges":controls, "outputs":[{"name":"value", "node":"consume", "port":result_port}]
+        "nodes":nodes, "edges":edges, "exclusive_inputs":exclusive_inputs, "control_edges":controls, "outputs":[{"name":"value", "node":"consume", "port":result_port}]
     })).unwrap()
+}
+
+fn add_body_join(
+    body: &mut Value,
+    source: (&str, &str),
+    winner: (&str, &str),
+    target: (&str, &str),
+) {
+    body["nodes"].as_array_mut().unwrap().extend([
+        json!({"id":"route", "kind":"builtin.if_else", "config":{"branches":[{"id":"present", "condition":{"source":{"output":format!("{}.{}", source.0, source.1), "path":""}, "operator":"exists"}}]}}),
+        json!({"id":"unused", "kind":"builtin.identity"})
+    ]);
+    body["edges"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|edge| edge["to_node"] != target.0);
+    body["edges"]
+        .as_array_mut()
+        .unwrap()
+        .push(edge(winner.0, winner.1, "unused", "input"));
+    body["control_edges"] = json!([
+        {"from_node":source.0, "from_output":source.1, "to_node":"route"},
+        {"from_node":"route", "from_output":"else", "to_node":"unused"}
+    ]);
+    body["exclusive_inputs"] = json!([{"to_node":target.0, "to_input":target.1, "sources":[
+        {"from_node":winner.0, "from_output":winner.1}, {"from_node":"unused", "from_output":"value"}
+    ]}]);
 }
 
 #[test]
@@ -85,12 +148,12 @@ fn generated_preparation_matches_memory_under_the_same_clock_and_inputs() {
     let root = tempfile::tempdir().unwrap();
     let project = root.path().join("build");
     let registry = NodeRegistry::from_inventory().unwrap();
-    for scenario in ["windows", "chain", "failure", "nested"] {
+    for scenario in ["windows", "chain", "failure", "nested", "exclusive"] {
         let definition = definition(scenario);
         let plan = compile_definition(&definition, &registry).unwrap();
         let expected = driver::drive(instantiate_stream(&plan, &registry).unwrap(), scenario);
         match scenario {
-            "windows" => assert_eq!(
+            "windows" | "exclusive" => assert_eq!(
                 expected,
                 json!({"outputs":[{"value":[3,6]}, {"value":[9,12,15]}, {"value":[18,21]}], "error":null})
             ),

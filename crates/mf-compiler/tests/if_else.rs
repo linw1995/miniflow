@@ -122,6 +122,19 @@ fn compiled_branches_match_memory_and_rebuild_when_precedence_changes() {
                 .unwrap()
                 .reverse();
         }
+        value["nodes"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"id":"joined", "kind":"builtin.identity"}));
+        value["exclusive_inputs"] = json!([{"to_node":"joined", "to_input":"input", "sources":[
+            {"from_node":"large", "from_output":"value"},
+            {"from_node":"medium", "from_output":"value"},
+            {"from_node":"fallback", "from_output":"value"}
+        ]}]);
+        value["outputs"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"joined", "node":"joined", "port":"value"}));
         for node in value["nodes"].as_array_mut().unwrap() {
             if node["kind"] == "fixture.context" {
                 node["config"]["trace"] = json!(trace);
@@ -142,7 +155,7 @@ fn compiled_branches_match_memory_and_rebuild_when_precedence_changes() {
         };
         assert_eq!(expected_trace, format!("audit\n{selected}\n"));
         if amount.is_null() {
-            assert_eq!(json!(expected), json!({"large":null}));
+            assert_eq!(json!(expected), json!({"large":null,"joined":null}));
         }
         fs::remove_file(&trace).unwrap();
         let definition = serde_json::from_value(value).unwrap();

@@ -68,6 +68,8 @@ pub struct NodeDescription {
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct DataEdge {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub exclusive: bool,
     pub from_node: String,
     pub from_output: String,
     pub to_node: String,
@@ -202,13 +204,31 @@ impl WorkflowDescription {
                 "edge violates execution order",
             )
         };
-        let mut inputs = BTreeSet::new();
+        let mut inputs = BTreeMap::new();
+        let mut candidates: BTreeMap<_, BTreeSet<_>> = BTreeMap::new();
         for edge in &self.data_edges {
             endpoint(&edge.from_node, &edge.from_output, &edge.to_node)?;
             require(!edge.to_input.is_empty(), "empty target input name")?;
             require(
-                inputs.insert((&edge.to_node, &edge.to_input)),
+                inputs
+                    .insert((&edge.to_node, &edge.to_input), edge.exclusive)
+                    .is_none_or(|previous| previous && edge.exclusive),
                 "duplicate target input binding",
+            )?;
+            if edge.exclusive {
+                require(
+                    candidates
+                        .entry((&edge.to_node, &edge.to_input))
+                        .or_default()
+                        .insert((&edge.from_node, &edge.from_output)),
+                    "duplicate exclusive candidate",
+                )?;
+            }
+        }
+        for sources in candidates.values() {
+            require(
+                sources.len() >= 2,
+                "exclusive input requires at least two sources",
             )?;
         }
         let mut controls = BTreeSet::new();

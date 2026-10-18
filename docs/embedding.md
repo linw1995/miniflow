@@ -162,3 +162,9 @@ Rust literals for workflow and body definitions must initialize the new `exclusi
 field (an empty vector retains the previous behavior). Prepared dependency and connection
 literals carry an `exclusive` marker; candidates with the same consumer input form one group.
 Graph algorithms visit every candidate, while input resolution preserves that group identity.
+
+Exclusive candidates use shared-value input resolution in generated and embedded execution.
+Typed ownership transfer into such a consumer reports `exclusive_input` as its fallback reason;
+unrelated safe segments remain eligible for optimization. Isolated node execution accepts the
+already resolved input and does not run or select predecessors. Loop rounds and iteration items
+resolve independently, including parallel iterations; candidate values cannot cross message domains.

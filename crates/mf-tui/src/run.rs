@@ -1397,6 +1397,7 @@ mod tests {
         description
             .data_edges
             .push(mf_telemetry::description::DataEdge {
+                exclusive: false,
                 from_node: "source".into(),
                 from_output: "value".into(),
                 to_node: "target".into(),
@@ -1597,6 +1598,7 @@ mod tests {
                     },
                 ],
                 data_edges: vec![mf_telemetry::description::DataEdge {
+                    exclusive: false,
                     from_node: "%loop".into(),
                     from_output: "value".into(),
                     to_node: "child".into(),

@@ -93,6 +93,7 @@ Selection is part of consumer preparation, not another user-visible node or span
 
 Existing workflows need no edits. Opt in by declaring one exclusive group at a common downstream input while keeping ordinary and control edges unchanged elsewhere. Add a self-contained `if_else` example using existing core nodes; the Git/CI tooling nodes are not present in this checkout and are not prerequisites.
 
-Implement definition and plan support, shared resolution, generated and scoped execution, then observation and acceptance coverage. Verify unique, all-skipped, ambiguous, missing, false/null, dynamic type, secret, ordinary-gate, cancellation, and reordered-candidate cases. Include in-memory/compiled parity and collection-boundary regression cases. Use the repository's affected-test selector and pinned toolchain, and run repository hooks.
+Implement definition and plan support, shared resolution, generated and scoped execution, including manifest candidate edges required by startup-interface validation, then selection observation and acceptance coverage.
+Verify unique, all-skipped, ambiguous, missing, false/null, dynamic type, secret, ordinary-gate, cancellation, and reordered-candidate cases. Include in-memory/compiled parity and collection-boundary regression cases. Use the repository's affected-test selector and pinned toolchain, and run repository hooks.
 
 Rollback consists of removing opt-in groups and returning callers to supported graph structures, such as separate workflow entry points. Binaries using the new contract must be rebuilt with matching support packages; do not downgrade readers while retaining the new syntax. Integrating the earlier test-selection plan is a follow-up, not part of this implementation.

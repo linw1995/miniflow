@@ -14,10 +14,10 @@
 
 ## 3. Generated and scoped execution
 
-- [ ] 3.1 Emit exclusive groups in compiled plans and conservatively exclude affected ownership transfers with a reported typed fallback; verify in-memory and standalone parity and preservation of unrelated typed segments.
-- [ ] 3.2 Integrate logical input resolution with Task, Event, and Stream consumers; verify delayed competing candidates, failure/cancellation before resolution, and collecting-node buffer/deadline preservation on all-skipped inputs.
-- [ ] 3.3 Carry groups through loop rounds and sequential/parallel iteration preparation; verify changing winners and all-skipped outcomes never reuse prior frame or body values.
-- [ ] 3.4 Preserve isolated-node and embedded execution contracts; verify callers can supply a resolved input without invoking candidate producers, and document supported scope and domain boundaries.
+- [x] 3.1 Emit exclusive groups in compiled plans and conservatively exclude affected ownership transfers with a reported typed fallback; verify in-memory and standalone parity and preservation of unrelated typed segments.
+- [x] 3.2 Integrate logical input resolution with Task, Event, and Stream consumers; verify delayed competing candidates, failure/cancellation before resolution, and collecting-node buffer/deadline preservation on all-skipped inputs.
+- [x] 3.3 Carry groups through loop rounds and sequential/parallel iteration preparation; verify changing winners and all-skipped outcomes never reuse prior frame or body values.
+- [x] 3.4 Preserve isolated-node and embedded execution contracts; verify callers can supply a resolved input without invoking candidate producers, and document supported scope and domain boundaries.
 
 ## 4. Observation and workflow acceptance
 

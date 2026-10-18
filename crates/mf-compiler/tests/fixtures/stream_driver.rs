@@ -69,7 +69,7 @@ pub fn drive(prepared: PreparedStream, scenario: &str) -> Value {
     let mut outputs = Vec::new();
     let result = (|| -> Result<(), StreamError> {
         match scenario {
-            "windows" => {
+            "windows" | "exclusive" => {
                 for value in [1, 2] {
                     input.send(json!(value))?;
                     settle(&instance, &input)?;

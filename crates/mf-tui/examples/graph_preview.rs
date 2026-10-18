@@ -170,12 +170,14 @@ fn description() -> WorkflowDescription {
             .collect(),
         data_edges: vec![
             DataEdge {
+                exclusive: false,
                 from_node: "fetch".into(),
                 from_output: "value".into(),
                 to_node: "transform".into(),
                 to_input: "input".into(),
             },
             DataEdge {
+                exclusive: false,
                 from_node: "transform".into(),
                 from_output: "value".into(),
                 to_node: "publish".into(),
@@ -398,6 +400,7 @@ fn dump_graph() -> PreviewResult<()> {
         for from in 0..4 {
             for to in if from < 2 { 2..6 } else { 4..6 } {
                 fixture.data_edges.push(DataEdge {
+                    exclusive: false,
                     from_node: names[from].into(),
                     from_output: "value".into(),
                     to_node: names[to].into(),

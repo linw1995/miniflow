@@ -32,18 +32,21 @@ fn description() -> WorkflowDescription {
             .collect(),
         data_edges: vec![
             DataEdge {
+                exclusive: false,
                 from_node: "source".into(),
                 from_output: "value".into(),
                 to_node: "router".into(),
                 to_input: "input".into(),
             },
             DataEdge {
+                exclusive: false,
                 from_node: "left".into(),
                 from_output: "value".into(),
                 to_node: "join".into(),
                 to_input: "left".into(),
             },
             DataEdge {
+                exclusive: false,
                 from_node: "right".into(),
                 from_output: "value".into(),
                 to_node: "join".into(),
@@ -92,6 +95,7 @@ fn loop_body_layout_renders_the_selected_pass_independently() {
             },
         ],
         data_edges: vec![DataEdge {
+            exclusive: false,
             from_node: "%loop".into(),
             from_output: "count".into(),
             to_node: "child".into(),
@@ -471,6 +475,7 @@ fn fan_graph(count: usize) -> WorkflowDescription {
     graph.control_edges.clear();
     graph.data_edges = (0..count)
         .map(|index| DataEdge {
+            exclusive: false,
             from_node: "source".into(),
             from_output: "value".into(),
             to_node: format!("sink-{index:04}"),
@@ -551,12 +556,14 @@ fn crowded_attachments_expand_nodes_and_channels_without_reusing_rows() {
 fn long_edges_use_passages_and_keep_isolated_components_disjoint() {
     let mut graph = fan_graph(3);
     graph.data_edges.push(DataEdge {
+        exclusive: false,
         from_node: "sink-0000".into(),
         from_output: "value".into(),
         to_node: "sink-0001".into(),
         to_input: "extra".into(),
     });
     graph.data_edges.push(DataEdge {
+        exclusive: false,
         from_node: "sink-0001".into(),
         from_output: "value".into(),
         to_node: "sink-0002".into(),
@@ -606,6 +613,7 @@ fn crowded_inputs_have_distinct_rows_and_disjoint_boxes() {
     graph.execution_order.rotate_left(1);
     graph.data_edges = (0..9)
         .map(|index| DataEdge {
+            exclusive: false,
             from_node: format!("sink-{index:04}"),
             from_output: "value".into(),
             to_node: "source".into(),
@@ -708,6 +716,7 @@ fn sparse_ten_thousand_node_chain_uses_linear_conflict_work() {
     let mut graph = fan_graph(9_999);
     graph.data_edges = (1..graph.execution_order.len())
         .map(|index| DataEdge {
+            exclusive: false,
             from_node: graph.execution_order[index - 1].clone(),
             from_output: "value".into(),
             to_node: graph.execution_order[index].clone(),
@@ -735,6 +744,7 @@ fn local_rerouting_never_replaces_a_better_valid_arrangement() {
         let first = if from < 3 { 3 } else { 6 };
         for to in first..9 {
             graph.data_edges.push(DataEdge {
+                exclusive: false,
                 from_node: graph.execution_order[from].clone(),
                 from_output: "value".into(),
                 to_node: graph.execution_order[to].clone(),
@@ -864,6 +874,7 @@ fn crowded_graph(width: usize, control: bool) -> WorkflowDescription {
             width * 2..width * 3
         } {
             graph.data_edges.push(DataEdge {
+                exclusive: false,
                 from_node: graph.execution_order[from].clone(),
                 from_output: "value".into(),
                 to_node: graph.execution_order[to].clone(),

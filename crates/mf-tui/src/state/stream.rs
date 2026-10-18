@@ -1339,6 +1339,7 @@ mod tests {
             control_edges: Vec::new(),
             loop_bodies: Vec::new(),
             data_edges: vec![DataEdge {
+                exclusive: false,
                 from_node: "source".into(),
                 from_output: "item".into(),
                 to_node: "consume".into(),

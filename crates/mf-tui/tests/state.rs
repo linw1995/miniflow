@@ -113,6 +113,7 @@ fn graph() -> WorkflowDescription {
             },
         ],
         data_edges: vec![DataEdge {
+            exclusive: false,
             from_node: "a".into(),
             from_output: "value".into(),
             to_node: "b".into(),
@@ -228,6 +229,7 @@ fn loop_graph() -> WorkflowDescription {
                 },
             ],
             data_edges: vec![DataEdge {
+                exclusive: false,
                 from_node: "%loop".into(),
                 from_output: "count".into(),
                 to_node: "step".into(),
