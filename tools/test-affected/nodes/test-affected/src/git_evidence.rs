@@ -56,9 +56,6 @@ fn run(
     let mut stdout = tempfile::tempfile().context(IoSnafu {
         action: "capture Git stdout",
     })?;
-    let mut stderr = tempfile::tempfile().context(IoSnafu {
-        action: "capture Git stderr",
-    })?;
     let mut command = Command::new("git");
     command
         .args(args)
@@ -70,9 +67,8 @@ fn run(
         .stdout(stdout.try_clone().context(IoSnafu {
             action: "clone Git stdout",
         })?)
-        .stderr(stderr.try_clone().context(IoSnafu {
-            action: "clone Git stderr",
-        })?);
+        // Transport diagnostics can contain credential-bearing remote URLs.
+        .stderr(Stdio::null());
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -94,14 +90,7 @@ fn run(
                         action: "measure Git stdout"
                     })?
                     .len()
-                    <= MAX_CAPTURE
-                    && stderr
-                        .metadata()
-                        .context(IoSnafu {
-                            action: "measure Git stderr"
-                        })?
-                        .len()
-                        <= MAX_CAPTURE,
+                    <= MAX_CAPTURE,
                 LimitSnafu {
                     message: "Git output too large"
                 }
@@ -116,25 +105,15 @@ fn run(
         stdout.seek(SeekFrom::Start(0)).context(IoSnafu {
             action: "rewind Git stdout",
         })?;
-        stderr.seek(SeekFrom::Start(0)).context(IoSnafu {
-            action: "rewind Git stderr",
-        })?;
         let mut out = Vec::new();
-        let mut err = Vec::new();
         stdout
             .take(MAX_CAPTURE + 1)
             .read_to_end(&mut out)
             .context(IoSnafu {
                 action: "read Git stdout",
             })?;
-        stderr
-            .take(MAX_CAPTURE + 1)
-            .read_to_end(&mut err)
-            .context(IoSnafu {
-                action: "read Git stderr",
-            })?;
         ensure!(
-            out.len() as u64 <= MAX_CAPTURE && err.len() as u64 <= MAX_CAPTURE,
+            out.len() as u64 <= MAX_CAPTURE,
             LimitSnafu {
                 message: "Git output too large"
             }
@@ -142,7 +121,7 @@ fn run(
         Ok(Output {
             status,
             stdout: out,
-            stderr: err,
+            stderr: Vec::new(),
         })
     })();
     process.close()?;

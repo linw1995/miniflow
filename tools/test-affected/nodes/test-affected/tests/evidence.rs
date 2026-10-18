@@ -71,6 +71,11 @@ impl Server {
                         (200, value.to_string().into_bytes())
                     }
                     "/large" => (200, vec![b'x'; 4096]),
+                    "/streamed" => {
+                        let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n");
+                        let _ = stream.write_all(&vec![b'x'; 4096]);
+                        continue;
+                    }
                     "/artifact" | "/large-member" => {
                         let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
                         zip.start_file("validation.json", zip::write::SimpleFileOptions::default())
@@ -195,6 +200,8 @@ fn reads_bounded_projected_evidence_and_distinguishes_history_gaps() {
         ("/deep", json!({}), "limit"),
         ("/wide", json!({}), "limit"),
         ("/large", json!({"max_bytes":1024}), "limit"),
+        ("/streamed", json!({"max_bytes":1024}), "limit"),
+        ("/wide", json!({"max_value_bytes":1024}), "limit"),
         (
             "/large-member",
             json!({"member":"validation.json","max_value_bytes":1024}),
@@ -237,6 +244,53 @@ fn reads_bounded_projected_evidence_and_distinguishes_history_gaps() {
         )
         .is_err()
     );
+    for query in [json!([]), json!({"branch":["topic"]})] {
+        assert!(
+            read(
+                &server,
+                json!({"required":false}),
+                json!({"path":"/runs","query":query}),
+                &mut ExecutionContext::default()
+            )
+            .is_err()
+        );
+    }
+}
+
+#[test]
+fn invalid_evidence_configuration_is_not_a_history_gap() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for (kind, config) in [
+        (
+            "github.read",
+            json!({"api_base":"https://user:secret@example.com/"}),
+        ),
+        ("github.read", json!({"pointer":"runs"})),
+        ("github.read", json!({"max_bytes":0})),
+        ("github.read", json!({"timeout_ms":0})),
+        ("git.inspect", json!({"max_revisions":101})),
+        ("git.fetch", json!({"remote":"--upload-pack=other"})),
+    ] {
+        assert!(
+            registry.get(kind).unwrap().instantiate(config).is_err(),
+            "{kind}"
+        );
+    }
+    let (repository, head) = common::fixture();
+    for (kind, config, input) in [
+        (
+            "git.fetch",
+            json!({}),
+            json!({"repository":repository.path(),"commit":"HEAD"}),
+        ),
+        (
+            "git.inspect",
+            json!({"required":false,"max_revisions":1}),
+            json!({"repository":repository.path(),"revisions":[head,head]}),
+        ),
+    ] {
+        assert!(invoke(kind, config, input, &mut ExecutionContext::default()).is_err());
+    }
 }
 
 #[test]
