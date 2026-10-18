@@ -1,5 +1,6 @@
 use mfn_lsp::{AnalysisRequest, SourceRange};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -16,6 +17,8 @@ pub enum ComparisonMode {
     #[default]
     MergeBase,
     Snapshot,
+    Worktree,
+    Commit,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -52,11 +55,46 @@ impl Default for BuildConfiguration {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct PlanOptions {
     pub configuration: BuildConfiguration,
     pub inventory: Option<PathBuf>,
+    pub exact_tests: bool,
+}
+
+impl Default for PlanOptions {
+    fn default() -> Self {
+        Self {
+            configuration: BuildConfiguration::default(),
+            inventory: None,
+            exact_tests: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ComparisonRequest {
+    pub mode: ComparisonMode,
+    #[serde(default)]
+    pub base: Option<String>,
+    #[serde(default = "default_head")]
+    pub head: String,
+    #[serde(default = "default_analysis")]
+    pub analyze: bool,
+    #[serde(default)]
+    pub require_checkout: bool,
+    #[serde(default)]
+    pub options: PlanOptions,
+    #[serde(default)]
+    pub validation: Value,
+}
+fn default_head() -> String {
+    "HEAD".into()
+}
+fn default_analysis() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]

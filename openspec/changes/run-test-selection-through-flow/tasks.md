@@ -14,9 +14,9 @@
 
 ## 3. Complete the common comparison and planning contract
 
-- [ ] 3.1 Extend `git.diff` with normalized requests, immutable worktree snapshots, first-parent/root-commit comparison, and explicit-ref compatibility.
-- [ ] 3.2 Support package-only CI selection and optional local semantic refinement through the existing LSP/planner path.
-- [ ] 3.3 Carry comparison/validation provenance through the producer boundary and compare package selection with the current selector; commit this group.
+- [x] 3.1 Extend `git.diff` with normalized requests, immutable worktree snapshots, first-parent/root-commit comparison, and explicit-ref compatibility.
+- [x] 3.2 Support package-only CI selection and optional local semantic refinement through the existing LSP/planner path.
+- [x] 3.3 Carry comparison/validation provenance through the producer boundary and compare package selection with the current selector; commit this group.
 
 ## 4. Compose the production Flow
 

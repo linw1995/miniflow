@@ -19,7 +19,7 @@ use mf_runtime::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-use snafu::ResultExt;
+use snafu::{ResultExt, ensure};
 use std::path::Path;
 
 #[derive(Clone, Default, Deserialize)]
@@ -32,8 +32,9 @@ pub struct GitConfig {
 #[derive(NodeValue)]
 pub struct GitInput {
     pub repository: String,
-    pub base: String,
+    pub base: Option<String>,
     pub head: Option<String>,
+    pub request: Option<ValueRef>,
     pub artifacts: Option<String>,
     pub options: Option<ValueRef>,
 }
@@ -54,22 +55,66 @@ impl TypedTaskNode for GitNode {
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());
         }
-        let comparison = git::compare_with_mode(
+        let sensitivity = input
+            .request
+            .iter()
+            .chain(input.options.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        let normalized = if let Some(value) = input.request {
+            ensure!(
+                input.base.is_none() && input.head.is_none() && input.options.is_none(),
+                error::InvalidSnafu {
+                    message: "request cannot be combined with legacy base/head/options inputs"
+                }
+            );
+            serde_json::from_value::<ComparisonRequest>(serde_json::to_value(value).context(
+                error::JsonSnafu {
+                    action: "encode comparison request",
+                },
+            )?)
+            .context(error::JsonSnafu {
+                action: "decode comparison request",
+            })?
+        } else {
+            ComparisonRequest {
+                mode: self.config.comparison_mode,
+                base: input.base,
+                head: input.head.unwrap_or_else(|| "HEAD".into()),
+                analyze: true,
+                require_checkout: false,
+                options: input
+                    .options
+                    .map(|value| {
+                        serde_json::from_value(serde_json::to_value(value).context(
+                            error::JsonSnafu {
+                                action: "encode planning options",
+                            },
+                        )?)
+                        .context(error::JsonSnafu {
+                            action: "decode planning options",
+                        })
+                    })
+                    .transpose()?
+                    .unwrap_or_default(),
+                validation: Value::Null,
+            }
+        };
+        let comparison = git::compare_request(
             Path::new(&input.repository),
-            &input.base,
-            input.head.as_deref().unwrap_or("HEAD"),
+            &normalized,
             input.artifacts.as_deref().map(Path::new),
             self.config.initialization_options.clone(),
-            self.config.comparison_mode,
         )?;
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());
         }
-        let request = serde_json::to_value(&comparison.request)
-            .context(error::JsonSnafu {
+        let request = ValueRef::from(serde_json::to_value(&comparison.request).context(
+            error::JsonSnafu {
                 action: "encode analysis request",
-            })?
-            .into();
+            },
+        )?)
+        .inherit_secrets(sensitivity.iter());
         let comparison = serde_json::to_value(comparison)
             .context(error::JsonSnafu {
                 action: "encode Git comparison",
@@ -81,11 +126,15 @@ impl TypedTaskNode for GitNode {
                 ("comparison".into(), comparison),
                 (
                     "options".into(),
-                    input
-                        .options
-                        .unwrap_or_else(|| serde_json::json!({}).into()),
+                    serde_json::to_value(normalized.options)
+                        .context(error::JsonSnafu {
+                            action: "encode planning options",
+                        })?
+                        .into(),
                 ),
-            ]),
+                ("validation".into(), normalized.validation.into()),
+            ])
+            .inherit_secrets(sensitivity.iter()),
         }
         .into())
     }
@@ -94,6 +143,7 @@ impl TypedTaskNode for GitNode {
 #[derive(NodeValue)]
 pub struct PlanOutput {
     pub plan: ValueRef,
+    pub validation: ValueRef,
 }
 
 pub struct PlanNode;
@@ -139,6 +189,13 @@ impl TypedTaskNode for PlanNode {
             return Err(error.into());
         }
         Ok(PlanOutput {
+            validation: input
+                .context
+                .as_object()
+                .and_then(|value| value.get("validation"))
+                .cloned()
+                .unwrap_or_else(|| Value::Null.into())
+                .inherit_secrets([&input.context]),
             plan: ValueRef::from(serde_json::to_value(plan).context(error::JsonSnafu {
                 action: "encode test plan",
             })?)

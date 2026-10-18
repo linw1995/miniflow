@@ -43,7 +43,7 @@ def execute(argv, root, capture=True):
 
 def load_plan(path):
     data = json.loads(Path(path).read_text())
-    if isinstance(data, dict) and set(data) == {"plan"}:
+    if isinstance(data, dict) and set(data) in ({"plan"}, {"plan", "validation"}):
         data = data["plan"]
     if isinstance(data, dict):
         data.setdefault("ignored_files", [])
@@ -52,8 +52,8 @@ def load_plan(path):
                 "baseline_packages", "packages", "tests", "reasons", "fallback_reasons", "analysis_status",
                 "baseline_count", "selected_count", "observed_relationships", "analysis_ms", "planning_ms"}
     if not isinstance(data, dict) or set(data) != required:
-        raise PlanError("expected a complete test-affected plan or its single-output wrapper")
-    if data["comparison_mode"] not in ("merge-base", "snapshot"):
+        raise PlanError("expected a complete test-affected plan or its Flow output wrapper")
+    if data["comparison_mode"] not in ("merge-base", "snapshot", "worktree", "commit"):
         raise PlanError("invalid comparison mode")
     for name in ("base", "head", "tree"):
         if not isinstance(data[name], str) or not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", data[name]):

@@ -71,6 +71,16 @@ between two supplied local snapshots. The default `merge-base` retains branch-co
 The plan records the selected mode and resolved revisions. CI baseline eligibility remains
 outside the node; the node never fetches missing historical merge objects.
 
+Alternatively, supply `request` with `mode` (`worktree`, `commit`, `merge-base`, or `snapshot`),
+optional `base`, `head` (default `HEAD`), `analyze` (default true), `require_checkout`, `options`,
+and opaque `validation` provenance. Do not combine it with legacy `base`/`head`/`options` inputs.
+Worktree mode snapshots current files through a temporary copy of the caller's index,
+including staged ignored files and nonignored untracked files, without changing the original
+index or branch. Commit mode uses the first parent, or an empty snapshot for a root commit.
+`require_checkout` enforces a clean caller checkout at the requested head for CI.
+Setting `analyze` to false retains Git changes while emitting an empty semantic batch.
+Set `options.exact_tests` to false for conservative package-only planning.
+
 `test_affected.plan` consumes only the analysis output and its opaque comparison context. It uses
 Cargo metadata for all declared dependency kinds and the same [input policy](../../docs/ci.md#affected-package-tests)
 as the current selector. Package manifests retain owner/consumer scope; known repository configuration
@@ -96,7 +106,8 @@ and reuses the build for execution with nextest's default profile and no user co
 Cargo artifacts live in `<snapshot>/target/test-affected`, isolating workspace binaries even when
 the caller supplies a shared `CARGO_TARGET_DIR`. Listing and execution use the same directory.
 Missing exact names widen to baseline. Empty plans invoke no test command; compile/test failures
-preserve a nonzero exit code. The script accepts either a plan object or the Flow's `{"plan": ...}` output.
+preserve a nonzero exit code. The script accepts a plan object or the Flow's `{"plan": ...}` output, including an optional
+`validation` field forwarded by the plan node.
 
 ```sh
 nix develop --command python3 tools/test-affected/run-tests.py target/test-plan.json --list-only --inventory-out target/test-inventory.json

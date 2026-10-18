@@ -5,13 +5,28 @@ use snafu::{ResultExt, ensure};
 use std::{fs, path::Path, process::Command};
 
 pub fn command(root: &Path, program: &str, args: &[&str]) -> Result<String, Error> {
-    let output = Command::new(program)
+    command_env(root, program, args, &[])
+}
+
+fn command_env(
+    root: &Path,
+    program: &str,
+    args: &[&str],
+    environment: &[(&str, &std::ffi::OsStr)],
+) -> Result<String, Error> {
+    let mut command = Command::new(program);
+    command
         .args(args)
         .current_dir(root)
-        .output()
-        .context(IoSnafu {
-            action: format!("run {program}"),
-        })?;
+        .envs(environment.iter().copied());
+    if program == "git" {
+        command
+            .env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_NO_LAZY_FETCH", "1");
+    }
+    let output = command.output().context(IoSnafu {
+        action: format!("run {program}"),
+    })?;
     ensure!(
         output.status.success(),
         CommandSnafu {
@@ -109,6 +124,12 @@ pub fn compare_with_mode(
             .trim()
             .to_owned(),
         ComparisonMode::Snapshot => base,
+        ComparisonMode::Worktree | ComparisonMode::Commit => {
+            return InvalidSnafu {
+                message: "use a comparison request for worktree or commit mode",
+            }
+            .fail();
+        }
     };
     let artifacts = artifacts
         .map(Path::to_path_buf)
@@ -301,4 +322,167 @@ fn hunk_range(source: &[u8], value: &str) -> Result<SourceRange, Error> {
             .unwrap_or(source.len())
     };
     Ok(SourceRange { start: from, end })
+}
+
+/// Resolves local comparison modes into immutable Git snapshots.
+pub fn compare_request(
+    repository: &Path,
+    request: &ComparisonRequest,
+    artifacts: Option<&Path>,
+    initialization_options: Value,
+) -> Result<Comparison, Error> {
+    let repository = repository.canonicalize().context(IoSnafu {
+        action: "resolve comparison repository",
+    })?;
+    let repository =
+        Path::new(command(&repository, "git", &["rev-parse", "--show-toplevel"])?.trim())
+            .to_path_buf();
+    let head = revision(&repository, &request.head)?;
+    if request.require_checkout {
+        ensure!(
+            revision(&repository, "HEAD")? == head
+                && command(
+                    &repository,
+                    "git",
+                    &["status", "--porcelain", "--untracked-files=all"]
+                )?
+                .is_empty(),
+            InvalidSnafu {
+                message: "comparison requires the clean checked-out head"
+            }
+        );
+    }
+    let (base, selected_head, mode) = match request.mode {
+        ComparisonMode::Worktree => {
+            ensure!(
+                request.base.is_none() && head == revision(&repository, "HEAD")?,
+                InvalidSnafu {
+                    message: "worktree mode requires HEAD and no explicit base"
+                }
+            );
+            (
+                head.clone(),
+                worktree_snapshot(&repository, &head)?,
+                ComparisonMode::Snapshot,
+            )
+        }
+        ComparisonMode::Commit => {
+            ensure!(
+                request.base.is_none(),
+                InvalidSnafu {
+                    message: "commit mode derives its first-parent base"
+                }
+            );
+            let contents = command(&repository, "git", &["cat-file", "commit", &head])?;
+            let parent = contents
+                .lines()
+                .take_while(|line| !line.is_empty())
+                .find_map(|line| line.strip_prefix("parent "));
+            let base = if let Some(parent) = parent {
+                parent.to_owned()
+            } else {
+                let tree = command(
+                    &repository,
+                    "git",
+                    &["hash-object", "-t", "tree", "-w", "--stdin"],
+                )?;
+                snapshot_commit(&repository, tree.trim(), None, &head)?
+            };
+            (base, head, ComparisonMode::Snapshot)
+        }
+        mode => (
+            request.base.clone().ok_or_else(|| {
+                InvalidSnafu {
+                    message: "comparison requires base",
+                }
+                .build()
+            })?,
+            head,
+            mode,
+        ),
+    };
+    let mut comparison = compare_with_mode(
+        &repository,
+        &base,
+        &selected_head,
+        artifacts,
+        initialization_options,
+        mode,
+    )?;
+    comparison.comparison_mode = request.mode;
+    if !request.analyze {
+        comparison.request.snapshots.clear();
+    }
+    Ok(comparison)
+}
+
+fn worktree_snapshot(repository: &Path, head: &str) -> Result<String, Error> {
+    let directory = tempfile::tempdir().context(IoSnafu {
+        action: "prepare snapshot index",
+    })?;
+    let index = directory.path().join("index");
+    let original =
+        repository.join(command(repository, "git", &["rev-parse", "--git-path", "index"])?.trim());
+    let environment = [("GIT_INDEX_FILE", index.as_os_str())];
+    if original.exists() {
+        fs::copy(original, &index).context(IoSnafu {
+            action: "copy caller index",
+        })?;
+    } else {
+        command_env(repository, "git", &["read-tree", head], &environment)?;
+    }
+    command_env(
+        repository,
+        "git",
+        &["add", "--all", "--", "."],
+        &environment,
+    )?;
+    let tree = command_env(repository, "git", &["write-tree"], &environment)?;
+    if tree.trim()
+        == command(
+            repository,
+            "git",
+            &["rev-parse", &format!("{head}^{{tree}}")],
+        )?
+        .trim()
+    {
+        return Ok(head.into());
+    }
+    snapshot_commit(repository, tree.trim(), Some(head), head)
+}
+
+fn snapshot_commit(
+    repository: &Path,
+    tree: &str,
+    parent: Option<&str>,
+    clock: &str,
+) -> Result<String, Error> {
+    use std::ffi::OsStr;
+    let date = command(
+        repository,
+        "git",
+        &["show", "--no-patch", "--format=%cI", clock],
+    )?;
+    let environment = [
+        ("GIT_AUTHOR_NAME", OsStr::new("Miniflow")),
+        ("GIT_AUTHOR_EMAIL", OsStr::new("tools@localhost")),
+        ("GIT_COMMITTER_NAME", OsStr::new("Miniflow")),
+        ("GIT_COMMITTER_EMAIL", OsStr::new("tools@localhost")),
+        ("GIT_AUTHOR_DATE", OsStr::new(date.trim())),
+        ("GIT_COMMITTER_DATE", OsStr::new(date.trim())),
+    ];
+    let mut args = vec![
+        "-c",
+        "commit.gpgsign=false",
+        "commit-tree",
+        tree,
+        "-m",
+        "Repository tooling snapshot",
+    ];
+    if let Some(parent) = parent {
+        args.extend(["-p", parent]);
+    }
+    Ok(command_env(repository, "git", &args, &environment)?
+        .trim()
+        .into())
 }

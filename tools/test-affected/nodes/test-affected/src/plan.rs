@@ -135,7 +135,9 @@ pub fn make_plan(
                 .entry(owner.clone())
                 .or_default()
                 .push(format!("Changed file: {}", change.path));
-            if let Some(selected) = isolated_tests(comparison, change, &packages[owner], root) {
+            if options.exact_tests
+                && let Some(selected) = isolated_tests(comparison, change, &packages[owner], root)
+            {
                 tests.extend(selected);
             } else {
                 production.insert(owner.clone());

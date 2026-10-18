@@ -517,7 +517,8 @@ fn task_boundaries_preserve_error_sources_and_reject_cancelled_work() {
     };
     let input = || mfn_test_affected::GitInput {
         repository: "/missing-test-affected-repository".into(),
-        base: "HEAD".into(),
+        base: Some("HEAD".into()),
+        request: None,
         head: None,
         artifacts: None,
         options: None,
@@ -712,7 +713,8 @@ fn snapshot_mode_preserves_incremental_base_and_plan_provenance() {
         &mfn_test_affected::GitNode { config },
         mfn_test_affected::GitInput {
             repository: root.to_str().unwrap().into(),
-            base: first_merge.trim().into(),
+            base: Some(first_merge.trim().into()),
+            request: None,
             head: Some(second_merge.trim().into()),
             artifacts: None,
             options: None,
@@ -722,4 +724,173 @@ fn snapshot_mode_preserves_incremental_base_and_plan_provenance() {
     .unwrap();
     let context = serde_json::to_value(result.outputs.context).unwrap();
     assert_eq!(context["comparison"]["base"], first_merge.trim());
+}
+
+#[test]
+fn worktree_and_root_commit_requests_preserve_source_and_index() {
+    use mfn_test_affected::{ComparisonMode, ComparisonRequest};
+    let (directory, first) = fixture();
+    let root = directory.path();
+    let first_request: ComparisonRequest = serde_json::from_value(
+        json!({"mode":"commit","head":first,"analyze":false,"options":{"exact_tests":false}}),
+    )
+    .unwrap();
+    let first_comparison = git::compare_request(root, &first_request, None, json!({})).unwrap();
+    assert_eq!(first_comparison.comparison_mode, ComparisonMode::Commit);
+    assert!(
+        git::command(&first_comparison.base_root, "git", &["ls-tree", "HEAD"])
+            .unwrap()
+            .is_empty()
+    );
+    assert!(first_comparison.request.snapshots.is_empty());
+    let first_plan = make_plan(
+        &first_comparison,
+        &outcome(&first_comparison),
+        &first_request.options,
+    )
+    .unwrap();
+    assert_eq!(first_plan.packages.len(), 3);
+
+    write(
+        root,
+        ".gitignore",
+        "/target/\n/ignored.txt\n/private-staged.txt\n",
+    );
+    let base = commit(root);
+    write(root, "core/src/lib.rs", &SOURCE.replace("{ 1 }", "{ 2 }"));
+    git::command(root, "git", &["add", "core/src/lib.rs"]).unwrap();
+    write(root, "app/src/lib.rs", &SOURCE.replace("{ 1 }", "{ 3 }"));
+    write(root, "other/src/new.rs", "pub fn added() {}\n");
+    write(root, "private-staged.txt", "forced into index\n");
+    git::command(root, "git", &["add", "-f", "private-staged.txt"]).unwrap();
+    write(root, "ignored.txt", "not part of the snapshot\n");
+    let index = fs::read(root.join(".git/index")).unwrap();
+    let request: ComparisonRequest = serde_json::from_value(
+        json!({"mode":"worktree","analyze":false,"options":{"exact_tests":false}}),
+    )
+    .unwrap();
+    let comparison = git::compare_request(root, &request, None, json!({})).unwrap();
+    assert_eq!(comparison.comparison_mode, ComparisonMode::Worktree);
+    assert_eq!(comparison.base, base);
+    assert_ne!(comparison.head, base);
+    assert_eq!(git::revision(root, "HEAD").unwrap(), base);
+    assert_eq!(fs::read(root.join(".git/index")).unwrap(), index);
+    assert_eq!(
+        fs::read_to_string(comparison.head_root.join("private-staged.txt")).unwrap(),
+        "forced into index\n"
+    );
+    assert!(comparison.head_root.join("other/src/new.rs").is_file());
+    assert!(!comparison.head_root.join("ignored.txt").exists());
+    assert_eq!(
+        comparison
+            .changes
+            .iter()
+            .map(|c| c.path.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "app/src/lib.rs",
+            "core/src/lib.rs",
+            "other/src/new.rs",
+            "private-staged.txt"
+        ]
+    );
+    assert!(
+        git::command(&comparison.head_root, "git", &["status", "--porcelain"])
+            .unwrap()
+            .is_empty()
+    );
+    let repeated = git::compare_request(root, &request, None, json!({})).unwrap();
+    assert_eq!(repeated.head, comparison.head);
+    let strict: ComparisonRequest = serde_json::from_value(
+        json!({"mode":"snapshot","base":base,"head":base,"require_checkout":true}),
+    )
+    .unwrap();
+    assert!(git::compare_request(root, &strict, None, json!({})).is_err());
+    let shallow = tempfile::tempdir().unwrap();
+    let source = url::Url::from_directory_path(root).unwrap();
+    git::command(
+        shallow.path(),
+        "git",
+        &["clone", "--quiet", "--depth=1", source.as_str(), "."],
+    )
+    .unwrap();
+    let commit_request: ComparisonRequest =
+        serde_json::from_value(json!({"mode":"commit","analyze":false})).unwrap();
+    assert!(git::compare_request(shallow.path(), &commit_request, None, json!({})).is_err());
+}
+
+#[test]
+fn normalized_requests_retain_provenance_and_package_only_scope() {
+    use mf_runtime::{ExecutionContext, TypedStreamNode, TypedTaskNode};
+    let (directory, base) = fixture();
+    let root = directory.path();
+    write(root, "core/src/lib.rs", &SOURCE.replace("1, 1", "2, 2"));
+    let head = commit(root);
+    let request = mf_runtime::ValueRef::from(json!({"mode":"snapshot","base":base,"head":head,"analyze":false,"require_checkout":true,"options":{"exact_tests":false},"validation":{"run":42}})).into_secret();
+    let analysis_input = mfn_test_affected::GitNode {
+        config: Default::default(),
+    }
+    .execute(
+        mfn_test_affected::GitInput {
+            repository: root.to_str().unwrap().into(),
+            base: None,
+            head: None,
+            request: Some(request),
+            artifacts: None,
+            options: None,
+        },
+        &mut ExecutionContext::default(),
+    )
+    .unwrap()
+    .outputs;
+    assert!(analysis_input.context.is_secret());
+    let mut analyzer = mfn_lsp::AnalyzeNode::new(ServerConfig {
+        command: "/missing-server-must-not-run".into(),
+        ..outcome(&compare(root, &base, &head)).server
+    })
+    .unwrap();
+    let mut final_output = None;
+    analyzer
+        .execute(
+            analysis_input,
+            &mut ExecutionContext::default(),
+            &mut |result| {
+                final_output = Some(
+                    mfn_test_affected::PlanNode
+                        .execute(result.outputs, &mut ExecutionContext::default())?
+                        .outputs,
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+    let output = final_output.unwrap();
+    assert!(output.plan.is_secret() && output.validation.is_secret());
+    assert_eq!(output.validation, json!({"run":42}));
+    let plan: mfn_test_affected::TestPlan =
+        serde_json::from_value(serde_json::to_value(output.plan).unwrap()).unwrap();
+    assert_eq!(plan.packages, ["sample-app", "sample-core"]);
+    assert!(plan.tests.is_empty());
+    assert_eq!(plan.analysis_status, Status::NotRequested);
+    let plan_file = root.join("target/package-plan.json");
+    fs::write(
+        &plan_file,
+        json!({"plan":plan,"validation":{"run":42}}).to_string(),
+    )
+    .unwrap();
+    let runner = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../run-tests.py");
+    let loaded = Command::new("python3")
+        .args([
+            "-c",
+            "import runpy,sys; m=runpy.run_path(sys.argv[1]); m['load_plan'](sys.argv[2])",
+        ])
+        .arg(runner)
+        .arg(plan_file)
+        .output()
+        .unwrap();
+    assert!(
+        loaded.status.success(),
+        "{}",
+        String::from_utf8_lossy(&loaded.stderr)
+    );
 }
