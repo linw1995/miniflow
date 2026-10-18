@@ -27,9 +27,9 @@
 
 ## 5. Integration validation
 
-- [ ] 5.1 Run `nix develop --command python3 scripts/affected_tests.py --worktree --run` and resolve failures; preserve an empty selection without invoking an unfiltered Rust suite.
-- [ ] 5.2 Run `openspec validate add-exclusive-input-bindings --strict`, `nix develop --command prek install`, and `nix develop --command prek -a`; verify all applicable checks and separately check newly created untracked documentation files.
-- [ ] 5.3 Review the implementation against both spec deltas, with emphasis on ordinary-workflow compatibility, same-frame selection, generated parity, and secret handling; record any local experiments under ignored `target/`.
+- [x] 5.1 Run `nix develop --command python3 scripts/affected_tests.py --worktree --run` and resolve failures; preserve an empty selection without invoking an unfiltered Rust suite.
+- [x] 5.2 Run `openspec validate add-exclusive-input-bindings --strict`, `nix develop --command prek install`, and `nix develop --command prek -a`; verify all applicable checks and separately check newly created untracked documentation files.
+- [x] 5.3 Review the implementation against both spec deltas, with emphasis on ordinary-workflow compatibility, same-frame selection, generated parity, and secret handling; record any local experiments under ignored `target/`.
 
 ## Workflow follow-up
 

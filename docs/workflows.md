@@ -508,7 +508,12 @@ The optional `control_edges` array contains entries with `from_node`, `from_outp
 
 Context references use qualified IDs such as `load_order.value`. A reference must name an output on an explicit predecessor, directly or transitively. Merely sorting earlier by node ID does not establish a dependency. Node IDs and local output names may contain dots if their combined IDs remain unique.
 
-A produced control output activates its target regardless of whether its JSON value is false or null. All incoming data and control dependencies must be available; any explicit skip skips execution and propagates to downstream nodes. Unexpected missing outputs remain errors, including when another dependency is skipped. Independent nodes still execute, and ordinary connections to both mutually exclusive outputs do not merge branches; use an explicit exclusive input group for alternatives.
+A produced control output activates its target regardless of whether its JSON value is false or
+null. All ordinary data inputs, resolved exclusive groups, and control dependencies must be
+available; a skipped logical input or control dependency skips execution and propagates to
+downstream nodes. Unexpected missing outputs remain errors, including when another dependency is
+skipped. Independent nodes still execute, and ordinary connections to both mutually exclusive
+outputs do not merge branches; use an explicit exclusive input group for alternatives.
 
 ## Exclusive input bindings
 

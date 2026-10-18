@@ -446,3 +446,52 @@ fn stream_skip_observations_use_logical_inputs_and_keep_selected_sources() {
     assert_eq!(skipped.1.len(), 1);
     assert_eq!(skipped.1[0].source_node, "active");
 }
+
+#[test]
+fn exclusive_startup_input_activates_a_stream_producer() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for ci in [false, true] {
+        let definition: WorkflowDefinition = serde_json::from_value(json!({
+            "version":"2026-10-03", "dependencies":{}, "execution":{"mode":"stream"},
+            "nodes":[
+                {"id":"params", "kind":"builtin.parameters", "config":{"parameters":{
+                    "control":{"type":"string"}, "ci":{"type":"bool", "default":ci, "secret":false}
+                }}},
+                {"id":"route", "kind":"builtin.if_else", "config":{"branches":[{"id":"ci", "condition":{"source":{"output":"params.ci", "path":""}, "operator":"eq", "value":true}}]}},
+                {"id":"local", "kind":"builtin.identity"},
+                {"id":"ci", "kind":"builtin.identity"},
+                controlled::source(json!("int")),
+                {"id":"consume", "kind":"builtin.identity"}
+            ],
+            "edges":[
+                {"from_node":"params", "from_output":"control", "to_node":"local", "to_input":"input"},
+                {"from_node":"params", "from_output":"control", "to_node":"ci", "to_input":"input"},
+                {"from_node":"feed", "from_output":"item", "to_node":"consume", "to_input":"input"}
+            ],
+            "control_edges":[
+                {"from_node":"params", "from_output":"ci", "to_node":"route"},
+                {"from_node":"route", "from_output":"ci", "to_node":"ci"},
+                {"from_node":"route", "from_output":"else", "to_node":"local"}
+            ],
+            "exclusive_inputs":[{"to_node":"feed", "to_input":"control", "sources":[
+                {"from_node":"local", "from_output":"value"}, {"from_node":"ci", "from_output":"value"}
+            ]}],
+            "outputs":[{"name":"result", "node":"consume", "port":"value"}]
+        })).unwrap();
+        let plan = compile_definition(&definition, &registry).unwrap();
+        let mut options = mf_runtime::StreamOptions::default();
+        let source = controlled::prepare_control("params", &mut options);
+        let instance = mf_compiler::instantiate_stream(&plan, &registry)
+            .unwrap()
+            .start_with_options(options)
+            .unwrap();
+        source.send(json!(42)).unwrap();
+        source.close();
+        assert_eq!(
+            instance.recv().unwrap().unwrap().outputs["result"],
+            json!(42)
+        );
+        assert!(instance.recv().unwrap().is_none());
+        instance.join().unwrap();
+    }
+}
