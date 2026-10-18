@@ -20,6 +20,7 @@ platform = 'cfg(unix)'
 filter = '''
 (binary_id(=mf-chat::packaging) &
     test(=source_free_host_preserves_multi_session_retry_title_and_statistics)) |
+(binary_id(=mf-cli::chat_tui) & test(=executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart)) |
 (binary_id(=mf-cli::compile) & (
     test(=compiles_a_runner_without_telemetry_and_preserves_execution) |
     test(=compiled_runner_preserves_build_cache_and_installation_contracts) |
@@ -107,6 +108,7 @@ platform = 'cfg(unix)'
 filter = '''
 (binary_id(=mf-chat::packaging) &
     test(=source_free_host_preserves_multi_session_retry_title_and_statistics)) |
+(binary_id(=mf-cli::chat_tui) & test(=executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart)) |
 (binary_id(=mf-cli::compile) & (
     test(=compiles_a_runner_without_telemetry_and_preserves_execution) |
     test(=compiled_runner_preserves_build_cache_and_installation_contracts) |

@@ -278,3 +278,48 @@ LLM `usage` output remains available to other workflows, but `mf_chat::Reply` us
 reply writes leave legacy scalar token columns empty. Existing successful single-model records with
 reported scalar counters are upgraded to one usage entry using their stored call ID; explicit lists
 and unknown counters are preserved. Legacy columns remain compatibility data. No terminal interface or implicit runtime usage collector is installed.
+
+## Executable chat terminal
+
+Compile a conversation workflow, then launch it with explicit local storage:
+
+```bash
+mf run ./chat-flow --tui --chat --chat-db ./chat.sqlite --chat-profile default --params.model your-model
+```
+
+The terminal presents one conversation above an input area that grows with its content. The initial empty chat is
+saved only when its first prompt is sent; that prompt supplies its name. Existing conversations remain available
+through the session picker. New chats use no terminal-supplied system instructions; resumed sessions retain their
+stored instructions. Provider configuration remains in the workflow and its declared parameters.
+
+| Interaction | Key |
+| --- | --- |
+| Send the prompt | Alt+Enter, or Esc then Enter |
+| Insert a newline | Enter while editing |
+| Browse messages / return to editing | Esc / i |
+| Open commands | Ctrl+P |
+| New chat / switch saved chat | Ctrl+N / Ctrl+S |
+| Cancel the current execution | Ctrl+C |
+| Quit after cleanup | Ctrl+Q |
+
+Command and session pickers use Up/Down and Enter; Esc closes them. The command menu offers recovery actions only
+when applicable. A retry starts a fresh execution of the latest unsuccessful turn. Saving a retained reply writes
+the original result without running the workflow again; discarding it releases the execution lane explicitly.
+Session switching and new chats wait until the current turn finishes, is cancelled, or its retained reply is resolved.
+Additional submissions are rejected instead of queued. Drafts survive switching between idle conversations.
+
+Session history opens at the latest bounded page. Earlier messages and Latest messages are available from the command
+menu. Inspect current run opens the shared graph, trace, log, and data views; Esc returns to chat. Only the current
+turn's observation is retained, and changing conversation or starting another turn releases it.
+
+The terminal has no rename, archive/restore, usage dashboard, automatic-title, or parallel-execution controls.
+Storage and programmatic usage queries continue through `mf-chat`. Every submission executes the complete workflow,
+including loops, and persists its reported message metadata and individual call facts.
+
+Unicode editing and bracketed paste are supported. Editors accept 256 KiB; workflow arguments and captured results
+retain the shared 1 MiB and 16 MiB limits. Credentials travel through a private argument file. Storage operations and
+process supervision run on one background worker, keeping terminal rendering and cancellation responsive.
+
+Quitting cancels and reaps the child, reconciles retained results, and releases database ownership. It never prints
+turn JSON to stdout. Handled turn failures allow a normal exit; display or cleanup failures return status 1. Unsaved
+replies remain memory-only: restarting recovers abandoned turns as interrupted without resending them.

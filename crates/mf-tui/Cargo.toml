@@ -7,7 +7,8 @@ repository.workspace = true
 description = "Terminal observation of locally launched miniflow workflows"
 
 [dependencies]
-# Runtime state and snapshot contracts.
+# Chat persistence, runtime state, and snapshot contracts.
+mf-chat.workspace = true
 mf-runtime.workspace = true
 mf-telemetry = { workspace = true, features = ["snapshot"] }
 

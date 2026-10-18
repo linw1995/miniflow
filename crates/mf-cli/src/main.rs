@@ -44,6 +44,15 @@ enum Command {
         /// Observe workflow execution in the terminal UI.
         #[arg(long)]
         tui: bool,
+        /// Keep an interactive conversation using this executable.
+        #[arg(long, requires_all = ["tui", "chat_db"])]
+        chat: bool,
+        /// SQLite database owned by this chat application.
+        #[arg(long, value_name = "PATH", requires = "chat")]
+        chat_db: Option<PathBuf>,
+        /// Session profile label; model configuration stays in the executable.
+        #[arg(long, value_name = "NAME", requires = "chat")]
+        chat_profile: Option<String>,
         /// Workflow startup arguments keyed by qualified node.port names.
         #[arg(long, value_name = "JSON", conflicts_with = "inputs_file")]
         inputs: Option<String>,
@@ -65,6 +74,9 @@ enum CliError {
     #[cfg(unix)]
     #[snafu(transparent)]
     Run { source: mf_tui::run::RunError },
+    #[cfg(unix)]
+    #[snafu(transparent)]
+    Chat { source: mf_tui::chat::ChatRunError },
     #[cfg(not(unix))]
     #[snafu(display("TUI execution is supported on Linux and macOS"))]
     UnsupportedTui,
@@ -126,6 +138,9 @@ fn run(cli: Cli) -> Result<u8, CliError> {
         Command::Run {
             executable,
             tui,
+            chat,
+            chat_db,
+            chat_profile,
             inputs,
             inputs_file,
             arguments,
@@ -159,19 +174,39 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             }
             #[cfg(unix)]
             {
-                Ok(mf_tui::run::run_executable_with_options(
-                    &executable,
-                    &mf_tui::run::RunOptions {
-                        verbose,
-                        inputs,
-                        inputs_file,
-                        arguments,
-                    },
-                )?)
+                let options = mf_tui::run::RunOptions {
+                    verbose,
+                    inputs,
+                    inputs_file,
+                    arguments,
+                };
+                if chat {
+                    Ok(mf_tui::chat::run_chat(
+                        &executable,
+                        mf_tui::chat::ChatOptions {
+                            database_path: chat_db.expect("clap requires chat database"),
+                            profile: chat_profile.unwrap_or_else(|| "default".into()),
+                            run: options,
+                        },
+                    )?)
+                } else {
+                    Ok(mf_tui::run::run_executable_with_options(
+                        &executable,
+                        &options,
+                    )?)
+                }
             }
             #[cfg(not(unix))]
             {
-                let _ = (executable, inputs, inputs_file, arguments);
+                let _ = (
+                    executable,
+                    inputs,
+                    inputs_file,
+                    arguments,
+                    chat,
+                    chat_db,
+                    chat_profile,
+                );
                 UnsupportedTuiSnafu.fail()
             }
         }
@@ -442,5 +477,49 @@ mod tests {
             panic!("expected run command");
         };
         assert_eq!(executable, PathBuf::from(path));
+    }
+}
+
+#[cfg(test)]
+mod chat_tests {
+    use super::*;
+    #[test]
+    fn chat_options_require_terminal_mode_database_and_explicit_chat() {
+        for args in [
+            vec!["mf", "run", "flow", "--chat"],
+            vec!["mf", "run", "flow", "--chat", "--chat-db", "chat.sqlite"],
+            vec!["mf", "run", "flow", "--tui", "--chat-db", "chat.sqlite"],
+            vec!["mf", "run", "flow", "--chat-profile", "default"],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+        let cli = Cli::try_parse_from([
+            "mf",
+            "run",
+            "flow",
+            "--tui",
+            "--chat",
+            "--chat-db",
+            "chat.sqlite",
+            "--chat-profile",
+            "work",
+            "--task.path",
+            "input",
+        ])
+        .unwrap();
+        let Command::Run {
+            chat,
+            chat_db,
+            chat_profile,
+            arguments,
+            ..
+        } = cli.command
+        else {
+            panic!("expected run")
+        };
+        assert!(chat);
+        assert_eq!(chat_db, Some(PathBuf::from("chat.sqlite")));
+        assert_eq!(chat_profile.as_deref(), Some("work"));
+        assert_eq!(arguments.len(), 2);
     }
 }
