@@ -115,49 +115,46 @@ fn interact(binary: &Path, database: &Path, restart: bool) -> String {
                 history.push('\n');
                 let keys: Option<&[u8]> = if restart {
                     match stage {
-                        0 if text.starts_with("session-A") => Some(b"j"),
-                        1 if text.starts_with("session-B") => Some(b"\rcontinued after restart\r"),
-                        2 if text.contains("restart reply") => Some(b"\x1b"),
-                        3 if text.contains("Enter edit") => Some(b"q"),
+                        0 if text.contains("New chat") => Some(b"\x13"),
+                        1 if text.contains("Switch chat") && text.contains("session B prompt") => {
+                            Some(b"\x1b[B\r")
+                        }
+                        2 if text.contains("retained reply") => {
+                            Some(b"continued after restart\x1b\r")
+                        }
+                        3 if text.contains("restart reply") => Some(b"\x11"),
                         _ => None,
                     }
                 } else {
                     match stage {
-                        0 if text.contains("No session") => Some(b"n"),
-                        1 if text.contains("optional system instructions") => Some(b"Be concise\r"),
-                        2 if text.contains("New conversation") && text.contains("Prompt:") => Some("hello 🦀\x1b\rsecond line\r".as_bytes()),
-                        3 if text.contains("first reply") => Some(b"\x1b"),
-                        4 if text.contains("Enter edit") => Some(b"r"),
-                        5 if text.contains("Rename session") => Some(b"\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7fsession-A\r"),
-                        6 if text.contains("session-A") && text.contains("Enter edit") => Some(b"n"),
-                        7 if text.contains("optional system instructions") => Some(b"\r"),
-                        8 if text.contains("New conversation") && text.contains("Prompt:") => Some(b"session B prompt\r"),
-                        9 if text.contains("Running turn") => Some(b"\x1b"),
-                        10 if text.contains("[running]") && text.contains("Enter edit") => Some(b"k"),
-                        11 if text.starts_with("session-A") && !text.contains("[running]") => {
-                            assert!(!text.contains("second reply"));
-                            Some(b"j")
+                        0 if text.contains("What would you like") => {
+                            Some("hello 🦀\rsecond line\x1b\r".as_bytes())
                         }
-                        12 if text.contains("second reply") => Some(b"\x1b"),
-                        13 if text.contains("Enter edit") => Some(b"r"),
-                        14 if text.contains("Rename session") => Some(b"\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7f\x7fsession-B\r"),
-                        15 if text.contains("session-B") && text.contains("Enter edit") => Some(b"\rfailed prompt\r"),
-                        16 if text.contains("[failed]") => Some(b"\x1b"),
-                        17 if text.contains("Enter edit") => Some(b"t"),
-                        18 if text.contains("retried reply") => { fail_save(database,true); Some(b"\rretain this reply\r") },
-                        19 if text.contains("Assistant [uncommitted]") => { fail_save(database,false); Some(b"\x1b") },
-                        20 if text.contains("Enter edit") => Some(b"s"),
-                        21 if text.contains("retained reply") && text.contains("committed") && !text.contains("Assistant [uncommitted]") => Some(b"u"),
-                        22 if text.contains("Attempted calls:") => Some(b"g"),
-                        23 if text.contains("Workflow:") => Some(b"v"),
-                        24 if text.contains("OTEL Tracing") => Some(b"g"),
-                        25 if text.contains("Session LogRecords") => Some(b"\t"),
-                        26 if text.contains("Session Data") && text.contains("chat Succeeded") => Some(b"\x1b[H"),
-                        27 if text.contains("Inspecting selection") => Some(b"f"),
-                        28 if text.contains("Following tail") => Some(b"\x1b"),
-                        29 if text.contains("Enter edit") => Some(b"a"),
-                        30 if text.contains("[archived]") => Some(b"a"),
-                        31 if text.contains("Session session-B: active") => Some(b"q"),
+                        1 if text.contains("first reply") => Some(b"\x0e"),
+                        2 if text.contains("New chat") => Some(b"session B prompt\x1b\r"),
+                        3 if text.contains("second reply") => Some(b"failed prompt\x1b\r"),
+                        4 if text.contains("[failed]") => Some(b"\x10\x1b[B\x1b[B\r"),
+                        5 if text.contains("retried reply") => {
+                            fail_save(database, true);
+                            Some(b"retain this reply\x1b\r")
+                        }
+                        6 if text.contains("Assistant [not saved]") => {
+                            fail_save(database, false);
+                            Some(b"\x10\x1b[B\x1b[B\r")
+                        }
+                        7 if text.contains("retained reply")
+                            && text.contains("Saved")
+                            && !text.contains("[not saved]") =>
+                        {
+                            Some(b"\x10")
+                        }
+                        8 if text.contains("Inspect current run") => Some(b"\x1b[B\x1b[B\r"),
+                        9 if text.contains("Workflow:") => Some(b"\x1b"),
+                        10 if text.contains("Alt+Enter send") => Some(b"\x13"),
+                        11 if text.contains("Switch chat") && text.contains("hello") => Some(b"\r"),
+                        12 if text.contains("first reply") && !text.contains("second reply") => {
+                            Some(b"\x11")
+                        }
                         _ => None,
                     }
                 };
@@ -180,7 +177,7 @@ fn interact(binary: &Path, database: &Path, restart: bool) -> String {
         }
         thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(stage, if restart { 4 } else { 32 }, "{history}");
+    assert_eq!(stage, if restart { 4 } else { 13 }, "{history}");
     let restored = tcgetattr(&pty.slave).unwrap();
     assert_eq!(
         original.local_flags & (LocalFlags::ICANON | LocalFlags::ECHO),
@@ -236,7 +233,6 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
             .iter()
             .all(|request| request.body["model"] == "fixture-model")
     );
-    assert_eq!(messages(&requests[0])[0]["content"], "Be concise");
     assert_eq!(
         messages(&requests[0]).last().unwrap()["content"],
         "hello 🦀\nsecond line"
@@ -245,7 +241,10 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
     let database = ChatDatabase::open(&path).unwrap();
     let sessions = database.list_sessions(false, 50, None).unwrap().sessions;
     assert_eq!(sessions.len(), 2);
-    let session = sessions.iter().find(|s| s.title == "session-B").unwrap();
+    let session = sessions
+        .iter()
+        .find(|s| s.title == "session B prompt")
+        .unwrap();
     let transcript = database.messages(&session.id, 50, None).unwrap().messages;
     assert_eq!(
         transcript
@@ -356,11 +355,7 @@ fn application_exit(
             screen.feed(&bytes[..n]);
             let text = screen.text();
             let keys: Option<&[u8]> = match stage {
-                0 if text.contains("No session") => Some(b"n"),
-                1 if text.contains("optional system instructions") => Some(b"\r"),
-                2 if text.contains("New conversation") && text.contains("Prompt:") => {
-                    Some(b"exit recovery probe\r")
-                }
+                0 if text.contains("What would you like") => Some(b"exit recovery probe\x1b\r"),
                 _ => None,
             };
             if let Some(keys) = keys {
@@ -378,7 +373,7 @@ fn application_exit(
         );
         thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(stage, 3);
+    assert_eq!(stage, 1);
     if display_failure {
         drop(output);
     } else {
@@ -466,7 +461,6 @@ fn loop_conversations() {
         ChatOptions {
             database_path: path.clone(),
             profile: "loop".into(),
-            max_active: 4,
             run: mf_tui::run::RunOptions {
                 inputs: Some(
                     serde_json::json!({
@@ -490,28 +484,26 @@ fn loop_conversations() {
             thread::sleep(Duration::from_millis(10));
         }
     };
-    assert!(matches!(next(), ChatEvent::Sessions { .. }));
-    controller
-        .send(ChatCommand::Create {
-            system: None,
-            title: None,
-        })
-        .unwrap();
-    let ChatEvent::Created(session) = next() else {
-        panic!("expected loop session")
-    };
+    let mut session_id = None;
     let mut invocations = vec![];
     for prompt in ["first turn", "failed turn"] {
         controller
             .send(ChatCommand::Submit {
-                session_id: session.id.clone(),
+                session_id: session_id.clone(),
                 prompt: prompt.into(),
             })
             .unwrap();
         loop {
             match next() {
-                ChatEvent::Submitted { invocation, .. } => invocations.push(invocation),
-                ChatEvent::Observing { .. } => {}
+                ChatEvent::Submitted {
+                    session,
+                    invocation,
+                    ..
+                } => {
+                    session_id = Some(session.id);
+                    invocations.push(invocation);
+                }
+                ChatEvent::Observing(_) => {}
                 ChatEvent::Finished {
                     resolution,
                     status,
@@ -520,6 +512,7 @@ fn loop_conversations() {
                 } => {
                     assert!(status.unwrap().success());
                     assert!(capture_error.is_none());
+                    let resolution = resolution.unwrap();
                     assert!(resolution.diagnostics.is_empty());
                     if prompt == "first turn" {
                         let CompletionState::Committed(completion) = resolution.state else {
@@ -540,7 +533,7 @@ fn loop_conversations() {
                     }
                     break;
                 }
-                ChatEvent::Failed { source, .. } | ChatEvent::Error { source, .. } => {
+                ChatEvent::Error { source, .. } => {
                     panic!("loop controller failed: {source}")
                 }
                 _ => panic!("unexpected loop event"),
@@ -549,7 +542,10 @@ fn loop_conversations() {
     }
     controller.close().unwrap();
     let database = ChatDatabase::open(path).unwrap();
-    let history = database.history(&session.id, 4096).unwrap().history;
+    let history = database
+        .history(session_id.as_ref().unwrap(), 4096)
+        .unwrap()
+        .history;
     assert_eq!(history.len(), 2);
     assert_eq!(
         serde_json::to_value(&history[1].metadata).unwrap(),

@@ -1,20 +1,24 @@
 use super::*;
 use crate::run::{ObservationView, SignalGuard, TerminalGuard, terminal_area};
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    event::{DisableBracketedPaste, EnableBracketedPaste},
+    event::{
+        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+        KeyModifiers,
+    },
     execute,
 };
 use ratatui::{
     Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
-    style::{Color, Style},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    style::{Color, Modifier, Style},
+    text::Line,
+    widgets::{Block, Borders, Clear, List, ListState, Paragraph, Wrap},
 };
-use std::io::{IsTerminal, Write};
-
-const HELP: &str = "Enter edit | n new | r rename | a archive/restore | A archived | j/k session | p/o page | PgUp/PgDn scroll | c cancel | t model retry | s save reply | x abandon | u/U usage | g inspect | [/] turn | q quit";
+use std::{
+    collections::BTreeMap,
+    io::{IsTerminal, Write},
+};
 const MAX_EDITOR_BYTES: usize = 256 * 1024;
 
 pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
@@ -26,13 +30,13 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
     let area = terminal_area().context(IoSnafu {
         operation: "read terminal size",
     })?;
-    let mut state = ChatView::new(
+    let mut view = ChatView::new(
         &launch
             .manifest
             .description()
             .map_err(mf_chat::ChatError::from)?,
     )?;
-    let mut controller = ChatController::open(launch)?;
+    let controller = ChatController::open(launch)?;
     let signal = SignalGuard::register().context(IoSnafu {
         operation: "register interrupt handler",
     })?;
@@ -54,13 +58,12 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
         })?;
         loop {
             while let Some(event) = controller.try_event() {
-                state.event(event, &controller);
+                view.event(event, &controller);
             }
-            state.trim_observations();
             if signal.interrupted.swap(false, Ordering::Relaxed) {
-                break;
+                controller.cancel();
             }
-            state.draw(&mut terminal)?;
+            view.draw(&mut terminal)?;
             if !event::poll(Duration::from_millis(50)).context(IoSnafu {
                 operation: "poll terminal",
             })? {
@@ -76,16 +79,12 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
                             operation: "resize terminal",
                         })?;
                 }
-                Event::Paste(text) => {
-                    if state.focus != Focus::Navigate {
-                        state
-                            .editor_mut()
-                            .insert(&text.replace("\r\n", "\n").replace('\r', "\n"));
-                    }
-                }
+                Event::Paste(text) if view.mode == Mode::Input => view
+                    .editor
+                    .insert(&text.replace("\r\n", "\n").replace('\r', "\n")),
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat)
-                        && state.key(key, &controller) =>
+                        && view.key(key, &controller) =>
                 {
                     break;
                 }
@@ -95,16 +94,14 @@ pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
         Ok::<(), ChatRunError>(())
     })();
     *terminal.backend_mut() = CrosstermBackend::new(Box::new(io::sink()));
-    let cleanup = controller.join_workers();
+    let cleanup = controller.close();
     let _ = execute!(io::stderr(), DisableBracketedPaste);
     drop(terminal);
     drop(guard);
-    drop(controller);
     cleanup?;
     result?;
     Ok(0)
 }
-
 fn safe(text: &str) -> String {
     text.chars()
         .flat_map(|c| {
@@ -191,88 +188,71 @@ impl Editor {
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
-enum Focus {
+enum Mode {
     #[default]
-    Navigate,
-    Prompt,
-    NewSystem,
-    Rename,
+    Input,
+    Browse,
+    Commands,
+    Sessions,
+    Inspect,
 }
-struct ActiveTurn {
-    prompt: String,
-    invocation: Invocation,
-    cancel: Arc<AtomicBool>,
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Action {
+    New,
+    Switch,
+    Retry,
+    Save,
+    Discard,
+    Inspect,
+    Earlier,
+    Latest,
+    Quit,
 }
-struct TurnNotice {
-    invocation: Invocation,
-    state: String,
-    detail: String,
-    unsaved: Option<String>,
-    retained: bool,
-}
+
 struct ChatView {
-    sessions: Vec<Session>,
-    selected: usize,
-    archived: bool,
-    sessions_after: Option<String>,
+    session: Option<Session>,
     page: Option<MessagePage>,
-    page_after: Option<i64>,
-    previous_pages: Vec<Option<i64>>,
-    scroll: u16,
+    earlier: bool,
+    editor: Editor,
     drafts: BTreeMap<String, Editor>,
-    form: Editor,
-    focus: Focus,
-    pending: BTreeMap<String, Option<u64>>,
-    active: BTreeMap<String, ActiveTurn>,
-    turns: BTreeMap<String, TurnNotice>,
-    observations: VecDeque<(Invocation, LocalObservation)>,
-    observation_offset: usize,
+    mode: Mode,
+    selected: usize,
+    sessions: Option<SessionPage>,
+    sessions_after: Option<String>,
+    pending: Option<Option<u64>>,
+    active: Option<(Invocation, String)>,
+    retained: bool,
+    unsaved: Option<String>,
+    observation: Option<LocalObservation>,
     inspector: ObservationView,
-    inspecting: bool,
-    evicted: usize,
+    scroll: u16,
     notice: String,
-    usage: Option<(Option<String>, UsageStatistics)>,
-    creating: bool,
+    outcome: String,
 }
 impl ChatView {
     fn new(
         description: &mf_telemetry::description::WorkflowDescription,
     ) -> Result<Self, ChatRunError> {
         Ok(Self {
-            sessions: vec![],
-            selected: 0,
-            archived: false,
-            sessions_after: None,
+            session: None,
             page: None,
-            page_after: None,
-            previous_pages: vec![],
-            scroll: 0,
+            earlier: false,
+            editor: Editor::default(),
             drafts: BTreeMap::new(),
-            form: Editor::default(),
-            focus: Focus::Navigate,
-            pending: BTreeMap::new(),
-            active: BTreeMap::new(),
-            turns: BTreeMap::new(),
-            observations: VecDeque::new(),
-            observation_offset: 0,
+            mode: Mode::Input,
+            selected: 0,
+            sessions: None,
+            sessions_after: None,
+            pending: None,
+            active: None,
+            retained: false,
+            unsaved: None,
+            observation: None,
             inspector: ObservationView::new(description)?,
-            inspecting: false,
-            evicted: 0,
-            notice: HELP.into(),
-            usage: None,
-            creating: false,
+            scroll: 0,
+            notice: "Start a conversation, or Ctrl+S to resume one".into(),
+            outcome: String::new(),
         })
-    }
-    fn session_id(&self) -> Option<String> {
-        self.sessions.get(self.selected).map(|s| s.id.clone())
-    }
-    fn editor_mut(&mut self) -> &mut Editor {
-        if self.focus == Focus::Prompt
-            && let Some(id) = self.session_id()
-        {
-            return self.drafts.entry(id).or_default();
-        }
-        &mut self.form
     }
     fn send(&mut self, controller: &ChatController, command: ChatCommand) -> bool {
         match controller.send(command) {
@@ -283,842 +263,559 @@ impl ChatView {
             }
         }
     }
-    fn load(&mut self, controller: &ChatController) {
-        if let Some(session_id) = self.session_id() {
+    fn load(&mut self, controller: &ChatController, before: Option<i64>) {
+        if let Some(session) = &self.session {
             self.send(
                 controller,
                 ChatCommand::Load {
-                    session_id,
-                    after: self.page_after,
+                    session_id: session.id.clone(),
+                    before,
                 },
             );
         }
     }
-    fn select(&mut self, index: usize, controller: &ChatController) {
-        self.selected = index.min(self.sessions.len().saturating_sub(1));
+    fn switch(&mut self, session: Option<Session>) {
+        let old = self
+            .session
+            .as_ref()
+            .map(|s| s.id.clone())
+            .unwrap_or_default();
+        self.drafts.insert(old, std::mem::take(&mut self.editor));
+        let new = session.as_ref().map(|s| s.id.clone()).unwrap_or_default();
+        self.editor = self.drafts.remove(&new).unwrap_or_default();
+        self.session = session;
         self.page = None;
-        self.page_after = None;
-        self.previous_pages.clear();
+        self.earlier = false;
+        self.observation = None;
         self.scroll = 0;
-        self.observation_offset = 0;
-        self.usage = None;
-        self.load(controller);
+        self.outcome.clear();
+        self.notice.clear();
+        self.mode = Mode::Input;
     }
     fn event(&mut self, event: ChatEvent, controller: &ChatController) {
+        let selected_action = (self.mode == Mode::Commands)
+            .then(|| self.actions().get(self.selected).map(|(action, _)| *action))
+            .flatten();
         match event {
-            ChatEvent::Sessions {
-                archived,
-                page: list,
-            } => {
-                if archived != self.archived {
-                    return;
-                }
-                let selected_id = self.session_id();
-                self.sessions = list.sessions;
-                self.sessions_after = list.next_after;
-                let index = selected_id
-                    .and_then(|id| self.sessions.iter().position(|s| s.id == id))
-                    .unwrap_or(0);
-                self.select(index, controller);
+            ChatEvent::Sessions(page) => {
+                self.sessions = Some(page);
+                self.selected = 0;
             }
-            ChatEvent::Loaded {
-                session,
-                page,
-                after,
-            } => {
-                if self.session_id().as_deref() == Some(&session.id) && self.page_after == after {
-                    self.sessions[self.selected] = session;
+            ChatEvent::Loaded { session, page } => {
+                if self.session.as_ref().is_some_and(|s| s.id == session.id) {
+                    self.session = Some(session);
                     self.page = Some(page);
+                    self.scroll = 0;
                 }
-            }
-            ChatEvent::Created(session) => {
-                self.creating = false;
-                self.archived = false;
-                let id = session.id.clone();
-                self.sessions.push(session);
-                self.sessions.sort_by(|left, right| {
-                    (left.created_at, &left.id).cmp(&(right.created_at, &right.id))
-                });
-                let selected = self
-                    .sessions
-                    .iter()
-                    .position(|session| session.id == id)
-                    .expect("created session is listed");
-                self.select(selected, controller);
-                self.focus = Focus::Prompt;
-                self.form = Editor::default();
-            }
-            ChatEvent::Changed(session) => {
-                if let Some(old) = self.sessions.iter_mut().find(|s| s.id == session.id) {
-                    *old = session.clone();
-                }
-                self.notice = format!(
-                    "Session {}: {}",
-                    session.title,
-                    if session.archived {
-                        "archived"
-                    } else {
-                        "active"
-                    }
-                );
-                self.load(controller);
             }
             ChatEvent::Submitted {
+                session,
+                invocation,
                 prompt,
-                invocation,
-                cancel,
             } => {
-                if let Some(Some(revision)) = self.pending.remove(&invocation.session_id)
-                    && let Some(editor) = self.drafts.get_mut(&invocation.session_id)
-                    && editor.revision == revision
-                {
-                    *editor = Editor::default();
+                if self.pending.take() == Some(Some(self.editor.revision)) {
+                    self.editor = Editor::default();
                 }
-                self.turns.remove(&invocation.session_id);
-                self.active.insert(
-                    invocation.session_id.clone(),
-                    ActiveTurn {
-                        prompt,
-                        invocation,
-                        cancel,
-                    },
-                );
-                self.load(controller);
+                self.session = Some(session);
+                self.active = Some((invocation, prompt));
+                self.observation = None;
+                self.unsaved = None;
+                self.outcome.clear();
+                self.notice = "Working... Ctrl+C to cancel".into();
+                self.scroll = 0;
             }
-            ChatEvent::Observing {
-                invocation,
-                observation,
-            } => {
-                self.observations.push_back((invocation, observation));
-            }
+            ChatEvent::Observing(observation) => self.observation = Some(observation),
             ChatEvent::Finished {
-                invocation,
                 resolution,
-                status,
                 stderr,
                 capture_error,
+                ..
             } => {
-                let active = self.active.remove(&invocation.session_id);
-                if matches!(&resolution.state, CompletionState::NotBegun) {
-                    self.restore_prompt(&invocation.session_id, active);
-                }
-                let workflow_error = match &resolution.state {
-                    CompletionState::Finished(turn) => turn.error.as_deref(),
-                    _ => None,
-                };
-                let workflow_error = workflow_error.map(|error| format!("\nWorkflow: {error}"));
-                let (state, unsaved) = match resolution.state {
-                    CompletionState::Committed(_) => ("committed".into(), None),
-                    CompletionState::Uncommitted(pending) => {
-                        ("uncommitted".into(), Some(pending.completion.reply.text))
+                self.active = None;
+                self.pending = None;
+                self.retained = false;
+                self.unsaved = None;
+                match resolution {
+                    Ok(resolution) => {
+                        let mut details: Vec<_> = resolution
+                            .diagnostics
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect();
+                        match resolution.state {
+                            CompletionState::Committed(_) => self.notice = "Saved".into(),
+                            CompletionState::Uncommitted(pending) => {
+                                self.retained = true;
+                                self.unsaved = Some(pending.completion.reply.text);
+                                self.notice =
+                                    "Reply not saved. Ctrl+P to save or discard it".into();
+                            }
+                            CompletionState::Finished(turn) => {
+                                self.notice = format!("Turn {}. Ctrl+P for recovery", turn.state);
+                                if let Some(error) = turn.error {
+                                    details.push(error);
+                                }
+                            }
+                            CompletionState::NotBegun => self.notice = "Turn did not start".into(),
+                        }
+                        self.outcome = details.join("\n");
                     }
-                    CompletionState::Finished(turn) => (turn.state, None),
-                    CompletionState::NotBegun => ("not begun".into(), None),
-                };
-                let mut detail = format!(
-                    "Process: {}\nOutput: {}\n{}{}",
-                    status.map_or_else(|| "save-only operation".into(), |s| s.to_string()),
-                    capture_error.as_deref().unwrap_or("captured"),
-                    resolution
-                        .diagnostics
+                    Err(error) => {
+                        self.retained = true;
+                        self.notice = "Result needs recovery. Ctrl+P to save or discard it".into();
+                        self.outcome = error.to_string();
+                    }
+                }
+                if let Some(error) = capture_error {
+                    self.outcome.push_str(&format!("\n{error}"));
+                }
+                if !stderr.is_empty() {
+                    self.outcome.push_str(&format!("\n{stderr}"));
+                }
+                self.earlier = false;
+                self.load(controller, None);
+            }
+            ChatEvent::Error { admission, source } => {
+                if admission {
+                    self.pending = None;
+                    if let Some((_, prompt)) = self.active.take()
+                        && self.editor.text.is_empty()
+                    {
+                        self.editor.insert(&prompt);
+                    }
+                    self.load(controller, None);
+                }
+                self.notice = source.to_string();
+            }
+        }
+        if self.mode == Mode::Commands {
+            self.selected = selected_action
+                .and_then(|selected| {
+                    self.actions()
                         .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join("\n"),
-                    if stderr.is_empty() {
-                        String::new()
-                    } else {
-                        format!("\nStderr: {stderr}")
-                    }
-                );
-                if let Some(error) = workflow_error {
-                    detail.push_str(&error);
-                }
-                if status.is_none()
-                    && let Some(previous) = self.turns.get(&invocation.session_id)
-                {
-                    detail = format!("{}\nPersistence operation: {state}", previous.detail);
-                }
-                self.notice = format!("Turn {}: {state}", invocation.turn_id);
-                self.turns.insert(
-                    invocation.session_id.clone(),
-                    TurnNotice {
-                        invocation: invocation.clone(),
-                        state,
-                        detail,
-                        retained: unsaved.is_some(),
-                        unsaved,
-                    },
-                );
-                if self.session_id().as_deref() == Some(&invocation.session_id) {
-                    self.load(controller);
-                }
-            }
-            ChatEvent::RecoveryBlocked {
-                invocation,
-                status,
-                stderr,
-                capture_error,
-                source,
-            } => {
-                self.active.remove(&invocation.session_id);
-                self.notice =
-                    "Reconciliation failed; s retries facts and saving, x reconciles and abandons"
-                        .into();
-                self.turns.insert(
-                    invocation.session_id.clone(),
-                    TurnNotice {
-                        invocation,
-                        state: "reconciliation pending".into(),
-                        detail: format!(
-                            "Process: {status}\nOutput: {}\n{source}\n{stderr}",
-                            capture_error.as_deref().unwrap_or("captured")
-                        ),
-                        unsaved: None,
-                        retained: true,
-                    },
-                );
-            }
-            ChatEvent::Failed { invocation, source } => {
-                let active = self.active.remove(&invocation.session_id);
-                self.restore_prompt(&invocation.session_id, active);
-                self.notice = source.to_string();
-                self.load(controller);
-            }
-            ChatEvent::Usage {
-                session_id,
-                statistics,
-            } => {
-                if session_id.is_none() || session_id == self.session_id() {
-                    self.usage = Some((session_id, statistics));
-                }
-            }
-            ChatEvent::Error {
-                admission,
-                session_id,
-                source,
-            } => {
-                if admission && let Some(id) = session_id {
-                    self.pending.remove(&id);
-                }
-                self.creating = false;
-                self.notice = source.to_string();
-            }
+                        .position(|(action, _)| *action == selected)
+                })
+                .unwrap_or(0);
         }
     }
-    fn restore_prompt(&mut self, id: &str, active: Option<ActiveTurn>) {
-        if let Some(active) = active {
-            let editor = self.drafts.entry(id.into()).or_default();
-            if editor.text.is_empty() {
-                editor.insert(&active.prompt);
-            }
+    fn retry_turn(&self) -> Option<String> {
+        if self.earlier {
+            return None;
         }
+        self.page
+            .as_ref()?
+            .messages
+            .last()
+            .filter(|m| {
+                matches!(
+                    m.turn_state.as_str(),
+                    "failed" | "cancelled" | "interrupted"
+                )
+            })
+            .map(|m| m.message.turn_id.clone())
     }
-    fn trim_observations(&mut self) {
-        // Supervision can fail without an exit status, so use invocation ownership.
-        let active = &self.active;
-        let finished = |(invocation, _): &(Invocation, LocalObservation)| {
-            active
-                .get(&invocation.session_id)
-                .is_none_or(|turn| turn.invocation.call_id != invocation.call_id)
-        };
-        while self.observations.iter().filter(|run| finished(run)).count() > MAX_RETAINED_CHAT_RUNS
+    fn actions(&self) -> Vec<(Action, &'static str)> {
+        let mut actions = vec![(Action::New, "New chat"), (Action::Switch, "Switch chat")];
+        if self.retained {
+            actions.push((Action::Save, "Save reply without running again"));
+            actions.push((Action::Discard, "Discard unsaved reply"));
+        } else if self.retry_turn().is_some() {
+            actions.push((Action::Retry, "Retry failed turn"));
+        }
+        if self.observation.is_some() {
+            actions.push((Action::Inspect, "Inspect current run"));
+        }
+        if self
+            .page
+            .as_ref()
+            .and_then(|p| p.messages.first())
+            .is_some_and(|m| m.message.sequence > 0)
         {
-            if let Some(index) = self.observations.iter().position(finished) {
-                self.observations.remove(index);
-                self.evicted += 1;
-            }
+            actions.push((Action::Earlier, "Earlier messages"));
         }
+        if self.earlier {
+            actions.push((Action::Latest, "Latest messages"));
+        }
+        actions.push((Action::Quit, "Quit"));
+        actions
     }
-    fn observation(&self) -> Option<&LocalObservation> {
-        let id = self.session_id()?;
-        self.observations
-            .iter()
-            .rev()
-            .filter(|(invocation, _)| invocation.session_id == id)
-            .nth(self.observation_offset)
-            .map(|(_, run)| run)
+    fn act(&mut self, action: Action, controller: &ChatController) -> bool {
+        self.mode = Mode::Input;
+        match action {
+            Action::New | Action::Switch
+                if controller.busy()
+                    || self.pending.is_some()
+                    || self.active.is_some()
+                    || self.retained =>
+            {
+                self.notice =
+                    "Cancel the current turn or recover its reply before switching".into();
+            }
+            Action::New => self.switch(None),
+            Action::Switch => {
+                self.sessions = None;
+                self.sessions_after = None;
+                self.selected = 0;
+                if self.send(controller, ChatCommand::ListSessions { after: None }) {
+                    self.mode = Mode::Sessions;
+                }
+            }
+            Action::Retry => {
+                if let Some(turn_id) = self.retry_turn()
+                    && self.send(controller, ChatCommand::Retry { turn_id })
+                {
+                    self.pending = Some(None);
+                    self.notice = "Starting retry...".into();
+                }
+            }
+            Action::Save => {
+                self.send(controller, ChatCommand::Save);
+            }
+            Action::Discard => {
+                self.send(controller, ChatCommand::Abandon);
+            }
+            Action::Inspect => self.mode = Mode::Inspect,
+            Action::Earlier => {
+                if let Some(first) = self.page.as_ref().and_then(|p| p.messages.first()) {
+                    let before = first.message.sequence;
+                    self.earlier = true;
+                    self.load(controller, Some(before));
+                }
+            }
+            Action::Latest => {
+                self.earlier = false;
+                self.load(controller, None);
+            }
+            Action::Quit => return true,
+        }
+        false
+    }
+    fn submit(&mut self, controller: &ChatController) {
+        if self.editor.text.trim().is_empty() {
+            return;
+        }
+        if self.send(
+            controller,
+            ChatCommand::Submit {
+                session_id: self.session.as_ref().map(|s| s.id.clone()),
+                prompt: self.editor.text.clone(),
+            },
+        ) {
+            self.pending = Some(Some(self.editor.revision));
+            self.mode = Mode::Input;
+            self.notice = "Starting...".into();
+            self.earlier = false;
+        }
     }
     fn key(&mut self, key: KeyEvent, controller: &ChatController) -> bool {
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            return true;
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            match key.code {
+                KeyCode::Char('q') => return true,
+                KeyCode::Char('c') => {
+                    controller.cancel();
+                    self.notice = "Cancellation requested".into();
+                    return false;
+                }
+                KeyCode::Char('p') => {
+                    self.mode = Mode::Commands;
+                    self.selected = 0;
+                    return false;
+                }
+                KeyCode::Char('n') => return self.act(Action::New, controller),
+                KeyCode::Char('s') => return self.act(Action::Switch, controller),
+                KeyCode::Char('u') if self.mode == Mode::Input => {
+                    self.editor.text.clear();
+                    self.editor.cursor = 0;
+                    self.editor.revision = self.editor.revision.wrapping_add(1);
+                    return false;
+                }
+                _ => {}
+            }
         }
-        if self.inspecting {
-            if key.code == KeyCode::Esc {
-                self.inspecting = false;
-            } else {
-                let id = self.session_id();
-                let offset = self.observation_offset;
-                if let Some(run) = self
-                    .observations
-                    .iter()
-                    .rev()
-                    .filter(|(inv, _)| Some(&inv.session_id) == id.as_ref())
-                    .nth(offset)
-                    .map(|(_, run)| run)
-                {
+        match self.mode {
+            Mode::Inspect => {
+                if key.code == KeyCode::Esc {
+                    self.mode = Mode::Input;
+                } else if let Some(run) = &self.observation {
                     self.inspector.handle_key(key.code, run);
                 }
             }
-            return false;
-        }
-        if self.focus != Focus::Navigate {
-            match key.code {
-                KeyCode::Esc => {
-                    self.focus = Focus::Navigate;
-                    self.notice = HELP.into();
-                }
-                KeyCode::Enter
-                    if key
-                        .modifiers
-                        .intersects(KeyModifiers::ALT | KeyModifiers::SHIFT)
-                        && self.focus != Focus::Rename =>
-                {
-                    self.editor_mut().insert("\n")
-                }
-                KeyCode::Enter => match self.focus {
-                    Focus::Prompt => {
-                        if let Some(id) = self.session_id() {
-                            let busy = self.pending.contains_key(&id)
-                                || self.active.contains_key(&id)
-                                || self.turns.get(&id).is_some_and(|t| t.retained);
-                            if busy {
-                                self.notice = "Session has unresolved work; cancel, save, or abandon it first".into();
-                            } else {
-                                let editor = self.drafts.entry(id.clone()).or_default();
-                                let prompt = editor.text.clone();
-                                let revision = editor.revision;
-                                if !prompt.trim().is_empty()
-                                    && self.send(
-                                        controller,
-                                        ChatCommand::Submit {
-                                            session_id: id.clone(),
-                                            prompt,
-                                        },
-                                    )
-                                {
-                                    self.pending.insert(id, Some(revision));
-                                    self.notice = "Submission pending".into();
-                                }
-                            }
+            Mode::Commands | Mode::Sessions => {
+                let count = if self.mode == Mode::Commands {
+                    self.actions().len()
+                } else {
+                    self.session_rows().len()
+                };
+                match key.code {
+                    KeyCode::Esc => self.mode = Mode::Input,
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        self.selected = self.selected.saturating_sub(1)
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        self.selected = (self.selected + 1).min(count.saturating_sub(1))
+                    }
+                    KeyCode::Enter if self.mode == Mode::Commands => {
+                        if let Some((action, _)) = self.actions().get(self.selected) {
+                            return self.act(*action, controller);
                         }
                     }
-                    Focus::NewSystem => {
-                        if !self.creating {
-                            let system =
-                                (!self.form.text.is_empty()).then(|| self.form.text.clone());
-                            if self.send(
-                                controller,
-                                ChatCommand::Create {
-                                    system,
-                                    title: None,
-                                },
-                            ) {
-                                self.creating = true;
-                                self.focus = Focus::Navigate;
-                            }
-                        }
-                    }
-                    Focus::Rename => {
-                        if let Some(session_id) = self.session_id()
-                            && self.send(
-                                controller,
-                                ChatCommand::Rename {
-                                    session_id,
-                                    title: self.form.text.clone(),
-                                },
-                            )
-                        {
-                            self.focus = Focus::Navigate;
-                        }
-                    }
-                    Focus::Navigate => {}
-                },
-                _ => self.editor_mut().key(key),
-            }
-            return false;
-        }
-        match key.code {
-            KeyCode::Char('q') => return true,
-            KeyCode::Enter => {
-                if self.session_id().is_some() {
-                    self.focus = Focus::Prompt;
-                    self.usage = None;
+                    KeyCode::Enter => self.choose_session(controller),
+                    _ => {}
                 }
             }
-            KeyCode::Char('n') => {
-                self.form = Editor::default();
-                self.focus = Focus::NewSystem;
-                self.notice =
-                    "Optional system instructions: Enter create; Alt-Enter newline; Esc cancel"
-                        .into();
-            }
-            KeyCode::Char('r') => {
-                if let Some(session) = self.sessions.get(self.selected) {
-                    self.form = Editor {
-                        text: session.title.clone(),
-                        cursor: session.title.len(),
-                        revision: 0,
-                    };
-                    self.focus = Focus::Rename;
+            Mode::Input => match key.code {
+                KeyCode::Esc => self.mode = Mode::Browse,
+                KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+                    self.submit(controller)
                 }
-            }
-            KeyCode::Char('a') => {
-                if let Some(session) = self.sessions.get(self.selected) {
-                    self.send(
-                        controller,
-                        ChatCommand::Archive {
-                            session_id: session.id.clone(),
-                            archived: !session.archived,
-                        },
-                    );
-                }
-            }
-            KeyCode::Char('A') => {
-                self.archived = !self.archived;
-                self.send(
-                    controller,
-                    ChatCommand::ListSessions {
-                        archived: self.archived,
-                        after: None,
-                    },
-                );
-            }
-            KeyCode::Char('j') | KeyCode::Down => self.select(self.selected + 1, controller),
-            KeyCode::Char('k') | KeyCode::Up => {
-                self.select(self.selected.saturating_sub(1), controller)
-            }
-            KeyCode::Char('N') => {
-                if let Some(after) = &self.sessions_after {
-                    self.send(
-                        controller,
-                        ChatCommand::ListSessions {
-                            archived: self.archived,
-                            after: Some(after.clone()),
-                        },
-                    );
-                }
-            }
-            KeyCode::Char('B') => {
-                self.send(
-                    controller,
-                    ChatCommand::ListSessions {
-                        archived: self.archived,
-                        after: None,
-                    },
-                );
-            }
-            KeyCode::Char('p') => {
-                if let Some(after) = self.page.as_ref().and_then(|p| p.next_after) {
-                    self.previous_pages.push(self.page_after);
-                    self.page_after = Some(after);
-                    self.scroll = 0;
-                    self.load(controller);
-                }
-            }
-            KeyCode::Char('o') => {
-                if let Some(after) = self.previous_pages.pop() {
-                    self.page_after = after;
-                    self.scroll = 0;
-                    self.load(controller);
-                }
-            }
-            KeyCode::PageDown => self.scroll = self.scroll.saturating_add(10),
-            KeyCode::PageUp => self.scroll = self.scroll.saturating_sub(10),
-            KeyCode::Char('c') => {
-                if let Some(active) = self.session_id().and_then(|id| self.active.get(&id)) {
-                    active.cancel.store(true, Ordering::Release);
-                    self.notice = "Cancellation pending".into();
-                }
-            }
-            KeyCode::Char('t') => {
-                if let Some(turn_id) = self
-                    .page
-                    .as_ref()
-                    .and_then(|p| {
-                        p.messages.iter().rev().find(|m| {
-                            matches!(
-                                m.turn_state.as_str(),
-                                "failed" | "cancelled" | "interrupted"
-                            )
-                        })
-                    })
-                    .map(|m| m.message.turn_id.clone())
-                    && let Some(id) = self.session_id()
-                    && !self.pending.contains_key(&id)
-                    && !self.active.contains_key(&id)
-                    && self.send(
-                        controller,
-                        ChatCommand::Retry {
-                            session_id: id.clone(),
-                            turn_id,
-                        },
-                    )
-                {
-                    self.pending.insert(id, None);
-                }
-            }
-            KeyCode::Char('s') | KeyCode::Char('x') => {
-                if let Some(call_id) = self
-                    .session_id()
-                    .and_then(|id| self.turns.get(&id))
-                    .filter(|turn| turn.retained)
-                    .map(|turn| turn.invocation.call_id.clone())
-                {
-                    let abandon = key.code == KeyCode::Char('x');
-                    if self.send(
-                        controller,
-                        if abandon {
-                            ChatCommand::Abandon { call_id }
-                        } else {
-                            ChatCommand::Save { call_id }
-                        },
-                    ) {
-                        self.notice = if abandon {
-                            "Abandonment pending"
-                        } else {
-                            "Save-only retry pending"
-                        }
-                        .into();
-                    }
-                }
-            }
-            KeyCode::Char('u') | KeyCode::Char('U') => {
-                self.send(
-                    controller,
-                    ChatCommand::Usage {
-                        session_id: if key.code == KeyCode::Char('U') {
-                            None
-                        } else {
-                            self.session_id()
-                        },
-                    },
-                );
-            }
-            KeyCode::Char('g') => {
-                if self.observation().is_some() {
-                    self.inspecting = true;
-                }
-            }
-            KeyCode::Char('[') => {
-                self.observation_offset = self.observation_offset.saturating_add(1);
-                if self.observation().is_none() {
-                    self.observation_offset = self.observation_offset.saturating_sub(1);
-                }
-            }
-            KeyCode::Char(']') => {
-                self.observation_offset = self.observation_offset.saturating_sub(1)
-            }
-            _ => {}
+                KeyCode::Enter => self.editor.insert("\n"),
+                KeyCode::PageUp => self.scroll = self.scroll.saturating_add(10),
+                KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(10),
+                _ => self.editor.key(key),
+            },
+            Mode::Browse => match key.code {
+                KeyCode::Enter => self.submit(controller),
+                KeyCode::Char('i') | KeyCode::Esc => self.mode = Mode::Input,
+                KeyCode::Up | KeyCode::Char('k') => self.scroll = self.scroll.saturating_add(1),
+                KeyCode::Down | KeyCode::Char('j') => self.scroll = self.scroll.saturating_sub(1),
+                KeyCode::PageUp => self.scroll = self.scroll.saturating_add(10),
+                KeyCode::PageDown => self.scroll = self.scroll.saturating_sub(10),
+                _ => {}
+            },
         }
         false
+    }
+    fn session_rows(&self) -> Vec<String> {
+        let Some(page) = &self.sessions else {
+            return vec!["Loading...".into()];
+        };
+        let mut rows: Vec<_> = page
+            .sessions
+            .iter()
+            .map(|session| safe(&session.title).replace('\n', " "))
+            .collect();
+        if page.next_after.is_some() {
+            rows.push("More chats...".into());
+        }
+        if self.sessions_after.is_some() {
+            rows.push("First page".into());
+        }
+        if rows.is_empty() {
+            rows.push("No saved chats yet".into());
+        }
+        rows
+    }
+    fn choose_session(&mut self, controller: &ChatController) {
+        let Some(page) = &self.sessions else {
+            return;
+        };
+        if let Some(session) = page.sessions.get(self.selected).cloned() {
+            self.switch(Some(session));
+            self.load(controller, None);
+        } else {
+            let next = if self.selected == page.sessions.len() {
+                page.next_after.clone()
+            } else {
+                None
+            };
+            self.sessions_after = next.clone();
+            self.sessions = None;
+            self.send(controller, ChatCommand::ListSessions { after: next });
+        }
     }
     fn draw(
         &mut self,
         terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
     ) -> Result<(), ChatRunError> {
-        if self.inspecting {
-            let id = self.session_id();
-            let offset = self.observation_offset;
-            if let Some(run) = self
-                .observations
-                .iter()
-                .rev()
-                .filter(|(inv, _)| Some(&inv.session_id) == id.as_ref())
-                .nth(offset)
-                .map(|(_, run)| run)
-            {
-                self.inspector.draw(terminal, run)?;
-                return Ok(());
+        if self.mode == Mode::Inspect {
+            if let Some(observation) = &self.observation {
+                return self
+                    .inspector
+                    .draw(terminal, observation)
+                    .map_err(Into::into);
             }
-            self.inspecting = false;
+            self.mode = Mode::Input;
         }
-        terminal
-            .draw(|frame| {
-                let [header, body, input, footer] = Layout::vertical([
-                    Constraint::Length(2),
-                    Constraint::Min(1),
-                    Constraint::Length(6),
-                    Constraint::Length(3),
-                ])
-                .areas(frame.area());
-                let selected_id = self.session_id();
-                let status = selected_id
-                    .as_ref()
-                    .and_then(|id| self.turns.get(id))
-                    .map(|t| t.state.as_str())
-                    .unwrap_or("ready");
-                let title = self
-                    .sessions
-                    .get(self.selected)
-                    .map_or("No session", |s| s.title.as_str());
-                frame.render_widget(
-                    Paragraph::new(format!(
-                        "{} | {} | {}\nAutomatic titles: deferred; observation history evicted: {}",
-                        safe(title),
-                        if self.archived {
-                            "Archived sessions"
-                        } else {
-                            "Sessions"
-                        },
-                        status,
-                        self.evicted
-                    )),
-                    header,
-                );
-                let [list, transcript] =
-                    Layout::horizontal([Constraint::Percentage(25), Constraint::Percentage(75)])
-                        .areas(body);
-                let list_rows = self
-                    .sessions
-                    .iter()
-                    .enumerate()
-                    .map(|(index, s)| {
-                        format!(
-                            "{} {}{}{}",
-                            if index == self.selected { ">" } else { " " },
-                            safe(&s.title).replace('\n', "\\n"),
-                            if self.active.contains_key(&s.id) {
-                                " [running]"
-                            } else if self.pending.contains_key(&s.id) {
-                                " [pending]"
-                            } else {
-                                ""
-                            },
-                            if s.archived { " [archived]" } else { "" }
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let list_scroll = self
-                    .selected
-                    .saturating_sub(usize::from(list.height.saturating_sub(3)))
-                    as u16;
-                frame.render_widget(
-                    Paragraph::new(list_rows).scroll((list_scroll, 0)).block(
-                        Block::default()
-                            .title("Sessions (N next, B first)")
-                            .borders(Borders::ALL),
-                    ),
-                    list,
-                );
-                let text = if let Some((scope, stats)) = &self.usage {
-                    usage_text(scope.as_deref(), stats)
-                } else {
-                    let mut text = self
-                        .page
-                        .as_ref()
-                        .map(|p| {
-                            p.messages
-                                .iter()
-                                .map(|m| {
-                                    format!(
-                                        "{} [{}] {}:\n{}",
-                                        m.message.role,
-                                        m.turn_state,
-                                        m.message.turn_id,
-                                        safe(&m.message.content)
-                                    )
-                                })
-                                .collect::<Vec<_>>()
-                                .join("\n\n")
-                        })
-                        .unwrap_or_default();
-                    if let Some(turn) = selected_id.as_ref().and_then(|id| self.turns.get(id)) {
-                        if let Some(reply) = &turn.unsaved {
-                            text.push_str(&format!(
-                                "\n\nAssistant [uncommitted]:\n{}\nSave: s | Abandon: x",
-                                safe(reply)
-                            ));
-                        }
-                        text.push_str(&format!(
-                            "\n\nTurn {}: {}\n{}",
-                            turn.invocation.turn_id,
-                            turn.state,
-                            safe(&turn.detail)
-                        ));
-                    }
-                    if let Some(active) = selected_id.as_ref().and_then(|id| self.active.get(id)) {
-                        text.push_str(&format!("\n\nRunning turn {}", active.invocation.turn_id));
-                    }
-                    text
-                };
-                frame.render_widget(
-                    Paragraph::new(text)
-                        .scroll((self.scroll, 0))
-                        .wrap(Wrap { trim: false })
-                        .block(
-                            Block::default()
-                                .title("Transcript / outcomes / usage")
-                                .borders(Borders::ALL),
-                        ),
-                    transcript,
-                );
-                let (editor, label) = match self.focus {
-                    Focus::NewSystem => (
-                        Some(&self.form),
-                        "New session: optional system instructions",
-                    ),
-                    Focus::Rename => (Some(&self.form), "Rename session"),
-                    _ => (
-                        selected_id.as_ref().and_then(|id| self.drafts.get(id)),
-                        if self.focus == Focus::Navigate {
-                            "Prompt (Enter edit)"
-                        } else {
-                            "Prompt: Enter send; Alt/Shift-Enter newline; Esc navigate"
-                        },
-                    ),
-                };
-                let body = editor.map_or(String::new(), |editor| {
-                    editor.display(self.focus != Focus::Navigate)
-                });
-                let scroll = body
-                    .lines()
-                    .count()
-                    .saturating_sub(usize::from(input.height.saturating_sub(2)))
-                    as u16;
-                frame.render_widget(
-                    Paragraph::new(body)
-                        .scroll((scroll, 0))
-                        .wrap(Wrap { trim: false })
-                        .style(Style::default().fg(if self.focus == Focus::Navigate {
-                            Color::Gray
-                        } else {
-                            Color::White
-                        }))
-                        .block(Block::default().title(label).borders(Borders::ALL)),
-                    input,
-                );
-                frame.render_widget(
-                    Paragraph::new(format!("{}\n{HELP}", safe(&self.notice)))
-                        .wrap(Wrap { trim: false }),
-                    footer,
-                );
-            })
-            .context(IoSnafu {
-                operation: "draw chat",
-            })?;
+        terminal.draw(|frame| self.render(frame)).context(IoSnafu {
+            operation: "draw chat",
+        })?;
         Ok(())
     }
-}
-fn usage_text(scope: Option<&str>, statistics: &UsageStatistics) -> String {
-    let summary = &statistics.overall;
-    let counter = |label: &str, value: &mf_chat::TokenCounter| {
-        format!(
-            "{label}: {} (reported {}, missing {})",
-            value.known_subtotal.map_or_else(
-                || "unknown".into(),
-                |count| if value.missing_calls > 0 {
-                    format!("{count} partial")
+    fn render(&self, frame: &mut ratatui::Frame) {
+        let area = frame.area();
+        let input = self.editor.display(self.mode == Mode::Input);
+        let input_lines = Paragraph::new(input.clone())
+            .wrap(Wrap { trim: false })
+            .line_count(area.width.saturating_sub(2));
+        let input_height = (input_lines as u16)
+            .saturating_add(2)
+            .clamp(3, (area.height / 3).max(3));
+        let [header, body, input_area, footer] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(input_height),
+            Constraint::Length(2),
+        ])
+        .areas(area);
+        let title = self
+            .session
+            .as_ref()
+            .map_or("New chat", |s| s.title.as_str());
+        frame.render_widget(
+            Paragraph::new(format!("mf chat  /  {}", safe(title)))
+                .style(Style::default().fg(Color::DarkGray)),
+            header,
+        );
+        let mut lines = vec![];
+        if let Some(page) = &self.page {
+            for record in &page.messages {
+                let label = if record.message.role == "assistant" {
+                    "Assistant"
                 } else {
-                    count.to_string()
+                    "You"
+                };
+                lines.push(Line::styled(
+                    label,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ));
+                for line in safe(&record.message.content).split('\n') {
+                    lines.push(Line::raw(line.to_owned()));
                 }
+                if matches!(
+                    record.turn_state.as_str(),
+                    "failed" | "cancelled" | "interrupted"
+                ) {
+                    lines.push(Line::styled(
+                        format!("[{}]", record.turn_state),
+                        Style::default().fg(Color::Yellow),
+                    ));
+                }
+                lines.push(Line::raw(""));
+            }
+        }
+        if let Some((_, prompt)) = &self.active {
+            lines.push(Line::styled("You", Style::default().fg(Color::Cyan)));
+            for line in safe(prompt).split('\n') {
+                lines.push(Line::raw(line.to_owned()));
+            }
+            lines.push(Line::styled(
+                "Working...",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        if let Some(reply) = &self.unsaved {
+            lines.push(Line::styled(
+                "Assistant [not saved]",
+                Style::default().fg(Color::Yellow),
+            ));
+            for line in safe(reply).split('\n') {
+                lines.push(Line::raw(line.to_owned()));
+            }
+        }
+        if !self.outcome.is_empty() {
+            for line in safe(&self.outcome).split('\n') {
+                lines.push(Line::styled(
+                    line.to_owned(),
+                    Style::default().fg(Color::Yellow),
+                ));
+            }
+        }
+        if lines.is_empty() {
+            lines.push(Line::styled(
+                "What would you like to work on?",
+                Style::default().fg(Color::DarkGray),
+            ));
+        }
+        let transcript = Paragraph::new(lines).wrap(Wrap { trim: false });
+        let tail = transcript
+            .line_count(body.width)
+            .saturating_sub(body.height as usize)
+            .min(u16::MAX as usize) as u16;
+        frame.render_widget(
+            transcript.scroll((tail.saturating_sub(self.scroll), 0)),
+            body,
+        );
+        let hint = match self.mode {
+            Mode::Input => " Alt+Enter send | Enter newline | Esc browse ",
+            Mode::Browse => " Enter send | i edit | arrows scroll ",
+            _ => "",
+        };
+        let editor = Paragraph::new(input).wrap(Wrap { trim: false });
+        let offset = input_lines
+            .saturating_sub(input_area.height.saturating_sub(2) as usize)
+            .min(u16::MAX as usize) as u16;
+        frame.render_widget(
+            editor.scroll((offset, 0)).block(
+                Block::default()
+                    .borders(Borders::TOP | Borders::BOTTOM)
+                    .title(hint),
             ),
-            value.reported_calls,
-            value.missing_calls
-        )
-    };
-    let purposes = statistics
-        .groups
-        .iter()
-        .map(|group| format!("{}: {} attempted", group.key, group.summary.attempted_calls))
-        .collect::<Vec<_>>()
-        .join("\n");
-    format!(
-        "Usage: {}\nAttempted calls: {}\nUnreported invocations: {}\n{}\n{}\n{}\nStates: {:?}\n{}\nPending title requests are excluded until attempted.",
-        scope.unwrap_or("all sessions"),
-        summary.attempted_calls,
-        statistics.unreported_invocations,
-        counter("Input", &summary.input_tokens),
-        counter("Output", &summary.output_tokens),
-        counter("Total", &summary.total_tokens),
-        summary.statuses,
-        purposes
-    )
+            input_area,
+        );
+        let hints = if self.active.is_some() || self.pending.is_some() {
+            "Ctrl+C cancel | Ctrl+P commands"
+        } else if self.retained {
+            "Ctrl+P recover reply | Ctrl+Q quit"
+        } else {
+            "Ctrl+P commands | Ctrl+S switch chat | Ctrl+Q quit"
+        };
+        frame.render_widget(
+            Paragraph::new(format!("{}\n{hints}", safe(&self.notice)))
+                .style(Style::default().fg(Color::DarkGray)),
+            footer,
+        );
+        if matches!(self.mode, Mode::Commands | Mode::Sessions) {
+            let (title, rows) = if self.mode == Mode::Commands {
+                (
+                    "Commands",
+                    self.actions()
+                        .iter()
+                        .map(|(_, label)| (*label).to_string())
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                ("Switch chat", self.session_rows())
+            };
+            let width = area.width.saturating_sub(4).min(64);
+            let height = (rows.len() as u16)
+                .saturating_add(3)
+                .min(area.height.saturating_sub(2));
+            let popup = Rect::new(
+                area.x + area.width.saturating_sub(width) / 2,
+                area.y + area.height.saturating_sub(height) / 2,
+                width,
+                height,
+            );
+            frame.render_widget(Clear, popup);
+            let list = List::new(rows)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(title)
+                        .title_bottom(" Up/Down select | Enter open | Esc close "),
+                )
+                .highlight_symbol("› ")
+                .highlight_style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                );
+            frame.render_stateful_widget(
+                list,
+                popup,
+                &mut ListState::default().with_selected(Some(self.selected)),
+            );
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn editor_preserves_unicode_boundaries_multiline_and_literal_controls() {
-        let mut editor = Editor::default();
-        editor.insert("A🦀e\u{301}\nB");
-        editor.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
-        assert_eq!(editor.cursor, "A🦀e\u{301}\n".len());
-        editor.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
-        editor.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
-        assert_eq!(editor.text, "A🦀e\nB");
-        editor.cursor = 1;
-        editor.key(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
-        assert_eq!(editor.text, "Ae\nB");
-        editor.insert("\x1b[31m");
-        assert!(safe(&editor.text).contains("\\u{1b}[31m"));
-        assert!(!safe(&editor.text).contains('\x1b'));
-    }
-    #[test]
-    fn delayed_admission_and_other_session_results_preserve_edits() {
-        let root = tempfile::tempdir().unwrap();
-        let launch = super::super::tests::launch(root.path());
-        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
-        let controller = ChatController::open(launch).unwrap();
-        let database_path = root.path().join("chat.sqlite");
-        let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
-        let create = registry
-            .get("mf_chat.session.create")
-            .unwrap()
-            .instantiate(serde_json::json!({}))
-            .unwrap();
-        use mf_runtime::NodeValue;
-        let mut sessions = vec![];
-        for index in 0..2 {
-            let inputs = mf_chat::nodes::CreateSessionInputs {
-                database_path: database_path.to_str().unwrap().into(),
-                session_id: format!("session-{index}"),
-                profile: "default".into(),
-                system: None,
-                title: None,
-            };
-            let result = create
-                .execution
-                .as_task_node()
-                .unwrap()
-                .execute(inputs.into_values().unwrap(), &mut Default::default())
-                .unwrap();
-            sessions.push(
-                mf_chat::nodes::SessionOutputs::from_values(result.outputs)
-                    .unwrap()
-                    .session,
-            );
-        }
-        view.sessions = sessions;
-        view.focus = Focus::Prompt;
-        view.editor_mut().insert("submitted");
-        let id = view.session_id().unwrap();
-        let revision = view.editor_mut().revision;
-        view.pending.insert(id.clone(), Some(revision));
-        view.editor_mut().insert(" + new edit");
-        view.select(1, &controller);
-        let invocation = Invocation {
-            session_id: id.clone(),
-            turn_id: "turn".into(),
-            call_id: "call".into(),
-        };
-        view.event(
-            ChatEvent::Submitted {
-                prompt: "submitted".into(),
-                invocation,
-                cancel: Arc::new(AtomicBool::new(false)),
-            },
-            &controller,
-        );
-        assert_eq!(view.drafts[&id].text, "submitted + new edit");
-        assert!(view.active.contains_key(&id));
-        assert_ne!(view.session_id().unwrap(), id);
-    }
-    fn key(view: &mut ChatView, controller: &ChatController, code: KeyCode) {
-        assert!(!view.key(KeyEvent::new(code, KeyModifiers::NONE), controller));
-    }
+    use ratatui::backend::TestBackend;
+
     fn pump(view: &mut ChatView, controller: &ChatController, ready: impl Fn(&ChatView) -> bool) {
         let deadline = std::time::Instant::now() + Duration::from_secs(10);
         loop {
@@ -1132,27 +829,92 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
     }
-    fn draw(view: &mut ChatView) {
-        let mut terminal = Terminal::with_options(
-            CrosstermBackend::new(Box::new(io::sink()) as Box<dyn Write>),
-            TerminalOptions {
-                viewport: Viewport::Fixed(Rect::new(0, 0, 100, 30)),
-            },
-        )
-        .unwrap();
-        view.draw(&mut terminal).unwrap();
+    fn render(view: &ChatView, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| view.render(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..height)
+            .map(|y| {
+                (0..width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+    #[test]
+    fn multiline_submission_preserves_new_edits_and_blocks_switching_until_cancelled() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let controller = ChatController::open(launch).unwrap();
+        view.editor.insert("hello 🦀");
+        view.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+        );
+        assert_eq!(view.editor.text, "hello 🦀\n");
+        assert!(!controller.busy());
+        view.editor.insert("second line");
+        view.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+            &controller,
+        );
+        view.editor.insert(" + new draft");
+        pump(&mut view, &controller, |view| view.active.is_some());
+        assert!(view.editor.text.ends_with(" + new draft"));
+        let session = view.session.as_ref().unwrap().id.clone();
+        view.key(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        assert_eq!(view.session.as_ref().unwrap().id, session);
+        assert!(view.notice.contains("before switching"));
+        view.key(
+            KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        view.selected = view
+            .actions()
+            .iter()
+            .position(|(action, _)| *action == Action::Quit)
+            .unwrap();
+        view.key(
+            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        pump(&mut view, &controller, |view| {
+            view.active.is_none() && view.page.is_some()
+        });
+        assert!(matches!(view.actions()[view.selected].0, Action::Quit));
+        view.key(
+            KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        assert!(view.session.is_none());
+        view.key(
+            KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL),
+            &controller,
+        );
+        pump(&mut view, &controller, |view| view.sessions.is_some());
+        view.key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &controller,
+        );
+        pump(&mut view, &controller, |view| view.page.is_some());
+        assert_eq!(view.session.as_ref().unwrap().id, session);
+        assert!(view.editor.text.ends_with(" + new draft"));
+        controller.close().unwrap();
     }
 
     #[test]
-    fn abandoned_observations_close_and_do_not_escape_retention_limits() {
-        use crate::state::Completeness;
+    fn conversation_and_commands_remain_readable_without_management_panels() {
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());
-        let description = launch.manifest.description().unwrap();
-        let mut view = ChatView::new(&description).unwrap();
+        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
         let run = LocalRun::start(
             Command::new(&launch.executable),
-            description,
+            launch.manifest.description().unwrap(),
             mf_telemetry::identity::RunId::new(),
             1024,
         )
@@ -1161,251 +923,82 @@ mod tests {
         drop(run);
         assert_eq!(
             observation.reader.snapshot().lifecycle.completeness,
-            Completeness::UnverifiedTail
+            crate::state::Completeness::UnverifiedTail
         );
-        for _ in 0..MAX_RETAINED_CHAT_RUNS + 2 {
-            view.observations
-                .push_back((Invocation::new("session"), observation.clone()));
-        }
-        let active = view.observations.back().unwrap().0.clone();
-        view.active.insert(
-            active.session_id.clone(),
-            ActiveTurn {
-                invocation: active.clone(),
-                prompt: "pending".into(),
-                cancel: Arc::new(AtomicBool::new(false)),
-            },
-        );
-        view.trim_observations();
-        assert_eq!(view.observations.len(), MAX_RETAINED_CHAT_RUNS + 1);
-        assert_eq!(view.evicted, 1);
-        assert_eq!(view.observations.back().unwrap().0, active);
-    }
-
-    #[test]
-    fn stored_pages_archive_filters_and_usage_keep_session_drafts() {
-        let root = tempfile::tempdir().unwrap();
-        let launch = super::super::tests::launch(root.path());
-        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
-        let controller = ChatController::open(launch).unwrap();
-        let db = &controller._database;
-        for index in 0..55 {
-            db.create_session("default", None, Some(format!("session-{index}")))
-                .unwrap();
-        }
-        key(&mut view, &controller, KeyCode::Char('B'));
-        pump(&mut view, &controller, |v| {
-            v.sessions.len() == 50 && v.page.is_some()
-        });
-        let id = view.session_id().unwrap();
-        view.focus = Focus::Prompt;
-        view.editor_mut().insert("keep 🦀 draft");
-        key(&mut view, &controller, KeyCode::Esc);
-        key(&mut view, &controller, KeyCode::Char('N'));
-        pump(&mut view, &controller, |v| {
-            v.sessions.len() == 5 && v.page.is_some()
-        });
-        assert_eq!(view.drafts[&id].text, "keep 🦀 draft");
-        key(&mut view, &controller, KeyCode::Char('B'));
-        pump(&mut view, &controller, |v| {
-            v.sessions.len() == 50 && v.page.is_some()
-        });
-        assert_eq!(view.session_id().as_deref(), Some(id.as_str()));
-        let model =
-            mf_chat::ModelProfile::new("default", serde_json::json!({"model":"fixture"})).unwrap();
-        for index in 0..26 {
-            let start = db
-                .begin_turn(
-                    &id,
-                    &format!("page-{index}"),
-                    model.identity().clone(),
-                    None,
-                    mf_chat::DEFAULT_HISTORY_BYTES,
-                )
-                .unwrap();
-            db.complete_turn(
-                start.invocation,
-                mf_chat::Reply {
-                    text: format!("reply-{index}"),
-                    usages: None,
-                    metadata: None,
-                    finish_reason: None,
-                },
-            )
+        view.observation = Some(observation);
+        let database = ChatDatabase::open(&launch.options.database_path).unwrap();
+        let session = database
+            .create_session("default", None, Some("Review a workflow".into()))
             .unwrap();
-        }
-        view.load(&controller);
-        pump(&mut view, &controller, |v| {
-            v.page.as_ref().is_some_and(|p| p.messages.len() == 50)
-        });
-        key(&mut view, &controller, KeyCode::Char('p'));
-        pump(&mut view, &controller, |v| {
-            v.page.as_ref().is_some_and(|p| p.messages.len() == 2)
-        });
-        assert_eq!(
-            view.page.as_ref().unwrap().messages[0].message.content,
-            "page-25"
-        );
-        key(&mut view, &controller, KeyCode::Char('o'));
-        pump(&mut view, &controller, |v| {
-            v.page.as_ref().is_some_and(|p| p.messages.len() == 50)
-        });
-        key(&mut view, &controller, KeyCode::PageDown);
-        key(&mut view, &controller, KeyCode::PageUp);
-        key(&mut view, &controller, KeyCode::Char('U'));
-        pump(&mut view, &controller, |v| v.usage.is_some());
-        assert!(usage_text(None, &view.usage.as_ref().unwrap().1).contains("unknown"));
-        draw(&mut view);
-        db.archive_session(&id).unwrap();
-        key(&mut view, &controller, KeyCode::Char('A'));
-        pump(&mut view, &controller, |v| {
-            v.sessions.len() == 1 && v.sessions[0].archived
-        });
-        draw(&mut view);
-        key(&mut view, &controller, KeyCode::Char('A'));
-        pump(&mut view, &controller, |v| {
-            v.sessions.len() == 50 && !v.sessions[0].archived
-        });
-        assert_eq!(view.drafts[&id].text, "keep 🦀 draft");
-        controller.close().unwrap();
-    }
-
-    #[test]
-    fn launch_failure_restores_drafts_and_query_errors_clear_only_admission() {
-        use std::os::unix::process::ExitStatusExt;
-        let root = tempfile::tempdir().unwrap();
-        let mut launch = super::super::tests::launch(root.path());
-        std::fs::remove_file(&launch.executable).unwrap();
-        launch.options.run.verbose = 1;
-        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
-        let controller = ChatController::open(launch).unwrap();
-        controller
-            .send(ChatCommand::Create {
-                system: None,
-                title: None,
-            })
-            .unwrap();
-        pump(&mut view, &controller, |v| {
-            !v.sessions.is_empty() && v.focus == Focus::Prompt
-        });
-        let id = view.session_id().unwrap();
-        view.editor_mut().insert("restore this prompt");
-        key(&mut view, &controller, KeyCode::Enter);
-        pump(&mut view, &controller, |v| {
-            v.notice.contains("could not launch")
-        });
-        assert_eq!(view.drafts[&id].text, "restore this prompt");
-        view.pending.insert(id.clone(), None);
-        view.event(
-            ChatEvent::Error {
-                admission: false,
-                session_id: Some(id.clone()),
-                source: OptionsSnafu {
-                    reason: "query failed",
-                }
-                .build(),
-            },
-            &controller,
-        );
-        assert!(view.pending.contains_key(&id));
-        view.event(
-            ChatEvent::Error {
-                admission: true,
-                session_id: Some(id.clone()),
-                source: OptionsSnafu {
-                    reason: "retry failed",
-                }
-                .build(),
-            },
-            &controller,
-        );
-        assert!(!view.pending.contains_key(&id));
-        let invocation = Invocation {
-            session_id: id.clone(),
-            turn_id: "unresolved".into(),
-            call_id: "retained".into(),
-        };
-        view.event(
-            ChatEvent::RecoveryBlocked {
-                invocation: invocation.clone(),
-                status: ExitStatus::from_raw(256),
-                stderr: String::new(),
-                capture_error: None,
-                source: controller._database.session("missing").unwrap_err(),
-            },
-            &controller,
-        );
-        key(&mut view, &controller, KeyCode::Enter);
-        assert!(view.notice.contains("unresolved"));
-        draw(&mut view);
-        view.focus = Focus::Navigate;
-        key(&mut view, &controller, KeyCode::Char('x'));
-        pump(&mut view, &controller, |v| {
-            v.notice.contains("no retained reply")
-        });
-        let database = &controller._database;
         let started = database
             .begin_turn(
-                &id,
-                "captured failure",
+                &session.id,
+                "How should we simplify this workflow?",
                 mf_chat::ModelIdentity {
                     profile: "default".into(),
                     model: None,
                 },
                 None,
-                1024,
+                4096,
             )
             .unwrap();
-        database
-            .fail_turn(
-                started.invocation.clone(),
-                "failed",
-                "provider rejected request",
-            )
-            .unwrap();
-        view.event(
-            ChatEvent::Finished {
-                invocation: started.invocation.clone(),
-                resolution: ReconciledCompletion {
-                    state: CompletionState::Finished(
-                        database.turn(&started.invocation.turn_id).unwrap(),
-                    ),
-                    diagnostics: vec![],
-                },
-                status: Some(ExitStatus::from_raw(0)),
-                stderr: String::new(),
-                capture_error: None,
-            },
+        database.complete_turn(started.invocation, mf_chat::Reply {
+            text: "Keep one execution lane and move infrequent actions into the command palette.".into(),
+            metadata: None, usages: Some(vec![]), finish_reason: None,
+        }).unwrap();
+        view.page = Some(database.messages(&session.id, 50, None).unwrap());
+        view.session = Some(session);
+        view.notice.clear();
+        view.editor
+            .insert("Show me the next step.\nKeep the changes focused.");
+        let chat = render(&view, 100, 30);
+        assert!(chat.contains("Alt+Enter send"));
+        assert!(chat.contains("How should we simplify"));
+        assert!(!chat.contains("Automatic titles"));
+        assert!(!chat.contains("Transcript / outcomes / usage"));
+        assert!(!chat.contains(&view.session.as_ref().unwrap().id));
+        view.mode = Mode::Commands;
+        let commands = render(&view, 100, 30);
+        assert!(commands.contains("New chat") && commands.contains("Switch chat"));
+        assert!(!commands.contains("Archive") && !commands.contains("Usage"));
+        let compact = render(&view, 60, 18);
+        assert!(compact.contains("Switch chat"));
+        if let Some(directory) = std::env::var_os("MF_CHAT_PREVIEW_DIR") {
+            let directory = PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).unwrap();
+            for (name, text) in [
+                ("chat.txt", chat),
+                ("commands.txt", commands),
+                ("compact.txt", compact),
+            ] {
+                std::fs::write(directory.join(name), text).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn unicode_editing_and_clearing_keep_admission_revisions_distinct() {
+        let mut editor = Editor::default();
+        editor.insert("A🦀e\u{301}\nB");
+        editor.key(KeyEvent::new(KeyCode::Home, KeyModifiers::NONE));
+        assert_eq!(editor.cursor, "A🦀e\u{301}\n".len());
+        editor.key(KeyEvent::new(KeyCode::Left, KeyModifiers::NONE));
+        editor.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE));
+        assert_eq!(editor.text, "A🦀e\nB");
+        editor.insert("\x1b[31m");
+        assert!(!safe(&editor.text).contains('\x1b'));
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let controller = ChatController::open(launch).unwrap();
+        view.editor.insert("submitted");
+        let submitted = view.editor.revision;
+        view.key(
+            KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
             &controller,
         );
-        assert!(
-            view.turns[&id]
-                .detail
-                .contains("Workflow: provider rejected request")
-        );
-        assert!(
-            usage_text(None, &database.usage(Default::default()).unwrap())
-                .contains("Unreported invocations: 2")
-        );
-        view.active.insert(
-            id.clone(),
-            ActiveTurn {
-                invocation,
-                prompt: "keep".into(),
-                cancel: Arc::new(AtomicBool::new(false)),
-            },
-        );
-        key(&mut view, &controller, KeyCode::Char('c'));
-        assert!(view.active[&id].cancel.load(Ordering::Acquire));
-        key(&mut view, &controller, KeyCode::Char('['));
-        key(&mut view, &controller, KeyCode::Char(']'));
-        view.inspecting = true;
-        draw(&mut view);
-        assert!(!view.inspecting);
-        assert!(view.key(
-            KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
-            &controller
-        ));
+        view.editor.insert("replacement");
+        assert_ne!(view.editor.revision, submitted);
         controller.close().unwrap();
     }
 }

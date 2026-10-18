@@ -724,133 +724,132 @@ an embedded flow, infer model identities from the graph, or override provider co
 
 ### Requirement: Present persistent sessions and editable prompts
 
-Chat mode SHALL provide session creation, selection, renaming, archive/restore, bounded history pages, and a Unicode
-prompt editor. Archived sessions SHALL remain readable and reject new submissions. Opening an existing database SHALL
-restore persisted conversations. Pending deferred title work MUST NOT be presented as generated success.
+Chat mode SHALL present a full-width conversation, a content-sized Unicode input, contextual shortcuts, and
+command/session overlays. It SHALL create sessions on first submission and retain drafts when switching idle
+conversations. New names SHALL derive from the first prompt. The terminal SHALL omit rename, archive/restore,
+usage-dashboard, and system-instruction forms.
+
+#### Scenario: Open without creating an empty session
+
+- **WHEN** the user opens chat mode and has not submitted a prompt
+- **THEN** the editor is ready and no new session record is created
+
+#### Scenario: Start a named conversation
+
+- **WHEN** the user sends the first nonempty prompt in a new chat
+- **THEN** the terminal creates a session named from that prompt and starts one execution
 
 #### Scenario: Resume a stored conversation
 
-- **WHEN** the user opens chat mode with an existing session database
-- **THEN** stored sessions and ordered messages remain selectable and a new submission continues the selected session
+- **WHEN** the user chooses a saved conversation from the session overlay
+- **THEN** its latest bounded message page opens, stored system instructions apply, and the next prompt continues it
 
-#### Scenario: Edit a multiline Unicode prompt
+#### Scenario: Edit multiline text without accidental submission
 
-- **WHEN** the user edits and submits a multiline prompt containing Unicode text
-- **THEN** the complete prompt is passed once without corrupting terminal rendering or its stored contents
+- **WHEN** the editor has focus and the user presses Enter
+- **THEN** a newline is inserted; Alt+Enter or Esc followed by Enter submits the complete prompt
 
-#### Scenario: Archive during execution
+#### Scenario: Preserve a draft during session switching
 
-- **WHEN** a session is archived after a turn has begun
-- **THEN** that turn can finish into the session while later submissions are rejected until restoration
+- **WHEN** the user switches between idle conversations with unsent edits
+- **THEN** each draft is restored when its conversation is selected again
 
-### Requirement: Keep chat work independent of selected session
+#### Scenario: Read older messages
 
-Chat mode SHALL admit at most one unresolved turn per session and bound total active child execution. Switching
-selection MUST NOT cancel, redirect, or drop an admitted invocation. Capacity and session-busy results MUST NOT
-implicitly enqueue or resend prompts. Storage commands and process waits MUST NOT block terminal input or rendering.
-
-#### Scenario: Switch while a model is waiting
-
-- **WHEN** session A has an active turn and the user switches to session B
-- **THEN** A's result remains bound to A and the terminal can display and operate B independently
-
-#### Scenario: Reach capacity
-
-- **WHEN** the configured active-child limit is reached
-- **THEN** another submission receives a visible capacity result without starting a child or creating a turn
-
-#### Scenario: Delay a storage query
-
-- **WHEN** a history or statistics query waits on bounded database contention
-- **THEN** terminal rendering and input remain responsive while its result is pending
+- **WHEN** the user requests an earlier message page
+- **THEN** the terminal loads bounded nonoverlapping history and can return to the latest page
 
 ### Requirement: Present distinct retry and cancellation actions
 
-The interface SHALL distinguish retrying an unsuccessful model turn from saving a retained uncommitted reply. Model
-retry SHALL create fresh linked identities; save-only retry SHALL reuse original identities without executing the flow.
-Cancellation SHALL terminate the selected process group and reconcile its state before releasing its session
-reservation.
+The command menu SHALL distinguish retrying the latest unsuccessful turn from saving or discarding a retained
+reply. Retry SHALL allocate fresh linked identities; save-only recovery SHALL reuse the original identities without
+executing the workflow. Ctrl+C SHALL cancel the current child group. Ctrl+Q SHALL quit through supervised cleanup.
 
-#### Scenario: Retry a failed model turn
+#### Scenario: Retry the latest failed turn
 
-- **WHEN** the user explicitly retries a failed or interrupted turn
-- **THEN** a new launch creates new turn/call IDs with a link to the original unsuccessful turn
+- **WHEN** the latest turn failed and the user selects Retry failed turn
+- **THEN** a new execution reuses its prompt with fresh identities linked to the failed turn
 
-#### Scenario: Retry saving a reply
+#### Scenario: Avoid offering stale retries
 
-- **WHEN** a valid uncommitted reply is available after child exit
-- **THEN** the UI offers save-only retry and abandonment, and does not offer silent model resend as the save action
+- **WHEN** the latest turn succeeded or the user is browsing an older history page
+- **THEN** the menu does not offer an earlier failure as the current retry action
+
+#### Scenario: Recover an unsaved reply
+
+- **WHEN** a decoded reply or raw outcome needs persistence recovery
+- **THEN** the menu offers explicit save and discard actions without silently resending the workflow
 
 #### Scenario: Cancel after durable success
 
 - **WHEN** cancellation races with an already committed reply
-- **THEN** reconciliation preserves the saved success while reporting any separate process interruption
+- **THEN** reconciliation preserves saved success while process and observation facts remain separate
 
 ### Requirement: Associate observations with each chat turn
 
-Each launched turn SHALL have its own workflow/run observation identity and receiver. Chat mode SHALL allow inspection
-through the existing graph, trace, log, and data views and bound retained observation detail. Missing telemetry or
-evicted observations MUST NOT alter transcript facts, repair unknown node states, or trigger workflow restart.
+Each launched turn SHALL have its own workflow/run identity and receiver. The terminal SHALL retain only the
+current turn's observation and open the existing graph, trace, log, and data views on demand. Starting another turn
+or changing conversation SHALL release the previous observation. Missing telemetry MUST NOT alter persisted messages
+or trigger another workflow execution.
 
-#### Scenario: Inspect concurrent sessions
+#### Scenario: Inspect the current run
 
-- **WHEN** turns in two sessions execute concurrently
-- **THEN** selecting either turn shows only its own received observations and does not merge their lifecycle state
+- **WHEN** the user opens Inspect current run from the command menu
+- **THEN** the shared observation UI shows that run and Esc returns to the conversation
+
+#### Scenario: Replace a completed observation
+
+- **WHEN** the user starts another turn or changes conversation
+- **THEN** the earlier transient observation is released while saved messages remain available
 
 #### Scenario: Complete without telemetry
 
-- **WHEN** a chat turn commits but its telemetry is absent or incomplete
-- **THEN** its reply remains available while the observation view reports uncertainty independently
+- **WHEN** a turn commits but its telemetry is absent or incomplete
+- **THEN** the reply remains available and the observation view independently reports uncertainty
 
-#### Scenario: Evict old observation detail
+#### Scenario: Retain a reader after early teardown
 
-- **WHEN** retained turn observations exceed their configured bound
-- **THEN** old transient detail is evicted visibly while persisted message history remains available through pagination
-
-#### Scenario: Retain observations after supervision fails
-
-- **WHEN** supervision ends without an exit status and the UI retains an observation reader
-- **THEN** the receiver closes the observation stream, reports any unverified tail, and the completed turn counts
-  toward the retention bound without evicting active turns
-
-### Requirement: Display usage from committed call facts
-
-Chat mode SHALL provide session and overall usage queries through `mf-chat`. It SHALL distinguish conversation/title
-purposes, known subtotals, reported counters, and missing observations. A query failure MUST NOT change a completed turn
-or resend a prompt. Invocations without reported call facts SHALL be displayed separately from actual call attempts.
-Deferred title requests MUST NOT count as attempts.
-
-#### Scenario: Display partial usage
-
-- **WHEN** some begun calls lack input or total token counters
-- **THEN** the UI marks those subtotals partial or unknown instead of presenting them as complete consumption
-
-#### Scenario: Fail a usage refresh
-
-- **WHEN** a usage query fails after a reply commits
-- **THEN** the reply remains saved and the statistics view displays a retryable query error
+- **WHEN** supervision ends without an exit status and a reader survives
+- **THEN** the receiver closes its observation stream and reports any unverified tail
 
 ### Requirement: Close the chat application after supervised cleanup
 
-Quitting SHALL stop admissions, terminate and reap active child groups, reconcile exact invocation states, finalize
-recoverable pending completions, and join application workers before releasing database ownership. Terminal restoration
-SHALL occur on normal quit and recoverable display failure. Normal quit SHALL return success when shutdown succeeds;
-fatal application cleanup failure SHALL return status 1.
+Quitting SHALL stop admission, cancel and reap the current child, reconcile retained results, and join the worker
+before releasing database ownership. Normal exit and recoverable display failure SHALL restore the terminal.
+Handled turn failures SHALL allow exit status 0 when cleanup succeeds; display or cleanup failures SHALL return 1.
 
-#### Scenario: Quit with active sessions
+#### Scenario: Quit with a running turn
 
-- **WHEN** the user quits while multiple sessions have active children
-- **THEN** no child remains supervised as live and ownership is released only after cleanup and finalization are
-  attempted
+- **WHEN** the user quits during execution
+- **THEN** the child is cancelled and reaped and its invocation is reconciled before ownership is released
 
 #### Scenario: Disconnect the display
 
-- **WHEN** terminal display I/O fails during a chat turn
-- **THEN** bounded child cleanup and terminal restoration are attempted without a restoration panic, and the CLI exits
-  with failure
+- **WHEN** terminal display I/O fails during execution
+- **THEN** bounded child cleanup and terminal restoration are attempted without a restoration panic
 
-#### Scenario: Quit after a handled turn failure
+#### Scenario: Fail storage access during shutdown
 
-- **WHEN** a failed turn was reconciled and the user later quits normally
-- **THEN** the interactive session exits successfully when application shutdown succeeds and the failed turn remains
-  inspectable
+- **WHEN** shutdown cannot finalize the invocation because storage is unavailable
+- **THEN** close reports a typed failure and reopening can recover the interrupted turn without resending it
+
+### Requirement: Run one chat turn at a time
+
+The terminal SHALL reserve one execution lane before accepting a submission. A running turn or retained reply
+SHALL block additional submissions, new chats, and session switching. Extra submissions MUST be rejected instead
+of queued. Storage and supervision SHALL run off the terminal rendering thread, with independent cancellation.
+
+#### Scenario: Reject a second submission
+
+- **WHEN** another prompt arrives while admission, execution, or reply recovery is unresolved
+- **THEN** the terminal reports busy without creating a session or starting another child
+
+#### Scenario: Keep the selected conversation stable
+
+- **WHEN** the user requests a new chat or session switch during unresolved work
+- **THEN** the current conversation remains selected and the UI explains how to cancel or recover it
+
+#### Scenario: Keep editing responsive
+
+- **WHEN** storage or the child workflow is pending
+- **THEN** terminal input and rendering remain responsive and edits made after submission are preserved

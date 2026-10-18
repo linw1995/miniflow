@@ -186,7 +186,6 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                         mf_tui::chat::ChatOptions {
                             database_path: chat_db.expect("clap requires chat database"),
                             profile: chat_profile.unwrap_or_else(|| "default".into()),
-                            max_active: mf_tui::chat::MAX_ACTIVE_CHAT_RUNS,
                             run: options,
                         },
                     )?)
