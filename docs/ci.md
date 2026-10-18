@@ -263,3 +263,15 @@ only CI orchestration may retrieve a recorded merge object.
 
 The helper is staged for workflow integration; current CI still uses cumulative
 PR selection until the incremental coverage gate and final record job are wired.
+
+For a validated prior merge snapshot, direct comparison is explicit:
+
+```bash
+nix develop --command python3 scripts/affected_tests.py --base "$VALIDATED_MERGE" --comparison snapshot --head HEAD --json
+```
+
+This requires a clean checkout of the tested head and local comparison history.
+The returned `comparison_mode` distinguishes direct snapshots from ordinary
+merge-base selection. Keep `--commit HEAD` for initial cumulative PR selection;
+`--base <branch>` retains its merge-base default. A CI resolver chooses a reusable
+successful snapshot; the local selector never infers CI success or fetches refs.

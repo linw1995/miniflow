@@ -22,7 +22,7 @@ def package(root, name, dependencies=(), targets=None):
 
 
 def options(**values):
-    defaults = dict(commit=None, base=None, head=None, worktree=False, target=None, rust_analyzer="rust-analyzer", timeout=5)
+    defaults = dict(comparison="merge-base", commit=None, base=None, head=None, worktree=False, target=None, rust_analyzer="rust-analyzer", timeout=5)
     return argparse.Namespace(**(defaults | values))
 
 
@@ -187,6 +187,22 @@ class GitTests(unittest.TestCase):
         self.git("checkout", "feature")
         base, actual_head, paths = affected.changes(self.root, options(base="main", head="feature"))
         self.assertEqual((base, actual_head, paths), (ancestor, head, ["feature.rs"]))
+
+    def test_snapshot_comparison_retains_the_supplied_base_and_reports_only_the_increment(self):
+        original = self.git("rev-parse", "HEAD")
+        self.git("checkout", "-b", "feature")
+        self.write("feature.rs", "first")
+        first = self.commit()
+        first_merge = self.git("commit-tree", self.git("rev-parse", "HEAD^{tree}"), "-p", original, "-p", first, "-m", "first merge")
+        self.write("increment.rs", "second")
+        second = self.commit()
+        second_merge = self.git("commit-tree", self.git("rev-parse", "HEAD^{tree}"), "-p", original, "-p", second, "-m", "second merge")
+        self.git("checkout", "--detach", second_merge)
+        base, head, paths = affected.changes(self.root, options(base=first_merge, comparison="snapshot"))
+        self.assertEqual((base, head, paths), (first_merge, second_merge, ["increment.rs"]))
+        self.assertNotEqual(affected.changes(self.root, options(base=first_merge))[0], first_merge)
+        with self.assertRaisesRegex(affected.AnalysisError, "comparison"):
+            affected.changes(self.root, options(base=first_merge, comparison="unknown"))
 
     def test_worktree_includes_staged_unstaged_untracked_and_deleted_paths(self):
         self.write("staged.rs", "staged")

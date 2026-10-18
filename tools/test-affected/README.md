@@ -46,6 +46,10 @@ nix develop --command cargo nextest run -p mfn-lsp
 with head. Snapshots are detached Git worktrees under `target/test-affected/snapshots/` by default;
 they remain available after the Flow finishes. Missing refs are errors, not automatic fetches.
 The node's configured `initialization_options` are forwarded to analysis without Rust-specific policy.
+Set the Git node's `comparison_mode` configuration to `snapshot` for a direct comparison
+between two supplied local snapshots. The default `merge-base` retains branch-comparison behavior.
+The plan records the selected mode and resolved revisions. CI baseline eligibility remains
+outside the node; the node never fetches missing historical merge objects.
 
 `test_affected.plan` consumes only the analysis output and its opaque comparison context. It uses
 Cargo metadata for all declared dependency kinds and the same [input policy](../../docs/ci.md#affected-package-tests)

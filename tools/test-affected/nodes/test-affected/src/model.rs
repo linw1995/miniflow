@@ -10,9 +10,19 @@ pub struct Change {
     pub after: Vec<SourceRange>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ComparisonMode {
+    #[default]
+    MergeBase,
+    Snapshot,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Comparison {
+    #[serde(default)]
+    pub comparison_mode: ComparisonMode,
     pub repository: PathBuf,
     pub base: String,
     pub head: String,
@@ -60,6 +70,8 @@ pub struct TestCase {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TestPlan {
+    #[serde(default)]
+    pub comparison_mode: ComparisonMode,
     pub repository: PathBuf,
     pub base: String,
     pub head: String,

@@ -206,6 +206,7 @@ pub fn make_plan(
         .into();
     let toolchain = command(&comparison.head_root, "rustc", &["-vV"])?;
     let mut plan = TestPlan {
+        comparison_mode: comparison.comparison_mode,
         repository: comparison.repository.clone(),
         base: comparison.base.clone(),
         head: comparison.head.clone(),

@@ -47,11 +47,14 @@ def load_plan(path):
         data = data["plan"]
     if isinstance(data, dict):
         data.setdefault("ignored_files", [])
-    required = {"ignored_files", "repository", "base", "head", "snapshot", "tree", "configuration", "toolchain", "build_environment",
+        data.setdefault("comparison_mode", "merge-base")
+    required = {"comparison_mode", "ignored_files", "repository", "base", "head", "snapshot", "tree", "configuration", "toolchain", "build_environment",
                 "baseline_packages", "packages", "tests", "reasons", "fallback_reasons", "analysis_status",
                 "baseline_count", "selected_count", "observed_relationships", "analysis_ms", "planning_ms"}
     if not isinstance(data, dict) or set(data) != required:
         raise PlanError("expected a complete test-affected plan or its single-output wrapper")
+    if data["comparison_mode"] not in ("merge-base", "snapshot"):
+        raise PlanError("invalid comparison mode")
     for name in ("base", "head", "tree"):
         if not isinstance(data[name], str) or not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", data[name]):
             raise PlanError(f"invalid {name} identity")

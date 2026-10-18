@@ -78,6 +78,24 @@ pub fn compare(
     artifacts: Option<&Path>,
     options: Value,
 ) -> Result<Comparison, Error> {
+    compare_with_mode(
+        repository,
+        base,
+        head,
+        artifacts,
+        options,
+        ComparisonMode::MergeBase,
+    )
+}
+
+pub fn compare_with_mode(
+    repository: &Path,
+    base: &str,
+    head: &str,
+    artifacts: Option<&Path>,
+    options: Value,
+    comparison_mode: ComparisonMode,
+) -> Result<Comparison, Error> {
     let repository = repository.canonicalize().context(IoSnafu {
         action: "resolve repository",
     })?;
@@ -86,9 +104,12 @@ pub fn compare(
             .to_path_buf();
     let head = revision(&repository, head)?;
     let base = revision(&repository, base)?;
-    let base = command(&repository, "git", &["merge-base", &base, &head])?
-        .trim()
-        .to_owned();
+    let base = match comparison_mode {
+        ComparisonMode::MergeBase => command(&repository, "git", &["merge-base", &base, &head])?
+            .trim()
+            .to_owned(),
+        ComparisonMode::Snapshot => base,
+    };
     let artifacts = artifacts
         .map(Path::to_path_buf)
         .unwrap_or_else(|| repository.join("target/test-affected/snapshots"));
@@ -228,6 +249,7 @@ pub fn compare(
     })
     .collect();
     Ok(Comparison {
+        comparison_mode,
         repository,
         base,
         head,

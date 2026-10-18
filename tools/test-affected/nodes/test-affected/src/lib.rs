@@ -22,6 +22,7 @@ use std::path::Path;
 #[derive(Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct GitConfig {
+    pub comparison_mode: ComparisonMode,
     pub initialization_options: Value,
 }
 
@@ -50,12 +51,13 @@ impl TypedTaskNode for GitNode {
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());
         }
-        let comparison = git::compare(
+        let comparison = git::compare_with_mode(
             Path::new(&input.repository),
             &input.base,
             input.head.as_deref().unwrap_or("HEAD"),
             input.artifacts.as_deref().map(Path::new),
             self.config.initialization_options.clone(),
+            self.config.comparison_mode,
         )?;
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());

@@ -245,6 +245,7 @@ fn script_verifies_selection_runs_cases_and_preserves_empty_stale_and_failed_pla
     assert!(String::from_utf8_lossy(&output.stdout).contains("\"selected_count\": 1"));
     let mut legacy = serde_json::to_value(&plan).unwrap();
     legacy.as_object_mut().unwrap().remove("ignored_files");
+    legacy.as_object_mut().unwrap().remove("comparison_mode");
     assert!(
         serde_json::from_value::<mfn_test_affected::TestPlan>(legacy.clone())
             .unwrap()
@@ -644,4 +645,88 @@ fn shared_input_policy_matches_selector_and_scopes_consumers() {
     assert_eq!(plan.packages.len(), 3);
     assert!(!plan.fallback_reasons.is_empty());
     assert_baseline_parity(&comparison, &plan);
+}
+
+#[test]
+fn snapshot_mode_preserves_incremental_base_and_plan_provenance() {
+    use mfn_test_affected::{ComparisonMode, GitConfig};
+    let (directory, base) = fixture();
+    let root = directory.path();
+    write(root, "core/src/lib.rs", &SOURCE.replace("1, 1", "2, 2"));
+    let first = commit(root);
+    let tree = git::command(root, "git", &["rev-parse", "HEAD^{tree}"]).unwrap();
+    let first_merge = git::command(
+        root,
+        "git",
+        &[
+            "commit-tree",
+            tree.trim(),
+            "-p",
+            &base,
+            "-p",
+            &first,
+            "-m",
+            "first merge",
+        ],
+    )
+    .unwrap();
+    write(
+        root,
+        "app/src/lib.rs",
+        &SOURCE.replace("-> u32 { 1 }", "-> u32 { 2 }"),
+    );
+    let second = commit(root);
+    let tree = git::command(root, "git", &["rev-parse", "HEAD^{tree}"]).unwrap();
+    let second_merge = git::command(
+        root,
+        "git",
+        &[
+            "commit-tree",
+            tree.trim(),
+            "-p",
+            &base,
+            "-p",
+            &second,
+            "-m",
+            "second merge",
+        ],
+    )
+    .unwrap();
+    let comparison = git::compare_with_mode(
+        root,
+        first_merge.trim(),
+        second_merge.trim(),
+        None,
+        json!({}),
+        ComparisonMode::Snapshot,
+    )
+    .unwrap();
+    assert_eq!(comparison.base, first_merge.trim());
+    assert_eq!(comparison.changes.len(), 1);
+    assert_eq!(comparison.changes[0].path, "app/src/lib.rs");
+    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    assert_eq!(plan.comparison_mode, ComparisonMode::Snapshot);
+    assert_eq!(plan.packages, ["sample-app"]);
+    assert_baseline_parity(&comparison, &plan);
+    assert_ne!(
+        compare(root, first_merge.trim(), second_merge.trim()).base,
+        comparison.base
+    );
+    assert!(serde_json::from_value::<GitConfig>(json!({"comparison_mode":"unknown"})).is_err());
+    let config: GitConfig = serde_json::from_value(json!({"comparison_mode":"snapshot"})).unwrap();
+    assert_eq!(config.comparison_mode, ComparisonMode::Snapshot);
+    let result = mf_runtime::TypedTaskNode::execute(
+        &mfn_test_affected::GitNode { config },
+        mfn_test_affected::GitInput {
+            repository: root.to_str().unwrap().into(),
+            base: first_merge.trim().into(),
+            head: Some(second_merge.trim().into()),
+            artifacts: None,
+            options: None,
+        },
+        &mut mf_runtime::ExecutionContext::default(),
+    )
+    .unwrap();
+    let context = serde_json::to_value(result.outputs.context).unwrap();
+    assert_eq!(context["comparison"]["base"], first_merge.trim());
 }

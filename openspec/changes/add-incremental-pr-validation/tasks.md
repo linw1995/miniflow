@@ -11,10 +11,10 @@ Implement and commit each numbered group in order with its focused tests and doc
 
 ## 2. Direct snapshot comparison and affected selection
 
-- [ ] 2.1 Add explicit snapshot comparison to the Python selector without changing existing comparison defaults; verify sibling merge snapshots use their direct diff while ordinary branch comparison still uses a merge base.
-- [ ] 2.2 Extend the existing Git task and plan provenance with the same comparison semantics; verify resolved identities/ranges, invalid modes, no-fetch behavior, and compatibility with saved plans in focused Rust and consumer regressions.
-- [ ] 2.3 Apply existing ownership/shared-consumer rules and complete reverse closure to incremental changes; verify a previously passing suite reruns when newly affected and that ignored-only changes produce no nextest invocation.
-- [ ] 2.4 Update selector usage and the tool README with initial, incremental, and reset examples; verify example plans agree between Python and the opt-in Flow for equivalent local snapshots.
+- [x] 2.1 Add explicit snapshot comparison to the Python selector without changing existing comparison defaults; verify sibling merge snapshots use their direct diff while ordinary branch comparison still uses a merge base.
+- [x] 2.2 Extend the existing Git task and plan provenance with the same comparison semantics; verify resolved identities/ranges, invalid modes, no-fetch behavior, and compatibility with saved plans in focused Rust and consumer regressions.
+- [x] 2.3 Apply existing ownership/shared-consumer rules and complete reverse closure to incremental changes; verify a previously passing suite reruns when newly affected and that ignored-only changes produce no nextest invocation.
+- [x] 2.4 Update selector usage and the tool README with initial, incremental, and reset examples; verify example plans agree between Python and the opt-in Flow for equivalent local snapshots.
 
 ## 3. Incremental coverage evaluation
 

@@ -47,7 +47,11 @@ def changes(root, args):
             parents = command(root, "git", "rev-list", "--parents", "-n", "1", head).split()[1:]
             base = parents[0] if parents else None
         else:
-            base = command(root, "git", "merge-base", revision(root, args.base), head).strip()
+            base = revision(root, args.base)
+            if args.comparison == "merge-base":
+                base = command(root, "git", "merge-base", base, head).strip()
+            elif args.comparison != "snapshot":
+                raise AnalysisError("Unsupported comparison mode")
         if base:
             paths = command(root, "git", "diff", "--name-only", "--no-renames", "-z", base, head, "--")
         else:
@@ -314,6 +318,7 @@ def make_plan(root, args):
         for name in selected:
             argv += ["-p", name]
     return {
+        "comparison_mode": "worktree" if args.worktree else "snapshot" if args.commit else args.comparison,
         "base": base, "head": head, "mode": "all" if fallback else "affected" if selected else "none",
         "changed_files": paths, "direct_packages": sorted(direct), "packages": selected,
         "ignored_files": ignored, "reasons": reasons, "fallback_reasons": fallback,
@@ -328,6 +333,8 @@ def main():
     source.add_argument("--commit", help="Compare a checked-out commit with its first parent")
     source.add_argument("--base", help="Compare the merge base of this local ref and --head with --head")
     source.add_argument("--worktree", action="store_true", help="Include staged, unstaged and untracked changes against HEAD")
+    parser.add_argument("--comparison", choices=("merge-base", "snapshot"), default="merge-base",
+                        help="How --base is compared with the checked-out head")
     parser.add_argument("--head", help="PR head ref, which must be checked out (default: HEAD)")
     parser.add_argument("--target", help="Target triple for rust-analyzer and nextest")
     parser.add_argument("--rust-analyzer", default="rust-analyzer", help="rust-analyzer executable")
@@ -338,6 +345,8 @@ def main():
     args = parser.parse_args()
     if args.head and not args.base:
         parser.error("--head requires --base")
+    if args.comparison != "merge-base" and not args.base:
+        parser.error("--comparison requires --base")
     if args.timeout <= 0:
         parser.error("--timeout must be positive")
     try:
