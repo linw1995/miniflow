@@ -244,3 +244,22 @@ bash scripts/run-cov.sh
 The coverage script forwards additional arguments to `cargo nextest run`,
 so explicit test filters remain available for focused local checks. These
 checks supplement the required hooks and affected tests.
+
+### Incremental validation records
+
+`scripts/pr_validation.py` resolves reusable validation from completed successful
+CI attempts. A record binds repository/PR, workflow run and attempt, PR head,
+actual merge base, tested merge commit/tree, execution signature, comparison,
+selected packages, and successful coverage disposition. Artifacts are named
+`pr-validation-<run-id>-<attempt>` and contain only `validation.json`.
+
+Eligibility requires the same actual target base and execution signature and an
+ancestor PR head. Selection prefers the nearest ancestor, regardless of completion
+order. Failed/cancelled/pending attempts never advance the baseline. Discovery is
+bounded; unavailable history or malformed/expired records resets to cumulative PR
+affected scope. This reset does not force workspace-wide tests or change the
+existing root dependency/configuration deferrals. Local selectors never fetch;
+only CI orchestration may retrieve a recorded merge object.
+
+The helper is staged for workflow integration; current CI still uses cumulative
+PR selection until the incremental coverage gate and final record job are wired.

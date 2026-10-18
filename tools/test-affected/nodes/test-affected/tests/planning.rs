@@ -585,6 +585,7 @@ fn shared_input_policy_matches_selector_and_scopes_consumers() {
         ("docs/guide.md", vec![]),
         ("openspec/specs/example/spec.md", vec![]),
         ("scripts/run-cov.sh", vec![]),
+        ("scripts/pr_validation.py", vec![]),
         ("tools/test-affected/README.md", vec![]),
         ("core/Cargo.toml", vec!["mf-cli", "mf-compiler"]),
         (

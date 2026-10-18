@@ -219,6 +219,8 @@ def deferred_input(filename):
         "CHANGELOG.md",
         "tools/test-affected/README.md",
         "tools/test-affected/test_runner.py",
+        "scripts/pr_validation.py",
+        "scripts/test_pr_validation.py",
         "scripts/ci_monitor.py",
         "scripts/test_ci_monitor.py",
         "scripts/nightly_tests.py",

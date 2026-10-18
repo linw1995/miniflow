@@ -4,10 +4,10 @@ Implement and commit each numbered group in order with its focused tests and doc
 
 ## 1. Successful validation records and baseline resolution
 
-- [ ] 1.1 Define the record format and execution compatibility signature in a focused CI helper; verify repository/PR identity, run attempt, policy, source, and coverage fields with fixture records and document the format in `docs/ci.md`.
-- [ ] 1.2 Resolve the nearest successful ancestor PR head using completed workflow metadata and matching records; verify successful chains, failed/cancelled/pending intermediates, out-of-order completion, and same-head retries.
-- [ ] 1.3 Implement bounded discovery and cumulative-PR fallback; verify force pushes, changed target bases, incompatible policy, expired/missing artifacts, unavailable Git objects/API, and malformed records preserve explicit reasons without authorizing an empty success.
-- [ ] 1.4 Keep deferred dependency/configuration policy distinct from execution compatibility; verify compatibility resets select cumulative affected scope rather than automatically forcing all workspace packages.
+- [x] 1.1 Define the record format and execution compatibility signature in a focused CI helper; verify repository/PR identity, run attempt, policy, source, and coverage fields with fixture records and document the format in `docs/ci.md`.
+- [x] 1.2 Resolve the nearest successful ancestor PR head using completed workflow metadata and matching records; verify successful chains, failed/cancelled/pending intermediates, out-of-order completion, and same-head retries.
+- [x] 1.3 Implement bounded discovery and cumulative-PR fallback; verify force pushes, changed target bases, incompatible policy, expired/missing artifacts, unavailable Git objects/API, and malformed records preserve explicit reasons without authorizing an empty success.
+- [x] 1.4 Keep deferred dependency/configuration policy distinct from execution compatibility; verify compatibility resets select cumulative affected scope rather than automatically forcing all workspace packages.
 
 ## 2. Direct snapshot comparison and affected selection
 
