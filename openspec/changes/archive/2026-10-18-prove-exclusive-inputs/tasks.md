@@ -12,5 +12,5 @@
 ## 3. Review and delivery
 
 - [x] 3.1 Perform ablations and review repository rules; keep reports under target.
-- [ ] 3.2 Run hooks, archive the reviewed specification, and commit.
-- [ ] 3.3 Push the PR update and inspect checks and reviews.
+- [x] 3.2 Run hooks, archive the reviewed specification, and commit.
+- [x] 3.3 Push the PR update and inspect checks and reviews.
