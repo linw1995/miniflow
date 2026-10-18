@@ -268,8 +268,10 @@ selected packages, and successful coverage disposition. Artifacts are named
 
 Eligibility requires the same actual target base and execution signature and an
 ancestor PR head. Selection prefers the nearest ancestor, regardless of completion
-order. Failed/cancelled/pending attempts never advance the baseline. Discovery is
-bounded; unavailable history or malformed/expired records resets to cumulative PR
+order. Candidates are ranked by source ancestry before downloading records, and
+discovery stops at the nearest usable record. Unrelated or malformed older records
+do not invalidate another proven ancestor. Failed/cancelled/pending attempts never
+advance the baseline. Discovery is bounded; unavailable history or malformed/expired records resets to cumulative PR
 affected scope. This reset does not force workspace-wide tests or change the
 existing root dependency/configuration deferrals. Local selectors never fetch;
 only CI orchestration may retrieve a recorded merge object.

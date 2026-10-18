@@ -110,15 +110,17 @@ def eligible(root, current, run, record):
         return False
 
 
+def ancestry_order(root, head, run):
+    return (int(command(root, "git", "rev-list", "--count", run["head_sha"] + ".." + head)),
+            -run["id"], -run["run_attempt"])
+
+
 def choose_baseline(root, current, candidates):
     eligible_records = [(run, record) for run, record in candidates if eligible(root, current, run, record)]
     if not eligible_records:
         return cumulative(current, "No compatible completed successful validation record")
     # Completion order is unrelated to source ancestry, especially after reruns.
-    run, record = min(eligible_records, key=lambda pair: (
-        int(command(root, "git", "rev-list", "--count", pair[1]["head"] + ".." + current["head"])),
-        -pair[0]["id"], -pair[0]["run_attempt"],
-    ))
+    run, record = min(eligible_records, key=lambda pair: ancestry_order(root, current["head"], pair[0]))
     return {"base": record["merge"], "head": current["merge"], "scope": "incremental",
             "previous": {"run_id": run["id"], "run_attempt": run["run_attempt"], "merge": record["merge"]},
             "reason": "Reusing the nearest compatible successful PR-head ancestor"}
@@ -141,31 +143,38 @@ def discover_baseline(root, current, api, branch, download):
         runs = api.request(f"/actions/workflows/{current['workflow_id']}/runs?{query}")["workflow_runs"]
         if len(runs) >= 100:
             return cumulative(current, "Validation discovery limit reached")
-        candidates = []
-        for run in runs:
+        ancestors = set(command(root, "git", "rev-list", current["head"]).splitlines())
+        runs = [run for run in runs if run["head_sha"] in ancestors]
+        for run in sorted(runs, key=lambda r: ancestry_order(root, current["head"], r)):
             if time.monotonic() - started > 60:
                 return cumulative(current, "Validation discovery deadline reached")
             if run["id"] == current["run_id"] or run["workflow_id"] != current["workflow_id"]:
                 continue
             if run["status"] != "completed" or run["conclusion"] != "success":
                 continue
-            if command(root, "git", "merge-base", run["head_sha"], current["head"]).strip() != run["head_sha"]:
-                continue
             artifacts = api.request(f"/actions/runs/{run['id']}/artifacts?per_page=100")["artifacts"]
             matches = [a for a in artifacts if a["name"] == artifact_name(run) and not a["expired"]]
             if len(matches) != 1:
                 continue
-            record = read_record(download(matches[0]["id"]))
-            merge = record.get("merge", "")
-            if not isinstance(merge, str) or not SHA.fullmatch(merge):
+            try:
+                record = read_record(download(matches[0]["id"]))
+                if record.get("repository") != current["repository"] or record.get("pr") != current["pr"]:
+                    continue
+                merge = record.get("merge", "")
+                if not isinstance(merge, str) or not SHA.fullmatch(merge):
+                    continue
+                # Fetching is explicit CI orchestration; local selectors never fetch.
+                present = subprocess.run(["git", "cat-file", "-e", merge + "^{commit}"], cwd=root, capture_output=True)
+                if present.returncode:
+                    subprocess.run(["git", "fetch", "--no-tags", "origin", merge], cwd=root,
+                                   capture_output=True, check=True, timeout=30)
+                result = choose_baseline(root, current, [(run, record)])
+                if result["scope"] == "incremental":
+                    return result
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, zipfile.BadZipFile):
+                # An unusable record cannot invalidate another proven ancestor.
                 continue
-            # Fetching is explicit CI orchestration; local selectors never fetch.
-            present = subprocess.run(["git", "cat-file", "-e", merge + "^{commit}"], cwd=root, capture_output=True)
-            if present.returncode:
-                subprocess.run(["git", "fetch", "--no-tags", "origin", merge], cwd=root,
-                               capture_output=True, check=True, timeout=30)
-            candidates.append((run, record))
-        return choose_baseline(root, current, candidates)
+        return cumulative(current, "No compatible completed successful validation record")
     except (OSError, ValueError, KeyError, TypeError, AnalysisError, subprocess.SubprocessError, zipfile.BadZipFile) as error:
         return cumulative(current, f"Validation history unavailable: {error}")
 

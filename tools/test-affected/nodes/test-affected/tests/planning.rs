@@ -652,46 +652,38 @@ fn snapshot_mode_preserves_incremental_base_and_plan_provenance() {
     use mfn_test_affected::{ComparisonMode, GitConfig};
     let (directory, base) = fixture();
     let root = directory.path();
+    git::command(root, "git", &["checkout", "-qb", "feature"]).unwrap();
     write(root, "core/src/lib.rs", &SOURCE.replace("1, 1", "2, 2"));
-    let first = commit(root);
-    let tree = git::command(root, "git", &["rev-parse", "HEAD^{tree}"]).unwrap();
-    let first_merge = git::command(
+    commit(root);
+    git::command(root, "git", &["checkout", "-qb", "target", &base]).unwrap();
+    write(
+        root,
+        "other/src/lib.rs",
+        &SOURCE.replace("-> u32 { 1 }", "-> u32 { 3 }"),
+    );
+    let target = commit(root);
+    git::command(
         root,
         "git",
-        &[
-            "commit-tree",
-            tree.trim(),
-            "-p",
-            &base,
-            "-p",
-            &first,
-            "-m",
-            "first merge",
-        ],
+        &["merge", "--no-ff", "feature", "-m", "first merge"],
     )
     .unwrap();
+    let first_merge = git::revision(root, "HEAD").unwrap();
+    git::command(root, "git", &["checkout", "-q", "feature"]).unwrap();
     write(
         root,
         "app/src/lib.rs",
         &SOURCE.replace("-> u32 { 1 }", "-> u32 { 2 }"),
     );
-    let second = commit(root);
-    let tree = git::command(root, "git", &["rev-parse", "HEAD^{tree}"]).unwrap();
-    let second_merge = git::command(
+    commit(root);
+    git::command(root, "git", &["checkout", "-q", "--detach", &target]).unwrap();
+    git::command(
         root,
         "git",
-        &[
-            "commit-tree",
-            tree.trim(),
-            "-p",
-            &base,
-            "-p",
-            &second,
-            "-m",
-            "second merge",
-        ],
+        &["merge", "--no-ff", "feature", "-m", "second merge"],
     )
     .unwrap();
+    let second_merge = git::revision(root, "HEAD").unwrap();
     let comparison = git::compare_with_mode(
         root,
         first_merge.trim(),
@@ -708,10 +700,11 @@ fn snapshot_mode_preserves_incremental_base_and_plan_provenance() {
     assert_eq!(plan.comparison_mode, ComparisonMode::Snapshot);
     assert_eq!(plan.packages, ["sample-app"]);
     assert_baseline_parity(&comparison, &plan);
-    assert_ne!(
-        compare(root, first_merge.trim(), second_merge.trim()).base,
-        comparison.base
-    );
+    let cumulative = compare(root, first_merge.trim(), second_merge.trim());
+    assert_ne!(cumulative.base, comparison.base);
+    assert_eq!(cumulative.changes.len(), 2);
+    let broader = make_plan(&cumulative, &outcome(&cumulative), &PlanOptions::default()).unwrap();
+    assert_eq!(broader.baseline_packages.len(), 2);
     assert!(serde_json::from_value::<GitConfig>(json!({"comparison_mode":"unknown"})).is_err());
     let config: GitConfig = serde_json::from_value(json!({"comparison_mode":"snapshot"})).unwrap();
     assert_eq!(config.comparison_mode, ComparisonMode::Snapshot);

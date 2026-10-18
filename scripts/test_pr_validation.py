@@ -114,6 +114,18 @@ class ValidationTests(unittest.TestCase):
         result = validation.discover_baseline(self.root, self.current, api, 'feature', download)
         self.assertEqual(result['base'], self.merges[1])
         download.assert_called_once_with(2)
+        orphan = run | {'id': 3, 'head_sha': 'f' * 40}
+        api = Mock()
+        api.request.side_effect = [{'workflow_runs': [orphan, run]},
+                                  {'artifacts': [{'id': 2, 'name': validation.artifact_name(run), 'expired': False}]}]
+        self.assertEqual(validation.discover_baseline(self.root, self.current, api, 'feature', download)['base'], self.merges[1])
+        orphan = orphan | {'head_sha': self.current['head']}
+        api = Mock()
+        api.request.side_effect = [{'workflow_runs': [orphan, run]},
+                                  {'artifacts': [{'id': 3, 'name': validation.artifact_name(orphan), 'expired': False}]},
+                                  {'artifacts': [{'id': 2, 'name': validation.artifact_name(run), 'expired': False}]}]
+        self.assertEqual(validation.discover_baseline(self.root, self.current, api, 'feature',
+                         lambda identifier: b'broken' if identifier == 3 else archive(record))['base'], self.merges[1])
         for response in [OSError('offline'), {'workflow_runs': [run] * 100}, {'workflow_runs': []}]:
             api = Mock()
             if isinstance(response, Exception): api.request.side_effect = response
