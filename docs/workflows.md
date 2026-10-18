@@ -522,6 +522,13 @@ That target pair defines the group. At least two distinct candidate outputs are 
 ordinary and exclusive edges cannot bind the same input. An omitted or false marker retains
 ordinary single-source binding. Every candidate participates in ordering and type checks.
 
+Compilation must prove every pair of candidates mutually exclusive. Use different outputs of
+the same `builtin.if_else`, either directly or through data and control dependencies, to gate
+the candidate producers. An `exclusive` marker alone is insufficient: unguarded sources,
+producers on the same branch, and unrelated routers are rejected before execution, even if
+runtime values would happen to select only one. After convergence, only branch constraints
+shared by every candidate remain available for proving downstream groups.
+
 ```json
 {
   "edges": [
@@ -537,9 +544,10 @@ this declaration does not mix independent streams or select the first completed 
 Omitting the marker preserves existing workflows. New syntax requires updated support packages.
 
 Resolution waits for all candidate outcomes in the current frame. Exactly one produced value
-binds the input; all skipped candidates skip the consumer; multiple produced candidates fail,
-even if their values are equal. False and null count as values. Unexpected absence and ambiguity
-remain errors even behind another skipped dependency. A selected dynamic value is type-checked
+binds the input; all skipped candidates skip the consumer. False and null count as values.
+Unexpected absence remains an error even behind another skipped dependency. The runtime also
+fails closed if a node implementation violates its declared exclusivity contract. Such a
+violation is not a supported workflow outcome. A selected dynamic value is type-checked
 before an active consumer executes. Failure and cancellation do not select fallback candidates.
 
 Selection retains shared payloads and secret metadata. Different input groups resolve independently;

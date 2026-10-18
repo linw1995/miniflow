@@ -1,4 +1,4 @@
-use crate::runner::{AmbiguousInputSnafu, ContextSnafu, DependencySnafu, InputTypeSnafu};
+use crate::runner::{ContextSnafu, DependencySnafu, InputTypeSnafu};
 use crate::workflow_inputs::{InvalidSnafu, TextValueSnafu, TypeMismatchSnafu, pointer};
 use crate::{
     ContextValue, ExecutionDependency, FlowNode, Inputs, NodeExecutionError, WorkflowArguments,
@@ -19,8 +19,8 @@ pub struct InputResolution {
 
 #[derive(Default)]
 struct CandidateValues {
-    // Validated plans have unique candidates; only ambiguity diagnostics need ordering.
-    produced: Vec<(SkipCause, crate::ValueRef)>,
+    produced: Option<(SkipCause, crate::ValueRef)>,
+    conflicting: bool,
     skipped: Vec<SkipCause>,
 }
 
@@ -145,7 +145,8 @@ impl ExecutionInputs {
                 };
                 match value {
                     Some(ContextValue::Value(value)) => {
-                        group.produced.push((source, value.clone()));
+                        group.conflicting |=
+                            group.produced.replace((source, value.clone())).is_some();
                     }
                     Some(ContextValue::Skipped) => {
                         group.skipped.push(source);
@@ -175,33 +176,23 @@ impl ExecutionInputs {
                 None => {}
             }
         }
-        // Inspect every dependency before allowing skips or reporting cardinality errors.
         for (input, group) in groups {
-            match group.produced.len() {
-                0 => causes.extend(group.skipped),
-                1 => {
-                    let (source, value) = group.produced.into_iter().next().unwrap();
-                    selected.push(InputSelection {
-                        input: input.to_owned(),
-                        source_node: source.source_node,
-                        source_output: source.source_output,
-                    });
-                    inputs.insert(input.to_owned(), value);
+            snafu::ensure!(
+                !group.conflicting,
+                ContextSnafu {
+                    definition_id: id,
+                    message: format!("exclusive output contract violated for input `{input}`"),
                 }
-                _ => {
-                    let mut sources: Vec<_> = group
-                        .produced
-                        .into_iter()
-                        .map(|(source, _)| source)
-                        .collect();
-                    sources.sort();
-                    return AmbiguousInputSnafu {
-                        definition_id: id,
-                        input,
-                        sources,
-                    }
-                    .fail();
-                }
+            );
+            if let Some((source, value)) = group.produced {
+                selected.push(InputSelection {
+                    input: input.to_owned(),
+                    source_node: source.source_node,
+                    source_output: source.source_output,
+                });
+                inputs.insert(input.to_owned(), value);
+            } else {
+                causes.extend(group.skipped);
             }
         }
         if causes.is_empty() {

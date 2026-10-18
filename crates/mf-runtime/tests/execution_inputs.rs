@@ -150,9 +150,8 @@ fn exclusive_errors_precede_skips_and_input_type_checks() {
         for (case, required) in [
             ("one", true),
             ("none", false),
-            ("ambiguous", true),
+            ("contract_violation", true),
             ("missing", true),
-            ("missing_ambiguous", true),
         ] {
             let mut dependencies = vec![
                 candidate("left"),
@@ -181,7 +180,7 @@ fn exclusive_errors_precede_skips_and_input_type_checks() {
                         .fail();
                     }
                     let produced = source.source_node == "left" && case != "none"
-                        || source.source_node == "right" && case.contains("ambiguous");
+                        || source.source_node == "right" && case.contains("contract_violation");
                     Ok(Some(if produced {
                         ContextValue::Value(&bad)
                     } else {
@@ -200,18 +199,17 @@ fn exclusive_errors_precede_skips_and_input_type_checks() {
                     assert_eq!(result.unwrap().len(), 4);
                     assert!(inputs.is_empty());
                 }
-                "ambiguous" => {
+                "contract_violation" => {
                     let error = result.unwrap_err();
                     assert!(!format!("{error:?}").contains("sentinel-secret"));
-                    let mf_runtime::WorkflowRunError::AmbiguousInput { sources, .. } = error else {
-                        panic!("expected ambiguous candidates");
-                    };
-                    assert_eq!(
-                        sources
-                            .iter()
-                            .map(|source| source.source_node.as_str())
-                            .collect::<Vec<_>>(),
-                        ["left", "right"]
+                    assert!(matches!(
+                        error,
+                        mf_runtime::WorkflowRunError::Context { .. }
+                    ));
+                    assert!(
+                        error
+                            .to_string()
+                            .contains("exclusive output contract violated")
                     );
                 }
                 _ => assert!(matches!(

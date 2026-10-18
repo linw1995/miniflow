@@ -702,8 +702,7 @@ impl ExecutionContext {
             return;
         };
         let (node, phase) = match error {
-            WorkflowRunError::Dependency { definition_id, .. }
-            | WorkflowRunError::AmbiguousInput { definition_id, .. } => {
+            WorkflowRunError::Dependency { definition_id, .. } => {
                 (Some(definition_id.to_string()), FailurePhase::Dependency)
             }
             WorkflowRunError::InputType { definition_id, .. } => {

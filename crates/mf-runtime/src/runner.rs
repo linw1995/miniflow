@@ -4,17 +4,6 @@ use snafu::Snafu;
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowRunError {
-    #[snafu(
-        display(
-            "node `{definition_id}` input `{input}` has multiple produced candidates: {sources:?}"
-        ),
-        visibility(pub)
-    )]
-    AmbiguousInput {
-        definition_id: DefinitionId,
-        input: String,
-        sources: Vec<mf_telemetry::event::SkipCause>,
-    },
     #[snafu(transparent)]
     NodeTarget { source: crate::NodeTargetError },
     #[snafu(transparent)]
