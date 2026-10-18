@@ -42,3 +42,12 @@ The plan SHALL identify source/configuration snapshots, retained package or bina
 
 - **WHEN** a previously produced plan omits `ignored_files`
 - **THEN** the consumer treats the field as empty and preserves its execution selection
+
+### Requirement: Report cost without promising early policy gating
+
+Reports SHALL separate Flow analysis/planning time from script inventory/build and test execution time. Selection comparisons SHALL use the same head/configuration. The three-node Flow SHALL NOT be described as avoiding LSP work for every eventual full fallback; final policy decisions occur after analysis. Reduced case counts SHALL NOT be claimed as measured time savings.
+
+#### Scenario: Discover full fallback after analysis
+
+- **WHEN** the planner finds unclassified shared-input changes after LSP has already analyzed source edits
+- **THEN** the report retains that analysis cost and the full-workspace plan

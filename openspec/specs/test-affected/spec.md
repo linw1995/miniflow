@@ -45,12 +45,27 @@ Snapshots SHALL remain available through analysis, planning, and later script co
 
 ### Requirement: Build a conservative baseline in the planner
 
-The plan task SHALL derive Cargo package ownership and reverse dependencies with all declared local dependency kinds retained. Successful baseline results SHALL agree with the current selector. Dependency configuration, shared or unknown inputs, and unusable dependency analysis SHALL retain full-workspace fallback; missing workspace metadata SHALL fail planning.
+The plan task SHALL retain all declared local dependency kinds and agree with the current selector. Package-owned inputs, including manifests, SHALL select their owner and reverse dependencies. Known shared executables SHALL seed their consumers. Explicit repository configuration and documentation exceptions SHALL defer to full main/nightly runs. Unknown inputs and analyzer failures SHALL retain full fallback; missing metadata SHALL fail planning.
 
 #### Scenario: Change shared nextest configuration
 
-- **WHEN** the comparison changes `.config/nextest.toml`
-- **THEN** the plan selects the full workspace and records that reason, independently of semantic results
+- **WHEN** only `.config/nextest.toml`, root `Cargo.toml`, or root `Cargo.lock` changes
+- **THEN** the plan records the paths in `ignored_files` without selecting Rust tests
+
+#### Scenario: Change a package manifest
+
+- **WHEN** a package manifest or its nested fixture manifest changes
+- **THEN** package ownership selects that package and its reverse dependencies without forcing the entire workspace
+
+#### Scenario: Change a known shared executable input
+
+- **WHEN** examples or generated-runner build helpers change
+- **THEN** their known consumer packages and reverse dependencies remain selected
+
+#### Scenario: Encounter an unclassified input
+
+- **WHEN** a shared input has no rule or none of its expected consumers exist
+- **THEN** the plan selects the full workspace and records the reason
 
 #### Scenario: Preserve inactive dependency edges
 
@@ -110,12 +125,17 @@ The planner SHALL verify outcome snapshot/configuration identities against forwa
 
 ### Requirement: Emit a structured selection artifact
 
-The plan SHALL identify source/configuration snapshots, retained package or binary scopes, exact test selectors where justified, baseline fallback, and reasons. A supplied matching head inventory SHALL allow concrete case enumeration; otherwise unenumerated scopes SHALL be explicit. The Flow SHALL NOT compile or execute tests to obtain counts.
+The plan SHALL identify source/configuration snapshots, retained package or binary scopes, exact test selectors where justified, baseline fallback, reasons, and `ignored_files` for deferred inputs. A supplied matching head inventory SHALL allow concrete case enumeration; otherwise unenumerated scopes SHALL be explicit. The Flow SHALL NOT compile or execute tests to obtain counts.
 
 #### Scenario: Plan without compiled tests
 
 - **WHEN** no matching executable inventory is supplied
 - **THEN** the output retains required scopes/selectors and marks unavailable counts without building or running tests
+
+#### Scenario: Consume an existing saved plan
+
+- **WHEN** a previously produced plan omits `ignored_files`
+- **THEN** the consumer treats the field as empty and preserves its execution selection
 
 ### Requirement: Execute through a separate script
 
@@ -151,7 +171,7 @@ Reports SHALL separate Flow analysis/planning time from script inventory/build a
 
 #### Scenario: Discover full fallback after analysis
 
-- **WHEN** the planner finds shared-input changes after LSP has already analyzed source edits
+- **WHEN** the planner finds unclassified shared-input changes after LSP has already analyzed source edits
 - **THEN** the report retains that analysis cost and the full-workspace plan
 
 ### Requirement: Keep rollout opt-in
