@@ -61,6 +61,9 @@ fn versions_and_edge_shapes_cannot_be_mixed() {
     let mut controls = base.clone();
     controls["control_edges"] = json!([]);
     invalid.push(controls);
+    let mut internal = base.clone();
+    internal["order_edges"] = json!([]);
+    invalid.push(internal);
     for edge in [
         json!({"from_node":"source.with.dots","to_node":"consumer","to_input":"input","from_output":"value"}),
         json!({"from_node":"source.with.dots","to_node":"consumer","from_output":null}),
@@ -94,6 +97,7 @@ fn duplicate_input_keys_and_malformed_groups_fail() {
         json!({"exclusive":[{"node":"a","port":"p"},{"node":"a","port":"p"}]}),
         json!({"from":{"node":"a","port":"p"},"exclusive":[]}),
         json!({"from":{"node":"a","port":"p","path":"/x"}}),
+        json!({"from":{"node":"a","port":""}}),
     ] {
         let mut definition = reference_workflow();
         definition["nodes"][1]["inputs"]["input"] = binding;
@@ -227,4 +231,45 @@ fn redundant_success_prerequisites_do_not_consume_typed_payloads() {
     )
     .unwrap();
     assert_eq!(json!(result), json!({"result":42}));
+}
+
+#[test]
+fn serialization_rejects_unrepresentable_programmatic_graphs() {
+    let original: WorkflowDefinition = serde_json::from_value(reference_workflow()).unwrap();
+    let mut conflicting = original.clone();
+    conflicting.edges.push(conflicting.edges[0].clone());
+    assert!(
+        serde_json::to_value(&conflicting)
+            .unwrap_err()
+            .to_string()
+            .contains("conflicting bindings")
+    );
+
+    let mut missing = original.clone();
+    missing.edges[0].to_node = "missing".into();
+    assert!(
+        serde_json::to_value(&missing)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown node")
+    );
+
+    let mut legacy = original;
+    legacy.version = mf_compiler::WorkflowDefinitionVersion::V2026_10_03;
+    legacy.order_edges.push(mf_compiler::OrderEdgeDefinition {
+        from_node: "source.with.dots".into(),
+        to_node: "consumer".into(),
+    });
+    assert!(
+        serde_json::to_value(&legacy)
+            .unwrap_err()
+            .to_string()
+            .contains("require version")
+    );
+    assert!(
+        plan_definition(&legacy)
+            .unwrap_err()
+            .to_string()
+            .contains("require version")
+    );
 }

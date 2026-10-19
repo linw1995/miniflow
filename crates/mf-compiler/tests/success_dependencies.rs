@@ -290,6 +290,54 @@ fn programmatic_builders_and_stream_domains_enforce_success_boundaries() {
     );
     let plan = compile_definition(&graph, &registry).unwrap();
     assert!(instantiate_compiled(&plan, &registry).is_ok());
+    for (edges, definition_valid) in [
+        (json!([{"from_node":"a","to_node":"missing"}]), false),
+        (json!([{"from_node":"a","to_node":"a"}]), false),
+        (
+            json!([{"from_node":"a","to_node":"b"},{"from_node":"a","to_node":"b"}]),
+            false,
+        ),
+        (json!([{"from_node":"b","to_node":"a"}]), true),
+    ] {
+        let edges: Vec<mf_compiler::OrderEdgeDefinition> = serde_json::from_value(edges).unwrap();
+        let builder = mf_compiler::FlowBuilder::prepare(
+            mf_compiler::resolve_nodes(&graph, &registry).unwrap(),
+            vec![],
+            vec!["a".into(), "b".into()],
+            vec![],
+        )
+        .unwrap();
+        assert!(builder.with_order_edges(edges.clone()).is_err());
+        let mut candidate = graph.clone();
+        candidate.order_edges = edges;
+        assert_eq!(
+            mf_compiler::plan_definition(&candidate).is_ok(),
+            definition_valid
+        );
+    }
+
+    let mut inputs = graph.clone();
+    for node in &mut inputs.nodes {
+        node.config["inputs"] = json!(["argument"]);
+    }
+    let builder = mf_compiler::FlowBuilder::prepare(
+        mf_compiler::resolve_nodes(&inputs, &registry).unwrap(),
+        vec![],
+        vec!["a".into(), "b".into()],
+        vec![],
+    )
+    .unwrap()
+    .with_workflow_inputs()
+    .unwrap();
+    assert!(builder.input_schema().inputs.contains_key("b"));
+    let flow = builder
+        .with_order_edges(inputs.order_edges)
+        .unwrap()
+        .into_tasks()
+        .unwrap();
+    assert!(flow.input_schema().inputs.contains_key("a"));
+    assert!(!flow.input_schema().inputs.contains_key("b"));
+    assert!(!path.exists(), "validation must not invoke Tasks");
 }
 
 #[test]
