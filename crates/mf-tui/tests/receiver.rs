@@ -32,6 +32,7 @@ fn loopback_available() -> bool {
 
 fn graph() -> WorkflowDescription {
     WorkflowDescription {
+        order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
         nodes: vec![],

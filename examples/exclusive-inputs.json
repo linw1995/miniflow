@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-03",
+  "version": "2026-10-19",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -59,10 +59,31 @@
     },
     {
       "id": "consume",
-      "kind": "builtin.identity"
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "local",
+              "port": "value"
+            },
+            {
+              "node": "ci",
+              "port": "value"
+            }
+          ]
+        }
+      }
     }
   ],
-  "control_edges": [
+  "outputs": [
+    {
+      "name": "result",
+      "node": "consume",
+      "port": "value"
+    }
+  ],
+  "edges": [
     {
       "from_node": "params",
       "from_output": "ci",
@@ -77,29 +98,6 @@
       "from_node": "route",
       "from_output": "else",
       "to_node": "local"
-    }
-  ],
-  "outputs": [
-    {
-      "name": "result",
-      "node": "consume",
-      "port": "value"
-    }
-  ],
-  "edges": [
-    {
-      "from_node": "local",
-      "from_output": "value",
-      "to_node": "consume",
-      "to_input": "input",
-      "exclusive": true
-    },
-    {
-      "from_node": "ci",
-      "from_output": "value",
-      "to_node": "consume",
-      "to_input": "input",
-      "exclusive": true
     }
   ]
 }

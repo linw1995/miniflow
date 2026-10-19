@@ -60,6 +60,9 @@ impl NodePortContract for ScopeSourceNode {
 }
 
 impl TaskNode for ScopeSourceNode {
+    fn supports_success_dependencies(&self) -> bool {
+        false
+    }
     fn execute(
         &self,
         _: Inputs,
@@ -107,6 +110,9 @@ impl NodePortContract for LoopAssignNode {
 }
 
 impl TaskNode for LoopAssignNode {
+    fn supports_success_dependencies(&self) -> bool {
+        false
+    }
     fn execute(
         &self,
         mut inputs: Inputs,
@@ -141,6 +147,9 @@ struct ExitLoopNode;
 struct EmptyValues {}
 
 impl TypedTaskNode for ExitLoopNode {
+    fn supports_success_dependencies(&self) -> bool {
+        false
+    }
     type Input = EmptyValues;
     type Output = EmptyValues;
 

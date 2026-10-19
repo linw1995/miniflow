@@ -93,7 +93,7 @@ impl ExecutionInputs {
 
     /// Assembles and validates node inputs, retaining partial values for failure snapshots.
     ///
-    /// Lookup returns `None` only for an input already transferred through a typed slot.
+    /// Lookup returns `None` for an already transferred typed input.
     /// All dependencies are checked before honoring skips; skipped nodes bypass type validation.
     pub fn resolve_node<'a, 'value, N>(
         &self,
@@ -114,14 +114,34 @@ impl ExecutionInputs {
         node: &FlowNode<N>,
         in_scope: bool,
         dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
-        mut lookup: impl FnMut(
+        lookup: impl FnMut(
             ExecutionDependency<'a>,
         ) -> Result<Option<ContextValue<'value>>, NodeExecutionError>,
         inputs: &mut Inputs,
     ) -> Result<InputResolution, WorkflowRunError> {
+        self.resolve_node_inputs_with_causes(
+            node,
+            in_scope,
+            dependencies,
+            lookup,
+            inputs,
+            BTreeSet::new(),
+        )
+    }
+
+    pub fn resolve_node_inputs_with_causes<'a, 'value, N>(
+        &self,
+        node: &FlowNode<N>,
+        in_scope: bool,
+        dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
+        mut lookup: impl FnMut(
+            ExecutionDependency<'a>,
+        ) -> Result<Option<ContextValue<'value>>, NodeExecutionError>,
+        inputs: &mut Inputs,
+        mut causes: BTreeSet<SkipCause>,
+    ) -> Result<InputResolution, WorkflowRunError> {
         *inputs = self.initial(node, in_scope);
         let id = node.definition_id.as_str();
-        let mut causes = BTreeSet::new();
         let mut selected = Vec::new();
         let mut groups: BTreeMap<&str, CandidateValues> = BTreeMap::new();
         for dependency in dependencies {
@@ -138,7 +158,7 @@ impl ExecutionInputs {
                     .build()
                 })?;
                 let group = groups.entry(input).or_default();
-                let source = SkipCause {
+                let source = SkipCause::Output {
                     source_node: dependency.source_node.into(),
                     source_output: dependency.source_output.into(),
                 };
@@ -166,7 +186,7 @@ impl ExecutionInputs {
                     }
                 }
                 Some(ContextValue::Skipped) => {
-                    causes.insert(SkipCause {
+                    causes.insert(SkipCause::Output {
                         source_node: dependency.source_node.into(),
                         source_output: dependency.source_output.into(),
                     });
@@ -178,8 +198,11 @@ impl ExecutionInputs {
             if let Some((source, value)) = group.produced {
                 selected.push(InputSelection {
                     input: input.to_owned(),
-                    source_node: source.source_node,
-                    source_output: source.source_output,
+                    source_node: source.source_node().into(),
+                    source_output: source
+                        .source_output()
+                        .expect("exclusive output source")
+                        .into(),
                 });
                 inputs.insert(input.to_owned(), value);
             } else {

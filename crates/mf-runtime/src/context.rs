@@ -507,7 +507,11 @@ impl ExecutionContext {
         for node in nodes {
             for port in &node.metadata.ports.outputs {
                 let id = output_id(node.definition_id.as_str(), &port.name);
-                if let Some(value) = source.outputs.get(&id) {
+                if source.typed_outputs.contains(&id) {
+                    self.outputs.remove(&id);
+                    self.typed_outputs.insert(id);
+                } else if let Some(value) = source.outputs.get(&id) {
+                    self.typed_outputs.remove(&id);
                     self.outputs.insert(id, value.clone());
                 }
             }
@@ -702,7 +706,8 @@ impl ExecutionContext {
             return;
         };
         let (node, phase) = match error {
-            WorkflowRunError::Dependency { definition_id, .. } => {
+            WorkflowRunError::Dependency { definition_id, .. }
+            | WorkflowRunError::SuccessDependency { definition_id, .. } => {
                 (Some(definition_id.to_string()), FailurePhase::Dependency)
             }
             WorkflowRunError::InputType { definition_id, .. } => {
@@ -737,6 +742,44 @@ impl ExecutionContext {
             run.output_selection_failed(error.to_string());
         }
         result
+    }
+
+    /// Reads availability without decoding a transferred typed value.
+    pub fn output_available(&self, node: &str, port: &str) -> Result<bool, NodeExecutionError> {
+        let key = output_id(node, port);
+        if self.typed_outputs.contains(&key) {
+            return Ok(true);
+        }
+        self.output(&key)
+            .map(|value| matches!(value, ContextValue::Value(_)))
+    }
+
+    pub fn resolve_node_inputs<'a, N>(
+        &self,
+        node: &FlowNode<N>,
+        dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
+        transferred_inputs: &[&str],
+        inputs: &mut Inputs,
+        causes: BTreeSet<SkipCause>,
+    ) -> Result<crate::InputResolution, WorkflowRunError> {
+        self.inputs.resolve_node_inputs_with_causes(
+            node,
+            !self.scopes.is_empty(),
+            dependencies,
+            |dependency| {
+                let key = output_id(dependency.source_node, dependency.source_output);
+                if dependency
+                    .input
+                    .is_some_and(|input| transferred_inputs.contains(&input))
+                    && self.typed_outputs.contains(&key)
+                {
+                    return Ok(None);
+                }
+                self.output(&key).map(Some)
+            },
+            inputs,
+            causes,
+        )
     }
 
     pub fn output(&self, id: &str) -> Result<ContextValue<'_>, NodeExecutionError> {
@@ -1089,15 +1132,7 @@ pub fn execute_node_in_context(
         ordered.sort();
         std::borrow::Cow::Owned(ordered)
     };
-    execute_ordered_node_in_context(node, dependencies.iter().copied(), ctx)
-}
-
-pub fn execute_ordered_node_in_context<'a>(
-    node: &crate::TaskFlowNode,
-    dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
-    ctx: &mut ExecutionContext,
-) -> Result<(), WorkflowRunError> {
-    execute_ordered_task_in_context(node, node.node.as_ref(), dependencies, ctx)
+    execute_ordered_task_in_context(node, node.node.as_ref(), dependencies.iter().copied(), ctx)
 }
 
 pub(super) fn execute_ordered_task_in_context<'a, N>(
@@ -1106,7 +1141,7 @@ pub(super) fn execute_ordered_task_in_context<'a, N>(
     dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
     ctx: &mut ExecutionContext,
 ) -> Result<(), WorkflowRunError> {
-    execute_ordered_call_in_context(node, dependencies, ctx, &[], |inputs, ctx| {
+    execute_generated_node_in_context(node, dependencies, ctx, &[], |inputs, ctx| {
         task.execute(inputs, ctx).map(GeneratedNodeResult::Dynamic)
     })
 }
@@ -1122,14 +1157,30 @@ pub fn execute_generated_node_in_context<'a, N>(
         &mut ExecutionContext,
     ) -> Result<GeneratedNodeResult, NodeExecutionError>,
 ) -> Result<(), WorkflowRunError> {
-    execute_ordered_call_in_context(node, dependencies, ctx, transferred_inputs, invoke)
+    execute_resolved_node_in_context(
+        node,
+        ctx,
+        |ctx, inputs| {
+            ctx.resolve_node_inputs(
+                node,
+                dependencies,
+                transferred_inputs,
+                inputs,
+                BTreeSet::new(),
+            )
+        },
+        invoke,
+    )
 }
 
-fn execute_ordered_call_in_context<'a, N>(
+/// Runs prepared input resolution through the shared observation and publication lifecycle.
+pub fn execute_resolved_node_in_context<N>(
     node: &FlowNode<N>,
-    dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
     ctx: &mut ExecutionContext,
-    transferred_inputs: &[&str],
+    resolve: impl FnOnce(
+        &ExecutionContext,
+        &mut Inputs,
+    ) -> Result<crate::InputResolution, WorkflowRunError>,
     invoke: impl FnOnce(
         Inputs,
         &mut ExecutionContext,
@@ -1161,23 +1212,7 @@ fn execute_ordered_call_in_context<'a, N>(
         _ => None,
     };
     let mut inputs = Inputs::new();
-    let resolution = ctx.inputs.resolve_node_inputs(
-        node,
-        !ctx.scopes.is_empty(),
-        dependencies,
-        |dependency| {
-            let key = output_id(dependency.source_node, dependency.source_output);
-            if dependency
-                .input
-                .is_some_and(|input| transferred_inputs.contains(&input))
-                && ctx.typed_outputs.contains(&key)
-            {
-                return Ok(None);
-            }
-            ctx.output(&key).map(Some)
-        },
-        &mut inputs,
-    );
+    let resolution = resolve(ctx, &mut inputs);
     let causes = match resolution {
         Ok(resolution) => {
             if let Some(step) = step.as_mut() {

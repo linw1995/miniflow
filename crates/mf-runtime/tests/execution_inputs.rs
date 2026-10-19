@@ -104,7 +104,9 @@ fn node_resolution_combines_startup_values_and_dependencies_without_copying_payl
 fn candidate(source: &str) -> ExecutionDependency<'_> {
     ExecutionDependency {
         exclusive: true,
-        ..dependency(Some("value"), source)
+        input: Some("value"),
+        source_node: source,
+        source_output: "value",
     }
 }
 
@@ -187,7 +189,7 @@ fn exclusive_errors_precede_skips_and_input_type_checks() {
                 "one" => {
                     let causes = result.unwrap();
                     assert_eq!(causes.len(), 1);
-                    assert_eq!(causes.first().unwrap().source_node, "gate");
+                    assert_eq!(causes.first().unwrap().source_node(), "gate");
                 }
                 "none" => {
                     assert_eq!(result.unwrap().len(), 4);

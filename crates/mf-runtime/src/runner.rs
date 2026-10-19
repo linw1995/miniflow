@@ -4,6 +4,15 @@ use snafu::Snafu;
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowRunError {
+    #[snafu(
+        display("node `{definition_id}` requires successful node `{source_node}`: {source}"),
+        visibility(pub)
+    )]
+    SuccessDependency {
+        definition_id: DefinitionId,
+        source_node: String,
+        source: NodeExecutionError,
+    },
     #[snafu(transparent)]
     NodeTarget { source: crate::NodeTargetError },
     #[snafu(transparent)]

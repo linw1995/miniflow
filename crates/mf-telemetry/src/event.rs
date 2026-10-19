@@ -66,9 +66,58 @@ pub enum LoopPassOutcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct SkipCause {
-    pub source_node: String,
-    pub source_output: String,
+#[serde(untagged, deny_unknown_fields)]
+pub enum SkipCause {
+    Output {
+        source_node: String,
+        source_output: String,
+    },
+    NodeSuccess {
+        node_success: String,
+    },
+}
+
+impl SkipCause {
+    pub fn matches_dependency(
+        &self,
+        target: &str,
+        data: &[crate::description::DataEdge],
+        controls: &[crate::description::ControlEdge],
+        orders: &[crate::description::OrderEdge],
+    ) -> bool {
+        match self {
+            Self::Output {
+                source_node,
+                source_output,
+            } => {
+                data.iter().any(|edge| {
+                    edge.to_node == target
+                        && edge.from_node == *source_node
+                        && edge.from_output == *source_output
+                }) || controls.iter().any(|edge| {
+                    edge.to_node == target
+                        && edge.from_node == *source_node
+                        && edge.from_output == *source_output
+                })
+            }
+            Self::NodeSuccess { node_success } => orders
+                .iter()
+                .any(|edge| edge.to_node == target && edge.from_node == *node_success),
+        }
+    }
+
+    pub fn source_node(&self) -> &str {
+        match self {
+            Self::Output { source_node, .. } => source_node,
+            Self::NodeSuccess { node_success } => node_success,
+        }
+    }
+    pub fn source_output(&self) -> Option<&str> {
+        match self {
+            Self::Output { source_output, .. } => Some(source_output),
+            Self::NodeSuccess { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,8 +316,8 @@ impl Event {
                 require(!causes.is_empty(), "skip requires at least one cause")?;
                 for cause in causes {
                     require(
-                        !cause.source_node.trim().is_empty()
-                            && !cause.source_output.is_empty()
+                        !cause.source_node().trim().is_empty()
+                            && cause.source_output().is_none_or(|port| !port.is_empty())
                             && unique.insert(cause),
                         "invalid or duplicate skip cause",
                     )?;
@@ -445,11 +494,12 @@ impl LifecycleEvent {
                 .iter()
                 .map(|entry| entry.loop_id.clone())
                 .collect();
-            let (nodes, data_edges, control_edges, order) = if static_path.is_empty() {
+            let (nodes, data_edges, control_edges, order_edges, order) = if static_path.is_empty() {
                 (
                     &graph.nodes,
                     &graph.data_edges,
                     &graph.control_edges,
+                    &graph.order_edges,
                     &graph.execution_order,
                 )
             } else {
@@ -460,6 +510,7 @@ impl LifecycleEvent {
                     &body.nodes,
                     &body.data_edges,
                     &body.control_edges,
+                    &body.order_edges,
                     &body.execution_order,
                 )
             };
@@ -503,15 +554,12 @@ impl LifecycleEvent {
             if let Event::NodeSkipped { causes, .. } = &self.event {
                 for cause in causes {
                     require(
-                        data_edges.iter().any(|e| {
-                            e.to_node == identity.id
-                                && e.from_node == cause.source_node
-                                && e.from_output == cause.source_output
-                        }) || control_edges.iter().any(|e| {
-                            e.to_node == identity.id
-                                && e.from_node == cause.source_node
-                                && e.from_output == cause.source_output
-                        }),
+                        cause.matches_dependency(
+                            &identity.id,
+                            data_edges,
+                            control_edges,
+                            order_edges,
+                        ),
                         "skip cause is not an incoming dependency",
                     )?;
                 }

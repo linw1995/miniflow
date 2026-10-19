@@ -39,6 +39,8 @@ binary_id(=mfn-test-affected::flow) |
     test(=llm_stream_tasks_and_skips_preserve_existing_execution_contracts) |
     test(=parameter_templates_configure_memory_and_standalone_llm_requests)
 )) |
+(binary_id(=mf-compiler::success_dependencies) &
+    test(=standalone_success_dependencies_match_memory_and_preserve_manifests)) |
 (binary_id(=mf-compiler::runner_validation) &
     test(=build_validates_without_execution_and_reports_plugin_errors)) |
 (binary_id(=mf-compiler::typed_fast_paths) &
@@ -128,6 +130,8 @@ binary_id(=mfn-test-affected::flow) |
     test(=llm_stream_tasks_and_skips_preserve_existing_execution_contracts) |
     test(=parameter_templates_configure_memory_and_standalone_llm_requests)
 )) |
+(binary_id(=mf-compiler::success_dependencies) &
+    test(=standalone_success_dependencies_match_memory_and_preserve_manifests)) |
 (binary_id(=mf-compiler::runner_validation) &
     test(=build_validates_without_execution_and_reports_plugin_errors)) |
 (binary_id(=mf-compiler::typed_fast_paths) &

@@ -233,6 +233,32 @@ impl Flow {
         mut self,
         domains: impl IntoIterator<Item = (usize, Arc<GeneratedDomainExecutor>)>,
     ) -> Self {
+        for (id, executor) in domains {
+            let fallback = self.inner.generated_domains.get(&id).cloned();
+            self.data_mut().generated_domains.insert(
+                id,
+                Arc::new(move |flow, state| {
+                    if state.snapshot_recorder().is_none() && state.scope_path().is_empty() {
+                        executor(flow, state)
+                    } else if let Some(fallback) = &fallback {
+                        fallback(flow, state)
+                    } else {
+                        flow.execute_domain_positions(
+                            &flow.execution_domains().domains()[id],
+                            state,
+                        )
+                    }
+                }),
+            );
+        }
+        self
+    }
+
+    /// Binds semantic execution bodies that also run with snapshots and scoped frames.
+    pub fn with_prepared_domains(
+        mut self,
+        domains: impl IntoIterator<Item = (usize, Arc<GeneratedDomainExecutor>)>,
+    ) -> Self {
         self.data_mut().generated_domains.extend(domains);
         self
     }
@@ -244,16 +270,11 @@ impl Flow {
     ) -> Result<(), crate::WorkflowRunError> {
         let node_id = self.inner.plan.execution_order[position];
         let node = &self.inner.nodes[node_id.index()];
-        let previous = state.replace_execution_position(Some(position));
-        let result = crate::context::execute_ordered_node_in_context(
-            node,
-            self.inner.plan.dependencies[position]
-                .iter()
-                .map(crate::FlowDependency::borrowed),
-            state,
-        );
-        state.replace_execution_position(previous);
-        result
+        self.execute_generated_position(position, &[], state, |inputs, ctx| {
+            node.node
+                .execute(inputs, ctx)
+                .map(crate::GeneratedNodeResult::Dynamic)
+        })
     }
 
     pub fn execute_generated_position(
@@ -266,16 +287,44 @@ impl Flow {
             &mut crate::ExecutionContext,
         ) -> Result<crate::GeneratedNodeResult, crate::NodeExecutionError>,
     ) -> Result<(), crate::WorkflowRunError> {
-        let node_id = self.inner.plan.execution_order[position];
-        let node = &self.inner.nodes[node_id.index()];
-        let previous = state.replace_execution_position(Some(position));
-        let result = crate::execute_generated_node_in_context(
-            node,
-            self.inner.plan.dependencies[position]
-                .iter()
-                .map(crate::FlowDependency::borrowed),
+        self.execute_resolved_position(
+            position,
             state,
-            transferred_inputs,
+            |node, ctx, inputs| {
+                ctx.resolve_node_inputs(
+                    node,
+                    self.inner.plan.dependencies[position]
+                        .iter()
+                        .map(crate::FlowDependency::borrowed),
+                    transferred_inputs,
+                    inputs,
+                    BTreeSet::new(),
+                )
+            },
+            invoke,
+        )
+    }
+
+    pub fn execute_resolved_position(
+        &self,
+        position: usize,
+        state: &mut crate::ExecutionContext,
+        resolve: impl FnOnce(
+            &TaskFlowNode,
+            &crate::ExecutionContext,
+            &mut crate::Inputs,
+        ) -> Result<crate::InputResolution, crate::WorkflowRunError>,
+        invoke: impl FnOnce(
+            crate::Inputs,
+            &mut crate::ExecutionContext,
+        ) -> Result<crate::GeneratedNodeResult, crate::NodeExecutionError>,
+    ) -> Result<(), crate::WorkflowRunError> {
+        let node = &self.inner.nodes[self.inner.plan.execution_order[position].index()];
+        let previous = state.replace_execution_position(Some(position));
+        let result = crate::execute_resolved_node_in_context(
+            node,
+            state,
+            |ctx, inputs| resolve(node, ctx, inputs),
             invoke,
         );
         state.replace_execution_position(previous);
@@ -601,12 +650,17 @@ impl Flow {
         domain: &ExecutionDomain,
         state: &mut crate::ExecutionContext,
     ) -> Result<(), crate::WorkflowRunError> {
-        if state.snapshot_recorder().is_none()
-            && state.scope_path().is_empty()
-            && let Some(executor) = self.inner.generated_domains.get(&domain.id)
-        {
+        if let Some(executor) = self.inner.generated_domains.get(&domain.id) {
             return executor(self, state);
         }
+        self.execute_domain_positions(domain, state)
+    }
+
+    fn execute_domain_positions(
+        &self,
+        domain: &ExecutionDomain,
+        state: &mut crate::ExecutionContext,
+    ) -> Result<(), crate::WorkflowRunError> {
         for &position in domain.positions.iter() {
             if position > state.scope_exit_cutoff() {
                 break;

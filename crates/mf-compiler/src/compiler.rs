@@ -37,6 +37,8 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
+    #[snafu(display("invalid node-success dependency: {message}"))]
+    InvalidSuccessDependency { message: String },
     #[snafu(transparent)]
     ExclusiveInput {
         source: mf_runtime::ExclusiveInputError,
@@ -282,7 +284,7 @@ impl TypeInferenceState {
 
         let mut inputs: BTreeMap<&str, TypeFact> = BTreeMap::new();
         for dependency in dependencies {
-            let Some(input_name) = dependency.input else {
+            let Some(input_name) = dependency.input() else {
                 continue;
             };
             let input = node
@@ -295,13 +297,22 @@ impl TypeInferenceState {
                     definition_id: id.clone(),
                     message: format!("unknown input `{input_name}` in type binding"),
                 })?;
-            let source_id = DefinitionId::from(dependency.source_node);
+            let source_id = DefinitionId::from(dependency.source_node());
             let source = self
                 .outputs
-                .get(&(source_id.clone(), dependency.source_output.to_owned()))
+                .get(&(
+                    source_id.clone(),
+                    dependency
+                        .source_output()
+                        .expect("input output source")
+                        .to_owned(),
+                ))
                 .ok_or_else(|| WorkflowCompileError::UnavailableInferredOutput {
                     from_node: source_id.clone(),
-                    from_output: dependency.source_output.to_owned(),
+                    from_output: dependency
+                        .source_output()
+                        .expect("input output source")
+                        .to_owned(),
                     to_node: id.clone(),
                     to_input: input_name.to_owned(),
                 })?;
@@ -309,7 +320,10 @@ impl TypeInferenceState {
                 input.value_type.validate_shared(value).with_context(|_| {
                     KnownValueTypeConflictSnafu {
                         from_node: source_id.clone(),
-                        from_output: dependency.source_output.to_owned(),
+                        from_output: dependency
+                            .source_output()
+                            .expect("input output source")
+                            .to_owned(),
                         output_type: Box::new(source.value_type.clone()),
                         to_node: id.clone(),
                         to_input: input_name.to_owned(),
@@ -321,7 +335,10 @@ impl TypeInferenceState {
             {
                 return Err(WorkflowCompileError::IncompatiblePortTypes {
                     from_node: source_id,
-                    from_output: dependency.source_output.to_owned(),
+                    from_output: dependency
+                        .source_output()
+                        .expect("input output source")
+                        .to_owned(),
                     output_type: Box::new(source.value_type.clone()),
                     to_node: id.clone(),
                     to_input: input_name.to_owned(),
@@ -333,7 +350,7 @@ impl TypeInferenceState {
             } else {
                 input.value_type.clone()
             };
-            if dependency.exclusive
+            if dependency.exclusive()
                 && let Some(fact) = inputs.get_mut(input_name)
             {
                 if fact.value_type != value_type {
@@ -481,6 +498,18 @@ fn prepare_graph(
             ),
         }.fail();
     }
+    let indices: BTreeMap<_, _> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.definition_id.clone(), index))
+        .collect();
+    for edge in &definition.order_edges {
+        crate::validate_success_connection(
+            &nodes[indices[&edge.from_node]],
+            &nodes[indices[&edge.to_node]],
+        )
+        .context(FlowConstructionSnafu)?;
+    }
     let incoming = incoming_dependencies(definition);
     let startup = definition.version.supports_startup_inputs()
         && enclosing.is_none()
@@ -518,11 +547,6 @@ fn prepare_graph(
         .fail();
     }
 
-    let indices: BTreeMap<_, _> = nodes
-        .iter()
-        .enumerate()
-        .map(|(index, node)| (node.definition_id.clone(), index))
-        .collect();
     let mut inference = TypeInferenceState::default();
     for id in &order {
         let dependencies = incoming.get(id.as_str()).map_or(&[][..], Vec::as_slice);
@@ -546,7 +570,7 @@ pub fn incoming_dependencies(
         incoming
             .entry(edge.to_node.as_str())
             .or_default()
-            .push(ExecutionDependency {
+            .push(ExecutionDependency::Output {
                 exclusive: edge.exclusive,
                 input: Some(&edge.to_input),
                 source_node: edge.from_node.as_str(),
@@ -557,11 +581,19 @@ pub fn incoming_dependencies(
         incoming
             .entry(edge.to_node.as_str())
             .or_default()
-            .push(ExecutionDependency {
+            .push(ExecutionDependency::Output {
                 exclusive: false,
                 input: None,
                 source_node: edge.from_node.as_str(),
                 source_output: &edge.from_output,
+            });
+    }
+    for edge in &definition.order_edges {
+        incoming
+            .entry(edge.to_node.as_str())
+            .or_default()
+            .push(ExecutionDependency::NodeSuccess {
+                source_node: edge.from_node.as_str(),
             });
     }
     incoming
@@ -641,8 +673,8 @@ fn validate_base_metadata(
         let mut pending = vec![node.definition_id.as_str()];
         while let Some(id) = pending.pop() {
             for dependency in incoming.get(id).into_iter().flatten() {
-                if ancestors.insert(dependency.source_node) {
-                    pending.push(dependency.source_node);
+                if ancestors.insert(dependency.source_node()) {
+                    pending.push(dependency.source_node());
                 }
             }
         }
@@ -749,6 +781,14 @@ pub fn topological_order(
 }
 
 fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCompileError> {
+    if definition.has_order_edges()
+        && definition.version != crate::WorkflowDefinitionVersion::V2026_10_19
+    {
+        return InvalidSuccessDependencySnafu {
+            message: "node-success edges require version 2026-10-19",
+        }
+        .fail();
+    }
     let mut ids = BTreeSet::new();
     for (index, node) in definition.nodes.iter().enumerate() {
         if node.id.as_str().trim().is_empty() {
@@ -802,6 +842,19 @@ fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCom
             return Err(control_error(edge, "duplicate control edge"));
         }
     }
+    let mut orders = BTreeSet::new();
+    for edge in &definition.order_edges {
+        if edge.from_node == edge.to_node
+            || !ids.contains(&edge.from_node)
+            || !ids.contains(&edge.to_node)
+            || !orders.insert(edge)
+        {
+            return InvalidSuccessDependencySnafu {
+                message: "node-success edges must have distinct known endpoints and be unique",
+            }
+            .fail();
+        }
+    }
     let mut output_names = BTreeSet::new();
     for output in &definition.outputs {
         if !output_names.insert(&output.name) {
@@ -838,6 +891,12 @@ fn dependency_pairs(definition: &WorkflowDefinition) -> BTreeSet<(DefinitionId, 
         .chain(
             definition
                 .control_edges
+                .iter()
+                .map(|edge| (edge.from_node.clone(), edge.to_node.clone())),
+        )
+        .chain(
+            definition
+                .order_edges
                 .iter()
                 .map(|edge| (edge.from_node.clone(), edge.to_node.clone())),
         )
@@ -951,6 +1010,7 @@ pub fn compile_definition(
         definition.outputs.clone(),
     )
     .and_then(|flow| flow.with_control_edges(definition.control_edges.clone()))
+    .and_then(|flow| flow.with_order_edges(definition.order_edges.clone()))
     .context(FlowConstructionSnafu)?;
 
     if let Some(execution) = &definition.execution {
@@ -1028,6 +1088,11 @@ pub fn normalize_plan(
             nodes,
             edges,
             control_edges,
+            order_edges: {
+                let mut edges = definition.order_edges.clone();
+                edges.sort();
+                edges
+            },
             outputs,
         },
         execution_order,
@@ -1049,6 +1114,7 @@ fn normalize_loop_node(
     loop_definition.body.nodes = normalized.nodes;
     loop_definition.body.edges = normalized.edges;
     loop_definition.body.control_edges = normalized.control_edges;
+    loop_definition.body.order_edges = normalized.order_edges;
     Ok(())
 }
 
@@ -1073,6 +1139,7 @@ pub fn instantiate_compiled(
         plan.definition.outputs.clone(),
     )
     .and_then(|flow| flow.with_control_edges(plan.definition.control_edges.clone()))
+    .and_then(|flow| flow.with_order_edges(plan.definition.order_edges.clone()))
     .context(FlowConstructionSnafu)?;
     let builder = if plan.definition.version.supports_startup_inputs() {
         builder.with_workflow_inputs()?
@@ -1201,7 +1268,12 @@ pub fn loop_execution_orders(
     definition: &WorkflowDefinition,
 ) -> Result<Vec<mf_runtime::LoopExecutionOrder>, DescriptionError> {
     let mut orders = Vec::new();
-    collect_loop_execution_orders(definition, &mut Vec::new(), &mut orders)?;
+    collect_loop_execution_orders(
+        definition,
+        &mut Vec::new(),
+        &mut orders,
+        definition.has_order_edges(),
+    )?;
     Ok(orders)
 }
 
@@ -1209,20 +1281,34 @@ fn collect_loop_execution_orders(
     definition: &WorkflowDefinition,
     path: &mut Vec<String>,
     orders: &mut Vec<mf_runtime::LoopExecutionOrder>,
+    include_iterations: bool,
 ) -> Result<(), DescriptionError> {
     for node in &definition.nodes {
-        let Some(loop_definition) = &node.loop_definition else {
+        let body = if let Some(loop_definition) = &node.loop_definition {
+            crate::loops::body_definition(&loop_definition.body, &definition.dependencies)
+        } else if include_iterations && node.kind == ITERATION_KIND {
+            let config = parse_config(node)
+                .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
+            body_definition(definition, &config)
+                .map_err(|message| {
+                    InvalidIterationSnafu {
+                        definition_id: node.id.clone(),
+                        message,
+                    }
+                    .build()
+                })
+                .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?
+        } else {
             continue;
         };
         path.push(node.id.to_string());
-        let body = crate::loops::body_definition(&loop_definition.body, &definition.dependencies);
         let order = structural_order_graph(&body)
             .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
         orders.push(mf_runtime::LoopExecutionOrder {
             path: path.clone(),
             execution_order: order.iter().map(ToString::to_string).collect(),
         });
-        collect_loop_execution_orders(&body, path, orders)?;
+        collect_loop_execution_orders(&body, path, orders, include_iterations)?;
         path.pop();
     }
     Ok(())
@@ -1331,6 +1417,7 @@ fn bind_subgraph_node(
         .collect();
     let flow = crate::FlowBuilder::prepare(nodes, body.edges.clone(), order, body.outputs.clone())
         .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
+        .and_then(|flow| flow.with_order_edges(body.order_edges.clone()))
         .and_then(|flow| flow.into_tasks())
         .context(FlowConstructionSnafu)?;
     let body = PreparedSubgraph::new(identities, outputs, move |state| {

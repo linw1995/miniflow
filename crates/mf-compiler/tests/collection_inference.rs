@@ -54,7 +54,7 @@ fn node(
 }
 
 fn dependency(source_node: &str) -> ExecutionDependency<'_> {
-    ExecutionDependency {
+    ExecutionDependency::Output {
         exclusive: false,
         source_node,
         source_output: "value",
@@ -138,10 +138,19 @@ fn collection_inference_wraps_types_and_drops_exact_value_evidence() {
         .unwrap();
     let mut context = ExecutionContext::default();
     execute_node_in_context(&source, &[], &mut context).unwrap();
-    execute_node_in_context(&collect, &[dependency("source")], &mut context).unwrap();
-    let error = execute_node_in_context(&sink, &[dependency("collect")], &mut context)
-        .unwrap_err()
-        .to_string();
+    execute_node_in_context(
+        &collect,
+        &[dependency("source").output_dependency().unwrap()],
+        &mut context,
+    )
+    .unwrap();
+    let error = execute_node_in_context(
+        &sink,
+        &[dependency("collect").output_dependency().unwrap()],
+        &mut context,
+    )
+    .unwrap_err()
+    .to_string();
     assert!(error.contains("/0/1"), "{error}");
 }
 

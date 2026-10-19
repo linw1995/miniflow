@@ -432,10 +432,10 @@ recognize built-in kind names to perform inference.
 
 ### Requirement: Describe a compiled workflow without executing nodes
 
-Generated runners SHALL embed a date-versioned JSON graph description containing workflow identity, node IDs and kinds,
-named data edges, control edges, and deterministic execution order. Hosts SHALL read the graph record directly from the
-embedded manifest without requiring original build inputs or invoking plugin factories. Unconnected or dynamic port
-metadata MUST NOT be inferred from graph edges. The record MUST exclude node configuration and business values.
+Generated runners SHALL embed a date-versioned graph description of workflow identity, nodes, data bindings, output
+gates, node-success edges when present, and deterministic order. Hosts SHALL read it without build inputs or plugin
+execution. Success edges SHALL identify nodes without fabricated ports and require a supported description version.
+Descriptions MUST exclude config/business values and MUST NOT infer unconnected dynamic ports from edges.
 
 #### Scenario: Inspect a standalone binary
 
@@ -451,6 +451,11 @@ metadata MUST NOT be inferred from graph edges. The record MUST exclude node con
 
 - **WHEN** a linked plugin factory normally prints diagnostics during validation
 - **THEN** manifest inspection does not invoke that factory or start a process
+
+#### Scenario: Describe a zero-output success prerequisite
+
+- **WHEN** a compiled workflow orders two Tasks without passing a value
+- **THEN** its supported description includes the node-success dependency without inventing an output port
 
 ### Requirement: Require a complete embedded manifest before TUI execution
 

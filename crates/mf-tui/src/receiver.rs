@@ -595,7 +595,13 @@ fn receive_log(record: LogRecord, context: &Context) -> Result<(), IngestError> 
         }
     }
     let admission = (|| -> Result<Admission, IngestError> {
-        if schema_version == Some(mf_telemetry::STREAM_EVENT_SCHEMA_VERSION) {
+        if matches!(
+            schema_version,
+            Some(
+                mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
+                    | mf_telemetry::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
+            )
+        ) {
             let event = mf_telemetry::stream::StreamRecord::decode(&wire)?;
             Ok(context
                 .state

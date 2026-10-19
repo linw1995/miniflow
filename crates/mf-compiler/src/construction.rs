@@ -15,6 +15,12 @@ use std::{
 };
 #[derive(Debug, Snafu)]
 pub enum FlowBuildError {
+    #[snafu(display("invalid node-success dependency `{from_node}` -> `{to_node}`: {message}"))]
+    InvalidSuccessDependency {
+        from_node: String,
+        to_node: String,
+        message: &'static str,
+    },
     #[snafu(display("node `{definition_id}` has invalid exclusive outputs: {message}"))]
     InvalidExclusiveOutputs {
         definition_id: DefinitionId,
@@ -118,6 +124,7 @@ where
 {
     type Facts<'a> = BTreeSet<(&'a str, &'a str)>;
     let mut outputs: BTreeMap<(&str, &str), Facts<'_>> = BTreeMap::new();
+    let mut successes: BTreeMap<&str, Facts<'_>> = BTreeMap::new();
     for (node, dependencies) in ordered {
         let id = node.definition_id.as_str();
         let exclusive = &node.metadata.exclusive_outputs;
@@ -150,13 +157,15 @@ where
         let mut groups: BTreeMap<&str, Vec<(crate::ExecutionDependency<'_>, Facts<'_>)>> =
             BTreeMap::new();
         for dependency in dependencies {
-            let facts = outputs
-                .get(&(dependency.source_node, dependency.source_output))
-                .cloned()
-                .unwrap_or_default();
-            if dependency.exclusive {
+            let facts = match dependency.source_output() {
+                Some(port) => outputs.get(&(dependency.source_node(), port)),
+                None => successes.get(dependency.source_node()),
+            }
+            .cloned()
+            .unwrap_or_default();
+            if dependency.exclusive() {
                 groups
-                    .entry(dependency.input.unwrap_or("<control>"))
+                    .entry(dependency.input().unwrap_or("<control>"))
                     .or_default()
                     .push((dependency, facts));
             } else {
@@ -174,10 +183,10 @@ where
                         UnprovenExclusiveInputSnafu {
                             definition_id: id,
                             input,
-                            first_node: first.source_node,
-                            first_output: first.source_output,
-                            second_node: second.source_node,
-                            second_output: second.source_output,
+                            first_node: first.source_node(),
+                            first_output: first.source_output().expect("exclusive output source"),
+                            second_node: second.source_node(),
+                            second_output: second.source_output().expect("exclusive output source"),
                         }
                     );
                 }
@@ -195,6 +204,7 @@ where
         if !matches!(node.node, Some(NodeExecution::Task(_))) {
             activation.clear();
         }
+        successes.insert(id, activation.clone());
         for port in &node.metadata.ports.outputs {
             let mut facts = activation.clone();
             if exclusive.iter().any(|name| *name == port.name) {
@@ -213,6 +223,7 @@ pub struct FlowBuilder {
     execution_order: Vec<NodeId>,
     outputs: Vec<FlowOutput>,
     controls: Vec<crate::ControlEdgeDefinition>,
+    orders: Vec<crate::OrderEdgeDefinition>,
     input_schema: crate::WorkflowInputSchema,
 }
 
@@ -226,6 +237,17 @@ impl FlowBuilder {
                 )
             },
         ))?;
+        let guards = crate::dependencies::success_conditions(
+            self.execution_order
+                .iter()
+                .zip(&self.dependencies)
+                .map(|(id, deps)| {
+                    (
+                        self.nodes[id.index()].definition_id.as_str(),
+                        deps.iter().map(crate::FlowDependency::borrowed).collect(),
+                    )
+                }),
+        );
         let execution_domains = self.build_execution_domains();
         let data = self;
         let nodes = data
@@ -233,14 +255,20 @@ impl FlowBuilder {
             .into_iter()
             .map(into_task)
             .collect::<Result<_, _>>()?;
-        Ok(mf_runtime::Flow::from_plan(
+        let flow = mf_runtime::Flow::from_plan(
             nodes,
             mf_runtime::FlowPlan {
                 connections: data.connections.into(),
                 dependencies: data
                     .dependencies
                     .into_iter()
-                    .map(Cow::Owned)
+                    .map(|deps| {
+                        Cow::Owned(
+                            deps.iter()
+                                .filter_map(crate::FlowDependency::output_dependency)
+                                .collect(),
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .into(),
                 execution_order: data.execution_order.into(),
@@ -248,7 +276,8 @@ impl FlowBuilder {
                 execution_domains,
             },
             data.input_schema,
-        ))
+        );
+        Ok(crate::dependencies::bind_task_guards(flow, guards))
     }
     pub fn into_stream(
         self,
@@ -315,7 +344,7 @@ impl FlowBuilder {
                     .is_some_and(|position| {
                         self.dependencies[position]
                             .iter()
-                            .any(|dependency| dependency.input.as_deref() == Some(input))
+                            .any(|dependency| dependency.borrowed().input() == Some(input))
                     })
             },
         )?;
@@ -508,10 +537,55 @@ impl FlowBuilder {
             execution_order: resolved_order,
             outputs: resolved_outputs,
             controls: Vec::new(),
+            orders: Vec::new(),
             input_schema: crate::WorkflowInputSchema::default(),
         };
         flow.prepare_execution();
         Ok(flow)
+    }
+
+    pub fn with_order_edges(
+        mut self,
+        orders: Vec<crate::OrderEdgeDefinition>,
+    ) -> Result<Self, FlowBuildError> {
+        let positions: BTreeMap<_, _> = self
+            .execution_order
+            .iter()
+            .enumerate()
+            .map(|(position, id)| (self.nodes[id.index()].definition_id.as_str(), position))
+            .collect();
+        let mut unique = BTreeSet::new();
+        for edge in &orders {
+            let invalid = |message| {
+                InvalidSuccessDependencySnafu {
+                    from_node: edge.from_node.as_str(),
+                    to_node: edge.to_node.as_str(),
+                    message,
+                }
+                .build()
+            };
+            let (Some(&from), Some(&to)) = (
+                positions.get(edge.from_node.as_str()),
+                positions.get(edge.to_node.as_str()),
+            ) else {
+                return Err(invalid("unknown endpoint"));
+            };
+            if from >= to || !unique.insert(edge) {
+                return Err(invalid(
+                    "source must precede target and edges must be unique",
+                ));
+            }
+            validate_success_connection(
+                &self.nodes[self.execution_order[from].index()],
+                &self.nodes[self.execution_order[to].index()],
+            )?;
+        }
+        self.orders = orders;
+        self.prepare_execution();
+        if !self.input_schema.inputs.is_empty() {
+            self = self.with_workflow_inputs()?;
+        }
+        Ok(self)
     }
 
     pub fn with_control_edges(
@@ -580,19 +654,26 @@ impl FlowBuilder {
         for edge in self.connections.iter() {
             let source = &self.nodes[edge.from_node.index()];
             let target = &self.nodes[edge.to_node.index()];
-            incoming[positions[target.definition_id.as_str()]].push(crate::FlowDependency {
-                exclusive: edge.exclusive,
-                input: Some(edge.to_input.clone()),
-                source_node: source.definition_id.to_string().into(),
-                source_output: edge.from_output.clone(),
-            });
+            incoming[positions[target.definition_id.as_str()]].push(
+                crate::FlowDependency::Output {
+                    exclusive: edge.exclusive,
+                    input: Some(edge.to_input.clone()),
+                    source_node: source.definition_id.to_string().into(),
+                    source_output: edge.from_output.clone(),
+                },
+            );
         }
         for edge in self.controls.iter() {
-            incoming[positions[edge.to_node.as_str()]].push(crate::FlowDependency {
+            incoming[positions[edge.to_node.as_str()]].push(crate::FlowDependency::Output {
                 exclusive: false,
                 input: None,
                 source_node: edge.from_node.to_string().into(),
                 source_output: edge.from_output.clone(),
+            });
+        }
+        for edge in &self.orders {
+            incoming[positions[edge.to_node.as_str()]].push(crate::FlowDependency::NodeSuccess {
+                source_node: edge.from_node.to_string().into(),
             });
         }
         for dependencies in &mut incoming {
@@ -613,7 +694,7 @@ impl FlowBuilder {
         let mut edges = Vec::new();
         for (target, dependencies) in self.dependencies.iter().enumerate() {
             for dependency in dependencies.iter() {
-                if let Some(&source) = positions.get(dependency.source_node.as_ref()) {
+                if let Some(&source) = positions.get(dependency.borrowed().source_node()) {
                     edges.push((source, target));
                 }
             }
@@ -784,6 +865,25 @@ pub enum StreamBuildError {
     WorkflowInputs { source: crate::WorkflowInputError },
 }
 
+pub fn validate_success_connection(
+    source: &FlowNode,
+    target: &FlowNode,
+) -> Result<(), FlowBuildError> {
+    ensure!(
+        ordinary_task(source) && ordinary_task(target),
+        InvalidSuccessDependencySnafu {
+            from_node: source.definition_id.as_str(),
+            to_node: target.definition_id.as_str(),
+            message: "endpoints must be ordinary Tasks",
+        }
+    );
+    Ok(())
+}
+
+fn ordinary_task(node: &FlowNode) -> bool {
+    matches!(&node.node, Some(NodeExecution::Task(task)) if task.supports_success_dependencies())
+}
+
 /// Partitions a validated topological order; boundary nodes form separate domains.
 pub fn partition_execution_domains(
     order: &[NodeId],
@@ -900,12 +1000,13 @@ pub fn build_message_domains(
         let mut incoming_domains = BTreeSet::new();
         for dependency in &dependencies[index] {
             let source = indices
-                .get(dependency.source_node.as_ref())
+                .get(dependency.borrowed().source_node())
                 .copied()
                 .with_context(|| InvalidPlanSnafu {
                     message: format!(
                         "node `{}` has unknown dependency `{}`",
-                        node.definition_id, dependency.source_node
+                        node.definition_id,
+                        dependency.borrowed().source_node()
                     ),
                 })?;
             ensure!(
@@ -913,31 +1014,42 @@ pub fn build_message_domains(
                 InvalidPlanSnafu {
                     message: format!(
                         "dependency `{}` must precede `{}`",
-                        dependency.source_node, node.definition_id
+                        dependency.borrowed().source_node(),
+                        node.definition_id
                     ),
                 }
             );
-            ensure!(
-                nodes[source]
-                    .metadata
-                    .ports
-                    .outputs
-                    .iter()
-                    .any(|port| port.name == dependency.source_output),
-                InvalidPlanSnafu {
-                    message: format!(
-                        "node `{}` has no output `{}`",
-                        dependency.source_node, dependency.source_output
-                    ),
-                }
-            );
-            if let Some(input) = &dependency.input {
+            if let Some(port_name) = dependency.borrowed().source_output() {
+                ensure!(
+                    nodes[source]
+                        .metadata
+                        .ports
+                        .outputs
+                        .iter()
+                        .any(|port| port.name == port_name),
+                    InvalidPlanSnafu {
+                        message: format!(
+                            "node `{}` has no output `{}`",
+                            dependency.borrowed().source_node(),
+                            port_name
+                        ),
+                    }
+                );
+            } else {
+                ensure!(
+                    ordinary_task(&nodes[source]) && ordinary_task(node),
+                    InvalidPlanSnafu {
+                        message: "node-success endpoints must be ordinary Tasks"
+                    }
+                );
+            }
+            if let Some(input) = dependency.borrowed().input() {
                 ensure!(
                     node.metadata
                         .ports
                         .inputs
                         .iter()
-                        .any(|port| port.name == *input),
+                        .any(|port| port.name == input),
                     InvalidPlanSnafu {
                         message: format!("node `{}` has no input `{input}`", node.definition_id),
                     }
@@ -951,10 +1063,13 @@ pub fn build_message_domains(
                 .map(|dependency| {
                     format!(
                         "{}.{} -> {}.{}",
-                        dependency.source_node,
-                        dependency.source_output,
+                        dependency.borrowed().source_node(),
+                        dependency
+                            .borrowed()
+                            .source_output()
+                            .unwrap_or("[node success]"),
                         node.definition_id,
-                        dependency.input.as_deref().unwrap_or("<control>"),
+                        dependency.borrowed().input().unwrap_or("<control>"),
                     )
                 })
                 .collect::<Vec<_>>()
@@ -1049,7 +1164,7 @@ pub fn build_message_domains(
     let mut execution_edges = Vec::new();
     for (target, node_dependencies) in dependencies.iter().enumerate() {
         for dependency in node_dependencies {
-            let source = indices[dependency.source_node.as_ref()];
+            let source = indices[dependency.borrowed().source_node()];
             if node_message_domains[source] == node_message_domains[target] {
                 execution_edges.push((source, target));
             }
@@ -1199,13 +1314,14 @@ fn input_schema_error(path: String, message: impl Into<String>) -> WorkflowInput
 
 pub fn stream_workflow_inputs(
     nodes: &[FlowNode],
-    dependencies: &[Cow<'static, [crate::FlowDependency]>],
+    dependencies: &[Cow<'static, [mf_runtime::FlowDependency]>],
+    initial: &[bool],
 ) -> Result<crate::WorkflowInputSchema, WorkflowInputError> {
     workflow_input_schema(
         nodes
             .iter()
-            .zip(dependencies.iter())
-            .map(|(node, dependencies)| (node, dependencies.is_empty())),
+            .zip(initial)
+            .map(|(node, initial)| (node, *initial)),
         |node, input| {
             nodes
                 .iter()
@@ -1221,20 +1337,20 @@ pub fn stream_workflow_inputs(
 
 pub fn bind_workflow_inputs(
     flow: mf_runtime::Flow,
+    initial: &[bool],
 ) -> Result<mf_runtime::Flow, WorkflowInputError> {
     let order = flow.execution_order();
     let dependencies = &flow.plan().dependencies;
-    let initial: BTreeSet<_> = order
-        .iter()
-        .enumerate()
-        .filter(|(position, _)| dependencies[*position].is_empty())
-        .map(|(_, id)| id.index())
-        .collect();
     let schema = workflow_input_schema(
-        flow.nodes()
-            .iter()
-            .enumerate()
-            .map(|(index, node)| (node, initial.contains(&index))),
+        flow.nodes().iter().enumerate().map(|(index, node)| {
+            (
+                node,
+                initial[order
+                    .iter()
+                    .position(|id| id.index() == index)
+                    .expect("ordered node")],
+            )
+        }),
         |node, input| {
             order
                 .iter()
@@ -1262,7 +1378,7 @@ pub fn validate_stream_limits(limits: &crate::StreamLimits) -> Result<(), Stream
 pub fn validate_execution(definition: &crate::WorkflowDefinition) -> Result<(), StreamBuildError> {
     if let Some(execution) = &definition.execution {
         ensure!(
-            definition.version == crate::WorkflowDefinitionVersion::V2026_10_03,
+            definition.version.supports_startup_inputs(),
             InvalidPlanSnafu {
                 message: "stream execution requires workflow schema 2026-10-03"
             }
@@ -1301,16 +1417,36 @@ pub fn prepare_stream(
             )
         }
     );
-    let dependencies: Vec<_> = dependencies.into_iter().map(Cow::Owned).collect();
-    let schema = stream_workflow_inputs(&nodes, &dependencies).context(WorkflowInputsSnafu)?;
-    Ok(mf_runtime::PreparedStream::from_plan(
+    let guards = crate::dependencies::success_conditions(nodes.iter().zip(&dependencies).map(
+        |(node, deps)| {
+            (
+                node.definition_id.as_str(),
+                deps.iter().map(crate::FlowDependency::borrowed).collect(),
+            )
+        },
+    ));
+    let initial: Vec<_> = dependencies.iter().map(Vec::is_empty).collect();
+    let dependencies: Vec<_> = dependencies
+        .into_iter()
+        .map(|deps| {
+            Cow::Owned(
+                deps.iter()
+                    .filter_map(crate::FlowDependency::output_dependency)
+                    .collect(),
+            )
+        })
+        .collect();
+    let schema =
+        stream_workflow_inputs(&nodes, &dependencies, &initial).context(WorkflowInputsSnafu)?;
+    let prepared = mf_runtime::PreparedStream::from_plan(
         execution,
         nodes,
         dependencies.into(),
         domains,
         outputs.into(),
         schema,
-    ))
+    );
+    Ok(crate::dependencies::bind_stream_guards(prepared, guards))
 }
 #[cfg(test)]
 mod tests {

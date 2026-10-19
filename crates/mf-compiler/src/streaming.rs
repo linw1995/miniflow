@@ -38,6 +38,7 @@ pub fn instantiate_stream(
         plan.definition.outputs.clone(),
     )
     .and_then(|flow| flow.with_control_edges(plan.definition.control_edges.clone()))
+    .and_then(|flow| flow.with_order_edges(plan.definition.order_edges.clone()))
     .context(FlowConstructionSnafu)?;
     flow.into_stream(execution).context(StreamConstructionSnafu)
 }

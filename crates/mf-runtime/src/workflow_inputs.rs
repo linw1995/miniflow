@@ -77,6 +77,12 @@ impl WorkflowInterface {
                     .iter()
                     .map(|edge| edge.to_node.as_str()),
             )
+            .chain(
+                description
+                    .order_edges
+                    .iter()
+                    .map(|edge| edge.to_node.as_str()),
+            )
             .collect();
         let roots: BTreeSet<_> = description
             .nodes
@@ -408,7 +414,7 @@ impl WorkflowInputSchema {
     }
 }
 
-struct UniqueValue(Value);
+pub struct UniqueValue(pub Value);
 
 /// Decodes JSON with unique object keys; callers bound the input before decoding.
 pub fn from_unique_json<T: de::DeserializeOwned>(bytes: &[u8]) -> Result<T, serde_json::Error> {

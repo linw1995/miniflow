@@ -45,6 +45,7 @@ fn definition(count: usize, payload: usize) -> WorkflowDefinition {
         nodes,
         edges,
         control_edges: Vec::new(),
+        order_edges: Vec::new(),
         outputs: vec![WorkflowOutputDefinition {
             name: "result".into(),
             node: id(count - 1).into(),

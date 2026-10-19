@@ -52,6 +52,7 @@ pub fn body_definition(
         nodes,
         edges: config.body.edges.clone(),
         control_edges: config.body.control_edges.clone(),
+        order_edges: config.body.order_edges.clone(),
         outputs: vec![WorkflowOutputDefinition {
             name: "result".into(),
             node: config.body.result.node.clone(),
@@ -87,6 +88,7 @@ pub fn normalize_config(
     config.body.nodes = normalized.nodes;
     config.body.edges = normalized.edges;
     config.body.control_edges = normalized.control_edges;
+    config.body.order_edges = normalized.order_edges;
     serde_json::to_value(config).context(IterationConfigurationSnafu {
         definition_id: node.id.clone(),
     })
