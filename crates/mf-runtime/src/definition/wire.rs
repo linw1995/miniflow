@@ -18,7 +18,10 @@ enum WireError {
 impl<'de> Deserialize<'de> for WorkflowDefinition {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let mut value = crate::workflow_inputs::UniqueValue::deserialize(deserializer)?.0;
-        let modern = value.get("version").and_then(Value::as_str) == Some("2026-10-19");
+        let version: WorkflowDefinitionVersion =
+            serde_json::from_value(value.get("version").cloned().unwrap_or(Value::Null))
+                .map_err(de::Error::custom)?;
+        let modern = version == WorkflowDefinitionVersion::V2026_10_19;
         decode_scope(&mut value, modern, "workflow").map_err(de::Error::custom)?;
         DefinitionFields::deserialize(value).map_err(de::Error::custom)
     }
@@ -103,9 +106,17 @@ fn decode_scope(value: &mut Value, modern: bool, path: &str) -> Result<(), WireE
                     continue;
                 };
                 if let Some(bindings) = node.remove("inputs") {
-                    let bindings: BTreeMap<String, InputBindingDefinition> =
-                        serde_json::from_value(bindings).context(JsonSnafu { path })?;
-                    for (input, binding) in bindings {
+                    let input_path = crate::workflow_inputs::pointer(
+                        &crate::workflow_inputs::pointer(path, target.as_str().unwrap_or("?")),
+                        "inputs",
+                    );
+                    let bindings: BTreeMap<String, Value> = serde_json::from_value(bindings)
+                        .context(JsonSnafu { path: &input_path })?;
+                    for (input, value) in bindings {
+                        let binding_path = crate::workflow_inputs::pointer(&input_path, &input);
+                        let path = binding_path.as_str();
+                        let binding: InputBindingDefinition =
+                            serde_json::from_value(value).context(JsonSnafu { path })?;
                         let (exclusive, sources) = match binding {
                             InputBindingDefinition::From { from } => (false, vec![from]),
                             InputBindingDefinition::Exclusive { exclusive } => {

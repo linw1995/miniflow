@@ -716,6 +716,17 @@ fn generate_scope(
         });
         node_idents.push(node_ident);
     }
+    let positions: BTreeMap<_, _> = order
+        .iter()
+        .enumerate()
+        .map(|(index, id)| (id, index))
+        .collect();
+    for edge in &definition.order_edges {
+        let source = &node_idents[positions[&edge.from_node]];
+        let target = &node_idents[positions[&edge.to_node]];
+        preparations
+            .push(quote! { mf_compiler::validate_success_connection(&#source, &#target)?; });
+    }
     preparations.push(quote! { drop(#inference_ident); });
     let flow_ident = format_ident!("flow_{scope}");
     if !matches!(build, ScopeBuild::PreparationOnly) {

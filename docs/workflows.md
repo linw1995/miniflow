@@ -2,7 +2,37 @@
 
 ## JSON format
 
-The [basic example](../examples/hello-workflow.json) uses schema version `2026-09-26` for a flat DAG. Version `2026-09-29` adds structured Loop bodies and is required when using Loop control kinds. Both versions are accepted. Each ordinary node has a unique, nonblank string `id`, a registered `kind`, and an optional JSON `config`. An edge connects a named output port to a named input port. An `outputs` entry selects a node port and gives it a name in the executable's JSON output.
+Use version `2026-10-19` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
+`config`, and optional `inputs`. Inputs reference producer outputs; `edges` declare execution prerequisites. An
+`outputs` entry selects a node port and names the executable's JSON result.
+
+The [conditional convergence example](../examples/exclusive-inputs.json) uses the new format. The [basic
+example](../examples/hello-workflow.json) retains legacy `2026-09-26` syntax. Existing supported versions keep their
+original field meanings and feature restrictions; new fields are not inferred from their shape.
+
+### Input references
+
+Declare a source next to its consumer input:
+
+```json
+{
+  "id": "print",
+  "kind": "example.print",
+  "inputs": {
+    "text": {"from": {"node": "read", "port": "text"}}
+  }
+}
+```
+
+The kind above is illustrative. This reference binds `read.text` to `print.text` and establishes the scheduling
+dependency. It needs no additional execution edge. Source node and port names are separate opaque strings; dots are not
+parsed. References select whole output values, preserving sharing, types, and secret metadata. Use existing
+transformation nodes to select fields or construct another value.
+
+Input names must match the provider's ports. Duplicate keys, unknown fields, null bindings, and mixed binding variants
+fail. A connected optional input still skips its consumer when its source skips. Unbound inputs keep their existing
+required, optional, and startup parameter rules. Loop and Iteration bodies use the root version and the same binding
+syntax within their existing scope and message-domain restrictions.
 
 ## Node dependencies
 
@@ -63,7 +93,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | `builtin.constant` | Required `value`: any JSON value | None | `value`: inferred from the configured value |
 | `mfn-core` | [`builtin.parameters`](#parameters) | Named parameters with types, optional `env` and `default`, and `secret` (default `true`) | One typed startup input per parameter | One matching typed output per parameter |
 | `mfn-core` | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input, with its known type |
-| `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by control edges | One boolean activation output per branch, plus `else` |
+| `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by execution prerequisites | One boolean activation output per branch, plus `else` |
 | `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array or object | `results`: collected array |
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
 | `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
@@ -153,7 +183,7 @@ when compiling outside the checkout.
 
 `builtin.parameters` declares a typed startup interface shared by runner arguments,
 environment variables, and configured defaults. It must be a top-level initial node,
-without incoming data or control edges; Loop and Iteration bodies cannot declare it.
+without incoming data or execution dependencies; Loop and Iteration bodies cannot declare it.
 
 ```json
 {
@@ -223,7 +253,8 @@ structural settings such as parameter declarations, node ports, and Loop bodies 
 | `{"$template": "{{ params.settings#/models/0 }}"}` | Interpolate a selected subtree |
 | `"{{ params.name }}"` | Ordinary literal string; it is not evaluated |
 
-References name complete output IDs. The producer must be an explicit ancestor through data or control edges;
+References name complete output IDs. The producer must be an explicit ancestor through data bindings or execution
+dependencies;
 a template does not add an implicit dependency. References remain within the existing scope and message-domain
 boundaries. Compilation rejects unknown outputs and missing dependencies. Execution rejects missing or skipped
 values, missing paths, and incompatible field types. Interpolation accepts strings without implicit conversion;
@@ -356,7 +387,7 @@ register. The outer graph and every Loop body remain acyclic. The engine repeats
 execution order instead of adding a graph back edge.
 
 A Loop node has a typed `loop` field with required `max_iterations`, a nonempty `variables` list, an
-optional `until` condition, and a `body` containing ordinary `nodes`, `edges`, and `control_edges`.
+optional `until` condition, and a `body` containing ordinary nodes and bindings in the root definition's format.
 Each variable creates a required Loop input for its initial value and a required Loop output for its
 final value. The body reads current values and a zero-based `index` through the synthetic `%loop`
 node. Every body node ID is local to that body; `%loop` and `index` are reserved there. Cross-scope
@@ -464,13 +495,14 @@ array after the body has passed validation. Other input shapes fail at execution
 }
 ```
 
-The enclosing workflow must declare `mfn-core` for both `builtin.iteration` and `builtin.identity`. `%iteration` is a reserved body
+The enclosing workflow must declare `mfn-core` for both `builtin.iteration` and `builtin.identity`. `%iteration` is a
+reserved body
 source with outputs `item` (the current array element or map value), `key` (the map key, or JSON null for an array),
 and `index` (a zero-based signed integer). Maps are visited in lexicographic key order; their `index` and collected
 results use that order in both execution modes. The outer `items` input holds the complete collection.
 For example, the body above maps `{"b":2,"a":1}` to `[1,2]`.
 Connect `%iteration.key` to a body input to include the key in a transformation. Body
-nodes, data edges, and optional `control_edges` use the ordinary workflow graph rules. The required `result` selects
+nodes, data bindings, and execution prerequisites use the root version's ordinary graph rules. The required `result` selects
 one body port for each item. Body node IDs belong to the body scope; outer edges cannot address them. All body nodes
 are constructed and validated before the runner is installed, including when the input collection is empty.
 
@@ -504,68 +536,104 @@ Only one build can hold a Flow's dependency lock at a time. Contention reports a
 
 ## Execution dependencies
 
-The optional `control_edges` array contains entries with `from_node`, `from_output`, and `to_node`. A control edge establishes execution order without binding a target data input. Data and control edges together must be acyclic; repeated identical control edges are rejected. Existing `edges` retain their input binding and type rules.
-
-Context references use qualified IDs such as `load_order.value`. A reference must name an output on an explicit predecessor, directly or transitively. Merely sorting earlier by node ID does not establish a dependency. Node IDs and local output names may contain dots if their combined IDs remain unique.
-
-A produced control output activates its target regardless of whether its JSON value is false or
-null. All ordinary data inputs, resolved exclusive groups, and control dependencies must be
-available; a skipped logical input or control dependency skips execution and propagates to
-downstream nodes. Unexpected missing outputs remain errors, including when another dependency is
-skipped. Independent nodes still execute, and ordinary connections to both mutually exclusive
-outputs do not merge branches; use an explicit exclusive input group for alternatives.
-
-## Exclusive input bindings
-
-Set `exclusive: true` on each candidate data edge targeting the same `to_node` and `to_input`.
-That target pair defines the group. At least two distinct candidate outputs are required;
-ordinary and exclusive edges cannot bind the same input. An omitted or false marker retains
-ordinary single-source binding. Every candidate participates in ordering and type checks.
-
-Compilation must prove every pair of candidates mutually exclusive. Use different outputs of
-the same `builtin.if_else`, either directly or through data and control dependencies, to gate
-the candidate producers. An `exclusive` marker alone is insufficient: unguarded sources,
-producers on the same branch, and unrelated routers are rejected before execution, even if
-runtime values would happen to select only one. After convergence, only branch constraints
-shared by every candidate remain available for proving downstream groups.
+In version `2026-10-19`, `edges` is optional and never binds a target input. It supports two forms:
 
 ```json
 {
   "edges": [
-    {"from_node":"local","from_output":"value","to_node":"consume","to_input":"input","exclusive":true},
-    {"from_node":"remote","from_output":"value","to_node":"consume","to_input":"input","exclusive":true}
+    {"from_node": "write_file", "to_node": "notify"},
+    {"from_node": "route", "from_output": "ci", "to_node": "ci_request"}
   ]
 }
 ```
 
-The same syntax is available in loop and iteration bodies. Candidates must be in the consumer's
-scope and input message domain. Ordinary inputs and control edges retain their AND behavior;
-this declaration does not mix independent streams or select the first completed producer.
-Omitting the marker preserves existing workflows. New syntax requires updated support packages.
+An edge without `from_output` requires successful source Task execution, including output validation and publication.
+The Task may declare no outputs. An edge with `from_output` requires that output to be produced; false and null still
+activate it. Omission selects node success; explicit null or an empty output name is invalid.
 
-Resolution waits for all candidate outcomes in the current frame. Exactly one produced value
-binds the input; all skipped candidates skip the consumer. False and null count as values.
-Unexpected absence remains an error even behind another skipped dependency. Runtime resolution
-relies on the compiler's exclusivity proof without repeating the check. A selected dynamic value is type-checked
-before an active consumer executes. Failure and cancellation do not select fallback candidates.
+| Source outcome | Node-success edge | Output gate |
+| --- | --- | --- |
+| Successful Task with no outputs | Satisfied | No source port exists |
+| Successful Task with the selected optional output skipped | Satisfied | Target skips |
+| Source node skipped | Target skips | Target skips |
+| Source still running | Target waits | Target waits |
+| Failure or cancellation | Existing termination policy; no activation | Same |
 
-Selection retains shared payloads and secret metadata. Different input groups resolve independently;
-carry correlated fields together in one structured value when they must come from one branch.
-A connected optional group whose candidates all skip still skips its consumer. Collection nodes
-retain their existing behavior: a skipped input adds no item and does not reset a batch deadline.
+All logical input bindings and execution prerequisites are conjunctive. Missing expected outcomes are errors, including
+behind another skipped dependency. The combined graph must be acyclic; self edges, duplicate execution edges, and
+unknown endpoints are rejected. Independent nodes retain existing concurrency.
 
-The [exclusive-input example](../examples/exclusive-inputs.json) converges local and CI branches
-into one shared consumer. Compile it once and select either branch through startup arguments:
+Node-success edges currently connect ordinary Tasks in the same scope and input frame. This includes Tasks inside
+supported bodies and Tasks processing the same Stream message. Event/Stream operators, Loop/Iteration containers,
+synthetic sources, and cross-domain success edges are rejected. Operator termination and container completion are not
+inferred from one message or one body step.
+
+Context references such as `load_order.value` still require an explicit ancestor. Data bindings and execution edges
+establish that ancestry; mentioning an output in a predicate or configuration template does not. Source success does not
+guarantee a particular optional output exists: context reads retain their existing missing/skipped checks.
+
+## Exclusive input bindings
+
+Declare alternative outputs with an `exclusive` input binding:
+
+```json
+{
+  "id": "consume",
+  "kind": "builtin.identity",
+  "inputs": {
+    "input": {
+      "exclusive": [
+        {"node": "local", "port": "value"},
+        {"node": "ci", "port": "value"}
+      ]
+    }
+  }
+}
+```
+
+At least two distinct sources are required. Every candidate participates in ordering and type checks. Compilation must
+prove each candidate pair mutually exclusive, normally through different outputs of one `builtin.if_else`. Unguarded
+producers, producers on one branch, and unrelated routers are rejected even if runtime values happen to select only one.
+Success of a router does not prove any branch; success of a Task gated by a branch retains that necessary activation
+fact. Convergence retains only facts common to every alternative.
+
+Candidates must belong to the consumer's scope and input message domain. Resolution waits for all candidate outcomes in
+the current frame: one produced value binds the input; all skipped candidates skip the consumer. False and null are
+values. Unexpected absence remains an error, and failure or cancellation never selects a fallback. Runtime resolution
+trusts the static proof without repeating mutual-exclusion checks.
+
+Selection preserves shared values and secret metadata. Different input groups resolve independently; carry correlated
+fields in one object when they must come from the same branch. A skipped connected optional group still skips its
+consumer. Collectors retain their existing buffer and deadline behavior.
+
+Compile the [exclusive-input example](../examples/exclusive-inputs.json) and select either branch:
 
 ```sh
 mf compile examples/exclusive-inputs.json --output ./exclusive-inputs
 mf run ./exclusive-inputs
-mf run ./exclusive-inputs --inputs '{"params.ci":true}'
+mf run ./exclusive-inputs --params.ci true
 ```
 
-These runs produce `{"result":{"mode":"local"}}` and `{"result":{"mode":"ci"}}` respectively.
-To replace separate branch consumers, keep the branch control edges, add a common consumer, and
-bind its input with one exclusive group. Multiple ordinary inputs are still jointly required.
+These produce `{"result":{"mode":"local"}}` and `{"result":{"mode":"ci"}}`. Keep the branch-output gates when converging
+on a shared consumer. Ordinary inputs remain jointly required.
+
+## Migrating legacy definitions
+
+In older versions, `edges` maps outputs to inputs using `from_node`, `from_output`, `to_node`, and `to_input`. Marking
+every edge to one input with `exclusive: true` declares alternatives. Legacy `control_edges` contains output gates
+without `to_input`. Updated readers continue to support these definitions without rewriting files.
+
+To migrate a definition and its bodies:
+
+1. Set the root version to `2026-10-19`.
+2. Move each data edge into its consumer's `inputs`, using `from` or grouping its exclusive alternatives.
+3. Move the old `control_edges` entries unchanged into `edges`, and remove `control_edges`, including empty arrays.
+4. Add portless success edges only where successful Task completion is the intended prerequisite.
+
+Never replace a branch-output gate with node success: a router can succeed while skipping that branch. The new version
+rejects `control_edges`, `to_input` and `exclusive` on execution edges; older versions reject node-local inputs. Bodies
+cannot override or mix versions. New definitions require updated support packages and readers; unsupported versions fail
+explicitly.
 
 ## Optional workflow results
 
@@ -634,14 +702,14 @@ bounded worker pool.
 
 ## Workflow startup parameters
 
-Schema `2026-10-03` promotes the inputs of top-level initial nodes to workflow parameters. An initial node
-has no incoming data or control edges. Its configured input types and required flags define the interface;
+Schemas `2026-10-03` and `2026-10-19` promote the inputs of top-level initial nodes to workflow parameters. An initial node
+has no incoming data or execution dependencies. Its configured input types and required flags define the interface;
 the workflow does not repeat those declarations. A node behind a control edge still needs its required
 data connections. Loop and Iteration body inputs stay local to their enclosing scope.
 
 The startup interface uses flat qualified arguments: version `2026-10-11` for ordinary
 inputs, or `2026-10-16` when [parameter bindings](#parameters) are present. Recompile runners with an older
-interface before launching them through the updated CLI. The workflow definition schema remains `2026-10-03`.
+interface before launching them through the updated CLI. Definition versions `2026-10-03` and `2026-10-19` share this startup-interface contract.
 
 Pass parameters directly as `--node.port VALUE` or `--node.port=VALUE`:
 
@@ -675,7 +743,7 @@ Older single-run schemas keep their required-edge rules.
 
 ## Streaming through the in-memory API
 
-Schema `2026-10-03` enables streams with `execution: {"mode": "stream"}` and optional limits. Initial
+Schemas `2026-10-03` and `2026-10-19` enable streams with `execution: {"mode": "stream"}` and optional limits. Initial
 nodes receive their workflow parameters once. Initial tasks and their ordinary dependencies execute in one
 startup frame; producers execute independently and emit messages into their own domains. An empty graph or a
 task-only graph finishes without external input. A producer reached through startup tasks also starts once.

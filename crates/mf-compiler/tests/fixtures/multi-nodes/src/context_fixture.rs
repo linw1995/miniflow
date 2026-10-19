@@ -14,6 +14,12 @@ fn failure(message: impl Into<String>) -> NodeExecutionError {
     }
 }
 impl TaskNode for ContextNode {
+    fn supports_success_dependencies(&self) -> bool {
+        self.0["deny_success_env"]
+            .as_str()
+            .is_none_or(|name| std::env::var(name).ok().as_deref() != Some("deny"))
+    }
+
     fn execute(
         &self,
         _: Inputs,

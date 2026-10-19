@@ -142,9 +142,7 @@ impl GraphLayout {
         path: &[String],
         view: ConnectionView,
     ) -> Result<Self, GraphError> {
-        let body = description
-            .loop_body(path)
-            .ok_or(GraphError::MissingLoopBody)?;
+        let body = description.body(path).ok_or(GraphError::MissingLoopBody)?;
         let scope = WorkflowDescription {
             order_edges: body.order_edges.clone(),
             version: if description.version == WorkflowDescriptionVersion::V2026_10_19 {

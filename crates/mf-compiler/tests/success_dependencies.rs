@@ -462,6 +462,8 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
         vec![task("z_write", &path), task("a_notify", &path)],
         json!([{"from_node":"z_write","to_node":"a_notify"}]),
     )];
+    const DENY_SUCCESS_ENV: &str = "MF_TEST_SUCCESS_CONTRACT_DRIFT";
+    cases[0].nodes[0].config["deny_success_env"] = json!(DENY_SUCCESS_ENV);
     for source in [
         include_str!("../../../examples/loop.json"),
         include_str!("../../../examples/iteration.json"),
@@ -566,6 +568,22 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
             String::from_utf8_lossy(&build.stderr)
         );
         assert!(!path.exists());
+        if graph
+            .nodes
+            .iter()
+            .any(|node| node.config.get("deny_success_env").is_some())
+        {
+            let rejected = Command::new(common::runner_executable(&project, "release"))
+                .env(DENY_SUCCESS_ENV, "deny")
+                .output()
+                .unwrap();
+            assert!(!rejected.status.success());
+            assert!(String::from_utf8_lossy(&rejected.stderr).contains("ordinary Tasks"));
+            assert!(
+                !path.exists(),
+                "preparation must reject drift before any side effect"
+            );
+        }
         let mut command = Command::new(common::runner_executable(&project, "release"));
         if graph.execution.is_some() {
             command.arg("--read.path").arg(&input);

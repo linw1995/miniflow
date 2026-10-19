@@ -98,6 +98,20 @@ Version `2026-10-03` adds `execution` metadata with the execution mode and lifec
 interface inspection. The manifest interface record exposes initial-node input types,
 required flags, and runtime resource declarations. Inspection reads the embedded manifest without constructing providers.
 
+Description version `2026-10-19` adds `order_edges` to root and body graphs. Each entry contains only `from_node` and
+`to_node`, identifying a Task-success prerequisite. These edges participate in identity, ordering, initial-node
+interface validation, and skip-cause validation. Output gates remain in the inspection model's `control_edges`; these
+inspection fields are distinct from the authoring format.
+
+Graphs containing success dependencies use finite event schema `5` or streaming schema `6`. Other graphs retain their
+existing protocol, including new author definitions that only use input references and output gates. Old readers reject
+unsupported versions before execution. Node-success skip causes use `{"node_success":"source"}` without a fabricated
+port; output skip causes keep their existing source-node/source-output fields.
+
+The new description also includes static Iteration bodies when needed to describe success dependencies.
+`WorkflowDescription::body` looks up any described body; `loop_body` only accepts actual Loop lifecycle paths. Iteration
+item execution remains separate span/detail observation and cannot masquerade as a Loop pass.
+
 New runners name the synthetic Loop source `%loop`. Description readers also accept `$loop` from
 previously compiled runners, preserving its original node IDs and workflow identity.
 
@@ -144,7 +158,7 @@ Use the instrumentation scope `mf.workflow`. Event names, timestamps, and option
 
 | Attribute | Type | Meaning |
 | --- | --- | --- |
-| `mf.schema.version` | Signed integer | Event schema version: 1 for flat runs, 2 for finite Loop-capable runs, 4 for source-driven streams |
+| `mf.schema.version` | Signed integer | Event schema: 1 for flat runs, 2 for finite Loop-capable runs, 4 for source-driven streams; 5 and 6 add Task-success causes to finite and streaming runs |
 | `mf.workflow.id` | String | Identity shared with the description |
 | `mf.run.id` | String | Identity of this invocation |
 | `mf.event.sequence` | Signed integer | Positive per-run sequence starting at 1 |
@@ -208,8 +222,8 @@ This logical fixture demonstrates successful node completion:
 
 Reserve sequences before serialization/enqueueing through `EventSequence`. A dropped record consumes
 its sequence. The final reservation closes the sequence permanently, and retransmitting a record
-preserves its identity. Schema 1 permits at most `2 * node_count + 2` lifecycle records. Schema 2
-permits at most `4 * 10,000 + 4`: two node records and two pass boundaries per scheduled step, with
+preserves its identity. Schema 1 permits at most `2 * node_count + 2` lifecycle records. Schemas 2 and 5
+permit at most `4 * 10,000 + 4`: two node records and two pass boundaries per scheduled step, with
 room for one pass that fails before its first step after budget exhaustion. The sequence helper does
 not execute nodes or enforce a scheduler.
 
@@ -238,7 +252,8 @@ Schema 2's workflow final record reports the actual number of scheduled steps an
 
 ## Iteration observation
 
-An Iteration remains one node in its containing workflow lifecycle stream and graph description. Its ordinary
+An Iteration remains one node in its containing workflow lifecycle stream. New descriptions can additionally expose its
+static body graph. Its ordinary
 `mf.node` span and `mf.node.started` / `mf.node.finished` records bracket the complete array operation. Repeated body
 invocations use a separate `mf.iteration` instrumentation scope so they do not consume the bounded outer lifecycle
 sequence or appear as duplicate node outcomes in the terminal UI.
@@ -251,12 +266,14 @@ span. Each reached user-defined body node emits `mf.iteration.node.started` and
 `mf.node.id` and `mf.node.kind`. Terminal records include an outcome, duration when available, and failure context.
 They exclude item and result values. Plugin-provided failure messages can contain data supplied by that plugin.
 
-When an Iteration runs inside a Loop body, item detail spans inherit that pass's Iteration invocation span. The item span is a child of the Iteration node span, and each body-node span is a child of its item span. The
+When an Iteration runs inside a Loop body, item detail spans inherit that pass's Iteration invocation span. The item
+span is a child of the Iteration node span, and each body-node span is a child of its item span. The
 item context is attached in its worker thread, so spans created by a body plugin during its node invocation inherit
 that body-node context. Parallel completion order can differ from input order; use the item index and trace parentage
 to group records. Under `continue_on_error` or `remove_failed`, failed items and body nodes retain failed detail
-outcomes while the outer Iteration node can succeed. The terminal UI currently displays the outer node and does not
-render these repeated body invocations.
+outcomes while the outer Iteration node can succeed. The terminal UI can inspect described static bodies, with unknown
+per-item node states and an explicit span-inspection hint. It does not infer item execution from the outer node or
+render item spans as Loop lifecycle records.
 
 ## Runner export configuration
 
@@ -430,11 +447,32 @@ never implies successful completion; lifecycle telemetry retains execution and m
 
 ## Graph presentation
 
-`mf-tui::graph::GraphLayout` uses `rust-sugiyama` to assign layers and sibling order from the complete described graph, including isolated nodes. Data and control edges both contribute to the topology; parallel node pairs are deduplicated only for layout. A static terminal projection allocates attachment rows and expands boxes or column gaps to fit their routes. Node boxes and routes stay in place as observations arrive.
+The TUI provides three connection views, cycled with `e` while graph navigation owns input:
+
+| View | Visible connections |
+| --- | --- |
+| Execution (default) | Task-success edges and output gates |
+| Dependencies | Execution connections plus data bundles grouped by node pair and ordinary/exclusive kind |
+| Ports | Every original port mapping and execution connection |
+
+The header names the view and counts intentionally hidden data mappings. A data-only scope explicitly indicates that its
+dependencies are hidden. Selecting a node shows complete input references, exclusive groups, execution prerequisites,
+and consumers in Details. Available selection observations identify the chosen source; missing or truncated evidence
+remains unknown. No values or secret payloads are copied into these summaries.
+
+`GraphLayout` uses the complete dependency topology for layers and sibling order, including isolated nodes. Only visible
+connections reserve attachments, enlarge boxes, or consume routing work. Bundles retain all member identities; mixed or
+incomplete member outcomes are not displayed as uniform success. Success edges have a `success` label and no source
+port; output gates have `on` labels. Geometry is deterministic for each scope/view and stays fixed as observations,
+selection, or the viewport change.
+
+The browser builds layouts on demand and retains only the current root and current body layouts. Viewports are saved per
+scope/view; switching connections preserves the selected node. Re-entering an evicted scope reproduces its geometry.
+`GraphLayout::new` retains full-port behavior for widget callers; use `with_view` for an explicit projection.
 
 Node boxes start at four rows: two borders, a title, and a detail line. Compact attachments are spaced
 four rows apart. One-to-one connections align input and output rows; fan/join connections stagger
-their arrivals so channel crossings stay clear of turns. Boxes grow enough to keep all
+their arrivals so channel crossings stay clear of turns. Boxes grow enough to keep visible
 attachments inside their borders. Sibling boxes have at least a two-row gap, rounded to keep their
 port grids aligned, and disconnected components have an additional four-row gap. Producers are
 routed before downstream nodes, with stable connection identities breaking ties.
@@ -451,7 +489,11 @@ route coordinate limit. These limits govern optional route planning, independent
 10,000-node description admission limit. Routing counters and deterministic fixtures are available
 through `benchmark_routes`; performance reports remain local under `target/edge-routing/`.
 
-`GraphView` draws data and control edges with thin orthogonal lines, clips to a caller-owned viewport, and renders node status and elapsed time from a state snapshot. Data edges default to cyan, control edges default to blue and retain output-port labels. Connections join node borders through `├` output ports and `▶┤` input ports. Confirmed produced or skipped output ports change the associated edge style; possible lifecycle loss remains visibly uncertain.
+`GraphView` draws data and control edges with thin orthogonal lines, clips to a caller-owned viewport, and renders node
+status and elapsed time from a state snapshot. Data edges default to cyan, output gates to blue, and Task-success edges
+to yellow. Their labels distinguish prerequisites in monochrome. Connections join node borders through `├` output ports
+and `▶┤` input ports. Confirmed produced or skipped output ports change the associated edge style; possible lifecycle
+loss remains visibly uncertain.
 
 Edges use ordered integer channel tracks and reserved passages for connections spanning multiple layers.
 Obstacle-aware search and bounded local retries handle blocked routes. Completed routes avoid boxes,
@@ -469,7 +511,7 @@ If display limits prevent a safe route, the graph shows a separate unresolved-co
 Select an incident node with Tab/j/k to inspect its endpoint IDs, port names, edge kind, and reason in
 Details; PgUp/PgDn scroll those details. The connection remains in the graph metadata even though its
 unsafe path is not drawn. This warning does not change workflow results or telemetry completeness.
-Layout is calculated once per described scope, including Loop bodies; the CLI terminal loop owns
+Layout is deterministic per described scope and connection view; the CLI terminal loop owns
 scope navigation, panning, status banners, diagnostics, and terminal cleanup.
 
 ## Local TUI execution
@@ -507,14 +549,16 @@ mf run ./read-workflow --tui --read.path /data/events.txt
 printf '1\n2\n' | ./stream-batch
 ```
 
-The graph shows data and control edges, node status, elapsed time, and confirmed branch outcomes.
+The graph shows the selected connection view, node status, elapsed time, and confirmed branch outcomes.
 The header keeps the observed workflow outcome separate from the child process result. Arrow keys
-pan; `f` resets the viewport; Tab, `j`, and `k` select a node for details. On a Loop node, `l` opens
+pan; `f` resets the viewport; Tab, `j`, and `k` select a node for details. `e` cycles connection views. On a node with a
+described body, `l` opens
 its body graph; `h` or Esc returns to the parent graph. `[` and `]` inspect older and newer retained
 pass frames. The detail pane shows active and completed pass counts, stop reason, and any hidden
 older detail. Streaming details also show observed invocation/completion/result counts, Batch state,
 message identity, unresolved outcomes, and final workflow totals. Loop pass headers include their owning
-invocation so repeated paths in different messages remain distinct. `q` has no action while the workflow runs. Ctrl-C requests interruption, and a second
+invocation so repeated paths in different messages remain distinct. `q` has no action while the workflow runs. Ctrl-C
+requests interruption, and a second
 Ctrl-C or the two-second deadline forces termination. After the runner exits, the view stays open
 until `q`, Enter, Esc at the root, or Ctrl-C. The terminal is restored before the captured stdout is
 copied to CLI stdout.
@@ -577,9 +621,9 @@ See [compiling workflows](compiling.md) for executable commands, endpoint settin
 
 ## Streaming observations
 
-New streaming runner descriptions use version `2026-10-03`. Their workflow lifecycle records use event
-schema `4`, decoded with `mf_telemetry::stream::StreamRecord`; the existing finite-run decoder keeps
-its original schema `1` and `2` contracts. Session admission selects a reducer from the description
+Streaming descriptions use version `2026-10-03` with event schema `4`, or `2026-10-19` with schema `6` when success
+dependencies are present. Decode both with `mf_telemetry::stream::StreamRecord`. The finite-run decoder supports schemas
+`1`, `2`, and `5`. Session admission selects a reducer from the description
 protocol and rejects incompatible lifecycle records. Older schema-3 streams require recompilation for TUI use.
 
 A streaming instance has one workflow/run identity and a checked, monotonically increasing lifecycle
@@ -680,7 +724,8 @@ history remains available after collection finishes.
 ## Exclusive input provenance
 
 Descriptions mark each candidate data edge with `exclusive: true`; candidates sharing a target
-input form one group. The graph renders these edges in magenta with an `exclusive` label.
+input form one group. Ports view renders them individually; Dependencies view bundles matching node pairs and retains
+group members in Details. Exclusive connections use magenta and an `exclusive` label.
 `mf.node.started` and `mf.node.skipped` may include `selected_inputs`, containing only `input`,
 `source_node`, and `source_output` identities. Empty selections are omitted for compatibility.
 Iteration body logs carry the same identities in `mf.input.selections`. Values and secrets are

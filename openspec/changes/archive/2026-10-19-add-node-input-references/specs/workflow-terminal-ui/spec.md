@@ -99,16 +99,25 @@ differs or is incomplete.
 - **WHEN** members of a data bundle have different or incomplete observations
 - **THEN** the bundle does not falsely display uniform success or a single selected source
 
+### Requirement: Inspect static bodies without inventing lifecycle states
+
+When a description exposes an Iteration body, the UI SHALL permit static connection inspection and clearly identify its span-based item observation. It SHALL display unknown item-node states instead of inventing Loop lifecycle outcomes or deriving them from the outer node. An explicitly observed all-skipped input group SHALL be distinguished from missing selection evidence.
+
+#### Scenario: Inspect an Iteration body
+
+- **WHEN** an Iteration body is selected without per-node Loop lifecycle records
+- **THEN** the view shows its static dependencies, unknown node states, and an item-span inspection hint
+
+#### Scenario: Inspect an all-skipped group
+
+- **WHEN** the consumer observation explicitly identifies every candidate as skipped without missing or conflicting evidence
+- **THEN** details show that no source was selected rather than reporting an unknown winner
+
 ## MODIFIED Requirements
 
 ### Requirement: Keep routed connections individually traceable
 
-The graph SHALL retain every described data binding, output gate, and node-success connection in its semantic model and
-inspection details. Routing
-SHALL operate on the selected connection view, where an explicit data bundle is one visible connection with inspectable
-members. Completed routes MUST avoid unrelated node boxes, labels, arrowheads, and occupied attachment cells. Distinct
-visible connections MUST NOT share collinear runs or appear joined at incidental contacts. Perpendicular crossings SHALL
-remain distinguishable from connections.
+All semantic connections SHALL remain inspectable. Routing SHALL use the selected view, where each bundle is one visible connection with inspectable members. Completed routes MUST avoid unrelated boxes, labels, arrows, and attachments. Distinct visible connections MUST NOT share collinear runs or appear joined at incidental contacts; perpendicular crossings SHALL remain distinguishable from connections.
 
 #### Scenario: Separate parallel data and control edges
 
@@ -144,11 +153,7 @@ update the pannable canvas bounds. Diagram dimensions SHALL remain subject to ex
 
 ### Requirement: Keep graph geometry independent of observations and viewport
 
-For an unchanged described scope and connection view, node geometry, edge paths, and crossing layers SHALL remain stable
-across selection, lifecycle updates, elapsed-time updates, panning, selected execution passes, and viewport resizing.
-Reordering edge arrays while preserving the same nodes, execution order, and connections SHALL produce the same routed
-geometry and bundle membership. Explicit connection-view switches MAY change geometry; returning to a view SHALL
-reproduce its established geometry. Clipping SHALL preserve the visible portion of the full diagram.
+For a fixed scope and connection view, geometry SHALL remain stable across selection, observation updates, pass/message changes, panning, and resizing. Equivalent descriptions with reordered edge arrays SHALL produce identical nodes, bundles, routes, and crossing layers. Explicit view switches MAY change geometry; returning SHALL reproduce the established layout. Clipping SHALL match the visible region of the full diagram.
 
 #### Scenario: Change execution state at a crossing
 
@@ -167,11 +172,7 @@ reproduce its established geometry. Clipping SHALL preserve the visible portion 
 
 ### Requirement: Bound routing effort without hiding connections
 
-Routing SHALL use explicit limits for search work, retained routing state, retry rounds, and canvas dimensions. If a
-visible connection cannot be safely routed within these limits, the UI SHALL visibly report unresolved routing and
-retain its endpoints, port names, kind, and bundle members where applicable for inspection. It MUST NOT silently omit
-that connection or change workflow execution or observation integrity because of a routing limitation. Intentional view
-filtering SHALL be labelled separately and SHALL NOT count as routing failure.
+Routing SHALL bound search work, retained state, retries, and canvas dimensions. An unroutable visible connection SHALL be reported with inspectable endpoints, ports, kind, and bundle members where applicable. Routing MUST NOT silently omit that connection, present unsafe geometry as complete, or alter execution or observation integrity. Intentional filtering SHALL be labelled separately from routing failure.
 
 #### Scenario: Exhaust a routing budget
 

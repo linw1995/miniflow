@@ -58,7 +58,7 @@ mod wire;
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(remote = "WorkflowDefinition", deny_unknown_fields)]
-pub(super) struct DefinitionFields {
+struct DefinitionFields {
     pub version: WorkflowDefinitionVersion,
     #[serde(
         default,

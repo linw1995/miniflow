@@ -166,8 +166,26 @@ impl WorkflowDescription {
         Count::try_from(count)
     }
 
-    pub fn loop_body(&self, path: &[String]) -> Option<&LoopBodyDescription> {
+    pub fn body(&self, path: &[String]) -> Option<&LoopBodyDescription> {
         self.loop_bodies.iter().find(|body| body.path == path)
+    }
+
+    /// Lifecycle paths contain Loop scopes only; Iteration items use separate detail spans.
+    pub fn loop_body(&self, path: &[String]) -> Option<&LoopBodyDescription> {
+        if path.len() > crate::MAX_LOOP_DEPTH {
+            return None;
+        }
+        let (id, parent) = path.split_last()?;
+        let nodes = if parent.is_empty() {
+            &self.nodes
+        } else {
+            &self.loop_body(parent)?.nodes
+        };
+        nodes
+            .iter()
+            .any(|node| node.id == *id && node.kind == "workflow.loop")
+            .then(|| self.body(path))
+            .flatten()
     }
 
     pub fn validate(&self) -> Result<(), ContractError> {

@@ -38,12 +38,10 @@ derived as `N + 1 >= 2`.
 
 ### Requirement: Separate incoming activation from condition data access
 
-Workflow definitions SHALL accept an optional `control_edges` array defaulting to empty, whose entries contain
-`from_node`, `from_output`, and `to_node`. These edges SHALL establish execution dependencies without creating target
-input bindings. Existing data edges SHALL retain their data-binding behavior. The combined dependency graph MUST be
-acyclic. A control dependency SHALL be active when its source output is produced, including false or null values;
-explicit skip state SHALL make it inactive. Ordinary data inputs, resolved exclusive input groups, and incoming control dependencies SHALL all be required for activation. Candidate skips within a successfully resolved exclusive group MUST NOT independently deactivate the target. Every candidate SHALL still establish a scheduling dependency.
-Condition source references MUST NOT implicitly create dependencies or supply input values.
+Legacy definitions SHALL retain data `edges` and output-based `control_edges`. Version `2026-10-19` SHALL use node-local
+inputs and unified execution edges, rejecting `control_edges`. Output gates SHALL activate on produced values including
+false/null; success edges SHALL require same-frame Task success. Skipped prerequisites SHALL skip the target. All
+logical inputs and execution prerequisites SHALL be conjunctive. Condition references SHALL NOT create dependencies.
 
 #### Scenario: Trigger from one node and inspect another
 
@@ -62,13 +60,18 @@ Condition source references MUST NOT implicitly create dependencies or supply in
 
 #### Scenario: Preserve existing data-only definitions
 
-- **WHEN** a definition omits `control_edges`
+- **WHEN** a legacy definition omits `control_edges`
 - **THEN** its existing data bindings and dependency order retain their previous semantics
 
 #### Scenario: Keep a separate gate mandatory after selection
 
 - **WHEN** an exclusive input group resolves one produced value but a separate ordinary input or control dependency is skipped
 - **THEN** the consumer remains skipped without invoking its execution method
+
+#### Scenario: Trigger a router after a successful audit
+
+- **WHEN** a new-version router has a valid node-success prerequisite on an ordinary audit Task
+- **THEN** it can inspect declared ancestor context outputs after audit succeeds without requiring an audit output port
 
 ### Requirement: Read prior outputs from an isolated execution context
 

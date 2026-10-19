@@ -29,8 +29,8 @@
 
 ## 5. Migration and integration validation
 
-- [ ] 5.1 Document version migration, success-versus-output semantics, Task scope, and unchanged config references; migrate one conditional example and add zero-output ordering coverage.
-- [ ] 5.2 Add legacy/new equivalence and malformed-version fixtures without bulk source rewrites.
-- [ ] 5.3 Run `openspec validate add-node-input-references --strict`, `nix develop --command prek install`, and `nix develop --command prek -a`; explicitly lint untracked documentation.
-- [ ] 5.4 Run `nix develop --command python3 scripts/affected_tests.py --worktree --run`; preserve empty Rust selection and run affected non-Rust checks separately.
-- [ ] 5.5 Review all deltas, compatibility, success publication, and exclusive-proof boundaries; archive only after implementation and review.
+- [x] 5.1 Document version migration, success-versus-output semantics, Task scope, and unchanged config references; migrate one conditional example and add zero-output ordering coverage.
+- [x] 5.2 Add legacy/new equivalence and malformed-version fixtures without bulk source rewrites.
+- [x] 5.3 Run `openspec validate add-node-input-references --strict`, `nix develop --command prek install`, and `nix develop --command prek -a`; explicitly lint untracked documentation.
+- [x] 5.4 Run `nix develop --command python3 scripts/affected_tests.py --worktree --run`; preserve empty Rust selection and run affected non-Rust checks separately.
+- [x] 5.5 Review all deltas, compatibility, success publication, and exclusive-proof boundaries; archive only after implementation and review.

@@ -144,3 +144,87 @@ fn nested_iteration_uses_the_root_version_and_preserves_bindings() {
     value["nodes"][0]["config"]["body"]["control_edges"] = json!([]);
     assert!(serde_json::from_value::<WorkflowDefinition>(value).is_err());
 }
+
+#[test]
+fn migrated_conditional_example_preserves_legacy_branches_and_interfaces() {
+    let mut modern: WorkflowDefinition =
+        serde_json::from_str(include_str!("../../../examples/exclusive-inputs.json")).unwrap();
+    let mut legacy: WorkflowDefinition =
+        serde_json::from_str(include_str!("fixtures/exclusive-inputs-legacy.json")).unwrap();
+    modern.dependencies.clear();
+    legacy.dependencies.clear();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let modern = compile_definition(&modern, &registry).unwrap();
+    let legacy = compile_definition(&legacy, &registry).unwrap();
+    assert_eq!(modern.execution_order, legacy.execution_order);
+    assert_eq!(modern.definition.nodes, legacy.definition.nodes);
+    assert_eq!(modern.definition.edges, legacy.definition.edges);
+    assert_eq!(
+        modern.definition.control_edges,
+        legacy.definition.control_edges
+    );
+    assert_eq!(
+        mf_compiler::describe_workflow_inputs(&modern, &registry).unwrap(),
+        mf_compiler::describe_workflow_inputs(&legacy, &registry).unwrap()
+    );
+    for ci in [false, true] {
+        let arguments = mf_runtime::WorkflowArguments::try_from(json!({"params.ci":ci})).unwrap();
+        let current =
+            mf_compiler::execute_compiled_with_inputs(&modern, &registry, arguments.clone(), None)
+                .unwrap();
+        let previous =
+            mf_compiler::execute_compiled_with_inputs(&legacy, &registry, arguments, None).unwrap();
+        assert_eq!(json!(current), json!(previous));
+        assert_eq!(
+            json!(current),
+            json!({"result":{"mode":if ci { "ci" } else { "local" }}})
+        );
+    }
+    let mut incomplete: Value =
+        serde_json::from_str(include_str!("fixtures/exclusive-inputs-legacy.json")).unwrap();
+    incomplete["version"] = json!("2026-10-19");
+    assert!(serde_json::from_value::<WorkflowDefinition>(incomplete).is_err());
+}
+
+#[test]
+fn unknown_versions_and_binding_diagnostics_identify_the_declaration() {
+    let mut value = reference_workflow();
+    value["version"] = json!("2099-01-01");
+    let error = serde_json::from_value::<WorkflowDefinition>(value)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("2099-01-01"));
+    let mut value = reference_workflow();
+    value["nodes"][1]["inputs"]["input"] = json!({"from":{"node":"source.with.dots","port":null}});
+    let error = serde_json::from_value::<WorkflowDefinition>(value)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("consumer/inputs/input"), "{error}");
+}
+
+#[cfg(feature = "codegen")]
+#[test]
+fn redundant_success_prerequisites_do_not_consume_typed_payloads() {
+    let definition:WorkflowDefinition=serde_json::from_value(json!({
+        "version":"2026-10-19","dependencies":{"core":{"package":"mfn-core","path":std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../builtin-nodes/core")}},
+        "nodes":[{"id":"source","kind":"builtin.identity"},{"id":"target","kind":"builtin.identity","inputs":{"input":{"from":{"node":"source","port":"value"}}}}],
+        "edges":[{"from_node":"source","to_node":"target"}],"outputs":[{"name":"result","node":"target","port":"value"}]
+    })).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
+    let report: mf_compiler::TypedPlan = serde_json::from_str(&artifacts.typed_plan_json).unwrap();
+    assert!(
+        report.connections.iter().any(|edge| edge.source == "source"
+            && edge.target == "target"
+            && edge.fallback.is_none())
+    );
+    let result = mf_compiler::execute_compiled_with_inputs(
+        &plan,
+        &registry,
+        mf_runtime::WorkflowArguments::try_from(json!({"source.input":42})).unwrap(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(json!(result), json!({"result":42}));
+}

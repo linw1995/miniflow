@@ -230,10 +230,10 @@ fn observed_selections_and_snapshots_preserve_provenance_without_secret_values()
         value["nodes"][index]["kind"] = json!("builtin.identity");
         value["nodes"][index]["config"] = json!({});
     }
-    value["edges"].as_array_mut().unwrap().extend([
-        json!({"from_node":"params", "from_output":"payload", "to_node":"local", "to_input":"input"}),
-        json!({"from_node":"params", "from_output":"payload", "to_node":"ci", "to_input":"input"})
-    ]);
+    for index in [2, 3] {
+        value["nodes"][index]["inputs"] =
+            json!({"input":{"from":{"node":"params","port":"payload"}}});
+    }
     let registry = NodeRegistry::from_inventory().unwrap();
     for ci in [false, true] {
         let plan =

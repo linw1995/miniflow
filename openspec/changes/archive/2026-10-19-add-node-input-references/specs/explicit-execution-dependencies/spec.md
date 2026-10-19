@@ -105,6 +105,11 @@ builders MUST enforce the same validation.
 - **WHEN** generated execution uses typed data paths
 - **THEN** it publishes success at the same validated boundary as in-memory execution
 
+#### Scenario: Reject changed success contracts during generated preparation
+
+- **WHEN** a provider no longer permits ordinary success dependencies when a generated executable prepares its nodes
+- **THEN** preparation rejects the affected connection before any workflow node operation executes
+
 ### Requirement: Separate activation facts from output branch facts
 
 Exclusive proof SHALL propagate source activation facts through success edges without adding facts from individual
@@ -142,3 +147,8 @@ SHALL retain old protocol support.
 
 - **WHEN** a new reader inspects an old supported executable, or an old reader encounters the new description version
 - **THEN** the new reader accepts the old graph and the old reader rejects the unsupported version before execution
+
+#### Scenario: Reject Iteration detail as Loop lifecycle
+
+- **WHEN** a lifecycle record uses an Iteration body as a Loop invocation path
+- **THEN** graph-relative validation rejects the record while retaining the body's static description and separate item spans

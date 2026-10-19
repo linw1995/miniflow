@@ -498,20 +498,17 @@ fn prepare_graph(
             ),
         }.fail();
     }
+    let indices: BTreeMap<_, _> = nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| (node.definition_id.clone(), index))
+        .collect();
     for edge in &definition.order_edges {
-        for endpoint in [&edge.from_node, &edge.to_node] {
-            let node = nodes
-                .iter()
-                .find(|node| &node.definition_id == endpoint)
-                .expect("validated endpoints");
-            if !matches!(&node.node, Some(mf_runtime::NodeExecution::Task(task)) if task.supports_success_dependencies())
-            {
-                return InvalidSuccessDependencySnafu {
-                    message: format!("node `{endpoint}` is not an ordinary Task"),
-                }
-                .fail();
-            }
-        }
+        crate::validate_success_connection(
+            &nodes[indices[&edge.from_node]],
+            &nodes[indices[&edge.to_node]],
+        )
+        .context(FlowConstructionSnafu)?;
     }
     let incoming = incoming_dependencies(definition);
     let startup = definition.version.supports_startup_inputs()
@@ -550,11 +547,6 @@ fn prepare_graph(
         .fail();
     }
 
-    let indices: BTreeMap<_, _> = nodes
-        .iter()
-        .enumerate()
-        .map(|(index, node)| (node.definition_id.clone(), index))
-        .collect();
     let mut inference = TypeInferenceState::default();
     for id in &order {
         let dependencies = incoming.get(id.as_str()).map_or(&[][..], Vec::as_slice);

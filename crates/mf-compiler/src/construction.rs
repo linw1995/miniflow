@@ -557,16 +557,10 @@ impl FlowBuilder {
                     "source must precede target and edges must be unique",
                 ));
             }
-            for position in [from, to] {
-                ensure!(
-                    ordinary_task(&self.nodes[self.execution_order[position].index()]),
-                    InvalidSuccessDependencySnafu {
-                        from_node: edge.from_node.as_str(),
-                        to_node: edge.to_node.as_str(),
-                        message: "endpoints must be ordinary Tasks",
-                    }
-                );
-            }
+            validate_success_connection(
+                &self.nodes[self.execution_order[from].index()],
+                &self.nodes[self.execution_order[to].index()],
+            )?;
         }
         self.orders = orders;
         self.prepare_execution();
@@ -851,6 +845,21 @@ pub enum StreamBuildError {
     InvalidPlan { message: String },
     #[snafu(display("invalid streaming workflow: {source}"), visibility(pub))]
     WorkflowInputs { source: crate::WorkflowInputError },
+}
+
+pub fn validate_success_connection(
+    source: &FlowNode,
+    target: &FlowNode,
+) -> Result<(), FlowBuildError> {
+    ensure!(
+        ordinary_task(source) && ordinary_task(target),
+        InvalidSuccessDependencySnafu {
+            from_node: source.definition_id.as_str(),
+            to_node: target.definition_id.as_str(),
+            message: "endpoints must be ordinary Tasks",
+        }
+    );
+    Ok(())
 }
 
 fn ordinary_task(node: &FlowNode) -> bool {

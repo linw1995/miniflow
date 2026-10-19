@@ -913,24 +913,13 @@ fn draw(
     }
     let layout = view_state.layout(root_layout, body_layouts);
     let pass = view_state.pass(snapshot);
-    let display_nodes = if view_state.path.is_empty() {
-        None
-    } else {
-        let order = || {
-            layout
-                .nodes()
-                .iter()
-                .map(|node| (node.id.as_str(), node.kind.as_str()))
-        };
-        Some(pass.map_or_else(
-            || {
-                order()
-                    .map(|(id, kind)| NodeObservation::pending(id, kind))
-                    .collect()
-            },
-            |pass| pass.display_nodes(order()),
-        ))
-    };
+    let static_body = description.body(&view_state.path).is_some_and(|body| {
+        body.nodes
+            .iter()
+            .any(|node| node.kind == mf_runtime::ITERATION_INPUT_KIND)
+    });
+    let display_nodes =
+        (!view_state.path.is_empty()).then(|| body_observations(layout, pass, static_body));
     terminal.draw(|frame| {
         let [header, body, footer] = Layout::vertical([
             Constraint::Length(1), Constraint::Min(1), Constraint::Length(2),
@@ -945,13 +934,13 @@ fn draw(
         } else {
             format!("{:?}", view_state.path)
         };
-        let pass_label = pass.map_or(String::new(), |pass| {
+        let pass_label = if static_body { "  |  Static body; item execution in spans".into() } else { pass.map_or(String::new(), |pass| {
             let index = pass.path.last().map_or(0, |entry| entry.index.get());
             match pass.stream_invocation {
                 Some(owner) => format!("  |  Invocation: {owner}  |  Pass: {index}"),
                 None => format!("  |  Pass: {index}"),
             }
-        });
+        }) };
         frame.render_widget(Paragraph::new(format!(
             "{}  |  Workflow: {workflow}  |  Process: {phase}  |  Scope: {scope}{pass_label}  |  {:.1}s",
             connection_summary(layout), elapsed.as_secs_f64()
@@ -994,6 +983,31 @@ fn draw(
     Ok(())
 }
 
+fn body_observations(
+    layout: &GraphLayout,
+    pass: Option<&LoopPassObservation>,
+    static_body: bool,
+) -> Vec<NodeObservation> {
+    let order = || {
+        layout
+            .nodes()
+            .iter()
+            .map(|node| (node.id.as_str(), node.kind.as_str()))
+    };
+    if !static_body && let Some(pass) = pass {
+        return pass.display_nodes(order());
+    }
+    order()
+        .map(|(id, kind)| {
+            let mut node = NodeObservation::pending(id, kind);
+            if static_body {
+                node.status = crate::state::NodeStatus::Unknown;
+            }
+            node
+        })
+        .collect()
+}
+
 fn connection_summary(layout: &GraphLayout) -> String {
     let label = layout.connection_view().label();
     let hidden = layout.hidden_data_count();
@@ -1023,7 +1037,7 @@ fn binding_details(
             &description.control_edges,
             &description.order_edges,
         )
-    } else if let Some(body) = description.loop_body(path) {
+    } else if let Some(body) = description.body(path) {
         (&body.data_edges, &body.control_edges, &body.order_edges)
     } else {
         return String::new();
@@ -1047,6 +1061,14 @@ fn binding_details(
             label(input),
             if exclusive { " [exclusive]" } else { "" }
         ));
+        let all_skipped = !node.possibly_missing_events
+            && !node.conflicted
+            && sources.iter().all(|edge| {
+                node.skip_causes.iter().any(|cause| {
+                    cause.source_node() == edge.from_node
+                        && cause.source_output() == Some(edge.from_output.as_str())
+                })
+            });
         for edge in sources {
             text.push_str(&format!(
                 "    {}.{}\n",
@@ -1068,6 +1090,8 @@ fn binding_details(
                     label(&selected.source_node),
                     label(&selected.source_output)
                 ));
+            } else if all_skipped {
+                text.push_str("    selected: none (all candidates skipped)\n");
             } else {
                 text.push_str("    selected: unknown\n");
             }
@@ -1500,7 +1524,7 @@ impl ObservationView {
                 {
                     path.push(node.id.clone());
                 }
-                if self.description.loop_body(&path).is_none() {
+                if self.description.body(&path).is_none() {
                     return Ok(());
                 }
             }
@@ -1694,10 +1718,69 @@ mod tests {
         );
         node.possibly_missing_events = true;
         assert!(binding_details(&description, &[], Some(&node)).contains("selected: unknown"));
+        node.possibly_missing_events = false;
+        node.input_selections.clear();
+        node.skip_causes = ["first", "second"]
+            .map(|port| mf_telemetry::event::SkipCause::Output {
+                source_node: "source".into(),
+                source_output: port.into(),
+            })
+            .to_vec();
+        assert!(
+            binding_details(&description, &[], Some(&node))
+                .contains("none (all candidates skipped)")
+        );
         let source = NodeObservation::pending("source", "fixture.task");
         assert!(
             binding_details(&description, &[], Some(&source)).contains("target.input [exclusive]")
         );
+    }
+
+    #[test]
+    fn iteration_bodies_are_static_and_cannot_be_used_as_loop_lifecycle_paths() {
+        let mut description = scope_fixture();
+        description.version = WorkflowDescriptionVersion::V2026_10_19;
+        description.execution = Some(mf_telemetry::description::ExecutionDescription {
+            mode: mf_telemetry::description::ExecutionMode::Single,
+        });
+        description.nodes[0].kind = "builtin.iteration".into();
+        description.loop_bodies[0].nodes[0].id = mf_runtime::ITERATION_INPUT_ID.into();
+        description.loop_bodies[0].nodes[0].kind = mf_runtime::ITERATION_INPUT_KIND.into();
+        description.loop_bodies[0].execution_order[0] = mf_runtime::ITERATION_INPUT_ID.into();
+        description.validate().unwrap();
+        let path = vec!["first".into()];
+        assert!(description.body(&path).is_some());
+        assert!(description.loop_body(&path).is_none());
+        let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        view.handle_navigation(
+            KeyCode::Char('l'),
+            &snapshot,
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
+        assert_eq!(view.state.path, path);
+        let nodes = body_observations(view.state.layout(&view.root, &view.bodies), None, true);
+        assert!(
+            nodes
+                .iter()
+                .all(|node| node.status == crate::state::NodeStatus::Unknown)
+        );
+        let event = LifecycleEvent {
+            workflow_id: description.workflow_id.clone(),
+            run_id: RunId::new(),
+            sequence: Count::try_from(2).unwrap(),
+            event: LifecycleKind::LoopPassStarted {
+                path: vec![LoopPathEntry {
+                    loop_id: "first".into(),
+                    index: Count::ZERO,
+                }],
+                elapsed_ns: Count::ZERO,
+            },
+        };
+        assert!(event.validate_for(&description).is_err());
     }
 
     fn source_runner(directory: &Path, resource: Option<StdinRequirement>) -> PathBuf {
