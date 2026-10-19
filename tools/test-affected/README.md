@@ -145,7 +145,9 @@ nix develop --command python3 tools/test-affected/run-tests.py target/test-plan.
 
 The local compile command retains telemetry support so TUI can observe execution.
 To inspect execution, add `--tui` to `mf run`. The default Execution view shows execution
-prerequisites and bundles data dependencies where no explicit execution connection exists.
+prerequisites and bundled data dependencies, hiding direct connections already represented
+by another dependency path. This changes only the display; input bindings and execution
+conditions remain intact.
 Press `e` to cycle through Dependencies (all bundled data mappings) and Ports (individual
 mappings); Details retains the input sources. Select `search` and
 press `l` to inspect its Loop body, then `h` to return. Rebuild both the CLI and runner

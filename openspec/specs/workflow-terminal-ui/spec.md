@@ -859,25 +859,30 @@ of queued. Storage and supervision SHALL run off the terminal rendering thread, 
 
 ### Requirement: Select explicit connection views
 
-The graph SHALL offer Execution, Dependencies, and Ports. Execution SHALL show explicit execution edges and data bundles
-for node pairs without one, counting only mappings hidden behind explicit edges. Dependencies SHALL include all data
-bundles; Ports SHALL show every mapping. Bundles SHALL distinguish ordinary/exclusive inputs; success edges and output
-gates SHALL remain distinct. All nodes and mappings SHALL remain inspectable in compatible executables without recompilation.
+The graph SHALL offer Execution, Dependencies, and Ports. Execution SHALL reduce transitive node-pair dependencies,
+bundle data, and prefer explicit execution connections for each pair. It SHALL separately count hidden mappings and
+transitive pairs. Dependencies SHALL retain direct connections and bundles; Ports SHALL retain every mapping.
+Visible ordinary/exclusive data, success edges, and output gates SHALL remain distinct. Reduction SHALL preserve inspection and execution semantics.
 
 #### Scenario: Inspect a parameter-heavy node pair
 
-- **WHEN** eighteen ordinary data edges connect the same source and consumer without an explicit execution connection
+- **WHEN** eighteen ordinary data edges connect the same source and consumer without an explicit execution connection or alternate dependency path
 - **THEN** Execution and Dependencies display one counted bundle with all eighteen inspectable mappings, and Ports displays individual mappings
 
 #### Scenario: Keep control and exclusive identities
 
-- **WHEN** one node pair has success edges, control gates, ordinary data bindings, and multiple exclusive-input candidates
+- **WHEN** one node pair has success edges, control gates, ordinary data bindings, and multiple exclusive-input candidates, with no alternate dependency path
 - **THEN** Execution shows the distinct success edges and control gates; Dependencies also shows ordinary/exclusive data bundles, and Details retains each target input and candidate-group identity
 
 #### Scenario: Inspect a data-only workflow
 
 - **WHEN** a scope has data dependencies but no execution connections
-- **THEN** Execution connects dependent node pairs with data bundles while leaving independent nodes disconnected
+- **THEN** Execution preserves dependency reachability with data bundles while leaving independent nodes disconnected
+
+#### Scenario: Hide a transitively redundant connection
+
+- **WHEN** both `A -> B -> C` and `A -> C` are dependencies
+- **THEN** Execution hides the direct `A -> C` connection regardless of kind, while Dependencies, Ports, and Details retain it and runtime prerequisites remain unchanged
 
 ### Requirement: Inspect bindings independently of visible routes
 
@@ -967,3 +972,17 @@ When a description exposes an Iteration body, the UI SHALL permit static connect
 
 - **WHEN** the consumer observation explicitly identifies every candidate as skipped without missing or conflicting evidence
 - **THEN** details show that no source was selected rather than reporting an unknown winner
+
+### Requirement: Freeze elapsed time after local run completion
+
+The TUI SHALL advance elapsed time while a local run is active. Once completion is published, elapsed time SHALL remain fixed at the observed child process exit time throughout final-view inspection, regardless of exit outcome or missing terminal telemetry. Time spent draining output or inspecting the completed run MUST NOT extend its final duration.
+
+#### Scenario: Observe an active run
+
+- **WHEN** a local run is still active
+- **THEN** elapsed time continues to advance as the TUI refreshes
+
+#### Scenario: Inspect a run without terminal telemetry
+
+- **WHEN** the child exits without sending terminal telemetry and the user keeps its completed view open
+- **THEN** elapsed time remains fixed across subsequent refreshes using the observed process exit time
