@@ -163,9 +163,9 @@ where
             }
             .cloned()
             .unwrap_or_default();
-            if dependency.borrowed().exclusive() {
+            if dependency.exclusive() {
                 groups
-                    .entry(dependency.borrowed().input().unwrap_or("<control>"))
+                    .entry(dependency.input().unwrap_or("<control>"))
                     .or_default()
                     .push((dependency, facts));
             } else {

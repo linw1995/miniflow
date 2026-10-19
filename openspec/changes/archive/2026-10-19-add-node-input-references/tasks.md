@@ -34,3 +34,4 @@
 - [x] 5.3 Run `openspec validate add-node-input-references --strict`, `nix develop --command prek install`, and `nix develop --command prek -a`; explicitly lint untracked documentation.
 - [x] 5.4 Run `nix develop --command python3 scripts/affected_tests.py --worktree --run`; preserve empty Rust selection and run affected non-Rust checks separately.
 - [x] 5.5 Review all deltas, compatibility, success publication, and exclusive-proof boundaries; archive only after implementation and review.
+- [x] 5.6 Audit the implementation against repository instructions and run controlled ablations; remove identity borrowing and the redundant token-spelling test, retaining publication and frame-isolation safeguards. Keep experiment reports local under `target/`.

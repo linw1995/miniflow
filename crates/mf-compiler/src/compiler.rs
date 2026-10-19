@@ -284,7 +284,7 @@ impl TypeInferenceState {
 
         let mut inputs: BTreeMap<&str, TypeFact> = BTreeMap::new();
         for dependency in dependencies {
-            let Some(input_name) = dependency.borrowed().input() else {
+            let Some(input_name) = dependency.input() else {
                 continue;
             };
             let input = node
@@ -297,7 +297,7 @@ impl TypeInferenceState {
                     definition_id: id.clone(),
                     message: format!("unknown input `{input_name}` in type binding"),
                 })?;
-            let source_id = DefinitionId::from(dependency.borrowed().source_node());
+            let source_id = DefinitionId::from(dependency.source_node());
             let source = self
                 .outputs
                 .get(&(
@@ -350,7 +350,7 @@ impl TypeInferenceState {
             } else {
                 input.value_type.clone()
             };
-            if dependency.borrowed().exclusive()
+            if dependency.exclusive()
                 && let Some(fact) = inputs.get_mut(input_name)
             {
                 if fact.value_type != value_type {
@@ -673,8 +673,8 @@ fn validate_base_metadata(
         let mut pending = vec![node.definition_id.as_str()];
         while let Some(id) = pending.pop() {
             for dependency in incoming.get(id).into_iter().flatten() {
-                if ancestors.insert(dependency.borrowed().source_node()) {
-                    pending.push(dependency.borrowed().source_node());
+                if ancestors.insert(dependency.source_node()) {
+                    pending.push(dependency.source_node());
                 }
             }
         }

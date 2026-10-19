@@ -198,13 +198,13 @@ pub enum ContextValue<'a> {
     Skipped,
 }
 
-/// Completed output values for one run. Nodes receive an immutable reference.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TaskOutcome {
     Succeeded,
     Skipped,
 }
 
+/// Completed output values for one run. Nodes receive an immutable reference.
 #[derive(Debug)]
 pub struct ExecutionContext {
     // A present None is an explicit skip; an absent key is a missing output.
@@ -1075,9 +1075,6 @@ impl Dependency<std::borrow::Cow<'static, str>> {
 }
 
 impl<'a> ExecutionDependency<'a> {
-    pub fn borrowed(self) -> Self {
-        self
-    }
     pub fn source_node(self) -> &'a str {
         match self {
             Self::Output { source_node, .. } | Self::NodeSuccess { source_node } => source_node,
@@ -1272,7 +1269,6 @@ fn execute_ordered_call_in_context<'a, N>(
             };
             let key = output_id(dependency.source_node(), port);
             if dependency
-                .borrowed()
                 .input()
                 .is_some_and(|input| transferred_inputs.contains(&input))
                 && ctx.typed_outputs.contains(&key)

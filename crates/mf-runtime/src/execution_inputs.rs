@@ -138,8 +138,8 @@ impl ExecutionInputs {
                     })?
                 }
             };
-            if dependency.borrowed().exclusive() {
-                let input = dependency.borrowed().input().ok_or_else(|| {
+            if dependency.exclusive() {
+                let input = dependency.input().ok_or_else(|| {
                     ContextSnafu {
                         definition_id: id,
                         message: "exclusive dependency requires a target input",
@@ -148,7 +148,7 @@ impl ExecutionInputs {
                 })?;
                 let group = groups.entry(input).or_default();
                 let source = SkipCause::Output {
-                    source_node: dependency.borrowed().source_node().into(),
+                    source_node: dependency.source_node().into(),
                     source_output: dependency
                         .source_output()
                         .expect("exclusive output source")
@@ -173,7 +173,7 @@ impl ExecutionInputs {
             }
             match value {
                 Some(ContextValue::Value(value)) => {
-                    if let Some(input) = dependency.borrowed().input() {
+                    if let Some(input) = dependency.input() {
                         inputs.insert(input.to_owned(), value.clone());
                     }
                 }
