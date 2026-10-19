@@ -127,6 +127,8 @@ accepts package-only selection and must not be used to silently discard exact-ca
 
 ## Compile and run the Flow
 
+The definition uses version `2026-10-19`: node-local `inputs` bind data, including
+exclusive alternatives; `edges` express branch-output gates and Task-success prerequisites.
 Compile once and run the same executable locally or in CI. In this checkout, use the
 CLI's development support feature so generated projects use local support crates.
 An installed `mf` with the appropriate support packages uses the same compile/run commands.
@@ -134,12 +136,19 @@ An installed `mf` with the appropriate support packages uses the same compile/ru
 ```sh
 nix develop --command cargo run -p mf-cli --features development-support -- \
   compile tools/test-affected/flows/test-affected.json \
-  --output target/test-affected-runner --build-dir target/test-affected-build --no-telemetry
+  --output target/test-affected-runner --build-dir target/test-affected-build
 nix develop --command cargo run -p mf-cli --features development-support -- \
   run ./target/test-affected-runner --params.repository "$PWD" \
   --params.mode worktree > target/test-plan.json
 nix develop --command python3 tools/test-affected/run-tests.py target/test-plan.json
 ```
+
+The local compile command retains telemetry support so TUI can observe execution.
+To inspect execution, add `--tui` to `mf run`. The default Execution view draws only
+execution prerequisites. Press `e` to cycle through Dependencies (bundled data mappings)
+and Ports (individual mappings); Details retains the input sources. Select `search` and
+press `l` to inspect its Loop body, then `h` to return. Rebuild both the CLI and runner
+when upgrading from an older manifest format.
 
 Local parameters:
 

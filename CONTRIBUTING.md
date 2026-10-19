@@ -15,7 +15,7 @@ Before submitting changes, run:
 prek -a
 cargo run -p mf-cli --features development-support -- compile \
   tools/test-affected/flows/test-affected.json --output target/test-affected-runner \
-  --build-dir target/test-affected-build --no-telemetry
+  --build-dir target/test-affected-build
 cargo run -p mf-cli --features development-support -- run ./target/test-affected-runner \
   --params.mode worktree --params.precision packages > target/test-plan.json
 python3 tools/test-affected/run-tests.py target/test-plan.json

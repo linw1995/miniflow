@@ -149,7 +149,7 @@ suite already run by CI coverage.
 ### Affected package tests
 
 One planning Flow serves local and PR CI execution. `builtin.if_else` selects the local
-comparison path or the CI success-history path; exclusive input edges converge before
+comparison path or the CI success-history path; exclusive input bindings converge before
 Git comparison, optional LSP analysis, and the shared Rust planner. Cargo metadata supplies
 package ownership and every declared local dependency kind, including inactive optional,
 platform, test, and build dependencies. CI selects whole packages; local callers may request
@@ -160,7 +160,7 @@ From the repository root, compile once with pinned tools:
 ```bash
 nix develop --command cargo run -p mf-cli --features development-support -- compile \
   tools/test-affected/flows/test-affected.json --output target/test-affected-runner \
-  --build-dir target/test-affected-build --no-telemetry
+  --build-dir target/test-affected-build
 
 # Snapshot staged, unstaged, and nonignored untracked files without changing the index.
 nix develop --command cargo run -p mf-cli --features development-support -- run \

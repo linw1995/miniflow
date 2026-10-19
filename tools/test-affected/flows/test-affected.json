@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-03",
+  "version": "2026-10-19",
   "execution": {
     "mode": "stream",
     "limits": {
@@ -261,6 +261,32 @@
           "valid": "raw.all(k, k in ['target','all_features','features','no_default_features']) && mode in ['worktree','commit','merge-base','snapshot'] && precision in ['tests','packages']",
           "configuration": "{'target':has(raw.target)?raw.target:target,'all_features':has(raw.all_features)?raw.all_features:true,'features':has(raw.features)?raw.features:[],'no_default_features':has(raw.no_default_features)?raw.no_default_features:false}"
         }
+      },
+      "inputs": {
+        "raw": {
+          "from": {
+            "node": "params",
+            "port": "configuration"
+          }
+        },
+        "target": {
+          "from": {
+            "node": "params",
+            "port": "target"
+          }
+        },
+        "mode": {
+          "from": {
+            "node": "params",
+            "port": "mode"
+          }
+        },
+        "precision": {
+          "from": {
+            "node": "params",
+            "port": "precision"
+          }
+        }
       }
     },
     {
@@ -268,6 +294,14 @@
       "kind": "builtin.assert",
       "config": {
         "message": "Local comparison mode, precision, or configuration is invalid"
+      },
+      "inputs": {
+        "condition": {
+          "from": {
+            "node": "local_settings",
+            "port": "valid"
+          }
+        }
       }
     },
     {
@@ -286,12 +320,58 @@
         "code": {
           "request": "{'mode':mode,'base':base,'head':head,'analyze':precision=='tests','options':{'configuration':config,'inventory':inventory,'exact_tests':precision=='tests'},'initialization_options':{'cargo':{'features':config.all_features?'all':config.features,'target':config.target,'noDefaultFeatures':config.no_default_features,'buildScripts':{'enable':false},'sysroot':null},'procMacro':{'enable':false},'checkOnSave':false,'cachePriming':{'enable':false}}}"
         }
+      },
+      "inputs": {
+        "mode": {
+          "from": {
+            "node": "params",
+            "port": "mode"
+          }
+        },
+        "base": {
+          "from": {
+            "node": "params",
+            "port": "base"
+          }
+        },
+        "head": {
+          "from": {
+            "node": "params",
+            "port": "head"
+          }
+        },
+        "precision": {
+          "from": {
+            "node": "params",
+            "port": "precision"
+          }
+        },
+        "inventory": {
+          "from": {
+            "node": "params",
+            "port": "inventory"
+          }
+        },
+        "config": {
+          "from": {
+            "node": "local_settings",
+            "port": "configuration"
+          }
+        }
       }
     },
     {
       "id": "checkout",
       "kind": "git.inspect",
-      "config": {}
+      "config": {},
+      "inputs": {
+        "repository": {
+          "from": {
+            "node": "params",
+            "port": "repository"
+          }
+        }
+      }
     },
     {
       "id": "checkout_identity",
@@ -304,6 +384,14 @@
         "code": {
           "valid": "e.available && e.value.current.clean && !e.value.current.shallow && size(e.value.current.parents)==2"
         }
+      },
+      "inputs": {
+        "e": {
+          "from": {
+            "node": "checkout",
+            "port": "result"
+          }
+        }
       }
     },
     {
@@ -311,6 +399,14 @@
       "kind": "builtin.assert",
       "config": {
         "message": "CI planning requires a clean two-parent merge checkout with complete history"
+      },
+      "inputs": {
+        "condition": {
+          "from": {
+            "node": "checkout_identity",
+            "port": "valid"
+          }
+        }
       }
     },
     {
@@ -344,6 +440,122 @@
           "settings": "{'record_version':policy.record_version,'repository':github_repository,'run_id':run_id,'attempt':attempt,'pr':pr,'branch':branch,'manual':event=='workflow_dispatch','event':event,'expected_head':expected_head,'expected_merge':expected_merge,'cumulative':cumulative,'signature':{'policy':policy.id,'coverage_target':coverage_target,'toolchain':toolchain.endsWith('\\n')?toolchain:toolchain+'\\n','features':'all','profile':profile,'target':target,'environment':{'RUSTFLAGS':rustflags,'CARGO_ENCODED_RUSTFLAGS':encoded_rustflags,'CARGO_INCREMENTAL':incremental,'CARGO_PROFILE_DEV_DEBUG':dev_debug,'CARGO_PROFILE_TEST_DEBUG':test_debug}}}",
           "path": "'/repos/'+github_repository+'/actions/runs/'+string(run_id)+'/attempts/'+string(attempt)"
         }
+      },
+      "inputs": {
+        "github_repository": {
+          "from": {
+            "node": "params",
+            "port": "github_repository"
+          }
+        },
+        "run_id": {
+          "from": {
+            "node": "params",
+            "port": "run_id"
+          }
+        },
+        "attempt": {
+          "from": {
+            "node": "params",
+            "port": "attempt"
+          }
+        },
+        "pr": {
+          "from": {
+            "node": "params",
+            "port": "pr"
+          }
+        },
+        "branch": {
+          "from": {
+            "node": "params",
+            "port": "branch"
+          }
+        },
+        "event": {
+          "from": {
+            "node": "params",
+            "port": "event"
+          }
+        },
+        "expected_head": {
+          "from": {
+            "node": "params",
+            "port": "expected_head"
+          }
+        },
+        "expected_merge": {
+          "from": {
+            "node": "params",
+            "port": "expected_merge"
+          }
+        },
+        "cumulative": {
+          "from": {
+            "node": "params",
+            "port": "cumulative"
+          }
+        },
+        "coverage_target": {
+          "from": {
+            "node": "params",
+            "port": "coverage_target"
+          }
+        },
+        "profile": {
+          "from": {
+            "node": "params",
+            "port": "profile"
+          }
+        },
+        "toolchain": {
+          "from": {
+            "node": "params",
+            "port": "toolchain"
+          }
+        },
+        "target": {
+          "from": {
+            "node": "params",
+            "port": "target"
+          }
+        },
+        "rustflags": {
+          "from": {
+            "node": "params",
+            "port": "rustflags"
+          }
+        },
+        "encoded_rustflags": {
+          "from": {
+            "node": "params",
+            "port": "encoded_rustflags"
+          }
+        },
+        "incremental": {
+          "from": {
+            "node": "params",
+            "port": "incremental"
+          }
+        },
+        "dev_debug": {
+          "from": {
+            "node": "params",
+            "port": "dev_debug"
+          }
+        },
+        "test_debug": {
+          "from": {
+            "node": "params",
+            "port": "test_debug"
+          }
+        },
+        "policy": {
+          "from": {
+            "node": "validation_policy",
+            "port": "value"
+          }
+        }
       }
     },
     {
@@ -351,6 +563,14 @@
       "kind": "builtin.assert",
       "config": {
         "message": "CI planning requires valid PR execution parameters and toolchain identity"
+      },
+      "inputs": {
+        "condition": {
+          "from": {
+            "node": "ci_settings",
+            "port": "valid"
+          }
+        }
       }
     },
     {
@@ -363,6 +583,26 @@
           "workflow_id": "/workflow_id",
           "head_sha": "/head_sha",
           "event": "/event"
+        }
+      },
+      "inputs": {
+        "path": {
+          "from": {
+            "node": "ci_settings",
+            "port": "path"
+          }
+        },
+        "token": {
+          "from": {
+            "node": "params",
+            "port": "token"
+          }
+        },
+        "deadline": {
+          "from": {
+            "node": "checkout",
+            "port": "deadline"
+          }
         }
       }
     },
@@ -380,6 +620,26 @@
           "valid": "run.available && run.value.data.id==s.run_id && run.value.data.run_attempt==s.attempt && type(run.value.data.workflow_id)==int && run.value.data.workflow_id>0 && run.value.data.head_sha==git.value.current.parents[1] && run.value.data.event==s.event && (s.manual || s.expected_head==git.value.current.parents[1])",
           "current": "{'version':s.record_version,'repository':s.repository,'pr':s.pr,'run_id':s.run_id,'run_attempt':s.attempt,'workflow_id':run.value.data.workflow_id,'head':git.value.current.parents[1],'base':git.value.current.parents[0],'merge':git.value.current.commit,'tree':git.value.current.tree,'signature':s.signature}"
         }
+      },
+      "inputs": {
+        "run": {
+          "from": {
+            "node": "current_run",
+            "port": "result"
+          }
+        },
+        "git": {
+          "from": {
+            "node": "checkout",
+            "port": "result"
+          }
+        },
+        "s": {
+          "from": {
+            "node": "ci_settings",
+            "port": "settings"
+          }
+        }
       }
     },
     {
@@ -387,6 +647,14 @@
       "kind": "builtin.assert",
       "config": {
         "message": "Current PR, workflow attempt, and tested merge identities disagree"
+      },
+      "inputs": {
+        "condition": {
+          "from": {
+            "node": "current_identity",
+            "port": "valid"
+          }
+        }
       }
     },
     {
@@ -419,6 +687,14 @@
         "code": {
           "path": "'/repos/'+s.repository+'/pulls/'+string(s.pr)"
         }
+      },
+      "inputs": {
+        "s": {
+          "from": {
+            "node": "ci_settings",
+            "port": "settings"
+          }
+        }
       }
     },
     {
@@ -428,6 +704,26 @@
         "fields": {
           "head": "/head/sha",
           "merge": "/merge_commit_sha"
+        }
+      },
+      "inputs": {
+        "path": {
+          "from": {
+            "node": "manual_path",
+            "port": "path"
+          }
+        },
+        "token": {
+          "from": {
+            "node": "params",
+            "port": "token"
+          }
+        },
+        "deadline": {
+          "from": {
+            "node": "checkout",
+            "port": "deadline"
+          }
         }
       }
     },
@@ -444,6 +740,26 @@
         "code": {
           "valid": "e.available && s.expected_merge==c.merge && e.value.data.merge==c.merge && e.value.data.head==c.head"
         }
+      },
+      "inputs": {
+        "e": {
+          "from": {
+            "node": "manual_pull",
+            "port": "result"
+          }
+        },
+        "c": {
+          "from": {
+            "node": "current_identity",
+            "port": "current"
+          }
+        },
+        "s": {
+          "from": {
+            "node": "ci_settings",
+            "port": "settings"
+          }
+        }
       }
     },
     {
@@ -451,15 +767,39 @@
       "kind": "builtin.assert",
       "config": {
         "message": "Manual PR validation requires the current pinned PR merge snapshot"
+      },
+      "inputs": {
+        "condition": {
+          "from": {
+            "node": "manual_identity",
+            "port": "valid"
+          }
+        }
       }
     },
     {
       "id": "manual_context",
-      "kind": "builtin.identity"
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "current_identity",
+            "port": "current"
+          }
+        }
+      }
     },
     {
       "id": "event_context",
-      "kind": "builtin.identity"
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "current_identity",
+            "port": "current"
+          }
+        }
+      }
     },
     {
       "id": "ci_seed",
@@ -476,6 +816,26 @@
           "search": "!s.manual && !s.cumulative",
           "path": "'/repos/'+c.repository+'/actions/workflows/'+string(c.workflow_id)+'/runs'",
           "query": "{'branch':s.branch,'status':'success','per_page':100}"
+        }
+      },
+      "inputs": {
+        "s": {
+          "from": {
+            "node": "ci_settings",
+            "port": "settings"
+          }
+        },
+        "c": {
+          "exclusive": [
+            {
+              "node": "event_context",
+              "port": "value"
+            },
+            {
+              "node": "manual_context",
+              "port": "value"
+            }
+          ]
         }
       }
     },
@@ -500,7 +860,15 @@
     },
     {
       "id": "explicit_cumulative",
-      "kind": "builtin.identity"
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "ci_seed",
+            "port": "comparison"
+          }
+        }
+      }
     },
     {
       "id": "history",
@@ -515,6 +883,32 @@
           "head_sha": "/head_sha",
           "status": "/status",
           "conclusion": "/conclusion"
+        }
+      },
+      "inputs": {
+        "path": {
+          "from": {
+            "node": "ci_seed",
+            "port": "path"
+          }
+        },
+        "query": {
+          "from": {
+            "node": "ci_seed",
+            "port": "query"
+          }
+        },
+        "token": {
+          "from": {
+            "node": "params",
+            "port": "token"
+          }
+        },
+        "deadline": {
+          "from": {
+            "node": "checkout",
+            "port": "deadline"
+          }
         }
       }
     },
@@ -532,6 +926,20 @@
           "heads": "((e.available && type(e.value.data)==list && size(e.value.data)<100) ? e.value.data.filter(r, type(r)==map && type(r.id)==int && r.id>0 && type(r.run_attempt)==int && r.run_attempt>0 && r.workflow_id==c.workflow_id && r.id!=c.run_id && r.status=='completed' && r.conclusion=='success' && type(r.head_sha)==string && r.head_sha.matches('^[0-9a-f]{40}([0-9a-f]{24})?$')) : []).map(r,r.head_sha)",
           "usable": "(e.available && type(e.value.data)==list && size(e.value.data)<100) && size((e.available && type(e.value.data)==list && size(e.value.data)<100) ? e.value.data.filter(r, type(r)==map && type(r.id)==int && r.id>0 && type(r.run_attempt)==int && r.run_attempt>0 && r.workflow_id==c.workflow_id && r.id!=c.run_id && r.status=='completed' && r.conclusion=='success' && type(r.head_sha)==string && r.head_sha.matches('^[0-9a-f]{40}([0-9a-f]{24})?$')) : [])>0",
           "reason": "e.remaining_ms==0 ? 'Validation discovery deadline reached' : (!e.available || type(e.value.data)!=list ? 'Validation history unavailable' : (size(e.value.data)>=100 ? 'Validation discovery limit reached' : 'No compatible completed successful validation record'))"
+        }
+      },
+      "inputs": {
+        "e": {
+          "from": {
+            "node": "history",
+            "port": "result"
+          }
+        },
+        "c": {
+          "from": {
+            "node": "ci_seed",
+            "port": "current"
+          }
         }
       }
     },
@@ -566,6 +974,20 @@
         "code": {
           "comparison": "{'base':c.base,'head':c.merge,'scope':'cumulative','previous':null,'reason':reason}"
         }
+      },
+      "inputs": {
+        "c": {
+          "from": {
+            "node": "ci_seed",
+            "port": "current"
+          }
+        },
+        "reason": {
+          "from": {
+            "node": "history_metadata",
+            "port": "reason"
+          }
+        }
       }
     },
     {
@@ -579,6 +1001,14 @@
         "code": {
           "head": "c.head"
         }
+      },
+      "inputs": {
+        "c": {
+          "from": {
+            "node": "ci_seed",
+            "port": "current"
+          }
+        }
       }
     },
     {
@@ -586,6 +1016,32 @@
       "kind": "git.inspect",
       "config": {
         "required": false
+      },
+      "inputs": {
+        "repository": {
+          "from": {
+            "node": "params",
+            "port": "repository"
+          }
+        },
+        "revisions": {
+          "from": {
+            "node": "history_metadata",
+            "port": "heads"
+          }
+        },
+        "ancestor_of": {
+          "from": {
+            "node": "ancestry_target",
+            "port": "head"
+          }
+        },
+        "deadline": {
+          "from": {
+            "node": "checkout",
+            "port": "deadline"
+          }
+        }
       }
     },
     {
@@ -606,6 +1062,26 @@
           "current": "c",
           "done": "false",
           "comparison": "{'base':c.base,'head':c.merge,'scope':'cumulative','previous':null,'reason':e.remaining_ms==0?'Validation discovery deadline reached':(!e.available?'Git ancestry evidence unavailable':'No compatible completed successful validation record')}"
+        }
+      },
+      "inputs": {
+        "e": {
+          "from": {
+            "node": "ancestry",
+            "port": "result"
+          }
+        },
+        "runs": {
+          "from": {
+            "node": "history_metadata",
+            "port": "runs"
+          }
+        },
+        "c": {
+          "from": {
+            "node": "ci_seed",
+            "port": "current"
+          }
         }
       }
     },
@@ -630,7 +1106,15 @@
     },
     {
       "id": "ancestry_fallback",
-      "kind": "builtin.identity"
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "candidate_state",
+            "port": "comparison"
+          }
+        }
+      }
     },
     {
       "id": "search",
@@ -691,6 +1175,14 @@
                 "code": {
                   "candidate": "remaining.filter(x, remaining.all(y, x.distance<y.distance || (x.distance==y.distance && (x.run.id>y.run.id || (x.run.id==y.run.id && x.run.run_attempt>=y.run.run_attempt)))))[0]"
                 }
+              },
+              "inputs": {
+                "remaining": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "remaining"
+                  }
+                }
               }
             },
             {
@@ -706,6 +1198,20 @@
                   "path": "'/repos/'+c.repository+'/actions/runs/'+string(k.run.id)+'/artifacts'",
                   "query": "{'per_page':100}"
                 }
+              },
+              "inputs": {
+                "k": {
+                  "from": {
+                    "node": "pick",
+                    "port": "candidate"
+                  }
+                },
+                "c": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "current"
+                  }
+                }
               }
             },
             {
@@ -718,6 +1224,32 @@
                   "id": "/id",
                   "name": "/name",
                   "expired": "/expired"
+                }
+              },
+              "inputs": {
+                "path": {
+                  "from": {
+                    "node": "artifact_query",
+                    "port": "path"
+                  }
+                },
+                "query": {
+                  "from": {
+                    "node": "artifact_query",
+                    "port": "query"
+                  }
+                },
+                "token": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "token"
+                  }
+                },
+                "deadline": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "deadline"
+                  }
                 }
               }
             },
@@ -735,6 +1267,26 @@
                   "found": "e.available && type(e.value.data)==list && size(e.value.data)<100 && size(e.value.data.filter(a,type(a)==map && type(a.id)==int && a.id>0 && a.name=='pr-validation-'+string(k.run.id)+'-'+string(k.run.run_attempt) && a.expired==false))==1",
                   "path": "(e.available && type(e.value.data)==list && size(e.value.data)<100 && size(e.value.data.filter(a,type(a)==map && type(a.id)==int && a.id>0 && a.name=='pr-validation-'+string(k.run.id)+'-'+string(k.run.run_attempt) && a.expired==false))==1) ? '/repos/'+c.repository+'/actions/artifacts/'+string((e.value.data.filter(a,type(a)==map && type(a.id)==int && a.id>0 && a.name=='pr-validation-'+string(k.run.id)+'-'+string(k.run.run_attempt) && a.expired==false))[0].id)+'/zip' : ''",
                   "expired": "e.remaining_ms==0"
+                }
+              },
+              "inputs": {
+                "e": {
+                  "from": {
+                    "node": "artifacts",
+                    "port": "result"
+                  }
+                },
+                "k": {
+                  "from": {
+                    "node": "pick",
+                    "port": "candidate"
+                  }
+                },
+                "c": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "current"
+                  }
                 }
               }
             },
@@ -768,6 +1320,14 @@
                 "code": {
                   "decision": "{'accepted':false,'expired':expired,'reason':expired?'Validation discovery deadline reached':'Recorded validation artifact unavailable'}"
                 }
+              },
+              "inputs": {
+                "expired": {
+                  "from": {
+                    "node": "artifact_match",
+                    "port": "expired"
+                  }
+                }
               }
             },
             {
@@ -776,6 +1336,26 @@
               "config": {
                 "required": false,
                 "member": "validation.json"
+              },
+              "inputs": {
+                "path": {
+                  "from": {
+                    "node": "artifact_match",
+                    "port": "path"
+                  }
+                },
+                "token": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "token"
+                  }
+                },
+                "deadline": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "deadline"
+                  }
+                }
               }
             },
             {
@@ -790,6 +1370,14 @@
                   "record": "dyn(e.available && type(e.value.data)==map ? e.value.data : {})",
                   "schema": "e.available && e.value.members==['validation.json'] && type(e.value.data)==map && has(e.value.data.version) && type(e.value.data.version)==int && has(e.value.data.repository) && type(e.value.data.repository)==string && has(e.value.data.pr) && type(e.value.data.pr)==int && has(e.value.data.workflow_id) && type(e.value.data.workflow_id)==int && has(e.value.data.run_id) && type(e.value.data.run_id)==int && has(e.value.data.run_attempt) && type(e.value.data.run_attempt)==int && has(e.value.data.head) && type(e.value.data.head)==string && has(e.value.data.base) && type(e.value.data.base)==string && has(e.value.data.merge) && type(e.value.data.merge)==string && has(e.value.data.tree) && type(e.value.data.tree)==string && has(e.value.data.signature) && type(e.value.data.signature)==map && has(e.value.data.title_check) && type(e.value.data.title_check)==map && has(e.value.data.comparison) && type(e.value.data.comparison)==map && has(e.value.data.coverage) && type(e.value.data.coverage)==map && has(e.value.data.packages) && type(e.value.data.packages)==list && has(e.value.data.title_check.head_sha) && type(e.value.data.title_check.head_sha)==string && has(e.value.data.title_check.conclusion) && type(e.value.data.title_check.conclusion)==string && has(e.value.data.comparison.base) && type(e.value.data.comparison.base)==string && has(e.value.data.comparison.head) && type(e.value.data.comparison.head)==string && has(e.value.data.comparison.scope) && type(e.value.data.comparison.scope)==string && has(e.value.data.comparison.reason) && type(e.value.data.comparison.reason)==string && has(e.value.data.coverage.base) && type(e.value.data.coverage.base)==string && has(e.value.data.coverage.head) && type(e.value.data.coverage.head)==string && has(e.value.data.coverage.tree) && type(e.value.data.coverage.tree)==string && has(e.value.data.coverage.covered) && type(e.value.data.coverage.covered)==int && has(e.value.data.coverage.total) && type(e.value.data.coverage.total)==int && has(e.value.data.coverage.status) && type(e.value.data.coverage.status)==string && has(e.value.data.coverage.target) && (type(e.value.data.coverage.target)==int || type(e.value.data.coverage.target)==double) && e.value.data.packages.all(p,type(p)==string && size(p)>0) && e.value.data.head.matches('^[0-9a-f]{40}([0-9a-f]{24})?$') && e.value.data.base.matches('^[0-9a-f]{40}([0-9a-f]{24})?$') && e.value.data.merge.matches('^[0-9a-f]{40}([0-9a-f]{24})?$') && e.value.data.tree.matches('^[0-9a-f]{40}([0-9a-f]{24})?$') && e.value.data.comparison.base.matches('^[0-9a-f]{40}([0-9a-f]{24})?$')",
                   "expired": "e.remaining_ms==0"
+                }
+              },
+              "inputs": {
+                "e": {
+                  "from": {
+                    "node": "record",
+                    "port": "result"
+                  }
                 }
               }
             },
@@ -808,6 +1396,38 @@
                 "code": {
                   "compatible": "valid && r.version==c.version && r.repository==c.repository && r.pr==c.pr && r.workflow_id==c.workflow_id && r.run_id==k.run.id && r.run_attempt==k.run.run_attempt && r.head==k.run.head_sha && r.base==c.base && r.signature==c.signature && r.title_check.head_sha==r.head && r.title_check.conclusion=='success' && r.comparison.head==r.merge && r.comparison.scope in ['incremental','cumulative'] && r.coverage.base==r.comparison.base && r.coverage.head==r.merge && r.coverage.tree==r.tree && r.coverage.total>=0 && r.coverage.total<=1000000000 && r.coverage.covered>=0 && r.coverage.covered<=r.coverage.total && double(r.coverage.target)==c.signature.coverage_target && ((r.coverage.total==0 && r.coverage.status=='not_applicable') || (r.coverage.total>0 && r.coverage.status=='passed' && double(r.coverage.covered)*100.0>=c.signature.coverage_target*double(r.coverage.total)))",
                   "reason": "expired?'Validation discovery deadline reached':(valid && r.base!=c.base?'Target base changed since the successful validation':(valid && r.signature!=c.signature?'Execution settings changed since the successful validation':'Recorded validation is incompatible or unavailable'))"
+                }
+              },
+              "inputs": {
+                "r": {
+                  "from": {
+                    "node": "record_shape",
+                    "port": "record"
+                  }
+                },
+                "valid": {
+                  "from": {
+                    "node": "record_shape",
+                    "port": "schema"
+                  }
+                },
+                "expired": {
+                  "from": {
+                    "node": "record_shape",
+                    "port": "expired"
+                  }
+                },
+                "c": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "current"
+                  }
+                },
+                "k": {
+                  "from": {
+                    "node": "pick",
+                    "port": "candidate"
+                  }
                 }
               }
             },
@@ -842,6 +1462,20 @@
                 "code": {
                   "decision": "{'accepted':false,'expired':expired,'reason':reason}"
                 }
+              },
+              "inputs": {
+                "reason": {
+                  "from": {
+                    "node": "compatible_record",
+                    "port": "reason"
+                  }
+                },
+                "expired": {
+                  "from": {
+                    "node": "record_shape",
+                    "port": "expired"
+                  }
+                }
               }
             },
             {
@@ -856,6 +1490,14 @@
                   "commit": "r.merge",
                   "revisions": "[r.merge]"
                 }
+              },
+              "inputs": {
+                "r": {
+                  "from": {
+                    "node": "record_shape",
+                    "port": "record"
+                  }
+                }
               }
             },
             {
@@ -863,6 +1505,26 @@
               "kind": "git.inspect",
               "config": {
                 "required": false
+              },
+              "inputs": {
+                "repository": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "repository"
+                  }
+                },
+                "revisions": {
+                  "from": {
+                    "node": "merge_reference",
+                    "port": "revisions"
+                  }
+                },
+                "deadline": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "deadline"
+                  }
+                }
               }
             },
             {
@@ -875,6 +1537,14 @@
                 },
                 "code": {
                   "missing": "e.available && size(e.value.revisions)==1 && !dyn(e.value.revisions[0]).available"
+                }
+              },
+              "inputs": {
+                "e": {
+                  "from": {
+                    "node": "merge_facts",
+                    "port": "result"
+                  }
                 }
               }
             },
@@ -899,12 +1569,40 @@
             },
             {
               "id": "existing_merge",
-              "kind": "builtin.identity"
+              "kind": "builtin.identity",
+              "inputs": {
+                "input": {
+                  "from": {
+                    "node": "merge_facts",
+                    "port": "result"
+                  }
+                }
+              }
             },
             {
               "id": "fetch",
               "kind": "git.fetch",
-              "config": {}
+              "config": {},
+              "inputs": {
+                "repository": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "repository"
+                  }
+                },
+                "commit": {
+                  "from": {
+                    "node": "merge_reference",
+                    "port": "commit"
+                  }
+                },
+                "deadline": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "deadline"
+                  }
+                }
+              }
             },
             {
               "id": "fetched_route",
@@ -927,13 +1625,41 @@
             },
             {
               "id": "failed_fetch",
-              "kind": "builtin.identity"
+              "kind": "builtin.identity",
+              "inputs": {
+                "input": {
+                  "from": {
+                    "node": "fetch",
+                    "port": "result"
+                  }
+                }
+              }
             },
             {
               "id": "fetched_merge",
               "kind": "git.inspect",
               "config": {
                 "required": false
+              },
+              "inputs": {
+                "repository": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "repository"
+                  }
+                },
+                "revisions": {
+                  "from": {
+                    "node": "merge_reference",
+                    "port": "revisions"
+                  }
+                },
+                "deadline": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "deadline"
+                  }
+                }
               }
             },
             {
@@ -948,6 +1674,30 @@
                 "code": {
                   "accepted": "e.available && size(e.value.revisions)==1 && dyn(e.value.revisions[0]).available && dyn(e.value.revisions[0]).commit==r.merge && dyn(e.value.revisions[0]).tree==r.tree && dyn(e.value.revisions[0]).parents==[r.base,r.head]",
                   "expired": "e.remaining_ms==0"
+                }
+              },
+              "inputs": {
+                "r": {
+                  "from": {
+                    "node": "record_shape",
+                    "port": "record"
+                  }
+                },
+                "e": {
+                  "exclusive": [
+                    {
+                      "node": "existing_merge",
+                      "port": "value"
+                    },
+                    {
+                      "node": "fetched_merge",
+                      "port": "result"
+                    },
+                    {
+                      "node": "failed_fetch",
+                      "port": "value"
+                    }
+                  ]
                 }
               }
             },
@@ -965,6 +1715,38 @@
                 },
                 "code": {
                   "decision": "{'accepted':accepted,'expired':expired,'reason':expired?'Validation discovery deadline reached':'Recorded Git snapshot does not match validation','comparison':{'base':r.merge,'head':c.merge,'scope':'incremental','previous':{'run_id':k.run.id,'run_attempt':k.run.run_attempt,'merge':r.merge},'reason':'Reusing the nearest compatible successful PR-head ancestor'}}"
+                }
+              },
+              "inputs": {
+                "accepted": {
+                  "from": {
+                    "node": "verify_merge",
+                    "port": "accepted"
+                  }
+                },
+                "expired": {
+                  "from": {
+                    "node": "verify_merge",
+                    "port": "expired"
+                  }
+                },
+                "r": {
+                  "from": {
+                    "node": "record_shape",
+                    "port": "record"
+                  }
+                },
+                "k": {
+                  "from": {
+                    "node": "pick",
+                    "port": "candidate"
+                  }
+                },
+                "c": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "current"
+                  }
                 }
               }
             },
@@ -987,6 +1769,48 @@
                   "comparison": "d.accepted ? d.comparison : {'base':c.base,'head':c.merge,'scope':'cumulative','previous':null,'reason':d.expired || previous.reason=='No compatible completed successful validation record' ? d.reason : previous.reason}",
                   "done": "d.accepted || d.expired || size(remaining)==1"
                 }
+              },
+              "inputs": {
+                "k": {
+                  "from": {
+                    "node": "pick",
+                    "port": "candidate"
+                  }
+                },
+                "remaining": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "remaining"
+                  }
+                },
+                "previous": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "comparison"
+                  }
+                },
+                "c": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "current"
+                  }
+                },
+                "d": {
+                  "exclusive": [
+                    {
+                      "node": "artifact_unavailable",
+                      "port": "decision"
+                    },
+                    {
+                      "node": "record_unusable",
+                      "port": "decision"
+                    },
+                    {
+                      "node": "merge_decision",
+                      "port": "decision"
+                    }
+                  ]
+                }
               }
             },
             {
@@ -994,6 +1818,14 @@
               "kind": "workflow.loop_assign",
               "config": {
                 "variable": "remaining"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "advance",
+                    "port": "remaining"
+                  }
+                }
               }
             },
             {
@@ -1001,6 +1833,14 @@
               "kind": "workflow.loop_assign",
               "config": {
                 "variable": "comparison"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "advance",
+                    "port": "comparison"
+                  }
+                }
               }
             },
             {
@@ -1008,342 +1848,18 @@
               "kind": "workflow.loop_assign",
               "config": {
                 "variable": "done"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "advance",
+                    "port": "done"
+                  }
+                }
               }
             }
           ],
           "edges": [
-            {
-              "from_node": "%loop",
-              "from_output": "remaining",
-              "to_node": "pick",
-              "to_input": "remaining"
-            },
-            {
-              "from_node": "pick",
-              "from_output": "candidate",
-              "to_node": "artifact_query",
-              "to_input": "k"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "current",
-              "to_node": "artifact_query",
-              "to_input": "c"
-            },
-            {
-              "from_node": "artifact_query",
-              "from_output": "path",
-              "to_node": "artifacts",
-              "to_input": "path"
-            },
-            {
-              "from_node": "artifact_query",
-              "from_output": "query",
-              "to_node": "artifacts",
-              "to_input": "query"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "token",
-              "to_node": "artifacts",
-              "to_input": "token"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "deadline",
-              "to_node": "artifacts",
-              "to_input": "deadline"
-            },
-            {
-              "from_node": "artifacts",
-              "from_output": "result",
-              "to_node": "artifact_match",
-              "to_input": "e"
-            },
-            {
-              "from_node": "pick",
-              "from_output": "candidate",
-              "to_node": "artifact_match",
-              "to_input": "k"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "current",
-              "to_node": "artifact_match",
-              "to_input": "c"
-            },
-            {
-              "from_node": "artifact_match",
-              "from_output": "expired",
-              "to_node": "artifact_unavailable",
-              "to_input": "expired"
-            },
-            {
-              "from_node": "artifact_match",
-              "from_output": "path",
-              "to_node": "record",
-              "to_input": "path"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "token",
-              "to_node": "record",
-              "to_input": "token"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "deadline",
-              "to_node": "record",
-              "to_input": "deadline"
-            },
-            {
-              "from_node": "record",
-              "from_output": "result",
-              "to_node": "record_shape",
-              "to_input": "e"
-            },
-            {
-              "from_node": "record_shape",
-              "from_output": "record",
-              "to_node": "compatible_record",
-              "to_input": "r"
-            },
-            {
-              "from_node": "record_shape",
-              "from_output": "schema",
-              "to_node": "compatible_record",
-              "to_input": "valid"
-            },
-            {
-              "from_node": "record_shape",
-              "from_output": "expired",
-              "to_node": "compatible_record",
-              "to_input": "expired"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "current",
-              "to_node": "compatible_record",
-              "to_input": "c"
-            },
-            {
-              "from_node": "pick",
-              "from_output": "candidate",
-              "to_node": "compatible_record",
-              "to_input": "k"
-            },
-            {
-              "from_node": "compatible_record",
-              "from_output": "reason",
-              "to_node": "record_unusable",
-              "to_input": "reason"
-            },
-            {
-              "from_node": "record_shape",
-              "from_output": "expired",
-              "to_node": "record_unusable",
-              "to_input": "expired"
-            },
-            {
-              "from_node": "record_shape",
-              "from_output": "record",
-              "to_node": "merge_reference",
-              "to_input": "r"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "repository",
-              "to_node": "merge_facts",
-              "to_input": "repository"
-            },
-            {
-              "from_node": "merge_reference",
-              "from_output": "revisions",
-              "to_node": "merge_facts",
-              "to_input": "revisions"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "deadline",
-              "to_node": "merge_facts",
-              "to_input": "deadline"
-            },
-            {
-              "from_node": "merge_facts",
-              "from_output": "result",
-              "to_node": "missing_merge",
-              "to_input": "e"
-            },
-            {
-              "from_node": "merge_facts",
-              "from_output": "result",
-              "to_node": "existing_merge",
-              "to_input": "input"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "repository",
-              "to_node": "fetch",
-              "to_input": "repository"
-            },
-            {
-              "from_node": "merge_reference",
-              "from_output": "commit",
-              "to_node": "fetch",
-              "to_input": "commit"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "deadline",
-              "to_node": "fetch",
-              "to_input": "deadline"
-            },
-            {
-              "from_node": "fetch",
-              "from_output": "result",
-              "to_node": "failed_fetch",
-              "to_input": "input"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "repository",
-              "to_node": "fetched_merge",
-              "to_input": "repository"
-            },
-            {
-              "from_node": "merge_reference",
-              "from_output": "revisions",
-              "to_node": "fetched_merge",
-              "to_input": "revisions"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "deadline",
-              "to_node": "fetched_merge",
-              "to_input": "deadline"
-            },
-            {
-              "from_node": "record_shape",
-              "from_output": "record",
-              "to_node": "verify_merge",
-              "to_input": "r"
-            },
-            {
-              "from_node": "existing_merge",
-              "from_output": "value",
-              "to_node": "verify_merge",
-              "to_input": "e",
-              "exclusive": true
-            },
-            {
-              "from_node": "fetched_merge",
-              "from_output": "result",
-              "to_node": "verify_merge",
-              "to_input": "e",
-              "exclusive": true
-            },
-            {
-              "from_node": "failed_fetch",
-              "from_output": "value",
-              "to_node": "verify_merge",
-              "to_input": "e",
-              "exclusive": true
-            },
-            {
-              "from_node": "verify_merge",
-              "from_output": "accepted",
-              "to_node": "merge_decision",
-              "to_input": "accepted"
-            },
-            {
-              "from_node": "verify_merge",
-              "from_output": "expired",
-              "to_node": "merge_decision",
-              "to_input": "expired"
-            },
-            {
-              "from_node": "record_shape",
-              "from_output": "record",
-              "to_node": "merge_decision",
-              "to_input": "r"
-            },
-            {
-              "from_node": "pick",
-              "from_output": "candidate",
-              "to_node": "merge_decision",
-              "to_input": "k"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "current",
-              "to_node": "merge_decision",
-              "to_input": "c"
-            },
-            {
-              "from_node": "pick",
-              "from_output": "candidate",
-              "to_node": "advance",
-              "to_input": "k"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "remaining",
-              "to_node": "advance",
-              "to_input": "remaining"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "comparison",
-              "to_node": "advance",
-              "to_input": "previous"
-            },
-            {
-              "from_node": "%loop",
-              "from_output": "current",
-              "to_node": "advance",
-              "to_input": "c"
-            },
-            {
-              "from_node": "artifact_unavailable",
-              "from_output": "decision",
-              "to_node": "advance",
-              "to_input": "d",
-              "exclusive": true
-            },
-            {
-              "from_node": "record_unusable",
-              "from_output": "decision",
-              "to_node": "advance",
-              "to_input": "d",
-              "exclusive": true
-            },
-            {
-              "from_node": "merge_decision",
-              "from_output": "decision",
-              "to_node": "advance",
-              "to_input": "d",
-              "exclusive": true
-            },
-            {
-              "from_node": "advance",
-              "from_output": "remaining",
-              "to_node": "assign_remaining",
-              "to_input": "value"
-            },
-            {
-              "from_node": "advance",
-              "from_output": "comparison",
-              "to_node": "assign_comparison",
-              "to_input": "value"
-            },
-            {
-              "from_node": "advance",
-              "from_output": "done",
-              "to_node": "assign_done",
-              "to_input": "value"
-            }
-          ],
-          "control_edges": [
             {
               "from_node": "artifact_match",
               "from_output": "found",
@@ -1406,6 +1922,50 @@
             }
           ]
         }
+      },
+      "inputs": {
+        "current": {
+          "from": {
+            "node": "candidate_state",
+            "port": "current"
+          }
+        },
+        "remaining": {
+          "from": {
+            "node": "candidate_state",
+            "port": "remaining"
+          }
+        },
+        "comparison": {
+          "from": {
+            "node": "candidate_state",
+            "port": "comparison"
+          }
+        },
+        "done": {
+          "from": {
+            "node": "candidate_state",
+            "port": "done"
+          }
+        },
+        "repository": {
+          "from": {
+            "node": "params",
+            "port": "repository"
+          }
+        },
+        "token": {
+          "from": {
+            "node": "params",
+            "port": "token"
+          }
+        },
+        "deadline": {
+          "from": {
+            "node": "checkout",
+            "port": "deadline"
+          }
+        }
       }
     },
     {
@@ -1413,11 +1973,27 @@
       "kind": "builtin.assert",
       "config": {
         "message": "Baseline search terminated without a complete decision"
+      },
+      "inputs": {
+        "condition": {
+          "from": {
+            "node": "search",
+            "port": "done"
+          }
+        }
       }
     },
     {
       "id": "searched_comparison",
-      "kind": "builtin.identity"
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "search",
+            "port": "comparison"
+          }
+        }
+      }
     },
     {
       "id": "ci_request",
@@ -1431,12 +2007,66 @@
         "code": {
           "request": "{'mode':'snapshot','base':comparison.base,'head':comparison.head,'analyze':false,'require_checkout':true,'options':{'configuration':{'all_features':true,'target':c.signature.target},'exact_tests':false},'validation':{'context':c,'comparison':comparison}}"
         }
+      },
+      "inputs": {
+        "c": {
+          "from": {
+            "node": "ci_seed",
+            "port": "current"
+          }
+        },
+        "comparison": {
+          "exclusive": [
+            {
+              "node": "explicit_cumulative",
+              "port": "value"
+            },
+            {
+              "node": "history_fallback",
+              "port": "comparison"
+            },
+            {
+              "node": "ancestry_fallback",
+              "port": "value"
+            },
+            {
+              "node": "searched_comparison",
+              "port": "value"
+            }
+          ]
+        }
       }
     },
     {
       "id": "changes",
       "kind": "git.diff",
-      "config": {}
+      "config": {},
+      "inputs": {
+        "repository": {
+          "from": {
+            "node": "params",
+            "port": "repository"
+          }
+        },
+        "request": {
+          "exclusive": [
+            {
+              "node": "local_request",
+              "port": "request"
+            },
+            {
+              "node": "ci_request",
+              "port": "request"
+            }
+          ]
+        },
+        "artifacts": {
+          "from": {
+            "node": "params",
+            "port": "artifacts"
+          }
+        }
+      }
     },
     {
       "id": "analyze",
@@ -1448,589 +2078,55 @@
           "rs"
         ],
         "deadline_ms": 120000
+      },
+      "inputs": {
+        "request": {
+          "from": {
+            "node": "changes",
+            "port": "request"
+          }
+        },
+        "context": {
+          "from": {
+            "node": "changes",
+            "port": "context"
+          }
+        }
       }
     },
     {
       "id": "plan",
       "kind": "test_affected.plan",
-      "config": {}
+      "config": {},
+      "inputs": {
+        "outcome": {
+          "from": {
+            "node": "analyze",
+            "port": "outcome"
+          }
+        },
+        "context": {
+          "from": {
+            "node": "analyze",
+            "port": "context"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "plan",
+      "node": "plan",
+      "port": "plan"
+    },
+    {
+      "name": "validation",
+      "node": "plan",
+      "port": "validation"
     }
   ],
   "edges": [
-    {
-      "from_node": "params",
-      "from_output": "configuration",
-      "to_node": "local_settings",
-      "to_input": "raw"
-    },
-    {
-      "from_node": "params",
-      "from_output": "target",
-      "to_node": "local_settings",
-      "to_input": "target"
-    },
-    {
-      "from_node": "params",
-      "from_output": "mode",
-      "to_node": "local_settings",
-      "to_input": "mode"
-    },
-    {
-      "from_node": "params",
-      "from_output": "precision",
-      "to_node": "local_settings",
-      "to_input": "precision"
-    },
-    {
-      "from_node": "local_settings",
-      "from_output": "valid",
-      "to_node": "require_local_settings",
-      "to_input": "condition"
-    },
-    {
-      "from_node": "params",
-      "from_output": "mode",
-      "to_node": "local_request",
-      "to_input": "mode"
-    },
-    {
-      "from_node": "params",
-      "from_output": "base",
-      "to_node": "local_request",
-      "to_input": "base"
-    },
-    {
-      "from_node": "params",
-      "from_output": "head",
-      "to_node": "local_request",
-      "to_input": "head"
-    },
-    {
-      "from_node": "params",
-      "from_output": "precision",
-      "to_node": "local_request",
-      "to_input": "precision"
-    },
-    {
-      "from_node": "params",
-      "from_output": "inventory",
-      "to_node": "local_request",
-      "to_input": "inventory"
-    },
-    {
-      "from_node": "local_settings",
-      "from_output": "configuration",
-      "to_node": "local_request",
-      "to_input": "config"
-    },
-    {
-      "from_node": "params",
-      "from_output": "repository",
-      "to_node": "checkout",
-      "to_input": "repository"
-    },
-    {
-      "from_node": "checkout",
-      "from_output": "result",
-      "to_node": "checkout_identity",
-      "to_input": "e"
-    },
-    {
-      "from_node": "checkout_identity",
-      "from_output": "valid",
-      "to_node": "require_checkout",
-      "to_input": "condition"
-    },
-    {
-      "from_node": "params",
-      "from_output": "github_repository",
-      "to_node": "ci_settings",
-      "to_input": "github_repository"
-    },
-    {
-      "from_node": "params",
-      "from_output": "run_id",
-      "to_node": "ci_settings",
-      "to_input": "run_id"
-    },
-    {
-      "from_node": "params",
-      "from_output": "attempt",
-      "to_node": "ci_settings",
-      "to_input": "attempt"
-    },
-    {
-      "from_node": "params",
-      "from_output": "pr",
-      "to_node": "ci_settings",
-      "to_input": "pr"
-    },
-    {
-      "from_node": "params",
-      "from_output": "branch",
-      "to_node": "ci_settings",
-      "to_input": "branch"
-    },
-    {
-      "from_node": "params",
-      "from_output": "event",
-      "to_node": "ci_settings",
-      "to_input": "event"
-    },
-    {
-      "from_node": "params",
-      "from_output": "expected_head",
-      "to_node": "ci_settings",
-      "to_input": "expected_head"
-    },
-    {
-      "from_node": "params",
-      "from_output": "expected_merge",
-      "to_node": "ci_settings",
-      "to_input": "expected_merge"
-    },
-    {
-      "from_node": "params",
-      "from_output": "cumulative",
-      "to_node": "ci_settings",
-      "to_input": "cumulative"
-    },
-    {
-      "from_node": "params",
-      "from_output": "coverage_target",
-      "to_node": "ci_settings",
-      "to_input": "coverage_target"
-    },
-    {
-      "from_node": "params",
-      "from_output": "profile",
-      "to_node": "ci_settings",
-      "to_input": "profile"
-    },
-    {
-      "from_node": "params",
-      "from_output": "toolchain",
-      "to_node": "ci_settings",
-      "to_input": "toolchain"
-    },
-    {
-      "from_node": "params",
-      "from_output": "target",
-      "to_node": "ci_settings",
-      "to_input": "target"
-    },
-    {
-      "from_node": "params",
-      "from_output": "rustflags",
-      "to_node": "ci_settings",
-      "to_input": "rustflags"
-    },
-    {
-      "from_node": "params",
-      "from_output": "encoded_rustflags",
-      "to_node": "ci_settings",
-      "to_input": "encoded_rustflags"
-    },
-    {
-      "from_node": "params",
-      "from_output": "incremental",
-      "to_node": "ci_settings",
-      "to_input": "incremental"
-    },
-    {
-      "from_node": "params",
-      "from_output": "dev_debug",
-      "to_node": "ci_settings",
-      "to_input": "dev_debug"
-    },
-    {
-      "from_node": "params",
-      "from_output": "test_debug",
-      "to_node": "ci_settings",
-      "to_input": "test_debug"
-    },
-    {
-      "from_node": "ci_settings",
-      "from_output": "valid",
-      "to_node": "require_ci_settings",
-      "to_input": "condition"
-    },
-    {
-      "from_node": "ci_settings",
-      "from_output": "path",
-      "to_node": "current_run",
-      "to_input": "path"
-    },
-    {
-      "from_node": "params",
-      "from_output": "token",
-      "to_node": "current_run",
-      "to_input": "token"
-    },
-    {
-      "from_node": "checkout",
-      "from_output": "deadline",
-      "to_node": "current_run",
-      "to_input": "deadline"
-    },
-    {
-      "from_node": "current_run",
-      "from_output": "result",
-      "to_node": "current_identity",
-      "to_input": "run"
-    },
-    {
-      "from_node": "checkout",
-      "from_output": "result",
-      "to_node": "current_identity",
-      "to_input": "git"
-    },
-    {
-      "from_node": "ci_settings",
-      "from_output": "settings",
-      "to_node": "current_identity",
-      "to_input": "s"
-    },
-    {
-      "from_node": "current_identity",
-      "from_output": "valid",
-      "to_node": "require_current_identity",
-      "to_input": "condition"
-    },
-    {
-      "from_node": "ci_settings",
-      "from_output": "settings",
-      "to_node": "manual_path",
-      "to_input": "s"
-    },
-    {
-      "from_node": "manual_path",
-      "from_output": "path",
-      "to_node": "manual_pull",
-      "to_input": "path"
-    },
-    {
-      "from_node": "params",
-      "from_output": "token",
-      "to_node": "manual_pull",
-      "to_input": "token"
-    },
-    {
-      "from_node": "checkout",
-      "from_output": "deadline",
-      "to_node": "manual_pull",
-      "to_input": "deadline"
-    },
-    {
-      "from_node": "manual_pull",
-      "from_output": "result",
-      "to_node": "manual_identity",
-      "to_input": "e"
-    },
-    {
-      "from_node": "current_identity",
-      "from_output": "current",
-      "to_node": "manual_identity",
-      "to_input": "c"
-    },
-    {
-      "from_node": "ci_settings",
-      "from_output": "settings",
-      "to_node": "manual_identity",
-      "to_input": "s"
-    },
-    {
-      "from_node": "manual_identity",
-      "from_output": "valid",
-      "to_node": "require_manual_identity",
-      "to_input": "condition"
-    },
-    {
-      "from_node": "current_identity",
-      "from_output": "current",
-      "to_node": "manual_context",
-      "to_input": "input"
-    },
-    {
-      "from_node": "current_identity",
-      "from_output": "current",
-      "to_node": "event_context",
-      "to_input": "input"
-    },
-    {
-      "from_node": "ci_settings",
-      "from_output": "settings",
-      "to_node": "ci_seed",
-      "to_input": "s"
-    },
-    {
-      "from_node": "event_context",
-      "from_output": "value",
-      "to_node": "ci_seed",
-      "to_input": "c",
-      "exclusive": true
-    },
-    {
-      "from_node": "manual_context",
-      "from_output": "value",
-      "to_node": "ci_seed",
-      "to_input": "c",
-      "exclusive": true
-    },
-    {
-      "from_node": "ci_seed",
-      "from_output": "comparison",
-      "to_node": "explicit_cumulative",
-      "to_input": "input"
-    },
-    {
-      "from_node": "ci_seed",
-      "from_output": "path",
-      "to_node": "history",
-      "to_input": "path"
-    },
-    {
-      "from_node": "ci_seed",
-      "from_output": "query",
-      "to_node": "history",
-      "to_input": "query"
-    },
-    {
-      "from_node": "params",
-      "from_output": "token",
-      "to_node": "history",
-      "to_input": "token"
-    },
-    {
-      "from_node": "checkout",
-      "from_output": "deadline",
-      "to_node": "history",
-      "to_input": "deadline"
-    },
-    {
-      "from_node": "history",
-      "from_output": "result",
-      "to_node": "history_metadata",
-      "to_input": "e"
-    },
-    {
-      "from_node": "ci_seed",
-      "from_output": "current",
-      "to_node": "history_metadata",
-      "to_input": "c"
-    },
-    {
-      "from_node": "ci_seed",
-      "from_output": "current",
-      "to_node": "history_fallback",
-      "to_input": "c"
-    },
-    {
-      "from_node": "history_metadata",
-      "from_output": "reason",
-      "to_node": "history_fallback",
-      "to_input": "reason"
-    },
-    {
-      "from_node": "ci_seed",
-      "from_output": "current",
-      "to_node": "ancestry_target",
-      "to_input": "c"
-    },
-    {
-      "from_node": "params",
-      "from_output": "repository",
-      "to_node": "ancestry",
-      "to_input": "repository"
-    },
-    {
-      "from_node": "history_metadata",
-      "from_output": "heads",
-      "to_node": "ancestry",
-      "to_input": "revisions"
-    },
-    {
-      "from_node": "ancestry_target",
-      "from_output": "head",
-      "to_node": "ancestry",
-      "to_input": "ancestor_of"
-    },
-    {
-      "from_node": "checkout",
-      "from_output": "deadline",
-      "to_node": "ancestry",
-      "to_input": "deadline"
-    },
-    {
-      "from_node": "ancestry",
-      "from_output": "result",
-      "to_node": "candidate_state",
-      "to_input": "e"
-    },
-    {
-      "from_node": "history_metadata",
-      "from_output": "runs",
-      "to_node": "candidate_state",
-      "to_input": "runs"
-    },
-    {
-      "from_node": "ci_seed",
-      "from_output": "current",
-      "to_node": "candidate_state",
-      "to_input": "c"
-    },
-    {
-      "from_node": "candidate_state",
-      "from_output": "comparison",
-      "to_node": "ancestry_fallback",
-      "to_input": "input"
-    },
-    {
-      "from_node": "candidate_state",
-      "from_output": "current",
-      "to_node": "search",
-      "to_input": "current"
-    },
-    {
-      "from_node": "candidate_state",
-      "from_output": "remaining",
-      "to_node": "search",
-      "to_input": "remaining"
-    },
-    {
-      "from_node": "candidate_state",
-      "from_output": "comparison",
-      "to_node": "search",
-      "to_input": "comparison"
-    },
-    {
-      "from_node": "candidate_state",
-      "from_output": "done",
-      "to_node": "search",
-      "to_input": "done"
-    },
-    {
-      "from_node": "params",
-      "from_output": "repository",
-      "to_node": "search",
-      "to_input": "repository"
-    },
-    {
-      "from_node": "params",
-      "from_output": "token",
-      "to_node": "search",
-      "to_input": "token"
-    },
-    {
-      "from_node": "checkout",
-      "from_output": "deadline",
-      "to_node": "search",
-      "to_input": "deadline"
-    },
-    {
-      "from_node": "search",
-      "from_output": "done",
-      "to_node": "require_search_completion",
-      "to_input": "condition"
-    },
-    {
-      "from_node": "search",
-      "from_output": "comparison",
-      "to_node": "searched_comparison",
-      "to_input": "input"
-    },
-    {
-      "from_node": "ci_seed",
-      "from_output": "current",
-      "to_node": "ci_request",
-      "to_input": "c"
-    },
-    {
-      "from_node": "explicit_cumulative",
-      "from_output": "value",
-      "to_node": "ci_request",
-      "to_input": "comparison",
-      "exclusive": true
-    },
-    {
-      "from_node": "history_fallback",
-      "from_output": "comparison",
-      "to_node": "ci_request",
-      "to_input": "comparison",
-      "exclusive": true
-    },
-    {
-      "from_node": "ancestry_fallback",
-      "from_output": "value",
-      "to_node": "ci_request",
-      "to_input": "comparison",
-      "exclusive": true
-    },
-    {
-      "from_node": "searched_comparison",
-      "from_output": "value",
-      "to_node": "ci_request",
-      "to_input": "comparison",
-      "exclusive": true
-    },
-    {
-      "from_node": "params",
-      "from_output": "repository",
-      "to_node": "changes",
-      "to_input": "repository"
-    },
-    {
-      "from_node": "local_request",
-      "from_output": "request",
-      "to_node": "changes",
-      "to_input": "request",
-      "exclusive": true
-    },
-    {
-      "from_node": "ci_request",
-      "from_output": "request",
-      "to_node": "changes",
-      "to_input": "request",
-      "exclusive": true
-    },
-    {
-      "from_node": "params",
-      "from_output": "artifacts",
-      "to_node": "changes",
-      "to_input": "artifacts"
-    },
-    {
-      "from_node": "changes",
-      "from_output": "request",
-      "to_node": "analyze",
-      "to_input": "request"
-    },
-    {
-      "from_node": "changes",
-      "from_output": "context",
-      "to_node": "analyze",
-      "to_input": "context"
-    },
-    {
-      "from_node": "analyze",
-      "from_output": "outcome",
-      "to_node": "plan",
-      "to_input": "outcome"
-    },
-    {
-      "from_node": "analyze",
-      "from_output": "context",
-      "to_node": "plan",
-      "to_input": "context"
-    },
-    {
-      "from_node": "validation_policy",
-      "from_output": "value",
-      "to_node": "ci_settings",
-      "to_input": "policy"
-    }
-  ],
-  "control_edges": [
     {
       "from_node": "params",
       "from_output": "ci",
@@ -2043,7 +2139,6 @@
     },
     {
       "from_node": "require_local_settings",
-      "from_output": "passed",
       "to_node": "local_request"
     },
     {
@@ -2054,26 +2149,18 @@
     {
       "from_node": "environment",
       "from_output": "ci",
-      "to_node": "checkout_identity"
-    },
-    {
-      "from_node": "environment",
-      "from_output": "ci",
       "to_node": "ci_settings"
     },
     {
       "from_node": "require_ci_settings",
-      "from_output": "passed",
       "to_node": "current_run"
     },
     {
       "from_node": "require_checkout",
-      "from_output": "passed",
       "to_node": "current_run"
     },
     {
       "from_node": "require_current_identity",
-      "from_output": "passed",
       "to_node": "manual"
     },
     {
@@ -2083,7 +2170,6 @@
     },
     {
       "from_node": "require_manual_identity",
-      "from_output": "passed",
       "to_node": "manual_context"
     },
     {
@@ -2138,20 +2224,7 @@
     },
     {
       "from_node": "require_search_completion",
-      "from_output": "passed",
       "to_node": "searched_comparison"
-    }
-  ],
-  "outputs": [
-    {
-      "name": "plan",
-      "node": "plan",
-      "port": "plan"
-    },
-    {
-      "name": "validation",
-      "node": "plan",
-      "port": "validation"
     }
   ]
 }

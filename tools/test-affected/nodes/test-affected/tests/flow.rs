@@ -81,13 +81,13 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
     assert_eq!(memory.analysis_status, mfn_lsp::Status::Analyzed);
 
     let mut bypass = value.clone();
-    let edge = bypass["edges"]
+    let plan = bypass["nodes"]
         .as_array_mut()
         .unwrap()
         .iter_mut()
-        .find(|edge| edge["to_node"] == "plan" && edge["to_input"] == "context")
+        .find(|node| node["id"] == "plan")
         .unwrap();
-    edge["from_node"] = json!("changes");
+    plan["inputs"]["context"]["from"]["node"] = json!("changes");
     let workflow: WorkflowDefinition = serde_json::from_value(bypass).unwrap();
     let result =
         compile_definition(&workflow, &registry).and_then(|p| instantiate_stream(&p, &registry));

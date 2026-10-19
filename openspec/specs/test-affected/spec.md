@@ -191,7 +191,7 @@ Reports SHALL separate Flow analysis/planning time from script inventory/build a
 
 ### Requirement: Execute one conditional planning Flow
 
-One Flow definition and compiled executable SHALL serve local and CI planning through existing `mf` commands. Parameters and if-else SHALL route to local request construction or CI policy composition using Code and Loop. Both branches SHALL converge at one Git request input through proven exclusive edges, followed by shared LSP and planning. A successful admitted invocation SHALL emit exactly one explicit plan; invalid invocation SHALL fail.
+One Flow definition and compiled executable SHALL serve local and CI planning through existing `mf` commands. Parameters and if-else SHALL route to local request construction or CI policy composition using Code and Loop. Both branches SHALL converge at one Git request input through proven exclusive bindings, followed by shared LSP and planning. A successful admitted invocation SHALL emit exactly one explicit plan; invalid invocation SHALL fail.
 
 #### Scenario: Default to local planning
 
@@ -205,11 +205,11 @@ One Flow definition and compiled executable SHALL serve local and CI planning th
 
 ### Requirement: Reuse proven exclusive input bindings
 
-The Flow SHALL use the existing exclusive-input contract without adding a merge node or runtime selection policy. Both request producers SHALL depend on distinct outputs of the same if-else router and share the Git consumer's input domain. Correlated comparison fields SHALL travel together in one request value.
+The Flow SHALL use version `2026-10-19` input references and the existing exclusive-input contract without adding a merge node or runtime selection policy. Both request producers SHALL depend on distinct outputs of the same if-else router and share the Git consumer's input domain. Correlated comparison fields SHALL travel together in one request value.
 
 #### Scenario: Prove branch convergence
 
-- **WHEN** local and CI request outputs bind the Git request input with exclusive edges under the same router
+- **WHEN** local and CI request outputs bind the Git request input with an exclusive input declaration under the same router
 - **THEN** compilation proves their mutual exclusion and the consumer receives the selected request once
 
 #### Scenario: Reject unsafe rewiring
