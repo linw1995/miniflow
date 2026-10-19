@@ -120,6 +120,7 @@ impl GraphEdge {
 pub struct GraphLayout {
     view: ConnectionView,
     hidden_data_count: usize,
+    hidden_transitive_count: usize,
     nodes: Vec<GraphNode>,
     edges: Vec<GraphEdge>,
     routes: Vec<EdgeRoute>,
@@ -375,6 +376,12 @@ impl GraphLayout {
                 to_row: 0,
             });
         }
+        let mut hidden_transitive_count = 0;
+        if view == ConnectionView::Execution {
+            let redundant = transitive_dependencies(nodes.len(), &topology);
+            edges.retain(|edge| !redundant.contains(&(edge.from, edge.to)));
+            hidden_transitive_count = redundant.len();
+        }
         for edge in &mut edges {
             edge.members.sort();
             if let Some(first) = edge.members.first() {
@@ -569,6 +576,7 @@ impl GraphLayout {
         Ok(Self {
             view,
             hidden_data_count,
+            hidden_transitive_count,
             routes,
             crossings,
             routing_stats,
@@ -584,6 +592,9 @@ impl GraphLayout {
     }
     pub fn hidden_data_count(&self) -> usize {
         self.hidden_data_count
+    }
+    pub fn hidden_transitive_count(&self) -> usize {
+        self.hidden_transitive_count
     }
 
     pub fn nodes(&self) -> &[GraphNode] {
@@ -675,6 +686,35 @@ impl GraphLayout {
     pub fn size(&self) -> (u32, u32) {
         (self.width, self.height)
     }
+}
+
+fn transitive_dependencies(
+    node_count: usize,
+    topology: &BTreeSet<(u32, u32)>,
+) -> BTreeSet<(usize, usize)> {
+    let mut outgoing = vec![Vec::new(); node_count];
+    for &(from, to) in topology {
+        outgoing[from as usize].push(to as usize);
+    }
+    let mut reachable = vec![vec![0_u64; node_count.div_ceil(64)]; node_count];
+    let mut redundant = BTreeSet::new();
+    // Validation guarantees topological indices; the sorted successors expose shorter steps first.
+    for from in (0..node_count).rev() {
+        let (processed, descendants) = reachable.split_at_mut(from + 1);
+        let current = &mut processed[from];
+        for &to in &outgoing[from] {
+            let mask = 1_u64 << (to % 64);
+            if current[to / 64] & mask != 0 {
+                redundant.insert((from, to));
+                continue;
+            }
+            current[to / 64] |= mask;
+            for (word, inherited) in current.iter_mut().zip(&descendants[to - from - 1]) {
+                *word |= inherited;
+            }
+        }
+    }
+    redundant
 }
 
 fn row_stride(node: &GraphNode, attachment_spacing: u32) -> u32 {
@@ -1215,6 +1255,7 @@ mod rendering_tests {
         GraphLayout {
             view: ConnectionView::Ports,
             hidden_data_count: 0,
+            hidden_transitive_count: 0,
             nodes,
             edges,
             routes: vec![

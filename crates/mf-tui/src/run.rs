@@ -1023,11 +1023,16 @@ fn body_observations(
 fn connection_summary(layout: &GraphLayout) -> String {
     let label = layout.connection_view().label();
     let hidden = layout.hidden_data_count();
-    if hidden > 0 {
+    let mut summary = if hidden > 0 {
         format!("{label}: {hidden} data mappings hidden")
     } else {
         format!("Connections: {label}")
+    };
+    let transitive = layout.hidden_transitive_count();
+    if transitive > 0 {
+        summary.push_str(&format!(" | {transitive} transitive dependencies hidden"));
     }
+    summary
 }
 
 fn binding_details(
@@ -1700,6 +1705,40 @@ mod tests {
         let mode = view.root.connection_view();
         view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
         assert_eq!(view.root.connection_view(), mode);
+    }
+
+    #[test]
+    fn transitive_summary_and_details_preserve_hidden_loop_body_bindings() {
+        let mut description = scope_fixture();
+        let body = &mut description.loop_bodies[0];
+        for target in ["source", "target"] {
+            body.data_edges.push(mf_telemetry::description::DataEdge {
+                exclusive: false,
+                from_node: "%loop".into(),
+                from_output: "value".into(),
+                to_node: target.into(),
+                to_input: "direct".into(),
+            });
+        }
+        body.control_edges
+            .push(mf_telemetry::description::ControlEdge {
+                from_node: "source".into(),
+                from_output: "ready".into(),
+                to_node: "target".into(),
+            });
+        let path = vec!["first".into()];
+        let layout =
+            GraphLayout::from_body_with_view(&description, &path, ConnectionView::Execution)
+                .unwrap();
+        assert_eq!(
+            connection_summary(&layout),
+            "Execution: 1 data mappings hidden | 1 transitive dependencies hidden"
+        );
+        let node = NodeObservation::pending("target", "fixture.task");
+        let details = binding_details(&description, &path, Some(&node));
+        assert!(details.contains("%loop.value"));
+        assert!(details.contains("source.value"));
+        assert!(details.contains("source.ready"));
     }
 
     #[test]

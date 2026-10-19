@@ -1007,6 +1007,13 @@ fn root_and_loop_body_share_routing_geometry() {
         assert_eq!(body.edges(), root.edges());
         assert_eq!(body.routes(), root.routes());
         assert_eq!(body.crossings(), root.crossings());
+        assert_eq!(
+            body.hidden_transitive_count(),
+            root.hidden_transitive_count()
+        );
+        if view == mf_tui::graph::ConnectionView::Execution {
+            assert_eq!(body.hidden_transitive_count(), 16);
+        }
     }
 }
 
@@ -1159,6 +1166,150 @@ fn execution_view_connects_every_dependency_pair_without_ordering_independent_no
             "▶"
         );
     }
+}
+
+#[test]
+fn execution_view_reduces_transitive_bundles_and_preserves_the_diamond() {
+    use mf_tui::graph::ConnectionView;
+
+    let mut graph = description();
+    let expected: std::collections::BTreeSet<_> = graph
+        .data_edges
+        .iter()
+        .map(|edge| (edge.from_node.clone(), edge.to_node.clone()))
+        .chain(
+            graph
+                .control_edges
+                .iter()
+                .map(|edge| (edge.from_node.clone(), edge.to_node.clone())),
+        )
+        .collect();
+    for (from, to, input) in [
+        ("source", "join", "direct-a"),
+        ("source", "join", "direct-b"),
+        ("source", "left", "direct"),
+        ("router", "join", "direct-router"),
+    ] {
+        graph.data_edges.push(DataEdge {
+            exclusive: false,
+            from_node: from.into(),
+            from_output: "value".into(),
+            to_node: to.into(),
+            to_input: input.into(),
+        });
+    }
+    let layout = GraphLayout::with_view(&graph, ConnectionView::Execution).unwrap();
+    assert_eq!(layout.hidden_transitive_count(), 3);
+    assert_eq!(layout.hidden_data_count(), 0);
+    assert_eq!(
+        layout
+            .edges()
+            .iter()
+            .map(|edge| (edge.key.source.clone(), edge.key.destination.clone()))
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected
+    );
+    assert_completed_geometry_is_safe(&layout);
+    for (view, count) in [
+        (ConnectionView::Dependencies, 8),
+        (ConnectionView::Ports, 9),
+    ] {
+        let full = GraphLayout::with_view(&graph, view).unwrap();
+        assert_eq!(full.edges().len(), count);
+        assert_eq!(full.hidden_transitive_count(), 0);
+        for (index, reduced) in layout.nodes().iter().enumerate() {
+            for (other, node) in layout.nodes().iter().enumerate() {
+                assert_eq!(
+                    reduced.rect.x.cmp(&node.rect.x),
+                    full.nodes()[index].rect.x.cmp(&full.nodes()[other].rect.x)
+                );
+            }
+        }
+    }
+    graph.nodes.reverse();
+    graph.data_edges.reverse();
+    graph.control_edges.reverse();
+    let reordered = GraphLayout::with_view(&graph, ConnectionView::Execution).unwrap();
+    assert_eq!(layout.nodes(), reordered.nodes());
+    assert_eq!(layout.edges(), reordered.edges());
+    assert_eq!(layout.routes(), reordered.routes());
+    assert_eq!(layout.crossings(), reordered.crossings());
+}
+
+#[test]
+fn execution_view_reduces_transitive_pairs_across_all_connection_kinds() {
+    use mf_telemetry::description::{ExecutionDescription, ExecutionMode, OrderEdge};
+    use mf_tui::graph::ConnectionView;
+
+    let mut graph = description();
+    graph.version = WorkflowDescriptionVersion::V2026_10_19;
+    graph.execution = Some(ExecutionDescription {
+        mode: ExecutionMode::Single,
+    });
+    for output in ["yes", "no"] {
+        graph.control_edges.push(ControlEdge {
+            from_node: "source".into(),
+            from_output: output.into(),
+            to_node: "join".into(),
+        });
+        graph.data_edges.push(DataEdge {
+            exclusive: true,
+            from_node: "router".into(),
+            from_output: output.into(),
+            to_node: "join".into(),
+            to_input: "candidate".into(),
+        });
+        graph.data_edges.push(DataEdge {
+            exclusive: false,
+            from_node: "source".into(),
+            from_output: output.into(),
+            to_node: "join".into(),
+            to_input: format!("direct-{output}"),
+        });
+    }
+    graph.order_edges.push(OrderEdge {
+        from_node: "source".into(),
+        to_node: "join".into(),
+    });
+    let layout = GraphLayout::with_view(&graph, ConnectionView::Execution).unwrap();
+    assert_eq!(layout.hidden_transitive_count(), 2);
+    assert_eq!(layout.hidden_data_count(), 2);
+    assert_eq!(layout.edges().len(), 5);
+    assert!(layout.edges().iter().all(|edge| {
+        !(edge.key.destination == "join" && matches!(edge.key.source.as_str(), "source" | "router"))
+    }));
+    let full = GraphLayout::with_view(&graph, ConnectionView::Dependencies).unwrap();
+    assert_eq!(full.edges().len(), 10);
+    assert_eq!(full.hidden_transitive_count(), 0);
+    assert_completed_geometry_is_safe(&layout);
+}
+
+#[test]
+fn transitive_reduction_preserves_long_chains_across_reachability_words() {
+    use mf_tui::graph::{ConnectionView, routing::RoutingLimits};
+
+    let mut graph = fan_graph(129);
+    for index in 1..129 {
+        graph.data_edges.push(DataEdge {
+            exclusive: false,
+            from_node: graph.execution_order[index].clone(),
+            from_output: "value".into(),
+            to_node: graph.execution_order[index + 1].clone(),
+            to_input: "previous".into(),
+        });
+    }
+    let layout = GraphLayout::with_view_and_limits(
+        &graph,
+        ConnectionView::Execution,
+        RoutingLimits {
+            max_geometry_items: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(layout.hidden_transitive_count(), 128);
+    assert_eq!(layout.edges().len(), 129);
+    assert!(layout.edges().iter().all(|edge| edge.to == edge.from + 1));
 }
 
 #[test]
