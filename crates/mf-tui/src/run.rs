@@ -262,14 +262,23 @@ pub struct LocalObservation {
     pub reader: ObservationReader,
     capture: Arc<Mutex<Capture>>,
     started: Instant,
-    status: Arc<Mutex<Option<ExitStatus>>>,
+    completion: Arc<Mutex<Option<(ExitStatus, Instant)>>>,
 }
 impl LocalObservation {
     pub fn status(&self) -> Option<ExitStatus> {
-        *self.status.lock().expect("run status was not poisoned")
+        self.completion
+            .lock()
+            .expect("run completion was not poisoned")
+            .map(|(status, _)| status)
     }
     pub fn elapsed(&self) -> Duration {
-        self.started.elapsed()
+        self.completion
+            .lock()
+            .expect("run completion was not poisoned")
+            .map_or_else(
+                || self.started.elapsed(),
+                |(_, at)| at.duration_since(self.started),
+            )
     }
     pub fn capture_view(&self) -> CaptureView {
         self.capture
@@ -294,7 +303,7 @@ pub struct LocalRun {
     interrupted_at: Option<Instant>,
     killed: bool,
     finished: bool,
-    status: Arc<Mutex<Option<ExitStatus>>>,
+    completion: Arc<Mutex<Option<(ExitStatus, Instant)>>>,
 }
 impl LocalRun {
     pub fn start(
@@ -339,7 +348,7 @@ impl LocalRun {
             interrupted_at: None,
             killed: false,
             finished: false,
-            status: Arc::new(Mutex::new(None)),
+            completion: Arc::new(Mutex::new(None)),
         })
     }
     pub fn observation(&self) -> LocalObservation {
@@ -347,7 +356,7 @@ impl LocalRun {
             reader: self.receiver.reader(),
             capture: Arc::clone(&self.capture.capture),
             started: self.started,
-            status: Arc::clone(&self.status),
+            completion: Arc::clone(&self.completion),
         }
     }
     pub fn cancel(&mut self) {
@@ -417,7 +426,10 @@ impl LocalRun {
         };
         self.child.running = false;
         self.receiver.finish();
-        *self.status.lock().expect("run status was not poisoned") = Some(status);
+        *self
+            .completion
+            .lock()
+            .expect("run completion was not poisoned") = Some((status, at));
         self.finished = true;
         Ok(Some(outcome))
     }
@@ -1624,6 +1636,26 @@ mod tests {
                 "control_edges":[],"execution_order":["%loop","source","target"]
             })))
         })).unwrap()
+    }
+
+    #[test]
+    fn observation_elapsed_stops_after_process_completion() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 0"]);
+        let mut run = LocalRun::start(command, scope_fixture(), RunId::new(), 1024).unwrap();
+        let observation = run.observation();
+        let elapsed = observation.elapsed();
+        thread::sleep(Duration::from_millis(10));
+        assert!(observation.elapsed() > elapsed);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while run.poll().unwrap().is_none() {
+            assert!(Instant::now() < deadline, "process did not finish");
+            thread::sleep(Duration::from_millis(10));
+        }
+        let elapsed = observation.elapsed();
+        thread::sleep(Duration::from_millis(20));
+        assert_eq!(observation.elapsed(), elapsed);
     }
 
     #[test]
