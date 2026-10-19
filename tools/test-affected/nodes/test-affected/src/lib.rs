@@ -8,6 +8,8 @@ mod git_evidence;
 mod github;
 pub mod model;
 mod plan;
+#[cfg(unix)]
+mod process;
 
 pub use error::Error;
 pub use model::*;

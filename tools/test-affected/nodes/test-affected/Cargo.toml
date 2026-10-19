@@ -23,7 +23,7 @@ reqwest = { workspace = true, features = ["rustls", "query"] }
 url.workspace = true
 zip = { workspace = true, features = ["deflate-flate2-zlib-rs"] }
 
-# Owned Git processes and bounded output capture.
+# Owned processes and bounded input/output transport.
 libc.workspace = true
 tempfile.workspace = true
 

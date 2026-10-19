@@ -125,6 +125,20 @@ are no longer needed. Cleanup uses normal `git worktree remove` on explicitly ch
 Changing a snapshot or compilation configuration requires a new plan. The existing coverage script
 accepts package-only selection and must not be used to silently discard exact-case filters.
 
+## Process execution
+
+The unpublished tooling package also registers `process.run` on Unix. Configure `program`
+and optional `args` without shell interpolation. Inputs are optional `cwd` and `stdin_json`;
+the `result` output is text by default, or one decoded JSON value with `output: "json"`.
+JSON input sensitivity propagates to the result. Stderr is a separate diagnostic stream.
+
+The default timeout is one hour (`timeout_ms`); stdin is limited to 1 MiB and stdout to
+1 MiB by default (`max_stdout_bytes`, up to 16 MiB). Invalid output, nonzero exit, limits,
+and cancellation fail the Task. Cancellation permits up to five seconds of cooperative
+termination before forced group cleanup. Remaining same-group descendants are also
+terminated after normal completion. Programs such as the test consumer retain ownership
+of nested process groups they create.
+
 ## Compile and run the Flow
 
 The definition uses version `2026-10-19`: node-local `inputs` bind data, including

@@ -5,8 +5,8 @@
 
 ## 2. Add the missing process capability
 
-- [ ] 2.1 Implement `process.run` with typed errors, separate argv, JSON stdin, bounded output, timeout/cancellation, and owned group cleanup.
-- [ ] 2.2 Verify success, failure, malformed output, bounds, sensitivity, and cancellation; commit this group.
+- [x] 2.1 Implement `process.run` with typed errors, separate argv, JSON stdin, bounded output, timeout/cancellation, and owned group cleanup.
+- [x] 2.2 Verify success, failure, malformed output, bounds, sensitivity, and cancellation; commit this group.
 
 ## 3. Compose optional local execution
 
