@@ -17,7 +17,7 @@ class PlanError(Exception):
 
 
 def execute(argv, root, capture=True):
-    process = subprocess.Popen(argv, cwd=root, stdout=subprocess.PIPE if capture else None,
+    process = subprocess.Popen(argv, cwd=root, stdout=subprocess.PIPE if capture else sys.stderr,
                                stderr=subprocess.PIPE if capture else None, start_new_session=True)
     try:
         output, errors = process.communicate()
@@ -42,7 +42,7 @@ def execute(argv, root, capture=True):
 
 
 def load_plan(path):
-    data = json.loads(Path(path).read_text())
+    data = json.load(sys.stdin) if Path(path) == Path("-") else json.loads(Path(path).read_text())
     if isinstance(data, dict) and set(data) in ({"plan"}, {"plan", "validation"}):
         data = data["plan"]
     if isinstance(data, dict):
@@ -197,7 +197,7 @@ def consume(plan, list_only=False, inventory_out=None):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("plan", type=Path)
+    parser.add_argument("plan", type=Path, help="Plan path, or - to read JSON from stdin")
     parser.add_argument("--list-only", action="store_true")
     parser.add_argument("--inventory-out", type=Path)
     args = parser.parse_args()

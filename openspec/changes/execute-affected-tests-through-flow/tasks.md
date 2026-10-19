@@ -1,7 +1,7 @@
 ## 1. Preserve the consumer boundary
 
-- [ ] 1.1 Add stdin plan input and separate machine reports from child diagnostics, preserving path callers and failure/empty behavior.
-- [ ] 1.2 Extend existing consumer verification and commit this group.
+- [x] 1.1 Add stdin plan input and separate machine reports from child diagnostics, preserving path callers and failure/empty behavior.
+- [x] 1.2 Extend existing consumer verification and commit this group.
 
 ## 2. Add the missing process capability
 

@@ -32,6 +32,22 @@ class RunnerTests(unittest.TestCase):
                 path.write_text(json.dumps(value))
                 with self.assertRaises(runner.PlanError):
                     runner.load_plan(path)
+                with patch.object(sys, 'stdin', io.StringIO(json.dumps(value))):
+                    with self.assertRaises(runner.PlanError):
+                        runner.load_plan(Path('-'))
+
+    def test_child_diagnostics_do_not_mix_with_the_machine_report(self):
+        code = '''import json, pathlib, runpy, sys
+execute = runpy.run_path(sys.argv[1])['execute']
+execute([sys.executable, '-c', 'import sys; print("child-out"); print("child-err", file=sys.stderr)'],
+        pathlib.Path.cwd(), capture=False)
+print(json.dumps({'executed': True}))
+'''
+        result = subprocess.run([sys.executable, '-c', code, runner.__file__], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {'executed': True})
+        self.assertIn('child-out', result.stderr)
+        self.assertIn('child-err', result.stderr)
 
     @unittest.skipUnless(os.name == 'posix', 'Unix process groups')
     def test_cancellation_reaps_the_owned_process_group(self):
