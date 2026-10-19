@@ -1011,12 +1011,7 @@ fn body_observations(
 fn connection_summary(layout: &GraphLayout) -> String {
     let label = layout.connection_view().label();
     let hidden = layout.hidden_data_count();
-    if layout.connection_view() == ConnectionView::Execution
-        && layout.edges().is_empty()
-        && hidden > 0
-    {
-        format!("{label}: {hidden} data mappings hidden; no execution connections")
-    } else if hidden > 0 {
+    if hidden > 0 {
         format!("{label}: {hidden} data mappings hidden")
     } else {
         format!("Connections: {label}")
@@ -1700,7 +1695,9 @@ mod tests {
             })
             .to_vec();
         let layout = GraphLayout::with_view(&description, ConnectionView::Execution).unwrap();
-        assert!(connection_summary(&layout).contains("no execution connections"));
+        assert_eq!(connection_summary(&layout), "Connections: Execution");
+        assert_eq!(layout.edges().len(), 1);
+        assert_eq!(layout.edges()[0].members.len(), 2);
         let mut node = NodeObservation::pending("target", "fixture.task");
         let text = binding_details(&description, &[], Some(&node));
         assert!(text.contains("input [exclusive]"));

@@ -274,6 +274,18 @@ impl GraphLayout {
         let mut edges: Vec<GraphEdge> = Vec::new();
         let mut bundles: BTreeMap<(usize, usize, EdgeKind), usize> = BTreeMap::new();
         let mut topology = BTreeSet::new();
+        let execution_pairs: BTreeSet<_> = description
+            .control_edges
+            .iter()
+            .map(|edge| (edge.from_node.as_str(), edge.to_node.as_str()))
+            .chain(
+                description
+                    .order_edges
+                    .iter()
+                    .map(|edge| (edge.from_node.as_str(), edge.to_node.as_str())),
+            )
+            .collect();
+        let mut hidden_data_count = 0;
         for edge in &description.data_edges {
             let kind = if edge.exclusive {
                 EdgeKind::Exclusive
@@ -283,14 +295,18 @@ impl GraphLayout {
             let from = positions[edge.from_node.as_str()];
             let to = positions[edge.to_node.as_str()];
             topology.insert((from as u32, to as u32));
-            if view == ConnectionView::Execution {
+            // An explicit execution connection already shows this dependency's direction.
+            if view == ConnectionView::Execution
+                && execution_pairs.contains(&(edge.from_node.as_str(), edge.to_node.as_str()))
+            {
+                hidden_data_count += 1;
                 continue;
             }
             let member = DataMapping {
                 output: edge.from_output.clone(),
                 input: edge.to_input.clone(),
             };
-            if view == ConnectionView::Dependencies {
+            if view != ConnectionView::Ports {
                 if let Some(&index) = bundles.get(&(from, to, kind)) {
                     edges[index].members.push(member);
                     continue;
@@ -552,11 +568,7 @@ impl GraphLayout {
             .unwrap_or(MARGIN * 2);
         Ok(Self {
             view,
-            hidden_data_count: if view == ConnectionView::Execution {
-                description.data_edges.len()
-            } else {
-                0
-            },
+            hidden_data_count,
             routes,
             crossings,
             routing_stats,
