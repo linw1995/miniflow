@@ -26,6 +26,9 @@ mf compile flow.json --output ./flow --locked
 The output directory must exist. A successful first build creates `flow.lock`. See [workflow definitions](workflows.md) for dependency sources, features, and lock behavior. Native libraries required by plugins must be installed separately.
 
 `mf run ./flow` inherits stdin, stdout, and stderr and returns the runner's exit status. It requires no terminal.
+Generated Unix runners forward SIGINT and SIGTERM to the active run's cancellation signal,
+including streaming and selected-Task execution, so cooperative nodes can clean owned work.
+Embedded runtime calls do not install process-wide signal handlers.
 Use `-v` or `--verbose` with either `mf run ./flow` or `./flow` to print execution details on stderr:
 
 | Option | Execution diagnostics |

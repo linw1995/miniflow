@@ -115,6 +115,8 @@ fn execute_selected(
     verbose: u8,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut stdio = mf_runtime::StreamStdio::claim()?;
+    #[cfg(unix)]
+    let mut signals = mf_runtime::RunnerSignals::new()?;
     #[cfg(feature = "telemetry")]
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
@@ -145,6 +147,8 @@ fn execute_selected(
         None
     };
     let result = mf_runtime::ExecutionContext::run(observation, |state| -> Result<(), Box<dyn std::error::Error>> {
+        #[cfg(unix)]
+        signals.bind(state.cancellation())?;
         if target.inputs.stdin_owner(&inputs)?.is_some() {
             if let Some(input) = stdio.take_input() { state.set_stdin(input); }
         }
@@ -185,6 +189,8 @@ fn execute_selected(
 #[cfg(feature = "streaming")]
 fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Result<(), Box<dyn std::error::Error>> {
     let mut stdio = mf_runtime::StreamStdio::claim()?;
+    #[cfg(unix)]
+    let mut signals = mf_runtime::RunnerSignals::new()?;
     #[cfg(feature = "telemetry")]
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
@@ -231,6 +237,8 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Resu
         let needs_stdin = prepared.plan().input_schema().stdin_owner(&arguments)?.is_some();
         let stdin = if needs_stdin { stdio.take_input() } else { None };
         let instance = mf_runtime::FlowRuntime::default().start_stream(prepared, mf_runtime::StreamOptions { observation: observation.clone(), snapshots: snapshots.as_ref().map(mf_runtime::SnapshotRecording::recorder), arguments, stdin, ..Default::default() })?;
+        #[cfg(unix)]
+        signals.bind(instance.cancellation())?;
         stdio.run(instance)?;
         Ok(())
     })();
@@ -343,7 +351,11 @@ fn snapshot_recorder_for_id(workflow_id: mf_telemetry::identity::WorkflowId, run
 
 #[cfg(not(feature = "streaming"))]
 fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: Option<mf_runtime::SnapshotRecording>, arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+    #[cfg(unix)]
+    let mut signals = mf_runtime::RunnerSignals::new()?;
     let result = mf_runtime::ExecutionContext::run(observation, |state| -> Result<_, Box<dyn std::error::Error>> {
+        #[cfg(unix)]
+        signals.bind(state.cancellation())?;
         state.set_workflow_arguments(arguments);
         #[cfg(unix)]
         {

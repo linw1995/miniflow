@@ -217,6 +217,57 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("FAIL"));
+
+    let pidfile = root.join("target/running-test.pid");
+    write(
+        root,
+        "core/src/lib.rs",
+        &format!(
+            "#[test] fn waits() {{ std::fs::write({:?}, std::process::id().to_string()).unwrap(); std::thread::sleep(std::time::Duration::from_secs(60)); }}\n",
+            pidfile.to_str().unwrap()
+        ),
+    );
+    execute["params.head"] = json!(commit(root));
+    execute["params.precision"] = json!("packages");
+    use std::os::unix::process::CommandExt;
+    let mut child = Command::new(&executable)
+        .args(["--inputs", &execute.to_string()])
+        .process_group(0)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while !pidfile.exists() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    unsafe {
+        libc::kill(-(child.id() as i32), libc::SIGINT);
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut status = None;
+    while std::time::Instant::now() < deadline {
+        status = child.try_wait().unwrap();
+        if status.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    if status.is_none() {
+        unsafe {
+            libc::kill(-(child.id() as i32), libc::SIGKILL);
+        }
+    }
+    let completed = child.wait().unwrap();
+    let pid: i32 = fs::read_to_string(pidfile).unwrap().parse().unwrap();
+    let survived = unsafe { libc::kill(pid, 0) } == 0;
+    if survived {
+        unsafe {
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+    assert!(status.is_some() && !completed.success());
+    assert!(!survived, "selected test survived runner interruption");
 }
 
 struct GithubFixture {

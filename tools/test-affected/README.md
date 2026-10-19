@@ -135,7 +135,7 @@ JSON input sensitivity propagates to the result. Stderr is a separate diagnostic
 
 The default timeout is one hour (`timeout_ms`); stdin is limited to 1 MiB and stdout to
 1 MiB by default (`max_stdout_bytes`, up to 16 MiB). Invalid output, nonzero exit, limits,
-and cancellation fail the Task. Cancellation permits up to five seconds of cooperative
+and cancellation fail the Task. Cancellation permits up to one second of cooperative
 termination before forced group cleanup. Remaining same-group descendants are also
 terminated after normal completion. Programs such as the test consumer retain ownership
 of nested process groups they create.

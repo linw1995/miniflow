@@ -18,7 +18,8 @@ Local callers currently save a Flow plan and invoke a second command to execute 
 ### Modified Capabilities
 
 - `test-affected`: optional local execution after planning through the existing consumer.
+- `workflow-binary-compilation`: forward standalone runner interrupts to existing cancellation for owned-process cleanup.
 
 ## Non-goals
 
-No new selection policy, nextest-specific node, inventory node, generic transport framework, runtime change, CI coverage runner, or release membership change.
+No new selection policy, nextest-specific node, inventory node, generic transport framework, scheduler change, CI coverage runner, or release membership change. Standalone runners require a minimal signal-to-cancellation bridge to clean owned subprocesses on terminal interruption.

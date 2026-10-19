@@ -12,7 +12,7 @@ use std::{
 };
 
 const MAX_INPUT_BYTES: u64 = 1024 * 1024;
-const TERMINATION_GRACE: Duration = Duration::from_secs(5);
+const TERMINATION_GRACE: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Snafu)]
 enum Error {

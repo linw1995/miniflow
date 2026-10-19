@@ -39,3 +39,13 @@ propagation, CI rejection before external acquisition, and cross-message-domain 
 selection tests instead of copying them. Ablate execution gating and stdin/report separation; retain reports
 only under target/. Run pinned-toolchain tests and required hooks, then synchronize and archive the completed
 specification.
+
+## Native interruption boundary
+
+Review found that terminating a standalone runner bypasses Rust destructors while owned
+process groups remain separate. Add an explicit standalone-runner signal bridge using the
+existing signal-hook dependency and StreamCancellation. Register before execution and bind
+to the current execution context or started stream instance; embedding APIs do not install
+process-wide handlers. Scheduling is unchanged. Keep process termination grace at one second
+and consumer nested-group grace at 200 ms, below the TUI supervisor's two-second kill bound.
+Verify both standalone finite/selected Tasks and the real streaming Flow interruption path.
