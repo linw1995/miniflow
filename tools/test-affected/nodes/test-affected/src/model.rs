@@ -91,6 +91,8 @@ pub struct ComparisonRequest {
     pub options: PlanOptions,
     #[serde(default)]
     pub validation: Value,
+    #[serde(default)]
+    pub execution: Value,
 }
 fn default_head() -> String {
     "HEAD".into()

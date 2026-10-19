@@ -101,6 +101,7 @@ impl TypedTaskNode for GitNode {
                     .transpose()?
                     .unwrap_or_default(),
                 validation: Value::Null,
+                execution: Value::Null,
             }
         };
         let comparison = git::compare_request(
@@ -142,6 +143,7 @@ impl TypedTaskNode for GitNode {
                         .into(),
                 ),
                 ("validation".into(), normalized.validation.into()),
+                ("execution".into(), normalized.execution.into()),
             ])
             .inherit_secrets(sensitivity.iter()),
         }
@@ -153,6 +155,7 @@ impl TypedTaskNode for GitNode {
 pub struct PlanOutput {
     pub plan: ValueRef,
     pub validation: ValueRef,
+    pub execution: ValueRef,
 }
 
 pub struct PlanNode;
@@ -198,6 +201,13 @@ impl TypedTaskNode for PlanNode {
             return Err(error.into());
         }
         Ok(PlanOutput {
+            execution: input
+                .context
+                .as_object()
+                .and_then(|value| value.get("execution"))
+                .cloned()
+                .unwrap_or_else(|| Value::Null.into())
+                .inherit_secrets([&input.context]),
             validation: input
                 .context
                 .as_object()

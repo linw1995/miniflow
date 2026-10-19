@@ -43,7 +43,7 @@ def execute(argv, root, capture=True):
 
 def load_plan(path):
     data = json.load(sys.stdin) if Path(path) == Path("-") else json.loads(Path(path).read_text())
-    if isinstance(data, dict) and set(data) in ({"plan"}, {"plan", "validation"}):
+    if isinstance(data, dict) and set(data) in ({"plan"}, {"plan", "validation"}, {"plan", "validation", "execution"}):
         data = data["plan"]
     if isinstance(data, dict):
         data.setdefault("ignored_files", [])

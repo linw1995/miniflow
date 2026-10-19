@@ -35,6 +35,15 @@ fn definition(root: &Path) -> Value {
                 .unwrap()
         );
     }
+    value["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|node| node["kind"] == "process.run")
+        .unwrap()["config"]["args"] = json!([
+        package.join("../../run-tests.py").canonicalize().unwrap(),
+        "-"
+    ]);
     let analyzer = value["nodes"]
         .as_array_mut()
         .unwrap()
@@ -143,21 +152,34 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
     assert_eq!(generated.tests, memory.tests);
     assert_eq!(generated.packages, memory.packages);
     assert_eq!(generated.head, memory.head);
-    let plan_path = root.join("target/generated-plan.json");
-    fs::write(&plan_path, serde_json::to_vec(&records[0]).unwrap()).unwrap();
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../run-tests.py");
-    let output = Command::new("python3")
-        .arg(script)
-        .arg(&plan_path)
-        .current_dir(std::env::temp_dir())
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert!(String::from_utf8_lossy(&output.stdout).contains("\"selected_count\": 1"));
+    assert!(records[0].get("execution").is_none());
+    let mut execute = arguments.clone();
+    execute["params.run"] = json!(true);
+    let memory_execution = memory_result(&value, &execute).unwrap();
+    assert_eq!(memory_execution["execution"]["selected_count"], json!(1));
+    assert_eq!(memory_execution["execution"]["executed"], json!(true));
+    for empty in [false, true] {
+        let mut execute = execute.clone();
+        if empty {
+            execute["params.base"] = json!(head);
+        }
+        let output = Command::new(&executable)
+            .current_dir(std::env::temp_dir())
+            .args(["--inputs", &execute.to_string()])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(report["execution"]["executed"], json!(!empty));
+        assert_eq!(
+            report["execution"]["selected_count"],
+            json!(if empty { 0 } else { 1 })
+        );
+    }
 
     // Even an unavailable server must not run when the chosen extension has no inputs.
     let mut empty = value;
@@ -173,7 +195,7 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
         .start_stream(
             instantiate_stream(&compiled, &registry).unwrap(),
             StreamOptions {
-                arguments: WorkflowArguments::try_from(arguments).unwrap(),
+                arguments: WorkflowArguments::try_from(arguments.clone()).unwrap(),
                 ..Default::default()
             },
         )
@@ -185,6 +207,16 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
     assert_eq!(plan.tests, memory.tests);
     assert!(instance.recv().unwrap().is_none());
     instance.join().unwrap();
+
+    write(root, "core/src/lib.rs", &SOURCE.replace("1, 1", "2, 3"));
+    execute["params.head"] = json!(commit(root));
+    let output = Command::new(&executable)
+        .args(["--inputs", &execute.to_string()])
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("FAIL"));
 }
 
 struct GithubFixture {
@@ -399,6 +431,7 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
         "explicit",
         "manual",
         "invalid_current",
+        "ci_execution",
         "invalid_record",
         "failed_run",
         "missing_artifact",
@@ -563,6 +596,10 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
                     older_merge.as_str(),
                 )
             }
+            "ci_execution" => {
+                args["params.run"] = json!(true);
+                (None, vec![], "")
+            }
             "event_head_mismatch" => {
                 args["params.expected_head"] = json!("invalid");
                 (None, vec![], "")
@@ -583,11 +620,14 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
         let memory = memory_result(&flow, &args);
         if matches!(
             case,
-            "invalid_current" | "event_head_mismatch" | "manual_mismatch"
+            "invalid_current" | "event_head_mismatch" | "manual_mismatch" | "ci_execution"
         ) {
             assert!(memory.is_err());
         } else {
             assert!(memory.is_ok(), "{case}: {memory:?}");
+        }
+        if case == "ci_execution" {
+            assert!(server.requests().is_empty());
         }
         server.configure(&state);
         let result = Command::new(&executable)
@@ -596,9 +636,12 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
             .unwrap();
         if matches!(
             case,
-            "invalid_current" | "event_head_mismatch" | "manual_mismatch"
+            "invalid_current" | "event_head_mismatch" | "manual_mismatch" | "ci_execution"
         ) {
             assert!(!result.status.success() && result.stdout.is_empty());
+            if case == "ci_execution" {
+                assert!(server.requests().is_empty());
+            }
             continue;
         }
         assert!(
@@ -607,6 +650,7 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
             String::from_utf8_lossy(&result.stderr)
         );
         let generated: Value = serde_json::from_slice(&result.stdout).unwrap();
+        assert!(generated.get("execution").is_none(), "{case}");
         assert_eq!(generated["plan"]["packages"], json!(packages), "{case}");
         assert_eq!(generated["plan"]["base"], expected_base, "{case}");
         assert!(generated["plan"]["tests"].as_array().unwrap().is_empty());

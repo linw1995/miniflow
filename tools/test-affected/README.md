@@ -78,7 +78,8 @@ outside the node; the node never fetches missing historical merge objects.
 
 Alternatively, supply `request` with `mode` (`worktree`, `commit`, `merge-base`, or `snapshot`),
 optional `base`, `head` (default `HEAD`), `analyze` (default true), `require_checkout`, `options`,
-optional opaque `initialization_options`, and opaque `validation` provenance. Do not combine it with legacy `base`/`head`/`options` inputs.
+optional opaque `initialization_options`, opaque `validation` provenance, and optional opaque
+`execution` context forwarded through analysis and planning. Do not combine it with legacy `base`/`head`/`options` inputs.
 Worktree mode snapshots current files through a temporary copy of the caller's index,
 including staged ignored files and nonignored untracked files, without changing the original
 index or branch. Commit mode uses the first parent, or an empty snapshot for a root commit.
@@ -104,7 +105,7 @@ retained whole `packages`, exact `tests` (`package`, `binary`, `name`), reasons,
 `ignored_files`. Older saved plans without `ignored_files` remain accepted by the consumer. Counts remain null
 without a supplied matching inventory. Options accept `configuration` (`target`, `all_features`,
 `features`, `no_default_features`) and an optional `inventory` path. Default test configuration is
-all features on the host target. No tests or test builds run inside the Flow.
+all features on the host target. The planning path does not build or execute tests.
 
 The separate script validates identities, builds/lists the baseline once, validates exact cases,
 and reuses the build for execution with nextest's default profile and no user configuration file.
@@ -153,9 +154,14 @@ nix develop --command cargo run -p mf-cli --features development-support -- \
   --output target/test-affected-runner --build-dir target/test-affected-build
 nix develop --command cargo run -p mf-cli --features development-support -- \
   run ./target/test-affected-runner --params.repository "$PWD" \
-  --params.mode worktree > target/test-plan.json
-nix develop --command python3 tools/test-affected/run-tests.py target/test-plan.json
+  --params.mode worktree --params.run true
 ```
+
+Omit `--params.run true` to emit only a plan. Enabled local execution invokes the existing
+consumer through `process.run`, passing the plan on stdin. The consumer also accepts a path
+or `-` directly; its stdout contains one JSON report and child diagnostics use stderr.
+The execution branch uses the consumer at `tools/test-affected/run-tests.py` in the analyzed
+repository. Custom definitions can configure another program or consumer path.
 
 The local compile command retains telemetry support so TUI can observe execution.
 To inspect execution, add `--tui` to `mf run`. The default Execution view shows execution
@@ -172,6 +178,7 @@ Local parameters:
 | Parameter | Default | Meaning |
 | --- | --- | --- |
 | `ci` | `false` | Select CI explicitly with `--params.ci true`; environment variables do not switch branches |
+| `run` | `false` | Execute the local plan through the existing consumer; rejected with `ci=true` |
 | `repository` | `.` | Repository to analyze |
 | `mode` | `worktree` | `worktree`, `commit`, `merge-base`, or `snapshot` |
 | `base` | null | Local base ref for merge-base or snapshot comparison |
@@ -201,10 +208,12 @@ ancestry order. A usable record stops the Loop immediately. Incompatible or unav
 history produces a cumulative affected comparison, while invalid current identity fails.
 All comparison provenance crosses the LSP boundary through its context output.
 
-The output is one `{"plan": ..., "validation": ...}` record. Local validation is null; CI
+Plan-only output is one `{"plan": ..., "validation": ...}` record. Local validation is null; CI
 validation contains the current execution context and comparison for coverage and final recording.
-The Flow never runs tests or publishes a success record. Source compilation/build-cache preparation,
-Flow evidence/analysis/planning, and actual test execution are separate costs.
+Enabled local execution adds an `execution` report with the selected count, execution status,
+and inventory/test durations. Empty plans return `executed: false`; failed tests fail the Flow.
+CI retains external coverage and success-record publication. Source compilation/build-cache
+preparation, Flow evidence/analysis/planning, and actual test execution remain separate costs.
 
 ## Explicit real-server verification
 

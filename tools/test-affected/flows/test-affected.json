@@ -213,6 +213,11 @@
             "default": null,
             "secret": false,
             "env": "CARGO_PROFILE_TEST_DEBUG"
+          },
+          "run": {
+            "type": "bool",
+            "default": false,
+            "secret": false
           }
         }
       }
@@ -315,10 +320,11 @@
           "head": "string",
           "precision": "string",
           "inventory": "any",
-          "config": "object"
+          "config": "object",
+          "run": "bool"
         },
         "code": {
-          "request": "{'mode':mode,'base':base,'head':head,'analyze':precision=='tests','options':{'configuration':config,'inventory':inventory,'exact_tests':precision=='tests'},'initialization_options':{'cargo':{'features':config.all_features?'all':config.features,'target':config.target,'noDefaultFeatures':config.no_default_features,'buildScripts':{'enable':false},'sysroot':null},'procMacro':{'enable':false},'checkOnSave':false,'cachePriming':{'enable':false}}}"
+          "request": "{'execution':{'enabled':run},'mode':mode,'base':base,'head':head,'analyze':precision=='tests','options':{'configuration':config,'inventory':inventory,'exact_tests':precision=='tests'},'initialization_options':{'cargo':{'features':config.all_features?'all':config.features,'target':config.target,'noDefaultFeatures':config.no_default_features,'buildScripts':{'enable':false},'sysroot':null},'procMacro':{'enable':false},'checkOnSave':false,'cachePriming':{'enable':false}}}"
         }
       },
       "inputs": {
@@ -356,6 +362,12 @@
           "from": {
             "node": "local_settings",
             "port": "configuration"
+          }
+        },
+        "run": {
+          "from": {
+            "node": "params",
+            "port": "run"
           }
         }
       }
@@ -433,10 +445,11 @@
           "incremental": "any",
           "dev_debug": "any",
           "test_debug": "any",
-          "policy": "object"
+          "policy": "object",
+          "run": "bool"
         },
         "code": {
-          "valid": "github_repository.matches('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') && run_id>0 && attempt>0 && pr>0 && size(branch)>0 && event in ['pull_request','workflow_dispatch'] && coverage_target>=0.0 && coverage_target<=100.0 && profile=='ci' && size(toolchain)>0",
+          "valid": "!run && (github_repository.matches('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') && run_id>0 && attempt>0 && pr>0 && size(branch)>0 && event in ['pull_request','workflow_dispatch'] && coverage_target>=0.0 && coverage_target<=100.0 && profile=='ci' && size(toolchain)>0)",
           "settings": "{'record_version':policy.record_version,'repository':github_repository,'run_id':run_id,'attempt':attempt,'pr':pr,'branch':branch,'manual':event=='workflow_dispatch','event':event,'expected_head':expected_head,'expected_merge':expected_merge,'cumulative':cumulative,'signature':{'policy':policy.id,'coverage_target':coverage_target,'toolchain':toolchain.endsWith('\\n')?toolchain:toolchain+'\\n','features':'all','profile':profile,'target':target,'environment':{'RUSTFLAGS':rustflags,'CARGO_ENCODED_RUSTFLAGS':encoded_rustflags,'CARGO_INCREMENTAL':incremental,'CARGO_PROFILE_DEV_DEBUG':dev_debug,'CARGO_PROFILE_TEST_DEBUG':test_debug}}}",
           "path": "'/repos/'+github_repository+'/actions/runs/'+string(run_id)+'/attempts/'+string(attempt)"
         }
@@ -555,6 +568,12 @@
             "node": "validation_policy",
             "port": "value"
           }
+        },
+        "run": {
+          "from": {
+            "node": "params",
+            "port": "run"
+          }
         }
       }
     },
@@ -562,7 +581,7 @@
       "id": "require_ci_settings",
       "kind": "builtin.assert",
       "config": {
-        "message": "CI planning requires valid PR execution parameters and toolchain identity"
+        "message": "CI planning requires valid PR parameters and does not support local test execution"
       },
       "inputs": {
         "condition": {
@@ -2005,7 +2024,7 @@
           "c": "object"
         },
         "code": {
-          "request": "{'mode':'snapshot','base':comparison.base,'head':comparison.head,'analyze':false,'require_checkout':true,'options':{'configuration':{'all_features':true,'target':c.signature.target},'exact_tests':false},'validation':{'context':c,'comparison':comparison}}"
+          "request": "{'execution':{'enabled':false},'mode':'snapshot','base':comparison.base,'head':comparison.head,'analyze':false,'require_checkout':true,'options':{'configuration':{'all_features':true,'target':c.signature.target},'exact_tests':false},'validation':{'context':c,'comparison':comparison}}"
         }
       },
       "inputs": {
@@ -2112,6 +2131,72 @@
           }
         }
       }
+    },
+    {
+      "id": "execution_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "run",
+            "condition": {
+              "source": {
+                "output": "plan.execution",
+                "path": "/enabled"
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "execution_directory",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "plan": "object"
+        },
+        "code": {
+          "cwd": "plan.repository"
+        }
+      },
+      "inputs": {
+        "plan": {
+          "from": {
+            "node": "plan",
+            "port": "plan"
+          }
+        }
+      }
+    },
+    {
+      "id": "run_tests",
+      "kind": "process.run",
+      "config": {
+        "program": "python3",
+        "args": [
+          "tools/test-affected/run-tests.py",
+          "-"
+        ],
+        "output": "json"
+      },
+      "inputs": {
+        "cwd": {
+          "from": {
+            "node": "execution_directory",
+            "port": "cwd"
+          }
+        },
+        "stdin_json": {
+          "from": {
+            "node": "plan",
+            "port": "plan"
+          }
+        }
+      }
     }
   ],
   "outputs": [
@@ -2124,6 +2209,12 @@
       "name": "validation",
       "node": "plan",
       "port": "validation"
+    },
+    {
+      "name": "execution",
+      "node": "run_tests",
+      "port": "result",
+      "optional": true
     }
   ],
   "edges": [
@@ -2225,6 +2316,16 @@
     {
       "from_node": "require_search_completion",
       "to_node": "searched_comparison"
+    },
+    {
+      "from_node": "plan",
+      "from_output": "execution",
+      "to_node": "execution_route"
+    },
+    {
+      "from_node": "execution_route",
+      "from_output": "run",
+      "to_node": "execution_directory"
     }
   ]
 }

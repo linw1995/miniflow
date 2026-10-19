@@ -772,7 +772,7 @@ fn normalized_requests_retain_provenance_and_package_only_scope() {
     let root = directory.path();
     write(root, "core/src/lib.rs", &SOURCE.replace("1, 1", "2, 2"));
     let head = commit(root);
-    let request = mf_runtime::ValueRef::from(json!({"mode":"snapshot","base":base,"head":head,"analyze":false,"require_checkout":true,"options":{"exact_tests":false},"validation":{"run":42}})).into_secret();
+    let request = mf_runtime::ValueRef::from(json!({"mode":"snapshot","base":base,"head":head,"analyze":false,"require_checkout":true,"options":{"exact_tests":false},"validation":{"run":42},"execution":{"enabled":true,"opaque":{"key":42}}})).into_secret();
     let analysis_input = mfn_test_affected::GitNode {
         config: Default::default(),
     }
@@ -811,7 +811,13 @@ fn normalized_requests_retain_provenance_and_package_only_scope() {
         )
         .unwrap();
     let output = final_output.unwrap();
-    assert!(output.plan.is_secret() && output.validation.is_secret());
+    assert!(
+        output.plan.is_secret() && output.validation.is_secret() && output.execution.is_secret()
+    );
+    assert_eq!(
+        output.execution,
+        json!({"enabled":true,"opaque":{"key":42}})
+    );
     assert_eq!(output.validation, json!({"run":42}));
     let plan: mfn_test_affected::TestPlan =
         serde_json::from_value(serde_json::to_value(output.plan).unwrap()).unwrap();
@@ -821,7 +827,7 @@ fn normalized_requests_retain_provenance_and_package_only_scope() {
     let plan_file = root.join("target/package-plan.json");
     fs::write(
         &plan_file,
-        json!({"plan":plan,"validation":{"run":42}}).to_string(),
+        json!({"plan":plan,"validation":{"run":42},"execution":{"executed":false}}).to_string(),
     )
     .unwrap();
     let runner = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../run-tests.py");

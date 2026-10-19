@@ -10,9 +10,9 @@
 
 ## 3. Compose optional local execution
 
-- [ ] 3.1 Carry opaque execution context through Git/LSP/planning; add the default-false run parameter and existing conditional routing.
-- [ ] 3.2 Preserve plan-only output, reject CI execution, and expose optional execution reports through mf.
-- [ ] 3.3 Extend existing Flow replay and invocation documentation, rebuild the local runner, and commit this group.
+- [x] 3.1 Carry opaque execution context through Git/LSP/planning; add the default-false run parameter and existing conditional routing.
+- [x] 3.2 Preserve plan-only output, reject CI execution, and expose optional execution reports through mf.
+- [x] 3.3 Extend existing Flow replay and invocation documentation, rebuild the local runner, and commit this group.
 
 ## 4. Review and archive
 

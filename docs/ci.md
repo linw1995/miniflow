@@ -171,6 +171,17 @@ nix develop --command cargo run -p mf-cli --features development-support -- run 
 nix develop --command python3 tools/test-affected/run-tests.py target/test-plan.json
 ```
 
+For planning and execution in one command, pass `--params.run true` to the same Flow:
+
+```bash
+nix develop --command cargo run -p mf-cli --features development-support -- run \
+  ./target/test-affected-runner --params.precision packages --params.run true
+```
+
+Execution adds an `execution` report to the output. Test diagnostics use stderr; failure
+makes the Flow fail. The default remains planning-only. CI rejects `run=true` and continues
+to use the coverage pipeline rather than this local nextest consumer.
+
 Use `--params.mode commit --params.head HEAD` for a first-parent comparison, including
 root commits. Use `--params.mode merge-base --params.base origin/main --params.head HEAD`
 for a branch comparison, or `snapshot` to compare supplied local revisions directly.
