@@ -1254,8 +1254,8 @@ fn bounded_causes(causes: &[SkipCause]) -> (Vec<SkipCause>, usize) {
     let mut visible = Vec::new();
     let mut omitted = causes.len().saturating_sub(MAX_VISIBLE_PORTS);
     for cause in causes.iter().take(MAX_VISIBLE_PORTS) {
-        if cause.source_node.len() > MAX_PORT_NAME_BYTES
-            || cause.source_output.len() > MAX_PORT_NAME_BYTES
+        if cause.source_node().len() > MAX_PORT_NAME_BYTES
+            || cause.source_output().map_or(0, str::len) > MAX_PORT_NAME_BYTES
         {
             omitted += 1;
         } else {

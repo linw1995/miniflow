@@ -54,7 +54,7 @@ fn node(
 }
 
 fn dependency(source_node: &str) -> ExecutionDependency<'_> {
-    ExecutionDependency {
+    ExecutionDependency::Output {
         exclusive: false,
         source_node,
         source_output: "value",

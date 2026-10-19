@@ -1147,10 +1147,15 @@ fn details_text(
             details.push_str(&format!("Skipped: {}\n", node.skipped_ports.join(", ")));
         }
         for cause in &node.skip_causes {
-            details.push_str(&format!(
-                "Skipped by {}.{}\n",
-                cause.source_node, cause.source_output
-            ));
+            match cause.source_output() {
+                Some(port) => {
+                    details.push_str(&format!("Skipped by {}.{port}\n", cause.source_node()))
+                }
+                None => details.push_str(&format!(
+                    "Skipped by unsuccessful node {}\n",
+                    cause.source_node()
+                )),
+            }
         }
         if node.omitted_port_names != 0 || node.omitted_skip_causes != 0 {
             details.push_str(&format!(

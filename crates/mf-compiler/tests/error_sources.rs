@@ -277,7 +277,7 @@ fn forwarded_known_output_values_preserve_typed_mismatches() {
     let error = inference
         .resolve_node(
             &mut forward,
-            &[ExecutionDependency {
+            &[ExecutionDependency::Output {
                 exclusive: false,
                 source_node: "source",
                 source_output: "value",

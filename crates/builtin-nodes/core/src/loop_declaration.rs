@@ -131,6 +131,9 @@ impl From<LoopPassFailure> for NodeExecutionError {
 }
 
 impl TaskNode for LoopNode {
+    fn supports_success_dependencies(&self) -> bool {
+        false
+    }
     fn execute(
         &self,
         inputs: Inputs,

@@ -34,9 +34,9 @@ pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
 pub use config_template::{ConfigTemplate, ConfigTemplateError};
 pub use context::{
-    ContextValue, ExecutionContext, ExecutionDependency, ExecutionScope, GeneratedNodeResult,
-    NodeResult, TypedNodeResult, execute_generated_node_in_context, execute_node_in_context,
-    select_context_output,
+    ContextValue, Dependency, ExecutionContext, ExecutionDependency, ExecutionScope,
+    GeneratedNodeResult, NodeResult, TypedNodeResult, execute_generated_node_in_context,
+    execute_node_in_context, select_context_output,
 };
 pub use definition::{
     ControlEdgeDefinition, DefinitionId, DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition,

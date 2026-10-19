@@ -86,6 +86,10 @@ fn deserialize_execution<'de, D: serde::Deserializer<'de>>(
 }
 
 impl WorkflowDefinition {
+    pub fn has_order_edges(&self) -> bool {
+        !self.order_edges.is_empty() || self.nodes.iter().any(NodeDefinition::has_order_edges)
+    }
+
     pub fn from_json(input: &str) -> Result<Self, DefinitionParseError> {
         let value: Value = serde_json::from_str(input).context(JsonParseSnafu)?;
         if value.get("version").and_then(Value::as_str) == Some("2026-09-24") {
@@ -127,6 +131,24 @@ pub struct NodeDefinition {
     pub config: Value,
     #[serde(rename = "loop", default, skip_serializing_if = "Option::is_none")]
     pub loop_definition: Option<Box<LoopDefinition>>,
+}
+
+impl NodeDefinition {
+    pub fn has_order_edges(&self) -> bool {
+        self.loop_definition
+            .as_ref()
+            .is_some_and(|definition| definition.body.has_order_edges())
+            || (self.kind == crate::ITERATION_KIND
+                && self.config["body"]["order_edges"]
+                    .as_array()
+                    .is_some_and(|edges| !edges.is_empty()))
+    }
+}
+
+impl LoopBodyDefinition {
+    pub fn has_order_edges(&self) -> bool {
+        !self.order_edges.is_empty() || self.nodes.iter().any(NodeDefinition::has_order_edges)
+    }
 }
 
 pub const LOOP_KIND: &str = "workflow.loop";

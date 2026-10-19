@@ -287,7 +287,7 @@ fn exclusive_bindings_preserve_groups_and_validate_all_predecessors() {
             .last()
             .unwrap()
             .iter()
-            .all(|dependency| dependency.exclusive)
+            .all(|dependency| dependency.borrowed().exclusive())
     );
     let mut reordered = definition.clone();
     reordered.edges.reverse();

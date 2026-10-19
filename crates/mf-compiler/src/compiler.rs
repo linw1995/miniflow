@@ -284,7 +284,7 @@ impl TypeInferenceState {
 
         let mut inputs: BTreeMap<&str, TypeFact> = BTreeMap::new();
         for dependency in dependencies {
-            let Some(input_name) = dependency.input else {
+            let Some(input_name) = dependency.borrowed().input() else {
                 continue;
             };
             let input = node
@@ -297,13 +297,22 @@ impl TypeInferenceState {
                     definition_id: id.clone(),
                     message: format!("unknown input `{input_name}` in type binding"),
                 })?;
-            let source_id = DefinitionId::from(dependency.source_node);
+            let source_id = DefinitionId::from(dependency.borrowed().source_node());
             let source = self
                 .outputs
-                .get(&(source_id.clone(), dependency.source_output.to_owned()))
+                .get(&(
+                    source_id.clone(),
+                    dependency
+                        .source_output()
+                        .expect("input output source")
+                        .to_owned(),
+                ))
                 .ok_or_else(|| WorkflowCompileError::UnavailableInferredOutput {
                     from_node: source_id.clone(),
-                    from_output: dependency.source_output.to_owned(),
+                    from_output: dependency
+                        .source_output()
+                        .expect("input output source")
+                        .to_owned(),
                     to_node: id.clone(),
                     to_input: input_name.to_owned(),
                 })?;
@@ -311,7 +320,10 @@ impl TypeInferenceState {
                 input.value_type.validate_shared(value).with_context(|_| {
                     KnownValueTypeConflictSnafu {
                         from_node: source_id.clone(),
-                        from_output: dependency.source_output.to_owned(),
+                        from_output: dependency
+                            .source_output()
+                            .expect("input output source")
+                            .to_owned(),
                         output_type: Box::new(source.value_type.clone()),
                         to_node: id.clone(),
                         to_input: input_name.to_owned(),
@@ -323,7 +335,10 @@ impl TypeInferenceState {
             {
                 return Err(WorkflowCompileError::IncompatiblePortTypes {
                     from_node: source_id,
-                    from_output: dependency.source_output.to_owned(),
+                    from_output: dependency
+                        .source_output()
+                        .expect("input output source")
+                        .to_owned(),
                     output_type: Box::new(source.value_type.clone()),
                     to_node: id.clone(),
                     to_input: input_name.to_owned(),
@@ -335,7 +350,7 @@ impl TypeInferenceState {
             } else {
                 input.value_type.clone()
             };
-            if dependency.exclusive
+            if dependency.borrowed().exclusive()
                 && let Some(fact) = inputs.get_mut(input_name)
             {
                 if fact.value_type != value_type {
@@ -463,12 +478,6 @@ fn prepare_graph(
     enclosing: Option<&BTreeMap<String, ValueType>>,
     allow_iteration_input: bool,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
-    if !definition.order_edges.is_empty() {
-        return InvalidSuccessDependencySnafu {
-            message: "node-success execution support is not installed",
-        }
-        .fail();
-    }
     if allow_iteration_input {
         crate::loops::validate_structure(definition)?;
     }
@@ -488,6 +497,21 @@ fn prepare_graph(
                 node.definition_id
             ),
         }.fail();
+    }
+    for edge in &definition.order_edges {
+        for endpoint in [&edge.from_node, &edge.to_node] {
+            let node = nodes
+                .iter()
+                .find(|node| &node.definition_id == endpoint)
+                .expect("validated endpoints");
+            if !matches!(&node.node, Some(mf_runtime::NodeExecution::Task(task)) if task.supports_success_dependencies())
+            {
+                return InvalidSuccessDependencySnafu {
+                    message: format!("node `{endpoint}` is not an ordinary Task"),
+                }
+                .fail();
+            }
+        }
     }
     let incoming = incoming_dependencies(definition);
     let startup = definition.version.supports_startup_inputs()
@@ -554,7 +578,7 @@ pub fn incoming_dependencies(
         incoming
             .entry(edge.to_node.as_str())
             .or_default()
-            .push(ExecutionDependency {
+            .push(ExecutionDependency::Output {
                 exclusive: edge.exclusive,
                 input: Some(&edge.to_input),
                 source_node: edge.from_node.as_str(),
@@ -565,11 +589,19 @@ pub fn incoming_dependencies(
         incoming
             .entry(edge.to_node.as_str())
             .or_default()
-            .push(ExecutionDependency {
+            .push(ExecutionDependency::Output {
                 exclusive: false,
                 input: None,
                 source_node: edge.from_node.as_str(),
                 source_output: &edge.from_output,
+            });
+    }
+    for edge in &definition.order_edges {
+        incoming
+            .entry(edge.to_node.as_str())
+            .or_default()
+            .push(ExecutionDependency::NodeSuccess {
+                source_node: edge.from_node.as_str(),
             });
     }
     incoming
@@ -649,8 +681,8 @@ fn validate_base_metadata(
         let mut pending = vec![node.definition_id.as_str()];
         while let Some(id) = pending.pop() {
             for dependency in incoming.get(id).into_iter().flatten() {
-                if ancestors.insert(dependency.source_node) {
-                    pending.push(dependency.source_node);
+                if ancestors.insert(dependency.borrowed().source_node()) {
+                    pending.push(dependency.borrowed().source_node());
                 }
             }
         }
@@ -757,7 +789,7 @@ pub fn topological_order(
 }
 
 fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCompileError> {
-    if !definition.order_edges.is_empty()
+    if definition.has_order_edges()
         && definition.version != crate::WorkflowDefinitionVersion::V2026_10_19
     {
         return InvalidSuccessDependencySnafu {
@@ -986,6 +1018,7 @@ pub fn compile_definition(
         definition.outputs.clone(),
     )
     .and_then(|flow| flow.with_control_edges(definition.control_edges.clone()))
+    .and_then(|flow| flow.with_order_edges(definition.order_edges.clone()))
     .context(FlowConstructionSnafu)?;
 
     if let Some(execution) = &definition.execution {
@@ -1114,6 +1147,7 @@ pub fn instantiate_compiled(
         plan.definition.outputs.clone(),
     )
     .and_then(|flow| flow.with_control_edges(plan.definition.control_edges.clone()))
+    .and_then(|flow| flow.with_order_edges(plan.definition.order_edges.clone()))
     .context(FlowConstructionSnafu)?;
     let builder = if plan.definition.version.supports_startup_inputs() {
         builder.with_workflow_inputs()?
@@ -1372,6 +1406,7 @@ fn bind_subgraph_node(
         .collect();
     let flow = crate::FlowBuilder::prepare(nodes, body.edges.clone(), order, body.outputs.clone())
         .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
+        .and_then(|flow| flow.with_order_edges(body.order_edges.clone()))
         .and_then(|flow| flow.into_tasks())
         .context(FlowConstructionSnafu)?;
     let body = PreparedSubgraph::new(identities, outputs, move |state| {

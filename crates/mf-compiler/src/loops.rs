@@ -61,7 +61,7 @@ pub fn body_definition(
     });
     nodes.extend(body.nodes.iter().cloned());
     WorkflowDefinition {
-        version: if body.order_edges.is_empty() {
+        version: if !body.has_order_edges() {
             WorkflowDefinitionVersion::V2026_09_29
         } else {
             WorkflowDefinitionVersion::V2026_10_19

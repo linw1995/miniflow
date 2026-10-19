@@ -670,12 +670,12 @@ fn validate_graph(
                     for cause in causes {
                         if !data.iter().any(|edge| {
                             edge.to_node == node.id
-                                && edge.from_node == cause.source_node
-                                && edge.from_output == cause.source_output
+                                && edge.from_node == cause.source_node()
+                                && Some(edge.from_output.as_str()) == cause.source_output()
                         }) && !control.iter().any(|edge| {
                             edge.to_node == node.id
-                                && edge.from_node == cause.source_node
-                                && edge.from_output == cause.source_output
+                                && edge.from_node == cause.source_node()
+                                && Some(edge.from_output.as_str()) == cause.source_output()
                         }) {
                             return Err(invalid("stream skip cause is not an incoming dependency"));
                         }

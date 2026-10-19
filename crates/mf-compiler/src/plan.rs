@@ -733,17 +733,20 @@ fn generate_scope(
 #[cfg(feature = "codegen")]
 fn dependency_tokens(dependencies: &[mf_runtime::ExecutionDependency<'_>]) -> Vec<TokenStream> {
     dependencies.iter().map(|dependency| {
-        let source = LitStr::new(dependency.source_node, Span::call_site());
-        let port = LitStr::new(dependency.source_output, Span::call_site());
-        let input = match dependency.input {
+        let source = LitStr::new(dependency.borrowed().source_node(), Span::call_site());
+        let Some(port) = dependency.source_output() else {
+            return quote! { mf_runtime::ExecutionDependency::NodeSuccess { source_node: #source } };
+        };
+        let port = LitStr::new(port, Span::call_site());
+        let input = match dependency.borrowed().input() {
             Some(input) => {
                 let input = LitStr::new(input, Span::call_site());
                 quote! { Some(#input) }
             }
             None => quote! { None },
         };
-        let exclusive = dependency.exclusive;
-        quote! { mf_runtime::ExecutionDependency { exclusive: #exclusive, input: #input, source_node: #source, source_output: #port } }
+        let exclusive = dependency.borrowed().exclusive();
+        quote! { mf_runtime::ExecutionDependency::Output { exclusive: #exclusive, input: #input, source_node: #source, source_output: #port } }
     }).collect()
 }
 
@@ -932,6 +935,7 @@ impl CompiledWorkflow {
             self.definition.outputs.clone(),
         )
         .and_then(|flow| flow.with_control_edges(self.definition.control_edges.clone()))
+        .and_then(|flow| flow.with_order_edges(self.definition.order_edges.clone()))
         .map_err(crate::WorkflowBuildError::from)?;
         let flow = if self.definition.version.supports_startup_inputs() {
             flow.with_workflow_inputs()
@@ -1031,17 +1035,20 @@ fn dependency_layout_tokens(
             let mut dependencies = incoming.get(id.as_str()).cloned().unwrap_or_default();
             dependencies.sort();
             let values = dependencies.iter().map(|dependency| {
-                let source = LitStr::new(dependency.source_node, Span::call_site());
-                let output = LitStr::new(dependency.source_output, Span::call_site());
-                let input = match dependency.input {
+                let source = LitStr::new(dependency.borrowed().source_node(), Span::call_site());
+                let Some(output) = dependency.source_output() else {
+                    return quote! { mf_runtime::FlowDependency::NodeSuccess { source_node: std::borrow::Cow::Borrowed(#source) } };
+                };
+                let output = LitStr::new(output, Span::call_site());
+                let input = match dependency.borrowed().input() {
                     Some(input) => {
                         let input = LitStr::new(input, Span::call_site());
                         quote! { Some(std::borrow::Cow::Borrowed(#input)) }
                     }
                     None => quote! { None },
                 };
-                let exclusive = dependency.exclusive;
-                quote! { mf_runtime::FlowDependency { exclusive: #exclusive,
+                let exclusive = dependency.borrowed().exclusive();
+                quote! { mf_runtime::FlowDependency::Output { exclusive: #exclusive,
                     input: #input,
                     source_node: std::borrow::Cow::Borrowed(#source),
                     source_output: std::borrow::Cow::Borrowed(#output),
@@ -1447,7 +1454,7 @@ fn collect_body_layouts(
         let mut edges = Vec::new();
         for (target, id) in body_order.iter().enumerate() {
             for dependency in incoming.get(id.as_str()).into_iter().flatten() {
-                edges.push((indices[dependency.source_node], target));
+                edges.push((indices[dependency.borrowed().source_node()], target));
             }
         }
         let node_order: Vec<_> = (0..body_order.len()).map(mf_runtime::NodeId::new).collect();
@@ -1463,4 +1470,18 @@ fn collect_body_layouts(
         collect_body_layouts(&body, &body_order, &body_scope, layouts)?;
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "codegen"))]
+mod success_dependency_tests {
+    #[test]
+    fn frozen_success_dependencies_do_not_name_a_port() {
+        let dependency = mf_runtime::ExecutionDependency::NodeSuccess {
+            source_node: "source",
+        };
+        let tokens = super::dependency_tokens(&[dependency]);
+        let code = tokens[0].to_string();
+        assert!(code.contains("NodeSuccess"));
+        assert!(!code.contains("source_output"));
+    }
 }

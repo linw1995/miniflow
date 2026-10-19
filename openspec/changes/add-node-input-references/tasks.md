@@ -7,18 +7,18 @@
 
 ## 2. Node-success semantics and execution
 
-- [ ] 2.1 Add typed prerequisites and frame-local authoritative Task outcomes; publish success after output validation and record skips independently of outputs and observation.
-- [ ] 2.2 Integrate resolution, error-before-skip precedence, bounded retention, concurrent-domain synchronization, and generated/typed execution without synthetic outputs or another scheduler.
-- [ ] 2.3 Add validated success-edge builder support and restrict success edges to same-scope/frame ordinary Tasks; reject stateful, container, synthetic, and cross-domain endpoints while preserving existing output-gate support.
-- [ ] 2.4 Update activation facts, context ancestry, startup-input eligibility, and mixed cycles; distinguish router success from branch-output production in exclusive proofs.
-- [ ] 2.5 Test zero-output success, skipped optional outputs, validation failure, skips, errors, cancellation, pending/missing outcomes, conjunction, and frame resets with observation disabled.
-- [ ] 2.6 Verify in-memory/generated parity, typed data paths, concurrent domains, supported body Tasks, stream-message frames, and unchanged isolated execution.
+- [x] 2.1 Add typed prerequisites and frame-local authoritative Task outcomes; publish success after output validation and record skips independently of outputs and observation.
+- [x] 2.2 Integrate resolution, error-before-skip precedence, bounded retention, concurrent-domain synchronization, and generated/typed execution without synthetic outputs or another scheduler.
+- [x] 2.3 Add validated success-edge builder support and restrict success edges to same-scope/frame ordinary Tasks; reject stateful, container, synthetic, and cross-domain endpoints while preserving existing output-gate support.
+- [x] 2.4 Update activation facts, context ancestry, startup-input eligibility, and mixed cycles; distinguish router success from branch-output production in exclusive proofs.
+- [x] 2.5 Test zero-output success, skipped optional outputs, validation failure, skips, errors, cancellation, pending/missing outcomes, conjunction, and frame resets with observation disabled.
+- [x] 2.6 Verify in-memory execution, generated dependency emission, typed data paths, concurrent domains, body Tasks, stream-message frames, and isolated execution; complete standalone parity with the protocol in group 3.
 
 ## 3. Protocol and diagnostics
 
 - [ ] 3.1 Add versioned node-success edges to root/body descriptions; update validation, graph identity, manifests, readers, and protocol selection.
 - [ ] 3.2 Add versioned node-success skip causes; update OTLP/event encoding, verbose output, and reducers without sentinel ports or payload exposure.
-- [ ] 3.3 Retain old protocols for representable graphs; test old/new preflight, nested dependencies, round trips, and observation uncertainty.
+- [ ] 3.3 Retain old protocols for representable graphs; test standalone/in-memory success parity, old/new preflight, nested dependencies, round trips, and observation uncertainty.
 
 ## 4. TUI projection and inspection
 

@@ -26,7 +26,7 @@ fn schema() -> WorkflowInputSchema {
 }
 
 fn dependency<'a>(input: Option<&'a str>, source: &'a str) -> ExecutionDependency<'a> {
-    ExecutionDependency {
+    ExecutionDependency::Output {
         exclusive: false,
         input,
         source_node: source,
@@ -102,9 +102,11 @@ fn node_resolution_combines_startup_values_and_dependencies_without_copying_payl
 }
 
 fn candidate(source: &str) -> ExecutionDependency<'_> {
-    ExecutionDependency {
+    ExecutionDependency::Output {
         exclusive: true,
-        ..dependency(Some("value"), source)
+        input: Some("value"),
+        source_node: source,
+        source_output: "value",
     }
 }
 
@@ -126,7 +128,7 @@ fn exclusive_resolution_preserves_payloads_and_metadata() {
                     false,
                     [candidate("left"), candidate("right")],
                     |source| {
-                        Ok(Some(if source.source_node == selected {
+                        Ok(Some(if source.source_node() == selected {
                             ContextValue::Value(&value)
                         } else {
                             ContextValue::Skipped
@@ -165,16 +167,16 @@ fn exclusive_errors_precede_skips_and_input_type_checks() {
                 false,
                 dependencies,
                 |source| {
-                    if source.source_node == "gate" {
+                    if source.source_node() == "gate" {
                         return Ok(Some(ContextValue::Skipped));
                     }
-                    if source.source_node == "third" && case == "missing" {
+                    if source.source_node() == "third" && case == "missing" {
                         return mf_runtime::NodeExecutionFailedSnafu {
                             message: "missing third.value",
                         }
                         .fail();
                     }
-                    let produced = source.source_node == "left" && case != "none";
+                    let produced = source.source_node() == "left" && case != "none";
                     Ok(Some(if produced {
                         ContextValue::Value(&bad)
                     } else {
@@ -187,7 +189,7 @@ fn exclusive_errors_precede_skips_and_input_type_checks() {
                 "one" => {
                     let causes = result.unwrap();
                     assert_eq!(causes.len(), 1);
-                    assert_eq!(causes.first().unwrap().source_node, "gate");
+                    assert_eq!(causes.first().unwrap().source_node(), "gate");
                 }
                 "none" => {
                     assert_eq!(result.unwrap().len(), 4);
@@ -207,7 +209,7 @@ fn exclusive_errors_precede_skips_and_input_type_checks() {
             false,
             [candidate("left"), candidate("right")],
             |source| {
-                Ok(Some(if source.source_node == "left" {
+                Ok(Some(if source.source_node() == "left" {
                     ContextValue::Value(&bad)
                 } else {
                     ContextValue::Skipped

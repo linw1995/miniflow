@@ -668,6 +668,8 @@ pub enum NodeBuildError {
 
 #[derive(Debug, Snafu)]
 pub enum NodeExecutionError {
+    #[snafu(display("missing task outcome for node `{node}`"), visibility(pub))]
+    MissingTaskOutcome { node: String },
     #[snafu(display("could not decode typed node inputs at `{}`: {source}", source.pointer()), visibility(pub(super)))]
     InputDecode {
         #[snafu(source(from(crate::InputDecodeError, Box::new)))]
@@ -730,6 +732,11 @@ where
 }
 
 pub trait TaskNode: Send + Sync {
+    /// Containers and engine controls opt out of ordinary per-frame success dependencies.
+    fn supports_success_dependencies(&self) -> bool {
+        true
+    }
+
     fn execute(
         &self,
         inputs: Inputs,
@@ -748,6 +755,10 @@ pub trait NodePortContract {
 /// Prepare through [`PreparedNode::typed_task`]. The runtime adapter implements
 /// the dynamic task contract, so business logic only receives decoded fields.
 pub trait TypedTaskNode: Send + Sync {
+    fn supports_success_dependencies(&self) -> bool {
+        true
+    }
+
     type Input: crate::NodeInputs;
     type Output: crate::NodeOutputs;
 
@@ -786,6 +797,9 @@ pub fn encode_typed_result<O: crate::NodeOutputs>(
 }
 
 impl<N: TypedTaskNode> TaskNode for TypedTaskAdapter<N> {
+    fn supports_success_dependencies(&self) -> bool {
+        self.0.supports_success_dependencies()
+    }
     fn execute(
         &self,
         inputs: Inputs,
@@ -945,6 +959,9 @@ impl<N> Clone for TypedTaskHandle<N> {
 struct SharedTypedTask<N>(std::sync::Arc<N>);
 
 impl<N: TypedTaskNode> TaskNode for SharedTypedTask<N> {
+    fn supports_success_dependencies(&self) -> bool {
+        self.0.supports_success_dependencies()
+    }
     fn execute(
         &self,
         inputs: Inputs,

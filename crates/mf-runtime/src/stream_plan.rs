@@ -1,34 +1,13 @@
 use crate::execution_domains::{ExecutionDomain, ExecutionDomains};
 use crate::message_domain::MessageDomains;
 use crate::runner::ContextSnafu;
-use crate::{
-    ExecutionDependency, FlowNode, NodeExecution, StreamExecution, TaskNode,
-    WorkflowOutputDefinition,
-};
+use crate::{FlowNode, NodeExecution, StreamExecution, TaskNode, WorkflowOutputDefinition};
 use snafu::OptionExt;
 use std::borrow::Cow;
 
 type OperatorStates = Vec<Option<NodeExecution>>;
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct FlowDependency {
-    /// Candidates with the same target input form one exclusive group.
-    pub exclusive: bool,
-    pub input: Option<Cow<'static, str>>,
-    pub source_node: Cow<'static, str>,
-    pub source_output: Cow<'static, str>,
-}
-
-impl FlowDependency {
-    pub fn borrowed(&self) -> ExecutionDependency<'_> {
-        ExecutionDependency {
-            exclusive: self.exclusive,
-            input: self.input.as_deref(),
-            source_node: self.source_node.as_ref(),
-            source_output: self.source_output.as_ref(),
-        }
-    }
-}
+pub type FlowDependency = crate::Dependency<Cow<'static, str>>;
 
 pub struct StreamPlan {
     execution: StreamExecution,

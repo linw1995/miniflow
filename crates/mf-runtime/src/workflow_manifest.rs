@@ -237,6 +237,12 @@ pub fn describe_definition(
     execution_order: &[String],
     loop_orders: &[LoopExecutionOrder],
 ) -> Result<WorkflowDescription, ContractError> {
+    ensure!(
+        !definition.has_order_edges(),
+        mf_telemetry::InvalidSnafu {
+            message: "node-success descriptions require the next observation protocol"
+        }
+    );
     let mut orders: BTreeMap<_, _> = loop_orders
         .iter()
         .map(|order| (order.path.clone(), order.execution_order.as_slice()))

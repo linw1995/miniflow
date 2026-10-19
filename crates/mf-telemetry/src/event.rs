@@ -66,9 +66,30 @@ pub enum LoopPassOutcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-pub struct SkipCause {
-    pub source_node: String,
-    pub source_output: String,
+#[serde(untagged, deny_unknown_fields)]
+pub enum SkipCause {
+    Output {
+        source_node: String,
+        source_output: String,
+    },
+    NodeSuccess {
+        node_success: String,
+    },
+}
+
+impl SkipCause {
+    pub fn source_node(&self) -> &str {
+        match self {
+            Self::Output { source_node, .. } => source_node,
+            Self::NodeSuccess { node_success } => node_success,
+        }
+    }
+    pub fn source_output(&self) -> Option<&str> {
+        match self {
+            Self::Output { source_output, .. } => Some(source_output),
+            Self::NodeSuccess { .. } => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -267,8 +288,8 @@ impl Event {
                 require(!causes.is_empty(), "skip requires at least one cause")?;
                 for cause in causes {
                     require(
-                        !cause.source_node.trim().is_empty()
-                            && !cause.source_output.is_empty()
+                        !cause.source_node().trim().is_empty()
+                            && cause.source_output().is_none_or(|port| !port.is_empty())
                             && unique.insert(cause),
                         "invalid or duplicate skip cause",
                     )?;
@@ -505,12 +526,12 @@ impl LifecycleEvent {
                     require(
                         data_edges.iter().any(|e| {
                             e.to_node == identity.id
-                                && e.from_node == cause.source_node
-                                && e.from_output == cause.source_output
+                                && e.from_node == cause.source_node()
+                                && Some(e.from_output.as_str()) == cause.source_output()
                         }) || control_edges.iter().any(|e| {
                             e.to_node == identity.id
-                                && e.from_node == cause.source_node
-                                && e.from_output == cause.source_output
+                                && e.from_node == cause.source_node()
+                                && Some(e.from_output.as_str()) == cause.source_output()
                         }),
                         "skip cause is not an incoming dependency",
                     )?;

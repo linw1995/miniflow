@@ -346,7 +346,7 @@ fn stream_skip_observations_use_logical_inputs_and_keep_selected_sources() {
         })
         .unwrap();
     assert_eq!(skipped.0.len(), 1);
-    assert_eq!(skipped.0[0].source_node, "route");
+    assert_eq!(skipped.0[0].source_node(), "route");
     assert_eq!(skipped.1.len(), 1);
     assert_eq!(skipped.1[0].source_node, "active");
 }

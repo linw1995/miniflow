@@ -80,6 +80,7 @@ struct ScopeGuard<'a> {
     context: &'a mut ExecutionContext,
     parent_outputs: BTreeMap<String, Option<Value>>,
     parent_typed_outputs: BTreeSet<String>,
+    parent_task_outcomes: BTreeMap<String, TaskOutcome>,
     parent_exit_cutoff: Arc<AtomicUsize>,
     depth: usize,
 }
@@ -89,6 +90,7 @@ impl Drop for ScopeGuard<'_> {
         self.context.scopes.truncate(self.depth);
         self.context.outputs = std::mem::take(&mut self.parent_outputs);
         self.context.typed_outputs = std::mem::take(&mut self.parent_typed_outputs);
+        self.context.task_outcomes = std::mem::take(&mut self.parent_task_outcomes);
         self.context.scope_exit_cutoff = self.parent_exit_cutoff.clone();
         self.context.pending_loop_write = None;
     }
@@ -197,11 +199,18 @@ pub enum ContextValue<'a> {
 }
 
 /// Completed output values for one run. Nodes receive an immutable reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TaskOutcome {
+    Succeeded,
+    Skipped,
+}
+
 #[derive(Debug)]
 pub struct ExecutionContext {
     // A present None is an explicit skip; an absent key is a missing output.
     outputs: BTreeMap<String, Option<Value>>,
     typed_outputs: BTreeSet<String>,
+    task_outcomes: BTreeMap<String, TaskOutcome>,
     observation: Option<RunObservation>,
     body_observation: Option<BodyObservation>,
     scopes: Vec<ExecutionScope>,
@@ -226,6 +235,7 @@ impl Default for ExecutionContext {
         Self {
             outputs: BTreeMap::new(),
             typed_outputs: BTreeSet::new(),
+            task_outcomes: BTreeMap::new(),
             observation: None,
             body_observation: None,
             scopes: Vec::new(),
@@ -303,6 +313,7 @@ impl ExecutionContext {
         Self {
             outputs: self.outputs.clone(),
             typed_outputs: self.typed_outputs.clone(),
+            task_outcomes: BTreeMap::new(),
             remaining_steps: self.remaining_steps.clone(),
             stdin: self.stdin.clone(),
             cancellation: self.cancellation.clone(),
@@ -479,6 +490,7 @@ impl ExecutionContext {
         Self {
             outputs: self.outputs.clone(),
             typed_outputs: self.typed_outputs.clone(),
+            task_outcomes: self.task_outcomes.clone(),
             observation,
             body_observation: self.body_observation.clone(),
             scopes: self.scopes.clone(),
@@ -505,6 +517,10 @@ impl ExecutionContext {
         nodes: impl IntoIterator<Item = &'a FlowNode<N>>,
     ) {
         for node in nodes {
+            if let Some(outcome) = source.task_outcomes.get(node.definition_id.as_str()) {
+                self.task_outcomes
+                    .insert(node.definition_id.to_string(), *outcome);
+            }
             for port in &node.metadata.ports.outputs {
                 let id = output_id(node.definition_id.as_str(), &port.name);
                 if let Some(value) = source.outputs.get(&id) {
@@ -551,10 +567,7 @@ impl ExecutionContext {
             node,
             !self.scopes.is_empty(),
             dependencies.iter().map(crate::FlowDependency::borrowed),
-            |dependency| {
-                self.output(&output_id(dependency.source_node, dependency.source_output))
-                    .map(Some)
-            },
+            |dependency| self.dependency_value(dependency),
             &mut inputs,
         )?;
         Ok((inputs, resolution))
@@ -739,6 +752,31 @@ impl ExecutionContext {
         result
     }
 
+    fn dependency_value(
+        &self,
+        dependency: ExecutionDependency<'_>,
+    ) -> Result<Option<ContextValue<'_>>, NodeExecutionError> {
+        match dependency {
+            Dependency::Output {
+                source_node,
+                source_output,
+                ..
+            } => self
+                .output(&output_id(source_node, source_output))
+                .map(Some),
+            Dependency::NodeSuccess { source_node } => {
+                if let Some(failure) = self.cancellation.failure() {
+                    return Err(failure.into());
+                }
+                match self.task_outcomes.get(source_node) {
+                    Some(TaskOutcome::Succeeded) => Ok(None),
+                    Some(TaskOutcome::Skipped) => Ok(Some(ContextValue::Skipped)),
+                    None => crate::node::MissingTaskOutcomeSnafu { node: source_node }.fail(),
+                }
+            }
+        }
+    }
+
     pub fn output(&self, id: &str) -> Result<ContextValue<'_>, NodeExecutionError> {
         match self.outputs.get(id) {
             Some(Some(value)) => Ok(ContextValue::Value(value)),
@@ -818,6 +856,7 @@ impl ExecutionContext {
         let depth = self.scopes.len();
         let parent_outputs = std::mem::take(&mut self.outputs);
         let parent_typed_outputs = std::mem::take(&mut self.typed_outputs);
+        let parent_task_outcomes = std::mem::take(&mut self.task_outcomes);
         let parent_exit_cutoff = std::mem::replace(
             &mut self.scope_exit_cutoff,
             Arc::new(AtomicUsize::new(usize::MAX)),
@@ -827,6 +866,7 @@ impl ExecutionContext {
             context: self,
             parent_outputs,
             parent_typed_outputs,
+            parent_task_outcomes,
             parent_exit_cutoff,
             depth,
         };
@@ -998,12 +1038,71 @@ fn state_error(id: &str, message: impl Into<String>) -> WorkflowRunError {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ExecutionDependency<'a> {
-    /// Candidates with the same target input form one exclusive group.
-    pub exclusive: bool,
-    pub input: Option<&'a str>,
-    pub source_node: &'a str,
-    pub source_output: &'a str,
+pub enum Dependency<S> {
+    Output {
+        exclusive: bool,
+        input: Option<S>,
+        source_node: S,
+        source_output: S,
+    },
+    NodeSuccess {
+        source_node: S,
+    },
+}
+
+pub type ExecutionDependency<'a> = Dependency<&'a str>;
+
+impl Dependency<std::borrow::Cow<'static, str>> {
+    pub fn borrowed(&self) -> ExecutionDependency<'_> {
+        match self {
+            Self::Output {
+                exclusive,
+                input,
+                source_node,
+                source_output,
+            } => Dependency::Output {
+                exclusive: *exclusive,
+                input: input.as_ref().map(AsRef::as_ref),
+                source_node: source_node.as_ref(),
+                source_output: source_output.as_ref(),
+            },
+            Self::NodeSuccess { source_node } => Dependency::NodeSuccess {
+                source_node: source_node.as_ref(),
+            },
+        }
+    }
+}
+
+impl<'a> ExecutionDependency<'a> {
+    pub fn borrowed(self) -> Self {
+        self
+    }
+    pub fn source_node(self) -> &'a str {
+        match self {
+            Self::Output { source_node, .. } | Self::NodeSuccess { source_node } => source_node,
+        }
+    }
+    pub fn source_output(self) -> Option<&'a str> {
+        match self {
+            Self::Output { source_output, .. } => Some(source_output),
+            Self::NodeSuccess { .. } => None,
+        }
+    }
+    pub fn input(self) -> Option<&'a str> {
+        match self {
+            Self::Output { input, .. } => input,
+            Self::NodeSuccess { .. } => None,
+        }
+    }
+    pub fn exclusive(self) -> bool {
+        matches!(
+            self,
+            Self::Output {
+                exclusive: true,
+                ..
+            }
+        )
+    }
 }
 
 enum StepObservation {
@@ -1136,6 +1235,7 @@ fn execute_ordered_call_in_context<'a, N>(
     ) -> Result<GeneratedNodeResult, NodeExecutionError>,
 ) -> Result<(), WorkflowRunError> {
     let id = node.definition_id.as_str();
+    ctx.task_outcomes.remove(id);
     ctx.reserve_step(id)?;
     ctx.pending_loop_write = None;
     let path = ctx.observation.as_ref().map(|_| ctx.scope_path());
@@ -1166,9 +1266,13 @@ fn execute_ordered_call_in_context<'a, N>(
         !ctx.scopes.is_empty(),
         dependencies,
         |dependency| {
-            let key = output_id(dependency.source_node, dependency.source_output);
+            let Some(port) = dependency.source_output() else {
+                return ctx.dependency_value(dependency);
+            };
+            let key = output_id(dependency.source_node(), port);
             if dependency
-                .input
+                .borrowed()
+                .input()
                 .is_some_and(|input| transferred_inputs.contains(&input))
                 && ctx.typed_outputs.contains(&key)
             {
@@ -1264,6 +1368,16 @@ fn execute_ordered_call_in_context<'a, N>(
             .cloned()
     });
     let result = ctx.publish_generated(node, result);
+    if result.is_ok() {
+        ctx.task_outcomes.insert(
+            id.into(),
+            if skipped {
+                TaskOutcome::Skipped
+            } else {
+                TaskOutcome::Succeeded
+            },
+        );
+    }
     if let Some(inputs) = &snapshot_inputs {
         let outcome = if result.is_err() {
             crate::SnapshotOutcome::Failed
@@ -1514,13 +1628,13 @@ mod tests {
                 },
             );
             let mut dependencies = vec![
-                crate::FlowDependency {
+                crate::FlowDependency::Output {
                     exclusive: false,
                     input: Some("value".into()),
                     source_node: "source".into(),
                     source_output: "value".into(),
                 },
-                crate::FlowDependency {
+                crate::FlowDependency::Output {
                     exclusive: false,
                     input: None,
                     source_node: "gate".into(),
@@ -1528,7 +1642,7 @@ mod tests {
                 },
             ];
             if case == "missing" {
-                dependencies.push(crate::FlowDependency {
+                dependencies.push(crate::FlowDependency::Output {
                     exclusive: false,
                     input: None,
                     source_node: "absent".into(),
@@ -1726,7 +1840,7 @@ mod tests {
             "source.value".into(),
             Some(json!([{"count": 1}, {"count": "two"}]).into()),
         );
-        let dependency = ExecutionDependency {
+        let dependency = ExecutionDependency::Output {
             exclusive: false,
             input: Some("payload"),
             source_node: "source",
@@ -1772,7 +1886,7 @@ mod tests {
         context
             .outputs
             .insert("source.value".into(), Some(json!(1).into()));
-        let dependency = ExecutionDependency {
+        let dependency = ExecutionDependency::Output {
             exclusive: false,
             input: Some("unexpected"),
             source_node: "source",
@@ -1809,7 +1923,7 @@ mod tests {
                 );
                 let result = execute_node_in_context(
                     &node,
-                    &[ExecutionDependency {
+                    &[ExecutionDependency::Output {
                         exclusive: false,
                         input: Some("value"),
                         source_node: "source",
@@ -1878,7 +1992,7 @@ mod tests {
         )
         .into_task()
         .unwrap();
-        let skipped = ExecutionDependency {
+        let skipped = ExecutionDependency::Output {
             exclusive: false,
             input: Some("payload"),
             source_node: "branch",
@@ -1887,7 +2001,7 @@ mod tests {
         let mut context = ExecutionContext::default();
         context.outputs.insert("branch.off".into(), None);
         for input in [None, Some("payload")] {
-            let missing = ExecutionDependency {
+            let missing = ExecutionDependency::Output {
                 exclusive: false,
                 input,
                 source_node: "source",
@@ -2031,7 +2145,7 @@ mod tests {
                     .into(),
                     dependencies: vec![
                         std::borrow::Cow::Owned(vec![]),
-                        std::borrow::Cow::Owned(vec![crate::FlowDependency {
+                        std::borrow::Cow::Owned(vec![crate::FlowDependency::Output {
                             exclusive: false,
                             input: Some("payload".into()),
                             source_node: "source".into(),

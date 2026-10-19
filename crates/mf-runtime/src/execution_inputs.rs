@@ -93,7 +93,7 @@ impl ExecutionInputs {
 
     /// Assembles and validates node inputs, retaining partial values for failure snapshots.
     ///
-    /// Lookup returns `None` only for an input already transferred through a typed slot.
+    /// Lookup returns `None` for a satisfied node-success prerequisite or an already transferred typed input.
     /// All dependencies are checked before honoring skips; skipped nodes bypass type validation.
     pub fn resolve_node<'a, 'value, N>(
         &self,
@@ -127,10 +127,10 @@ impl ExecutionInputs {
         for dependency in dependencies {
             let value = lookup(dependency).with_context(|_| DependencySnafu {
                 definition_id: id,
-                input: dependency.input.unwrap_or("<control>"),
+                input: dependency.borrowed().input().unwrap_or("<control>"),
             })?;
-            if dependency.exclusive {
-                let input = dependency.input.ok_or_else(|| {
+            if dependency.borrowed().exclusive() {
+                let input = dependency.borrowed().input().ok_or_else(|| {
                     ContextSnafu {
                         definition_id: id,
                         message: "exclusive dependency requires a target input",
@@ -138,9 +138,12 @@ impl ExecutionInputs {
                     .build()
                 })?;
                 let group = groups.entry(input).or_default();
-                let source = SkipCause {
-                    source_node: dependency.source_node.into(),
-                    source_output: dependency.source_output.into(),
+                let source = SkipCause::Output {
+                    source_node: dependency.borrowed().source_node().into(),
+                    source_output: dependency
+                        .source_output()
+                        .expect("exclusive output source")
+                        .into(),
                 };
                 match value {
                     Some(ContextValue::Value(value)) => {
@@ -161,14 +164,19 @@ impl ExecutionInputs {
             }
             match value {
                 Some(ContextValue::Value(value)) => {
-                    if let Some(input) = dependency.input {
+                    if let Some(input) = dependency.borrowed().input() {
                         inputs.insert(input.to_owned(), value.clone());
                     }
                 }
                 Some(ContextValue::Skipped) => {
-                    causes.insert(SkipCause {
-                        source_node: dependency.source_node.into(),
-                        source_output: dependency.source_output.into(),
+                    causes.insert(match dependency.source_output() {
+                        Some(port) => SkipCause::Output {
+                            source_node: dependency.source_node().into(),
+                            source_output: port.into(),
+                        },
+                        None => SkipCause::NodeSuccess {
+                            node_success: dependency.source_node().into(),
+                        },
                     });
                 }
                 None => {}
@@ -178,8 +186,11 @@ impl ExecutionInputs {
             if let Some((source, value)) = group.produced {
                 selected.push(InputSelection {
                     input: input.to_owned(),
-                    source_node: source.source_node,
-                    source_output: source.source_output,
+                    source_node: source.source_node().into(),
+                    source_output: source
+                        .source_output()
+                        .expect("exclusive output source")
+                        .into(),
                 });
                 inputs.insert(input.to_owned(), value);
             } else {

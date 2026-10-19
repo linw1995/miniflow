@@ -318,7 +318,7 @@ fn scheduled_events(
                 node: node("archive"),
                 position: count(3),
                 elapsed_ns: count(3_500_000_000),
-                causes: vec![SkipCause {
+                causes: vec![SkipCause::Output {
                     source_node: "transform".into(),
                     source_output: "archive".into(),
                 }],

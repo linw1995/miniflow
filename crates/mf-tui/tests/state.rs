@@ -1091,7 +1091,7 @@ fn conditional_skip_keeps_its_cause_and_inactive_port_outcome() {
             node: node("b", "fixture.sink"),
             position: count(1),
             elapsed_ns: count(40),
-            causes: vec![SkipCause {
+            causes: vec![SkipCause::Output {
                 source_node: "a".into(),
                 source_output: "value".into(),
             }],
@@ -1099,8 +1099,10 @@ fn conditional_skip_keeps_its_cause_and_inactive_port_outcome() {
         },
     );
     let mut wrong = skip.clone();
-    if let Event::NodeSkipped { causes, .. } = &mut wrong.event {
-        causes[0].source_output = "not-connected".into();
+    if let Event::NodeSkipped { causes, .. } = &mut wrong.event
+        && let SkipCause::Output { source_output, .. } = &mut causes[0]
+    {
+        *source_output = "not-connected".into();
     }
     assert!(state.apply(wrong).is_err());
     state.apply(skip).unwrap();
@@ -1121,7 +1123,7 @@ fn conditional_skip_keeps_its_cause_and_inactive_port_outcome() {
     let snapshot = state.snapshot();
     assert_eq!(snapshot.nodes[0].skipped_ports, ["value"]);
     assert_eq!(snapshot.nodes[1].status, NodeStatus::Skipped);
-    assert_eq!(snapshot.nodes[1].skip_causes[0].source_node, "a");
+    assert_eq!(snapshot.nodes[1].skip_causes[0].source_node(), "a");
     assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
 }
 
