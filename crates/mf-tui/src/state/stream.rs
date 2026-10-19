@@ -420,6 +420,7 @@ impl StreamState {
                 } else {
                     observed.started_sequence = Some(record.sequence);
                     observed.started_elapsed_ns = Some(*elapsed_ns);
+                    observed.set_selections(event.selected_inputs());
                     if observed.terminal_sequence.is_none() {
                         observed.status = NodeStatus::Running;
                     }
@@ -475,6 +476,7 @@ impl StreamState {
                     Some("stream invocation skipped after another lifecycle")
                 } else {
                     observed.status = NodeStatus::Skipped;
+                    observed.set_selections(event.selected_inputs());
                     observed.terminal_sequence = Some(record.sequence);
                     observed.terminal_elapsed_ns = Some(*elapsed_ns);
                     (observed.skip_causes, observed.omitted_skip_causes) = bounded_causes(causes);

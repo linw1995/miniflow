@@ -2,7 +2,7 @@
 
 use crate::{
     duration::format_duration_ns,
-    graph::{GraphError, GraphLayout, GraphView},
+    graph::{ConnectionView, GraphError, GraphLayout, GraphView},
     logs::LogSnapshot,
     manifest::{ManifestReadError, read_manifest},
     receiver::{LoopbackReceiver, ObservationReader, ReceiverError},
@@ -710,6 +710,7 @@ fn set_nonblocking(fd: impl AsFd) -> io::Result<()> {
 
 #[derive(Default)]
 struct ViewState {
+    graph_notice: Option<String>,
     traces: TraceView,
     path: Vec<String>,
     offset: (u32, u32),
@@ -746,30 +747,6 @@ impl ViewState {
         matching.get(matching.len() - offset - 1).copied()
     }
 
-    fn handle_observation_key(
-        &mut self,
-        key: KeyCode,
-        root: &GraphLayout,
-        bodies: &BTreeMap<Vec<String>, GraphLayout>,
-        reader: &ObservationReader,
-    ) {
-        let snapshot = reader.snapshot_shared();
-        let traces = reader.trace_snapshot();
-        if !self
-            .traces
-            .handle_data_key(key, &traces, &reader.data_snapshot())
-        {
-            self.handle_key(
-                key,
-                &snapshot,
-                root,
-                bodies,
-                &traces,
-                &reader.log_snapshot(),
-            );
-        }
-    }
-
     pub fn handle_key(
         &mut self,
         key: KeyCode,
@@ -787,7 +764,7 @@ impl ViewState {
             KeyCode::PageUp => self.details_offset = self.details_offset.saturating_sub(10),
             KeyCode::Char('l') => {
                 if let Some(node) = self.layout(root, bodies).nodes().get(self.selected)
-                    && node.kind == "workflow.loop"
+                    && matches!(node.kind.as_str(), "workflow.loop" | "builtin.iteration")
                 {
                     let mut child = self.path.clone();
                     child.push(node.id.clone());
@@ -907,6 +884,7 @@ fn draw(
     terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
     root_layout: &GraphLayout,
     body_layouts: &BTreeMap<Vec<String>, GraphLayout>,
+    description: &WorkflowDescription,
     snapshot: &StateSnapshot,
     capture: &CaptureView,
     elapsed: Duration,
@@ -975,8 +953,8 @@ fn draw(
             }
         });
         frame.render_widget(Paragraph::new(format!(
-            "Workflow: {workflow}  |  Process: {phase}  |  Scope: {scope}{pass_label}  |  {:.1}s",
-            elapsed.as_secs_f64()
+            "{}  |  Workflow: {workflow}  |  Process: {phase}  |  Scope: {scope}{pass_label}  |  {:.1}s",
+            connection_summary(layout), elapsed.as_secs_f64()
         )), header);
         let [graph, details] = Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)]).areas(body);
         let graph = if layout.unresolved_count() > 0 {
@@ -999,7 +977,8 @@ fn draw(
         } else {
             snapshot.nodes.get(view_state.selected)
         };
-        let details_body = format!("{}\n{}", details_text(selected_node, pass, snapshot, capture), layout.routing_details(view_state.selected));
+        let bindings = binding_details(description, &view_state.path, selected_node);
+        let details_body = format!("{}\n{}\n{}", view_state.graph_notice.as_deref().unwrap_or_default(), details_text(selected_node, pass, snapshot, capture, &bindings), layout.routing_details(view_state.selected));
         let (window, offset) = details_window(&details_body, usize::from(details.width.saturating_sub(2)), usize::from(details.height.saturating_sub(2)), view_state.details_offset);
         view_state.details_offset = offset;
         frame.render_widget(Paragraph::new(window)
@@ -1007,12 +986,147 @@ fn draw(
         let lifecycle = &snapshot.lifecycle;
         let controls = if status.is_some() { "q/Enter close" } else { "Ctrl-C interrupt" };
         frame.render_widget(Paragraph::new(format!(
-            "Observation: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nv OTEL tracing | PgUp/PgDn details | Arrows pan | Tab/j/k select | l enter Loop | h back | [/] pass | {controls}",
+            "Observation: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\ne connections | v OTEL tracing | PgUp/PgDn details | Arrows pan | Tab/j/k select | l enter body | h back | [/] pass | {controls}",
             lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
             lifecycle.observation_errors + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
         )), footer);
     }).context(TerminalSnafu)?;
     Ok(())
+}
+
+fn connection_summary(layout: &GraphLayout) -> String {
+    let label = layout.connection_view().label();
+    let hidden = layout.hidden_data_count();
+    if layout.connection_view() == ConnectionView::Execution
+        && layout.edges().is_empty()
+        && hidden > 0
+    {
+        format!("{label}: {hidden} data mappings hidden; no execution connections")
+    } else if hidden > 0 {
+        format!("{label}: {hidden} data mappings hidden")
+    } else {
+        format!("Connections: {label}")
+    }
+}
+
+fn binding_details(
+    description: &WorkflowDescription,
+    path: &[String],
+    node: Option<&NodeObservation>,
+) -> String {
+    let Some(node) = node else {
+        return String::new();
+    };
+    let (data, controls, orders) = if path.is_empty() {
+        (
+            &description.data_edges,
+            &description.control_edges,
+            &description.order_edges,
+        )
+    } else if let Some(body) = description.loop_body(path) {
+        (&body.data_edges, &body.control_edges, &body.order_edges)
+    } else {
+        return String::new();
+    };
+    let label = |value: &str| value.escape_debug().to_string();
+    let mut inputs: BTreeMap<(&str, bool), Vec<_>> = BTreeMap::new();
+    for edge in data.iter().filter(|edge| edge.to_node == node.id) {
+        inputs
+            .entry((&edge.to_input, edge.exclusive))
+            .or_default()
+            .push(edge);
+    }
+    let mut text = String::from("Input bindings:\n");
+    if inputs.is_empty() {
+        text.push_str("  none\n");
+    }
+    for ((input, exclusive), mut sources) in inputs {
+        sources.sort_by_key(|edge| (&edge.from_node, &edge.from_output));
+        text.push_str(&format!(
+            "  {}{}\n",
+            label(input),
+            if exclusive { " [exclusive]" } else { "" }
+        ));
+        for edge in sources {
+            text.push_str(&format!(
+                "    {}.{}\n",
+                label(&edge.from_node),
+                label(&edge.from_output)
+            ));
+        }
+        if exclusive {
+            let selected = (!node.possibly_missing_events && !node.conflicted)
+                .then(|| {
+                    node.input_selections
+                        .iter()
+                        .find(|selection| selection.input == input)
+                })
+                .flatten();
+            if let Some(selected) = selected {
+                text.push_str(&format!(
+                    "    selected: {}.{}\n",
+                    label(&selected.source_node),
+                    label(&selected.source_output)
+                ));
+            } else {
+                text.push_str("    selected: unknown\n");
+            }
+        }
+    }
+    let mut prerequisites = Vec::new();
+    for edge in controls.iter().filter(|edge| edge.to_node == node.id) {
+        prerequisites.push(format!(
+            "  output {}.{}",
+            label(&edge.from_node),
+            label(&edge.from_output)
+        ));
+    }
+    for edge in orders.iter().filter(|edge| edge.to_node == node.id) {
+        prerequisites.push(format!("  success of {}", label(&edge.from_node)));
+    }
+    prerequisites.sort();
+    text.push_str("Execution prerequisites:\n");
+    if prerequisites.is_empty() {
+        text.push_str("  none\n");
+    } else {
+        text.push_str(&prerequisites.join("\n"));
+        text.push('\n');
+    }
+    let mut outgoing = Vec::new();
+    for edge in data.iter().filter(|edge| edge.from_node == node.id) {
+        outgoing.push(format!(
+            "  {} -> {}.{}{}",
+            label(&edge.from_output),
+            label(&edge.to_node),
+            label(&edge.to_input),
+            if edge.exclusive { " [exclusive]" } else { "" }
+        ));
+    }
+    for edge in controls.iter().filter(|edge| edge.from_node == node.id) {
+        outgoing.push(format!(
+            "  output {} -> {}",
+            label(&edge.from_output),
+            label(&edge.to_node)
+        ));
+    }
+    for edge in orders.iter().filter(|edge| edge.from_node == node.id) {
+        outgoing.push(format!("  success -> {}", label(&edge.to_node)));
+    }
+    outgoing.sort();
+    text.push_str("Consumers:\n");
+    if outgoing.is_empty() {
+        text.push_str("  none\n");
+    } else {
+        text.push_str(&outgoing.join("\n"));
+        text.push('\n');
+    }
+    if node.omitted_input_selections > 0 {
+        text.push_str(&format!(
+            "Omitted selection observations: {}\n",
+            node.omitted_input_selections
+        ));
+    }
+    text
 }
 
 fn details_window(text: &str, width: usize, height: usize, offset: usize) -> (String, usize) {
@@ -1077,6 +1191,7 @@ fn details_text(
     pass: Option<&LoopPassObservation>,
     snapshot: &StateSnapshot,
     capture: &CaptureView,
+    bindings: &str,
 ) -> String {
     let mut details = String::new();
     let parent_path = pass.map_or(&[][..], |pass| pass.path.as_slice());
@@ -1085,6 +1200,7 @@ fn details_text(
             "{} ({})\nStatus: {:?}\n",
             node.id, node.kind, node.status
         ));
+        details.push_str(bindings);
         if let Some(stream) = &snapshot.stream {
             if parent_path.is_empty()
                 && let Some(metrics) = stream.nodes.iter().find(|metrics| metrics.id == node.id)
@@ -1275,30 +1391,170 @@ fn details_text(
         .collect()
 }
 
+#[derive(Clone, Default)]
+struct GraphViewport {
+    offset: (u32, u32),
+    selected: usize,
+    pass_offset: usize,
+    details_offset: usize,
+}
+
 pub struct ObservationView {
+    description: WorkflowDescription,
     root: GraphLayout,
+    // Retain only the currently inspected body, regardless of the number of scopes or views.
     bodies: BTreeMap<Vec<String>, GraphLayout>,
+    viewports: BTreeMap<(Vec<String>, ConnectionView), GraphViewport>,
     state: ViewState,
 }
 impl ObservationView {
     pub fn new(description: &WorkflowDescription) -> Result<Self, RunError> {
-        let root = GraphLayout::new(description).context(GraphSnafu)?;
-        let mut bodies = BTreeMap::new();
-        for body in &description.loop_bodies {
-            bodies.insert(
-                body.path.clone(),
-                GraphLayout::from_loop_body(description, &body.path).context(GraphSnafu)?,
-            );
-        }
+        let root =
+            GraphLayout::with_view(description, ConnectionView::Execution).context(GraphSnafu)?;
         Ok(Self {
+            description: description.clone(),
             root,
-            bodies,
+            bodies: BTreeMap::new(),
+            viewports: BTreeMap::new(),
             state: ViewState::default(),
         })
     }
-    pub fn handle_key(&mut self, key: KeyCode, observation: &LocalObservation) {
+    fn save_viewport(&mut self) {
+        self.viewports.insert(
+            (self.state.path.clone(), self.root.connection_view()),
+            GraphViewport {
+                offset: self.state.offset,
+                selected: self.state.selected,
+                pass_offset: self.state.pass_offset,
+                details_offset: self.state.details_offset,
+            },
+        );
+    }
+    fn restore_viewport(&mut self) {
+        let viewport = self
+            .viewports
+            .get(&(self.state.path.clone(), self.root.connection_view()))
+            .cloned()
+            .unwrap_or_default();
+        self.state.offset = viewport.offset;
+        self.state.selected = viewport.selected;
+        self.state.pass_offset = viewport.pass_offset;
+        self.state.details_offset = viewport.details_offset;
+    }
+    fn load_body(&mut self, path: &[String]) -> Result<(), RunError> {
+        if !path.is_empty() && !self.bodies.contains_key(path) {
+            let layout = GraphLayout::from_body_with_view(
+                &self.description,
+                path,
+                self.root.connection_view(),
+            )
+            .context(GraphSnafu)?;
+            self.bodies.insert(path.to_vec(), layout);
+        }
+        Ok(())
+    }
+    fn switch_connections(&mut self) -> Result<(), RunError> {
+        let selected = self
+            .state
+            .layout(&self.root, &self.bodies)
+            .nodes()
+            .get(self.state.selected)
+            .map(|node| node.id.clone());
+        let view = self.root.connection_view().next();
+        let root = GraphLayout::with_view(&self.description, view).context(GraphSnafu)?;
+        let body = if self.state.path.is_empty() {
+            None
+        } else {
+            Some(
+                GraphLayout::from_body_with_view(&self.description, &self.state.path, view)
+                    .context(GraphSnafu)?,
+            )
+        };
+        self.save_viewport();
+        self.root = root;
+        self.bodies.clear();
+        if let Some(body) = body {
+            self.bodies.insert(self.state.path.clone(), body);
+        }
+        self.restore_viewport();
+        if let Some(id) = selected {
+            self.state.selected = self
+                .state
+                .layout(&self.root, &self.bodies)
+                .nodes()
+                .iter()
+                .position(|node| node.id == id)
+                .unwrap_or_default();
+        }
+        Ok(())
+    }
+    fn prepare_navigation(&mut self, key: KeyCode) -> Result<(), RunError> {
+        let mut path = self.state.path.clone();
+        match key {
+            KeyCode::Char('l') => {
+                if let Some(node) = self
+                    .state
+                    .layout(&self.root, &self.bodies)
+                    .nodes()
+                    .get(self.state.selected)
+                {
+                    path.push(node.id.clone());
+                }
+                if self.description.loop_body(&path).is_none() {
+                    return Ok(());
+                }
+            }
+            KeyCode::Char('h') | KeyCode::Esc => {
+                path.pop();
+            }
+            _ => return Ok(()),
+        }
+        self.load_body(&path)
+    }
+    fn handle_navigation(
+        &mut self,
+        key: KeyCode,
+        snapshot: &StateSnapshot,
+        traces: &TraceSnapshot,
+        logs: &LogSnapshot,
+    ) {
+        if !self.state.traces.visible {
+            if key == KeyCode::Char('e') {
+                self.state.graph_notice = self
+                    .switch_connections()
+                    .err()
+                    .map(|error| format!("Connection view unavailable: {error}"));
+                return;
+            }
+            if let Err(error) = self.prepare_navigation(key) {
+                self.state.graph_notice = Some(format!("Body view unavailable: {error}"));
+                return;
+            }
+            self.save_viewport();
+        }
+        let previous = self.state.path.clone();
         self.state
-            .handle_observation_key(key, &self.root, &self.bodies, &observation.reader);
+            .handle_key(key, snapshot, &self.root, &self.bodies, traces, logs);
+        if self.state.path != previous {
+            self.restore_viewport();
+        }
+        self.bodies.retain(|path, _| *path == self.state.path);
+    }
+    pub fn handle_key(&mut self, key: KeyCode, observation: &LocalObservation) {
+        let reader = &observation.reader;
+        let traces = reader.trace_snapshot();
+        if !self
+            .state
+            .traces
+            .handle_data_key(key, &traces, &reader.data_snapshot())
+        {
+            self.handle_navigation(
+                key,
+                &reader.snapshot_shared(),
+                &traces,
+                &reader.log_snapshot(),
+            );
+        }
     }
     pub fn draw(
         &mut self,
@@ -1309,6 +1565,7 @@ impl ObservationView {
             terminal,
             &self.root,
             &self.bodies,
+            &self.description,
             &observation.reader.snapshot_shared(),
             &observation.capture_view(),
             observation.elapsed(),
@@ -1331,6 +1588,117 @@ mod tests {
         event::{Event as LifecycleKind, LifecycleEvent, LoopPathEntry},
         identity::WorkflowId,
     };
+
+    fn scope_fixture() -> WorkflowDescription {
+        serde_json::from_value(serde_json::json!({
+            "version":"2026-09-29","workflow_id":format!("sha256:{}","e".repeat(64)),
+            "nodes":[{"id":"first","kind":"workflow.loop"},{"id":"second","kind":"workflow.loop"}],
+            "data_edges":[],"control_edges":[],"execution_order":["first","second"],
+            "loop_bodies":(["first","second"].map(|id| serde_json::json!({
+                "path":[id],"nodes":[{"id":"%loop","kind":"%loop"},{"id":"source","kind":"fixture.task"},{"id":"target","kind":"fixture.task"}],
+                "data_edges":[{"from_node":"source","from_output":"value","to_node":"target","to_input":"input"}],
+                "control_edges":[],"execution_order":["%loop","source","target"]
+            })))
+        })).unwrap()
+    }
+
+    #[test]
+    fn connection_navigation_restores_viewports_and_bounds_retained_layouts() {
+        let description = scope_fixture();
+        let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        assert_eq!(view.root.connection_view(), ConnectionView::Execution);
+        assert!(view.bodies.is_empty());
+        let geometry = view.root.nodes().to_vec();
+        view.state.selected = 1;
+        view.state.offset = (12, 8);
+        view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
+        assert_eq!(view.state.selected, 1);
+        view.state.offset = (30, 16);
+        view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
+        view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
+        assert_eq!(view.state.offset, (12, 8));
+        assert_eq!(view.state.selected, 1);
+        assert_eq!(view.root.nodes(), geometry);
+        for _ in 0..4 {
+            for selected in [0, 1] {
+                view.state.selected = selected;
+                view.handle_navigation(KeyCode::Char('l'), &snapshot, &traces, &logs);
+                assert_eq!(view.bodies.len(), 1);
+                assert_eq!(view.state.path.len(), 1);
+                view.state.selected = 2;
+                view.state.offset = (7, 9);
+                for _ in 0..3 {
+                    view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
+                    assert_eq!(view.bodies.len(), 1);
+                    assert_eq!(view.state.selected, 2);
+                }
+                assert_eq!(view.state.offset, (7, 9));
+                view.handle_navigation(KeyCode::Char('h'), &snapshot, &traces, &logs);
+                assert!(view.state.path.is_empty());
+                assert!(view.bodies.is_empty());
+                assert_eq!(view.state.selected, selected);
+            }
+        }
+        assert!(view.viewports.len() <= 9);
+        view.state.traces.visible = true;
+        let mode = view.root.connection_view();
+        view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
+        assert_eq!(view.root.connection_view(), mode);
+    }
+
+    #[test]
+    fn binding_details_explain_hidden_references_and_do_not_guess_selection() {
+        let mut description = scope_fixture();
+        description.nodes = vec![
+            NodeDescription {
+                id: "source".into(),
+                kind: "fixture.task".into(),
+            },
+            NodeDescription {
+                id: "target".into(),
+                kind: "fixture.task".into(),
+            },
+        ];
+        description.execution_order = vec!["source".into(), "target".into()];
+        description.loop_bodies.clear();
+        description.data_edges = ["first", "second"]
+            .map(|port| mf_telemetry::description::DataEdge {
+                exclusive: true,
+                from_node: "source".into(),
+                from_output: port.into(),
+                to_node: "target".into(),
+                to_input: "input".into(),
+            })
+            .to_vec();
+        let layout = GraphLayout::with_view(&description, ConnectionView::Execution).unwrap();
+        assert!(connection_summary(&layout).contains("no execution connections"));
+        let mut node = NodeObservation::pending("target", "fixture.task");
+        let text = binding_details(&description, &[], Some(&node));
+        assert!(text.contains("input [exclusive]"));
+        assert!(text.contains("source.first"));
+        assert!(text.contains("source.second"));
+        assert!(text.contains("selected: unknown"));
+        node.input_selections
+            .push(mf_telemetry::event::InputSelection {
+                input: "input".into(),
+                source_node: "source".into(),
+                source_output: "second".into(),
+            });
+        assert!(
+            binding_details(&description, &[], Some(&node)).contains("selected: source.second")
+        );
+        node.possibly_missing_events = true;
+        assert!(binding_details(&description, &[], Some(&node)).contains("selected: unknown"));
+        let source = NodeObservation::pending("source", "fixture.task");
+        assert!(
+            binding_details(&description, &[], Some(&source)).contains("target.input [exclusive]")
+        );
+    }
 
     fn source_runner(directory: &Path, resource: Option<StdinRequirement>) -> PathBuf {
         use std::{fs, os::unix::fs::PermissionsExt};
@@ -1725,7 +2093,7 @@ mod tests {
             stderr_dropped: 0,
             error: None,
         };
-        let text = details_text(snapshot.nodes.first(), None, &snapshot, &capture);
+        let text = details_text(snapshot.nodes.first(), None, &snapshot, &capture, "");
         assert!(text.contains("Completed passes: 1000"));
         assert!(text.contains("Older invocation details hidden: 1000"));
     }

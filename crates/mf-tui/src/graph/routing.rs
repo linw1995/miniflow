@@ -148,7 +148,7 @@ pub enum Intersection {
 pub struct EdgeKey {
     pub source: String,
     pub destination: String,
-    pub output: String,
+    pub output: Option<String>,
     pub input: Option<String>,
     pub kind: EdgeKind,
 }
@@ -253,7 +253,9 @@ pub struct MarkerCell {
 
 pub fn line_symbols(kind: EdgeKind) -> [&'static str; 6] {
     match kind {
-        EdgeKind::Data | EdgeKind::Exclusive | EdgeKind::Control => ["─", "│", "┌", "┐", "└", "┘"],
+        EdgeKind::Data | EdgeKind::Exclusive | EdgeKind::Control | EdgeKind::Success => {
+            ["─", "│", "┌", "┐", "└", "┘"]
+        }
     }
 }
 
@@ -560,7 +562,7 @@ pub fn channel_routes(
         let from_y = nodes[edge.from].rect.y + edge.from_row;
         let to_y = nodes[edge.to].rect.y + edge.to_row;
         let source_column = columns[edge.from];
-        if matches!(edge.kind, EdgeKind::Control | EdgeKind::Exclusive) {
+        if edge.has_label() {
             stubs[source_column as usize] = stubs[source_column as usize]
                 .max(ratatui::text::Span::raw(edge_label(edge)).width() as u32 + 2);
         }
@@ -679,7 +681,7 @@ pub fn channel_routes(
                     to,
                 ])
             };
-            if matches!(edge.kind, EdgeKind::Control | EdgeKind::Exclusive) {
+            if edge.has_label() {
                 let text = edge_label(edge);
                 let width = ratatui::text::Span::raw(text.as_str()).width() as u32;
                 route.label = Some(EdgeLabel {
@@ -1621,13 +1623,32 @@ pub fn route_all(
 }
 
 fn edge_label(edge: &GraphEdge) -> String {
+    if edge.members.len() > 1 {
+        return format!(
+            "{} x{}",
+            if edge.kind == EdgeKind::Exclusive {
+                "exclusive"
+            } else {
+                "data"
+            },
+            edge.members.len()
+        );
+    }
+    if edge.kind == EdgeKind::Success {
+        return "success".into();
+    }
     if edge.kind == EdgeKind::Exclusive {
         format!(
             "exclusive {}",
             label_text(edge.to_input.as_deref().unwrap_or_default())
         )
+    } else if edge.kind == EdgeKind::Control {
+        label_text(&format!(
+            "on {}",
+            edge.from_output.as_deref().expect("output gate")
+        ))
     } else {
-        label_text(&edge.from_output)
+        label_text(edge.from_output.as_deref().expect("output connection"))
     }
 }
 
@@ -1683,15 +1704,16 @@ mod tests {
             key: EdgeKey {
                 source: "source".into(),
                 destination: "target".into(),
-                output: "value".into(),
+                output: Some("value".into()),
                 input: Some("input".into()),
                 kind: EdgeKind::Data,
             },
             from: 0,
             to: 1,
-            from_output: "value".into(),
+            from_output: Some("value".into()),
             to_input: Some("input".into()),
             kind: EdgeKind::Data,
+            members: Vec::new(),
             from_row: 1,
             to_row: 4,
         };
@@ -1775,10 +1797,10 @@ mod tests {
         let (mut nodes, mut edges, route) = search_fixture();
         nodes.truncate(2);
         let mut other = edges[0].clone();
-        other.key.output = "other".into();
+        other.key.output = Some("other".into());
         other.to_row = 7;
         edges.push(other.clone());
-        other.key.output = "third".into();
+        other.key.output = Some("third".into());
         other.to_row = 8;
         edges.push(other);
         let horizontal = EdgeRoute::from_points([

@@ -1325,3 +1325,71 @@ fn finite_and_stream_success_causes_are_validated_against_order_edges() {
         );
     }
 }
+
+#[test]
+fn selected_input_evidence_survives_completion_and_remains_bounded() {
+    use mf_telemetry::event::InputSelection;
+    let mut description = graph();
+    description.data_edges.clear();
+    let selections: Vec<_> = (0..300)
+        .map(|index| InputSelection {
+            input: format!("input{index}"),
+            source_node: "a".into(),
+            source_output: format!("first{index}"),
+        })
+        .collect();
+    for selection in &selections {
+        for port in [
+            &selection.source_output,
+            &format!("second{}", selection.input),
+        ] {
+            description.data_edges.push(DataEdge {
+                exclusive: true,
+                from_node: "a".into(),
+                from_output: port.clone(),
+                to_node: "b".into(),
+                to_input: selection.input.clone(),
+            });
+        }
+    }
+    let mut state = SessionState::new(description, run_id()).unwrap();
+    state.apply(start()).unwrap();
+    state
+        .apply(event(
+            2,
+            Event::NodeStarted {
+                node: node("b", "fixture.sink"),
+                position: count(1),
+                elapsed_ns: count(1),
+                selected_inputs: selections.clone(),
+            },
+        ))
+        .unwrap();
+    let before = state.snapshot();
+    let retained = before.nodes[1].input_selections.len();
+    assert!(retained > 0 && retained < selections.len());
+    assert_eq!(
+        before.nodes[1].omitted_input_selections,
+        selections.len() - retained
+    );
+    state
+        .apply(event(
+            3,
+            Event::NodeFinished {
+                node: node("b", "fixture.sink"),
+                position: count(1),
+                elapsed_ns: count(2),
+                duration_ns: Some(count(1)),
+                outcome: Outcome::Succeeded,
+                produced_ports: vec![],
+                skipped_ports: vec![],
+                failure: None,
+                loop_summary: None,
+            },
+        ))
+        .unwrap();
+    assert_eq!(
+        state.snapshot().nodes[1].input_selections,
+        before.nodes[1].input_selections
+    );
+}

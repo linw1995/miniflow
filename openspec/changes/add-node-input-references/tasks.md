@@ -22,10 +22,10 @@
 
 ## 4. TUI projection and inspection
 
-- [ ] 4.1 Add Execution, Dependencies, and Ports views over full topology, distinguishing node-success edges from output gates and data mappings.
-- [ ] 4.2 Route and size only visible connections; add deterministic data bundles, member details, mixed/unknown styles, hidden counts, and bounded lazy caching.
-- [ ] 4.3 Add selected-node prerequisites and graph-owned `e` navigation/help in ordinary/chat hosts; preserve selection, viewports, and redaction.
-- [ ] 4.4 Test 18-port pairs, mixed dependency kinds, data-only graphs, old manifests, uncertainty, body/view navigation, stable geometry, and routing budgets.
+- [x] 4.1 Add Execution, Dependencies, and Ports views over full topology, distinguishing node-success edges from output gates and data mappings.
+- [x] 4.2 Route and size only visible connections; add deterministic data bundles, member details, mixed/unknown styles, hidden counts, and bounded lazy caching.
+- [x] 4.3 Add selected-node prerequisites and graph-owned `e` navigation/help in ordinary/chat hosts; preserve selection, viewports, and redaction.
+- [x] 4.4 Test 18-port pairs, mixed dependency kinds, data-only graphs, old manifests, uncertainty, body/view navigation, stable geometry, and routing budgets.
 
 ## 5. Migration and integration validation
 
