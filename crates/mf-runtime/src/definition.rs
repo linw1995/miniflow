@@ -42,9 +42,23 @@ impl fmt::Display for DefinitionId {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WorkflowDefinition {
+    pub version: WorkflowDefinitionVersion,
+    pub execution: Option<crate::StreamExecution>,
+    pub dependencies: BTreeMap<String, NodeDependency>,
+    pub nodes: Vec<NodeDefinition>,
+    pub edges: Vec<EdgeDefinition>,
+    pub control_edges: Vec<ControlEdgeDefinition>,
+    pub outputs: Vec<WorkflowOutputDefinition>,
+    pub order_edges: Vec<OrderEdgeDefinition>,
+}
+
+mod wire;
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(remote = "WorkflowDefinition", deny_unknown_fields)]
+pub(super) struct DefinitionFields {
     pub version: WorkflowDefinitionVersion,
     #[serde(
         default,
@@ -61,6 +75,8 @@ pub struct WorkflowDefinition {
     pub control_edges: Vec<ControlEdgeDefinition>,
     #[serde(default)]
     pub outputs: Vec<WorkflowOutputDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order_edges: Vec<OrderEdgeDefinition>,
 }
 
 fn deserialize_execution<'de, D: serde::Deserializer<'de>>(
@@ -90,13 +106,15 @@ pub enum WorkflowDefinitionVersion {
     V2026_10_02,
     #[serde(rename = "2026-10-03")]
     V2026_10_03,
+    #[serde(rename = "2026-10-19")]
+    V2026_10_19,
 }
 
 impl WorkflowDefinitionVersion {
     pub const CURRENT: Self = Self::V2026_10_03;
 
     pub fn supports_startup_inputs(self) -> bool {
-        self == Self::V2026_10_03
+        matches!(self, Self::V2026_10_03 | Self::V2026_10_19)
     }
 }
 
@@ -145,6 +163,8 @@ pub struct LoopBodyDefinition {
     pub edges: Vec<EdgeDefinition>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub control_edges: Vec<ControlEdgeDefinition>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order_edges: Vec<OrderEdgeDefinition>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -231,6 +251,31 @@ pub struct ControlEdgeDefinition {
     pub from_node: DefinitionId,
     pub from_output: Cow<'static, str>,
     pub to_node: DefinitionId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrderEdgeDefinition {
+    pub from_node: DefinitionId,
+    pub to_node: DefinitionId,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OutputReferenceDefinition {
+    pub node: DefinitionId,
+    pub port: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged, deny_unknown_fields)]
+pub enum InputBindingDefinition {
+    From {
+        from: OutputReferenceDefinition,
+    },
+    Exclusive {
+        exclusive: Vec<OutputReferenceDefinition>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

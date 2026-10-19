@@ -269,7 +269,8 @@ pub fn describe_definition(
             | crate::WorkflowDefinitionVersion::V2026_10_02 => {
                 WorkflowDescriptionVersion::V2026_09_29
             }
-            crate::WorkflowDefinitionVersion::V2026_10_03 => {
+            crate::WorkflowDefinitionVersion::V2026_10_03
+            | crate::WorkflowDefinitionVersion::V2026_10_19 => {
                 WorkflowDescriptionVersion::V2026_10_03
             }
         },

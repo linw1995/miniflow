@@ -1,15 +1,15 @@
 ## 1. Versioned definition and canonical graph
 
-- [ ] 1.1 Add version `2026-10-19` and strict version-selected decoding through JSON and programmatic paths; inherit existing features and reject mixed-format root/body fields.
-- [ ] 1.2 Add input bindings and execution-edge syntax; reject duplicate input keys, malformed variants, null/empty output names, data fields on new edges, and new-version `control_edges`.
-- [ ] 1.3 Normalize both formats into data bindings, output gates, and node-success prerequisites before analysis, preserving source serialization and supported body boundaries.
-- [ ] 1.4 Audit structural/prepared/generated/stream/body/description/instantiation paths and add validated success-edge builder support.
+- [x] 1.1 Add version `2026-10-19` and strict version-selected decoding through JSON and programmatic paths; inherit existing features and reject mixed-format root/body fields.
+- [x] 1.2 Add input bindings and execution-edge syntax; reject duplicate input keys, malformed variants, null/empty output names, data fields on new edges, and new-version `control_edges`.
+- [x] 1.3 Normalize both formats into data bindings, output gates, and node-success prerequisites before analysis, preserving source serialization and supported body boundaries.
+- [x] 1.4 Audit structural/prepared/generated/stream/body/description/instantiation paths; reject executable success edges until runtime support is installed in group 2.
 
 ## 2. Node-success semantics and execution
 
 - [ ] 2.1 Add typed prerequisites and frame-local authoritative Task outcomes; publish success after output validation and record skips independently of outputs and observation.
 - [ ] 2.2 Integrate resolution, error-before-skip precedence, bounded retention, concurrent-domain synchronization, and generated/typed execution without synthetic outputs or another scheduler.
-- [ ] 2.3 Restrict success edges to same-scope/frame ordinary Tasks; reject stateful, container, synthetic, and cross-domain endpoints while preserving existing output-gate support.
+- [ ] 2.3 Add validated success-edge builder support and restrict success edges to same-scope/frame ordinary Tasks; reject stateful, container, synthetic, and cross-domain endpoints while preserving existing output-gate support.
 - [ ] 2.4 Update activation facts, context ancestry, startup-input eligibility, and mixed cycles; distinguish router success from branch-output production in exclusive proofs.
 - [ ] 2.5 Test zero-output success, skipped optional outputs, validation failure, skips, errors, cancellation, pending/missing outcomes, conjunction, and frame resets with observation disabled.
 - [ ] 2.6 Verify in-memory/generated parity, typed data paths, concurrent domains, supported body Tasks, stream-message frames, and unchanged isolated execution.

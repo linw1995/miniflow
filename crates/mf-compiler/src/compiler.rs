@@ -37,6 +37,8 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
+    #[snafu(display("invalid node-success dependency: {message}"))]
+    InvalidSuccessDependency { message: String },
     #[snafu(transparent)]
     ExclusiveInput {
         source: mf_runtime::ExclusiveInputError,
@@ -461,6 +463,12 @@ fn prepare_graph(
     enclosing: Option<&BTreeMap<String, ValueType>>,
     allow_iteration_input: bool,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
+    if !definition.order_edges.is_empty() {
+        return InvalidSuccessDependencySnafu {
+            message: "node-success execution support is not installed",
+        }
+        .fail();
+    }
     if allow_iteration_input {
         crate::loops::validate_structure(definition)?;
     }
@@ -749,6 +757,14 @@ pub fn topological_order(
 }
 
 fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCompileError> {
+    if !definition.order_edges.is_empty()
+        && definition.version != crate::WorkflowDefinitionVersion::V2026_10_19
+    {
+        return InvalidSuccessDependencySnafu {
+            message: "node-success edges require version 2026-10-19",
+        }
+        .fail();
+    }
     let mut ids = BTreeSet::new();
     for (index, node) in definition.nodes.iter().enumerate() {
         if node.id.as_str().trim().is_empty() {
@@ -802,6 +818,19 @@ fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCom
             return Err(control_error(edge, "duplicate control edge"));
         }
     }
+    let mut orders = BTreeSet::new();
+    for edge in &definition.order_edges {
+        if edge.from_node == edge.to_node
+            || !ids.contains(&edge.from_node)
+            || !ids.contains(&edge.to_node)
+            || !orders.insert(edge)
+        {
+            return InvalidSuccessDependencySnafu {
+                message: "node-success edges must have distinct known endpoints and be unique",
+            }
+            .fail();
+        }
+    }
     let mut output_names = BTreeSet::new();
     for output in &definition.outputs {
         if !output_names.insert(&output.name) {
@@ -838,6 +867,12 @@ fn dependency_pairs(definition: &WorkflowDefinition) -> BTreeSet<(DefinitionId, 
         .chain(
             definition
                 .control_edges
+                .iter()
+                .map(|edge| (edge.from_node.clone(), edge.to_node.clone())),
+        )
+        .chain(
+            definition
+                .order_edges
                 .iter()
                 .map(|edge| (edge.from_node.clone(), edge.to_node.clone())),
         )
@@ -1028,6 +1063,11 @@ pub fn normalize_plan(
             nodes,
             edges,
             control_edges,
+            order_edges: {
+                let mut edges = definition.order_edges.clone();
+                edges.sort();
+                edges
+            },
             outputs,
         },
         execution_order,
@@ -1049,6 +1089,7 @@ fn normalize_loop_node(
     loop_definition.body.nodes = normalized.nodes;
     loop_definition.body.edges = normalized.edges;
     loop_definition.body.control_edges = normalized.control_edges;
+    loop_definition.body.order_edges = normalized.order_edges;
     Ok(())
 }
 

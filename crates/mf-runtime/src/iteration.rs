@@ -44,6 +44,8 @@ pub struct IterationBodyDefinition {
     #[serde(default)]
     pub control_edges: Vec<ControlEdgeDefinition>,
     pub result: IterationResultDefinition,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order_edges: Vec<crate::OrderEdgeDefinition>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
