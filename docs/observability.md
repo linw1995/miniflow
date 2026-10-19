@@ -451,14 +451,18 @@ The TUI provides three connection views, cycled with `e` while graph navigation 
 
 | View | Visible connections |
 | --- | --- |
-| Execution (default) | Task-success edges, output gates, and data bundles between node pairs without an explicit execution connection |
+| Execution (default) | Task-success edges, output gates, and data bundles, with transitively redundant node pairs hidden |
 | Dependencies | Execution connections plus data bundles grouped by node pair and ordinary/exclusive kind |
 | Ports | Every original port mapping and execution connection |
 
-The default view preserves a visible connection for every dependent node pair, including data-only chains. Data mappings
-are bundled by node pair and ordinary/exclusive kind unless an explicit execution connection already shows the dependency.
+The default view preserves dependency reachability, including data-only chains. If `A -> B -> C` already connects two nodes,
+the redundant `A -> C` connections are hidden, regardless of connection kind. This only simplifies the display; it does not
+change execution prerequisites or input bindings. Dependencies and Ports retain these direct connections.
+Data mappings are bundled by node pair and ordinary/exclusive kind unless an explicit execution connection already shows
+the dependency.
 Independent nodes remain disconnected; the display does not impose a sequential order on them.
-The header names the view and counts data mappings hidden behind explicit execution connections. Selecting a node shows
+The header names the view and separately counts data mappings hidden behind explicit execution connections and transitive
+node-pair dependencies hidden from the graph. Selecting a node shows
 complete input references, exclusive groups, execution prerequisites,
 and consumers in Details. Available selection observations identify the chosen source; missing or truncated evidence
 remains unknown. No values or secret payloads are copied into these summaries.
