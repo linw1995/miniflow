@@ -14,6 +14,8 @@ pub enum WorkflowDescriptionVersion {
     V2026_10_02,
     #[serde(rename = "2026-10-03")]
     V2026_10_03,
+    #[serde(rename = "2026-10-19")]
+    V2026_10_19,
 }
 
 impl WorkflowDescriptionVersion {
@@ -46,6 +48,8 @@ pub struct WorkflowDescription {
     pub nodes: Vec<NodeDescription>,
     pub data_edges: Vec<DataEdge>,
     pub control_edges: Vec<ControlEdge>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order_edges: Vec<OrderEdge>,
     pub execution_order: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loop_bodies: Vec<LoopBodyDescription>,
@@ -57,6 +61,8 @@ pub struct LoopBodyDescription {
     pub nodes: Vec<NodeDescription>,
     pub data_edges: Vec<DataEdge>,
     pub control_edges: Vec<ControlEdge>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub order_edges: Vec<OrderEdge>,
     pub execution_order: Vec<String>,
 }
 
@@ -83,6 +89,13 @@ pub struct ControlEdge {
     pub to_node: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrderEdge {
+    pub from_node: String,
+    pub to_node: String,
+}
+
 impl WorkflowDescription {
     pub fn is_streaming(&self) -> bool {
         self.execution.as_ref().map_or(
@@ -92,6 +105,13 @@ impl WorkflowDescription {
     }
 
     pub fn event_schema_version(&self) -> i64 {
+        if self.version == WorkflowDescriptionVersion::V2026_10_19 {
+            return if self.is_streaming() {
+                crate::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
+            } else {
+                crate::SUCCESS_EVENT_SCHEMA_VERSION
+            };
+        }
         self.execution.as_ref().map_or_else(
             || match self.version {
                 WorkflowDescriptionVersion::V2026_09_27 => crate::EVENT_SCHEMA_VERSION,
@@ -151,7 +171,19 @@ impl WorkflowDescription {
     }
 
     pub fn validate(&self) -> Result<(), ContractError> {
-        if self.version == WorkflowDescriptionVersion::V2026_10_03 {
+        require(
+            self.version == WorkflowDescriptionVersion::V2026_10_19
+                || (self.order_edges.is_empty()
+                    && self
+                        .loop_bodies
+                        .iter()
+                        .all(|body| body.order_edges.is_empty())),
+            "node-success edges require a supported description version",
+        )?;
+        if matches!(
+            self.version,
+            WorkflowDescriptionVersion::V2026_10_03 | WorkflowDescriptionVersion::V2026_10_19
+        ) {
             require(
                 self.execution.is_some(),
                 "missing workflow execution description",
@@ -236,6 +268,19 @@ impl WorkflowDescription {
             endpoint(&edge.from_node, &edge.from_output, &edge.to_node)?;
             require(controls.insert(edge), "duplicate control edge")?;
         }
+        let mut orders = BTreeSet::new();
+        for edge in &self.order_edges {
+            require(
+                nodes.contains_key(edge.from_node.as_str())
+                    && nodes.contains_key(edge.to_node.as_str()),
+                "unknown node-success endpoint",
+            )?;
+            require(
+                positions[edge.from_node.as_str()] < positions[edge.to_node.as_str()],
+                "node-success edge violates execution order",
+            )?;
+            require(orders.insert(edge), "duplicate node-success edge")?;
+        }
         let mut scopes: BTreeMap<Vec<String>, Vec<NodeDescription>> = BTreeMap::new();
         scopes.insert(Vec::new(), self.nodes.clone());
         let mut bodies: Vec<_> = self.loop_bodies.iter().collect();
@@ -249,29 +294,43 @@ impl WorkflowDescription {
             let parent = scopes
                 .get(parent_path)
                 .ok_or_else(|| crate::invalid("unknown parent Loop scope"))?;
+            let container = parent
+                .iter()
+                .find(|node| node.id == *loop_id)
+                .ok_or_else(|| crate::invalid("unknown body container"))?;
+            let iteration = self.version == WorkflowDescriptionVersion::V2026_10_19
+                && container.kind == "builtin.iteration";
             require(
-                parent
-                    .iter()
-                    .any(|node| node.id == *loop_id && node.kind == "workflow.loop"),
-                "Loop body path does not name a parent Loop",
+                container.kind == "workflow.loop" || iteration,
+                "body path does not name a supported container",
             )?;
             require(
-                body.nodes
-                    .iter()
-                    // Existing runners embed the original source name in their descriptions.
-                    .any(|node| {
+                body.nodes.iter().any(|node| {
+                    if iteration {
+                        node.id == "%iteration" && node.kind == "builtin.iteration_input"
+                    } else {
                         matches!(node.id.as_str(), "%loop" | "$loop") && node.kind == node.id
-                    }),
-                "Loop body omits its synthetic source",
+                    }
+                }),
+                "body omits its synthetic source",
             )?;
             let scope = Self {
-                version: WorkflowDescriptionVersion::V2026_09_27,
+                version: if self.version == WorkflowDescriptionVersion::V2026_10_19 {
+                    self.version
+                } else {
+                    WorkflowDescriptionVersion::V2026_09_27
+                },
                 workflow_id: self.workflow_id.clone(),
+                order_edges: body.order_edges.clone(),
                 nodes: body.nodes.clone(),
                 data_edges: body.data_edges.clone(),
                 control_edges: body.control_edges.clone(),
                 execution_order: body.execution_order.clone(),
-                execution: None,
+                execution: (self.version == WorkflowDescriptionVersion::V2026_10_19).then_some(
+                    ExecutionDescription {
+                        mode: ExecutionMode::Single,
+                    },
+                ),
                 loop_bodies: Vec::new(),
             };
             scope.validate()?;

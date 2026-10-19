@@ -158,6 +158,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<(
 
 fn description() -> WorkflowDescription {
     WorkflowDescription {
+        order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "c".repeat(64)))
             .expect("fixture workflow ID is valid"),
@@ -424,6 +425,7 @@ fn dump_graph() -> PreviewResult<()> {
     }
     let layout = if std::env::args().any(|arg| arg == "--body") {
         let body = mf_telemetry::description::LoopBodyDescription {
+            order_edges: Vec::new(),
             path: vec!["repeat".into()],
             nodes: fixture.nodes.clone(),
             data_edges: fixture.data_edges.clone(),

@@ -168,6 +168,7 @@ impl CompiledWorkflow {
             };
             let inputs = crate::workflow_input_schema(std::iter::once((node, true)), |_, _| false)?;
             let mut description = mf_telemetry::description::WorkflowDescription {
+            order_edges: Vec::new(),
                 version: mf_telemetry::description::WorkflowDescriptionVersion::CURRENT,
                 workflow_id: original.workflow_id.clone(), execution: None,
                 nodes: vec![original.nodes[index].clone()],
@@ -175,6 +176,10 @@ impl CompiledWorkflow {
                 execution_order: vec![id.clone()],
                 loop_bodies: bodies.get(id.as_str()).cloned().unwrap_or_default(),
             };
+            if description.loop_bodies.iter().any(|body| !body.order_edges.is_empty() || body.nodes.iter().any(|node| node.id == mf_runtime::ITERATION_INPUT_ID)) {
+                description.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_19;
+                description.execution = Some(mf_telemetry::description::ExecutionDescription { mode: mf_telemetry::description::ExecutionMode::Single });
+            }
             description.workflow_id = mf_telemetry::identity::WorkflowId::from_definition(
                 &serde_json::json!({"isolation_format": 1, "workflow_id": original.workflow_id, "target": id}),
                 &description.execution_order,
@@ -374,6 +379,12 @@ impl CompiledWorkflow {
             .chain(
                 self.definition
                     .control_edges
+                    .iter()
+                    .map(|edge| (&edge.from_node, &edge.to_node)),
+            )
+            .chain(
+                self.definition
+                    .order_edges
                     .iter()
                     .map(|edge| (&edge.from_node, &edge.to_node)),
             )

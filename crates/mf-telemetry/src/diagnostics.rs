@@ -289,6 +289,10 @@ fn write_diagnostic(
             write!(writer, "node {node:?} skipped")?;
             if let Some(causes) = body["causes"].as_array() {
                 for cause in causes {
+                    if let Some(node) = cause["node_success"].as_str() {
+                        write!(writer, " | requires successful node {node:?}")?;
+                        continue;
+                    }
                     write!(
                         writer,
                         " | gated by {:?}.{:?}",
@@ -443,6 +447,21 @@ mod tests {
 
     fn fixture(source: &str) -> WireRecord {
         serde_json::from_str(source).unwrap()
+    }
+
+    #[test]
+    fn success_skip_diagnostics_do_not_invent_a_port() {
+        let mut wire = fixture(include_str!("../tests/fixtures/node-skipped.json"));
+        wire.attributes.insert(
+            "mf.schema.version".into(),
+            json!(crate::SUCCESS_EVENT_SCHEMA_VERSION),
+        );
+        wire.body["causes"] = json!([{"node_success":"write_file"}]);
+        let mut bytes = Vec::new();
+        write_diagnostic(&mut bytes, &wire, 1).unwrap();
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("requires successful node \"write_file\""));
+        assert!(!text.contains("unknown"));
     }
 
     #[test]

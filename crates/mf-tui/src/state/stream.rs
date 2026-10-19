@@ -620,12 +620,13 @@ fn validate_graph(
                     .iter()
                     .map(|entry| entry.loop_id.clone())
                     .collect();
-                let (nodes, order, data, control) = if path.is_empty() {
+                let (nodes, order, data, control, orders) = if path.is_empty() {
                     (
                         &description.nodes,
                         &description.execution_order,
                         &description.data_edges,
                         &description.control_edges,
+                        &description.order_edges,
                     )
                 } else {
                     let body = description
@@ -636,6 +637,7 @@ fn validate_graph(
                         &body.execution_order,
                         &body.data_edges,
                         &body.control_edges,
+                        &body.order_edges,
                     )
                 };
                 if order.get(position.get() as usize) != Some(&node.id)
@@ -668,15 +670,7 @@ fn validate_graph(
                 }
                 if let Event::NodeSkipped { causes, .. } = event {
                     for cause in causes {
-                        if !data.iter().any(|edge| {
-                            edge.to_node == node.id
-                                && edge.from_node == cause.source_node()
-                                && Some(edge.from_output.as_str()) == cause.source_output()
-                        }) && !control.iter().any(|edge| {
-                            edge.to_node == node.id
-                                && edge.from_node == cause.source_node()
-                                && Some(edge.from_output.as_str()) == cause.source_output()
-                        }) {
+                        if !cause.matches_dependency(&node.id, data, control, orders) {
                             return Err(invalid("stream skip cause is not an incoming dependency"));
                         }
                     }
@@ -1331,6 +1325,7 @@ mod tests {
     }
     fn description() -> WorkflowDescription {
         WorkflowDescription {
+            order_edges: Vec::new(),
             version: WorkflowDescriptionVersion::V2026_10_03,
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
             execution: Some(ExecutionDescription {
@@ -1634,6 +1629,7 @@ mod tests {
         graph.execution_order[1] = "repeat".into();
         graph.data_edges[0].to_node = "repeat".into();
         graph.loop_bodies = vec![LoopBodyDescription {
+            order_edges: Vec::new(),
             path: vec!["repeat".into()],
             nodes: vec![NodeDescription {
                 id: "%loop".into(),

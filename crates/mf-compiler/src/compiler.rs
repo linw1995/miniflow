@@ -1276,7 +1276,12 @@ pub fn loop_execution_orders(
     definition: &WorkflowDefinition,
 ) -> Result<Vec<mf_runtime::LoopExecutionOrder>, DescriptionError> {
     let mut orders = Vec::new();
-    collect_loop_execution_orders(definition, &mut Vec::new(), &mut orders)?;
+    collect_loop_execution_orders(
+        definition,
+        &mut Vec::new(),
+        &mut orders,
+        definition.has_order_edges(),
+    )?;
     Ok(orders)
 }
 
@@ -1284,20 +1289,34 @@ fn collect_loop_execution_orders(
     definition: &WorkflowDefinition,
     path: &mut Vec<String>,
     orders: &mut Vec<mf_runtime::LoopExecutionOrder>,
+    include_iterations: bool,
 ) -> Result<(), DescriptionError> {
     for node in &definition.nodes {
-        let Some(loop_definition) = &node.loop_definition else {
+        let body = if let Some(loop_definition) = &node.loop_definition {
+            crate::loops::body_definition(&loop_definition.body, &definition.dependencies)
+        } else if include_iterations && node.kind == ITERATION_KIND {
+            let config = parse_config(node)
+                .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
+            body_definition(definition, &config)
+                .map_err(|message| {
+                    InvalidIterationSnafu {
+                        definition_id: node.id.clone(),
+                        message,
+                    }
+                    .build()
+                })
+                .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?
+        } else {
             continue;
         };
         path.push(node.id.to_string());
-        let body = crate::loops::body_definition(&loop_definition.body, &definition.dependencies);
         let order = structural_order_graph(&body)
             .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
         orders.push(mf_runtime::LoopExecutionOrder {
             path: path.clone(),
             execution_order: order.iter().map(ToString::to_string).collect(),
         });
-        collect_loop_execution_orders(&body, path, orders)?;
+        collect_loop_execution_orders(&body, path, orders, include_iterations)?;
         path.pop();
     }
     Ok(())

@@ -92,7 +92,9 @@ fn decode_scope(value: &mut Value, modern: bool, path: &str) -> Result<(), WireE
             }
         }
         scope.insert("control_edges".into(), controls.into());
-        scope.insert("order_edges".into(), orders.into());
+        if !orders.is_empty() {
+            scope.insert("order_edges".into(), orders.into());
+        }
         let mut data = Vec::new();
         if let Some(nodes) = scope.get_mut("nodes").and_then(Value::as_array_mut) {
             for node in nodes {
@@ -127,12 +129,20 @@ fn decode_scope(value: &mut Value, modern: bool, path: &str) -> Result<(), WireE
                                     message: "source port must not be empty"
                                 }
                             );
-                            data.push(json!({"exclusive":exclusive,"from_node":source.node,"from_output":source.port,"to_node":target,"to_input":input}));
+                            let mut edge = json!({"from_node":source.node,"from_output":source.port,"to_node":target,"to_input":input});
+                            if exclusive {
+                                edge["exclusive"] = json!(true);
+                            }
+                            data.push(edge);
                         }
                     }
                 }
             }
         }
+        fn edge_key(edge: &Value) -> [Option<&str>; 4] {
+            ["from_node", "from_output", "to_node", "to_input"].map(|field| edge[field].as_str())
+        }
+        data.sort_by(|left, right| edge_key(left).cmp(&edge_key(right)));
         scope.insert("edges".into(), data.into());
     } else if let Some(nodes) = scope.get("nodes").and_then(Value::as_array) {
         ensure!(

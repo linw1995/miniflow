@@ -1,3 +1,6 @@
+#[path = "fixtures/observation_capture.rs"]
+mod capture;
+mod common;
 extern crate mfn_code as _;
 extern crate mfn_core as _;
 #[path = "fixtures/controlled_source.rs"]
@@ -286,4 +289,300 @@ fn success_edges_cannot_join_startup_and_message_domains() {
             .to_string()
             .contains("message domain")
     );
+}
+
+#[test]
+fn success_observations_round_trip_and_reject_protocol_downgrades() {
+    use mf_telemetry::{
+        event::{Event, SkipCause},
+        identity::RunId,
+    };
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("trace");
+    let graph = definition(
+        vec![
+            json!({"id":"value","kind":"builtin.constant","config":{"value":-1}}),
+            router("value.value"),
+            task("source", &path),
+            task("target", &path),
+        ],
+        json!([
+            {"from_node":"value","to_node":"route"},{"from_node":"route","from_output":"positive","to_node":"source"},{"from_node":"source","to_node":"target"}
+        ]),
+    );
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&graph, &registry).unwrap();
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    assert_eq!(
+        description.event_schema_version(),
+        mf_telemetry::SUCCESS_EVENT_SCHEMA_VERSION
+    );
+    let harness = capture::Harness::new(false);
+    let observation = plan
+        .start_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    mf_compiler::execute_compiled(&plan, &registry, Some(observation)).unwrap();
+    let records = harness.records();
+    assert!(!records.is_empty());
+    assert!(harness.spans.get_finished_spans().unwrap().is_empty());
+    let mut seen = false;
+    for wire in records {
+        assert_eq!(
+            wire.schema_version().unwrap(),
+            mf_telemetry::SUCCESS_EVENT_SCHEMA_VERSION
+        );
+        let event = wire.decode().unwrap();
+        event.validate_for(&description).unwrap();
+        if let Event::NodeSkipped { node, causes, .. } = event.event
+            && node.id == "target"
+        {
+            assert_eq!(
+                causes,
+                [SkipCause::NodeSuccess {
+                    node_success: "source".into()
+                }]
+            );
+            assert!(wire.body["causes"][0].get("source_output").is_none());
+            let mut old = wire.clone();
+            old.attributes.insert("mf.schema.version".into(), json!(2));
+            assert!(old.decode().is_err());
+            seen = true;
+        }
+    }
+    assert!(seen);
+    let mut old = description.clone();
+    old.version = mf_telemetry::description::WorkflowDescriptionVersion::V2026_10_03;
+    assert!(old.validate().is_err());
+    let mut malformed = description;
+    malformed.order_edges[0].to_node = "unknown".into();
+    assert!(malformed.validate().is_err());
+}
+
+#[test]
+fn stream_success_events_round_trip_with_node_only_skip_causes() {
+    use mf_telemetry::{
+        event::{Event, SkipCause},
+        identity::RunId,
+        stream::{StreamPayload, StreamRecord},
+    };
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("trace");
+    let mut graph = definition(
+        vec![
+            controlled::source(json!("int")),
+            router("feed.item"),
+            task("source", &path),
+            task("target", &path),
+        ],
+        json!([
+            {"from_node":"feed","from_output":"item","to_node":"route"},{"from_node":"route","from_output":"positive","to_node":"source"},{"from_node":"source","to_node":"target"}
+        ]),
+    );
+    graph.execution = Some(serde_json::from_value(json!({"mode":"stream"})).unwrap());
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let plan = compile_definition(&graph, &registry).unwrap();
+    let harness = capture::Harness::new(false);
+    let observation = plan
+        .start_stream_observation(&harness.observer(), RunId::new())
+        .unwrap();
+    let run = controlled::SourceRun::start(
+        mf_compiler::instantiate_stream(&plan, &registry).unwrap(),
+        "feed",
+        mf_runtime::StreamOptions {
+            observation: Some(observation),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    run.source.send(json!(-1)).unwrap();
+    run.source.close();
+    while run.recv().unwrap().is_some() {}
+    run.join().unwrap();
+    let mut seen = false;
+    for wire in harness.records() {
+        let record = StreamRecord::decode(&wire).unwrap();
+        assert_eq!(
+            record.schema_version,
+            mf_telemetry::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
+        );
+        let encoded = record
+            .to_wire(wire.time_unix_nano, wire.trace_context.clone())
+            .unwrap();
+        assert_eq!(StreamRecord::decode(&encoded).unwrap(), record);
+        if let StreamPayload::Execution(Event::NodeSkipped { node, causes, .. }) = record.payload
+            && node.id == "target"
+        {
+            assert_eq!(
+                causes,
+                [SkipCause::NodeSuccess {
+                    node_success: "source".into()
+                }]
+            );
+            let mut old = wire;
+            old.attributes.insert("mf.schema.version".into(), json!(4));
+            assert!(StreamRecord::decode(&old).is_err());
+            seen = true;
+        }
+    }
+    assert!(seen);
+}
+
+#[test]
+fn success_edges_change_identity_even_when_execution_order_is_unchanged() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("trace");
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut graph = definition(
+        vec![task("a", &path), task("z", &path)],
+        json!([{"from_node":"a","to_node":"z"}]),
+    );
+    let with = compile_definition(&graph, &registry).unwrap();
+    let id = with.manifest(&registry).unwrap().workflow_id().unwrap();
+    graph.order_edges.clear();
+    let without = compile_definition(&graph, &registry).unwrap();
+    assert_eq!(with.execution_order, without.execution_order);
+    let manifest = without.manifest(&registry).unwrap();
+    assert_ne!(id, manifest.workflow_id().unwrap());
+    assert_eq!(
+        manifest.description().unwrap().event_schema_version(),
+        mf_telemetry::LOOP_EVENT_SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
+    use std::{fs, process::Command};
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("trace");
+    let project = root.path().join("build");
+    let input = root.path().join("lines");
+    fs::write(&input, "first\nsecond\n").unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut cases = vec![definition(
+        vec![task("z_write", &path), task("a_notify", &path)],
+        json!([{"from_node":"z_write","to_node":"a_notify"}]),
+    )];
+    for source in [
+        include_str!("../../../examples/loop.json"),
+        include_str!("../../../examples/iteration.json"),
+    ] {
+        let mut graph: WorkflowDefinition = serde_json::from_str(source).unwrap();
+        graph.version = mf_compiler::WorkflowDefinitionVersion::V2026_10_19;
+        if let Some(definition) = &mut graph.nodes[1].loop_definition {
+            definition.body.nodes.extend([
+                serde_json::from_value(task("a", &path)).unwrap(),
+                serde_json::from_value(task("b", &path)).unwrap(),
+            ]);
+            definition
+                .body
+                .order_edges
+                .push(mf_compiler::OrderEdgeDefinition {
+                    from_node: "a".into(),
+                    to_node: "b".into(),
+                });
+        } else {
+            graph.nodes[1].config["body"]["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .extend([task("a", &path), task("b", &path)]);
+            graph.nodes[1].config["body"]["order_edges"] = json!([{"from_node":"a","to_node":"b"}]);
+        }
+        cases.push(graph);
+    }
+    let mut stream = definition(
+        vec![
+            json!({"id":"read","kind":"builtin.readline"}),
+            task("source", &path),
+            task("target", &path),
+        ],
+        json!([
+            {"from_node":"read","from_output":"line","to_node":"source"},{"from_node":"source","to_node":"target"}
+        ]),
+    );
+    stream.execution = Some(serde_json::from_value(json!({"mode":"stream"})).unwrap());
+    stream.outputs =
+        serde_json::from_value(json!([{"name":"line","node":"read","port":"line"}])).unwrap();
+    cases.push(stream);
+    for mut graph in cases {
+        let _ = fs::remove_file(&path);
+        graph.dependencies=serde_json::from_value(json!({
+            "fixture":{"package":"fixture-multi-nodes","path":common::crates_dir().join("mf-compiler/tests/fixtures/multi-nodes")},
+            "core":{"package":"mfn-core","path":common::crates_dir().join("builtin-nodes/core")},
+            "code":{"package":"mfn-code","path":common::crates_dir().join("builtin-nodes/code")}
+        })).unwrap();
+        let plan = compile_definition(&graph, &registry).unwrap();
+        let manifest = plan.manifest(&registry).unwrap();
+        assert_eq!(
+            mf_runtime::WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap(),
+            manifest
+        );
+        let description = manifest.description().unwrap();
+        description.validate().unwrap();
+        assert!(
+            !description.order_edges.is_empty()
+                || description
+                    .loop_bodies
+                    .iter()
+                    .any(|body| !body.order_edges.is_empty())
+        );
+        let expected: Vec<Value> = if graph.execution.is_some() {
+            let instance = mf_compiler::instantiate_stream(&plan, &registry)
+                .unwrap()
+                .start_with_options(mf_runtime::StreamOptions {
+                    arguments: mf_runtime::WorkflowArguments::try_from(json!({"read.path":input}))
+                        .unwrap(),
+                    ..Default::default()
+                })
+                .unwrap();
+            let mut outputs = Vec::new();
+            while let Some(value) = instance.recv().unwrap() {
+                outputs.push(json!(value.outputs));
+            }
+            instance.join().unwrap();
+            outputs
+        } else {
+            vec![json!(
+                mf_compiler::execute_compiled(&plan, &registry, None).unwrap()
+            )]
+        };
+        let expected_trace = trace(&path);
+        fs::remove_file(&path).unwrap();
+        mf_compiler::write_dependency_project(
+            &project,
+            &plan,
+            &mf_compiler::SupportPackages::Local {
+                crates_dir: common::crates_dir(),
+            },
+        )
+        .unwrap();
+        mf_compiler::resolve_project(&project, &root.path().join("flow.lock"), false).unwrap();
+        let build = mf_compiler::cargo_command(&project)
+            .args(["build", "--release", "--offline", "--locked"])
+            .output()
+            .unwrap();
+        assert!(
+            build.status.success(),
+            "{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        assert!(!path.exists());
+        let mut command = Command::new(common::runner_executable(&project, "release"));
+        if graph.execution.is_some() {
+            command.arg("--read.path").arg(&input);
+        }
+        let result = command.arg("-v").output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let actual: Vec<Value> = result
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .map(|line| serde_json::from_slice(line).unwrap())
+            .collect();
+        assert_eq!(actual, expected);
+        assert_eq!(trace(&path), expected_trace);
+    }
 }

@@ -569,6 +569,7 @@ mod tests {
         observer
             .start_stream(
                 WorkflowDescription {
+                    order_edges: Vec::new(),
                     version: crate::description::WorkflowDescriptionVersion::V2026_10_02,
                     workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64)))
                         .unwrap(),

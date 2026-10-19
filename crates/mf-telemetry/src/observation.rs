@@ -1,7 +1,7 @@
 //! Caller-owned OTel instrumentation for one synchronous workflow invocation.
 
 use crate::{
-    ContractError, Count, EVENT_SCHEMA_VERSION, INSTRUMENTATION_SCOPE, LOOP_EVENT_SCHEMA_VERSION,
+    ContractError, Count, EVENT_SCHEMA_VERSION, INSTRUMENTATION_SCOPE,
     description::WorkflowDescription,
     event::{
         Event, EventSequence, Failure, FailurePhase, InputSelection, LifecycleEvent,
@@ -720,11 +720,12 @@ impl RunObservation {
             sequence,
             event,
         };
-        let schema_version = if self.description.is_some() {
-            LOOP_EVENT_SCHEMA_VERSION
-        } else {
-            EVENT_SCHEMA_VERSION
-        };
+        let schema_version = self
+            .description
+            .as_ref()
+            .map_or(EVENT_SCHEMA_VERSION, |description| {
+                description.event_schema_version()
+            });
         if let Ok(record) =
             WireRecord::from_event_with_version(&event, schema_version, timestamp, trace_context)
         {

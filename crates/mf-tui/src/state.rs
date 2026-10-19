@@ -289,7 +289,11 @@ struct SequenceWitness {
 impl SessionState {
     pub fn new(description: WorkflowDescription, run_id: RunId) -> Result<Self, StateError> {
         if description.is_streaming()
-            && description.event_schema_version() != mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
+            && !matches!(
+                description.event_schema_version(),
+                mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
+                    | mf_telemetry::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
+            )
         {
             return UnsupportedStreamSnafu.fail();
         }

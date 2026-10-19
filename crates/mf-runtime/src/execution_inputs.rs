@@ -1,4 +1,4 @@
-use crate::runner::{ContextSnafu, DependencySnafu, InputTypeSnafu};
+use crate::runner::{ContextSnafu, DependencySnafu, InputTypeSnafu, SuccessDependencySnafu};
 use crate::workflow_inputs::{InvalidSnafu, TextValueSnafu, TypeMismatchSnafu, pointer};
 use crate::{
     ContextValue, ExecutionDependency, FlowNode, Inputs, NodeExecutionError, WorkflowArguments,
@@ -125,10 +125,19 @@ impl ExecutionInputs {
         let mut selected = Vec::new();
         let mut groups: BTreeMap<&str, CandidateValues> = BTreeMap::new();
         for dependency in dependencies {
-            let value = lookup(dependency).with_context(|_| DependencySnafu {
-                definition_id: id,
-                input: dependency.borrowed().input().unwrap_or("<control>"),
-            })?;
+            let value = match dependency {
+                ExecutionDependency::NodeSuccess { source_node } => lookup(dependency)
+                    .with_context(|_| SuccessDependencySnafu {
+                        definition_id: id,
+                        source_node,
+                    })?,
+                ExecutionDependency::Output { input, .. } => {
+                    lookup(dependency).with_context(|_| DependencySnafu {
+                        definition_id: id,
+                        input: input.unwrap_or("<control>"),
+                    })?
+                }
+            };
             if dependency.borrowed().exclusive() {
                 let input = dependency.borrowed().input().ok_or_else(|| {
                     ContextSnafu {

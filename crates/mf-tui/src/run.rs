@@ -1580,6 +1580,7 @@ mod tests {
     #[test]
     fn loop_views_preserve_navigation_and_compacted_stream_totals() {
         let description = WorkflowDescription {
+            order_edges: Vec::new(),
             version: WorkflowDescriptionVersion::V2026_09_29,
             workflow_id: WorkflowId::try_from(format!("sha256:{}", "c".repeat(64))).unwrap(),
             nodes: vec![NodeDescription {
@@ -1591,6 +1592,7 @@ mod tests {
             execution_order: vec!["repeat".into()],
             execution: None,
             loop_bodies: vec![LoopBodyDescription {
+                order_edges: Vec::new(),
                 path: vec!["repeat".into()],
                 nodes: vec![
                     NodeDescription {

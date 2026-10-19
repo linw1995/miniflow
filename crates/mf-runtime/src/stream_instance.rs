@@ -534,6 +534,7 @@ fn run_producer(
 fn workflow_error_node(error: &crate::WorkflowRunError) -> String {
     match error {
         crate::WorkflowRunError::Dependency { definition_id, .. }
+        | crate::WorkflowRunError::SuccessDependency { definition_id, .. }
         | crate::WorkflowRunError::InputType { definition_id, .. }
         | crate::WorkflowRunError::OutputType { definition_id, .. }
         | crate::WorkflowRunError::OutputSelection { definition_id, .. }
@@ -656,10 +657,13 @@ impl PreparedStream {
     ) -> Result<StreamInstance, StreamError> {
         if let Some(observation) = &options.observation {
             ensure!(
-                observation.description().event_schema_version()
-                    == mf_telemetry::STREAM_EVENT_SCHEMA_VERSION,
+                matches!(
+                    observation.description().event_schema_version(),
+                    mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
+                        | mf_telemetry::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
+                ),
                 ConfigurationSnafu {
-                    message: "stream execution requires observation schema 4"
+                    message: "stream execution requires a supported source-driven observation schema"
                 }
             );
         }

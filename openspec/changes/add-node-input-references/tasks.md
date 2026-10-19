@@ -16,9 +16,9 @@
 
 ## 3. Protocol and diagnostics
 
-- [ ] 3.1 Add versioned node-success edges to root/body descriptions; update validation, graph identity, manifests, readers, and protocol selection.
-- [ ] 3.2 Add versioned node-success skip causes; update OTLP/event encoding, verbose output, and reducers without sentinel ports or payload exposure.
-- [ ] 3.3 Retain old protocols for representable graphs; test standalone/in-memory success parity, old/new preflight, nested dependencies, round trips, and observation uncertainty.
+- [x] 3.1 Add versioned node-success edges to root/body descriptions; update validation, graph identity, manifests, readers, and protocol selection.
+- [x] 3.2 Add versioned node-success skip causes; update OTLP/event encoding, verbose output, and reducers without sentinel ports or payload exposure.
+- [x] 3.3 Retain old protocols for representable graphs; test standalone/in-memory success parity, old/new preflight, nested dependencies, round trips, and observation uncertainty.
 
 ## 4. TUI projection and inspection
 

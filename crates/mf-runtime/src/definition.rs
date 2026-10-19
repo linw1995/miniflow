@@ -115,7 +115,7 @@ pub enum WorkflowDefinitionVersion {
 }
 
 impl WorkflowDefinitionVersion {
-    pub const CURRENT: Self = Self::V2026_10_03;
+    pub const CURRENT: Self = Self::V2026_10_19;
 
     pub fn supports_startup_inputs(self) -> bool {
         matches!(self, Self::V2026_10_03 | Self::V2026_10_19)

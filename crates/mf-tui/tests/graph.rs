@@ -21,6 +21,7 @@ use ratatui::{
 fn description() -> WorkflowDescription {
     let nodes = ["source", "router", "left", "right", "join", "orphan"];
     WorkflowDescription {
+        order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "b".repeat(64))).unwrap(),
         nodes: nodes
@@ -83,6 +84,7 @@ fn loop_body_layout_renders_the_selected_pass_independently() {
     graph.control_edges.clear();
     graph.execution_order = vec!["repeat".into()];
     graph.loop_bodies = vec![LoopBodyDescription {
+        order_edges: Vec::new(),
         path: vec!["repeat".into()],
         nodes: vec![
             NodeDescription {
@@ -986,6 +988,7 @@ fn root_and_loop_body_share_routing_geometry() {
     description.data_edges.clear();
     description.control_edges.clear();
     description.loop_bodies = vec![LoopBodyDescription {
+        order_edges: Vec::new(),
         path: vec!["repeat".into()],
         nodes: body_graph.nodes,
         data_edges: body_graph.data_edges,

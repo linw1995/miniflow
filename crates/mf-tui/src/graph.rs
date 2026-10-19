@@ -98,13 +98,22 @@ impl GraphLayout {
             .loop_body(path)
             .ok_or(GraphError::MissingLoopBody)?;
         let scope = WorkflowDescription {
-            version: WorkflowDescriptionVersion::V2026_09_27,
+            order_edges: body.order_edges.clone(),
+            version: if description.version == WorkflowDescriptionVersion::V2026_10_19 {
+                description.version
+            } else {
+                WorkflowDescriptionVersion::V2026_09_27
+            },
             workflow_id: description.workflow_id.clone(),
             nodes: body.nodes.clone(),
             data_edges: body.data_edges.clone(),
             control_edges: body.control_edges.clone(),
             execution_order: body.execution_order.clone(),
-            execution: None,
+            execution: (description.version == WorkflowDescriptionVersion::V2026_10_19).then_some(
+                mf_telemetry::description::ExecutionDescription {
+                    mode: mf_telemetry::description::ExecutionMode::Single,
+                },
+            ),
             loop_bodies: Vec::new(),
         };
         Self::new(&scope)
