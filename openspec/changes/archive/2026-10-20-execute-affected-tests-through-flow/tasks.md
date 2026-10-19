@@ -18,5 +18,5 @@
 
 - [x] 4.0 Bridge standalone runner interrupts to existing cancellation and verify native child cleanup before archival.
 
-- [ ] 4.1 Run focused tests and required hooks; ablate gating/report separation and remove unnecessary abstractions or tests.
-- [ ] 4.2 Review AGENTS.md compliance, synchronize formal specs, and archive in a separate commit.
+- [x] 4.1 Run focused tests and required hooks; ablate gating/report separation and remove unnecessary abstractions or tests.
+- [x] 4.2 Review AGENTS.md compliance, synchronize formal specs, and archive in a separate commit.
