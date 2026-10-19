@@ -1641,15 +1641,8 @@ fn task_guard_tokens(
                 Ok(())
             }
         });
-        if domain.positions.iter().any(|&position| {
-            definition
-                .order_edges
-                .iter()
-                .any(|edge| edge.to_node == order[position])
-        }) {
-            let id = domain.id;
-            bindings.push(quote! { (#id, std::sync::Arc::new(#name) as std::sync::Arc<mf_runtime::GeneratedDomainExecutor>) });
-        }
+        let id = domain.id;
+        bindings.push(quote! { (#id, std::sync::Arc::new(#name) as std::sync::Arc<mf_runtime::GeneratedDomainExecutor>) });
     }
     let bind = format_ident!("bind_success_guards_{scope}");
     let binding = (!bindings.is_empty()).then(|| {

@@ -162,34 +162,34 @@ pub fn success_conditions<'a>(
     guards
 }
 
-type Predicate = Arc<dyn Fn(&ExecutionContext) -> Result<bool, NodeExecutionError> + Send + Sync>;
+type Predicate = Box<dyn Fn(&ExecutionContext) -> Result<bool, NodeExecutionError> + Send + Sync>;
 type Guard =
-    Arc<dyn Fn(&ExecutionContext) -> Result<BTreeSet<SkipCause>, WorkflowRunError> + Send + Sync>;
+    Box<dyn Fn(&ExecutionContext) -> Result<BTreeSet<SkipCause>, WorkflowRunError> + Send + Sync>;
 
 // Preparation binds the predicate structure once; execution does not walk a dependency graph.
 fn bind_condition(clauses: BTreeSet<Clause>) -> Predicate {
-    let mut conjunction: Predicate = Arc::new(|_| Ok(true));
+    let mut conjunction: Predicate = Box::new(|_| Ok(true));
     for clause in clauses {
-        let mut disjunction: Predicate = Arc::new(|_| Ok(false));
+        let mut disjunction: Predicate = Box::new(|_| Ok(false));
         for (source, port) in clause {
             let previous = disjunction;
             disjunction =
-                Arc::new(move |ctx| Ok(previous(ctx)? | ctx.output_available(&source, &port)?));
+                Box::new(move |ctx| Ok(previous(ctx)? | ctx.output_available(&source, &port)?));
         }
         let previous = conjunction;
-        conjunction = Arc::new(move |ctx| Ok(previous(ctx)? & disjunction(ctx)?));
+        conjunction = Box::new(move |ctx| Ok(previous(ctx)? & disjunction(ctx)?));
     }
     conjunction
 }
 
 fn bind_guards(id: String, conditions: Vec<SuccessCondition>) -> Guard {
-    let mut guard: Guard = Arc::new(|_| Ok(BTreeSet::new()));
+    let mut guard: Guard = Box::new(|_| Ok(BTreeSet::new()));
     for condition in conditions {
         let predicate = bind_condition(condition.clauses);
         let source = condition.source;
         let id = id.clone();
         let previous = guard;
-        guard = Arc::new(move |ctx| {
+        guard = Box::new(move |ctx| {
             let mut causes = previous(ctx)?;
             let active = (|| {
                 if let Some(error) = ctx.cancellation().failure() {
@@ -216,7 +216,7 @@ pub fn bind_task_guards(
     flow: mf_runtime::Flow,
     guards: Vec<Vec<SuccessCondition>>,
 ) -> mf_runtime::Flow {
-    let guards: Vec<_> = guards
+    let mut guards: Vec<_> = guards
         .into_iter()
         .enumerate()
         .map(|(position, conditions)| {
@@ -242,7 +242,7 @@ pub fn bind_task_guards(
         let positions: Vec<_> = domain
             .positions
             .iter()
-            .map(|&position| (position, guards[position].clone()))
+            .map(|&position| (position, guards[position].take()))
             .collect();
         let executor: Arc<mf_runtime::GeneratedDomainExecutor> = Arc::new(move |flow, ctx| {
             for (position, guard) in &positions {
@@ -286,7 +286,7 @@ pub fn bind_stream_guards(
     prepared: mf_runtime::PreparedStream,
     guards: Vec<Vec<SuccessCondition>>,
 ) -> mf_runtime::PreparedStream {
-    let guards: Vec<_> = guards
+    let mut guards: Vec<_> = guards
         .into_iter()
         .enumerate()
         .map(|(position, conditions)| {
@@ -310,7 +310,7 @@ pub fn bind_stream_guards(
         let positions: Vec<_> = domain
             .positions
             .iter()
-            .map(|&position| (position, guards[position].clone()))
+            .map(|&position| (position, guards[position].take()))
             .collect();
         let executor: Arc<mf_runtime::GeneratedStreamDomainExecutor> =
             Arc::new(move |plan, ctx| {

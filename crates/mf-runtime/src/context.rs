@@ -1132,15 +1132,7 @@ pub fn execute_node_in_context(
         ordered.sort();
         std::borrow::Cow::Owned(ordered)
     };
-    execute_ordered_node_in_context(node, dependencies.iter().copied(), ctx)
-}
-
-pub fn execute_ordered_node_in_context<'a>(
-    node: &crate::TaskFlowNode,
-    dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
-    ctx: &mut ExecutionContext,
-) -> Result<(), WorkflowRunError> {
-    execute_ordered_task_in_context(node, node.node.as_ref(), dependencies, ctx)
+    execute_ordered_task_in_context(node, node.node.as_ref(), dependencies.iter().copied(), ctx)
 }
 
 pub(super) fn execute_ordered_task_in_context<'a, N>(

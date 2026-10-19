@@ -192,7 +192,10 @@ impl StreamPlan {
             &mut crate::Inputs,
         ) -> Result<crate::InputResolution, crate::WorkflowRunError>,
     ) -> Result<(), crate::WorkflowRunError> {
-        let node = &self.nodes[position];
+        let node = self.nodes.get(position).context(ContextSnafu {
+            definition_id: "<stream>",
+            message: "invalid stream domain dispatch index",
+        })?;
         let task = node.node.as_deref().with_context(|| ContextSnafu {
             definition_id: node.definition_id.clone(),
             message: "stream execution domain contains a non-task node",
@@ -221,21 +224,17 @@ impl StreamPlan {
             if context.cancellation().failure().is_some() {
                 break;
             }
-            let node = self.nodes.get(position).context(ContextSnafu {
-                definition_id: "<stream>",
-                message: "invalid stream domain dispatch index",
+            self.execute_resolved_position(position, context, |node, ctx, inputs| {
+                ctx.resolve_node_inputs(
+                    node,
+                    self.dependencies(position)
+                        .iter()
+                        .map(FlowDependency::borrowed),
+                    &[],
+                    inputs,
+                    Default::default(),
+                )
             })?;
-            crate::context::execute_ordered_task_in_context(
-                node,
-                node.node.as_deref().with_context(|| ContextSnafu {
-                    definition_id: node.definition_id.clone(),
-                    message: "stream execution domain contains a non-task node",
-                })?,
-                self.dependencies(position)
-                    .iter()
-                    .map(FlowDependency::borrowed),
-                context,
-            )?;
             if context.scope_exit_requested() {
                 break;
             }

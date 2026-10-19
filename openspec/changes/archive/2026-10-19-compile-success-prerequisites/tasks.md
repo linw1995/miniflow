@@ -13,3 +13,4 @@
 - [x] 3.1 Replace outcome-implementation tests with activation and generated execution regressions; run ablations.
 - [x] 3.2 Fix the Nix fixture omission, run repository checks and affected suites, and review the final diff.
 - [x] 3.3 Update documentation, review the specification for archival, and prepare the PR update.
+- [x] 3.4 Ablate duplicate Flow/Stream dispatch, redundant forwarding and guard-domain checks, and unshared predicate ownership; retain existing behavioral coverage.

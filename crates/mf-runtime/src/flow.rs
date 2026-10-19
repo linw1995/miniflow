@@ -270,16 +270,11 @@ impl Flow {
     ) -> Result<(), crate::WorkflowRunError> {
         let node_id = self.inner.plan.execution_order[position];
         let node = &self.inner.nodes[node_id.index()];
-        let previous = state.replace_execution_position(Some(position));
-        let result = crate::context::execute_ordered_node_in_context(
-            node,
-            self.inner.plan.dependencies[position]
-                .iter()
-                .map(crate::FlowDependency::borrowed),
-            state,
-        );
-        state.replace_execution_position(previous);
-        result
+        self.execute_generated_position(position, &[], state, |inputs, ctx| {
+            node.node
+                .execute(inputs, ctx)
+                .map(crate::GeneratedNodeResult::Dynamic)
+        })
     }
 
     pub fn execute_generated_position(
@@ -292,20 +287,22 @@ impl Flow {
             &mut crate::ExecutionContext,
         ) -> Result<crate::GeneratedNodeResult, crate::NodeExecutionError>,
     ) -> Result<(), crate::WorkflowRunError> {
-        let node_id = self.inner.plan.execution_order[position];
-        let node = &self.inner.nodes[node_id.index()];
-        let previous = state.replace_execution_position(Some(position));
-        let result = crate::execute_generated_node_in_context(
-            node,
-            self.inner.plan.dependencies[position]
-                .iter()
-                .map(crate::FlowDependency::borrowed),
+        self.execute_resolved_position(
+            position,
             state,
-            transferred_inputs,
+            |node, ctx, inputs| {
+                ctx.resolve_node_inputs(
+                    node,
+                    self.inner.plan.dependencies[position]
+                        .iter()
+                        .map(crate::FlowDependency::borrowed),
+                    transferred_inputs,
+                    inputs,
+                    BTreeSet::new(),
+                )
+            },
             invoke,
-        );
-        state.replace_execution_position(previous);
-        result
+        )
     }
 
     pub fn execute_resolved_position(
