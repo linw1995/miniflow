@@ -843,6 +843,20 @@ mod tests {
             .join("\n")
     }
     #[test]
+    fn connection_shortcut_does_not_intercept_chat_prompt_editing() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        let controller = ChatController::open(launch).unwrap();
+        view.key(
+            KeyEvent::new(KeyCode::Char('e'), KeyModifiers::NONE),
+            &controller,
+        );
+        assert_eq!(view.editor.text, "e");
+        controller.close().unwrap();
+    }
+
+    #[test]
     fn multiline_submission_preserves_new_edits_and_blocks_switching_until_cancelled() {
         let root = tempfile::tempdir().unwrap();
         let launch = super::super::tests::launch(root.path());

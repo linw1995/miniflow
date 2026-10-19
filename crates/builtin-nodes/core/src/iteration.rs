@@ -257,6 +257,9 @@ impl IterationNode {
 }
 
 impl TypedTaskNode for IterationNode {
+    fn supports_success_dependencies(&self) -> bool {
+        false
+    }
     type Input = IterationInputs;
     type Output = IterationOutputs;
 
@@ -274,6 +277,9 @@ impl TypedTaskNode for IterationNode {
 }
 
 impl TaskNode for IterationNode {
+    fn supports_success_dependencies(&self) -> bool {
+        false
+    }
     fn execute(
         &self,
         inputs: Inputs,

@@ -170,11 +170,38 @@ iteration bodies are checked within their own scopes. Structural-only `plan_defi
 defers metadata checks, but executable preparation and code generation require proof.
 
 Rust `EdgeDefinition` literals must initialize the new `exclusive` field; `false` preserves
-ordinary binding. Workflow and body definition structs retain their existing shape. Prepared
-dependencies and connections preserve the marker through graph planning and input resolution.
+ordinary binding. Prepared data connections preserve the marker through graph planning and input resolution.
 
 Exclusive candidates use shared-value input resolution in generated and embedded execution.
 Typed ownership transfer into such a consumer reports `exclusive_input` as its fallback reason;
 unrelated safe segments remain eligible for optimization. Isolated node execution accepts the
 already resolved input and does not run or select predecessors. Loop rounds and iteration items
 resolve independently, including parallel iterations; candidate values cannot cross message domains.
+
+## Input references and Task success prerequisites
+
+`WorkflowDefinition` is the normalized Rust representation. Parsing version `2026-10-19` converts node-local references
+into canonical data `edges`, output gates into `control_edges`, and node-success prerequisites into `order_edges`.
+Serialization emits the authoring shape for the selected version, including nested bodies. Compiler entry points
+therefore share one complete dependency graph; programmatic callers continue to use canonical connections.
+
+Add node-success prerequisites to a prepared builder before executable construction:
+
+```rust
+let builder = builder.with_order_edges(vec![mf_runtime::OrderEdgeDefinition {
+    from_node: "write_file".into(),
+    to_node: "notify".into(),
+}])?;
+let flow = builder.into_tasks()?;
+```
+
+The supplied execution order must place sources before targets. Both endpoints must be ordinary Tasks in the same frame.
+`TaskNode::supports_success_dependencies` defaults to true; engine controls and container providers opt out. Typed
+adapters preserve the typed Task's policy. The compiler derives success activation from the source's input and output gates.
+Generated runners emit direct Rust conditions; in-memory preparation binds equivalent predicates. Scheduling and output
+publication establish completion, so runtime execution needs no Task outcome map. Both paths work without observation.
+
+Compiler dependencies distinguish `Dependency::Output` from `Dependency::NodeSuccess`; compiler `FlowDependency` owns names and
+`ExecutionDependency` borrows them. Executable runtime dependencies contain only data and output gates. Success prerequisites carry no input or output port. They retain activation facts,
+but router success alone adds no branch-selection fact. Success errors preserve their typed source chains, and
+isolated-node execution still accepts resolved inputs without running predecessors.

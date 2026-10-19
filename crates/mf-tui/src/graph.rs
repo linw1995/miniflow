@@ -60,11 +60,42 @@ pub struct GraphNode {
     pub rect: GraphRect,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ConnectionView {
+    #[default]
+    Execution,
+    Dependencies,
+    Ports,
+}
+impl ConnectionView {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Execution => Self::Dependencies,
+            Self::Dependencies => Self::Ports,
+            Self::Ports => Self::Execution,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Execution => "Execution",
+            Self::Dependencies => "Dependencies",
+            Self::Ports => "Ports",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DataMapping {
+    pub output: String,
+    pub input: String,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EdgeKind {
     Data,
     Exclusive,
     Control,
+    Success,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -72,14 +103,23 @@ pub struct GraphEdge {
     pub key: EdgeKey,
     pub from: usize,
     pub to: usize,
-    pub from_output: String,
+    pub from_output: Option<String>,
+    pub members: Vec<DataMapping>,
     pub to_input: Option<String>,
     pub kind: EdgeKind,
     pub from_row: u32,
     pub to_row: u32,
 }
 
+impl GraphEdge {
+    pub fn has_label(&self) -> bool {
+        self.kind != EdgeKind::Data || self.members.len() > 1
+    }
+}
+
 pub struct GraphLayout {
+    view: ConnectionView,
+    hidden_data_count: usize,
     nodes: Vec<GraphNode>,
     edges: Vec<GraphEdge>,
     routes: Vec<EdgeRoute>,
@@ -94,20 +134,35 @@ impl GraphLayout {
         description: &WorkflowDescription,
         path: &[String],
     ) -> Result<Self, GraphError> {
-        let body = description
-            .loop_body(path)
-            .ok_or(GraphError::MissingLoopBody)?;
+        Self::from_body_with_view(description, path, ConnectionView::Ports)
+    }
+
+    pub fn from_body_with_view(
+        description: &WorkflowDescription,
+        path: &[String],
+        view: ConnectionView,
+    ) -> Result<Self, GraphError> {
+        let body = description.body(path).ok_or(GraphError::MissingLoopBody)?;
         let scope = WorkflowDescription {
-            version: WorkflowDescriptionVersion::V2026_09_27,
+            order_edges: body.order_edges.clone(),
+            version: if description.version == WorkflowDescriptionVersion::V2026_10_19 {
+                description.version
+            } else {
+                WorkflowDescriptionVersion::V2026_09_27
+            },
             workflow_id: description.workflow_id.clone(),
             nodes: body.nodes.clone(),
             data_edges: body.data_edges.clone(),
             control_edges: body.control_edges.clone(),
             execution_order: body.execution_order.clone(),
-            execution: None,
+            execution: (description.version == WorkflowDescriptionVersion::V2026_10_19).then_some(
+                mf_telemetry::description::ExecutionDescription {
+                    mode: mf_telemetry::description::ExecutionMode::Single,
+                },
+            ),
             loop_bodies: Vec::new(),
         };
-        Self::new(&scope)
+        Self::with_view(&scope, view)
     }
 
     pub fn new(description: &WorkflowDescription) -> Result<Self, GraphError> {
@@ -118,6 +173,21 @@ impl GraphLayout {
         description: &WorkflowDescription,
         limits: routing::RoutingLimits,
     ) -> Result<Self, GraphError> {
+        Self::with_view_and_limits(description, ConnectionView::Ports, limits)
+    }
+
+    pub fn with_view(
+        description: &WorkflowDescription,
+        view: ConnectionView,
+    ) -> Result<Self, GraphError> {
+        Self::with_view_and_limits(description, view, routing::RoutingLimits::default())
+    }
+
+    pub fn with_view_and_limits(
+        description: &WorkflowDescription,
+        view: ConnectionView,
+        limits: routing::RoutingLimits,
+    ) -> Result<Self, GraphError> {
         description.validate().context(DescriptionSnafu)?;
         if description.nodes.len() > MAX_SESSION_NODES {
             return Err(GraphError::TooManyNodes {
@@ -126,7 +196,7 @@ impl GraphLayout {
         }
 
         let compact =
-            Self::with_attachment_spacing(description, limits, routing::ATTACHMENT_SPACING)?;
+            Self::with_attachment_spacing(description, limits, routing::ATTACHMENT_SPACING, view)?;
         if compact.unresolved_count() == 0 {
             return Ok(compact);
         }
@@ -154,7 +224,7 @@ impl GraphLayout {
         if remaining.max_geometry_items < estimate || remaining.max_conflict_checks == 0 {
             return Ok(compact);
         }
-        let relaxed = Self::with_attachment_spacing(description, remaining, 6)?;
+        let relaxed = Self::with_attachment_spacing(description, remaining, 6, view)?;
         let extra = relaxed.routing_stats;
         let mut selected = if relaxed.unresolved_count() < compact.unresolved_count() {
             relaxed
@@ -174,6 +244,7 @@ impl GraphLayout {
         description: &WorkflowDescription,
         limits: routing::RoutingLimits,
         attachment_spacing: u32,
+        view: ConnectionView,
     ) -> Result<Self, GraphError> {
         let described: BTreeMap<_, _> = description
             .nodes
@@ -200,8 +271,8 @@ impl GraphLayout {
                 },
             })
             .collect();
-        let mut edges =
-            Vec::with_capacity(description.data_edges.len() + description.control_edges.len());
+        let mut edges: Vec<GraphEdge> = Vec::new();
+        let mut bundles: BTreeMap<(usize, usize, EdgeKind), usize> = BTreeMap::new();
         let mut topology = BTreeSet::new();
         for edge in &description.data_edges {
             let kind = if edge.exclusive {
@@ -212,19 +283,34 @@ impl GraphLayout {
             let from = positions[edge.from_node.as_str()];
             let to = positions[edge.to_node.as_str()];
             topology.insert((from as u32, to as u32));
+            if view == ConnectionView::Execution {
+                continue;
+            }
+            let member = DataMapping {
+                output: edge.from_output.clone(),
+                input: edge.to_input.clone(),
+            };
+            if view == ConnectionView::Dependencies {
+                if let Some(&index) = bundles.get(&(from, to, kind)) {
+                    edges[index].members.push(member);
+                    continue;
+                }
+                bundles.insert((from, to, kind), edges.len());
+            }
             edges.push(GraphEdge {
                 key: EdgeKey {
                     source: nodes[from].id.clone(),
                     destination: nodes[to].id.clone(),
-                    output: edge.from_output.clone(),
+                    output: Some(edge.from_output.clone()),
                     input: Some(edge.to_input.clone()),
                     kind,
                 },
                 from,
                 to,
-                from_output: edge.from_output.clone(),
+                from_output: Some(edge.from_output.clone()),
                 to_input: Some(edge.to_input.clone()),
                 kind,
+                members: vec![member],
                 from_row: 0,
                 to_row: 0,
             });
@@ -237,19 +323,52 @@ impl GraphLayout {
                 key: EdgeKey {
                     source: nodes[from].id.clone(),
                     destination: nodes[to].id.clone(),
-                    output: edge.from_output.clone(),
+                    output: Some(edge.from_output.clone()),
                     input: None,
                     kind: EdgeKind::Control,
                 },
                 from,
                 to,
-                from_output: edge.from_output.clone(),
+                from_output: Some(edge.from_output.clone()),
                 to_input: None,
                 kind: EdgeKind::Control,
+                members: Vec::new(),
                 from_row: 0,
                 to_row: 0,
             });
         }
+        for edge in &description.order_edges {
+            let from = positions[edge.from_node.as_str()];
+            let to = positions[edge.to_node.as_str()];
+            topology.insert((from as u32, to as u32));
+            edges.push(GraphEdge {
+                key: EdgeKey {
+                    source: nodes[from].id.clone(),
+                    destination: nodes[to].id.clone(),
+                    output: None,
+                    input: None,
+                    kind: EdgeKind::Success,
+                },
+                from,
+                to,
+                from_output: None,
+                to_input: None,
+                kind: EdgeKind::Success,
+                members: Vec::new(),
+                from_row: 0,
+                to_row: 0,
+            });
+        }
+        for edge in &mut edges {
+            edge.members.sort();
+            if let Some(first) = edge.members.first() {
+                edge.from_output = Some(first.output.clone());
+                edge.to_input = Some(first.input.clone());
+                edge.key.output = edge.from_output.clone();
+                edge.key.input = edge.to_input.clone();
+            }
+        }
+        edges.sort_by(|left, right| left.key.cmp(&right.key));
         let mut outgoing = vec![Vec::new(); nodes.len()];
         let mut incoming = vec![Vec::new(); nodes.len()];
         for (index, edge) in edges.iter().enumerate() {
@@ -432,6 +551,12 @@ impl GraphLayout {
             .max()
             .unwrap_or(MARGIN * 2);
         Ok(Self {
+            view,
+            hidden_data_count: if view == ConnectionView::Execution {
+                description.data_edges.len()
+            } else {
+                0
+            },
             routes,
             crossings,
             routing_stats,
@@ -440,6 +565,13 @@ impl GraphLayout {
             width: right + MARGIN,
             height,
         })
+    }
+
+    pub fn connection_view(&self) -> ConnectionView {
+        self.view
+    }
+    pub fn hidden_data_count(&self) -> usize {
+        self.hidden_data_count
     }
 
     pub fn nodes(&self) -> &[GraphNode] {
@@ -484,10 +616,30 @@ impl GraphLayout {
         }
         let mut text = String::from("Unresolved connections:\n");
         for (edge, route) in entries {
-            let source = format!(
-                "{}.{}",
-                display_line(&edge.key.source),
-                display_line(&edge.from_output)
+            if edge.members.len() > 1 {
+                text.push_str(&format!(
+                    "{:?} bundle ({} mappings):\n",
+                    edge.kind,
+                    edge.members.len()
+                ));
+                for member in &edge.members {
+                    text.push_str(&format!(
+                        "{}.{} -> {}.{}\n",
+                        display_line(&edge.key.source),
+                        display_line(&member.output),
+                        display_line(&edge.key.destination),
+                        display_line(&member.input)
+                    ));
+                }
+                text.push_str(&format!(
+                    "{}\n",
+                    route.unresolved.expect("unresolved reason exists")
+                ));
+                continue;
+            }
+            let source = edge.from_output.as_deref().map_or_else(
+                || format!("success of {}", display_line(&edge.key.source)),
+                |port| format!("{}.{}", display_line(&edge.key.source), display_line(port)),
             );
             let target = edge.to_input.as_ref().map_or_else(
                 || display_line(&edge.key.destination),
@@ -771,6 +923,7 @@ impl<'a> GraphView<'a> {
             EdgeKind::Data => Color::Cyan,
             EdgeKind::Exclusive => Color::Magenta,
             EdgeKind::Control => Color::Blue,
+            EdgeKind::Success => Color::Yellow,
         };
         let Some(source) = self
             .nodes
@@ -784,19 +937,41 @@ impl<'a> GraphView<'a> {
         {
             return Style::default().fg(Color::Magenta);
         }
-        if source
-            .skipped_ports
-            .iter()
-            .any(|port| port == &edge.from_output)
-            || matches!(source.status, NodeStatus::Skipped | NodeStatus::NotRun)
-        {
+        if matches!(source.status, NodeStatus::Skipped | NodeStatus::NotRun) {
             return Style::default().fg(Color::DarkGray);
         }
-        if source
-            .produced_ports
-            .iter()
-            .any(|port| port == &edge.from_output)
+        if edge.kind == EdgeKind::Success {
+            return match source.status {
+                NodeStatus::Succeeded => Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+                NodeStatus::Failed => Style::default().fg(Color::Red),
+                _ => Style::default().fg(default),
+            };
+        }
+        let port_state = |port: &str| {
+            if source.produced_ports.iter().any(|name| name == port) {
+                1
+            } else if source.skipped_ports.iter().any(|name| name == port) {
+                2
+            } else {
+                0
+            }
+        };
+        let state = edge.from_output.as_deref().map_or(0, port_state);
+        if edge.members.len() > 1
+            && (state == 0
+                || edge
+                    .members
+                    .iter()
+                    .any(|member| port_state(&member.output) != state))
         {
+            return Style::default().fg(Color::Magenta);
+        }
+        if state == 2 {
+            return Style::default().fg(Color::DarkGray);
+        }
+        if state == 1 {
             return Style::default()
                 .fg(Color::Green)
                 .add_modifier(Modifier::BOLD);
@@ -1011,20 +1186,23 @@ mod rendering_tests {
                 key: EdgeKey {
                     source: nodes[index].id.clone(),
                     destination: nodes[index].id.clone(),
-                    output: "value".into(),
+                    output: Some("value".into()),
                     input: Some("input".into()),
                     kind,
                 },
                 from: index,
                 to: index,
-                from_output: "value".into(),
+                from_output: Some("value".into()),
                 to_input: Some("input".into()),
                 kind,
+                members: Vec::new(),
                 from_row: 1,
                 to_row: 4,
             })
             .collect();
         GraphLayout {
+            view: ConnectionView::Ports,
+            hidden_data_count: 0,
             nodes,
             edges,
             routes: vec![

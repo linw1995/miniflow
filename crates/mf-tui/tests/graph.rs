@@ -21,6 +21,7 @@ use ratatui::{
 fn description() -> WorkflowDescription {
     let nodes = ["source", "router", "left", "right", "join", "orphan"];
     WorkflowDescription {
+        order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "b".repeat(64))).unwrap(),
         nodes: nodes
@@ -83,6 +84,7 @@ fn loop_body_layout_renders_the_selected_pass_independently() {
     graph.control_edges.clear();
     graph.execution_order = vec!["repeat".into()];
     graph.loop_bodies = vec![LoopBodyDescription {
+        order_edges: Vec::new(),
         path: vec!["repeat".into()],
         nodes: vec![
             NodeDescription {
@@ -244,6 +246,7 @@ fn parallel_data_and_control_edges_use_separate_block_rows() {
             EdgeKind::Data => Color::Cyan,
             EdgeKind::Exclusive => Color::Magenta,
             EdgeKind::Control => Color::Blue,
+            EdgeKind::Success => Color::Yellow,
         };
         for (x, y, symbol) in [
             (source.x + source.width - 1, source.y + edge.from_row, "├"),
@@ -986,6 +989,7 @@ fn root_and_loop_body_share_routing_geometry() {
     description.data_edges.clear();
     description.control_edges.clear();
     description.loop_bodies = vec![LoopBodyDescription {
+        order_edges: Vec::new(),
         path: vec!["repeat".into()],
         nodes: body_graph.nodes,
         data_edges: body_graph.data_edges,
@@ -1017,8 +1021,10 @@ fn a_wide_label_fragment_cannot_overwrite_the_next_pane() {
         .cell_mut(Position::new(1, 0))
         .unwrap()
         .set_symbol("#");
+    let wide = label.text.find('🦀').unwrap();
+    let prefix_width = ratatui::text::Span::raw(&label.text[..wide]).width() as u32;
     GraphView::new(&layout)
-        .offset(label.rect.x, label.rect.y)
+        .offset(label.rect.x + prefix_width, label.rect.y)
         .render(Rect::new(0, 0, 1, 1), &mut buffer);
     assert_eq!(buffer.cell(Position::new(0, 0)).unwrap().symbol(), " ");
     assert_eq!(buffer.cell(Position::new(1, 0)).unwrap().symbol(), "#");
@@ -1057,4 +1063,181 @@ fn exclusive_candidates_have_distinct_edges_and_visible_labels() {
     );
     graph.data_edges.last_mut().unwrap().exclusive = false;
     assert!(graph.validate().is_err());
+}
+
+fn parameter_graph() -> WorkflowDescription {
+    WorkflowDescription {
+        version: WorkflowDescriptionVersion::V2026_09_27,
+        workflow_id: WorkflowId::try_from(format!("sha256:{}", "d".repeat(64))).unwrap(),
+        execution: None,
+        nodes: ["params", "settings"]
+            .map(|id| NodeDescription {
+                id: id.into(),
+                kind: "fixture.task".into(),
+            })
+            .to_vec(),
+        data_edges: (0..18)
+            .map(|index| DataEdge {
+                exclusive: false,
+                from_node: "params".into(),
+                from_output: format!("field{index}"),
+                to_node: "settings".into(),
+                to_input: format!("p{index}"),
+            })
+            .collect(),
+        control_edges: vec![],
+        order_edges: vec![],
+        execution_order: vec!["params".into(), "settings".into()],
+        loop_bodies: vec![],
+    }
+}
+
+#[test]
+fn connection_views_reduce_attachments_without_losing_dependency_placement() {
+    use mf_tui::graph::ConnectionView;
+    let graph = parameter_graph();
+    let execution = GraphLayout::with_view(&graph, ConnectionView::Execution).unwrap();
+    assert!(execution.edges().is_empty());
+    assert!(execution.routes().is_empty());
+    assert_eq!(execution.hidden_data_count(), 18);
+    assert_eq!(execution.routing_stats().search_expansions, 0);
+    assert!(execution.nodes().iter().all(|node| node.rect.height == 4));
+    assert!(execution.nodes()[0].rect.x < execution.nodes()[1].rect.x);
+    let dependencies = GraphLayout::with_view(&graph, ConnectionView::Dependencies).unwrap();
+    assert_eq!(dependencies.edges().len(), 1);
+    assert_eq!(dependencies.edges()[0].members.len(), 18);
+    assert!(
+        dependencies
+            .nodes()
+            .iter()
+            .all(|node| node.rect.height == 4)
+    );
+    assert!(
+        dependencies.routes()[0]
+            .label
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("18")
+    );
+    let ports = GraphLayout::with_view(&graph, ConnectionView::Ports).unwrap();
+    assert_eq!(ports.edges().len(), 18);
+    assert!(ports.nodes()[0].rect.height > dependencies.nodes()[0].rect.height);
+    assert_completed_geometry_is_safe(&execution);
+    assert_completed_geometry_is_safe(&dependencies);
+    assert_completed_geometry_is_safe(&ports);
+    let mut reordered = graph.clone();
+    reordered.data_edges.reverse();
+    for view in [
+        ConnectionView::Execution,
+        ConnectionView::Dependencies,
+        ConnectionView::Ports,
+    ] {
+        let first = GraphLayout::with_view(&graph, view).unwrap();
+        let second = GraphLayout::with_view(&reordered, view).unwrap();
+        assert_eq!(first.nodes(), second.nodes());
+        assert_eq!(first.edges(), second.edges());
+        assert_eq!(first.routes(), second.routes());
+        assert_eq!(first.crossings(), second.crossings());
+    }
+}
+
+#[test]
+fn success_gates_and_data_bundles_have_distinct_inspectable_identities() {
+    use mf_telemetry::description::{ExecutionDescription, ExecutionMode, OrderEdge};
+    use mf_tui::graph::ConnectionView;
+    let mut graph = parameter_graph();
+    graph.version = WorkflowDescriptionVersion::V2026_10_19;
+    graph.execution = Some(ExecutionDescription {
+        mode: ExecutionMode::Single,
+    });
+    graph.control_edges.push(ControlEdge {
+        from_node: "params".into(),
+        from_output: "success".into(),
+        to_node: "settings".into(),
+    });
+    graph.order_edges.push(OrderEdge {
+        from_node: "params".into(),
+        to_node: "settings".into(),
+    });
+    let layout = GraphLayout::with_view(&graph, ConnectionView::Dependencies).unwrap();
+    assert_eq!(layout.edges().len(), 3);
+    let success = layout
+        .edges()
+        .iter()
+        .position(|edge| edge.kind == EdgeKind::Success)
+        .unwrap();
+    let gate = layout
+        .edges()
+        .iter()
+        .position(|edge| edge.kind == EdgeKind::Control)
+        .unwrap();
+    assert_eq!(layout.edges()[success].from_output, None);
+    assert_eq!(layout.edges()[success].key.output, None);
+    assert_eq!(layout.edges()[gate].from_output.as_deref(), Some("success"));
+    assert_ne!(
+        layout.routes()[success].label.as_ref().unwrap().text,
+        layout.routes()[gate].label.as_ref().unwrap().text
+    );
+    let execution = GraphLayout::with_view(&graph, ConnectionView::Execution).unwrap();
+    assert_eq!(execution.edges().len(), 2);
+    assert_eq!(execution.hidden_data_count(), 18);
+    assert_completed_geometry_is_safe(&layout);
+}
+
+#[test]
+fn unresolved_bundles_retain_all_members_and_mixed_evidence_is_not_success() {
+    use mf_tui::graph::{ConnectionView, routing::RoutingLimits};
+    let graph = parameter_graph();
+    let limited = GraphLayout::with_view_and_limits(
+        &graph,
+        ConnectionView::Dependencies,
+        RoutingLimits {
+            max_geometry_items: 0,
+            max_conflict_checks: 0,
+            max_total_expansions: 0,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(limited.unresolved_count(), 1);
+    let details = limited.routing_details(0);
+    assert!(details.contains("18 mappings"));
+    for index in 0..18 {
+        assert!(details.contains(&format!("params.field{index} -> settings.p{index}")));
+    }
+    let layout = GraphLayout::with_view(&graph, ConnectionView::Dependencies).unwrap();
+    let mut nodes = vec![
+        NodeObservation::pending("params", "fixture.task"),
+        NodeObservation::pending("settings", "fixture.task"),
+    ];
+    nodes[0].status = NodeStatus::Succeeded;
+    nodes[0].produced_ports = (0..17).map(|index| format!("field{index}")).collect();
+    nodes[0].skipped_ports = vec!["field17".into()];
+    let mut buffer = Buffer::empty(Rect::new(0, 0, 120, 20));
+    GraphView::new(&layout)
+        .nodes(&nodes)
+        .render(buffer.area, &mut buffer);
+    let route = &layout.routes()[0];
+    let point = route.points[0];
+    assert_eq!(
+        buffer
+            .cell(Position::new(point.x as u16, point.y as u16))
+            .unwrap()
+            .fg,
+        Color::Magenta
+    );
+    nodes[0].produced_ports.push("field17".into());
+    nodes[0].skipped_ports.clear();
+    let mut complete = Buffer::empty(buffer.area);
+    GraphView::new(&layout)
+        .nodes(&nodes)
+        .render(complete.area, &mut complete);
+    assert_eq!(
+        complete
+            .cell(Position::new(point.x as u16, point.y as u16))
+            .unwrap()
+            .fg,
+        Color::Green
+    );
 }

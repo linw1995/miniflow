@@ -733,7 +733,7 @@ fn loop_observation_distinguishes_exit_skip_and_nested_paths() {
             assert!(events.iter().any(|event| matches!(event,
                 Event::NodeSkipped { node, causes, .. }
                     if node.id == "exit" && causes.iter().any(|cause|
-                        cause.source_node == "route" && cause.source_output == "stop"))));
+                        cause.source_node() == "route" && cause.source_output() == Some("stop")))));
             assert!(events.iter().any(|event| matches!(event,
                 Event::NodeFinished { node, loop_summary: Some(summary), .. }
                     if node.id == "repeat" && summary.reason == LoopStopReason::Exit)));

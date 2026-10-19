@@ -60,6 +60,8 @@ pub struct FailureSummary {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NodeObservation {
+    pub input_selections: Vec<mf_telemetry::event::InputSelection>,
+    pub omitted_input_selections: usize,
     pub id: String,
     pub kind: String,
     pub status: NodeStatus,
@@ -190,6 +192,25 @@ impl LoopPassObservation {
 }
 
 impl NodeObservation {
+    fn set_selections(&mut self, selections: &[mf_telemetry::event::InputSelection]) {
+        self.input_selections.clear();
+        self.omitted_input_selections = selections.len().saturating_sub(MAX_VISIBLE_PORTS);
+        for selection in selections.iter().take(MAX_VISIBLE_PORTS) {
+            if [
+                &selection.input,
+                &selection.source_node,
+                &selection.source_output,
+            ]
+            .iter()
+            .any(|value| value.len() > MAX_PORT_NAME_BYTES)
+            {
+                self.omitted_input_selections += 1;
+            } else {
+                self.input_selections.push(selection.clone());
+            }
+        }
+    }
+
     pub fn pending(id: &str, kind: &str) -> Self {
         pending_node_parts(id, kind)
     }
@@ -289,7 +310,11 @@ struct SequenceWitness {
 impl SessionState {
     pub fn new(description: WorkflowDescription, run_id: RunId) -> Result<Self, StateError> {
         if description.is_streaming()
-            && description.event_schema_version() != mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
+            && !matches!(
+                description.event_schema_version(),
+                mf_telemetry::STREAM_EVENT_SCHEMA_VERSION
+                    | mf_telemetry::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
+            )
         {
             return UnsupportedStreamSnafu.fail();
         }
@@ -869,6 +894,7 @@ impl SessionState {
                     } else {
                         observed.started_sequence = Some(sequence);
                         observed.started_elapsed_ns = Some(*elapsed_ns);
+                        observed.set_selections(event.selected_inputs());
                         if observed.terminal_sequence.is_none() {
                             observed.status = NodeStatus::Running;
                         }
@@ -940,6 +966,7 @@ impl SessionState {
                         violation = Some("body node skipped after another outcome");
                     } else {
                         observed.status = NodeStatus::Skipped;
+                        observed.set_selections(event.selected_inputs());
                         observed.terminal_sequence = Some(sequence);
                         observed.terminal_elapsed_ns = Some(*elapsed_ns);
                         let (visible_causes, omitted_causes) = bounded_causes(causes);
@@ -980,6 +1007,7 @@ impl SessionState {
                 }
                 observed.started_sequence = Some(sequence);
                 observed.started_elapsed_ns = Some(*elapsed_ns);
+                observed.set_selections(event.selected_inputs());
                 match observed.status {
                     NodeStatus::Pending => observed.status = NodeStatus::Running,
                     NodeStatus::Unknown if observed.terminal_sequence.is_none() => {
@@ -1067,6 +1095,7 @@ impl SessionState {
                     return true;
                 }
                 observed.status = NodeStatus::Skipped;
+                observed.set_selections(event.selected_inputs());
                 observed.last_known = None;
                 observed.terminal_sequence = Some(sequence);
                 observed.terminal_elapsed_ns = Some(*elapsed_ns);
@@ -1201,6 +1230,8 @@ fn pending_node(node: &NodeDescription) -> NodeObservation {
 
 fn pending_node_parts(id: &str, kind: &str) -> NodeObservation {
     NodeObservation {
+        input_selections: Vec::new(),
+        omitted_input_selections: 0,
         id: id.into(),
         kind: kind.into(),
         status: NodeStatus::Pending,
@@ -1254,8 +1285,8 @@ fn bounded_causes(causes: &[SkipCause]) -> (Vec<SkipCause>, usize) {
     let mut visible = Vec::new();
     let mut omitted = causes.len().saturating_sub(MAX_VISIBLE_PORTS);
     for cause in causes.iter().take(MAX_VISIBLE_PORTS) {
-        if cause.source_node.len() > MAX_PORT_NAME_BYTES
-            || cause.source_output.len() > MAX_PORT_NAME_BYTES
+        if cause.source_node().len() > MAX_PORT_NAME_BYTES
+            || cause.source_output().map_or(0, str::len) > MAX_PORT_NAME_BYTES
         {
             omitted += 1;
         } else {

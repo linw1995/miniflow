@@ -17,6 +17,7 @@ fn main() {
     assert!(repetitions > 0);
     let order: Vec<_> = (0..nodes).map(|index| format!("n{index:06}")).collect();
     let description = WorkflowDescription {
+        order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::from_definition(&json!({"nodes": nodes}), &order).unwrap(),
         nodes: order

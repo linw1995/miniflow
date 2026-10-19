@@ -70,7 +70,9 @@ impl WireRecord {
         require(
             matches!(
                 schema_version,
-                EVENT_SCHEMA_VERSION | LOOP_EVENT_SCHEMA_VERSION
+                EVENT_SCHEMA_VERSION
+                    | LOOP_EVENT_SCHEMA_VERSION
+                    | crate::SUCCESS_EVENT_SCHEMA_VERSION
             ),
             "unsupported event schema version",
         )?;
@@ -93,7 +95,10 @@ impl WireRecord {
             attributes.insert("mf.node.kind".into(), node["kind"].clone());
             if let Some(path) = node.get("path") {
                 require(
-                    schema_version == LOOP_EVENT_SCHEMA_VERSION,
+                    matches!(
+                        schema_version,
+                        LOOP_EVENT_SCHEMA_VERSION | crate::SUCCESS_EVENT_SCHEMA_VERSION
+                    ),
                     "old event schema cannot contain a Loop path",
                 )?;
                 body.insert("loop_path".into(), path.clone());
@@ -149,7 +154,10 @@ impl WireRecord {
         if self.event_name.starts_with("mf.node.") {
             let path = body.remove("loop_path");
             require(
-                schema_version == LOOP_EVENT_SCHEMA_VERSION || path.is_none(),
+                matches!(
+                    schema_version,
+                    LOOP_EVENT_SCHEMA_VERSION | crate::SUCCESS_EVENT_SCHEMA_VERSION
+                ) || path.is_none(),
                 "old event schema cannot contain a Loop path",
             )?;
             body.insert(
@@ -218,7 +226,12 @@ impl WireRecord {
             .as_i64()
             .ok_or_else(|| crate::invalid("invalid event schema version"))?;
         require(
-            matches!(version, EVENT_SCHEMA_VERSION | LOOP_EVENT_SCHEMA_VERSION),
+            matches!(
+                version,
+                EVENT_SCHEMA_VERSION
+                    | LOOP_EVENT_SCHEMA_VERSION
+                    | crate::SUCCESS_EVENT_SCHEMA_VERSION
+            ),
             "unsupported event schema version",
         )?;
         Ok(version)
@@ -237,7 +250,11 @@ impl WireRecord {
             self.attributes
                 .get("mf.schema.version")
                 .and_then(Value::as_i64),
-            Some(crate::LEGACY_STREAM_EVENT_SCHEMA_VERSION | crate::STREAM_EVENT_SCHEMA_VERSION)
+            Some(
+                crate::LEGACY_STREAM_EVENT_SCHEMA_VERSION
+                    | crate::STREAM_EVENT_SCHEMA_VERSION
+                    | crate::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
+            )
         ) {
             let event = crate::stream::StreamRecord::decode(self)?;
             (
@@ -277,7 +294,14 @@ impl WireRecord {
     }
 }
 
-fn validate_event_version(event: &Event, schema_version: i64) -> Result<(), ContractError> {
+pub fn validate_event_version(event: &Event, schema_version: i64) -> Result<(), ContractError> {
+    if let Event::NodeSkipped { causes, .. } = event {
+        require(
+            schema_version == crate::SUCCESS_EVENT_SCHEMA_VERSION
+                || causes.iter().all(|cause| cause.source_output().is_some()),
+            "node-success skip causes require a supported event version",
+        )?;
+    }
     if schema_version == EVENT_SCHEMA_VERSION {
         require(
             !matches!(

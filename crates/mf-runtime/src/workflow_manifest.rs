@@ -4,7 +4,7 @@ use crate::{
 };
 use mf_telemetry::description::{
     ControlEdge, DataEdge, ExecutionDescription, ExecutionMode, LoopBodyDescription,
-    NodeDescription, WorkflowDescriptionVersion,
+    NodeDescription, OrderEdge, WorkflowDescriptionVersion,
 };
 use mf_telemetry::identity::WorkflowId;
 use mf_telemetry::{ContractError, description::WorkflowDescription};
@@ -253,6 +253,7 @@ pub fn describe_definition(
         &mut Vec::new(),
         &mut orders,
         &mut loop_bodies,
+        definition.has_order_edges(),
     )?;
     ensure!(
         orders.is_empty(),
@@ -261,16 +262,22 @@ pub fn describe_definition(
         }
     );
     let description = WorkflowDescription {
-        version: match definition.version {
-            crate::WorkflowDefinitionVersion::V2026_09_26 => {
-                WorkflowDescriptionVersion::V2026_09_27
-            }
-            crate::WorkflowDefinitionVersion::V2026_09_29
-            | crate::WorkflowDefinitionVersion::V2026_10_02 => {
-                WorkflowDescriptionVersion::V2026_09_29
-            }
-            crate::WorkflowDefinitionVersion::V2026_10_03 => {
-                WorkflowDescriptionVersion::V2026_10_03
+        order_edges: order_edges(&definition.order_edges),
+        version: if definition.has_order_edges() {
+            WorkflowDescriptionVersion::V2026_10_19
+        } else {
+            match definition.version {
+                crate::WorkflowDefinitionVersion::V2026_09_26 => {
+                    WorkflowDescriptionVersion::V2026_09_27
+                }
+                crate::WorkflowDefinitionVersion::V2026_09_29
+                | crate::WorkflowDefinitionVersion::V2026_10_02 => {
+                    WorkflowDescriptionVersion::V2026_09_29
+                }
+                crate::WorkflowDefinitionVersion::V2026_10_03
+                | crate::WorkflowDefinitionVersion::V2026_10_19 => {
+                    WorkflowDescriptionVersion::V2026_10_03
+                }
             }
         },
         execution: definition
@@ -360,36 +367,72 @@ fn control_edges(edges: &[crate::ControlEdgeDefinition]) -> Vec<ControlEdge> {
         .collect()
 }
 
+fn order_edges(edges: &[crate::OrderEdgeDefinition]) -> Vec<OrderEdge> {
+    edges
+        .iter()
+        .map(|edge| OrderEdge {
+            from_node: edge.from_node.to_string(),
+            to_node: edge.to_node.to_string(),
+        })
+        .collect()
+}
+
 fn describe_loops(
     nodes: &[crate::NodeDefinition],
     path: &mut Vec<String>,
     orders: &mut BTreeMap<Vec<String>, &[String]>,
     bodies: &mut Vec<LoopBodyDescription>,
+    include_iterations: bool,
 ) -> Result<(), ContractError> {
     for node in nodes {
-        let Some(loop_definition) = &node.loop_definition else {
-            continue;
-        };
+        let iteration;
+        let (nodes, data, controls, successes, source_id, source_kind) =
+            if let Some(definition) = &node.loop_definition {
+                let body = &definition.body;
+                (
+                    &body.nodes,
+                    &body.edges,
+                    &body.control_edges,
+                    &body.order_edges,
+                    crate::LOOP_SOURCE_ID,
+                    crate::LOOP_SOURCE_ID,
+                )
+            } else if include_iterations && node.kind == crate::ITERATION_KIND {
+                iteration = serde_json::from_value::<crate::IterationConfig>(node.config.clone())?;
+                let body = &iteration.body;
+                (
+                    &body.nodes,
+                    &body.edges,
+                    &body.control_edges,
+                    &body.order_edges,
+                    crate::ITERATION_INPUT_ID,
+                    crate::ITERATION_INPUT_KIND,
+                )
+            } else {
+                continue;
+            };
         path.push(node.id.to_string());
         let order = orders
             .remove(path)
             .with_context(|| mf_telemetry::InvalidSnafu {
-                message: format!("missing compiled Loop execution order at {path:?}"),
+                message: format!("missing compiled body execution order at {path:?}"),
             })?;
-        let body = &loop_definition.body;
-        let nodes = std::iter::once((crate::LOOP_SOURCE_ID, crate::LOOP_SOURCE_ID)).chain(
-            body.nodes
-                .iter()
-                .map(|node| (node.id.as_str(), node.kind.as_str())),
-        );
         bodies.push(LoopBodyDescription {
             path: path.clone(),
-            nodes: ordered_nodes(nodes, order)?,
-            data_edges: data_edges(&body.edges),
-            control_edges: control_edges(&body.control_edges),
+            nodes: ordered_nodes(
+                std::iter::once((source_id, source_kind)).chain(
+                    nodes
+                        .iter()
+                        .map(|node| (node.id.as_str(), node.kind.as_str())),
+                ),
+                order,
+            )?,
+            data_edges: data_edges(data),
+            control_edges: control_edges(controls),
+            order_edges: order_edges(successes),
             execution_order: order.to_vec(),
         });
-        describe_loops(&body.nodes, path, orders, bodies)?;
+        describe_loops(nodes, path, orders, bodies, include_iterations)?;
         path.pop();
     }
     Ok(())

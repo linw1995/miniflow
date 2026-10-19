@@ -72,14 +72,16 @@ pub fn plan_typed_segments(flow: &Flow, standard_runner: bool, oneshot: bool) ->
             .or_default() += 1;
     }
     for dependencies in flow.plan().dependencies.iter() {
-        for dependency in dependencies.iter().filter(|dep| dep.input.is_none()) {
+        for dependency in dependencies
+            .iter()
+            .filter(|dep| dep.input.as_deref().is_none())
+        {
+            let output = dependency.source_output.as_ref();
             if let Some(index) = nodes
                 .iter()
                 .position(|node| node.definition_id.as_str() == dependency.source_node.as_ref())
             {
-                *uses
-                    .entry((index, dependency.source_output.to_string()))
-                    .or_default() += 1;
+                *uses.entry((index, output.to_string())).or_default() += 1;
             }
         }
     }

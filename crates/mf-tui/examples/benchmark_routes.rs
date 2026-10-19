@@ -20,6 +20,7 @@ fn main() {
         .expect("size must be an integer");
     assert!(size >= 2);
     let mut graph = WorkflowDescription {
+        order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "d".repeat(64))).unwrap(),
         nodes: (0..size)

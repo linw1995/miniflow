@@ -61,12 +61,17 @@ pub fn body_definition(
     });
     nodes.extend(body.nodes.iter().cloned());
     WorkflowDefinition {
-        version: WorkflowDefinitionVersion::V2026_09_29,
+        version: if !body.has_order_edges() {
+            WorkflowDefinitionVersion::V2026_09_29
+        } else {
+            WorkflowDefinitionVersion::V2026_10_19
+        },
         execution: None,
         dependencies: dependencies.clone(),
         nodes,
         edges: body.edges.clone(),
         control_edges: body.control_edges.clone(),
+        order_edges: body.order_edges.clone(),
         outputs: Vec::new(),
     }
 }

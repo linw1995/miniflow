@@ -16,7 +16,7 @@ use mf_telemetry::{
 };
 use mf_tui::{
     graph::{
-        EdgeKind, GraphLayout, GraphView,
+        ConnectionView, EdgeKind, GraphLayout, GraphView,
         routing::{crossing_cells, line_symbols},
     },
     state::SessionState,
@@ -158,6 +158,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<io::Stderr>>) -> PreviewResult<(
 
 fn description() -> WorkflowDescription {
     WorkflowDescription {
+        order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "c".repeat(64)))
             .expect("fixture workflow ID is valid"),
@@ -318,7 +319,7 @@ fn scheduled_events(
                 node: node("archive"),
                 position: count(3),
                 elapsed_ns: count(3_500_000_000),
-                causes: vec![SkipCause {
+                causes: vec![SkipCause::Output {
                     source_node: "transform".into(),
                     source_output: "archive".into(),
                 }],
@@ -422,8 +423,37 @@ fn dump_graph() -> PreviewResult<()> {
             }
         }
     }
+    if std::env::args().any(|arg| arg == "--parameters") {
+        fixture.nodes = ["params", "settings"]
+            .map(|id| NodeDescription {
+                id: id.into(),
+                kind: "preview.task".into(),
+            })
+            .to_vec();
+        fixture.execution_order = vec!["params".into(), "settings".into()];
+        fixture.control_edges.clear();
+        fixture.data_edges = (0..18)
+            .map(|index| DataEdge {
+                exclusive: false,
+                from_node: "params".into(),
+                from_output: format!("field{index}"),
+                to_node: "settings".into(),
+                to_input: format!("input{index}"),
+            })
+            .collect();
+    }
+    let view = match std::env::args()
+        .find_map(|arg| arg.strip_prefix("--view=").map(str::to_owned))
+        .as_deref()
+    {
+        Some("execution") => ConnectionView::Execution,
+        Some("dependencies") => ConnectionView::Dependencies,
+        Some("ports") | None => ConnectionView::Ports,
+        Some(_) => return Err("unknown connection view".into()),
+    };
     let layout = if std::env::args().any(|arg| arg == "--body") {
         let body = mf_telemetry::description::LoopBodyDescription {
+            order_edges: Vec::new(),
             path: vec!["repeat".into()],
             nodes: fixture.nodes.clone(),
             data_edges: fixture.data_edges.clone(),
@@ -439,9 +469,9 @@ fn dump_graph() -> PreviewResult<()> {
         fixture.data_edges.clear();
         fixture.control_edges.clear();
         fixture.loop_bodies = vec![body];
-        GraphLayout::from_loop_body(&fixture, &["repeat".into()])?
+        GraphLayout::from_body_with_view(&fixture, &["repeat".into()], view)?
     } else {
-        GraphLayout::new(&fixture)?
+        GraphLayout::with_view(&fixture, view)?
     };
     let mut buffer = Buffer::empty(Rect::new(
         0,
@@ -451,7 +481,9 @@ fn dump_graph() -> PreviewResult<()> {
     ));
     GraphView::new(&layout).render(buffer.area, &mut buffer);
     println!(
-        "Graph preview: {} edges, {} crossings, {} unresolved, canvas {:?}",
+        "Graph preview ({}): {} hidden data mappings, {} edges, {} crossings, {} unresolved, canvas {:?}",
+        view.label(),
+        layout.hidden_data_count(),
         layout.edges().len(),
         layout.crossings().len(),
         layout.unresolved_count(),

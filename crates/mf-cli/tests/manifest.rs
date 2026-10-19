@@ -18,7 +18,7 @@ fn moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts() 
     let support = SupportPackages::Local {
         crates_dir: crates.to_owned(),
     };
-    for scenario in ["task", "stream", "nested"] {
+    for scenario in ["task", "stream", "nested", "ordered"] {
         let root = tempfile::tempdir().unwrap();
         let definition_path = root.path().join("workflow.json");
         let installed = root.path().join("runner");
@@ -26,6 +26,14 @@ fn moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts() 
         let build = root.path().join("build");
         let data = root.path().join("runtime-input.txt");
         let (mut definition, arguments, expected) = match scenario {
+            "ordered" => (
+                json!({"version":"2026-10-19","nodes":[
+                    {"id":"z_start","kind":"builtin.constant","config":{"value":0}},
+                    {"id":"a_end","kind":"builtin.constant","config":{"value":42}}
+                ],"edges":[{"from_node":"z_start","to_node":"a_end"}],"outputs":[{"name":"result","node":"a_end","port":"value"}]}),
+                json!({}),
+                json!({"result":42}),
+            ),
             "task" => (
                 json!({"version":"2026-10-03", "nodes":[{"id":"identity", "kind":"builtin.identity"}],
                 "outputs":[{"name":"result", "node":"identity", "port":"value"}]}),
@@ -62,6 +70,13 @@ fn moved_task_stream_and_nested_runners_keep_manifest_and_execution_contracts() 
         )
         .unwrap();
         let manifest = read_manifest(&installed).unwrap();
+        if scenario == "ordered" {
+            assert_eq!(manifest.description().unwrap().order_edges.len(), 1);
+            assert_eq!(
+                manifest.description().unwrap().event_schema_version(),
+                mf_telemetry::SUCCESS_EVENT_SCHEMA_VERSION
+            );
+        }
         if scenario == "nested" {
             assert_eq!(manifest.description().unwrap().loop_bodies.len(), 1);
         }

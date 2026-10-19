@@ -1,7 +1,7 @@
 //! Caller-owned OTel instrumentation for one synchronous workflow invocation.
 
 use crate::{
-    ContractError, Count, EVENT_SCHEMA_VERSION, INSTRUMENTATION_SCOPE, LOOP_EVENT_SCHEMA_VERSION,
+    ContractError, Count, EVENT_SCHEMA_VERSION, INSTRUMENTATION_SCOPE,
     description::WorkflowDescription,
     event::{
         Event, EventSequence, Failure, FailurePhase, InputSelection, LifecycleEvent,
@@ -720,11 +720,12 @@ impl RunObservation {
             sequence,
             event,
         };
-        let schema_version = if self.description.is_some() {
-            LOOP_EVENT_SCHEMA_VERSION
-        } else {
-            EVENT_SCHEMA_VERSION
-        };
+        let schema_version = self
+            .description
+            .as_ref()
+            .map_or(EVENT_SCHEMA_VERSION, |description| {
+                description.event_schema_version()
+            });
         if let Ok(record) =
             WireRecord::from_event_with_version(&event, schema_version, timestamp, trace_context)
         {
@@ -1026,20 +1027,26 @@ impl BodyNodeObservation {
                         causes
                             .into_iter()
                             .map(|cause| {
-                                AnyValue::Map(Box::new(
-                                    [
+                                let fields = match cause {
+                                    SkipCause::Output {
+                                        source_node,
+                                        source_output,
+                                    } => vec![
                                         (
                                             "source_node".into(),
-                                            AnyValue::String(cause.source_node.into()),
+                                            AnyValue::String(source_node.into()),
                                         ),
                                         (
                                             "source_output".into(),
-                                            AnyValue::String(cause.source_output.into()),
+                                            AnyValue::String(source_output.into()),
                                         ),
-                                    ]
-                                    .into_iter()
-                                    .collect(),
-                                ))
+                                    ],
+                                    SkipCause::NodeSuccess { node_success } => vec![(
+                                        "node_success".into(),
+                                        AnyValue::String(node_success.into()),
+                                    )],
+                                };
+                                AnyValue::Map(Box::new(fields.into_iter().collect()))
                             })
                             .collect(),
                     )),

@@ -100,6 +100,7 @@ fn count(value: i64) -> Count {
 
 fn graph() -> WorkflowDescription {
     WorkflowDescription {
+        order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "a".repeat(64))).unwrap(),
         nodes: vec![
@@ -207,6 +208,7 @@ fn state() -> SessionState {
 
 fn loop_graph() -> WorkflowDescription {
     WorkflowDescription {
+        order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_29,
         workflow_id: graph().workflow_id,
         nodes: vec![NodeDescription {
@@ -218,6 +220,7 @@ fn loop_graph() -> WorkflowDescription {
         execution_order: vec!["repeat".into()],
         execution: None,
         loop_bodies: vec![LoopBodyDescription {
+            order_edges: Vec::new(),
             path: vec!["repeat".into()],
             nodes: vec![
                 NodeDescription {
@@ -1091,7 +1094,7 @@ fn conditional_skip_keeps_its_cause_and_inactive_port_outcome() {
             node: node("b", "fixture.sink"),
             position: count(1),
             elapsed_ns: count(40),
-            causes: vec![SkipCause {
+            causes: vec![SkipCause::Output {
                 source_node: "a".into(),
                 source_output: "value".into(),
             }],
@@ -1099,8 +1102,10 @@ fn conditional_skip_keeps_its_cause_and_inactive_port_outcome() {
         },
     );
     let mut wrong = skip.clone();
-    if let Event::NodeSkipped { causes, .. } = &mut wrong.event {
-        causes[0].source_output = "not-connected".into();
+    if let Event::NodeSkipped { causes, .. } = &mut wrong.event
+        && let SkipCause::Output { source_output, .. } = &mut causes[0]
+    {
+        *source_output = "not-connected".into();
     }
     assert!(state.apply(wrong).is_err());
     state.apply(skip).unwrap();
@@ -1121,7 +1126,7 @@ fn conditional_skip_keeps_its_cause_and_inactive_port_outcome() {
     let snapshot = state.snapshot();
     assert_eq!(snapshot.nodes[0].skipped_ports, ["value"]);
     assert_eq!(snapshot.nodes[1].status, NodeStatus::Skipped);
-    assert_eq!(snapshot.nodes[1].skip_causes[0].source_node, "a");
+    assert_eq!(snapshot.nodes[1].skip_causes[0].source_node(), "a");
     assert_eq!(snapshot.lifecycle.completeness, Completeness::Complete);
 }
 
@@ -1243,4 +1248,148 @@ fn unchanged_admissions_and_repeated_close_reuse_the_snapshot() {
     state.close();
     assert!(state.apply(start()).is_err());
     assert!(Arc::ptr_eq(&closed, &state.snapshot_shared()));
+}
+
+#[test]
+fn finite_and_stream_success_causes_are_validated_against_order_edges() {
+    use mf_telemetry::{
+        description::{ExecutionDescription, ExecutionMode, OrderEdge},
+        stream::{StreamEvent, StreamIdentity, StreamPayload, StreamRecord, StreamTrigger},
+    };
+    for streaming in [false, true] {
+        let mut description = graph();
+        description.version = WorkflowDescriptionVersion::V2026_10_19;
+        description.execution = Some(ExecutionDescription {
+            mode: if streaming {
+                ExecutionMode::Stream
+            } else {
+                ExecutionMode::Single
+            },
+        });
+        description.data_edges.clear();
+        description.order_edges.push(OrderEdge {
+            from_node: "a".into(),
+            to_node: "b".into(),
+        });
+        let mut state = SessionState::new(description.clone(), run_id()).unwrap();
+        let skip = Event::NodeSkipped {
+            node: node("b", "fixture.sink"),
+            position: count(1),
+            elapsed_ns: count(1),
+            selected_inputs: vec![],
+            skipped_ports: vec![],
+            causes: vec![SkipCause::NodeSuccess {
+                node_success: "a".into(),
+            }],
+        };
+        if streaming {
+            let record = |sequence, identity, payload| StreamRecord {
+                schema_version: mf_telemetry::SUCCESS_STREAM_EVENT_SCHEMA_VERSION,
+                workflow_id: description.workflow_id.clone(),
+                run_id: run_id(),
+                sequence: count(sequence),
+                identity,
+                payload,
+                emission_count: None,
+            };
+            state
+                .apply_stream(record(
+                    1,
+                    None,
+                    StreamPayload::Control(StreamEvent::Started {
+                        node_count: count(2),
+                        elapsed_ns: Count::ZERO,
+                    }),
+                ))
+                .unwrap();
+            state
+                .apply_stream(record(
+                    2,
+                    Some(StreamIdentity {
+                        invocation: 1,
+                        trigger: StreamTrigger::Startup,
+                        message: None,
+                        parent: None,
+                    }),
+                    StreamPayload::Execution(skip),
+                ))
+                .unwrap();
+        } else {
+            state.apply(start()).unwrap();
+            state.apply(event(2, skip)).unwrap();
+        }
+        assert_eq!(state.snapshot().nodes[1].status, NodeStatus::Skipped);
+        assert_eq!(
+            state.snapshot().nodes[1].skip_causes[0].source_output(),
+            None
+        );
+    }
+}
+
+#[test]
+fn selected_input_evidence_survives_completion_and_remains_bounded() {
+    use mf_telemetry::event::InputSelection;
+    let mut description = graph();
+    description.data_edges.clear();
+    let selections: Vec<_> = (0..300)
+        .map(|index| InputSelection {
+            input: format!("input{index}"),
+            source_node: "a".into(),
+            source_output: format!("first{index}"),
+        })
+        .collect();
+    for selection in &selections {
+        for port in [
+            &selection.source_output,
+            &format!("second{}", selection.input),
+        ] {
+            description.data_edges.push(DataEdge {
+                exclusive: true,
+                from_node: "a".into(),
+                from_output: port.clone(),
+                to_node: "b".into(),
+                to_input: selection.input.clone(),
+            });
+        }
+    }
+    let mut state = SessionState::new(description, run_id()).unwrap();
+    state.apply(start()).unwrap();
+    state
+        .apply(event(
+            2,
+            Event::NodeStarted {
+                node: node("b", "fixture.sink"),
+                position: count(1),
+                elapsed_ns: count(1),
+                selected_inputs: selections.clone(),
+            },
+        ))
+        .unwrap();
+    let before = state.snapshot();
+    let retained = before.nodes[1].input_selections.len();
+    assert!(retained > 0 && retained < selections.len());
+    assert_eq!(
+        before.nodes[1].omitted_input_selections,
+        selections.len() - retained
+    );
+    state
+        .apply(event(
+            3,
+            Event::NodeFinished {
+                node: node("b", "fixture.sink"),
+                position: count(1),
+                elapsed_ns: count(2),
+                duration_ns: Some(count(1)),
+                outcome: Outcome::Succeeded,
+                produced_ports: vec![],
+                skipped_ports: vec![],
+                failure: None,
+                loop_summary: None,
+            },
+        ))
+        .unwrap();
+    assert_eq!(
+        state.snapshot().nodes[1].input_selections,
+        before.nodes[1].input_selections
+    );
 }

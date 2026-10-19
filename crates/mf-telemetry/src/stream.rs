@@ -181,21 +181,35 @@ pub struct StreamRecord {
 
 impl StreamRecord {
     pub fn validate(&self) -> Result<(), ContractError> {
+        if let StreamPayload::Execution(event) = &self.payload {
+            crate::wire::validate_event_version(
+                event,
+                if self.schema_version == crate::SUCCESS_STREAM_EVENT_SCHEMA_VERSION {
+                    crate::SUCCESS_EVENT_SCHEMA_VERSION
+                } else {
+                    LOOP_EVENT_SCHEMA_VERSION
+                },
+            )?;
+        }
         ensure!(
             matches!(
                 self.schema_version,
-                crate::LEGACY_STREAM_EVENT_SCHEMA_VERSION | STREAM_EVENT_SCHEMA_VERSION
+                crate::LEGACY_STREAM_EVENT_SCHEMA_VERSION
+                    | STREAM_EVENT_SCHEMA_VERSION
+                    | crate::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
             ),
             InvalidSnafu {
                 message: "unsupported stream event schema"
             }
         );
         ensure!(
-            self.schema_version == STREAM_EVENT_SCHEMA_VERSION
-                || !self
-                    .identity
-                    .as_ref()
-                    .is_some_and(|identity| identity.trigger == StreamTrigger::Startup),
+            matches!(
+                self.schema_version,
+                STREAM_EVENT_SCHEMA_VERSION | crate::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
+            ) || !self
+                .identity
+                .as_ref()
+                .is_some_and(|identity| identity.trigger == StreamTrigger::Startup),
             InvalidSnafu {
                 message: "startup requires source-driven stream observation"
             }
@@ -294,7 +308,10 @@ impl StreamRecord {
                     }
                 );
                 ensure!(
-                    if self.schema_version == STREAM_EVENT_SCHEMA_VERSION {
+                    if matches!(
+                        self.schema_version,
+                        STREAM_EVENT_SCHEMA_VERSION | crate::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
+                    ) {
                         counts.startup_frames <= 1 && counts.accepted_inputs == 0
                     } else {
                         counts.startup_frames == 0
@@ -395,7 +412,11 @@ impl StreamRecord {
                     sequence: self.sequence,
                     event: event.clone(),
                 },
-                LOOP_EVENT_SCHEMA_VERSION,
+                if self.schema_version == crate::SUCCESS_STREAM_EVENT_SCHEMA_VERSION {
+                    crate::SUCCESS_EVENT_SCHEMA_VERSION
+                } else {
+                    LOOP_EVENT_SCHEMA_VERSION
+                },
                 timestamp,
                 trace,
             )?,
@@ -429,11 +450,16 @@ impl StreamRecord {
         wire.attributes
             .insert("mf.schema.version".into(), json!(self.schema_version));
         if let Some(counts) = wire.body.get_mut("counts").and_then(Value::as_object_mut) {
-            counts.remove(if self.schema_version == STREAM_EVENT_SCHEMA_VERSION {
-                "accepted_inputs"
-            } else {
-                "startup_frames"
-            });
+            counts.remove(
+                if matches!(
+                    self.schema_version,
+                    STREAM_EVENT_SCHEMA_VERSION | crate::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
+                ) {
+                    "accepted_inputs"
+                } else {
+                    "startup_frames"
+                },
+            );
         }
         if let Some(identity) = &self.identity {
             wire.body
@@ -457,7 +483,11 @@ impl StreamRecord {
                     wire.attributes
                         .get("mf.schema.version")
                         .and_then(Value::as_i64),
-                    Some(crate::LEGACY_STREAM_EVENT_SCHEMA_VERSION | STREAM_EVENT_SCHEMA_VERSION)
+                    Some(
+                        crate::LEGACY_STREAM_EVENT_SCHEMA_VERSION
+                            | STREAM_EVENT_SCHEMA_VERSION
+                            | crate::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
+                    )
                 ),
             InvalidSnafu {
                 message: "unsupported stream event schema",
@@ -494,9 +524,16 @@ impl StreamRecord {
         {
             let mut legacy = wire.clone();
             legacy.body = Value::Object(body);
-            legacy
-                .attributes
-                .insert("mf.schema.version".into(), json!(LOOP_EVENT_SCHEMA_VERSION));
+            legacy.attributes.insert(
+                "mf.schema.version".into(),
+                json!(if wire.attributes["mf.schema.version"]
+                    == crate::SUCCESS_STREAM_EVENT_SCHEMA_VERSION
+                {
+                    crate::SUCCESS_EVENT_SCHEMA_VERSION
+                } else {
+                    LOOP_EVENT_SCHEMA_VERSION
+                }),
+            );
             StreamPayload::Execution(legacy.decode()?.event)
         } else {
             if wire.event_name.starts_with("mf.batch.") {

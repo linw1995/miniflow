@@ -1,12 +1,11 @@
 use crate::execution_domains::{ExecutionDomain, ExecutionDomains};
 use crate::message_domain::MessageDomains;
 use crate::runner::ContextSnafu;
-use crate::{
-    ExecutionDependency, FlowNode, NodeExecution, StreamExecution, TaskNode,
-    WorkflowOutputDefinition,
-};
+use crate::{FlowNode, NodeExecution, StreamExecution, TaskNode, WorkflowOutputDefinition};
 use snafu::OptionExt;
 use std::borrow::Cow;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 type OperatorStates = Vec<Option<NodeExecution>>;
 
@@ -20,8 +19,8 @@ pub struct FlowDependency {
 }
 
 impl FlowDependency {
-    pub fn borrowed(&self) -> ExecutionDependency<'_> {
-        ExecutionDependency {
+    pub fn borrowed(&self) -> crate::ExecutionDependency<'_> {
+        crate::ExecutionDependency {
             exclusive: self.exclusive,
             input: self.input.as_deref(),
             source_node: self.source_node.as_ref(),
@@ -30,6 +29,10 @@ impl FlowDependency {
     }
 }
 
+pub type GeneratedStreamDomainExecutor = dyn Fn(&StreamPlan, &mut crate::ExecutionContext) -> Result<(), crate::WorkflowRunError>
+    + Send
+    + Sync;
+
 pub struct StreamPlan {
     execution: StreamExecution,
     nodes: Vec<FlowNode<Option<Box<dyn TaskNode>>>>,
@@ -37,6 +40,7 @@ pub struct StreamPlan {
     domains: MessageDomains,
     outputs: Cow<'static, [WorkflowOutputDefinition]>,
     input_schema: crate::WorkflowInputSchema,
+    generated_domains: BTreeMap<usize, Arc<GeneratedStreamDomainExecutor>>,
 }
 
 pub struct PreparedStream {
@@ -90,11 +94,20 @@ impl PreparedStream {
             domains,
             outputs,
             input_schema,
+            generated_domains: BTreeMap::new(),
         };
         Self {
             plan,
             operator_states,
         }
+    }
+
+    pub fn with_prepared_domains(
+        mut self,
+        domains: impl IntoIterator<Item = (usize, Arc<GeneratedStreamDomainExecutor>)>,
+    ) -> Self {
+        self.plan.generated_domains.extend(domains);
+        self
     }
 
     pub fn plan(&self) -> &StreamPlan {
@@ -169,31 +182,59 @@ impl StreamPlan {
         self.domains.selected_domain()
     }
 
+    pub fn execute_resolved_position(
+        &self,
+        position: usize,
+        context: &mut crate::ExecutionContext,
+        resolve: impl FnOnce(
+            &FlowNode<Option<Box<dyn TaskNode>>>,
+            &crate::ExecutionContext,
+            &mut crate::Inputs,
+        ) -> Result<crate::InputResolution, crate::WorkflowRunError>,
+    ) -> Result<(), crate::WorkflowRunError> {
+        let node = self.nodes.get(position).context(ContextSnafu {
+            definition_id: "<stream>",
+            message: "invalid stream domain dispatch index",
+        })?;
+        let task = node.node.as_deref().with_context(|| ContextSnafu {
+            definition_id: node.definition_id.clone(),
+            message: "stream execution domain contains a non-task node",
+        })?;
+        crate::execute_resolved_node_in_context(
+            node,
+            context,
+            |ctx, inputs| resolve(node, ctx, inputs),
+            |inputs, ctx| {
+                task.execute(inputs, ctx)
+                    .map(crate::GeneratedNodeResult::Dynamic)
+            },
+        )
+    }
+
     pub fn execute_domain(
         &self,
         id: usize,
         context: &mut crate::ExecutionContext,
     ) -> Result<(), crate::WorkflowRunError> {
+        if let Some(executor) = self.generated_domains.get(&id) {
+            return executor(self, context);
+        }
         let domain = self.execution_domain(id);
         for &position in domain.positions.iter() {
             if context.cancellation().failure().is_some() {
                 break;
             }
-            let node = self.nodes.get(position).context(ContextSnafu {
-                definition_id: "<stream>",
-                message: "invalid stream domain dispatch index",
+            self.execute_resolved_position(position, context, |node, ctx, inputs| {
+                ctx.resolve_node_inputs(
+                    node,
+                    self.dependencies(position)
+                        .iter()
+                        .map(FlowDependency::borrowed),
+                    &[],
+                    inputs,
+                    Default::default(),
+                )
             })?;
-            crate::context::execute_ordered_task_in_context(
-                node,
-                node.node.as_deref().with_context(|| ContextSnafu {
-                    definition_id: node.definition_id.clone(),
-                    message: "stream execution domain contains a non-task node",
-                })?,
-                self.dependencies(position)
-                    .iter()
-                    .map(FlowDependency::borrowed),
-                context,
-            )?;
             if context.scope_exit_requested() {
                 break;
             }
