@@ -34,9 +34,9 @@ pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
 pub use config_template::{ConfigTemplate, ConfigTemplateError};
 pub use context::{
-    ContextValue, Dependency, ExecutionContext, ExecutionDependency, ExecutionScope,
-    GeneratedNodeResult, NodeResult, TypedNodeResult, execute_generated_node_in_context,
-    execute_node_in_context, select_context_output,
+    ContextValue, ExecutionContext, ExecutionDependency, ExecutionScope, GeneratedNodeResult,
+    NodeResult, TypedNodeResult, execute_generated_node_in_context, execute_node_in_context,
+    execute_resolved_node_in_context, select_context_output,
 };
 pub use definition::{
     ControlEdgeDefinition, DefinitionId, DefinitionParseError, EXIT_LOOP_KIND, EdgeDefinition,
@@ -66,7 +66,7 @@ pub use loop_node::{
 };
 pub use message_domain::MessageDomains;
 pub use mf_runtime_derive::{NodeEnum, NodeInputs, NodeOutputs, NodeValue};
-pub use mf_telemetry::event::NodeIdentity;
+pub use mf_telemetry::event::{NodeIdentity, SkipCause};
 pub use mf_telemetry::observation::RunObservation;
 pub use mf_telemetry::observation::StreamObservation;
 pub use node::{
@@ -89,7 +89,7 @@ pub use node_target::{
 };
 pub use number::{compare_json_numbers, number_to_f64, number_to_i64, number_to_u64};
 pub use registry::{NodeRegistry, NodeRegistryError};
-pub use runner::WorkflowRunError;
+pub use runner::{SuccessDependencySnafu, WorkflowRunError};
 pub use stream::{
     BatchInfo, EventContext, EventEffects, EventEmission, EventNode, FlushReason, NodeEvent,
     StreamExecution, StreamLimits, StreamMode, StreamNode, TimerUpdate, TypedEventNode,
@@ -100,7 +100,7 @@ pub use stream_instance::{
     StreamMetrics, StreamOptions, StreamOutput, StreamSummary,
 };
 pub use stream_io::{StreamStdio, TextInput};
-pub use stream_plan::{FlowDependency, PreparedStream, StreamPlan};
+pub use stream_plan::{FlowDependency, GeneratedStreamDomainExecutor, PreparedStream, StreamPlan};
 pub use subgraph::PreparedSubgraph;
 pub use typed_inputs::{
     InputDecodeError, InputField, InputValue, NodeInputs, Nullable, Shared, decode_default_input,

@@ -297,14 +297,14 @@ fn generated_calls_preserve_missing_before_skip_without_input_assembly() {
         .unwrap();
         mf_runtime::execute_node_in_context(&gate, &[], &mut ctx).unwrap();
         let run = flow(false);
-        let mut dependencies = vec![mf_runtime::ExecutionDependency::Output {
+        let mut dependencies = vec![mf_runtime::ExecutionDependency {
             exclusive: false,
             input: None,
             source_node: "gate",
             source_output: "trigger",
         }];
         if missing {
-            dependencies.push(mf_runtime::ExecutionDependency::Output {
+            dependencies.push(mf_runtime::ExecutionDependency {
                 exclusive: false,
                 input: None,
                 source_node: "missing",

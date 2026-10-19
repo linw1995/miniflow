@@ -74,14 +74,12 @@ pub fn plan_typed_segments(flow: &Flow, standard_runner: bool, oneshot: bool) ->
     for dependencies in flow.plan().dependencies.iter() {
         for dependency in dependencies
             .iter()
-            .filter(|dep| dep.borrowed().input().is_none())
+            .filter(|dep| dep.input.as_deref().is_none())
         {
-            let Some(output) = dependency.borrowed().source_output() else {
-                continue;
-            };
+            let output = dependency.source_output.as_ref();
             if let Some(index) = nodes
                 .iter()
-                .position(|node| node.definition_id.as_str() == dependency.borrowed().source_node())
+                .position(|node| node.definition_id.as_str() == dependency.source_node.as_ref())
             {
                 *uses.entry((index, output.to_string())).or_default() += 1;
             }

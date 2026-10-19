@@ -237,6 +237,17 @@ impl FlowBuilder {
                 )
             },
         ))?;
+        let guards = crate::dependencies::success_conditions(
+            self.execution_order
+                .iter()
+                .zip(&self.dependencies)
+                .map(|(id, deps)| {
+                    (
+                        self.nodes[id.index()].definition_id.as_str(),
+                        deps.iter().map(crate::FlowDependency::borrowed).collect(),
+                    )
+                }),
+        );
         let execution_domains = self.build_execution_domains();
         let data = self;
         let nodes = data
@@ -244,14 +255,20 @@ impl FlowBuilder {
             .into_iter()
             .map(into_task)
             .collect::<Result<_, _>>()?;
-        Ok(mf_runtime::Flow::from_plan(
+        let flow = mf_runtime::Flow::from_plan(
             nodes,
             mf_runtime::FlowPlan {
                 connections: data.connections.into(),
                 dependencies: data
                     .dependencies
                     .into_iter()
-                    .map(Cow::Owned)
+                    .map(|deps| {
+                        Cow::Owned(
+                            deps.iter()
+                                .filter_map(crate::FlowDependency::output_dependency)
+                                .collect(),
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .into(),
                 execution_order: data.execution_order.into(),
@@ -259,7 +276,8 @@ impl FlowBuilder {
                 execution_domains,
             },
             data.input_schema,
-        ))
+        );
+        Ok(crate::dependencies::bind_task_guards(flow, guards))
     }
     pub fn into_stream(
         self,
@@ -1296,13 +1314,14 @@ fn input_schema_error(path: String, message: impl Into<String>) -> WorkflowInput
 
 pub fn stream_workflow_inputs(
     nodes: &[FlowNode],
-    dependencies: &[Cow<'static, [crate::FlowDependency]>],
+    dependencies: &[Cow<'static, [mf_runtime::FlowDependency]>],
+    initial: &[bool],
 ) -> Result<crate::WorkflowInputSchema, WorkflowInputError> {
     workflow_input_schema(
         nodes
             .iter()
-            .zip(dependencies.iter())
-            .map(|(node, dependencies)| (node, dependencies.is_empty())),
+            .zip(initial)
+            .map(|(node, initial)| (node, *initial)),
         |node, input| {
             nodes
                 .iter()
@@ -1310,7 +1329,7 @@ pub fn stream_workflow_inputs(
                 .is_some_and(|index| {
                     dependencies[index]
                         .iter()
-                        .any(|dependency| dependency.borrowed().input() == Some(input))
+                        .any(|dependency| dependency.input.as_deref() == Some(input))
                 })
         },
     )
@@ -1318,20 +1337,20 @@ pub fn stream_workflow_inputs(
 
 pub fn bind_workflow_inputs(
     flow: mf_runtime::Flow,
+    initial: &[bool],
 ) -> Result<mf_runtime::Flow, WorkflowInputError> {
     let order = flow.execution_order();
     let dependencies = &flow.plan().dependencies;
-    let initial: BTreeSet<_> = order
-        .iter()
-        .enumerate()
-        .filter(|(position, _)| dependencies[*position].is_empty())
-        .map(|(_, id)| id.index())
-        .collect();
     let schema = workflow_input_schema(
-        flow.nodes()
-            .iter()
-            .enumerate()
-            .map(|(index, node)| (node, initial.contains(&index))),
+        flow.nodes().iter().enumerate().map(|(index, node)| {
+            (
+                node,
+                initial[order
+                    .iter()
+                    .position(|id| id.index() == index)
+                    .expect("ordered node")],
+            )
+        }),
         |node, input| {
             order
                 .iter()
@@ -1339,7 +1358,7 @@ pub fn bind_workflow_inputs(
                 .is_some_and(|position| {
                     dependencies[position]
                         .iter()
-                        .any(|dependency| dependency.borrowed().input() == Some(input))
+                        .any(|dependency| dependency.input.as_deref() == Some(input))
                 })
         },
     )?;
@@ -1398,16 +1417,36 @@ pub fn prepare_stream(
             )
         }
     );
-    let dependencies: Vec<_> = dependencies.into_iter().map(Cow::Owned).collect();
-    let schema = stream_workflow_inputs(&nodes, &dependencies).context(WorkflowInputsSnafu)?;
-    Ok(mf_runtime::PreparedStream::from_plan(
+    let guards = crate::dependencies::success_conditions(nodes.iter().zip(&dependencies).map(
+        |(node, deps)| {
+            (
+                node.definition_id.as_str(),
+                deps.iter().map(crate::FlowDependency::borrowed).collect(),
+            )
+        },
+    ));
+    let initial: Vec<_> = dependencies.iter().map(Vec::is_empty).collect();
+    let dependencies: Vec<_> = dependencies
+        .into_iter()
+        .map(|deps| {
+            Cow::Owned(
+                deps.iter()
+                    .filter_map(crate::FlowDependency::output_dependency)
+                    .collect(),
+            )
+        })
+        .collect();
+    let schema =
+        stream_workflow_inputs(&nodes, &dependencies, &initial).context(WorkflowInputsSnafu)?;
+    let prepared = mf_runtime::PreparedStream::from_plan(
         execution,
         nodes,
         dependencies.into(),
         domains,
         outputs.into(),
         schema,
-    ))
+    );
+    Ok(crate::dependencies::bind_stream_guards(prepared, guards))
 }
 #[cfg(test)]
 mod tests {

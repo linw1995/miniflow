@@ -197,10 +197,11 @@ let flow = builder.into_tasks()?;
 
 The supplied execution order must place sources before targets. Both endpoints must be ordinary Tasks in the same frame.
 `TaskNode::supports_success_dependencies` defaults to true; engine controls and container providers opt out. Typed
-adapters preserve the typed Task's policy. Generated and embedded execution use the same frame-local success/skip state
-independently of observation and output values.
+adapters preserve the typed Task's policy. The compiler derives success activation from the source's input and output gates.
+Generated runners emit direct Rust conditions; in-memory preparation binds equivalent predicates. Scheduling and output
+publication establish completion, so runtime execution needs no Task outcome map. Both paths work without observation.
 
-Prepared dependencies distinguish `Dependency::Output` from `Dependency::NodeSuccess`; `FlowDependency` owns names and
-`ExecutionDependency` borrows them. Success prerequisites carry no input or output port. They retain activation facts,
+Compiler dependencies distinguish `Dependency::Output` from `Dependency::NodeSuccess`; compiler `FlowDependency` owns names and
+`ExecutionDependency` borrows them. Executable runtime dependencies contain only data and output gates. Success prerequisites carry no input or output port. They retain activation facts,
 but router success alone adds no branch-selection fact. Success errors preserve their typed source chains, and
 isolated-node execution still accepts resolved inputs without running predecessors.

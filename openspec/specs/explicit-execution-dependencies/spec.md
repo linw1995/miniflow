@@ -26,9 +26,9 @@ MUST be rejected in this version, including in bodies.
 ### Requirement: Resolve node success independently of outputs
 
 A node-success prerequisite SHALL be satisfied only by successful operation and normal output validation/publication in
-the current frame. A skipped source SHALL skip its consumer. Pending/running states SHALL remain unresolved;
-unexpectedly missing terminal state at resolution SHALL fail. Source errors and cancellation SHALL follow existing
-termination policy without activating dependents.
+the current frame. A skipped source SHALL skip its consumer. The compiler SHALL derive source activation from its
+input/output gates and transitive success prerequisites. Validated scheduling SHALL wait for predecessor completion;
+source errors and cancellation SHALL terminate execution without activating dependents.
 
 #### Scenario: Complete a zero-output Task
 
@@ -69,7 +69,7 @@ dropping semantic requirements.
 
 #### Scenario: Do not hide missing state behind a skip
 
-- **WHEN** a scheduled consumer has an unexpectedly missing predecessor outcome and another prerequisite is skipped
+- **WHEN** a scheduled consumer has an missing required gate output and another prerequisite is skipped
 - **THEN** resolution fails before invoking it rather than silently skipping
 
 ### Requirement: Bound success edges to ordinary same-frame Tasks
@@ -82,39 +82,44 @@ output-gate support.
 #### Scenario: Order body Tasks
 
 - **WHEN** two ordinary Tasks within a supported body use a success edge
-- **THEN** each body invocation resolves only its own predecessor outcome
+- **THEN** each body invocation evaluates only its own predecessor activation conditions
 
 #### Scenario: Reject operator lifetime ordering
 
 - **WHEN** a portless edge names a Stream operator or a container endpoint
 - **THEN** preparation rejects it rather than interpreting a message or body step as whole-node completion
 
-### Requirement: Maintain authoritative bounded invocation outcomes
+### Requirement: Compile success activation without runtime outcomes
 
-Success/skip outcomes SHALL belong to execution state independently of outputs, snapshots, or telemetry. Retention SHALL
-be bounded by Task identities per active frame and released with that frame. Ordinary, generated, typed,
-concurrent-domain, and supported body execution SHALL use equivalent publication boundaries. Programmatic executable
-builders MUST enforce the same validation.
+In-memory preparation SHALL bind success predicates, and generated runners SHALL emit direct Rust conditions. Runtime
+execution SHALL NOT interpret node-success dependency records or retain a Task outcome map. Predicates SHALL use
+current-frame output availability, preserve exclusive alternatives, and report the immediate predecessor as a skip
+cause. Unconditional predecessors SHALL require ordering without an output probe.
 
 #### Scenario: Run without observation
 
 - **WHEN** snapshots and telemetry are disabled
-- **THEN** zero-output success dependencies still resolve correctly
+- **THEN** zero-output success prerequisites resolve through validated scheduling and compiled activation conditions
 
 #### Scenario: Process another message
 
-- **WHEN** a later stream message skips a Task that succeeded on an earlier message
-- **THEN** its dependent skips without reusing the prior outcome
+- **WHEN** a later stream message skips a Task that ran on an earlier message
+- **THEN** its dependent skips based on current-frame gates without consulting prior success state
+
+#### Scenario: Preserve exclusive alternatives
+
+- **WHEN** a source executes with one produced exclusive input candidate and other candidates skipped
+- **THEN** its success consumer remains active rather than requiring every candidate to be produced
 
 #### Scenario: Execute a generated optimized Task
 
-- **WHEN** generated execution uses typed data paths
-- **THEN** it publishes success at the same validated boundary as in-memory execution
+- **WHEN** generated execution uses typed data paths or falls back for snapshots
+- **THEN** both paths apply the compiled success condition and preserve the publication boundary
 
 #### Scenario: Reject changed success contracts during generated preparation
 
-- **WHEN** a provider no longer permits ordinary success dependencies when a generated executable prepares its nodes
-- **THEN** preparation rejects the affected connection before any workflow node operation executes
+- **WHEN** a provider no longer permits ordinary success prerequisites when a generated executable prepares its nodes
+- **THEN** preparation rejects the graph before invoking any node
 
 ### Requirement: Separate activation facts from output branch facts
 

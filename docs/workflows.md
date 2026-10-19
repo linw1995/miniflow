@@ -559,7 +559,7 @@ activate it. Omission selects node success; explicit null or an empty output nam
 | Source still running | Target waits | Target waits |
 | Failure or cancellation | Existing termination policy; no activation | Same |
 
-All logical input bindings and execution prerequisites are conjunctive. Missing expected outcomes are errors, including
+All logical input bindings and execution prerequisites are conjunctive. Missing required gate outputs are errors, including
 behind another skipped dependency. The combined graph must be acyclic; self edges, duplicate execution edges, and
 unknown endpoints are rejected. Independent nodes retain existing concurrency.
 

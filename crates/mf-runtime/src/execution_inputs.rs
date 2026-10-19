@@ -1,4 +1,4 @@
-use crate::runner::{ContextSnafu, DependencySnafu, InputTypeSnafu, SuccessDependencySnafu};
+use crate::runner::{ContextSnafu, DependencySnafu, InputTypeSnafu};
 use crate::workflow_inputs::{InvalidSnafu, TextValueSnafu, TypeMismatchSnafu, pointer};
 use crate::{
     ContextValue, ExecutionDependency, FlowNode, Inputs, NodeExecutionError, WorkflowArguments,
@@ -93,7 +93,7 @@ impl ExecutionInputs {
 
     /// Assembles and validates node inputs, retaining partial values for failure snapshots.
     ///
-    /// Lookup returns `None` for a satisfied node-success prerequisite or an already transferred typed input.
+    /// Lookup returns `None` for an already transferred typed input.
     /// All dependencies are checked before honoring skips; skipped nodes bypass type validation.
     pub fn resolve_node<'a, 'value, N>(
         &self,
@@ -114,32 +114,43 @@ impl ExecutionInputs {
         node: &FlowNode<N>,
         in_scope: bool,
         dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
-        mut lookup: impl FnMut(
+        lookup: impl FnMut(
             ExecutionDependency<'a>,
         ) -> Result<Option<ContextValue<'value>>, NodeExecutionError>,
         inputs: &mut Inputs,
     ) -> Result<InputResolution, WorkflowRunError> {
+        self.resolve_node_inputs_with_causes(
+            node,
+            in_scope,
+            dependencies,
+            lookup,
+            inputs,
+            BTreeSet::new(),
+        )
+    }
+
+    pub fn resolve_node_inputs_with_causes<'a, 'value, N>(
+        &self,
+        node: &FlowNode<N>,
+        in_scope: bool,
+        dependencies: impl IntoIterator<Item = ExecutionDependency<'a>>,
+        mut lookup: impl FnMut(
+            ExecutionDependency<'a>,
+        ) -> Result<Option<ContextValue<'value>>, NodeExecutionError>,
+        inputs: &mut Inputs,
+        mut causes: BTreeSet<SkipCause>,
+    ) -> Result<InputResolution, WorkflowRunError> {
         *inputs = self.initial(node, in_scope);
         let id = node.definition_id.as_str();
-        let mut causes = BTreeSet::new();
         let mut selected = Vec::new();
         let mut groups: BTreeMap<&str, CandidateValues> = BTreeMap::new();
         for dependency in dependencies {
-            let value = match dependency {
-                ExecutionDependency::NodeSuccess { source_node } => lookup(dependency)
-                    .with_context(|_| SuccessDependencySnafu {
-                        definition_id: id,
-                        source_node,
-                    })?,
-                ExecutionDependency::Output { input, .. } => {
-                    lookup(dependency).with_context(|_| DependencySnafu {
-                        definition_id: id,
-                        input: input.unwrap_or("<control>"),
-                    })?
-                }
-            };
-            if dependency.exclusive() {
-                let input = dependency.input().ok_or_else(|| {
+            let value = lookup(dependency).with_context(|_| DependencySnafu {
+                definition_id: id,
+                input: dependency.input.unwrap_or("<control>"),
+            })?;
+            if dependency.exclusive {
+                let input = dependency.input.ok_or_else(|| {
                     ContextSnafu {
                         definition_id: id,
                         message: "exclusive dependency requires a target input",
@@ -148,11 +159,8 @@ impl ExecutionInputs {
                 })?;
                 let group = groups.entry(input).or_default();
                 let source = SkipCause::Output {
-                    source_node: dependency.source_node().into(),
-                    source_output: dependency
-                        .source_output()
-                        .expect("exclusive output source")
-                        .into(),
+                    source_node: dependency.source_node.into(),
+                    source_output: dependency.source_output.into(),
                 };
                 match value {
                     Some(ContextValue::Value(value)) => {
@@ -173,19 +181,14 @@ impl ExecutionInputs {
             }
             match value {
                 Some(ContextValue::Value(value)) => {
-                    if let Some(input) = dependency.input() {
+                    if let Some(input) = dependency.input {
                         inputs.insert(input.to_owned(), value.clone());
                     }
                 }
                 Some(ContextValue::Skipped) => {
-                    causes.insert(match dependency.source_output() {
-                        Some(port) => SkipCause::Output {
-                            source_node: dependency.source_node().into(),
-                            source_output: port.into(),
-                        },
-                        None => SkipCause::NodeSuccess {
-                            node_success: dependency.source_node().into(),
-                        },
+                    causes.insert(SkipCause::Output {
+                        source_node: dependency.source_node.into(),
+                        source_output: dependency.source_output.into(),
                     });
                 }
                 None => {}

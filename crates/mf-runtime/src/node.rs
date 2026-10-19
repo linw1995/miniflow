@@ -668,8 +668,6 @@ pub enum NodeBuildError {
 
 #[derive(Debug, Snafu)]
 pub enum NodeExecutionError {
-    #[snafu(display("missing task outcome for node `{node}`"), visibility(pub))]
-    MissingTaskOutcome { node: String },
     #[snafu(display("could not decode typed node inputs at `{}`: {source}", source.pointer()), visibility(pub(super)))]
     InputDecode {
         #[snafu(source(from(crate::InputDecodeError, Box::new)))]

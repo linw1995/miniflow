@@ -2,10 +2,10 @@ extern crate mfn_code as _;
 extern crate mfn_core as _;
 
 use mf_compiler::{
-    BuildGuard, CompileRequest, ExecutionContext, ExecutionDependency, FlowNode, Inputs,
-    NodeBuildError, NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration,
-    NodeRegistry, NodeResult, OutputDerivation, OutputDerivationError, PortSpec, PreparedNode,
-    SupportPackages, TaskNode, TypeInferenceState, TypeMismatch, ValueType, WorkflowCompileError,
+    BuildGuard, CompileRequest, ExecutionContext, FlowNode, Inputs, NodeBuildError,
+    NodeExecutionError, NodeFactory, NodeMetadata, NodePorts, NodeRegistration, NodeRegistry,
+    NodeResult, OutputDerivation, OutputDerivationError, PortSpec, PreparedNode, SupportPackages,
+    TaskNode, TypeInferenceState, TypeMismatch, ValueType, WorkflowCompileError,
     WorkflowDefinition, compile_definition, compile_project, instantiate_compiled,
     instantiate_stream, plan_definition,
 };
@@ -277,7 +277,7 @@ fn forwarded_known_output_values_preserve_typed_mismatches() {
     let error = inference
         .resolve_node(
             &mut forward,
-            &[ExecutionDependency::Output {
+            &[mf_compiler::ExecutionDependency::Output {
                 exclusive: false,
                 source_node: "source",
                 source_output: "value",

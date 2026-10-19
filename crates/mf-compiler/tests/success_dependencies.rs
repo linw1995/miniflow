@@ -35,6 +35,76 @@ fn execute(
     mf_compiler::execute_compiled(&plan, &registry, None)
 }
 
+fn exclusive_success_graph(value: i64, path: &Path) -> WorkflowDefinition {
+    definition(
+        vec![
+            json!({"id":"value","kind":"builtin.constant","config":{"value":value}}),
+            router("value.value"),
+            json!({"id":"left","kind":"builtin.constant","config":{"value":11}}),
+            json!({"id":"right","kind":"builtin.constant","config":{"value":22}}),
+            json!({"id":"select","kind":"builtin.identity","inputs":{"input":{"exclusive":[
+                {"node":"left","port":"value"},{"node":"right","port":"value"}
+            ]}}}),
+            task("after_select", path),
+            task("chained", path),
+            task("positive", path),
+            task("joined", path),
+        ],
+        json!([
+            {"from_node":"value","to_node":"route"},
+            {"from_node":"route","from_output":"positive","to_node":"left"},
+            {"from_node":"route","from_output":"else","to_node":"right"},
+            {"from_node":"select","to_node":"after_select"},
+            {"from_node":"after_select","to_node":"chained"},
+            {"from_node":"route","from_output":"positive","to_node":"positive"},
+            {"from_node":"chained","to_node":"joined"},{"from_node":"positive","to_node":"joined"}
+        ]),
+    )
+}
+
+#[test]
+fn compiled_success_conditions_preserve_exclusive_alternatives_and_snapshot_skips() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("trace");
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for value in [-1, 1] {
+        let graph = exclusive_success_graph(value, &path);
+        let flow = instantiate_compiled(&compile_definition(&graph, &registry).unwrap(), &registry)
+            .unwrap();
+        for snapshots in [false, true] {
+            let _ = std::fs::remove_file(&path);
+            let mut ctx = mf_runtime::ExecutionContext::default();
+            let recording = mf_runtime::SnapshotRecording::memory();
+            if snapshots {
+                ctx.set_snapshot_recorder(recording.recorder());
+            }
+            flow.execute_in_context(&mut ctx).unwrap();
+            let mut calls = trace(&path);
+            calls.sort();
+            assert_eq!(
+                calls,
+                if value > 0 {
+                    vec!["after_select", "chained", "joined", "positive"]
+                } else {
+                    vec!["after_select", "chained"]
+                }
+            );
+            if snapshots {
+                assert!(!recording.history().is_empty());
+            }
+        }
+        std::fs::remove_file(&path).unwrap();
+        let mut cancelled = mf_runtime::ExecutionContext::default();
+        cancelled
+            .cancellation()
+            .cancel(mf_runtime::StreamError::Execution {
+                message: "cancelled before activation".into(),
+            });
+        assert!(flow.execute_in_context(&mut cancelled).is_err());
+        assert!(trace(&path).is_empty());
+    }
+}
+
 #[test]
 fn zero_output_success_orders_forks_and_joins_without_observation() {
     let root = tempfile::tempdir().unwrap();
@@ -161,7 +231,7 @@ fn router_success_does_not_prove_branches_but_gated_task_success_does() {
 }
 
 #[test]
-fn stream_messages_have_independent_success_outcomes() {
+fn stream_messages_have_independent_success_conditions() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("trace");
     let mut graph = definition(
@@ -223,7 +293,7 @@ fn programmatic_builders_and_stream_domains_enforce_success_boundaries() {
 }
 
 #[test]
-fn body_invocations_keep_success_states_local_and_containers_are_rejected() {
+fn body_invocations_keep_success_conditions_local_and_containers_are_rejected() {
     let registry = NodeRegistry::from_inventory().unwrap();
     for source in [
         include_str!("../../../examples/loop.json"),
@@ -464,6 +534,23 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
     )];
     const DENY_SUCCESS_ENV: &str = "MF_TEST_SUCCESS_CONTRACT_DRIFT";
     cases[0].nodes[0].config["deny_success_env"] = json!(DENY_SUCCESS_ENV);
+    cases.extend([-1, 1].map(|value| exclusive_success_graph(value, &path)));
+    let mut value = task("value", &path);
+    value["config"]["ports"] = json!(["value"]);
+    value["config"]["outputs"] = json!({"value":42});
+    let mut typed = definition(
+        vec![
+            value,
+            json!({"id":"source","kind":"builtin.identity","inputs":{"input":{"from":{"node":"value","port":"value"}}}}),
+            json!({"id":"target","kind":"builtin.identity","inputs":{"input":{"from":{"node":"source","port":"value"}}}}),
+            task("after_typed", &path),
+            task("peer", &path),
+        ],
+        json!([{"from_node":"source","to_node":"target"},{"from_node":"target","to_node":"after_typed"},{"from_node":"target","to_node":"peer"}]),
+    );
+    typed.outputs =
+        serde_json::from_value(json!([{"name":"result","node":"target","port":"value"}])).unwrap();
+    cases.push(typed);
     for source in [
         include_str!("../../../examples/loop.json"),
         include_str!("../../../examples/iteration.json"),
@@ -513,6 +600,15 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
             "code":{"package":"mfn-code","path":common::crates_dir().join("builtin-nodes/code")}
         })).unwrap();
         let plan = compile_definition(&graph, &registry).unwrap();
+        if graph.nodes.iter().any(|node| node.id.as_str() == "peer") {
+            let artifacts = plan.generate_runner_execution_plans(&registry).unwrap();
+            let typed: mf_compiler::TypedPlan =
+                serde_json::from_str(&artifacts.typed_plan_json).unwrap();
+            assert!(typed.connections.iter().any(|edge| edge.source == "source"
+                && edge.target == "target"
+                && edge.fallback.is_none()));
+            assert!(!typed.segments.is_empty());
+        }
         let manifest = plan.manifest(&registry).unwrap();
         assert_eq!(
             mf_runtime::WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap(),
@@ -601,6 +697,32 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
             .map(|line| serde_json::from_slice(line).unwrap())
             .collect();
         assert_eq!(actual, expected);
-        assert_eq!(trace(&path), expected_trace);
+        let actual_trace = trace(&path);
+        if graph
+            .nodes
+            .iter()
+            .any(|node| matches!(node.id.as_str(), "select" | "peer"))
+        {
+            // Independent domains may report their side effects in either order.
+            let mut expected = expected_trace;
+            let mut actual = actual_trace.clone();
+            expected.sort();
+            actual.sort();
+            assert_eq!(actual, expected);
+            for edge in &graph.order_edges {
+                if let (Some(source), Some(target)) = (
+                    actual_trace
+                        .iter()
+                        .position(|id| id == edge.from_node.as_str()),
+                    actual_trace
+                        .iter()
+                        .position(|id| id == edge.to_node.as_str()),
+                ) {
+                    assert!(source < target);
+                }
+            }
+        } else {
+            assert_eq!(actual_trace, expected_trace);
+        }
     }
 }

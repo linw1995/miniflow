@@ -1811,7 +1811,7 @@ mod tests {
             ],
             vec![
                 Vec::new(),
-                vec![crate::FlowDependency::Output {
+                vec![crate::FlowDependency {
                     exclusive: false,
                     input: None,
                     source_node: "start".into(),
