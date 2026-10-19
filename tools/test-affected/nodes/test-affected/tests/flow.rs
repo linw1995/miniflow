@@ -60,7 +60,7 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
     let compiled = compile_definition(&workflow, &registry).unwrap();
     let prepared = instantiate_stream(&compiled, &registry).unwrap();
     assert!(!root.join("target/server.pid").exists());
-    let arguments = json!({"params.ci":false,"params.repository":root,"params.mode":"snapshot","params.base":base,"params.head":head});
+    let arguments = json!({"params.repository":root,"params.mode":"snapshot","params.base":base,"params.head":head});
     let instance = FlowRuntime::default()
         .start_stream(
             prepared,
@@ -124,6 +124,7 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
     );
     let output = Command::new(&executable)
         .current_dir(std::env::temp_dir())
+        .env("GITHUB_ACTIONS", "true")
         .args(["--inputs", &arguments.to_string()])
         .output()
         .unwrap();
@@ -416,7 +417,7 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
         let mut args = args.clone();
         let (scope, packages, expected_base) = match case {
             "local" => {
-                args["params.ci"] = json!(false);
+                args.as_object_mut().unwrap().remove("params.ci");
                 args["params.mode"] = json!("snapshot");
                 args["params.base"] = json!(base);
                 args["params.head"] = json!(head);

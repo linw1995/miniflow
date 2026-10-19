@@ -193,10 +193,10 @@ Reports SHALL separate Flow analysis/planning time from script inventory/build a
 
 One Flow definition and compiled executable SHALL serve local and CI planning through existing `mf` commands. Parameters and if-else SHALL route to local request construction or CI policy composition using Code and Loop. Both branches SHALL converge at one Git request input through proven exclusive edges, followed by shared LSP and planning. A successful admitted invocation SHALL emit exactly one explicit plan; invalid invocation SHALL fail.
 
-#### Scenario: Plan locally without CI setup
+#### Scenario: Default to local planning
 
-- **WHEN** a caller selects local planning and supplies no CI identity or credentials
-- **THEN** the local branch completes through the shared analysis path without activating CI resolution
+- **WHEN** a caller omits `ci`, including when `GITHUB_ACTIONS` is set
+- **THEN** `ci` defaults to false and the local branch runs without activating CI resolution; selecting CI requires explicit `ci=true`
 
 #### Scenario: Plan from a CI success
 

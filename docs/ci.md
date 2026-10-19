@@ -164,7 +164,7 @@ nix develop --command cargo run -p mf-cli --features development-support -- comp
 
 # Snapshot staged, unstaged, and nonignored untracked files without changing the index.
 nix develop --command cargo run -p mf-cli --features development-support -- run \
-  ./target/test-affected-runner --params.ci false --params.mode worktree \
+  ./target/test-affected-runner --params.mode worktree \
   --params.precision packages > target/test-plan.json
 
 # Execute the snapshot-bound selection, preserving empty and failed plans.
@@ -191,7 +191,7 @@ committed comparison, generate a package-only plan and extract it:
 
 ```bash
 nix develop --command cargo run -p mf-cli --features development-support -- run \
-  ./target/test-affected-runner --params.ci false --params.mode merge-base \
+  ./target/test-affected-runner --params.mode merge-base \
   --params.base origin/main --params.head HEAD --params.precision packages > target/test-plan.json
 jq '.plan' target/test-plan.json > target/affected-packages.json
 nix develop --command bash scripts/run-cov.sh --affected-plan target/affected-packages.json
@@ -287,7 +287,7 @@ For a validated prior merge snapshot, direct comparison is explicit:
 
 ```bash
 nix develop --command cargo run -p mf-cli --features development-support -- run \
-  ./target/test-affected-runner --params.ci false --params.mode snapshot \
+  ./target/test-affected-runner --params.mode snapshot \
   --params.base "$VALIDATED_MERGE" --params.head HEAD --params.precision packages
 ```
 

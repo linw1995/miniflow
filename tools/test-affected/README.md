@@ -136,7 +136,7 @@ nix develop --command cargo run -p mf-cli --features development-support -- \
   compile tools/test-affected/flows/test-affected.json \
   --output target/test-affected-runner --build-dir target/test-affected-build --no-telemetry
 nix develop --command cargo run -p mf-cli --features development-support -- \
-  run ./target/test-affected-runner --params.ci false --params.repository "$PWD" \
+  run ./target/test-affected-runner --params.repository "$PWD" \
   --params.mode worktree > target/test-plan.json
 nix develop --command python3 tools/test-affected/run-tests.py target/test-plan.json
 ```
@@ -145,7 +145,7 @@ Local parameters:
 
 | Parameter | Default | Meaning |
 | --- | --- | --- |
-| `ci` | `GITHUB_ACTIONS`, otherwise false | Choose the branch explicitly when needed |
+| `ci` | `false` | Select CI explicitly with `--params.ci true`; environment variables do not switch branches |
 | `repository` | `.` | Repository to analyze |
 | `mode` | `worktree` | `worktree`, `commit`, `merge-base`, or `snapshot` |
 | `base` | null | Local base ref for merge-base or snapshot comparison |
@@ -161,7 +161,8 @@ supplied refs directly. Worktree snapshots preserve caller files and index, and 
 for the consumer. Relative dependency paths resolve against the definition, not the invocation directory.
 The `--inputs` and `--inputs-file` interfaces also accept these qualified parameter names.
 
-The CI branch binds repository/run/attempt and event parameters from GitHub environment variables.
+Enable the CI branch with `--params.ci true`. It binds repository/run/attempt and event
+parameters from GitHub environment variables.
 The caller supplies `MF_PR_NUMBER`, `MF_PR_BRANCH`, `MF_PR_HEAD`, `MF_TOOLCHAIN` (`rustc -vV`),
 and optionally `MF_COVERAGE_TARGET` (95 by default). `GH_TOKEN` is a secret parameter supplied
 only to GitHub reads. Manual PR dispatch supplies `MF_MERGE_SHA` and must identify the current

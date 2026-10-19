@@ -34,8 +34,7 @@
           "ci": {
             "type": "bool",
             "default": false,
-            "secret": false,
-            "env": "GITHUB_ACTIONS"
+            "secret": false
           },
           "repository": {
             "type": "string",
