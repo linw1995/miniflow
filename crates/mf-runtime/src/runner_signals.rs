@@ -64,3 +64,42 @@ impl Drop for RunnerSignals {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        process::Command,
+        time::{Duration, Instant},
+    };
+
+    #[test]
+    fn interrupt_received_before_binding_is_not_lost() {
+        const CHILD: &str = "MF_RUNNER_SIGNAL_TEST_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let mut signals = RunnerSignals::new().unwrap();
+            assert_eq!(unsafe { libc::raise(SIGINT) }, 0);
+            let cancellation = StreamCancellation::default();
+            signals.bind(cancellation.clone()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while cancellation.failure().is_none() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert!(cancellation.failure().is_some());
+            return;
+        }
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "runner_signals::tests::interrupt_received_before_binding_is_not_lost",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
