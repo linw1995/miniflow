@@ -1648,11 +1648,11 @@ mod tests {
         thread::sleep(Duration::from_millis(10));
         assert!(observation.elapsed() > elapsed);
 
-        let deadline = Instant::now() + Duration::from_secs(5);
-        while run.poll().unwrap().is_none() {
-            assert!(Instant::now() < deadline, "process did not finish");
+        let outcome = (0..500).find_map(|_| {
             thread::sleep(Duration::from_millis(10));
-        }
+            run.poll().unwrap()
+        });
+        assert!(outcome.is_some(), "process did not finish");
         let elapsed = observation.elapsed();
         thread::sleep(Duration::from_millis(20));
         assert_eq!(observation.elapsed(), elapsed);
