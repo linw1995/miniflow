@@ -978,7 +978,6 @@ fn input_permutations_keep_geometry_crossing_layers_and_rendered_styles() {
 #[test]
 fn root_and_loop_body_share_routing_geometry() {
     let body_graph = crowded_graph(4, true);
-    let root = GraphLayout::new(&body_graph).unwrap();
     let mut description = body_graph.clone();
     description.version = WorkflowDescriptionVersion::V2026_09_29;
     description.nodes = vec![NodeDescription {
@@ -991,15 +990,24 @@ fn root_and_loop_body_share_routing_geometry() {
     description.loop_bodies = vec![LoopBodyDescription {
         order_edges: Vec::new(),
         path: vec!["repeat".into()],
-        nodes: body_graph.nodes,
-        data_edges: body_graph.data_edges,
-        control_edges: body_graph.control_edges,
-        execution_order: body_graph.execution_order,
+        nodes: body_graph.nodes.clone(),
+        data_edges: body_graph.data_edges.clone(),
+        control_edges: body_graph.control_edges.clone(),
+        execution_order: body_graph.execution_order.clone(),
     }];
-    let body = GraphLayout::from_loop_body(&description, &["repeat".into()]).unwrap();
-    assert_eq!(body.nodes(), root.nodes());
-    assert_eq!(body.routes(), root.routes());
-    assert_eq!(body.crossings(), root.crossings());
+    for view in [
+        mf_tui::graph::ConnectionView::Execution,
+        mf_tui::graph::ConnectionView::Dependencies,
+        mf_tui::graph::ConnectionView::Ports,
+    ] {
+        let root = GraphLayout::with_view(&body_graph, view).unwrap();
+        let body =
+            GraphLayout::from_body_with_view(&description, &["repeat".into()], view).unwrap();
+        assert_eq!(body.nodes(), root.nodes());
+        assert_eq!(body.edges(), root.edges());
+        assert_eq!(body.routes(), root.routes());
+        assert_eq!(body.crossings(), root.crossings());
+    }
 }
 
 #[test]
@@ -1093,14 +1101,75 @@ fn parameter_graph() -> WorkflowDescription {
 }
 
 #[test]
+fn execution_view_connects_every_dependency_pair_without_ordering_independent_nodes() {
+    use mf_tui::graph::ConnectionView;
+
+    let mut graph = description();
+    graph.data_edges.push(DataEdge {
+        exclusive: false,
+        from_node: "router".into(),
+        from_output: "yes".into(),
+        to_node: "left".into(),
+        to_input: "input".into(),
+    });
+    let layout = GraphLayout::with_view(&graph, ConnectionView::Execution).unwrap();
+    assert_eq!(layout.edges().len(), 5);
+    assert_eq!(layout.hidden_data_count(), 1);
+    for (source, destination) in graph
+        .data_edges
+        .iter()
+        .map(|edge| (&edge.from_node, &edge.to_node))
+        .chain(
+            graph
+                .control_edges
+                .iter()
+                .map(|edge| (&edge.from_node, &edge.to_node)),
+        )
+    {
+        assert_eq!(
+            layout
+                .edges()
+                .iter()
+                .filter(|edge| &edge.key.source == source && &edge.key.destination == destination)
+                .count(),
+            1,
+            "missing or duplicated dependency: {source} -> {destination}"
+        );
+    }
+    assert!(
+        layout
+            .edges()
+            .iter()
+            .all(|edge| edge.key.source != "orphan" && edge.key.destination != "orphan")
+    );
+    assert_completed_geometry_is_safe(&layout);
+    let (width, height) = layout.size();
+    let mut buffer = Buffer::empty(Rect::new(0, 0, width as u16, height as u16));
+    GraphView::new(&layout).render(buffer.area, &mut buffer);
+    for edge in layout.edges() {
+        let target = layout.nodes()[edge.to].rect;
+        assert_eq!(
+            buffer
+                .cell(Position::new(
+                    (target.x - 1) as u16,
+                    (target.y + edge.to_row) as u16,
+                ))
+                .unwrap()
+                .symbol(),
+            "▶"
+        );
+    }
+}
+
+#[test]
 fn connection_views_reduce_attachments_without_losing_dependency_placement() {
     use mf_tui::graph::ConnectionView;
     let graph = parameter_graph();
     let execution = GraphLayout::with_view(&graph, ConnectionView::Execution).unwrap();
-    assert!(execution.edges().is_empty());
-    assert!(execution.routes().is_empty());
-    assert_eq!(execution.hidden_data_count(), 18);
-    assert_eq!(execution.routing_stats().search_expansions, 0);
+    assert_eq!(execution.edges().len(), 1);
+    assert_eq!(execution.edges()[0].members.len(), 18);
+    assert_eq!(execution.routes().len(), 1);
+    assert_eq!(execution.hidden_data_count(), 0);
     assert!(execution.nodes().iter().all(|node| node.rect.height == 4));
     assert!(execution.nodes()[0].rect.x < execution.nodes()[1].rect.x);
     let dependencies = GraphLayout::with_view(&graph, ConnectionView::Dependencies).unwrap();
