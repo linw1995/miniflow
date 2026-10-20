@@ -14,6 +14,33 @@ use mf_tui::state::{Admission, Completeness, NodeStatus, SessionState};
 use std::sync::Arc;
 
 #[test]
+fn latest_node_event_ignores_late_duplicate_and_conflicting_records() {
+    let mut state = state();
+    assert!(state.snapshot().latest_node_event.is_none());
+    let latest = node_start(4, "b", "fixture.sink", 1);
+    assert_eq!(state.apply(latest.clone()).unwrap(), Admission::Applied);
+    let focus = state.snapshot().latest_node_event.unwrap();
+    assert_eq!(focus.sequence, count(4));
+    assert_eq!(focus.node.id, "b");
+    state.apply(start()).unwrap();
+    state
+        .apply(node_start(2, "a", "fixture.source", 0))
+        .unwrap();
+    assert_eq!(state.apply(latest).unwrap(), Admission::Duplicate);
+    assert_eq!(
+        state
+            .apply(node_start(5, "a", "fixture.source", 0))
+            .unwrap(),
+        Admission::Conflict
+    );
+    state.record_trace_span();
+    assert_eq!(state.snapshot().latest_node_event.as_ref(), Some(&focus));
+    state.apply(success()).unwrap();
+    state.close();
+    assert_eq!(state.snapshot().latest_node_event.as_ref(), Some(&focus));
+}
+
+#[test]
 fn shared_snapshots_preserve_old_views_and_follow_session_updates() {
     fn assert_send_sync<T: Send + Sync>() {}
     assert_send_sync::<SessionState>();
@@ -1318,6 +1345,9 @@ fn finite_and_stream_success_causes_are_validated_against_order_edges() {
             state.apply(start()).unwrap();
             state.apply(event(2, skip)).unwrap();
         }
+        let focus = state.snapshot().latest_node_event.unwrap();
+        assert_eq!(focus.sequence, count(2));
+        assert_eq!(focus.node.id, "b");
         assert_eq!(state.snapshot().nodes[1].status, NodeStatus::Skipped);
         assert_eq!(
             state.snapshot().nodes[1].skip_causes[0].source_output(),

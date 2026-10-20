@@ -579,6 +579,21 @@ The graph SHALL visibly identify the node selected for Details in the current ro
 - **WHEN** the user changes the selected node with Tab, Shift-Tab, j, or k
 - **THEN** the graph highlights the newly selected node and restores the previous node's ordinary presentation
 
+#### Scenario: Reveal a selected node
+
+- **WHEN** selection moves with Tab, Shift-Tab, j, or k, or the graph viewport is resized
+- **THEN** the viewport scrolls only as far as needed to reveal the selected node on both axes
+- **AND** a viewport smaller than the node aligns with its top-left corner
+- **AND** ordinary redraws preserve manual panning
+
+#### Scenario: Follow the latest node event
+
+- **WHEN** a newer admitted node event arrives during finite or streaming execution
+- **THEN** the current graph scope selects and reveals that node, or its visible enclosing Loop
+- **AND** duplicate, conflicting, and older events do not move focus backwards
+- **AND** unrelated scopes and historical Loop passes retain their selection
+- **AND** redrawing unchanged observation data preserves manual selection
+
 #### Scenario: Focus a running node
 
 - **WHEN** the selected node is Running and another node is also Running
