@@ -535,7 +535,9 @@ impl ChatView {
         match self.mode {
             Mode::Inspect => {
                 if key.code == KeyCode::Esc {
-                    self.mode = Mode::Input;
+                    if !self.inspector.dismiss_overlay() {
+                        self.mode = Mode::Input;
+                    }
                 } else if let Some(run) = &self.observation {
                     self.inspector.handle_key(key.code, run);
                 }
