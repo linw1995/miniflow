@@ -288,6 +288,8 @@ source, manifest, definition, and pinned-toolchain identity; cache misses rebuil
 cannot alter selected scope. A separate cache retains Cargo dependencies for both the CLI
 and generated planning runner across source revisions. It prefers matching manifests and
 lockfiles, then falls back within the same pinned toolchain and build configuration.
+The generated project's ownership marker travels with its target directory; CLI version
+and build-layout inputs partition every dependency-cache restore prefix.
 Restored checkout artifacts are removed before building; workspace artifacts and generated
 executables are pruned again before saving. Final executable reuse still requires an exact
 source identity, and an executable-cache hit skips dependency-cache transfer entirely.
