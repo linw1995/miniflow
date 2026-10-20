@@ -78,6 +78,8 @@ class ValidationTests(unittest.TestCase):
         report.write_text(report.read_text() + 'SF:source.rs\nDA:1,2\nLF:1\nend_of_record\n')
         result = validation.evaluate_coverage(self.root, current, comparison, plan, report)
         self.assertEqual((result['status'], result['covered'], result['total']), ('passed', 1, 1))
+        exact = plan | {'packages': [], 'tests': [{'package': 'sample', 'binary': 'sample', 'name': 'changed'}]}
+        self.assertEqual(validation.evaluate_coverage(self.root, current, comparison, exact, report), result)
         comparison['base'] = plan['base'] = current['merge']
         self.assertEqual(validation.evaluate_coverage(self.root, current, comparison, plan, report)['status'], 'not_applicable')
         plan['packages'] = []
@@ -169,11 +171,15 @@ class ValidationTests(unittest.TestCase):
             with patch.object(validation, 'execution_signature', return_value=signature):
                 return validation.accept_plan(self.root, value, 'owner/repo', 7, 9, 1, 95)
         self.assertEqual(accept(output), (current, comparison, plan))
+        exact = copy.deepcopy(output)
+        exact['plan'].update(packages=[], baseline_packages=['sample'],
+                             tests=[{'package': 'sample', 'binary': 'sample', 'name': 'test'}])
+        self.assertEqual(accept(exact)[2], exact['plan'])
         for change in ['attempt', 'source', 'exact', 'features', 'toolchain', 'environment', 'scope', 'local']:
             invalid = copy.deepcopy(output)
             if change == 'attempt': invalid['validation']['context']['run_attempt'] = 2
             elif change == 'source': invalid['plan']['tree'] = '0' * 40
-            elif change == 'exact': invalid['plan']['tests'] = [{'package': 'sample', 'binary': 'sample', 'name': 'test'}]
+            elif change == 'exact': invalid['plan']['tests'] = [{'package': 'unknown', 'binary': 'sample', 'name': 'test'}]
             elif change == 'features': invalid['plan']['configuration']['all_features'] = False
             elif change == 'toolchain': invalid['plan']['toolchain'] = 'other'
             elif change == 'environment': invalid['plan']['build_environment'] = {'RUSTFLAGS': 'other'}

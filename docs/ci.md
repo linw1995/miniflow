@@ -1,6 +1,6 @@
 # CI tests
 
-Pull requests select packages from changes since the nearest compatible successful
+Pull requests select tests from changes since the nearest compatible successful
 validation. CI compares the previous tested merge snapshot directly with the current
 merge snapshot. Reuse requires the same actual target-base commit, an ancestor PR
 head, compatible execution settings, and a completed successful workflow attempt.
@@ -8,7 +8,9 @@ Without that evidence, CI selects from the entire PR diff against the current
 merge's actual first parent. Stale base metadata from the event is never used.
 
 All analysis, compilation, and execution use the current merged tree. The selection
-retains changed packages and every declared reverse dependency. Known repository
+starts with changed packages and every declared reverse dependency. CI enables
+`lsp.analyze` and permits exact-case refinement for verified isolated test-body changes.
+Production changes retain package scope. Known repository
 configuration is deferred to full main/nightly verification; unknown inputs or
 analyzer failures select the workspace. An empty plan skips Rust tests and reports
 coverage as not applicable, while lint and build checks still apply.
@@ -105,7 +107,10 @@ full-suite measurements.
 
 The script's `--prepare`, `--test-package <name>`, and `--report` modes support
 these separate steps. Preparation accepts `--affected-plan <path>`, clears stale
-profiles and workspace binaries, and builds only the selected package suites.
+profiles and workspace binaries, and builds the selected suites. Exact-case plans
+build their conservative baseline once so missing runnable identities can widen
+selection without rebuilding. The actual nextest inventory resolves per-package
+filters and promotes exact selections covering a complete suite to package scope.
 Package steps accumulate profiles, and reporting merges them. Local invocations
 without a phase argument still prepare, test, and report in one command.
 
@@ -113,12 +118,21 @@ without a phase argument still prepare, test, and report in one command.
 
 Main, nightly, and manual full-suite runs upload LCOV with the `rust` flag for
 project coverage. Automatic report discovery and carry-forward remain disabled.
-PR runs retain their measured LCOV and incremental gate result as Actions artifacts;
-they do not upload a partial increment as cumulative PR patch coverage. The old
+Each successfully completed crate suite also produces a source-scoped
+`crates/<package>.lcov` report, uploaded in its own step with a package-named flag.
+PRs upload only these complete crate reports. A package with only some tests selected
+retains partial LCOV in Actions artifacts and still participates in the changed-line
+gate; its partial report is never uploaded as complete crate coverage. Reports omit
+dependency-owned sources and crates without source mappings. Completeness refers to
+the configured nextest suite, including the explicitly enabled LSP smoke test.
+Main/nightly publish the same crate flags alongside the full `rust` report, without
+carry-forward. Crate reports are not cumulative PR patch coverage. The old
 Codecov patch status is disabled and the required local `coverage`/`validation`
 checks provide the incremental coverage decision.
 
-The `coverage` artifact contains current LCOV and source provenance. The
+The `coverage` artifact contains current LCOV, source provenance, and `selection.json`
+with complete/partial suites, inventory fallback, execution completion, and published
+crate reports. The
 `pr-validation-input-<run>-<attempt>` artifact contains context, comparison, selected
 plan, and gate result. Only the final successful aggregate job publishes
 `pr-validation-<run>-<attempt>` for future reuse. Failed gates retain report artifacts
@@ -195,8 +209,8 @@ The output contains `plan` and optional CI `validation` provenance. Plans report
 LSP work. `tests` precision may narrow verified isolated test changes. The consumer handles
 both scopes and never turns an empty plan into unfiltered nextest execution.
 
-The coverage script accepts package-only selection and executes its current checkout;
-it does not implement the snapshot consumer or exact-case filters. To reproduce a saved
+The coverage script accepts whole packages and exact test identities and executes its
+current checkout; it does not implement the snapshot consumer. To reproduce a saved
 CI selection, use its `plan.json` with the matching clean tested checkout. For a local
 committed comparison, generate a package-only plan and extract it:
 
@@ -209,8 +223,9 @@ nix develop --command bash scripts/run-cov.sh --affected-plan target/affected-pa
 ```
 
 `--affected-plan` must be the first coverage-script argument (or follow `--prepare`).
-It replaces workspace selection with explicit packages. Empty selections clear stale reports
-and do not invoke Cargo. Malformed plans or exact-test filters fail instead of being discarded.
+It replaces workspace selection with explicit packages and exact-case filters. Empty selections
+clear stale reports and do not invoke Cargo. Malformed selections fail; missing runnable exact
+identities or oversized filter expressions widen to the recorded conservative baseline.
 Other nextest arguments can follow the path. For mutable local source, use the snapshot-aware
 test consumer or run local coverage explicitly after choosing its package scope.
 

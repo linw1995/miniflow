@@ -228,7 +228,7 @@
       "config": {
         "value": {
           "record_version": 1,
-          "id": "flow-pr-v2"
+          "id": "flow-pr-v3"
         }
       }
     },
@@ -2024,7 +2024,7 @@
           "c": "object"
         },
         "code": {
-          "request": "{'execution':{'enabled':false},'mode':'snapshot','base':comparison.base,'head':comparison.head,'analyze':false,'require_checkout':true,'options':{'configuration':{'all_features':true,'target':c.signature.target},'exact_tests':false},'validation':{'context':c,'comparison':comparison}}"
+          "request": "{'execution':{'enabled':false},'mode':'snapshot','base':comparison.base,'head':comparison.head,'analyze':true,'require_checkout':true,'options':{'configuration':{'all_features':true,'target':c.signature.target},'exact_tests':true},'initialization_options':{'cargo':{'features':'all','target':c.signature.target,'noDefaultFeatures':false,'buildScripts':{'enable':false},'sysroot':null},'procMacro':{'enable':false},'checkOnSave':false,'cachePriming':{'enable':false}},'validation':{'context':c,'comparison':comparison}}"
         }
       },
       "inputs": {
