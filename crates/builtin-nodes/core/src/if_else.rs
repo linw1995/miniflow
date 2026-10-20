@@ -1,12 +1,13 @@
+use crate::condition::{Condition, ConditionExecutionError, ConditionValidationError};
 use mf_runtime::{
-    ContextReference, ContextValue, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError,
+    ContextReference, ExecutionContext, Inputs, NodeBuildError, NodeExecutionError,
     NodePortContract, NodePorts, NodeRegistration, NodeResult, Outputs, PortSpec, TaskNode,
     ValueType, deserialize_config,
 };
-use serde::{Deserialize, Deserializer};
+use serde::Deserialize;
 use serde_json::Value;
 use snafu::{ResultExt, Snafu};
-use std::{cmp::Ordering, collections::BTreeSet, error::Error};
+use std::{collections::BTreeSet, error::Error};
 
 pub const KIND: &str = "builtin.if_else";
 
@@ -21,40 +22,15 @@ struct Branch {
     id: String,
     condition: Condition,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Source {
-    output: String,
-    path: String,
-}
-#[derive(Clone, Copy, Debug, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum Operator {
-    Eq,
-    Ne,
-    Gt,
-    Gte,
-    Lt,
-    Lte,
-    Exists,
-    NotExists,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Condition {
-    source: Source,
-    operator: Operator,
-    #[serde(default, deserialize_with = "present_value")]
-    value: Option<Value>,
-}
-fn present_value<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Value>, D::Error> {
-    Value::deserialize(deserializer).map(Some)
-}
-
 #[derive(Debug, Snafu)]
 enum BranchBuildError {
     #[snafu(display("{message}"))]
     InvalidConfig { message: String },
+    #[snafu(display("branch `{branch}`: {source}"))]
+    Condition {
+        branch: String,
+        source: ConditionValidationError,
+    },
     #[snafu(display("branch `{branch}`: {source}"))]
     Configuration {
         branch: String,
@@ -69,15 +45,10 @@ impl From<BranchBuildError> for NodeBuildError {
 }
 
 #[derive(Debug, Snafu)]
-#[snafu(display(
-    "branch `{branch}` source `{output}` path `{path}` operator {operator:?}: {source}"
-))]
+#[snafu(display("branch `{branch}` {source}"))]
 struct BranchExecutionError {
     branch: String,
-    output: String,
-    path: String,
-    operator: Operator,
-    source: NodeExecutionError,
+    source: ConditionExecutionError,
 }
 
 impl From<BranchExecutionError> for NodeExecutionError {
@@ -93,81 +64,6 @@ fn invalid(message: impl Into<String>) -> NodeBuildError {
     .build()
     .into()
 }
-fn execution_error(message: impl Into<String>) -> NodeExecutionError {
-    mf_runtime::NodeExecutionFailedSnafu {
-        message: message.into(),
-    }
-    .build()
-}
-fn valid_pointer(path: &str) -> bool {
-    if !path.is_empty() && !path.starts_with('/') {
-        return false;
-    }
-    let mut bytes = path.bytes();
-    while let Some(byte) = bytes.next() {
-        if byte == b'~' && !matches!(bytes.next(), Some(b'0' | b'1')) {
-            return false;
-        }
-    }
-    true
-}
-impl Condition {
-    fn validate(&self) -> Result<(), String> {
-        if self.source.output.is_empty() || !valid_pointer(&self.source.path) {
-            return Err("source requires an output ID and a valid JSON Pointer".into());
-        }
-        match (self.operator, &self.value) {
-            (Operator::Exists | Operator::NotExists, None) => Ok(()),
-            (Operator::Eq | Operator::Ne, Some(value)) if !value.is_array() && !value.is_object() => Ok(()),
-            (Operator::Gt | Operator::Gte | Operator::Lt | Operator::Lte, Some(Value::Number(_))) => Ok(()),
-            _ => Err("operator requires a scalar comparison value, a numeric ordering value, or no value for existence checks".into()),
-        }
-    }
-    fn evaluate(&self, source: Option<&mf_runtime::ValueRef>) -> Result<bool, String> {
-        let value = source.and_then(|value| value.pointer(&self.source.path));
-        match self.operator {
-            Operator::Exists => return Ok(value.is_some()),
-            Operator::NotExists => return Ok(value.is_none()),
-            _ => {}
-        }
-        let value = value.ok_or("source output is skipped or field is missing")?;
-        if value.is_array() || value.is_object() {
-            return Err("comparison requires a scalar value".into());
-        }
-        let literal = self
-            .value
-            .as_ref()
-            .expect("comparison literals are validated during construction");
-        match self.operator {
-            Operator::Eq | Operator::Ne => {
-                let equal = match (value.as_number(), literal.as_number()) {
-                    (Some(left), Some(right)) => {
-                        mf_runtime::compare_json_numbers(left, right) == Ordering::Equal
-                    }
-                    _ => value == literal,
-                };
-                Ok(if matches!(self.operator, Operator::Eq) {
-                    equal
-                } else {
-                    !equal
-                })
-            }
-            operator => {
-                let (Some(left), Some(right)) = (value.as_number(), literal.as_number()) else {
-                    return Err("ordering requires numeric operands".into());
-                };
-                let order = mf_runtime::compare_json_numbers(left, right);
-                Ok(match operator {
-                    Operator::Gt => order == Ordering::Greater,
-                    Operator::Gte => order != Ordering::Less,
-                    Operator::Lt => order == Ordering::Less,
-                    Operator::Lte => order != Ordering::Greater,
-                    _ => unreachable!("equality and existence were handled above"),
-                })
-            }
-        }
-    }
-}
 
 struct IfElse {
     branches: Vec<Branch>,
@@ -180,20 +76,10 @@ impl TaskNode for IfElse {
     ) -> Result<NodeResult, NodeExecutionError> {
         let mut selected = "else";
         for branch in &self.branches {
-            let condition = &branch.condition;
-            let result = (|| {
-                let source = match ctx.output(&condition.source.output)? {
-                    ContextValue::Value(value) => Some(value),
-                    ContextValue::Skipped => None,
-                };
-                condition.evaluate(source).map_err(execution_error)
-            })();
-            let matched = result.context(BranchExecutionSnafu {
-                branch: &branch.id,
-                output: &condition.source.output,
-                path: &condition.source.path,
-                operator: condition.operator,
-            })?;
+            let matched = branch
+                .condition
+                .evaluate(ctx)
+                .context(BranchExecutionSnafu { branch: &branch.id })?;
             if matched {
                 selected = &branch.id;
                 break;
@@ -231,7 +117,7 @@ impl IfElse {
     fn context_references(&self) -> Vec<ContextReference> {
         self.branches
             .iter()
-            .map(|branch| ContextReference::new(&branch.condition.source.output, &branch.id))
+            .map(|branch| branch.condition.reference(&branch.id))
             .collect()
     }
 }
@@ -264,7 +150,7 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
         branch
             .condition
             .validate()
-            .map_err(|message| invalid(format!("branch `{}`: {message}", branch.id)))?;
+            .context(ConditionSnafu { branch: &branch.id })?;
         branches.push(branch);
     }
     let node = IfElse { branches };
@@ -349,57 +235,5 @@ mod tests {
         let node = factory(config()).unwrap();
         assert!(node.metadata.ports.inputs.is_empty());
         assert_eq!(node.metadata.ports.outputs.len(), 2);
-    }
-    #[test]
-    fn evaluates_typed_scalars_presence_and_json_pointers() {
-        for (operator, input, literal, expected) in [
-            ("eq", json!(1), json!(1.0), true),
-            ("ne", json!("1"), json!(1), true),
-            ("eq", json!("VIP"), json!("vip"), false),
-            ("eq", json!(null), json!(null), true),
-            ("gt", json!(2), json!(1), true),
-            ("gte", json!(1), json!(1), true),
-            ("lt", json!(1), json!(2), true),
-            ("lte", json!(1), json!(1), true),
-        ] {
-            let predicate: Condition =
-                serde_json::from_value(condition(operator, literal)).unwrap();
-            predicate.validate().unwrap();
-            assert_eq!(
-                predicate.evaluate(Some(&input.clone().into())).unwrap(),
-                expected
-            );
-        }
-        let input = json!({"a/b":null,"a~b":true,"items":[{"price":10}]});
-        for (path, expected) in [
-            ("/a~1b", true),
-            ("/a~0b", true),
-            ("/items/0/price", true),
-            ("/missing", false),
-            ("/items/9", false),
-            ("/a~0b/no", false),
-        ] {
-            for operator in ["exists", "not_exists"] {
-                let predicate: Condition = serde_json::from_value(
-                    json!({"source":{"output":"a.value","path":path},"operator":operator}),
-                )
-                .unwrap();
-                predicate.validate().unwrap();
-                assert_eq!(
-                    predicate.evaluate(Some(&input.clone().into())).unwrap(),
-                    if operator == "exists" {
-                        expected
-                    } else {
-                        !expected
-                    }
-                );
-                assert_eq!(predicate.evaluate(None).unwrap(), operator == "not_exists");
-            }
-        }
-        let eq: Condition = serde_json::from_value(condition("eq", json!(1))).unwrap();
-        assert!(eq.evaluate(None).is_err());
-        assert!(eq.evaluate(Some(&json!({}).into())).is_err());
-        let gt: Condition = serde_json::from_value(condition("gt", json!(1))).unwrap();
-        assert!(gt.evaluate(Some(&json!("2").into())).is_err());
     }
 }

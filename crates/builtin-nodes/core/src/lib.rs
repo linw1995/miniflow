@@ -1,4 +1,6 @@
+mod assert;
 mod batch;
+mod condition;
 mod constant;
 mod identity;
 mod if_else;
@@ -7,6 +9,7 @@ mod loop_declaration;
 mod parameters;
 mod readline;
 
+pub use assert::KIND as ASSERT_KIND;
 pub use batch::KIND as BATCH_KIND;
 pub use constant::{KIND as CONSTANT_KIND, kind as constant_kind};
 pub use identity::{
