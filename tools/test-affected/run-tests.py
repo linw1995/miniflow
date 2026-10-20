@@ -121,8 +121,19 @@ def matcher(value):
 
 
 def filterset(packages, tests):
-    parts = [f"package({matcher(p)})" for p in packages]
-    parts += [f"(package({matcher(t['package'])}) & binary_id({matcher(t['binary'])}) & test({matcher(t['name'])}))" for t in tests]
+    packages = set(packages)
+    grouped = {}
+    for test in tests:
+        if test["package"] not in packages:
+            binaries = grouped.setdefault(test["package"], {})
+            binaries.setdefault(test["binary"], set()).add(test["name"])
+    parts = [f"package({matcher(p)})" for p in sorted(packages)]
+    for package, binaries in sorted(grouped.items()):
+        binary_parts = []
+        for binary, names in sorted(binaries.items()):
+            test_parts = " | ".join(f"test({matcher(name)})" for name in sorted(names))
+            binary_parts.append(f"(binary_id({matcher(binary)}) & ({test_parts}))")
+        parts.append(f"(package({matcher(package)}) & ({' | '.join(binary_parts)}))")
     return " | ".join(parts) or "none()"
 
 
