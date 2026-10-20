@@ -442,23 +442,16 @@ impl ExecutionContext {
         Ok(context)
     }
 
-    pub fn fork_domain_with_visible_outputs(&self, visible_outputs: &BTreeSet<String>) -> Self {
-        self.fork_domain_with_observation_and_visible_outputs(
-            self.observation.clone(),
-            visible_outputs,
-        )
-    }
-
-    pub fn fork_domain_with_observation_and_visible_outputs(
+    pub fn fork_domain_snapshot(
         &self,
         observation: Option<RunObservation>,
-        visible_outputs: &BTreeSet<String>,
+        visibility: crate::OutputVisibility,
     ) -> Self {
-        self.fork_domain(observation, self.outputs.fork_visible(visible_outputs))
+        self.fork_domain(observation, self.outputs.fork_snapshot(Some(visibility)))
     }
 
     pub fn fork_domain_with_observation(&self, observation: Option<RunObservation>) -> Self {
-        self.fork_domain(observation, self.outputs.clone())
+        self.fork_domain(observation, self.outputs.fork_snapshot(None))
     }
 
     fn fork_domain(&self, observation: Option<RunObservation>, outputs: ExecutionOutputs) -> Self {
@@ -1873,6 +1866,7 @@ mod tests {
                         predecessors: vec![].into(),
                         successors: vec![].into(),
                         first_position: 0,
+                        snapshot_visibility: crate::OutputVisibility::Borrowed(&[]),
                     }]
                     .into(),
                     vec![std::borrow::Cow::Owned(vec![])].into(),
@@ -1957,6 +1951,7 @@ mod tests {
                             predecessors: vec![].into(),
                             successors: vec![].into(),
                             first_position: 0,
+                            snapshot_visibility: crate::OutputVisibility::Borrowed(&[]),
                         }]
                         .into(),
                         vec![std::borrow::Cow::Owned(vec![])].into(),

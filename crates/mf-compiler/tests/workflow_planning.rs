@@ -64,6 +64,38 @@ fn diamond_definition() -> Value {
 }
 
 #[test]
+fn domain_snapshots_include_all_ancestor_ports_but_exclude_siblings() {
+    let definition: WorkflowDefinition = serde_json::from_value(diamond_definition()).unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let compiled = mf_compiler::compile_definition(&definition, &registry).unwrap();
+    let flow = mf_compiler::instantiate_compiled(&compiled, &registry).unwrap();
+    let visible: std::collections::BTreeMap<_, _> = flow
+        .execution_domains()
+        .domains()
+        .iter()
+        .map(|domain| {
+            (
+                flow.definition_node_id(&domain.nodes[0]).unwrap(),
+                domain.snapshot_visibility.keys().collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    assert!(visible["root"].is_empty());
+    assert_eq!(visible["left"], ["root.value"]);
+    assert_eq!(visible["right"], ["root.value"]);
+    assert_eq!(visible["sink"], ["left.value", "right.value", "root.value"]);
+    #[cfg(feature = "codegen")]
+    {
+        let generated = compiled
+            .generate_execution_plans(&registry)
+            .unwrap()
+            .rust_source;
+        assert!(generated.contains("OutputVisibility::Borrowed"));
+        assert!(generated.contains("\"root.value\""));
+    }
+}
+
+#[test]
 fn chooses_a_stable_order_when_multiple_nodes_are_ready() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let value = diamond_definition();

@@ -740,6 +740,13 @@ message identity and FIFO ordering. Domains inside Loop and Iteration scopes run
 preserve scope writes and exit behavior; Iteration can still process separate items in parallel through the same
 bounded worker pool.
 
+Each domain forks an immutable execution-context snapshot and records its writes separately.
+The compiler fixes which inherited output keys are visible, including the message source for
+stream domains. Forking shares state without copying the visible output map; completed sibling
+branches cannot become visible merely because they finish earlier. Successful domains commit
+their declared outputs while scope writes retain the existing Loop ordering. Execution snapshots
+are independent of optional observation snapshots and do not retain execution history.
+
 ## Workflow startup parameters
 
 Schemas `2026-10-03` and `2026-10-19` promote the inputs of top-level initial nodes to workflow parameters. An initial node

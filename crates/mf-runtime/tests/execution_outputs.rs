@@ -131,11 +131,11 @@ fn visible_forks_share_values_preserve_skips_and_isolate_updates() {
     parent
         .publish_generated(&node("typed"), Some(typed(vec!["value"], &[])))
         .unwrap();
-    let mut child = parent.fork_visible(&BTreeSet::from([
-        "source.value".into(),
-        "skipped.value".into(),
+    let mut child = parent.fork_snapshot(Some(mf_runtime::OutputVisibility::from_sorted(vec![
         "missing.value".into(),
-    ]));
+        "skipped.value".into(),
+        "source.value".into(),
+    ])));
     let ContextValue::Value(value) = child.output("source.value").unwrap() else {
         panic!("visible value must remain available");
     };
@@ -222,4 +222,81 @@ fn output_selection_distinguishes_missing_skipped_and_null_values() {
             .unwrap(),
         Some(ValueRef::null())
     );
+}
+
+#[test]
+fn snapshots_freeze_parent_updates_and_keep_branch_writes_private() {
+    let mut parent = ExecutionOutputs::from_values(Outputs::from([
+        ("source.value".into(), 1.into()),
+        ("sibling.value".into(), 2.into()),
+    ]));
+    let visibility = mf_runtime::OutputVisibility::Borrowed(&["source.value"]);
+    assert_eq!(
+        visibility,
+        mf_runtime::OutputVisibility::from_sorted(vec!["source.value".into()])
+    );
+    let mut left = parent.fork_snapshot(Some(visibility.clone()));
+    let right = parent.fork_snapshot(Some(visibility));
+    parent.set_value("source.value".into(), 3.into());
+    parent.set_value("later.value".into(), 4.into());
+    left.set_value("source.value".into(), 5.into());
+    left.publish(&node("left"), Some(result(6))).unwrap();
+    assert_eq!(
+        right.output("source.value").unwrap(),
+        ContextValue::Value(&1.into())
+    );
+    assert_eq!(
+        left.output("source.value").unwrap(),
+        ContextValue::Value(&5.into())
+    );
+    assert_eq!(
+        parent.output("source.value").unwrap(),
+        ContextValue::Value(&3.into())
+    );
+    for snapshot in [&left, &right] {
+        assert!(snapshot.output("sibling.value").is_err());
+        assert!(snapshot.output("later.value").is_err());
+    }
+    assert!(right.output("left.value").is_err());
+    assert!(parent.output("left.value").is_err());
+    parent.merge_nodes(&left, [&node("left")]);
+    assert_eq!(
+        parent.output("left.value").unwrap(),
+        ContextValue::Value(&6.into())
+    );
+    assert_eq!(
+        parent.output("source.value").unwrap(),
+        ContextValue::Value(&3.into())
+    );
+}
+
+#[test]
+fn nested_snapshots_cannot_restore_hidden_values_and_shadow_inherited_states() {
+    let mut parent = ExecutionOutputs::default();
+    parent.publish(&node("source"), Some(result(1))).unwrap();
+    parent.publish(&node("hidden"), Some(result(2))).unwrap();
+    parent
+        .publish_generated(&node("typed"), Some(typed(vec!["optional"], &[])))
+        .unwrap();
+    let first = parent.fork_snapshot(Some(mf_runtime::OutputVisibility::Borrowed(&[
+        "source.value",
+    ])));
+    let mut nested = first.fork_snapshot(Some(mf_runtime::OutputVisibility::Borrowed(&[
+        "hidden.value",
+        "source.value",
+    ])));
+    assert!(nested.output("hidden.value").is_err());
+    nested.publish(&node("source"), None).unwrap();
+    assert_eq!(
+        nested.output("source.value").unwrap(),
+        ContextValue::Skipped
+    );
+    assert_eq!(
+        first.output("source.value").unwrap(),
+        ContextValue::Value(&1.into())
+    );
+    nested.publish(&node("typed"), Some(result(3))).unwrap();
+    assert!(!nested.is_transferred("typed.optional"));
+    assert!(!nested.contains_output("typed.optional"));
+    assert!(parent.is_transferred("typed.optional"));
 }

@@ -89,6 +89,26 @@ fn collect_graph() -> Value {
 }
 
 #[test]
+fn snapshots_include_the_message_source_without_crossing_message_boundaries() {
+    let prepared = prepare(collect_graph()).unwrap();
+    let plan = prepared.plan();
+    let visible: std::collections::BTreeMap<_, _> = plan
+        .execution_domains()
+        .domains()
+        .iter()
+        .map(|domain| {
+            (
+                plan.nodes()[domain.nodes[0].index()].definition_id.as_str(),
+                domain.snapshot_visibility.keys().collect::<Vec<_>>(),
+            )
+        })
+        .collect();
+    assert!(visible["feed"].is_empty());
+    assert_eq!(visible["collect"], ["feed.item"]);
+    assert_eq!(visible["copy"], ["collect.items"]);
+}
+
+#[test]
 fn prepares_typed_input_and_new_message_domains_without_execution() {
     let mut value = collect_graph();
     value["outputs"] = json!([{"name":"result", "node":"copy", "port":"value"}]);

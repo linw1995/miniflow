@@ -467,14 +467,37 @@ pub fn prepare_definition(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
+    prepare_definition_with_layouts(definition, registry, None)
+}
+
+pub fn prepare_definition_with_layouts(
+    definition: &WorkflowDefinition,
+    registry: &NodeRegistry,
+    body_layouts: Option<&mut BTreeMap<Vec<DefinitionId>, mf_runtime::ExecutionDomains>>,
+) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
     crate::validate_execution(definition).context(StreamConstructionSnafu)?;
-    prepare_graph(definition, registry, None, false)
+    prepare_graph(
+        definition,
+        &mut GraphPreparation {
+            registry,
+            body_layouts,
+            path: Vec::new(),
+        },
+        None,
+        false,
+    )
+}
+
+struct GraphPreparation<'a> {
+    registry: &'a NodeRegistry,
+    body_layouts: Option<&'a mut BTreeMap<Vec<DefinitionId>, mf_runtime::ExecutionDomains>>,
+    path: Vec<DefinitionId>,
 }
 
 fn prepare_graph(
     definition: &WorkflowDefinition,
-    registry: &NodeRegistry,
+    preparation: &mut GraphPreparation<'_>,
     enclosing: Option<&BTreeMap<String, ValueType>>,
     allow_iteration_input: bool,
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
@@ -482,7 +505,8 @@ fn prepare_graph(
         crate::loops::validate_structure(definition)?;
     }
     let order = structural_order_graph(definition)?;
-    let mut nodes = resolve_nodes_in_scope(definition, registry, enclosing, allow_iteration_input)?;
+    let mut nodes =
+        resolve_nodes_in_scope(definition, preparation, enclosing, allow_iteration_input)?;
     if definition.execution.is_none()
         && let Some(node) = nodes.iter().find(|node| {
             matches!(
@@ -1347,7 +1371,16 @@ pub fn resolve_nodes(
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
     crate::validate_execution(definition).context(StreamConstructionSnafu)?;
-    resolve_nodes_in_scope(definition, registry, None, false)
+    resolve_nodes_in_scope(
+        definition,
+        &mut GraphPreparation {
+            registry,
+            body_layouts: None,
+            path: Vec::new(),
+        },
+        None,
+        false,
+    )
 }
 
 fn registration_for(
@@ -1366,14 +1399,20 @@ fn registration_for(
 
 fn bind_subgraph_node(
     node: &crate::NodeDefinition,
-    registry: &NodeRegistry,
+    preparation: &mut GraphPreparation<'_>,
     body: &WorkflowDefinition,
     enclosing: Option<&BTreeMap<String, ValueType>>,
     allow_iteration_input: bool,
     options: Value,
 ) -> Result<FlowNode, WorkflowCompileError> {
-    let registration = registration_for(node, registry)?;
-    let prepared = prepare_graph(body, registry, enclosing, allow_iteration_input);
+    let registration = registration_for(node, preparation.registry)?;
+    preparation.path.push(node.id.clone());
+    let prepared = prepare_graph(body, preparation, enclosing, allow_iteration_input);
+    let path = preparation
+        .body_layouts
+        .as_ref()
+        .map(|_| preparation.path.clone());
+    preparation.path.pop();
     let (nodes, order) = if node.kind == crate::LOOP_KIND {
         prepared.context(LoopBodySnafu {
             path: format!("{:?}", node.id),
@@ -1420,6 +1459,12 @@ fn bind_subgraph_node(
         .and_then(|flow| flow.with_order_edges(body.order_edges.clone()))
         .and_then(|flow| flow.into_tasks())
         .context(FlowConstructionSnafu)?;
+    if let Some(layouts) = preparation.body_layouts.as_mut() {
+        layouts.insert(
+            path.expect("layout collection has a body path"),
+            flow.execution_domains().clone(),
+        );
+    }
     let body = PreparedSubgraph::new(identities, outputs, move |state| {
         flow.execute_in_context(state)
     });
@@ -1434,7 +1479,7 @@ fn bind_subgraph_node(
 
 fn resolve_nodes_in_scope(
     definition: &WorkflowDefinition,
-    registry: &NodeRegistry,
+    preparation: &mut GraphPreparation<'_>,
     enclosing: Option<&BTreeMap<String, ValueType>>,
     allow_iteration_input: bool,
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
@@ -1456,7 +1501,14 @@ fn resolve_nodes_in_scope(
                         "variables": loop_definition.variables,
                         "until": loop_definition.until,
                     });
-                    return bind_subgraph_node(node, registry, &body, Some(&types), false, options);
+                    return bind_subgraph_node(
+                        node,
+                        preparation,
+                        &body,
+                        Some(&types),
+                        false,
+                        options,
+                    );
                 }
                 crate::LOOP_ASSIGN_KIND => {
                     let target = crate::loops::assignment_target(
@@ -1507,9 +1559,9 @@ fn resolve_nodes_in_scope(
                     }
                     .build()
                 })?;
-                return bind_subgraph_node(node, registry, &body, None, true, Value::Null);
+                return bind_subgraph_node(node, preparation, &body, None, true, Value::Null);
             }
-            let instance = registration_for(node, registry)?
+            let instance = registration_for(node, preparation.registry)?
                 .instantiate(node.config.clone())
                 .context(NodeConstructionSnafu {
                     definition_id: node.id.clone(),

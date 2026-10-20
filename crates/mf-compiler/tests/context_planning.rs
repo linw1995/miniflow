@@ -5,8 +5,10 @@ use mf_compiler::{
 };
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicUsize, Ordering};
+extern crate mfn_core as _;
 
 static CONSTRUCTIONS: AtomicUsize = AtomicUsize::new(0);
+static BODY_CONSTRUCTIONS: AtomicUsize = AtomicUsize::new(0);
 struct Dynamic(Value);
 impl TaskNode for Dynamic {
     fn execute(
@@ -40,6 +42,9 @@ impl Dynamic {
 fn factory(config: Value) -> Result<mf_runtime::PreparedNode, NodeBuildError> {
     if config["count"] == true {
         CONSTRUCTIONS.fetch_add(1, Ordering::SeqCst);
+    }
+    if config["count_body"] == true {
+        BODY_CONSTRUCTIONS.fetch_add(1, Ordering::SeqCst);
     }
     let node = Dynamic(config);
     let metadata = mf_runtime::NodeMetadata {
@@ -102,6 +107,40 @@ fn factories_run_once_per_preparation() {
     CONSTRUCTIONS.store(0, Ordering::SeqCst);
     instantiate_compiled(&plan, &registry).unwrap();
     assert_eq!(CONSTRUCTIONS.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+#[cfg(feature = "codegen")]
+fn generated_body_snapshots_reuse_prepared_factories_and_preserve_dotted_keys() {
+    let definition = definition(json!({
+        "version": "2026-09-29", "dependencies": {},
+        "nodes": [
+            {"id": "seed", "kind": "builtin.constant", "config": {"value": 0}},
+            {"id": "repeat", "kind": "workflow.loop", "loop": {
+                "max_iterations": 1,
+                "variables": [{"name": "count", "type": "int"}],
+                "body": {
+                    "nodes": [
+                        {"id": "a.part", "kind": "test.dynamic", "config": {"ports": ["value.part"], "count_body": true}},
+                        {"id": "b", "kind": "test.dynamic", "config": {"ports": ["done"], "count_body": true}},
+                        {"id": "c", "kind": "test.dynamic", "config": {"ports": ["done"], "count_body": true}}
+                    ],
+                    "control_edges": [
+                        {"from_node": "a.part", "from_output": "value.part", "to_node": "b"},
+                        {"from_node": "a.part", "from_output": "value.part", "to_node": "c"}
+                    ]
+                }
+            }}
+        ],
+        "edges": [{"from_node": "seed", "from_output": "value", "to_node": "repeat", "to_input": "count"}]
+    }));
+    let plan = plan_definition(&definition).unwrap();
+    BODY_CONSTRUCTIONS.store(0, Ordering::SeqCst);
+    let generated = plan
+        .generate_execution_plans(&NodeRegistry::from_inventory().unwrap())
+        .unwrap();
+    assert_eq!(BODY_CONSTRUCTIONS.load(Ordering::SeqCst), 3);
+    assert!(generated.rust_source.contains("\"a.part.value.part\""));
 }
 #[test]
 fn rejects_missing_and_unordered_context_references() {
