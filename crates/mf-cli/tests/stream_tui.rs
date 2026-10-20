@@ -60,6 +60,7 @@ fn run_tui(
         let mut terminal = Screen::new(160, 40);
         let mut buffer = [0; 8192];
         let mut interrupted = false;
+        let mut details_requested = false;
         let mut stage = 0;
         loop {
             let size = match master.read(&mut buffer) {
@@ -70,6 +71,11 @@ fn run_tui(
             let text = terminal.text();
             screen.push_str(&text);
             screen.push('\n');
+            if !details_requested && text.contains("Workflow:") {
+                master.write_all(b"d").unwrap();
+                details_requested = true;
+                continue;
+            }
             if interrupt
                 && !interrupted
                 && text.contains("Observed calls:")
@@ -79,7 +85,7 @@ fn run_tui(
                 master.write_all(b"\x03").unwrap();
                 interrupted = true;
             }
-            if stage == 0 && text.contains("Exited:") {
+            if stage == 0 && text.contains("Exited:") && text.contains("Details") {
                 master
                     .write_all(if inspect { b"jv" } else { b"q" })
                     .unwrap();

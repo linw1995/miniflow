@@ -516,7 +516,7 @@ resizing clip the same planned geometry, including partially visible node text a
 
 If display limits prevent a safe route, the graph shows a separate unresolved-connections warning.
 Select an incident node with Tab/j/k to inspect its endpoint IDs, port names, edge kind, and reason in
-Details; PgUp/PgDn scroll those details. The connection remains in the graph metadata even though its
+Details (press `d` to open); PgUp/PgDn scroll those details. The connection remains in the graph metadata even though its
 unsafe path is not drawn. This warning does not change workflow results or telemetry completeness.
 Layout is deterministic per described scope and connection view; the CLI terminal loop owns
 scope navigation, panning, status banners, diagnostics, and terminal cleanup.
@@ -557,6 +557,9 @@ printf '1\n2\n' | ./stream-batch
 ```
 
 The graph shows the selected connection view, node status, elapsed time, and confirmed branch outcomes.
+The graph uses the full width by default. Press `d` to show or hide Details; Esc closes visible Details
+before navigating back. The footer shows only common controls. Press `?` in the graph or tracing view
+for the remaining shortcuts, and `?` or Esc to dismiss help. Help consumes navigation keys while open.
 The header keeps the observed workflow outcome separate from the child process result. Arrow keys
 pan; `f` resets the viewport; Tab, `j`, and `k` select a node for details. `e` cycles connection views. On a node with a
 described body, `l` opens
@@ -567,7 +570,8 @@ message identity, unresolved outcomes, and final workflow totals. Loop pass head
 invocation so repeated paths in different messages remain distinct. `q` has no action while the workflow runs. Ctrl-C
 requests interruption, and a second
 Ctrl-C or the two-second deadline forces termination. After the runner exits, the view stays open
-until `q`, Enter, Esc at the root, or Ctrl-C. The terminal is restored before the captured stdout is
+until `q`, Enter, Esc at the root with Details hidden, or Ctrl-C. With help open, `q`, Enter, or Esc
+only dismisses help. The terminal is restored before the captured stdout is
 copied to CLI stdout.
 
 Press `v` to open OTEL Tracing for finite and streaming runs. The span tree groups records by
