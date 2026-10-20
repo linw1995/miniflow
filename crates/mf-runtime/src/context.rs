@@ -1,8 +1,11 @@
 use crate::ValueRef as Value;
 use crate::node::LoopVariableTypeSnafu;
-use crate::runner::{ContextSnafu, NodeExecutionSnafu, OutputSelectionSnafu, OutputTypeSnafu};
+use crate::runner::{ContextSnafu, NodeExecutionSnafu};
 use crate::worker::{RuntimeWorkerHandle, WorkerJob, WorkerPool};
-use crate::{FlowNode, Inputs, NodeExecutionError, Outputs, WorkflowRunError, output_id};
+use crate::{
+    ContextValue, ExecutionOutputs, FlowNode, Inputs, NodeExecutionError, Outputs,
+    WorkflowRunError, output_id,
+};
 use mf_telemetry::{
     event::{FailurePhase, LoopPathEntry, LoopSummary, SkipCause},
     observation::{BodyNodeObservation, BodyObservation, NodeObservation, RunObservation},
@@ -78,8 +81,7 @@ impl StepBudget {
 
 struct ScopeGuard<'a> {
     context: &'a mut ExecutionContext,
-    parent_outputs: BTreeMap<String, Option<Value>>,
-    parent_typed_outputs: BTreeSet<String>,
+    parent_outputs: ExecutionOutputs,
     parent_exit_cutoff: Arc<AtomicUsize>,
     depth: usize,
 }
@@ -88,7 +90,6 @@ impl Drop for ScopeGuard<'_> {
     fn drop(&mut self) {
         self.context.scopes.truncate(self.depth);
         self.context.outputs = std::mem::take(&mut self.parent_outputs);
-        self.context.typed_outputs = std::mem::take(&mut self.parent_typed_outputs);
         self.context.scope_exit_cutoff = self.parent_exit_cutoff.clone();
         self.context.pending_loop_write = None;
     }
@@ -190,18 +191,10 @@ impl<O> From<O> for TypedNodeResult<O> {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum ContextValue<'a> {
-    Value(&'a Value),
-    Skipped,
-}
-
-/// Completed output values for one run. Nodes receive an immutable reference.
+/// State and shared services for one execution context.
 #[derive(Debug)]
 pub struct ExecutionContext {
-    // A present None is an explicit skip; an absent key is a missing output.
-    outputs: BTreeMap<String, Option<Value>>,
-    typed_outputs: BTreeSet<String>,
+    outputs: ExecutionOutputs,
     observation: Option<RunObservation>,
     body_observation: Option<BodyObservation>,
     scopes: Vec<ExecutionScope>,
@@ -224,8 +217,7 @@ pub struct ExecutionContext {
 impl Default for ExecutionContext {
     fn default() -> Self {
         Self {
-            outputs: BTreeMap::new(),
-            typed_outputs: BTreeSet::new(),
+            outputs: ExecutionOutputs::default(),
             observation: None,
             body_observation: None,
             scopes: Vec::new(),
@@ -302,7 +294,6 @@ impl ExecutionContext {
     pub fn fork_stream(&self, observation: Option<RunObservation>) -> Self {
         Self {
             outputs: self.outputs.clone(),
-            typed_outputs: self.typed_outputs.clone(),
             remaining_steps: self.remaining_steps.clone(),
             stdin: self.stdin.clone(),
             cancellation: self.cancellation.clone(),
@@ -346,12 +337,7 @@ impl ExecutionContext {
         if self.inputs.stdin_owner().is_none() {
             self.stdin = None;
         }
-        self.outputs = context
-            .0
-            .into_iter()
-            .map(|(id, value)| (id, Some(value)))
-            .collect();
-        self.typed_outputs.clear();
+        self.outputs = ExecutionOutputs::from_values(context.0);
         self.remaining_steps = StepBudget::new(crate::MAX_SCHEDULED_STEPS);
         self.current_position = None;
         self.pending_loop_write = None;
@@ -366,7 +352,7 @@ impl ExecutionContext {
         let mut outputs = Outputs::new();
         for port in &node.metadata.ports.outputs {
             let id = node.definition_id.as_str();
-            if !port.required && !self.outputs.contains_key(&output_id(id, &port.name)) {
+            if !port.required && !self.outputs.contains_output(&output_id(id, &port.name)) {
                 continue;
             }
             if let Some(value) = self.select_output(&port.name, id, &port.name, !port.required)? {
@@ -468,17 +454,16 @@ impl ExecutionContext {
         observation: Option<RunObservation>,
         visible_outputs: &BTreeSet<String>,
     ) -> Self {
-        let mut context = self.fork_domain_with_observation(observation);
-        context
-            .outputs
-            .retain(|output, _| visible_outputs.contains(output));
-        context
+        self.fork_domain(observation, self.outputs.fork_visible(visible_outputs))
     }
 
     pub fn fork_domain_with_observation(&self, observation: Option<RunObservation>) -> Self {
+        self.fork_domain(observation, self.outputs.clone())
+    }
+
+    fn fork_domain(&self, observation: Option<RunObservation>, outputs: ExecutionOutputs) -> Self {
         Self {
-            outputs: self.outputs.clone(),
-            typed_outputs: self.typed_outputs.clone(),
+            outputs,
             observation,
             body_observation: self.body_observation.clone(),
             scopes: self.scopes.clone(),
@@ -504,18 +489,7 @@ impl ExecutionContext {
         source: &Self,
         nodes: impl IntoIterator<Item = &'a FlowNode<N>>,
     ) {
-        for node in nodes {
-            for port in &node.metadata.ports.outputs {
-                let id = output_id(node.definition_id.as_str(), &port.name);
-                if source.typed_outputs.contains(&id) {
-                    self.outputs.remove(&id);
-                    self.typed_outputs.insert(id);
-                } else if let Some(value) = source.outputs.get(&id) {
-                    self.typed_outputs.remove(&id);
-                    self.outputs.insert(id, value.clone());
-                }
-            }
-        }
+        self.outputs.merge_nodes(&source.outputs, nodes);
         for (scope_index, scope) in source.scopes.iter().enumerate() {
             if let Some(target) = self.scopes.get_mut(scope_index) {
                 for (name, value) in &scope.variables {
@@ -527,7 +501,7 @@ impl ExecutionContext {
                     {
                         target.variables.insert(name.clone(), value.clone());
                         self.outputs
-                            .insert(output_id(&target.source_id, name), Some(value.clone()));
+                            .set_value(output_id(&target.source_id, name), value.clone());
                     }
                 }
                 target.exit_requested |= scope.exit_requested;
@@ -746,12 +720,7 @@ impl ExecutionContext {
 
     /// Reads availability without decoding a transferred typed value.
     pub fn output_available(&self, node: &str, port: &str) -> Result<bool, NodeExecutionError> {
-        let key = output_id(node, port);
-        if self.typed_outputs.contains(&key) {
-            return Ok(true);
-        }
-        self.output(&key)
-            .map(|value| matches!(value, ContextValue::Value(_)))
+        self.outputs.output_available(node, port)
     }
 
     pub fn resolve_node_inputs<'a, N>(
@@ -771,7 +740,7 @@ impl ExecutionContext {
                 if dependency
                     .input
                     .is_some_and(|input| transferred_inputs.contains(&input))
-                    && self.typed_outputs.contains(&key)
+                    && self.outputs.is_transferred(&key)
                 {
                     return Ok(None);
                 }
@@ -783,13 +752,7 @@ impl ExecutionContext {
     }
 
     pub fn output(&self, id: &str) -> Result<ContextValue<'_>, NodeExecutionError> {
-        match self.outputs.get(id) {
-            Some(Some(value)) => Ok(ContextValue::Value(value)),
-            Some(None) => Ok(ContextValue::Skipped),
-            None => Err(NodeExecutionError::ExecutionFailed {
-                message: format!("missing context output `{id}`"),
-            }),
-        }
+        self.outputs.output(id)
     }
 
     pub(crate) fn scope_values(&self) -> Result<Outputs, NodeExecutionError> {
@@ -860,7 +823,6 @@ impl ExecutionContext {
     ) -> Result<(T, Outputs, bool), WorkflowRunError> {
         let depth = self.scopes.len();
         let parent_outputs = std::mem::take(&mut self.outputs);
-        let parent_typed_outputs = std::mem::take(&mut self.typed_outputs);
         let parent_exit_cutoff = std::mem::replace(
             &mut self.scope_exit_cutoff,
             Arc::new(AtomicUsize::new(usize::MAX)),
@@ -869,7 +831,6 @@ impl ExecutionContext {
         let guard = ScopeGuard {
             context: self,
             parent_outputs,
-            parent_typed_outputs,
             parent_exit_cutoff,
             depth,
         };
@@ -896,7 +857,7 @@ impl ExecutionContext {
             frame.variables.insert(variable.clone(), value.clone());
             // Later body steps read the current state through the synthetic source.
             self.outputs
-                .insert(output_id(&frame.source_id, &variable), Some(value));
+                .set_value(output_id(&frame.source_id, &variable), value);
         }
     }
 
@@ -905,38 +866,7 @@ impl ExecutionContext {
         node: &FlowNode<N>,
         result: Option<GeneratedNodeResult>,
     ) -> Result<(), WorkflowRunError> {
-        let (produced, skipped) = match result {
-            Some(GeneratedNodeResult::Typed {
-                produced, skipped, ..
-            }) => (produced, skipped),
-            Some(GeneratedNodeResult::Dynamic(result)) => return self.publish(node, Some(result)),
-            None => return self.publish(node, None),
-        };
-        validate_skipped_outputs(node, &skipped, |name| produced.contains(&name))?;
-        for name in &produced {
-            if !node
-                .metadata
-                .ports
-                .outputs
-                .iter()
-                .any(|port| port.name == *name)
-            {
-                return Err(state_error(
-                    node.definition_id.as_str(),
-                    format!("produced undeclared output `{name}`"),
-                ));
-            }
-        }
-        for name in &produced {
-            let key = output_id(node.definition_id.as_str(), name);
-            self.outputs.remove(&key);
-            self.typed_outputs.insert(key);
-        }
-        for name in skipped {
-            let key = output_id(node.definition_id.as_str(), &name);
-            self.typed_outputs.remove(&key);
-            self.outputs.insert(key, None);
-        }
+        self.outputs.publish_generated(node, result)?;
         self.commit_pending_loop_write();
         Ok(())
     }
@@ -946,97 +876,9 @@ impl ExecutionContext {
         node: &FlowNode<N>,
         result: Option<NodeResult>,
     ) -> Result<(), WorkflowRunError> {
-        let id = node.definition_id.as_str();
-        if let Some(result) = &result {
-            validate_skipped_outputs(node, &result.skipped, |name| {
-                result.outputs.contains_key(name)
-            })?;
-            for (name, value) in &result.outputs {
-                let Some(port) = node
-                    .metadata
-                    .ports
-                    .outputs
-                    .iter()
-                    .find(|port| port.name == *name)
-                else {
-                    return Err(state_error(
-                        id,
-                        format!("produced undeclared output `{name}`"),
-                    ));
-                };
-                port.value_type
-                    .validate_shared(value)
-                    .with_context(|_| OutputTypeSnafu {
-                        definition_id: id,
-                        output: name,
-                    })?;
-            }
-        }
-        // Validate the complete result before making any values visible.
-        for port in &node.metadata.ports.outputs {
-            self.typed_outputs.remove(&output_id(id, &port.name));
-        }
-        match result {
-            Some(result) => {
-                self.outputs.extend(
-                    result
-                        .outputs
-                        .into_iter()
-                        .map(|(port, value)| (output_id(id, &port), Some(value))),
-                );
-                self.outputs.extend(
-                    result
-                        .skipped
-                        .into_iter()
-                        .map(|port| (output_id(id, &port), None)),
-                );
-            }
-            None => self.outputs.extend(
-                node.metadata
-                    .ports
-                    .outputs
-                    .iter()
-                    .map(|port| (output_id(id, &port.name), None)),
-            ),
-        }
+        self.outputs.publish(node, result)?;
         self.commit_pending_loop_write();
         Ok(())
-    }
-}
-
-fn validate_skipped_outputs<N>(
-    node: &FlowNode<N>,
-    skipped: &BTreeSet<String>,
-    produced: impl Fn(&str) -> bool,
-) -> Result<(), WorkflowRunError> {
-    let id = node.definition_id.as_str();
-    for name in skipped {
-        if produced(name) {
-            return Err(state_error(
-                id,
-                format!("output `{name}` is both produced and skipped"),
-            ));
-        }
-        if !node
-            .metadata
-            .ports
-            .outputs
-            .iter()
-            .any(|port| port.name == *name && !port.required)
-        {
-            return Err(state_error(
-                id,
-                format!("cannot explicitly skip unknown or required output `{name}`"),
-            ));
-        }
-    }
-    Ok(())
-}
-
-fn state_error(id: &str, message: impl Into<String>) -> WorkflowRunError {
-    WorkflowRunError::Context {
-        definition_id: id.into(),
-        message: message.into(),
     }
 }
 
@@ -1336,22 +1178,7 @@ pub fn select_context_output(
     port: &str,
     optional: bool,
 ) -> Result<Option<Value>, WorkflowRunError> {
-    match ctx
-        .output(&output_id(node, port))
-        .context(OutputSelectionSnafu {
-            definition_id: node,
-            output: name,
-        })? {
-        ContextValue::Value(value) => Ok(Some(value.clone())),
-        ContextValue::Skipped if optional => Ok(None),
-        ContextValue::Skipped => Err(state_error(
-            node,
-            format!(
-                "workflow output `{name}` requires skipped output `{}`",
-                output_id(node, port)
-            ),
-        )),
-    }
+    ctx.outputs.select_output(name, node, port, optional)
 }
 
 #[cfg(test)]
@@ -1392,6 +1219,19 @@ mod tests {
 
     fn port(name: &str, value_type: ValueType, required: bool) -> PortSpec {
         PortSpec::owned(name, value_type, required)
+    }
+
+    fn skip_output(context: &mut ExecutionContext, id: &str, name: &str) {
+        let node = FlowNode {
+            definition_id: id.into(),
+            node: (),
+            metadata: NodePorts {
+                inputs: vec![],
+                outputs: vec![port(name, ValueType::Any, false)],
+            }
+            .into(),
+        };
+        context.outputs.publish(&node, None).unwrap();
     }
 
     #[test]
@@ -1539,15 +1379,14 @@ mod tests {
             let mut context = ExecutionContext::default();
             context
                 .outputs
-                .insert("source.value".into(), Some(value.clone()));
-            context.outputs.insert(
-                "gate.value".into(),
-                if matches!(case, "skipped" | "missing") {
-                    None
-                } else {
-                    Some(Value::from(true))
-                },
-            );
+                .set_value("source.value".into(), value.clone());
+            if matches!(case, "skipped" | "missing") {
+                skip_output(&mut context, "gate", "value");
+            } else {
+                context
+                    .outputs
+                    .set_value("gate.value".into(), Value::from(true));
+            }
             let mut dependencies = vec![
                 crate::FlowDependency {
                     exclusive: false,
@@ -1626,7 +1465,7 @@ mod tests {
         target.scopes.push(scope);
         target
             .outputs
-            .insert("%loop.token".into(), Some(public.clone()));
+            .set_value("%loop.token".into(), public.clone());
         let mut source = target.fork_domain_with_observation(None);
         source.scopes[0]
             .variables
@@ -1645,8 +1484,27 @@ mod tests {
             let mut state = ExecutionContext::default();
             state
                 .outputs
-                .insert("parent.value".into(), Some(json!(9).into()));
-            let parent_outputs = state.outputs.clone();
+                .set_value("parent.value".into(), json!(9).into());
+            let typed = FlowNode {
+                definition_id: "typed".into(),
+                node: (),
+                metadata: NodePorts {
+                    inputs: vec![],
+                    outputs: vec![port("value", ValueType::Int64, true)],
+                }
+                .into(),
+            };
+            state
+                .outputs
+                .publish_generated(
+                    &typed,
+                    Some(GeneratedNodeResult::Typed {
+                        produced: vec!["value"],
+                        skipped: BTreeSet::new(),
+                        loop_summary: None,
+                    }),
+                )
+                .unwrap();
             let types = BTreeMap::from([("count".into(), ValueType::Int64)]);
             let source = crate::prepared_scope_source("input", &types)
                 .into_task()
@@ -1662,6 +1520,7 @@ mod tests {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 state.run_scope(scope, |state| {
                     assert!(state.output("parent.value").is_err());
+                    assert!(state.output_available("typed", "value").is_err());
                     execute_node_in_context(&source, &[], state)?;
                     let nested = ExecutionScope::new(
                         "nested",
@@ -1675,7 +1534,11 @@ mod tests {
                         if unwinds {
                             panic!("body panicked");
                         }
-                        Err::<(), _>(state_error("body", "body failed"))
+                        ContextSnafu {
+                            definition_id: "body",
+                            message: "body failed",
+                        }
+                        .fail::<()>()
                     })?;
                     Ok(())
                 })
@@ -1685,7 +1548,12 @@ mod tests {
             } else {
                 assert!(result.unwrap().is_err());
             }
-            assert_eq!(state.outputs, parent_outputs);
+            assert_eq!(
+                state.output("parent.value").unwrap(),
+                ContextValue::Value(&Value::from(9))
+            );
+            assert!(state.output("input.count").is_err());
+            assert!(state.output_available("typed", "value").unwrap());
             assert!(state.scopes.is_empty());
             assert_eq!(
                 state.remaining_steps.0.load(Ordering::Acquire),
@@ -1757,9 +1625,9 @@ mod tests {
         .into_task()
         .unwrap();
         let mut context = ExecutionContext::default();
-        context.outputs.insert(
+        context.outputs.set_value(
             "source.value".into(),
-            Some(json!([{"count": 1}, {"count": "two"}]).into()),
+            json!([{"count": 1}, {"count": "two"}]).into(),
         );
         let dependency = ExecutionDependency {
             exclusive: false,
@@ -1806,7 +1674,7 @@ mod tests {
         let mut context = ExecutionContext::default();
         context
             .outputs
-            .insert("source.value".into(), Some(json!(1).into()));
+            .set_value("source.value".into(), json!(1).into());
         let dependency = ExecutionDependency {
             exclusive: false,
             input: Some("unexpected"),
@@ -1838,10 +1706,9 @@ mod tests {
         let mut context = ExecutionContext::default();
         let error = context
             .run_scope(scope, |context| {
-                context.outputs.insert(
-                    "source.value".into(),
-                    Some(json!([{ "count": "wrong" }]).into()),
-                );
+                context
+                    .outputs
+                    .set_value("source.value".into(), json!([{ "count": "wrong" }]).into());
                 let result = execute_node_in_context(
                     &node,
                     &[ExecutionDependency {
@@ -1920,7 +1787,7 @@ mod tests {
             source_output: "off",
         };
         let mut context = ExecutionContext::default();
-        context.outputs.insert("branch.off".into(), None);
+        skip_output(&mut context, "branch", "off");
         for input in [None, Some("payload")] {
             let missing = ExecutionDependency {
                 exclusive: false,
