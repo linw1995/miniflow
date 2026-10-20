@@ -45,5 +45,5 @@ opentelemetry_sdk = { workspace = true, features = ["logs", "trace", "testing"] 
 tempfile.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
-# Named pipe fixtures for source cancellation regressions.
-nix = { workspace = true, features = ["fs"] }
+# Named pipes and process signals for cancellation regressions.
+nix = { workspace = true, features = ["fs", "signal"] }
