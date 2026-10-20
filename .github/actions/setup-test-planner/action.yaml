@@ -17,10 +17,11 @@ runs:
           target/test-affected-ci/cargo
           target/test-affected-ci/project/target
           target/test-affected-ci/project/.mf-owner.json
-        key: planning-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'crates/mf-compiler/src/cache.rs', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '.github/actions/setup-test-planner/action.yaml', 'scripts/prune-test-cache.py', 'scripts/cargo_cache.py') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+        # The owner binds the CLI version and generated-project layout.
+        key: planning-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'crates/mf-compiler/src/cache.rs', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '.github/actions/setup-test-planner/action.yaml', 'scripts/prune-test-cache.py', 'scripts/cargo_cache.py') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
         restore-keys: |
-          planning-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'crates/mf-compiler/src/cache.rs', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '.github/actions/setup-test-planner/action.yaml', 'scripts/prune-test-cache.py', 'scripts/cargo_cache.py') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
-          planning-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'crates/mf-compiler/src/cache.rs', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '.github/actions/setup-test-planner/action.yaml', 'scripts/prune-test-cache.py', 'scripts/cargo_cache.py') }}-
+          planning-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'crates/mf-compiler/src/cache.rs', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '.github/actions/setup-test-planner/action.yaml', 'scripts/prune-test-cache.py', 'scripts/cargo_cache.py') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
+          planning-build-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.toml', 'crates/mf-compiler/src/cache.rs', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', '.github/actions/setup-test-planner/action.yaml', 'scripts/prune-test-cache.py', 'scripts/cargo_cache.py') }}-
     - name: Build planning Flow
       shell: bash
       env:

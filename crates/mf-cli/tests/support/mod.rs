@@ -173,8 +173,54 @@ pub fn copy_directory(source: &Path, destination: &Path) {
         if entry.file_type().unwrap().is_dir() {
             copy_directory(&entry.path(), &target);
         } else {
-            fs::copy(entry.path(), target).unwrap();
+            fs::copy(entry.path(), &target).unwrap();
+            // Nix-backed build outputs can be read-only, but fixture rebuilds must
+            // overwrite them. Preserve executable bits and source permissions.
+            let mut permissions = fs::metadata(&target).unwrap().permissions();
+            #[cfg(unix)]
+            permissions.set_mode(permissions.mode() | 0o200);
+            #[cfg(not(unix))]
+            permissions.set_readonly(false);
+            fs::set_permissions(target, permissions).unwrap();
         }
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn copied_fixture_artifacts_are_writable_without_changing_source_permissions() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("seed");
+    let destination = directory.path().join("target");
+    let bindings = Path::new("build/sqlite/out/bindgen.rs");
+    let executable = Path::new("build/sqlite/build-script-build");
+    fs::create_dir_all(source.join(bindings).parent().unwrap()).unwrap();
+    for (path, mode) in [(bindings, 0o444), (executable, 0o555)] {
+        fs::write(source.join(path), "original").unwrap();
+        fs::set_permissions(source.join(path), fs::Permissions::from_mode(mode)).unwrap();
+    }
+
+    copy_directory(&source, &destination);
+
+    for (path, mode) in [(bindings, 0o444), (executable, 0o555)] {
+        assert_eq!(
+            fs::metadata(destination.join(path))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            mode | 0o200
+        );
+        fs::write(destination.join(path), "rebuilt").unwrap();
+        assert_eq!(fs::read_to_string(source.join(path)).unwrap(), "original");
+        assert_eq!(
+            fs::metadata(source.join(path))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            mode
+        );
     }
 }
 
