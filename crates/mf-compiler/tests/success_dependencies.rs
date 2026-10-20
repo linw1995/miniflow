@@ -125,6 +125,41 @@ fn zero_output_success_orders_forks_and_joins_without_observation() {
     assert_eq!(calls[3], "a_join");
 }
 
+fn assertion_graph(condition: bool, path: &Path) -> WorkflowDefinition {
+    definition(
+        vec![
+            json!({"id":"condition","kind":"builtin.parameters","config":{"parameters":{
+                "value":{"type":"bool","default":condition}
+            }}}),
+            json!({"id":"validate","kind":"builtin.assert","config":{"message":"current identity is inconsistent"},
+                "inputs":{"condition":{"from":{"node":"condition","port":"value"}}}}),
+            task("after_assert", path),
+        ],
+        json!([{"from_node":"validate","to_node":"after_assert"}]),
+    )
+}
+
+#[test]
+fn assertions_fail_execution_before_success_dependents_run() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("trace");
+    for condition in [false, true] {
+        let result = execute(&assertion_graph(condition, &path));
+        if condition {
+            result.unwrap();
+            assert_eq!(trace(&path), ["after_assert"]);
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("current identity is inconsistent")
+            );
+            assert!(trace(&path).is_empty());
+        }
+    }
+}
+
 #[test]
 fn success_is_distinct_from_an_optional_output_skip() {
     let root = tempfile::tempdir().unwrap();
@@ -583,6 +618,7 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
     const DENY_SUCCESS_ENV: &str = "MF_TEST_SUCCESS_CONTRACT_DRIFT";
     cases[0].nodes[0].config["deny_success_env"] = json!(DENY_SUCCESS_ENV);
     cases.extend([-1, 1].map(|value| exclusive_success_graph(value, &path)));
+    cases.push(assertion_graph(true, &path));
     let mut value = task("value", &path);
     value["config"]["ports"] = json!(["value"]);
     value["config"]["outputs"] = json!({"value":42});
@@ -771,6 +807,19 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
             }
         } else {
             assert_eq!(actual_trace, expected_trace);
+        }
+        if graph.nodes.iter().any(|node| node.kind == "builtin.assert") {
+            fs::remove_file(&path).unwrap();
+            let failed = Command::new(common::runner_executable(&project, "release"))
+                .args(["--inputs", r#"{"condition.value":false}"#])
+                .output()
+                .unwrap();
+            assert!(!failed.status.success());
+            assert!(
+                String::from_utf8_lossy(&failed.stderr)
+                    .contains("current identity is inconsistent")
+            );
+            assert!(trace(&path).is_empty());
         }
     }
 }

@@ -94,6 +94,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | [`builtin.parameters`](#parameters) | Named parameters with types, optional `env` and `default`, and `secret` (default `true`) | One typed startup input per parameter | One matching typed output per parameter |
 | `mfn-core` | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input, with its known type |
 | `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by execution prerequisites | One boolean activation output per branch, plus `else` |
+| `mfn-core` | [`builtin.assert`](#assertions) | Required static failure `message` | Required boolean `condition` | None; false fails execution |
 | `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array or object | `results`: collected array |
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
 | `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
@@ -178,6 +179,33 @@ Run the complete [scalar example](../examples/cel-scalar.json) or [typed-list ex
 with the [repository development commands](compiling.md#repository-development). They produce `{"doubled":42}`
 and `{"doubled":[2,4]}` respectively. Replace the examples' local package paths with published package versions
 when compiling outside the checkout.
+
+### Assertions
+
+`builtin.assert` succeeds when `condition` is true and fails execution with its configured `message` when false.
+It accepts only a boolean; missing or invalid inputs fail without including their values in diagnostics. Configuration
+requires a string `message` and rejects unknown fields. Use Code to calculate complex conditions, then pass the result
+to Assert. The message is static configuration and should not contain secrets.
+
+Assert has no outputs. In version `2026-10-19`, add a node-success edge to require the assertion before another Task:
+
+```json
+{
+  "nodes": [
+    {
+      "id": "validate",
+      "kind": "builtin.assert",
+      "config": {"message": "current identity is inconsistent"},
+      "inputs": {"condition": {"from": {"node": "check", "port": "valid"}}}
+    }
+  ],
+  "edges": [{"from_node": "validate", "to_node": "continue"}]
+}
+```
+
+This fragment assumes `check.valid` is a boolean output and `continue` is another Task in the same scope.
+Unlike `builtin.if_else`, a failed assertion reports an error instead of selecting or skipping a branch. An assertion
+on a skipped branch is itself skipped and does not activate its success dependents.
 
 ### Parameters
 
