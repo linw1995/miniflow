@@ -130,8 +130,9 @@ nix develop --command python3 -m unittest discover -s tools/test-affected -p tes
 
 Keep plans and inventories under ignored `target/`. Do not remove referenced snapshots until their plans
 are no longer needed. Cleanup uses normal `git worktree remove` on explicitly chosen owned snapshots.
-Changing a snapshot or compilation configuration requires a new plan. The existing coverage script
-accepts package-only selection and must not be used to silently discard exact-case filters.
+Changing a snapshot or compilation configuration requires a new plan. The coverage script
+accepts packages and exact cases against its current checkout. It validates cases against the
+instrumented nextest inventory, widening missing identities to the conservative baseline.
 
 ## Process execution
 
@@ -209,7 +210,8 @@ only to GitHub reads. Manual PR dispatch supplies `MF_MERGE_SHA` and must identi
 pinned merge. `MF_CUMULATIVE=true` bypasses historical candidate discovery. Local execution
 needs none of these CI values and performs no GitHub request.
 
-CI retains package-level scope and an explicit `flow-pr-v2` compatibility policy. Candidate
+CI enables semantic analysis and exact-test refinement under the `flow-pr-v3` compatibility policy.
+Production changes and analysis failures retain conservative package scope. Candidate
 metadata is inspected first; artifacts and missing merge objects are read lazily in source
 ancestry order. A usable record stops the Loop immediately. Incompatible or unavailable
 history produces a cumulative affected comparison, while invalid current identity fails.
@@ -233,7 +235,9 @@ nix develop --command env MF_LSP_SMOKE_SERVER=rust-analyzer \
   cargo nextest run -p mfn-lsp --test smoke --run-ignored all
 ```
 
-CI invokes this same Flow and consumes package-only plans. Local semantic fallback is decided
-after analysis, so some local full-suite plans still pay for LSP work. Measure compilation,
+CI invokes this same Flow and consumes mixed package/exact-test plans. Coverage preparation checks
+the runnable inventory before executing each package's filter. Complete crate suites may upload
+source-scoped coverage; partial suites retain reports only as artifacts and for the incremental gate.
+Semantic fallback is decided after analysis, so some full-suite plans still pay for LSP work. Measure compilation,
 initialization, evidence discovery, analysis/planning, and script build/list/test time separately.
 The policy identifier and validation record version live in the `validation_policy` constant.

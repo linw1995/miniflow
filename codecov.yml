@@ -11,8 +11,44 @@ coverage:
 flags:
   rust:
     carryforward: false
+  mf-chat:
+    paths: [crates/mf-chat/]
+    carryforward: false
+  mf-cli:
+    paths: [crates/mf-cli/]
+    carryforward: false
+  mf-compiler:
+    paths: [crates/mf-compiler/]
+    carryforward: false
+  mf-runtime:
+    paths: [crates/mf-runtime/]
+    carryforward: false
+  mf-runtime-derive:
+    paths: [crates/mf-runtime-derive/]
+    carryforward: false
+  mf-telemetry:
+    paths: [crates/mf-telemetry/]
+    carryforward: false
+  mf-tui:
+    paths: [crates/mf-tui/]
+    carryforward: false
+  mfn-code:
+    paths: [crates/builtin-nodes/code/]
+    carryforward: false
+  mfn-core:
+    paths: [crates/builtin-nodes/core/]
+    carryforward: false
+  mfn-llm:
+    paths: [crates/builtin-nodes/llm/]
+    carryforward: false
+  mfn-lsp:
+    paths: [tools/test-affected/nodes/lsp/]
+    carryforward: false
+  mfn-test-affected:
+    paths: [tools/test-affected/nodes/test-affected/]
+    carryforward: false
 
 comment:
-  layout: "header, files, footer"
+  layout: "header, flags, files, footer"
   hide_project_coverage: true
   require_head: true

@@ -9,6 +9,8 @@ import re
 import subprocess
 import sys
 
+from coverage_selection import validate_selection
+
 
 FLOW = Path(__file__).resolve().parent.parent / "tools/test-affected/flows/test-affected.json"
 POLICY_SETTINGS = next(node["config"]["value"] for node in json.loads(FLOW.read_text())["nodes"]
@@ -172,7 +174,7 @@ def evaluate_coverage(root, current, comparison, plan, report):
         raise ValueError("Coverage and selection comparison identities differ")
     changes = changed_lines(root, comparison["base"], comparison["head"])
     changes = {p: lines for p, lines in changes.items() if p not in plan["ignored_files"]}
-    if plan["packages"]:
+    if plan["packages"] or plan.get("tests"):
         provenance = json.loads(report.with_name("source.json").read_text())
         expected = {"head": current["merge"], "tree": current["tree"], "dirty": False, "initial_profiles": [],
                     "input_environment": input_environment(current["signature"]),
@@ -225,7 +227,7 @@ def make_record(root, current, comparison, plan, coverage, needs, run, title_che
     if (comparison["head"] != current["merge"] or plan["base"] != comparison["base"]
             or plan["head"] != current["merge"] or plan["comparison_mode"] != "snapshot"):
         raise ValueError("Selection belongs to another comparison")
-    record = current | {"comparison": comparison, "packages": plan["packages"], "coverage": coverage,
+    record = current | {"comparison": comparison, "packages": plan["packages"], "tests": plan.get("tests", []), "coverage": coverage,
                         "title_check": {"id": title_check["id"], "head_sha": title_check["head_sha"], "conclusion": "success"}}
     if not valid_coverage(record):
         raise ValueError("Incremental coverage did not succeed")
@@ -237,7 +239,7 @@ def write_json(path, value):
 
 
 def summarize(comparison, plan, coverage=None):
-    return {"comparison": comparison, "packages": plan["packages"], "reasons": plan["reasons"],
+    return {"comparison": comparison, "packages": plan["packages"], "tests": plan.get("tests", []), "reasons": plan["reasons"],
             "fallback_reasons": plan["fallback_reasons"], "ignored_files": plan["ignored_files"],
             "coverage": coverage}
 
@@ -281,9 +283,10 @@ def accept_plan(root, output, repository, pr, run_id, attempt, target):
     environment = input_environment(signature)
     if signature["target"] is not None:
         environment["CARGO_BUILD_TARGET"] = signature["target"]
-    if (plan["tests"] != [] or plan["configuration"] != configuration
+    if (plan["configuration"] != configuration
             or plan["toolchain"] != signature["toolchain"] or plan["build_environment"] != environment):
-        raise ValueError("CI requires a matching package-only Flow plan")
+        raise ValueError("CI requires a matching Flow execution configuration")
+    validate_selection(plan)
     if (not isinstance(plan["packages"], list)
             or not all(isinstance(p, str) and p for p in plan["packages"])
             or not isinstance(plan["ignored_files"], list)):
@@ -315,7 +318,7 @@ def main():
                 write_json(directory / f"{name}.json", value)
             if os.environ.get("GITHUB_OUTPUT"):
                 with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-                    output.write(f"scoped=true\nrun={str(bool(plan['packages'])).lower()}\npackages={json.dumps(plan['packages'])}\n")
+                    output.write(f"scoped=true\nrun={str(bool(plan['packages'] or plan['tests'])).lower()}\n")
             summary = summarize(comparison, plan)
         else:
             current, comparison, plan = [json.loads((directory / f"{name}.json").read_text())

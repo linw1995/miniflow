@@ -32,6 +32,7 @@ mark_fixture_target() {
 reset_reports() {
   rm -rf "${coverage_dir}/data" "${coverage_dir}/result"
   rm -f "${coverage_dir}/binaries.json" "${coverage_dir}/cargo-metadata.json"
+  rm -f "${coverage_dir}/selection.json" "${coverage_dir}/inventory.json"
   mkdir -p "${coverage_dir}/data" "${coverage_dir}/result"
   MF_TEST_BUILD_CACHE_SESSION="$(python3 -c 'import uuid; print(uuid.uuid4())')"
   export MF_TEST_BUILD_CACHE_SESSION
@@ -140,6 +141,7 @@ PYTHON
   test -s "${coverage_dir}/result/lcov"
   test -s "${coverage_dir}/result/cobertura.xml"
   cp "${coverage_dir}/result/lcov" "${coverage_dir}/result/lcov.info"
+  python3 -B scripts/coverage_selection.py report
   rm -rf "${coverage_dir}/report-binaries"
 }
 
@@ -149,6 +151,7 @@ case "${1:-}" in
     [[ $# -ge 2 && -n "$2" ]]
     selected_package="$2"
     shift 2
+    expression="$(python3 -B scripts/coverage_selection.py filter --package "$selected_package")"
     MF_TEST_BUILD_CACHE_SESSION="$(cat "${coverage_dir}/build-cache-session")"
     export MF_TEST_BUILD_CACHE_SESSION
     # Some packages, such as derive macros, are tested only by their consumers.
@@ -156,8 +159,15 @@ case "${1:-}" in
     cargo nextest run \
       --cargo-metadata "${coverage_dir}/cargo-metadata.json" \
       --binaries-metadata "${coverage_dir}/binaries.json" \
-      -E "package(=$selected_package)" --no-tests warn "$@" || status=$?
+      -E "$expression" --no-tests warn "$@" || status=$?
     collect_profiles
+    if [[ "$status" -eq 0 ]]; then
+      completion=()
+      if [[ ( $# -gt 0 || "$selected_package" == mfn-lsp ) && "$*" != "--run-ignored all" ]]; then
+        completion+=(--partial)
+      fi
+      python3 -B scripts/coverage_selection.py complete --package "$selected_package" "${completion[@]}"
+    fi
     exit "$status"
     ;;
   --prune-cache)
@@ -187,15 +197,18 @@ if [[ "${1:-}" == "--prepare" ]]; then
 fi
 reset_reports
 test_packages=(--workspace)
+selection_plan=()
 if [[ "${1:-}" == "--affected-plan" ]]; then
   plan="${2:?--affected-plan requires a JSON plan path}"
   shift 2
-  jq -e '(.packages | type == "array") and all(.packages[]; type == "string" and length > 0)
-    and ((has("tests") | not) or .tests == [])' "$plan" > /dev/null
+  package_names="$(python3 -B scripts/coverage_selection.py packages --plan "$plan")"
+  selection_plan=(--plan "$plan")
   test_packages=()
   while IFS= read -r package; do
-    test_packages+=(-p "$package")
-  done < <(jq -r '.packages[]' "$plan")
+    if [[ -n "$package" ]]; then
+      test_packages+=(-p "$package")
+    fi
+  done <<< "$package_names"
   if [[ ${#test_packages[@]} -eq 0 ]]; then
     echo "No affected Rust package tests."
     exit 0
@@ -203,18 +216,32 @@ if [[ "${1:-}" == "--affected-plan" ]]; then
 fi
 
 prepare_coverage
+# Preserve feature unification and reuse one instrumented build for inventory and execution.
+cargo metadata --offline --locked --all-features --format-version 1 > "${coverage_dir}/cargo-metadata.json"
+cargo nextest list --locked --all-features "${test_packages[@]}" \
+  --list-type binaries-only --message-format json > "${coverage_dir}/binaries.json"
+cargo nextest list --cargo-metadata "${coverage_dir}/cargo-metadata.json" \
+  --binaries-metadata "${coverage_dir}/binaries.json" \
+  --message-format json > "${coverage_dir}/inventory.json"
+python3 -B scripts/coverage_selection.py resolve "${selection_plan[@]}"
 if [[ "$phase" == "prepare" ]]; then
   [[ $# -eq 0 ]]
-  # Preserve feature unification across selected packages and compile only once.
-  cargo metadata --offline --locked --all-features --format-version 1 > "${coverage_dir}/cargo-metadata.json"
-  cargo nextest list --locked --all-features "${test_packages[@]}" \
-    --list-type binaries-only --message-format json > "${coverage_dir}/binaries.json"
   exit 0
 fi
 status=0
-cargo nextest run --locked --all-features "${test_packages[@]}" "$@" || status=$?
+expression="$(jq -r '[.filters[]] | join(" | ")' "${coverage_dir}/selection.json")"
+cargo nextest run --cargo-metadata "${coverage_dir}/cargo-metadata.json" \
+  --binaries-metadata "${coverage_dir}/binaries.json" -E "$expression" --no-tests warn "$@" || status=$?
 collect_profiles
 if [[ "$status" -ne 0 ]]; then
   exit "$status"
+fi
+completion=()
+if [[ $# -gt 0 && "$*" != "--run-ignored all" ]]; then
+  completion+=(--partial)
+fi
+python3 -B scripts/coverage_selection.py complete "${completion[@]}"
+if [[ "$*" != "--run-ignored all" ]] && jq -e '.packages | index("mfn-lsp")' "${coverage_dir}/selection.json" > /dev/null; then
+  python3 -B scripts/coverage_selection.py complete --package mfn-lsp --partial
 fi
 report_coverage

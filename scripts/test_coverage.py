@@ -40,7 +40,7 @@ class CoverageTests(unittest.TestCase):
                     if filename == "CI.yaml":
                         self.assertIn(
                             "if: steps.selection.outputs.scoped != 'true' || "
-                            f"contains(fromJSON(steps.selection.outputs.packages || '[]'), '{name}')",
+                            f"contains(fromJSON(steps.prepared.outputs.packages || '[]'), '{name}')",
                             body,
                         )
 
@@ -76,8 +76,11 @@ session = os.environ["MF_TEST_BUILD_CACHE_SESSION"]
 assert session != "inherited-session"
 assert session == Path("target/coverage/build-cache-session").read_text().strip()
 ''')
-            for script in ["run-cov.sh", "prune-test-cache.py", "cargo_cache.py"]:
+            for script in ["run-cov.sh", "prune-test-cache.py", "cargo_cache.py", "coverage_selection.py"]:
                 shutil.copyfile(Path(__file__).resolve().parent / script, root / "scripts" / script)
+            (root / "tools/test-affected").mkdir(parents=True)
+            shutil.copyfile(Path(__file__).resolve().parent.parent / "tools/test-affected/run-tests.py",
+                            root / "tools/test-affected/run-tests.py")
             (root / "Cargo.toml").write_text('''[package]
 name = "coverage-fixture"
 version = "0.1.0"
@@ -274,6 +277,33 @@ mod tests {{
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertNotIn("other/src/lib.rs", report.read_text())
             self.assertIn("src/alpha.rs", report.read_text())
+
+            # Exact selection runs the requested test and retains partial LCOV locally.
+            exact = {"packages": [], "baseline_packages": ["coverage-fixture"], "tests": [
+                {"package": "coverage-fixture", "binary": "coverage-fixture", "name": "alpha::tests::value_matches"}]}
+            plan.write_text(json.dumps(exact))
+            for args in [("--prepare", "--affected-plan", str(plan)), ("--test-package", "coverage-fixture"), ("--report",)]:
+                result = execute("bash", "scripts/run-cov.sh", *args)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                if args[0] == "--test-package":
+                    self.assertIn("1 passed", result.stdout + result.stderr)
+            selection = json.loads(report.with_name("selection.json").read_text())
+            self.assertEqual(selection["partial_packages"], ["coverage-fixture"])
+            self.assertEqual(selection["report_packages"], [])
+            self.assertTrue(report.is_file())
+            self.assertFalse((report.parent / "crates/coverage-fixture.lcov").exists())
+
+            # Missing identities widen to the baseline rather than silently skipping.
+            exact["tests"][0]["name"] = "missing"
+            plan.write_text(json.dumps(exact))
+            result = execute("bash", "scripts/run-cov.sh", "--affected-plan", str(plan))
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            selection = json.loads(report.with_name("selection.json").read_text())
+            self.assertIsNotNone(selection["fallback"])
+            self.assertEqual(selection["report_packages"], ["coverage-fixture"])
+            self.assertNotIn("other/src/lib.rs", (report.parent / "crates/coverage-fixture.lcov").read_text())
+            self.assertNotIn("dependency/src/lib.rs", (report.parent / "crates/coverage-fixture.lcov").read_text())
+            plan.write_text(json.dumps({"packages": ["coverage-fixture"]}))
 
             source = root / "src/alpha.rs"
             source.write_text(source.read_text().replace("    1", "    99"))

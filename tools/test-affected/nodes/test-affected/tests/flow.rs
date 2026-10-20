@@ -377,7 +377,7 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
     let prior = commit(origin);
     write(origin, "core/src/lib.rs", &SOURCE.replace("{ 1 }", "{ 3 }"));
     let nearest = commit(origin);
-    write(origin, "app/src/lib.rs", &SOURCE.replace("{ 1 }", "{ 4 }"));
+    write(origin, "app/src/lib.rs", &SOURCE.replace("1, 1", "4, 4"));
     let head = commit(origin);
     let older_merge = merge_commit(origin, &base, &prior);
     let newer_merge = merge_commit(origin, &base, &nearest);
@@ -432,7 +432,7 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
     .into_iter()
     .map(|key| (key.to_owned(), json!(std::env::var(key).ok())))
     .collect();
-    let signature = json!({"policy":"flow-pr-v2","coverage_target":95.0,"toolchain":toolchain,"features":"all","profile":"ci","target":std::env::var("CARGO_BUILD_TARGET").ok(),"environment":environment});
+    let signature = json!({"policy":"flow-pr-v3","coverage_target":95.0,"toolchain":toolchain,"features":"all","profile":"ci","target":std::env::var("CARGO_BUILD_TARGET").ok(),"environment":environment});
     let record = |id: u64, head: &str, merge: &str| {
         let tree =
             git::command(origin, "git", &["rev-parse", &format!("{merge}^{{tree}}")]).unwrap();
@@ -656,11 +656,7 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
                 state["current"]["event"] = json!("workflow_dispatch");
                 (None, vec![], "")
             }
-            _ => (
-                Some("incremental"),
-                vec!["sample-app"],
-                newer_merge.as_str(),
-            ),
+            _ => (Some("incremental"), vec![], newer_merge.as_str()),
         };
         server.configure(&state);
         let memory = memory_result(&flow, &args);
@@ -699,7 +695,23 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
         assert!(generated.get("execution").is_none(), "{case}");
         assert_eq!(generated["plan"]["packages"], json!(packages), "{case}");
         assert_eq!(generated["plan"]["base"], expected_base, "{case}");
-        assert!(generated["plan"]["tests"].as_array().unwrap().is_empty());
+        if case == "incremental" {
+            assert_eq!(
+                generated["plan"]["tests"],
+                json!([{"package":"sample-app","binary":"sample-app","name":"tests::changed"}])
+            );
+        } else {
+            assert!(generated["plan"]["tests"].as_array().unwrap().is_empty());
+        }
+        assert_eq!(
+            generated["plan"]["analysis_status"],
+            if case == "local" {
+                "not_requested"
+            } else {
+                "analyzed"
+            },
+            "{case}"
+        );
         if let Some(scope) = scope {
             assert_eq!(
                 generated["validation"]["comparison"]["scope"], scope,

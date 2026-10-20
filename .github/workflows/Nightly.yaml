@@ -103,6 +103,7 @@ jobs:
       - name: Coverage tests (mfn-test-affected)
         run: nix develop --command bash scripts/run-cov.sh --test-package mfn-test-affected
       - name: Generate coverage reports
+        id: report
         run: nix develop --command bash scripts/run-cov.sh --report
       - name: Prune coverage build cache
         run: nix develop --command bash scripts/run-cov.sh --prune-cache
@@ -113,6 +114,114 @@ jobs:
           path: target/coverage/result/
           if-no-files-found: error
           overwrite: true
+      - name: Upload crate coverage (mf-chat)
+        if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mf-chat')
+        uses: codecov/codecov-action@v7
+        with:
+          files: target/coverage/result/crates/mf-chat.lcov
+          disable_search: true
+          flags: mf-chat
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload crate coverage (mf-cli)
+        if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mf-cli')
+        uses: codecov/codecov-action@v7
+        with:
+          files: target/coverage/result/crates/mf-cli.lcov
+          disable_search: true
+          flags: mf-cli
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload crate coverage (mf-compiler)
+        if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mf-compiler')
+        uses: codecov/codecov-action@v7
+        with:
+          files: target/coverage/result/crates/mf-compiler.lcov
+          disable_search: true
+          flags: mf-compiler
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload crate coverage (mf-runtime)
+        if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mf-runtime')
+        uses: codecov/codecov-action@v7
+        with:
+          files: target/coverage/result/crates/mf-runtime.lcov
+          disable_search: true
+          flags: mf-runtime
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload crate coverage (mf-runtime-derive)
+        if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mf-runtime-derive')
+        uses: codecov/codecov-action@v7
+        with:
+          files: target/coverage/result/crates/mf-runtime-derive.lcov
+          disable_search: true
+          flags: mf-runtime-derive
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload crate coverage (mf-telemetry)
+        if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mf-telemetry')
+        uses: codecov/codecov-action@v7
+        with:
+          files: target/coverage/result/crates/mf-telemetry.lcov
+          disable_search: true
+          flags: mf-telemetry
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload crate coverage (mf-tui)
+        if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mf-tui')
+        uses: codecov/codecov-action@v7
+        with:
+          files: target/coverage/result/crates/mf-tui.lcov
+          disable_search: true
+          flags: mf-tui
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload crate coverage (mfn-code)
+        if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mfn-code')
+        uses: codecov/codecov-action@v7
+        with:
+          files: target/coverage/result/crates/mfn-code.lcov
+          disable_search: true
+          flags: mfn-code
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload crate coverage (mfn-core)
+        if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mfn-core')
+        uses: codecov/codecov-action@v7
+        with:
+          files: target/coverage/result/crates/mfn-core.lcov
+          disable_search: true
+          flags: mfn-core
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload crate coverage (mfn-llm)
+        if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mfn-llm')
+        uses: codecov/codecov-action@v7
+        with:
+          files: target/coverage/result/crates/mfn-llm.lcov
+          disable_search: true
+          flags: mfn-llm
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload crate coverage (mfn-lsp)
+        if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mfn-lsp')
+        uses: codecov/codecov-action@v7
+        with:
+          files: target/coverage/result/crates/mfn-lsp.lcov
+          disable_search: true
+          flags: mfn-lsp
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Upload crate coverage (mfn-test-affected)
+        if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mfn-test-affected')
+        uses: codecov/codecov-action@v7
+        with:
+          files: target/coverage/result/crates/mfn-test-affected.lcov
+          disable_search: true
+          flags: mfn-test-affected
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v7
         with:

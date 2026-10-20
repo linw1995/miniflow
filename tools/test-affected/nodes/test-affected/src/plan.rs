@@ -284,6 +284,8 @@ fn deferred_input(path: &str) -> bool {
                 | "scripts/check_semantic_title.py"
                 | "scripts/run-cov.sh"
                 | "scripts/test_coverage.py"
+                | "scripts/coverage_selection.py"
+                | "scripts/test_coverage_selection.py"
                 | "scripts/prune-test-cache.py"
                 | "scripts/test_prune_test_cache.py"
                 | "scripts/generate-third-party-notices.sh"
