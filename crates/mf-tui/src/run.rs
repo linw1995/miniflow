@@ -2,7 +2,7 @@
 
 use crate::{
     duration::format_duration_ns,
-    graph::{ConnectionView, GraphError, GraphLayout, GraphView},
+    graph::{ConnectionView, GraphError, GraphLayout, GraphRect, GraphView},
     logs::LogSnapshot,
     manifest::{ManifestReadError, read_manifest},
     receiver::{LoopbackReceiver, ObservationReader, ReceiverError},
@@ -723,6 +723,9 @@ fn set_nonblocking(fd: impl AsFd) -> io::Result<()> {
 #[derive(Default)]
 struct ViewState {
     graph_notice: Option<String>,
+    latest_node_sequence: Option<mf_telemetry::Count>,
+    reveal_selected: bool,
+    graph_size: Option<(u16, u16)>,
     traces: TraceView,
     path: Vec<String>,
     offset: (u32, u32),
@@ -732,6 +735,57 @@ struct ViewState {
 }
 
 impl ViewState {
+    fn follow_latest(&mut self, snapshot: &StateSnapshot, layout: &GraphLayout) {
+        let Some(latest) = &snapshot.latest_node_event else {
+            return;
+        };
+        if self
+            .latest_node_sequence
+            .is_some_and(|sequence| sequence >= latest.sequence)
+        {
+            return;
+        }
+        self.latest_node_sequence = Some(latest.sequence);
+        if self.pass_offset != 0 || self.traces.visible {
+            return;
+        }
+        let path = &latest.node.path;
+        if !self
+            .path
+            .iter()
+            .zip(path)
+            .all(|(id, entry)| *id == entry.loop_id)
+            || self.path.len() > path.len()
+        {
+            return;
+        }
+        // Keep the inspected scope; descendants focus their visible enclosing Loop.
+        let id = path
+            .get(self.path.len())
+            .map_or(&latest.node.id, |entry| &entry.loop_id);
+        if let Some(selected) = layout.nodes().iter().position(|node| node.id == *id) {
+            if self.selected != selected {
+                self.details_offset = 0;
+            }
+            self.selected = selected;
+            self.reveal_selected = true;
+        }
+    }
+
+    fn reveal(&mut self, layout: &GraphLayout, area: Rect) {
+        let size = (area.width, area.height);
+        if (self.reveal_selected || self.graph_size != Some(size))
+            && area.width > 0
+            && area.height > 0
+        {
+            if let Some(node) = layout.nodes().get(self.selected) {
+                self.offset = scroll_into_view(self.offset, node.rect, size);
+            }
+            self.reveal_selected = false;
+        }
+        self.graph_size = Some(size);
+    }
+
     fn layout<'a>(
         &self,
         root: &'a GraphLayout,
@@ -816,6 +870,12 @@ impl ViewState {
                 let nodes = self.layout(root, bodies).nodes().len();
                 let previous = self.selected;
                 navigate(key, &mut self.offset, &mut self.selected, nodes);
+                if matches!(
+                    key,
+                    KeyCode::Tab | KeyCode::BackTab | KeyCode::Char('j' | 'k')
+                ) {
+                    self.reveal_selected = true;
+                }
                 if previous != self.selected {
                     self.details_offset = 0;
                 }
@@ -891,6 +951,23 @@ fn navigate(key: KeyCode, offset: &mut (u32, u32), selected: &mut usize, nodes: 
     }
 }
 
+fn scroll_into_view(offset: (u32, u32), node: GraphRect, size: (u16, u16)) -> (u32, u32) {
+    fn axis(offset: u32, start: u32, length: u32, visible: u16) -> u32 {
+        let visible = u32::from(visible);
+        if visible == 0 {
+            offset
+        } else if start < offset || length > visible {
+            start
+        } else {
+            offset.max(start.saturating_add(length).saturating_sub(visible))
+        }
+    }
+    (
+        axis(offset.0, node.x, node.width, size.0),
+        axis(offset.1, node.y, node.height, size.1),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw(
     terminal: &mut Terminal<CrosstermBackend<Box<dyn Write>>>,
@@ -924,6 +1001,7 @@ fn draw(
         return Ok(());
     }
     let layout = view_state.layout(root_layout, body_layouts);
+    view_state.follow_latest(snapshot, layout);
     let pass = view_state.pass(snapshot);
     let static_body = description.body(&view_state.path).is_some_and(|body| {
         body.nodes
@@ -963,6 +1041,7 @@ fn draw(
             frame.render_widget(Paragraph::new(routing_warning(layout)).style(Style::default().fg(Color::Yellow)), warning);
             graph
         } else { graph };
+        view_state.reveal(layout, graph);
         let mut graph_view = GraphView::new(layout)
             .selected(view_state.selected)
             .offset(view_state.offset.0, view_state.offset.1)
@@ -1476,6 +1555,7 @@ impl ObservationView {
         self.state.selected = viewport.selected;
         self.state.pass_offset = viewport.pass_offset;
         self.state.details_offset = viewport.details_offset;
+        self.state.reveal_selected = true;
     }
     fn load_body(&mut self, path: &[String]) -> Result<(), RunError> {
         if !path.is_empty() && !self.bodies.contains_key(path) {
@@ -1636,6 +1716,101 @@ mod tests {
                 "control_edges":[],"execution_order":["%loop","source","target"]
             })))
         })).unwrap()
+    }
+
+    #[test]
+    fn scrolling_reveals_nodes_with_minimal_movement_and_handles_small_viewports() {
+        let node = GraphRect {
+            x: 40,
+            y: 20,
+            width: 24,
+            height: 4,
+        };
+        assert_eq!(scroll_into_view((0, 0), node, (50, 22)), (14, 2));
+        assert_eq!(scroll_into_view((14, 2), node, (50, 22)), (14, 2));
+        assert_eq!(scroll_into_view((60, 30), node, (50, 22)), (40, 20));
+        assert_eq!(scroll_into_view((0, 0), node, (10, 2)), (40, 20));
+        assert_eq!(scroll_into_view((14, 2), node, (0, 0)), (14, 2));
+    }
+
+    #[test]
+    fn navigation_reveals_selection_but_redraws_preserve_manual_panning() {
+        let description = scope_fixture();
+        let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        let area = Rect::new(5, 3, 26, 6);
+        view.state.reveal(&view.root, area);
+        for key in [
+            KeyCode::Tab,
+            KeyCode::BackTab,
+            KeyCode::Char('k'),
+            KeyCode::Char('j'),
+        ] {
+            view.state.offset = (1000, 1000);
+            view.handle_navigation(key, &snapshot, &traces, &logs);
+            view.state.reveal(&view.root, area);
+            let rect = view.root.nodes()[view.state.selected].rect;
+            assert!(view.state.offset.0 <= rect.x);
+            assert!(view.state.offset.1 <= rect.y);
+            assert!(view.state.offset.0 + u32::from(area.width) >= rect.x + rect.width);
+            assert!(view.state.offset.1 + u32::from(area.height) >= rect.y + rect.height);
+        }
+        view.handle_navigation(KeyCode::Right, &snapshot, &traces, &logs);
+        let panned = view.state.offset;
+        view.state.reveal(&view.root, area);
+        assert_eq!(view.state.offset, panned);
+        view.state.reveal(&view.root, Rect::new(0, 0, 10, 2));
+        let rect = view.root.nodes()[view.state.selected].rect;
+        assert_eq!(view.state.offset, (rect.x, rect.y));
+    }
+
+    #[test]
+    fn new_events_follow_visible_nodes_without_overriding_manual_selection_on_redraw() {
+        let description = scope_fixture();
+        let mut snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        snapshot.latest_node_event = Some(crate::state::NodeEventFocus {
+            sequence: Count::try_from(2).unwrap(),
+            node: mf_telemetry::event::NodeIdentity {
+                id: "target".into(),
+                kind: "fixture.task".into(),
+                path: vec![LoopPathEntry {
+                    loop_id: "second".into(),
+                    index: Count::ZERO,
+                }],
+            },
+        });
+        view.state.follow_latest(&snapshot, &view.root);
+        assert_eq!(view.root.nodes()[view.state.selected].id, "second");
+        assert!(view.state.reveal_selected);
+        view.state.selected = 0;
+        view.state.reveal_selected = false;
+        view.state.follow_latest(&snapshot, &view.root);
+        assert_eq!(view.state.selected, 0);
+        assert!(!view.state.reveal_selected);
+
+        view.state.path = vec!["second".into()];
+        view.load_body(&["second".into()]).unwrap();
+        let layout = view.state.layout(&view.root, &view.bodies);
+        snapshot.latest_node_event.as_mut().unwrap().sequence = Count::try_from(3).unwrap();
+        view.state.follow_latest(&snapshot, layout);
+        assert_eq!(layout.nodes()[view.state.selected].id, "target");
+        view.state.pass_offset = 1;
+        view.state.selected = 0;
+        snapshot.latest_node_event.as_mut().unwrap().sequence = Count::try_from(4).unwrap();
+        view.state.follow_latest(&snapshot, layout);
+        assert_eq!(view.state.selected, 0);
+        view.state.pass_offset = 0;
+        snapshot.latest_node_event.as_mut().unwrap().sequence = Count::try_from(5).unwrap();
+        snapshot.latest_node_event.as_mut().unwrap().node.path[0].loop_id = "first".into();
+        view.state.follow_latest(&snapshot, layout);
+        assert_eq!(view.state.selected, 0);
     }
 
     #[test]

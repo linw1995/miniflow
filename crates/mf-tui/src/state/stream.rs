@@ -1277,6 +1277,7 @@ impl StreamState {
             }
         }
         StateSnapshot {
+            latest_node_event: session.latest_node_event.clone(),
             nodes,
             workflow_outcome: self
                 .final_boundary
@@ -1470,6 +1471,22 @@ mod tests {
             node(run, 7, 0, true, true),
             finish(run, 8, 2),
         ]
+    }
+
+    #[test]
+    fn latest_stream_node_focus_survives_reordering_and_completion() {
+        let run = RunId::new();
+        let mut state = SessionState::new(description(), run).unwrap();
+        let records = events(run);
+        state.apply_stream(records[6].clone()).unwrap();
+        let focus = state.snapshot().latest_node_event.unwrap();
+        assert_eq!(focus.sequence, count(7));
+        for record in records.iter().rev() {
+            state.apply_stream(record.clone()).unwrap();
+            assert_eq!(state.snapshot().latest_node_event.as_ref(), Some(&focus));
+        }
+        state.close();
+        assert_eq!(state.snapshot().latest_node_event.as_ref(), Some(&focus));
     }
 
     #[test]

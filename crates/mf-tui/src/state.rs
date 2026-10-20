@@ -8,7 +8,7 @@ use mf_telemetry::{
     description::{NodeDescription, WorkflowDescription},
     event::{
         Event, Failure, FailurePhase, LifecycleEvent, LoopPassOutcome, LoopPathEntry,
-        LoopStopReason, LoopSummary, Outcome, SkipCause,
+        LoopStopReason, LoopSummary, NodeIdentity, Outcome, SkipCause,
     },
     identity::RunId,
     maximum_event_count, maximum_loop_event_count,
@@ -115,7 +115,14 @@ pub struct TraceAvailability {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NodeEventFocus {
+    pub sequence: Count,
+    pub node: NodeIdentity,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StateSnapshot {
+    pub latest_node_event: Option<NodeEventFocus>,
     pub nodes: Vec<NodeObservation>,
     pub workflow_outcome: Option<Outcome>,
     pub workflow_failure: Option<FailureSummary>,
@@ -265,6 +272,7 @@ pub struct SessionState {
     run_id: RunId,
     node_positions: BTreeMap<String, usize>,
     nodes: Vec<NodeObservation>,
+    latest_node_event: Option<NodeEventFocus>,
     max_sequence: Count,
     received: BTreeMap<i64, SequenceWitness>,
     final_boundary: Option<FinalBoundary>,
@@ -363,6 +371,7 @@ impl SessionState {
             run_id,
             node_positions,
             nodes,
+            latest_node_event: None,
             max_sequence,
             received: BTreeMap::new(),
             final_boundary: None,
@@ -400,7 +409,23 @@ impl SessionState {
             .stream
             .as_mut()
             .ok_or_else(|| invalid("stream record in a finite session"))?;
-        stream.apply(&self.description, record)
+        let node = match &record.payload {
+            mf_telemetry::stream::StreamPayload::Execution(event) => {
+                event.node().map(|(node, _)| node)
+            }
+            mf_telemetry::stream::StreamPayload::Control(
+                mf_telemetry::stream::StreamEvent::Buffered { node, .. }
+                | mf_telemetry::stream::StreamEvent::Flushed { node, .. },
+            ) => Some(node),
+            _ => None,
+        }
+        .cloned();
+        let sequence = record.sequence;
+        let admission = stream.apply(&self.description, record)?;
+        if admission == Admission::Applied {
+            self.record_node_focus(sequence, node.as_ref());
+        }
+        Ok(admission)
     }
 
     pub fn apply(&mut self, event: LifecycleEvent) -> Result<Admission, StateError> {
@@ -503,7 +528,22 @@ impl SessionState {
         if conflicted {
             Ok(Admission::Conflict)
         } else {
+            self.record_node_focus(event.sequence, event.event.node().map(|(node, _)| node));
             Ok(Admission::Applied)
+        }
+    }
+
+    fn record_node_focus(&mut self, sequence: Count, node: Option<&NodeIdentity>) {
+        if let Some(node) = node
+            && self
+                .latest_node_event
+                .as_ref()
+                .is_none_or(|latest| sequence > latest.sequence)
+        {
+            self.latest_node_event = Some(NodeEventFocus {
+                sequence,
+                node: node.clone(),
+            });
         }
     }
 
@@ -597,6 +637,7 @@ impl SessionState {
             }
         }
         StateSnapshot {
+            latest_node_event: self.latest_node_event.clone(),
             stream: None,
             nodes,
             workflow_outcome: self
