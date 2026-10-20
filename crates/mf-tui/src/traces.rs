@@ -539,7 +539,12 @@ impl TraceView {
                 .min(u16::MAX as usize) as u16,
         );
         frame.render_widget(paragraph.scroll((self.scroll, 0)), details);
-        frame.render_widget(Paragraph::new("Tab: pane | g: spans/session logs | l: focus related logs | j/k: select | Home/End: first/follow\nPgUp/PgDn: scroll details | v/Esc: graph | Ctrl-C: interrupt/close"), footer);
+        frame.render_widget(
+            Paragraph::new(
+                "Up/Down select | Tab pane | ? help | Esc graph\nCtrl-C interrupt/close",
+            ),
+            footer,
+        );
     }
 }
 

@@ -214,23 +214,48 @@ TRACES
                     let text = screen.text();
                     output.push_str(&text);
                     output.push('\n');
-                    if !sent && (stage > 0 || text.contains("Exited:")) {
+                    if !sent && (stage > 0 || (text.contains("Exited:") && text.contains("? help")))
+                    {
                         if !with_observation {
                             master.write_all(b"q").unwrap();
                             sent = true;
                         } else if stage == 0 {
-                            master.write_all(b"v").unwrap();
+                            assert!(!text.contains("Input bindings:"));
+                            assert!(!text.contains("e connections"));
+                            assert!(text.contains("? help"));
+                            master.write_all(b"d").unwrap();
                             stage = 1;
-                        } else if stage == 1 && text.contains("OTEL Tracing") {
-                            master.write_all(b"\t").unwrap();
+                        } else if stage == 1 && text.contains("Details") {
+                            master.write_all(b"?").unwrap();
                             stage = 2;
-                        } else if stage == 2 && text.contains("history-payload-42") {
-                            master.write_all(b"\t").unwrap();
+                        } else if stage == 2 && text.contains("Shortcuts") {
+                            master.write_all(b"q").unwrap();
                             stage = 3;
-                        } else if stage == 3 && text.contains("log-body-42") {
-                            master.write_all(b"g").unwrap();
+                        } else if stage == 3 && !text.contains("Shortcuts") {
+                            master.write_all(b"\x1b").unwrap();
                             stage = 4;
-                        } else if stage == 4 && text.contains("Session LogRecords") {
+                        } else if stage == 4 && !text.contains("Details") {
+                            master.write_all(b"v").unwrap();
+                            stage = 5;
+                        } else if stage == 5 && text.contains("OTEL Tracing") {
+                            master.write_all(b"?").unwrap();
+                            stage = 6;
+                        } else if stage == 6
+                            && text.contains("Shortcuts")
+                            && text.contains("Spans / session logs")
+                        {
+                            master.write_all(b"\x1b").unwrap();
+                            stage = 7;
+                        } else if stage == 7 && !text.contains("Shortcuts") {
+                            master.write_all(b"\t").unwrap();
+                            stage = 8;
+                        } else if stage == 8 && text.contains("history-payload-42") {
+                            master.write_all(b"\t").unwrap();
+                            stage = 9;
+                        } else if stage == 9 && text.contains("log-body-42") {
+                            master.write_all(b"g").unwrap();
+                            stage = 10;
+                        } else if stage == 10 && text.contains("Session LogRecords") {
                             master.write_all(b"q").unwrap();
                             sent = true;
                         }

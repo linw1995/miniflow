@@ -1835,7 +1835,6 @@ dependencies = [
  "libc",
  "mf-compiler",
  "mf-runtime",
- "mf-tui",
  "mfn-code",
  "mfn-core",
  "mfn-lsp",

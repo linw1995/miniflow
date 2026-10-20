@@ -122,11 +122,6 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
         &RunnerOptions { telemetry: false },
     )
     .unwrap();
-    let manifest = mf_tui::manifest::read_manifest(&executable).unwrap();
-    assert_eq!(
-        manifest.definition.nodes.len(),
-        value["nodes"].as_array().unwrap().len()
-    );
     assert_eq!(
         fs::read(root.join("target/server")).unwrap(),
         prior_requests

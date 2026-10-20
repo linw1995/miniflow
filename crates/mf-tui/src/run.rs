@@ -23,11 +23,11 @@ use nix::{
 };
 use process_wrap::std::{ChildWrapper, CommandWrap, ProcessGroup};
 use ratatui::{
-    Terminal, TerminalOptions, Viewport,
+    Frame, Terminal, TerminalOptions, Viewport,
     backend::CrosstermBackend,
     layout::{Constraint, Layout, Rect},
     style::{Color, Style},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, Borders, Clear, Paragraph},
 };
 use signal_hook::{SigId, consts::SIGINT, flag, low_level::unregister};
 use snafu::{ResultExt, Snafu};
@@ -726,6 +726,8 @@ struct ViewState {
     latest_node_sequence: Option<mf_telemetry::Count>,
     reveal_selected: bool,
     graph_size: Option<(u16, u16)>,
+    details_visible: bool,
+    help_visible: bool,
     traces: TraceView,
     path: Vec<String>,
     offset: (u32, u32),
@@ -786,6 +788,20 @@ impl ViewState {
         self.graph_size = Some(size);
     }
 
+    fn handle_help(&mut self, key: KeyCode) -> bool {
+        if key == KeyCode::Char('?') {
+            self.help_visible = !self.help_visible;
+            return true;
+        }
+        if self.help_visible {
+            if matches!(key, KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q')) {
+                self.help_visible = false;
+            }
+            return true;
+        }
+        false
+    }
+
     fn layout<'a>(
         &self,
         root: &'a GraphLayout,
@@ -826,8 +842,14 @@ impl ViewState {
             return;
         }
         match key {
-            KeyCode::PageDown => self.details_offset = self.details_offset.saturating_add(10),
-            KeyCode::PageUp => self.details_offset = self.details_offset.saturating_sub(10),
+            KeyCode::Char('d') => self.details_visible = !self.details_visible,
+            KeyCode::Esc if self.details_visible => self.details_visible = false,
+            KeyCode::PageDown if self.details_visible => {
+                self.details_offset = self.details_offset.saturating_add(10)
+            }
+            KeyCode::PageUp if self.details_visible => {
+                self.details_offset = self.details_offset.saturating_sub(10)
+            }
             KeyCode::Char('l') => {
                 if let Some(node) = self.layout(root, bodies).nodes().get(self.selected)
                     && matches!(node.kind.as_str(), "workflow.loop" | "builtin.iteration")
@@ -908,10 +930,12 @@ fn supervise(
                 Event::Key(key)
                     if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) =>
                 {
-                    let quit = matches!(key.code, KeyCode::Char('q') | KeyCode::Enter)
-                        || (key.code == KeyCode::Esc
-                            && view.state.path.is_empty()
-                            && !view.state.traces.visible)
+                    let quit = (!view.state.help_visible
+                        && (matches!(key.code, KeyCode::Char('q') | KeyCode::Enter)
+                            || (key.code == KeyCode::Esc
+                                && view.state.path.is_empty()
+                                && !view.state.traces.visible
+                                && !view.state.details_visible)))
                         || (key.code == KeyCode::Char('c')
                             && key.modifiers.contains(KeyModifiers::CONTROL));
                     if quit && let Some(outcome) = outcome.take() {
@@ -996,6 +1020,7 @@ fn draw(
                         finished: status.is_some(),
                     },
                 );
+                draw_help(frame, view_state);
             })
             .context(TerminalSnafu)?;
         return Ok(());
@@ -1035,10 +1060,15 @@ fn draw(
             "{}  |  Workflow: {workflow}  |  Process: {phase}  |  Scope: {scope}{pass_label}  |  {:.1}s",
             connection_summary(layout), elapsed.as_secs_f64()
         )), header);
-        let [graph, details] = Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)]).areas(body);
-        let graph = if layout.unresolved_count() > 0 {
+        let (graph, details) = if view_state.details_visible {
+            let [graph, details] = Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)]).areas(body);
+            (graph, Some(details))
+        } else {
+            (body, None)
+        };
+        let graph = if view_state.graph_notice.is_some() || layout.unresolved_count() > 0 {
             let [warning, graph] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(graph);
-            frame.render_widget(Paragraph::new(routing_warning(layout)).style(Style::default().fg(Color::Yellow)), warning);
+            frame.render_widget(Paragraph::new(view_state.graph_notice.clone().unwrap_or_else(|| routing_warning(layout))).style(Style::default().fg(Color::Yellow)), warning);
             graph
         } else { graph };
         view_state.reveal(layout, graph);
@@ -1052,26 +1082,72 @@ fn draw(
             graph_view = graph_view.nodes(nodes);
         }
         frame.render_widget(graph_view, graph);
-        let selected_node = if let Some(nodes) = &display_nodes {
-            nodes.get(view_state.selected)
-        } else {
-            snapshot.nodes.get(view_state.selected)
-        };
-        let bindings = binding_details(description, &view_state.path, selected_node);
-        let details_body = format!("{}\n{}\n{}", view_state.graph_notice.as_deref().unwrap_or_default(), details_text(selected_node, pass, snapshot, capture, &bindings), layout.routing_details(view_state.selected));
-        let (window, offset) = details_window(&details_body, usize::from(details.width.saturating_sub(2)), usize::from(details.height.saturating_sub(2)), view_state.details_offset);
-        view_state.details_offset = offset;
-        frame.render_widget(Paragraph::new(window)
-            .block(Block::default().title("Details").borders(Borders::ALL)), details);
+        if let Some(details) = details {
+            let selected_node = if let Some(nodes) = &display_nodes {
+                nodes.get(view_state.selected)
+            } else {
+                snapshot.nodes.get(view_state.selected)
+            };
+            let bindings = binding_details(description, &view_state.path, selected_node);
+            let details_body = format!("{}\n{}\n{}", view_state.graph_notice.as_deref().unwrap_or_default(), details_text(selected_node, pass, snapshot, capture, &bindings), layout.routing_details(view_state.selected));
+            let (window, offset) = details_window(&details_body, usize::from(details.width.saturating_sub(2)), usize::from(details.height.saturating_sub(2)), view_state.details_offset);
+            view_state.details_offset = offset;
+            frame.render_widget(Paragraph::new(window)
+                .block(Block::default().title("Details · d hide").title_bottom("PgUp/PgDn scroll").borders(Borders::ALL)), details);
+        }
         let lifecycle = &snapshot.lifecycle;
         let controls = if status.is_some() { "q/Enter close" } else { "Ctrl-C interrupt" };
         frame.render_widget(Paragraph::new(format!(
-            "Observation: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\ne connections | v OTEL tracing | PgUp/PgDn details | Arrows pan | Tab/j/k select | l enter body | h back | [/] pass | {controls}",
+            "Observation: {:?} | gaps: {} | drops: {} | errors: {} | traces: {}\nArrows pan | Tab select | d details | ? help | {controls}",
             lifecycle.completeness, lifecycle.known_missing_count, lifecycle.local_drops,
             lifecycle.observation_errors + lifecycle.protocol_conflicts, snapshot.traces.observed_spans,
         )), footer);
+        draw_help(frame, view_state);
     }).context(TerminalSnafu)?;
     Ok(())
+}
+
+fn draw_help(frame: &mut Frame<'_>, state: &ViewState) {
+    if !state.help_visible {
+        return;
+    }
+    let text = if state.traces.visible {
+        "Up/Down, j/k   Select entry\nTab            Switch pane\n\
+         g              Spans / session logs\nl              Focus related records\n\
+         Home           First entry\nEnd, f         Follow latest entry\n\
+         PgUp/PgDn      Scroll / page records\nv, Esc         Return to graph\n\
+         Ctrl-C         Interrupt / close"
+    } else {
+        "Arrows         Pan graph\nTab / Shift-Tab, j/k   Select node\n\
+         d              Show / hide details\nPgUp/PgDn      Scroll visible details\n\
+         e              Cycle connection view\nv              Open OTEL tracing\n\
+         l              Enter selected body\nh              Return to parent scope\n\
+         Esc            Close details / return to parent\n\
+         [ / ]          Older / newer pass\nf              Reset viewport\n\
+         Ctrl-C         Interrupt / close\nq, Enter       Close after completion"
+    };
+    let [_, horizontal, _] = Layout::horizontal([
+        Constraint::Fill(1),
+        Constraint::Length(58),
+        Constraint::Fill(1),
+    ])
+    .areas(frame.area());
+    let [_, popup, _] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(text.lines().count() as u16 + 2),
+        Constraint::Fill(1),
+    ])
+    .areas(horizontal);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(text).block(
+            Block::default()
+                .title("Shortcuts")
+                .title_bottom("? / Esc close")
+                .borders(Borders::ALL),
+        ),
+        popup,
+    );
 }
 
 fn body_observations(
@@ -1605,6 +1681,9 @@ impl ObservationView {
         Ok(())
     }
     fn prepare_navigation(&mut self, key: KeyCode) -> Result<(), RunError> {
+        if key == KeyCode::Esc && self.state.details_visible {
+            return Ok(());
+        }
         let mut path = self.state.path.clone();
         match key {
             KeyCode::Char('l') => {
@@ -1657,6 +1736,9 @@ impl ObservationView {
         self.bodies.retain(|path, _| *path == self.state.path);
     }
     pub fn handle_key(&mut self, key: KeyCode, observation: &LocalObservation) {
+        if self.state.handle_help(key) {
+            return;
+        }
         let reader = &observation.reader;
         let traces = reader.trace_snapshot();
         if !self
@@ -1670,6 +1752,17 @@ impl ObservationView {
                 &traces,
                 &reader.log_snapshot(),
             );
+        }
+    }
+    pub fn dismiss_overlay(&mut self) -> bool {
+        if self.state.help_visible {
+            self.state.help_visible = false;
+            true
+        } else if !self.state.traces.visible && self.state.details_visible {
+            self.state.details_visible = false;
+            true
+        } else {
+            false
         }
     }
     pub fn draw(
@@ -2126,6 +2219,28 @@ mod tests {
     }
 
     #[test]
+    fn shortcut_help_consumes_navigation_until_dismissed() {
+        let mut state = ViewState::default();
+        assert!(!state.help_visible);
+        assert!(state.handle_help(KeyCode::Char('?')));
+        assert!(state.help_visible);
+        for key in [KeyCode::Char('v'), KeyCode::Char('d'), KeyCode::Tab] {
+            assert!(state.handle_help(key));
+            assert!(state.help_visible);
+        }
+        assert!(!state.traces.visible);
+        assert!(!state.details_visible);
+        for close in [KeyCode::Esc, KeyCode::Enter, KeyCode::Char('q')] {
+            assert!(state.handle_help(close));
+            assert!(!state.help_visible);
+            assert!(!state.handle_help(KeyCode::Tab));
+            assert!(state.handle_help(KeyCode::Char('?')));
+        }
+        assert!(state.handle_help(KeyCode::Char('?')));
+        assert!(!state.help_visible);
+    }
+
+    #[test]
     fn routing_warnings_are_independent_of_observation_integrity() {
         let mut description = crate::test_support::sample_manifest()
             .description()
@@ -2165,6 +2280,25 @@ mod tests {
         );
         assert_eq!(session.snapshot().lifecycle.completeness, before);
         let mut view = ViewState::default();
+        assert!(!view.details_visible);
+        view.handle_key(
+            KeyCode::PageDown,
+            &session.snapshot(),
+            &layout,
+            &BTreeMap::new(),
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
+        assert_eq!(view.details_offset, 0);
+        view.handle_key(
+            KeyCode::Char('d'),
+            &session.snapshot(),
+            &layout,
+            &BTreeMap::new(),
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
+        assert!(view.details_visible);
         view.handle_key(
             KeyCode::PageDown,
             &session.snapshot(),
