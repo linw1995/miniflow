@@ -1,0 +1,49 @@
+name: Setup test planner
+description: Restore or build the planning CLI and Flow with reusable Cargo dependencies.
+runs:
+  using: composite
+  steps:
+    - name: Cache planning executables
+      id: planner-cache
+      uses: actions/cache@v6
+      with:
+        path: target/test-affected-ci/bin
+        key: planning-v2-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'rust-toolchain.toml', 'flake.nix', 'flake.lock', 'crates/**', 'tools/test-affected/**', '.github/actions/setup-test-planner/action.yaml') }}
+    - name: Cache planning dependencies
+      if: steps.planner-cache.outputs.cache-hit != 'true'
+      uses: actions/cache@v6
+      with:
+        path: |
+          target/test-affected-ci/cargo
+          target/test-affected-ci/project/target
+        key: planning-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.nix', 'flake.lock', '.github/actions/setup-test-planner/action.yaml', 'scripts/prune-test-cache.py', 'scripts/cargo_cache.py') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-${{ github.sha }}
+        restore-keys: |
+          planning-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.nix', 'flake.lock', '.github/actions/setup-test-planner/action.yaml', 'scripts/prune-test-cache.py', 'scripts/cargo_cache.py') }}-${{ hashFiles('Cargo.lock', '**/Cargo.toml') }}-
+          planning-build-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'flake.nix', 'flake.lock', '.github/actions/setup-test-planner/action.yaml', 'scripts/prune-test-cache.py', 'scripts/cargo_cache.py') }}-
+    - name: Build planning Flow
+      shell: bash
+      env:
+        PLANNER_CACHE_HIT: ${{ steps.planner-cache.outputs.cache-hit }}
+      run: |
+        if [[ "$PLANNER_CACHE_HIT" == true && -x target/test-affected-ci/bin/mf && -x target/test-affected-ci/bin/runner ]]; then
+          exit 0
+        fi
+        nix develop --command bash -euo pipefail <<'SCRIPT'
+          unset CARGO_BUILD_TARGET RUSTFLAGS CARGO_ENCODED_RUSTFLAGS
+          export CARGO_TARGET_DIR="$PWD/target/test-affected-ci/cargo"
+          export CARGO_INCREMENTAL=0
+          export CARGO_PROFILE_DEV_DEBUG=0
+          export CARGO_PROFILE_RELEASE_OPT_LEVEL=0
+          export MF_DEV_SUPPORT_ROOT="$PWD/crates"
+          mkdir -p target/test-affected-ci/bin
+          cargo fetch --locked
+          # Restored checkout artifacts must never outrun source mtimes.
+          python3 scripts/prune-test-cache.py "$CARGO_TARGET_DIR" target/test-affected-ci/project/target
+          cargo build --locked -p mf-cli --features development-support
+          cp Cargo.lock tools/test-affected/flows/test-affected.lock
+          CARGO_NET_OFFLINE=true "$CARGO_TARGET_DIR/debug/mf" compile tools/test-affected/flows/test-affected.json \
+            --output target/test-affected-ci/bin/runner --build-dir target/test-affected-ci/project --no-telemetry
+          cp "$CARGO_TARGET_DIR/debug/mf" target/test-affected-ci/bin/mf
+          # Retain dependency libraries without transferring disposable runners.
+          python3 scripts/prune-test-cache.py "$CARGO_TARGET_DIR" target/test-affected-ci/project/target
+        SCRIPT

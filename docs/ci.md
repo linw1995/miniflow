@@ -285,7 +285,16 @@ only CI orchestration may retrieve a recorded merge object.
 
 CI invokes the compiled Flow through `mf`. Its native planning executables are cached by
 source, manifest, definition, and pinned-toolchain identity; cache misses rebuild them and
-cannot alter selected scope. `pr_validation.py accept` only binds the returned plan to the
+cannot alter selected scope. A separate cache retains Cargo dependencies for both the CLI
+and generated planning runner across source revisions. It prefers matching manifests and
+lockfiles, then falls back within the same pinned toolchain and build configuration.
+Restored checkout artifacts are removed before building; workspace artifacts and generated
+executables are pruned again before saving. Final executable reuse still requires an exact
+source identity, and an executable-cache hit skips dependency-cache transfer entirely.
+Main pushes warm both caches in the lint job alongside coverage, using the same composite
+action as PR coverage. This publishes a default-branch cache that new PRs can restore;
+PR-scoped cache entries otherwise benefit only subsequent runs of that PR.
+`pr_validation.py accept` only binds the returned plan to the
 current execution and writes handoff artifacts. The `flow-pr-v2` policy resets incompatible
 pre-migration records to cumulative scope. The policy identifier and record version live
 in the Flow's `validation_policy` constant and are read by the publication guard.
