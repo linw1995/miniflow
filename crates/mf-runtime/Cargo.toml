@@ -36,5 +36,8 @@ tokio = { workspace = true, features = ["rt-multi-thread", "net", "time"], optio
 # Streaming standard I/O redirection and polling.
 libc.workspace = true
 
+# Standalone runner signal forwarding.
+signal-hook.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true

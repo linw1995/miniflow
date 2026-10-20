@@ -1035,3 +1035,32 @@ fail validation.
 
 - **WHEN** a reader derives an execution description from a manifest
 - **THEN** its event schema is computed from description version and execution mode without a stored event-version field
+
+### Requirement: Cancel standalone execution on Unix interrupts
+
+Generated Unix runners SHALL translate the first SIGINT or SIGTERM into cancellation of
+finite, streaming, and selected-Task execution. Cooperative nodes SHALL have an opportunity
+to release owned resources before the runner exits. Embedded runtime calls SHALL NOT
+implicitly install process-wide signal handlers. Signals received before the execution's
+cancellation state is bound SHALL remain pending and be forwarded when it is bound.
+
+After cooperative shutdown the runner SHALL exit with status 130 for SIGINT or 143 for
+SIGTERM. A second SIGINT or SIGTERM SHALL force immediate exit with the second signal's
+corresponding status, even before binding or during cleanup; forced exit does not guarantee
+resource cleanup.
+
+#### Scenario: Interrupt a node that owns an external process
+
+- **WHEN** a generated runner receives SIGINT while a cooperative node owns a child process
+- **THEN** the node observes cancellation and can terminate and reap that child
+- **AND** the runner exits with status 130 after cleanup
+
+#### Scenario: Interrupt a non-cooperative node again
+
+- **WHEN** a node remains blocked after the first interrupt and the runner receives SIGTERM
+- **THEN** the runner exits immediately with status 143 without waiting for the node
+
+#### Scenario: Interrupt before execution is bound
+
+- **WHEN** a runner receives SIGINT after registering handlers but before binding cancellation
+- **THEN** binding publishes the pending cancellation before returning

@@ -17,6 +17,8 @@ mod number;
 mod registry;
 mod runner;
 mod runner_arguments;
+#[cfg(unix)]
+mod runner_signals;
 mod snapshot;
 mod stream;
 mod stream_instance;
@@ -130,6 +132,8 @@ pub use workflow_inputs::{
 };
 
 pub use runner_arguments::{RunnerArgumentError, RunnerArguments, RunnerInvocation};
+#[cfg(unix)]
+pub use runner_signals::{RunnerSignalError, RunnerSignals};
 
 pub use workflow_inputs::{
     JsonSnafu as WorkflowInputJsonSnafu, TooLargeSnafu as WorkflowInputTooLargeSnafu,
