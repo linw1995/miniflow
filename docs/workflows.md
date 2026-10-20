@@ -94,7 +94,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | [`builtin.parameters`](#parameters) | Named parameters with types, optional `env` and `default`, and `secret` (default `true`) | One typed startup input per parameter | One matching typed output per parameter |
 | `mfn-core` | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input, with its known type |
 | `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by execution prerequisites | One boolean activation output per branch, plus `else` |
-| `mfn-core` | [`builtin.assert`](#assertions) | Required static failure `message` | Required boolean `condition` | None; false fails execution |
+| `mfn-core` | [`builtin.assert`](#assertions) | Required structured `condition` and static failure `message` | None; reads explicit upstream outputs from context | None; false fails execution |
 | `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array or object | `results`: collected array |
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
 | `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
@@ -182,12 +182,14 @@ when compiling outside the checkout.
 
 ### Assertions
 
-`builtin.assert` succeeds when `condition` is true and fails execution with its configured `message` when false.
-It accepts only a boolean; missing or invalid inputs fail without including their values in diagnostics. Configuration
-requires a string `message` and rejects unknown fields. Use Code to calculate complex conditions, then pass the result
-to Assert. The message is static configuration and should not contain secrets.
+`builtin.assert` uses the same structured `condition` as [IfElse](#if-else-if-and-else): `source`, `operator`,
+and an optional comparison `value`. It succeeds when the condition matches and fails execution with its configured
+static `message` otherwise. Invalid conditions fail at build time; unavailable comparison operands and evaluation
+errors fail execution with source, path, and operator context. Diagnostics do not include source values. Keep secrets
+out of the static message.
 
-Assert has no outputs. In version `2026-10-19`, add a node-success edge to require the assertion before another Task:
+Assert has no input or output ports. Condition references must name an explicit upstream output and do not add execution
+dependencies. In version `2026-10-19`, use node-success edges to order the producer, assertion, and subsequent Task:
 
 ```json
 {
@@ -195,17 +197,27 @@ Assert has no outputs. In version `2026-10-19`, add a node-success edge to requi
     {
       "id": "validate",
       "kind": "builtin.assert",
-      "config": {"message": "current identity is inconsistent"},
-      "inputs": {"condition": {"from": {"node": "check", "port": "valid"}}}
+      "config": {
+        "condition": {
+          "source": {"output": "check.result", "path": "/valid"},
+          "operator": "eq",
+          "value": true
+        },
+        "message": "current identity is inconsistent"
+      }
     }
   ],
-  "edges": [{"from_node": "validate", "to_node": "continue"}]
+  "edges": [
+    {"from_node": "check", "to_node": "validate"},
+    {"from_node": "validate", "to_node": "continue"}
+  ]
 }
 ```
 
-This fragment assumes `check.valid` is a boolean output and `continue` is another Task in the same scope.
-Unlike `builtin.if_else`, a failed assertion reports an error instead of selecting or skipping a branch. An assertion
-on a skipped branch is itself skipped and does not activate its success dependents.
+This fragment assumes `check.result` contains a `valid` field and `continue` is another Task in the same scope.
+All IfElse operators, JSON Pointer rules, numeric comparisons, and existence semantics apply to Assert. Use Code for
+compound expressions, then assert its boolean result with `eq` and `value: true`.
+An assertion on a skipped branch is itself skipped and does not activate its success dependents.
 
 ### Parameters
 

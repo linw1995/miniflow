@@ -131,11 +131,13 @@ fn assertion_graph(condition: bool, path: &Path) -> WorkflowDefinition {
             json!({"id":"condition","kind":"builtin.parameters","config":{"parameters":{
                 "value":{"type":"bool","default":condition}
             }}}),
-            json!({"id":"validate","kind":"builtin.assert","config":{"message":"current identity is inconsistent"},
-                "inputs":{"condition":{"from":{"node":"condition","port":"value"}}}}),
+            json!({"id":"validate","kind":"builtin.assert","config":{
+                "message":"current identity is inconsistent",
+                "condition":{"source":{"output":"condition.value","path":""},"operator":"eq","value":true}
+            }}),
             task("after_assert", path),
         ],
-        json!([{"from_node":"validate","to_node":"after_assert"}]),
+        json!([{"from_node":"condition","to_node":"validate"}, {"from_node":"validate","to_node":"after_assert"}]),
     )
 }
 
@@ -156,6 +158,88 @@ fn assertions_fail_execution_before_success_dependents_run() {
                     .contains("current identity is inconsistent")
             );
             assert!(trace(&path).is_empty());
+        }
+    }
+}
+
+#[test]
+fn assertions_require_explicit_upstream_references_and_keep_source_values_private() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("trace");
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut graph = assertion_graph(true, &path);
+    graph.order_edges.remove(0);
+    assert!(
+        compile_definition(&graph, &registry)
+            .unwrap_err()
+            .to_string()
+            .contains("explicit dependency")
+    );
+    let mut graph = assertion_graph(true, &path);
+    graph.nodes[1].config["condition"]["source"]["output"] = json!("missing.value");
+    assert!(
+        compile_definition(&graph, &registry)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown")
+    );
+
+    for (value, pointer, operator, reason) in [
+        (json!({"sensitive value":true}), "", "eq", "scalar"),
+        (json!("sensitive value"), "", "gt", "numeric"),
+        (json!({}), "/missing", "eq", "missing"),
+    ] {
+        let mut graph = assertion_graph(true, &path);
+        graph.nodes[0].config["parameters"]["value"] = json!({"type":"any", "default":value});
+        graph.nodes[1].config["condition"]["source"]["path"] = json!(pointer);
+        graph.nodes[1].config["condition"]["operator"] = json!(operator);
+        graph.nodes[1].config["condition"]["value"] = json!(1);
+        let error = execute(&graph).unwrap_err();
+        let diagnostic = format!("{error:?}");
+        assert!(error.to_string().contains(reason));
+        assert!(error.to_string().contains("condition.value"));
+        assert!(!diagnostic.contains("sensitive value"));
+        assert!(std::error::Error::source(&error).is_some());
+        assert!(trace(&path).is_empty());
+    }
+}
+
+#[test]
+fn assertions_distinguish_skipped_outputs_from_omitted_outputs() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("trace");
+    for (skipped, operator, expected) in [
+        (true, "not_exists", None),
+        (true, "exists", Some("current identity is inconsistent")),
+        (
+            true,
+            "eq",
+            Some("source output is skipped or field is missing"),
+        ),
+        (false, "not_exists", Some("missing")),
+    ] {
+        let mut graph = assertion_graph(true, &path);
+        graph.nodes[0] = serde_json::from_value(json!({
+            "id":"condition", "kind":"fixture.context", "config":{
+                "ports":["value"], "skipped":if skipped { json!(["value"]) } else { json!([]) }
+            }
+        }))
+        .unwrap();
+        graph.nodes[1].config["condition"]["operator"] = json!(operator);
+        if operator != "eq" {
+            graph.nodes[1].config["condition"]
+                .as_object_mut()
+                .unwrap()
+                .remove("value");
+        }
+        let result = execute(&graph);
+        if let Some(message) = expected {
+            assert!(result.unwrap_err().to_string().contains(message));
+            assert!(trace(&path).is_empty());
+        } else {
+            result.unwrap();
+            assert_eq!(trace(&path), ["after_assert"]);
+            std::fs::remove_file(&path).unwrap();
         }
     }
 }

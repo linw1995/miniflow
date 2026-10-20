@@ -1,7 +1,7 @@
+use crate::condition::Condition;
 use mf_runtime::{
     ExecutionContext, Inputs, NodeBuildError, NodeExecutionError, NodeMetadata, NodePortContract,
-    NodePorts, NodeRegistration, NodeResult, PortSpec, PreparedNode, TaskNode, ValueType,
-    deserialize_config,
+    NodePorts, NodeRegistration, NodeResult, PreparedNode, TaskNode, deserialize_config,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -12,15 +12,14 @@ pub const KIND: &str = "builtin.assert";
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AssertNode {
+    condition: Condition,
     message: String,
 }
 
 #[derive(Debug, Snafu)]
-enum AssertionError {
-    #[snafu(display("assert requires one boolean condition"))]
-    InvalidCondition,
-    #[snafu(display("{message}"))]
-    Failed { message: String },
+#[snafu(display("{message}"))]
+struct AssertionError {
+    message: String,
 }
 
 impl From<AssertionError> for NodeExecutionError {
@@ -31,30 +30,22 @@ impl From<AssertionError> for NodeExecutionError {
 
 impl NodePortContract for AssertNode {
     fn ports(&self) -> NodePorts {
-        NodePorts {
-            inputs: vec![PortSpec::new("condition", ValueType::Boolean, true)],
-            outputs: vec![],
-        }
+        NodePorts::default()
     }
 }
 
 impl TaskNode for AssertNode {
     fn execute(
         &self,
-        inputs: Inputs,
+        _inputs: Inputs,
         context: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());
         }
-        ensure!(inputs.len() == 1, InvalidConditionSnafu);
-        let condition = inputs
-            .get("condition")
-            .and_then(|value| value.as_bool())
-            .ok_or_else(|| InvalidConditionSnafu.build())?;
         ensure!(
-            condition,
-            FailedSnafu {
+            self.condition.evaluate(context)?,
+            AssertionSnafu {
                 message: &self.message
             }
         );
@@ -64,7 +55,12 @@ impl TaskNode for AssertNode {
 
 fn factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
     let node: AssertNode = deserialize_config(config)?;
-    PreparedNode::new(node, NodeMetadata::default())
+    node.condition.validate()?;
+    let metadata = NodeMetadata {
+        context_references: vec![node.condition.reference("condition")],
+        ..Default::default()
+    };
+    PreparedNode::new(node, metadata)
 }
 
 inventory::submit! { NodeRegistration { kind: KIND, factory: mf_runtime::NodeFactory::Plain(factory) } }
@@ -72,80 +68,55 @@ inventory::submit! { NodeRegistration { kind: KIND, factory: mf_runtime::NodeFac
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mf_runtime::{NodeRegistry, StreamError, ValueRef};
+    use mf_runtime::{ContextReference, NodeRegistry, StreamError};
     use serde_json::json;
     use std::error::Error;
 
+    fn config() -> Value {
+        json!({
+            "condition": {"source":{"output":"source.value","path":""}, "operator":"eq", "value":true},
+            "message":"current identity is inconsistent"
+        })
+    }
+
     #[test]
-    fn registration_requires_a_static_message_and_boolean_condition() {
+    fn registration_validates_conditions_and_declares_context_references() {
         let registry = NodeRegistry::from_inventory().unwrap();
         let registration = registry.get(KIND).unwrap();
-        for config in [
-            json!({}),
-            json!({"message": false}),
-            json!({"message": "failed", "extra": true}),
+        for (field, value) in [
+            ("message", json!(false)),
+            ("extra", json!(true)),
+            ("condition", json!(true)),
+            (
+                "condition",
+                json!({"source":{"output":"source.value","path":"bad~"},"operator":"exists"}),
+            ),
+            (
+                "condition",
+                json!({"source":{"output":"source.value","path":""},"operator":"gt","value":"1"}),
+            ),
         ] {
-            assert!(registration.instantiate(config).is_err());
+            let mut candidate = config();
+            candidate[field] = value;
+            assert!(registration.instantiate(candidate).is_err());
         }
-        let prepared = registration
-            .instantiate(json!({"message": "failed"}))
-            .unwrap();
-        assert_eq!(
-            prepared.metadata.ports.inputs,
-            vec![PortSpec::new("condition", ValueType::Boolean, true)]
-        );
+        for field in ["condition", "message"] {
+            let mut candidate = config();
+            candidate.as_object_mut().unwrap().remove(field);
+            assert!(registration.instantiate(candidate).is_err());
+        }
+        let prepared = registration.instantiate(config()).unwrap();
+        assert!(prepared.metadata.ports.inputs.is_empty());
         assert!(prepared.metadata.ports.outputs.is_empty());
-    }
-
-    #[test]
-    fn checks_conditions_without_disclosing_input_values() {
-        let node = AssertNode {
-            message: "current identity is inconsistent".into(),
-        };
-        let inputs = |value: Value| {
-            Inputs::from([("condition".into(), ValueRef::from(value).into_secret())])
-        };
-        let result = node
-            .execute(inputs(json!(true)), &mut ExecutionContext::default())
-            .unwrap();
-        assert!(result.outputs.is_empty());
-        assert!(result.skipped.is_empty());
-
-        let error = node
-            .execute(inputs(json!(false)), &mut ExecutionContext::default())
-            .unwrap_err();
-        assert!(
-            matches!(error.source().unwrap().downcast_ref::<AssertionError>(), Some(AssertionError::Failed { message }) if message == &node.message)
+        assert_eq!(
+            prepared.metadata.context_references,
+            vec![ContextReference::new("source.value", "condition")]
         );
-        for input in [
-            Inputs::new(),
-            inputs(json!(null)),
-            inputs(json!("sensitive value")),
-            inputs(json!(1)),
-            inputs(json!([])),
-            inputs(json!({})),
-            Inputs::from([("unexpected".into(), true.into())]),
-            Inputs::from([
-                ("condition".into(), true.into()),
-                ("extra".into(), true.into()),
-            ]),
-        ] {
-            let error = node
-                .execute(input, &mut ExecutionContext::default())
-                .unwrap_err();
-            assert!(matches!(
-                error.source().unwrap().downcast_ref::<AssertionError>(),
-                Some(AssertionError::InvalidCondition)
-            ));
-            assert!(!format!("{error:?}").contains("sensitive value"));
-        }
     }
 
     #[test]
-    fn cancellation_precedes_condition_validation() {
-        let node = AssertNode {
-            message: "assertion failed".into(),
-        };
+    fn cancellation_precedes_condition_evaluation() {
+        let node: AssertNode = serde_json::from_value(config()).unwrap();
         let mut context = ExecutionContext::default();
         context.cancellation().cancel(StreamError::Execution {
             message: "cancel assertion".into(),
