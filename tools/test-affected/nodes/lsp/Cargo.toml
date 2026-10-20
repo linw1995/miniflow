@@ -1,0 +1,30 @@
+[package]
+name = "mfn-lsp"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Language-server analysis for repository developer flows"
+
+[dependencies]
+# Node contracts and registration.
+inventory.workspace = true
+mf-runtime.workspace = true
+
+# Language-server protocol and file URIs.
+lsp-types.workspace = true
+url.workspace = true
+
+# Configuration, semantic evidence, and typed diagnostics.
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+snafu.workspace = true
+
+# Bounded process I/O and progress observations.
+libc.workspace = true
+opentelemetry = { workspace = true, features = ["trace"] }
+
+[dev-dependencies]
+# Isolated source snapshots and protocol fixtures.
+tempfile.workspace = true

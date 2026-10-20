@@ -13,8 +13,14 @@ Before submitting changes, run:
 
 ```sh
 prek -a
-nix develop --command python3 scripts/affected_tests.py --worktree --run
+cargo run -p mf-cli --features development-support -- compile \
+  tools/test-affected/flows/test-affected.json --output target/test-affected-runner \
+  --build-dir target/test-affected-build
+cargo run -p mf-cli --features development-support -- run ./target/test-affected-runner \
+  --params.mode worktree --params.precision packages --params.run true
 ```
+
+Omit `--params.run true` to produce a plan without executing tests.
 
 These checks cover formatting, Rust diagnostics, affected package tests, workflow configuration, Markdown, and the [dependency license audit](docs/licensing.md).
 See [test selection](docs/ci.md#affected-package-tests) for commit and PR comparisons.
@@ -122,8 +128,9 @@ The arguments select the node count and repetition count. Shared snapshots are r
 | `crates/mf-chat/` | Persistent chat nodes and embedded application workflows |
 | `crates/builtin-nodes/core/` | `mfn-core` basic node implementations |
 | `crates/builtin-nodes/code/` | `mfn-code` CEL node implementation |
+| `tools/test-affected/nodes/` | Unpublished developer-only LSP and affected-test providers |
 
-See [node development](docs/node-development.md) for adding nodes.
+See [node development](docs/node-development.md) for adding nodes. Developer tools share workspace validation but are not product release dependencies.
 
 ## Commits and pull requests
 

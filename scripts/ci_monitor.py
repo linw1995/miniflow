@@ -3,13 +3,16 @@
 import argparse
 from datetime import datetime
 import html
+import io
 import json
 import os
 from pathlib import Path
 import re
+import subprocess
 from statistics import median
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
+import zipfile
 
 
 MARKER = "<!-- miniflow-ci-timing -->"
@@ -156,7 +159,36 @@ def coverage_summary(jobs, current_wall):
     return lines
 
 
-def render_report(run, jobs, samples, branch):
+def validation_record(api, repository, run, pr):
+    if run["conclusion"] != "success":
+        return None
+    try:
+        artifacts = api.request(f"/actions/runs/{run['id']}/artifacts?per_page=100")["artifacts"]
+        name = f"pr-validation-{run['id']}-{run['run_attempt']}"
+        matches = [a for a in artifacts if a["name"] == name and not a["expired"]]
+        if len(matches) != 1:
+            return None
+        archive = subprocess.run(
+            ["gh", "api", f"/repos/{repository}/actions/artifacts/{matches[0]['id']}/zip"],
+            check=True, capture_output=True, timeout=30,
+        ).stdout
+        with zipfile.ZipFile(io.BytesIO(archive)) as zipped:
+            if zipped.namelist() != ["validation.json"] or zipped.getinfo("validation.json").file_size > 1024 * 1024:
+                return None
+            record = json.loads(zipped.read("validation.json"))
+        if (record["repository"] != repository or record["pr"] != pr or record["head"] != run["head_sha"]
+                or record["run_id"] != run["id"] or record["run_attempt"] != run["run_attempt"]):
+            return None
+        if not {"scope", "base", "head", "previous", "reason"} <= record["comparison"].keys():
+            return None
+        if not {"covered", "total", "status"} <= record["coverage"].keys():
+            return None
+        return record
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError, zipfile.BadZipFile):
+        return None
+
+
+def render_report(run, jobs, samples, branch, validation=None):
     complete = run["conclusion"] == "success"
     baseline_wall = median([wall_time(candidate, sample) for candidate, sample in samples]) if samples else None
     current_wall = wall_time(run, jobs)
@@ -169,6 +201,17 @@ def render_report(run, jobs, samples, branch):
         f"for `{run['head_sha'][:12]}`: **{label(run['conclusion'])}**.",
         "",
     ]
+    if validation is not None:
+        comparison, coverage = validation["comparison"], validation["coverage"]
+        lines.extend([
+            "### Validation range", "",
+            f"Scope: {label(comparison['scope'])}.",
+            f"Comparison: {label(comparison['base'])} to {label(comparison['head'])}.",
+            f"Inherited validation: {label(comparison['previous'])}.",
+            f"Selection reason: {label(comparison['reason'])}.",
+            f"Current increment coverage: {label(coverage['covered'])}/{label(coverage['total'])} executable lines; {label(coverage['status'])}.",
+            "Inherited validation does not contribute historical LCOV hits to this measurement.", "",
+        ])
     lines.extend(coverage_summary(jobs, current_wall))
     lines.extend([
         "### Timing comparison",
@@ -258,7 +301,8 @@ def main():
         return
     for pull in current_pull_requests(api, run):
         samples = baseline_runs(api, run, pull["base"]["ref"], jobs)
-        body = render_report(run, jobs, samples, pull["base"]["ref"])
+        validation = validation_record(api, os.environ["GITHUB_REPOSITORY"], run, pull["number"])
+        body = render_report(run, jobs, samples, pull["base"]["ref"], validation)
         if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
             with Path(summary).open("a") as output:
                 output.write(body)

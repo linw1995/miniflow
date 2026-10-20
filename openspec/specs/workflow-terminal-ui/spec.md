@@ -859,27 +859,30 @@ of queued. Storage and supervision SHALL run off the terminal rendering thread, 
 
 ### Requirement: Select explicit connection views
 
-The graph SHALL offer Execution, Dependencies, and Ports views. Default Execution SHALL route node-success edges and
-output gates and report
-hidden data counts. Dependencies SHALL add data bundles by source, target, and ordinary/exclusive kind. Ports SHALL
-route all original connections. Success edges and output gates SHALL stay individually identifiable. All nodes and
-mappings SHALL remain
-inspectable, including for existing compatible executables without recompilation.
+The graph SHALL offer Execution, Dependencies, and Ports. Execution SHALL reduce transitive node-pair dependencies,
+bundle data, and prefer explicit execution connections for each pair. It SHALL separately count hidden mappings and
+transitive pairs. Dependencies SHALL retain direct connections and bundles; Ports SHALL retain every mapping.
+Visible ordinary/exclusive data, success edges, and output gates SHALL remain distinct. Reduction SHALL preserve inspection and execution semantics.
 
 #### Scenario: Inspect a parameter-heavy node pair
 
-- **WHEN** eighteen ordinary data edges connect the same source and consumer
-- **THEN** Execution reports them as hidden, Dependencies displays one counted bundle with all eighteen inspectable mappings, and Ports displays individual mappings
+- **WHEN** eighteen ordinary data edges connect the same source and consumer without an explicit execution connection or alternate dependency path
+- **THEN** Execution and Dependencies display one counted bundle with all eighteen inspectable mappings, and Ports displays individual mappings
 
 #### Scenario: Keep control and exclusive identities
 
-- **WHEN** one node pair has success edges, control gates, ordinary data bindings, and multiple exclusive-input candidates
-- **THEN** success edges and control gates remain separate, data bundles distinguish ordinary and exclusive kinds, and details retain each target input and candidate-group identity
+- **WHEN** one node pair has success edges, control gates, ordinary data bindings, and multiple exclusive-input candidates, with no alternate dependency path
+- **THEN** Execution shows the distinct success edges and control gates; Dependencies also shows ordinary/exclusive data bundles, and Details retains each target input and candidate-group identity
 
 #### Scenario: Inspect a data-only workflow
 
 - **WHEN** a scope has data dependencies but no execution connections
-- **THEN** Execution retains dependency-based node placement and explicitly indicates hidden data dependencies without inventing an execution chain
+- **THEN** Execution preserves dependency reachability with data bundles while leaving independent nodes disconnected
+
+#### Scenario: Hide a transitively redundant connection
+
+- **WHEN** both `A -> B -> C` and `A -> C` are dependencies
+- **THEN** Execution hides the direct `A -> C` connection regardless of kind, while Dependencies, Ports, and Details retain it and runtime prerequisites remain unchanged
 
 ### Requirement: Inspect bindings independently of visible routes
 

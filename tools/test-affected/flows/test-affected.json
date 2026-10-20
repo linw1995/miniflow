@@ -1,0 +1,2356 @@
+{
+  "version": "2026-10-19",
+  "execution": {
+    "mode": "stream",
+    "limits": {
+      "max_pending_messages": 2,
+      "workers": 1
+    }
+  },
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../../../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../../../crates/builtin-nodes/code"
+    },
+    "lsp": {
+      "package": "mfn-lsp",
+      "path": "../nodes/lsp"
+    },
+    "tests": {
+      "package": "mfn-test-affected",
+      "path": "../nodes/test-affected"
+    }
+  },
+  "nodes": [
+    {
+      "id": "params",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "ci": {
+            "type": "bool",
+            "default": false,
+            "secret": false
+          },
+          "repository": {
+            "type": "string",
+            "default": ".",
+            "secret": false
+          },
+          "mode": {
+            "type": "string",
+            "default": "worktree",
+            "secret": false
+          },
+          "base": {
+            "type": {
+              "nullable": "string"
+            },
+            "default": null,
+            "secret": false
+          },
+          "head": {
+            "type": "string",
+            "default": "HEAD",
+            "secret": false
+          },
+          "precision": {
+            "type": "string",
+            "default": "tests",
+            "secret": false
+          },
+          "configuration": {
+            "type": "object",
+            "default": {},
+            "secret": false
+          },
+          "inventory": {
+            "type": {
+              "nullable": "string"
+            },
+            "default": null,
+            "secret": false
+          },
+          "artifacts": {
+            "type": {
+              "nullable": "string"
+            },
+            "default": null,
+            "secret": false
+          },
+          "github_repository": {
+            "type": "string",
+            "default": "",
+            "secret": false,
+            "env": "GITHUB_REPOSITORY"
+          },
+          "run_id": {
+            "type": "int",
+            "default": 0,
+            "secret": false,
+            "env": "GITHUB_RUN_ID"
+          },
+          "attempt": {
+            "type": "int",
+            "default": 0,
+            "secret": false,
+            "env": "GITHUB_RUN_ATTEMPT"
+          },
+          "pr": {
+            "type": "int",
+            "default": 0,
+            "secret": false,
+            "env": "MF_PR_NUMBER"
+          },
+          "branch": {
+            "type": "string",
+            "default": "",
+            "secret": false,
+            "env": "MF_PR_BRANCH"
+          },
+          "event": {
+            "type": "string",
+            "default": "",
+            "secret": false,
+            "env": "GITHUB_EVENT_NAME"
+          },
+          "expected_head": {
+            "type": {
+              "nullable": "string"
+            },
+            "default": null,
+            "secret": false,
+            "env": "MF_PR_HEAD"
+          },
+          "expected_merge": {
+            "type": {
+              "nullable": "string"
+            },
+            "default": null,
+            "secret": false,
+            "env": "MF_MERGE_SHA"
+          },
+          "cumulative": {
+            "type": "bool",
+            "default": false,
+            "secret": false,
+            "env": "MF_CUMULATIVE"
+          },
+          "coverage_target": {
+            "type": "double",
+            "default": 95.0,
+            "secret": false,
+            "env": "MF_COVERAGE_TARGET"
+          },
+          "profile": {
+            "type": "string",
+            "default": "ci",
+            "secret": false,
+            "env": "NEXTEST_PROFILE"
+          },
+          "toolchain": {
+            "type": "string",
+            "default": "",
+            "secret": false,
+            "env": "MF_TOOLCHAIN"
+          },
+          "target": {
+            "type": {
+              "nullable": "string"
+            },
+            "default": null,
+            "secret": false,
+            "env": "CARGO_BUILD_TARGET"
+          },
+          "token": {
+            "type": {
+              "nullable": "string"
+            },
+            "default": null,
+            "secret": true,
+            "env": "GH_TOKEN"
+          },
+          "rustflags": {
+            "type": {
+              "nullable": "string"
+            },
+            "default": null,
+            "secret": false,
+            "env": "RUSTFLAGS"
+          },
+          "encoded_rustflags": {
+            "type": {
+              "nullable": "string"
+            },
+            "default": null,
+            "secret": false,
+            "env": "CARGO_ENCODED_RUSTFLAGS"
+          },
+          "incremental": {
+            "type": {
+              "nullable": "string"
+            },
+            "default": null,
+            "secret": false,
+            "env": "CARGO_INCREMENTAL"
+          },
+          "dev_debug": {
+            "type": {
+              "nullable": "string"
+            },
+            "default": null,
+            "secret": false,
+            "env": "CARGO_PROFILE_DEV_DEBUG"
+          },
+          "test_debug": {
+            "type": {
+              "nullable": "string"
+            },
+            "default": null,
+            "secret": false,
+            "env": "CARGO_PROFILE_TEST_DEBUG"
+          },
+          "run": {
+            "type": "bool",
+            "default": false,
+            "secret": false
+          }
+        }
+      }
+    },
+    {
+      "id": "validation_policy",
+      "kind": "builtin.constant",
+      "config": {
+        "value": {
+          "record_version": 1,
+          "id": "flow-pr-v2"
+        }
+      }
+    },
+    {
+      "id": "environment",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "ci",
+            "condition": {
+              "source": {
+                "output": "params.ci",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "local_settings",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "raw": "object",
+          "target": "any",
+          "mode": "string",
+          "precision": "string"
+        },
+        "code": {
+          "valid": "raw.all(k, k in ['target','all_features','features','no_default_features']) && mode in ['worktree','commit','merge-base','snapshot'] && precision in ['tests','packages']",
+          "configuration": "{'target':has(raw.target)?raw.target:target,'all_features':has(raw.all_features)?raw.all_features:true,'features':has(raw.features)?raw.features:[],'no_default_features':has(raw.no_default_features)?raw.no_default_features:false}"
+        }
+      },
+      "inputs": {
+        "raw": {
+          "from": {
+            "node": "params",
+            "port": "configuration"
+          }
+        },
+        "target": {
+          "from": {
+            "node": "params",
+            "port": "target"
+          }
+        },
+        "mode": {
+          "from": {
+            "node": "params",
+            "port": "mode"
+          }
+        },
+        "precision": {
+          "from": {
+            "node": "params",
+            "port": "precision"
+          }
+        }
+      }
+    },
+    {
+      "id": "require_local_settings",
+      "kind": "builtin.assert",
+      "config": {
+        "message": "Local comparison mode, precision, or configuration is invalid",
+        "condition": {
+          "source": {
+            "output": "local_settings.valid",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
+        }
+      }
+    },
+    {
+      "id": "local_request",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "mode": "string",
+          "base": "any",
+          "head": "string",
+          "precision": "string",
+          "inventory": "any",
+          "config": "object",
+          "run": "bool"
+        },
+        "code": {
+          "request": "{'execution':{'enabled':run},'mode':mode,'base':base,'head':head,'analyze':precision=='tests','options':{'configuration':config,'inventory':inventory,'exact_tests':precision=='tests'},'initialization_options':{'cargo':{'features':config.all_features?'all':config.features,'target':config.target,'noDefaultFeatures':config.no_default_features,'buildScripts':{'enable':false},'sysroot':null},'procMacro':{'enable':false},'checkOnSave':false,'cachePriming':{'enable':false}}}"
+        }
+      },
+      "inputs": {
+        "mode": {
+          "from": {
+            "node": "params",
+            "port": "mode"
+          }
+        },
+        "base": {
+          "from": {
+            "node": "params",
+            "port": "base"
+          }
+        },
+        "head": {
+          "from": {
+            "node": "params",
+            "port": "head"
+          }
+        },
+        "precision": {
+          "from": {
+            "node": "params",
+            "port": "precision"
+          }
+        },
+        "inventory": {
+          "from": {
+            "node": "params",
+            "port": "inventory"
+          }
+        },
+        "config": {
+          "from": {
+            "node": "local_settings",
+            "port": "configuration"
+          }
+        },
+        "run": {
+          "from": {
+            "node": "params",
+            "port": "run"
+          }
+        }
+      }
+    },
+    {
+      "id": "checkout",
+      "kind": "git.inspect",
+      "config": {},
+      "inputs": {
+        "repository": {
+          "from": {
+            "node": "params",
+            "port": "repository"
+          }
+        }
+      }
+    },
+    {
+      "id": "checkout_identity",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "e": "object"
+        },
+        "code": {
+          "valid": "e.available && e.value.current.clean && !e.value.current.shallow && size(e.value.current.parents)==2"
+        }
+      },
+      "inputs": {
+        "e": {
+          "from": {
+            "node": "checkout",
+            "port": "result"
+          }
+        }
+      }
+    },
+    {
+      "id": "require_checkout",
+      "kind": "builtin.assert",
+      "config": {
+        "message": "CI planning requires a clean two-parent merge checkout with complete history",
+        "condition": {
+          "source": {
+            "output": "checkout_identity.valid",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
+        }
+      }
+    },
+    {
+      "id": "ci_settings",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "github_repository": "string",
+          "run_id": "int",
+          "attempt": "int",
+          "pr": "int",
+          "branch": "string",
+          "event": "string",
+          "expected_head": "any",
+          "expected_merge": "any",
+          "cumulative": "bool",
+          "coverage_target": "double",
+          "profile": "string",
+          "toolchain": "string",
+          "target": "any",
+          "rustflags": "any",
+          "encoded_rustflags": "any",
+          "incremental": "any",
+          "dev_debug": "any",
+          "test_debug": "any",
+          "policy": "object",
+          "run": "bool"
+        },
+        "code": {
+          "valid": "!run && (github_repository.matches('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') && run_id>0 && attempt>0 && pr>0 && size(branch)>0 && event in ['pull_request','workflow_dispatch'] && coverage_target>=0.0 && coverage_target<=100.0 && profile=='ci' && size(toolchain)>0)",
+          "settings": "{'record_version':policy.record_version,'repository':github_repository,'run_id':run_id,'attempt':attempt,'pr':pr,'branch':branch,'manual':event=='workflow_dispatch','event':event,'expected_head':expected_head,'expected_merge':expected_merge,'cumulative':cumulative,'signature':{'policy':policy.id,'coverage_target':coverage_target,'toolchain':toolchain.endsWith('\\n')?toolchain:toolchain+'\\n','features':'all','profile':profile,'target':target,'environment':{'RUSTFLAGS':rustflags,'CARGO_ENCODED_RUSTFLAGS':encoded_rustflags,'CARGO_INCREMENTAL':incremental,'CARGO_PROFILE_DEV_DEBUG':dev_debug,'CARGO_PROFILE_TEST_DEBUG':test_debug}}}",
+          "path": "'/repos/'+github_repository+'/actions/runs/'+string(run_id)+'/attempts/'+string(attempt)"
+        }
+      },
+      "inputs": {
+        "github_repository": {
+          "from": {
+            "node": "params",
+            "port": "github_repository"
+          }
+        },
+        "run_id": {
+          "from": {
+            "node": "params",
+            "port": "run_id"
+          }
+        },
+        "attempt": {
+          "from": {
+            "node": "params",
+            "port": "attempt"
+          }
+        },
+        "pr": {
+          "from": {
+            "node": "params",
+            "port": "pr"
+          }
+        },
+        "branch": {
+          "from": {
+            "node": "params",
+            "port": "branch"
+          }
+        },
+        "event": {
+          "from": {
+            "node": "params",
+            "port": "event"
+          }
+        },
+        "expected_head": {
+          "from": {
+            "node": "params",
+            "port": "expected_head"
+          }
+        },
+        "expected_merge": {
+          "from": {
+            "node": "params",
+            "port": "expected_merge"
+          }
+        },
+        "cumulative": {
+          "from": {
+            "node": "params",
+            "port": "cumulative"
+          }
+        },
+        "coverage_target": {
+          "from": {
+            "node": "params",
+            "port": "coverage_target"
+          }
+        },
+        "profile": {
+          "from": {
+            "node": "params",
+            "port": "profile"
+          }
+        },
+        "toolchain": {
+          "from": {
+            "node": "params",
+            "port": "toolchain"
+          }
+        },
+        "target": {
+          "from": {
+            "node": "params",
+            "port": "target"
+          }
+        },
+        "rustflags": {
+          "from": {
+            "node": "params",
+            "port": "rustflags"
+          }
+        },
+        "encoded_rustflags": {
+          "from": {
+            "node": "params",
+            "port": "encoded_rustflags"
+          }
+        },
+        "incremental": {
+          "from": {
+            "node": "params",
+            "port": "incremental"
+          }
+        },
+        "dev_debug": {
+          "from": {
+            "node": "params",
+            "port": "dev_debug"
+          }
+        },
+        "test_debug": {
+          "from": {
+            "node": "params",
+            "port": "test_debug"
+          }
+        },
+        "policy": {
+          "from": {
+            "node": "validation_policy",
+            "port": "value"
+          }
+        },
+        "run": {
+          "from": {
+            "node": "params",
+            "port": "run"
+          }
+        }
+      }
+    },
+    {
+      "id": "require_ci_settings",
+      "kind": "builtin.assert",
+      "config": {
+        "message": "CI planning requires valid PR parameters and does not support local test execution",
+        "condition": {
+          "source": {
+            "output": "ci_settings.valid",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
+        }
+      }
+    },
+    {
+      "id": "current_run",
+      "kind": "github.read",
+      "config": {
+        "fields": {
+          "id": "/id",
+          "run_attempt": "/run_attempt",
+          "workflow_id": "/workflow_id",
+          "head_sha": "/head_sha",
+          "event": "/event"
+        }
+      },
+      "inputs": {
+        "path": {
+          "from": {
+            "node": "ci_settings",
+            "port": "path"
+          }
+        },
+        "token": {
+          "from": {
+            "node": "params",
+            "port": "token"
+          }
+        },
+        "deadline": {
+          "from": {
+            "node": "checkout",
+            "port": "deadline"
+          }
+        }
+      }
+    },
+    {
+      "id": "current_identity",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "run": "object",
+          "git": "object",
+          "s": "object"
+        },
+        "code": {
+          "valid": "run.available && run.value.data.id==s.run_id && run.value.data.run_attempt==s.attempt && type(run.value.data.workflow_id)==int && run.value.data.workflow_id>0 && run.value.data.head_sha==git.value.current.parents[1] && run.value.data.event==s.event && (s.manual || s.expected_head==git.value.current.parents[1])",
+          "current": "{'version':s.record_version,'repository':s.repository,'pr':s.pr,'run_id':s.run_id,'run_attempt':s.attempt,'workflow_id':run.value.data.workflow_id,'head':git.value.current.parents[1],'base':git.value.current.parents[0],'merge':git.value.current.commit,'tree':git.value.current.tree,'signature':s.signature}"
+        }
+      },
+      "inputs": {
+        "run": {
+          "from": {
+            "node": "current_run",
+            "port": "result"
+          }
+        },
+        "git": {
+          "from": {
+            "node": "checkout",
+            "port": "result"
+          }
+        },
+        "s": {
+          "from": {
+            "node": "ci_settings",
+            "port": "settings"
+          }
+        }
+      }
+    },
+    {
+      "id": "require_current_identity",
+      "kind": "builtin.assert",
+      "config": {
+        "message": "Current PR, workflow attempt, and tested merge identities disagree",
+        "condition": {
+          "source": {
+            "output": "current_identity.valid",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
+        }
+      }
+    },
+    {
+      "id": "manual",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "manual",
+            "condition": {
+              "source": {
+                "output": "ci_settings.settings",
+                "path": "/manual"
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "manual_path",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "s": "object"
+        },
+        "code": {
+          "path": "'/repos/'+s.repository+'/pulls/'+string(s.pr)"
+        }
+      },
+      "inputs": {
+        "s": {
+          "from": {
+            "node": "ci_settings",
+            "port": "settings"
+          }
+        }
+      }
+    },
+    {
+      "id": "manual_pull",
+      "kind": "github.read",
+      "config": {
+        "fields": {
+          "head": "/head/sha",
+          "merge": "/merge_commit_sha"
+        }
+      },
+      "inputs": {
+        "path": {
+          "from": {
+            "node": "manual_path",
+            "port": "path"
+          }
+        },
+        "token": {
+          "from": {
+            "node": "params",
+            "port": "token"
+          }
+        },
+        "deadline": {
+          "from": {
+            "node": "checkout",
+            "port": "deadline"
+          }
+        }
+      }
+    },
+    {
+      "id": "manual_identity",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "e": "object",
+          "c": "object",
+          "s": "object"
+        },
+        "code": {
+          "valid": "e.available && s.expected_merge==c.merge && e.value.data.merge==c.merge && e.value.data.head==c.head"
+        }
+      },
+      "inputs": {
+        "e": {
+          "from": {
+            "node": "manual_pull",
+            "port": "result"
+          }
+        },
+        "c": {
+          "from": {
+            "node": "current_identity",
+            "port": "current"
+          }
+        },
+        "s": {
+          "from": {
+            "node": "ci_settings",
+            "port": "settings"
+          }
+        }
+      }
+    },
+    {
+      "id": "require_manual_identity",
+      "kind": "builtin.assert",
+      "config": {
+        "message": "Manual PR validation requires the current pinned PR merge snapshot",
+        "condition": {
+          "source": {
+            "output": "manual_identity.valid",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
+        }
+      }
+    },
+    {
+      "id": "manual_context",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "current_identity",
+            "port": "current"
+          }
+        }
+      }
+    },
+    {
+      "id": "event_context",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "current_identity",
+            "port": "current"
+          }
+        }
+      }
+    },
+    {
+      "id": "ci_seed",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "c": "object",
+          "s": "object"
+        },
+        "code": {
+          "current": "c",
+          "comparison": "{'base':c.base,'head':c.merge,'scope':'cumulative','previous':null,'reason':'Cumulative PR validation explicitly requested'}",
+          "search": "!s.manual && !s.cumulative",
+          "path": "'/repos/'+c.repository+'/actions/workflows/'+string(c.workflow_id)+'/runs'",
+          "query": "{'branch':s.branch,'status':'success','per_page':100}"
+        }
+      },
+      "inputs": {
+        "s": {
+          "from": {
+            "node": "ci_settings",
+            "port": "settings"
+          }
+        },
+        "c": {
+          "exclusive": [
+            {
+              "node": "event_context",
+              "port": "value"
+            },
+            {
+              "node": "manual_context",
+              "port": "value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "search_policy",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "search",
+            "condition": {
+              "source": {
+                "output": "ci_seed.search",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "explicit_cumulative",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "ci_seed",
+            "port": "comparison"
+          }
+        }
+      }
+    },
+    {
+      "id": "history",
+      "kind": "github.read",
+      "config": {
+        "required": false,
+        "pointer": "/workflow_runs",
+        "fields": {
+          "id": "/id",
+          "run_attempt": "/run_attempt",
+          "workflow_id": "/workflow_id",
+          "head_sha": "/head_sha",
+          "status": "/status",
+          "conclusion": "/conclusion"
+        }
+      },
+      "inputs": {
+        "path": {
+          "from": {
+            "node": "ci_seed",
+            "port": "path"
+          }
+        },
+        "query": {
+          "from": {
+            "node": "ci_seed",
+            "port": "query"
+          }
+        },
+        "token": {
+          "from": {
+            "node": "params",
+            "port": "token"
+          }
+        },
+        "deadline": {
+          "from": {
+            "node": "checkout",
+            "port": "deadline"
+          }
+        }
+      }
+    },
+    {
+      "id": "history_metadata",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "e": "object",
+          "c": "object"
+        },
+        "code": {
+          "runs": "(e.available && type(e.value.data)==list && size(e.value.data)<100) ? e.value.data.filter(r, type(r)==map && type(r.id)==int && r.id>0 && type(r.run_attempt)==int && r.run_attempt>0 && r.workflow_id==c.workflow_id && r.id!=c.run_id && r.status=='completed' && r.conclusion=='success' && type(r.head_sha)==string && r.head_sha.matches('^[0-9a-f]{40}([0-9a-f]{24})?$')) : []",
+          "heads": "((e.available && type(e.value.data)==list && size(e.value.data)<100) ? e.value.data.filter(r, type(r)==map && type(r.id)==int && r.id>0 && type(r.run_attempt)==int && r.run_attempt>0 && r.workflow_id==c.workflow_id && r.id!=c.run_id && r.status=='completed' && r.conclusion=='success' && type(r.head_sha)==string && r.head_sha.matches('^[0-9a-f]{40}([0-9a-f]{24})?$')) : []).map(r,r.head_sha)",
+          "usable": "(e.available && type(e.value.data)==list && size(e.value.data)<100) && size((e.available && type(e.value.data)==list && size(e.value.data)<100) ? e.value.data.filter(r, type(r)==map && type(r.id)==int && r.id>0 && type(r.run_attempt)==int && r.run_attempt>0 && r.workflow_id==c.workflow_id && r.id!=c.run_id && r.status=='completed' && r.conclusion=='success' && type(r.head_sha)==string && r.head_sha.matches('^[0-9a-f]{40}([0-9a-f]{24})?$')) : [])>0",
+          "reason": "e.remaining_ms==0 ? 'Validation discovery deadline reached' : (!e.available || type(e.value.data)!=list ? 'Validation history unavailable' : (size(e.value.data)>=100 ? 'Validation discovery limit reached' : 'No compatible completed successful validation record'))"
+        }
+      },
+      "inputs": {
+        "e": {
+          "from": {
+            "node": "history",
+            "port": "result"
+          }
+        },
+        "c": {
+          "from": {
+            "node": "ci_seed",
+            "port": "current"
+          }
+        }
+      }
+    },
+    {
+      "id": "history_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "inspect",
+            "condition": {
+              "source": {
+                "output": "history_metadata.usable",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "history_fallback",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "c": "object",
+          "reason": "string"
+        },
+        "code": {
+          "comparison": "{'base':c.base,'head':c.merge,'scope':'cumulative','previous':null,'reason':reason}"
+        }
+      },
+      "inputs": {
+        "c": {
+          "from": {
+            "node": "ci_seed",
+            "port": "current"
+          }
+        },
+        "reason": {
+          "from": {
+            "node": "history_metadata",
+            "port": "reason"
+          }
+        }
+      }
+    },
+    {
+      "id": "ancestry_target",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "c": "object"
+        },
+        "code": {
+          "head": "c.head"
+        }
+      },
+      "inputs": {
+        "c": {
+          "from": {
+            "node": "ci_seed",
+            "port": "current"
+          }
+        }
+      }
+    },
+    {
+      "id": "ancestry",
+      "kind": "git.inspect",
+      "config": {
+        "required": false
+      },
+      "inputs": {
+        "repository": {
+          "from": {
+            "node": "params",
+            "port": "repository"
+          }
+        },
+        "revisions": {
+          "from": {
+            "node": "history_metadata",
+            "port": "heads"
+          }
+        },
+        "ancestor_of": {
+          "from": {
+            "node": "ancestry_target",
+            "port": "head"
+          }
+        },
+        "deadline": {
+          "from": {
+            "node": "checkout",
+            "port": "deadline"
+          }
+        }
+      }
+    },
+    {
+      "id": "candidate_state",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "e": "object",
+          "runs": {
+            "list": "object"
+          },
+          "c": "object"
+        },
+        "code": {
+          "remaining": "dyn(e.available ? runs.filter(r,size(e.value.revisions.filter(f, f.reference==r.head_sha && f.available && f.ancestor))>0).map(r,{'run':r,'distance':(e.value.revisions.filter(f, f.reference==r.head_sha && f.available && f.ancestor))[0].distance}) : [])",
+          "has_candidates": "size(e.available ? runs.filter(r,size(e.value.revisions.filter(f, f.reference==r.head_sha && f.available && f.ancestor))>0).map(r,{'run':r,'distance':(e.value.revisions.filter(f, f.reference==r.head_sha && f.available && f.ancestor))[0].distance}) : [])>0",
+          "current": "c",
+          "done": "false",
+          "comparison": "{'base':c.base,'head':c.merge,'scope':'cumulative','previous':null,'reason':e.remaining_ms==0?'Validation discovery deadline reached':(!e.available?'Git ancestry evidence unavailable':'No compatible completed successful validation record')}"
+        }
+      },
+      "inputs": {
+        "e": {
+          "from": {
+            "node": "ancestry",
+            "port": "result"
+          }
+        },
+        "runs": {
+          "from": {
+            "node": "history_metadata",
+            "port": "runs"
+          }
+        },
+        "c": {
+          "from": {
+            "node": "ci_seed",
+            "port": "current"
+          }
+        }
+      }
+    },
+    {
+      "id": "candidate_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "search",
+            "condition": {
+              "source": {
+                "output": "candidate_state.has_candidates",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "ancestry_fallback",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "candidate_state",
+            "port": "comparison"
+          }
+        }
+      }
+    },
+    {
+      "id": "search",
+      "kind": "workflow.loop",
+      "loop": {
+        "max_iterations": 100,
+        "variables": [
+          {
+            "name": "repository",
+            "type": "string"
+          },
+          {
+            "name": "token",
+            "type": {
+              "nullable": "string"
+            }
+          },
+          {
+            "name": "deadline",
+            "type": "uint"
+          },
+          {
+            "name": "current",
+            "type": "object"
+          },
+          {
+            "name": "remaining",
+            "type": {
+              "list": "object"
+            }
+          },
+          {
+            "name": "comparison",
+            "type": "object"
+          },
+          {
+            "name": "done",
+            "type": "bool"
+          }
+        ],
+        "until": {
+          "variable": "done",
+          "operator": "eq",
+          "value": true
+        },
+        "body": {
+          "nodes": [
+            {
+              "id": "pick",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "remaining": {
+                    "list": "object"
+                  }
+                },
+                "code": {
+                  "candidate": "remaining.filter(x, remaining.all(y, x.distance<y.distance || (x.distance==y.distance && (x.run.id>y.run.id || (x.run.id==y.run.id && x.run.run_attempt>=y.run.run_attempt)))))[0]"
+                }
+              },
+              "inputs": {
+                "remaining": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "remaining"
+                  }
+                }
+              }
+            },
+            {
+              "id": "artifact_query",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "k": "object",
+                  "c": "object"
+                },
+                "code": {
+                  "path": "'/repos/'+c.repository+'/actions/runs/'+string(k.run.id)+'/artifacts'",
+                  "query": "{'per_page':100}"
+                }
+              },
+              "inputs": {
+                "k": {
+                  "from": {
+                    "node": "pick",
+                    "port": "candidate"
+                  }
+                },
+                "c": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "current"
+                  }
+                }
+              }
+            },
+            {
+              "id": "artifacts",
+              "kind": "github.read",
+              "config": {
+                "required": false,
+                "pointer": "/artifacts",
+                "fields": {
+                  "id": "/id",
+                  "name": "/name",
+                  "expired": "/expired"
+                }
+              },
+              "inputs": {
+                "path": {
+                  "from": {
+                    "node": "artifact_query",
+                    "port": "path"
+                  }
+                },
+                "query": {
+                  "from": {
+                    "node": "artifact_query",
+                    "port": "query"
+                  }
+                },
+                "token": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "token"
+                  }
+                },
+                "deadline": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "deadline"
+                  }
+                }
+              }
+            },
+            {
+              "id": "artifact_match",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "e": "object",
+                  "k": "object",
+                  "c": "object"
+                },
+                "code": {
+                  "found": "e.available && type(e.value.data)==list && size(e.value.data)<100 && size(e.value.data.filter(a,type(a)==map && type(a.id)==int && a.id>0 && a.name=='pr-validation-'+string(k.run.id)+'-'+string(k.run.run_attempt) && a.expired==false))==1",
+                  "path": "(e.available && type(e.value.data)==list && size(e.value.data)<100 && size(e.value.data.filter(a,type(a)==map && type(a.id)==int && a.id>0 && a.name=='pr-validation-'+string(k.run.id)+'-'+string(k.run.run_attempt) && a.expired==false))==1) ? '/repos/'+c.repository+'/actions/artifacts/'+string((e.value.data.filter(a,type(a)==map && type(a.id)==int && a.id>0 && a.name=='pr-validation-'+string(k.run.id)+'-'+string(k.run.run_attempt) && a.expired==false))[0].id)+'/zip' : ''",
+                  "expired": "e.remaining_ms==0"
+                }
+              },
+              "inputs": {
+                "e": {
+                  "from": {
+                    "node": "artifacts",
+                    "port": "result"
+                  }
+                },
+                "k": {
+                  "from": {
+                    "node": "pick",
+                    "port": "candidate"
+                  }
+                },
+                "c": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "current"
+                  }
+                }
+              }
+            },
+            {
+              "id": "artifact_route",
+              "kind": "builtin.if_else",
+              "config": {
+                "branches": [
+                  {
+                    "id": "read",
+                    "condition": {
+                      "source": {
+                        "output": "artifact_match.found",
+                        "path": ""
+                      },
+                      "operator": "eq",
+                      "value": true
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "artifact_unavailable",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "expired": "bool"
+                },
+                "code": {
+                  "decision": "{'accepted':false,'expired':expired,'reason':expired?'Validation discovery deadline reached':'Recorded validation artifact unavailable'}"
+                }
+              },
+              "inputs": {
+                "expired": {
+                  "from": {
+                    "node": "artifact_match",
+                    "port": "expired"
+                  }
+                }
+              }
+            },
+            {
+              "id": "record",
+              "kind": "github.read",
+              "config": {
+                "required": false,
+                "member": "validation.json"
+              },
+              "inputs": {
+                "path": {
+                  "from": {
+                    "node": "artifact_match",
+                    "port": "path"
+                  }
+                },
+                "token": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "token"
+                  }
+                },
+                "deadline": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "deadline"
+                  }
+                }
+              }
+            },
+            {
+              "id": "record_shape",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "e": "object"
+                },
+                "code": {
+                  "record": "dyn(e.available && type(e.value.data)==map ? e.value.data : {})",
+                  "schema": "e.available && e.value.members==['validation.json'] && type(e.value.data)==map && has(e.value.data.version) && type(e.value.data.version)==int && has(e.value.data.repository) && type(e.value.data.repository)==string && has(e.value.data.pr) && type(e.value.data.pr)==int && has(e.value.data.workflow_id) && type(e.value.data.workflow_id)==int && has(e.value.data.run_id) && type(e.value.data.run_id)==int && has(e.value.data.run_attempt) && type(e.value.data.run_attempt)==int && has(e.value.data.head) && type(e.value.data.head)==string && has(e.value.data.base) && type(e.value.data.base)==string && has(e.value.data.merge) && type(e.value.data.merge)==string && has(e.value.data.tree) && type(e.value.data.tree)==string && has(e.value.data.signature) && type(e.value.data.signature)==map && has(e.value.data.title_check) && type(e.value.data.title_check)==map && has(e.value.data.comparison) && type(e.value.data.comparison)==map && has(e.value.data.coverage) && type(e.value.data.coverage)==map && has(e.value.data.packages) && type(e.value.data.packages)==list && has(e.value.data.title_check.head_sha) && type(e.value.data.title_check.head_sha)==string && has(e.value.data.title_check.conclusion) && type(e.value.data.title_check.conclusion)==string && has(e.value.data.comparison.base) && type(e.value.data.comparison.base)==string && has(e.value.data.comparison.head) && type(e.value.data.comparison.head)==string && has(e.value.data.comparison.scope) && type(e.value.data.comparison.scope)==string && has(e.value.data.comparison.reason) && type(e.value.data.comparison.reason)==string && has(e.value.data.coverage.base) && type(e.value.data.coverage.base)==string && has(e.value.data.coverage.head) && type(e.value.data.coverage.head)==string && has(e.value.data.coverage.tree) && type(e.value.data.coverage.tree)==string && has(e.value.data.coverage.covered) && type(e.value.data.coverage.covered)==int && has(e.value.data.coverage.total) && type(e.value.data.coverage.total)==int && has(e.value.data.coverage.status) && type(e.value.data.coverage.status)==string && has(e.value.data.coverage.target) && (type(e.value.data.coverage.target)==int || type(e.value.data.coverage.target)==double) && e.value.data.packages.all(p,type(p)==string && size(p)>0) && e.value.data.head.matches('^[0-9a-f]{40}([0-9a-f]{24})?$') && e.value.data.base.matches('^[0-9a-f]{40}([0-9a-f]{24})?$') && e.value.data.merge.matches('^[0-9a-f]{40}([0-9a-f]{24})?$') && e.value.data.tree.matches('^[0-9a-f]{40}([0-9a-f]{24})?$') && e.value.data.comparison.base.matches('^[0-9a-f]{40}([0-9a-f]{24})?$')",
+                  "expired": "e.remaining_ms==0"
+                }
+              },
+              "inputs": {
+                "e": {
+                  "from": {
+                    "node": "record",
+                    "port": "result"
+                  }
+                }
+              }
+            },
+            {
+              "id": "compatible_record",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "r": "object",
+                  "valid": "bool",
+                  "expired": "bool",
+                  "c": "object",
+                  "k": "object"
+                },
+                "code": {
+                  "compatible": "valid && r.version==c.version && r.repository==c.repository && r.pr==c.pr && r.workflow_id==c.workflow_id && r.run_id==k.run.id && r.run_attempt==k.run.run_attempt && r.head==k.run.head_sha && r.base==c.base && r.signature==c.signature && r.title_check.head_sha==r.head && r.title_check.conclusion=='success' && r.comparison.head==r.merge && r.comparison.scope in ['incremental','cumulative'] && r.coverage.base==r.comparison.base && r.coverage.head==r.merge && r.coverage.tree==r.tree && r.coverage.total>=0 && r.coverage.total<=1000000000 && r.coverage.covered>=0 && r.coverage.covered<=r.coverage.total && double(r.coverage.target)==c.signature.coverage_target && ((r.coverage.total==0 && r.coverage.status=='not_applicable') || (r.coverage.total>0 && r.coverage.status=='passed' && double(r.coverage.covered)*100.0>=c.signature.coverage_target*double(r.coverage.total)))",
+                  "reason": "expired?'Validation discovery deadline reached':(valid && r.base!=c.base?'Target base changed since the successful validation':(valid && r.signature!=c.signature?'Execution settings changed since the successful validation':'Recorded validation is incompatible or unavailable'))"
+                }
+              },
+              "inputs": {
+                "r": {
+                  "from": {
+                    "node": "record_shape",
+                    "port": "record"
+                  }
+                },
+                "valid": {
+                  "from": {
+                    "node": "record_shape",
+                    "port": "schema"
+                  }
+                },
+                "expired": {
+                  "from": {
+                    "node": "record_shape",
+                    "port": "expired"
+                  }
+                },
+                "c": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "current"
+                  }
+                },
+                "k": {
+                  "from": {
+                    "node": "pick",
+                    "port": "candidate"
+                  }
+                }
+              }
+            },
+            {
+              "id": "compatibility_route",
+              "kind": "builtin.if_else",
+              "config": {
+                "branches": [
+                  {
+                    "id": "inspect",
+                    "condition": {
+                      "source": {
+                        "output": "compatible_record.compatible",
+                        "path": ""
+                      },
+                      "operator": "eq",
+                      "value": true
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "record_unusable",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "reason": "string",
+                  "expired": "bool"
+                },
+                "code": {
+                  "decision": "{'accepted':false,'expired':expired,'reason':reason}"
+                }
+              },
+              "inputs": {
+                "reason": {
+                  "from": {
+                    "node": "compatible_record",
+                    "port": "reason"
+                  }
+                },
+                "expired": {
+                  "from": {
+                    "node": "record_shape",
+                    "port": "expired"
+                  }
+                }
+              }
+            },
+            {
+              "id": "merge_reference",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "r": "object"
+                },
+                "code": {
+                  "commit": "r.merge",
+                  "revisions": "[r.merge]"
+                }
+              },
+              "inputs": {
+                "r": {
+                  "from": {
+                    "node": "record_shape",
+                    "port": "record"
+                  }
+                }
+              }
+            },
+            {
+              "id": "merge_facts",
+              "kind": "git.inspect",
+              "config": {
+                "required": false
+              },
+              "inputs": {
+                "repository": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "repository"
+                  }
+                },
+                "revisions": {
+                  "from": {
+                    "node": "merge_reference",
+                    "port": "revisions"
+                  }
+                },
+                "deadline": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "deadline"
+                  }
+                }
+              }
+            },
+            {
+              "id": "missing_merge",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "e": "object"
+                },
+                "code": {
+                  "missing": "e.available && size(e.value.revisions)==1 && !dyn(e.value.revisions[0]).available"
+                }
+              },
+              "inputs": {
+                "e": {
+                  "from": {
+                    "node": "merge_facts",
+                    "port": "result"
+                  }
+                }
+              }
+            },
+            {
+              "id": "fetch_route",
+              "kind": "builtin.if_else",
+              "config": {
+                "branches": [
+                  {
+                    "id": "fetch",
+                    "condition": {
+                      "source": {
+                        "output": "missing_merge.missing",
+                        "path": ""
+                      },
+                      "operator": "eq",
+                      "value": true
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "existing_merge",
+              "kind": "builtin.identity",
+              "inputs": {
+                "input": {
+                  "from": {
+                    "node": "merge_facts",
+                    "port": "result"
+                  }
+                }
+              }
+            },
+            {
+              "id": "fetch",
+              "kind": "git.fetch",
+              "config": {},
+              "inputs": {
+                "repository": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "repository"
+                  }
+                },
+                "commit": {
+                  "from": {
+                    "node": "merge_reference",
+                    "port": "commit"
+                  }
+                },
+                "deadline": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "deadline"
+                  }
+                }
+              }
+            },
+            {
+              "id": "fetched_route",
+              "kind": "builtin.if_else",
+              "config": {
+                "branches": [
+                  {
+                    "id": "inspect",
+                    "condition": {
+                      "source": {
+                        "output": "fetch.result",
+                        "path": "/available"
+                      },
+                      "operator": "eq",
+                      "value": true
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "id": "failed_fetch",
+              "kind": "builtin.identity",
+              "inputs": {
+                "input": {
+                  "from": {
+                    "node": "fetch",
+                    "port": "result"
+                  }
+                }
+              }
+            },
+            {
+              "id": "fetched_merge",
+              "kind": "git.inspect",
+              "config": {
+                "required": false
+              },
+              "inputs": {
+                "repository": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "repository"
+                  }
+                },
+                "revisions": {
+                  "from": {
+                    "node": "merge_reference",
+                    "port": "revisions"
+                  }
+                },
+                "deadline": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "deadline"
+                  }
+                }
+              }
+            },
+            {
+              "id": "verify_merge",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "e": "object",
+                  "r": "object"
+                },
+                "code": {
+                  "accepted": "e.available && size(e.value.revisions)==1 && dyn(e.value.revisions[0]).available && dyn(e.value.revisions[0]).commit==r.merge && dyn(e.value.revisions[0]).tree==r.tree && dyn(e.value.revisions[0]).parents==[r.base,r.head]",
+                  "expired": "e.remaining_ms==0"
+                }
+              },
+              "inputs": {
+                "r": {
+                  "from": {
+                    "node": "record_shape",
+                    "port": "record"
+                  }
+                },
+                "e": {
+                  "exclusive": [
+                    {
+                      "node": "existing_merge",
+                      "port": "value"
+                    },
+                    {
+                      "node": "fetched_merge",
+                      "port": "result"
+                    },
+                    {
+                      "node": "failed_fetch",
+                      "port": "value"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "id": "merge_decision",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "accepted": "bool",
+                  "expired": "bool",
+                  "r": "object",
+                  "k": "object",
+                  "c": "object"
+                },
+                "code": {
+                  "decision": "{'accepted':accepted,'expired':expired,'reason':expired?'Validation discovery deadline reached':'Recorded Git snapshot does not match validation','comparison':{'base':r.merge,'head':c.merge,'scope':'incremental','previous':{'run_id':k.run.id,'run_attempt':k.run.run_attempt,'merge':r.merge},'reason':'Reusing the nearest compatible successful PR-head ancestor'}}"
+                }
+              },
+              "inputs": {
+                "accepted": {
+                  "from": {
+                    "node": "verify_merge",
+                    "port": "accepted"
+                  }
+                },
+                "expired": {
+                  "from": {
+                    "node": "verify_merge",
+                    "port": "expired"
+                  }
+                },
+                "r": {
+                  "from": {
+                    "node": "record_shape",
+                    "port": "record"
+                  }
+                },
+                "k": {
+                  "from": {
+                    "node": "pick",
+                    "port": "candidate"
+                  }
+                },
+                "c": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "current"
+                  }
+                }
+              }
+            },
+            {
+              "id": "advance",
+              "kind": "builtin.code",
+              "config": {
+                "language": "cel",
+                "inputs": {
+                  "d": "object",
+                  "k": "object",
+                  "remaining": {
+                    "list": "object"
+                  },
+                  "previous": "object",
+                  "c": "object"
+                },
+                "code": {
+                  "remaining": "remaining.filter(x, x.run.id!=k.run.id || x.run.run_attempt!=k.run.run_attempt)",
+                  "comparison": "d.accepted ? d.comparison : {'base':c.base,'head':c.merge,'scope':'cumulative','previous':null,'reason':d.expired || previous.reason=='No compatible completed successful validation record' ? d.reason : previous.reason}",
+                  "done": "d.accepted || d.expired || size(remaining)==1"
+                }
+              },
+              "inputs": {
+                "k": {
+                  "from": {
+                    "node": "pick",
+                    "port": "candidate"
+                  }
+                },
+                "remaining": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "remaining"
+                  }
+                },
+                "previous": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "comparison"
+                  }
+                },
+                "c": {
+                  "from": {
+                    "node": "%loop",
+                    "port": "current"
+                  }
+                },
+                "d": {
+                  "exclusive": [
+                    {
+                      "node": "artifact_unavailable",
+                      "port": "decision"
+                    },
+                    {
+                      "node": "record_unusable",
+                      "port": "decision"
+                    },
+                    {
+                      "node": "merge_decision",
+                      "port": "decision"
+                    }
+                  ]
+                }
+              }
+            },
+            {
+              "id": "assign_remaining",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "remaining"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "advance",
+                    "port": "remaining"
+                  }
+                }
+              }
+            },
+            {
+              "id": "assign_comparison",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "comparison"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "advance",
+                    "port": "comparison"
+                  }
+                }
+              }
+            },
+            {
+              "id": "assign_done",
+              "kind": "workflow.loop_assign",
+              "config": {
+                "variable": "done"
+              },
+              "inputs": {
+                "value": {
+                  "from": {
+                    "node": "advance",
+                    "port": "done"
+                  }
+                }
+              }
+            }
+          ],
+          "edges": [
+            {
+              "from_node": "artifact_match",
+              "from_output": "found",
+              "to_node": "artifact_route"
+            },
+            {
+              "from_node": "artifact_route",
+              "from_output": "else",
+              "to_node": "artifact_unavailable"
+            },
+            {
+              "from_node": "artifact_route",
+              "from_output": "read",
+              "to_node": "record"
+            },
+            {
+              "from_node": "compatible_record",
+              "from_output": "compatible",
+              "to_node": "compatibility_route"
+            },
+            {
+              "from_node": "compatibility_route",
+              "from_output": "else",
+              "to_node": "record_unusable"
+            },
+            {
+              "from_node": "compatibility_route",
+              "from_output": "inspect",
+              "to_node": "merge_reference"
+            },
+            {
+              "from_node": "missing_merge",
+              "from_output": "missing",
+              "to_node": "fetch_route"
+            },
+            {
+              "from_node": "fetch_route",
+              "from_output": "else",
+              "to_node": "existing_merge"
+            },
+            {
+              "from_node": "fetch_route",
+              "from_output": "fetch",
+              "to_node": "fetch"
+            },
+            {
+              "from_node": "fetch",
+              "from_output": "result",
+              "to_node": "fetched_route"
+            },
+            {
+              "from_node": "fetched_route",
+              "from_output": "else",
+              "to_node": "failed_fetch"
+            },
+            {
+              "from_node": "fetched_route",
+              "from_output": "inspect",
+              "to_node": "fetched_merge"
+            }
+          ]
+        }
+      },
+      "inputs": {
+        "current": {
+          "from": {
+            "node": "candidate_state",
+            "port": "current"
+          }
+        },
+        "remaining": {
+          "from": {
+            "node": "candidate_state",
+            "port": "remaining"
+          }
+        },
+        "comparison": {
+          "from": {
+            "node": "candidate_state",
+            "port": "comparison"
+          }
+        },
+        "done": {
+          "from": {
+            "node": "candidate_state",
+            "port": "done"
+          }
+        },
+        "repository": {
+          "from": {
+            "node": "params",
+            "port": "repository"
+          }
+        },
+        "token": {
+          "from": {
+            "node": "params",
+            "port": "token"
+          }
+        },
+        "deadline": {
+          "from": {
+            "node": "checkout",
+            "port": "deadline"
+          }
+        }
+      }
+    },
+    {
+      "id": "require_search_completion",
+      "kind": "builtin.assert",
+      "config": {
+        "message": "Baseline search terminated without a complete decision",
+        "condition": {
+          "source": {
+            "output": "search.done",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
+        }
+      }
+    },
+    {
+      "id": "searched_comparison",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "search",
+            "port": "comparison"
+          }
+        }
+      }
+    },
+    {
+      "id": "ci_request",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "comparison": "object",
+          "c": "object"
+        },
+        "code": {
+          "request": "{'execution':{'enabled':false},'mode':'snapshot','base':comparison.base,'head':comparison.head,'analyze':false,'require_checkout':true,'options':{'configuration':{'all_features':true,'target':c.signature.target},'exact_tests':false},'validation':{'context':c,'comparison':comparison}}"
+        }
+      },
+      "inputs": {
+        "c": {
+          "from": {
+            "node": "ci_seed",
+            "port": "current"
+          }
+        },
+        "comparison": {
+          "exclusive": [
+            {
+              "node": "explicit_cumulative",
+              "port": "value"
+            },
+            {
+              "node": "history_fallback",
+              "port": "comparison"
+            },
+            {
+              "node": "ancestry_fallback",
+              "port": "value"
+            },
+            {
+              "node": "searched_comparison",
+              "port": "value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "changes",
+      "kind": "git.diff",
+      "config": {},
+      "inputs": {
+        "repository": {
+          "from": {
+            "node": "params",
+            "port": "repository"
+          }
+        },
+        "request": {
+          "exclusive": [
+            {
+              "node": "local_request",
+              "port": "request"
+            },
+            {
+              "node": "ci_request",
+              "port": "request"
+            }
+          ]
+        },
+        "artifacts": {
+          "from": {
+            "node": "params",
+            "port": "artifacts"
+          }
+        }
+      }
+    },
+    {
+      "id": "analyze",
+      "kind": "lsp.analyze",
+      "config": {
+        "command": "rust-analyzer",
+        "profile": "rust_analyzer",
+        "extensions": [
+          "rs"
+        ],
+        "deadline_ms": 120000
+      },
+      "inputs": {
+        "request": {
+          "from": {
+            "node": "changes",
+            "port": "request"
+          }
+        },
+        "context": {
+          "from": {
+            "node": "changes",
+            "port": "context"
+          }
+        }
+      }
+    },
+    {
+      "id": "plan",
+      "kind": "test_affected.plan",
+      "config": {},
+      "inputs": {
+        "outcome": {
+          "from": {
+            "node": "analyze",
+            "port": "outcome"
+          }
+        },
+        "context": {
+          "from": {
+            "node": "analyze",
+            "port": "context"
+          }
+        }
+      }
+    },
+    {
+      "id": "execution_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "run",
+            "condition": {
+              "source": {
+                "output": "plan.execution",
+                "path": "/enabled"
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "execution_directory",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "plan": "object"
+        },
+        "code": {
+          "cwd": "plan.repository"
+        }
+      },
+      "inputs": {
+        "plan": {
+          "from": {
+            "node": "plan",
+            "port": "plan"
+          }
+        }
+      }
+    },
+    {
+      "id": "run_tests",
+      "kind": "process.run",
+      "config": {
+        "program": "python3",
+        "args": [
+          "tools/test-affected/run-tests.py",
+          "-"
+        ],
+        "output": "json"
+      },
+      "inputs": {
+        "cwd": {
+          "from": {
+            "node": "execution_directory",
+            "port": "cwd"
+          }
+        },
+        "stdin_json": {
+          "from": {
+            "node": "plan",
+            "port": "plan"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "name": "plan",
+      "node": "plan",
+      "port": "plan"
+    },
+    {
+      "name": "validation",
+      "node": "plan",
+      "port": "validation"
+    },
+    {
+      "name": "execution",
+      "node": "run_tests",
+      "port": "result",
+      "optional": true
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "params",
+      "from_output": "ci",
+      "to_node": "environment"
+    },
+    {
+      "from_node": "environment",
+      "from_output": "else",
+      "to_node": "local_settings"
+    },
+    {
+      "from_node": "local_settings",
+      "to_node": "require_local_settings"
+    },
+    {
+      "from_node": "require_local_settings",
+      "to_node": "local_request"
+    },
+    {
+      "from_node": "environment",
+      "from_output": "ci",
+      "to_node": "checkout"
+    },
+    {
+      "from_node": "environment",
+      "from_output": "ci",
+      "to_node": "ci_settings"
+    },
+    {
+      "from_node": "ci_settings",
+      "to_node": "require_ci_settings"
+    },
+    {
+      "from_node": "require_ci_settings",
+      "to_node": "current_run"
+    },
+    {
+      "from_node": "checkout_identity",
+      "to_node": "require_checkout"
+    },
+    {
+      "from_node": "require_checkout",
+      "to_node": "current_run"
+    },
+    {
+      "from_node": "current_identity",
+      "to_node": "require_current_identity"
+    },
+    {
+      "from_node": "require_current_identity",
+      "to_node": "manual"
+    },
+    {
+      "from_node": "manual",
+      "from_output": "manual",
+      "to_node": "manual_path"
+    },
+    {
+      "from_node": "manual_identity",
+      "to_node": "require_manual_identity"
+    },
+    {
+      "from_node": "require_manual_identity",
+      "to_node": "manual_context"
+    },
+    {
+      "from_node": "manual",
+      "from_output": "else",
+      "to_node": "event_context"
+    },
+    {
+      "from_node": "ci_seed",
+      "from_output": "search",
+      "to_node": "search_policy"
+    },
+    {
+      "from_node": "search_policy",
+      "from_output": "else",
+      "to_node": "explicit_cumulative"
+    },
+    {
+      "from_node": "search_policy",
+      "from_output": "search",
+      "to_node": "history"
+    },
+    {
+      "from_node": "history_metadata",
+      "from_output": "usable",
+      "to_node": "history_route"
+    },
+    {
+      "from_node": "history_route",
+      "from_output": "else",
+      "to_node": "history_fallback"
+    },
+    {
+      "from_node": "history_route",
+      "from_output": "inspect",
+      "to_node": "ancestry_target"
+    },
+    {
+      "from_node": "candidate_state",
+      "from_output": "has_candidates",
+      "to_node": "candidate_route"
+    },
+    {
+      "from_node": "candidate_route",
+      "from_output": "else",
+      "to_node": "ancestry_fallback"
+    },
+    {
+      "from_node": "candidate_route",
+      "from_output": "search",
+      "to_node": "search"
+    },
+    {
+      "from_node": "search",
+      "to_node": "require_search_completion",
+      "from_output": "done"
+    },
+    {
+      "from_node": "require_search_completion",
+      "to_node": "searched_comparison"
+    },
+    {
+      "from_node": "plan",
+      "from_output": "execution",
+      "to_node": "execution_route"
+    },
+    {
+      "from_node": "execution_route",
+      "from_output": "run",
+      "to_node": "execution_directory"
+    }
+  ]
+}

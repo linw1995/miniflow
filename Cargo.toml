@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/mf-*", "crates/builtin-nodes/*"]
+members = ["crates/mf-*", "crates/builtin-nodes/*", "tools/test-affected/nodes/*"]
 default-members = ["crates/mf-cli"]
 resolver = "3"
 
@@ -23,6 +23,9 @@ mfn-code = { path = "crates/builtin-nodes/code", version = "0.1.0" }
 mfn-core = { path = "crates/builtin-nodes/core", version = "0.1.0" }
 mfn-llm = { path = "crates/builtin-nodes/llm", version = "0.1.0" }
 
+# Repository developer tooling.
+mfn-lsp = { path = "tools/test-affected/nodes/lsp" }
+
 # Serialization and error reporting.
 serde = "1.0.229"
 serde_json = "1.0.151"
@@ -45,6 +48,9 @@ prettyplease = "0.3.0"
 proc-macro2 = "1.0.107"
 quote = "1.0.47"
 syn = { version = "3.0.6", default-features = false }
+
+# Language-server protocol types.
+lsp-types = "0.97.0"
 
 # Telemetry APIs, exporters, and protobuf messages.
 opentelemetry = { version = "0.33.0", default-features = false }
@@ -87,6 +93,7 @@ uuid = "1.26.1"
 flate2 = "1.1.10"
 tar = "0.4.46"
 tempfile = "3.27.0"
+zip = { version = "9.0.5", default-features = false }
 
 # Executable metadata inspection.
 object = { version = "0.40.0", default-features = false, features = ["read_core", "elf", "macho", "std"] }

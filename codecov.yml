@@ -6,16 +6,10 @@ coverage:
       default:
         flags: [rust]
         target: auto
-    patch:
-      default:
-        flags: [rust, rust-affected]
-        target: auto
-        only_pulls: true
+    patch: false
 
 flags:
   rust:
-    carryforward: false
-  rust-affected:
     carryforward: false
 
 comment:

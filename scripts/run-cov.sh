@@ -4,6 +4,14 @@ set -euo pipefail
 
 workspace_root="$(pwd -P)"
 coverage_dir="${workspace_root}/target/coverage"
+coverage_input_environment="$(python3 - <<'PYTHON'
+import json, os
+print(json.dumps({name: os.environ[name] for name in (
+    "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "CARGO_INCREMENTAL",
+    "CARGO_PROFILE_DEV_DEBUG", "CARGO_PROFILE_TEST_DEBUG",
+) if name in os.environ}))
+PYTHON
+)"
 export CARGO_INCREMENTAL=0
 export CARGO_TARGET_DIR="${coverage_dir}/build"
 export RUSTFLAGS="-Cinstrument-coverage -Ccodegen-units=1 -Copt-level=0"
@@ -47,9 +55,77 @@ prepare_coverage() {
 
   # grcov scans every binary in its search directory. Remove old workspace mappings while retaining dependencies.
   cargo clean --workspace --profile dev
+  python3 - "$coverage_input_environment" <<'PYTHON'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+
+def git(*args):
+    return subprocess.check_output(["git", *args], stderr=subprocess.DEVNULL, text=True).strip()
+
+head = tree = None
+dirty = True
+initial_profiles = []
+try:
+    if Path(git("rev-parse", "--show-toplevel")).resolve() == Path.cwd().resolve():
+        head, tree = git("rev-parse", "HEAD"), git("rev-parse", "HEAD^{tree}")
+        dirty = bool(git("status", "--porcelain", "--untracked-files=all"))
+        initial_profiles = [p for p in os.fsdecode(subprocess.check_output([
+            "git", "ls-files", "--others", "--exclude-standard", "-z", "--", "*.profraw"
+        ])).split("\0") if p]
+except subprocess.CalledProcessError:
+    pass
+identity = {"head": head, "tree": tree, "dirty": dirty, "initial_profiles": initial_profiles,
+            "input_environment": json.loads(sys.argv[1]),
+            "toolchain": subprocess.check_output(["rustc", "-vV"], text=True),
+            "features": "all", "target": os.environ.get("CARGO_BUILD_TARGET"),
+            "profile": os.environ.get("NEXTEST_PROFILE", "default")}
+Path("target/coverage/result/source.json").write_text(json.dumps(identity) + "\n")
+PYTHON
+}
+
+collect_profiles() {
+  # Credential-isolated subprocesses may clear LLVM_PROFILE_FILE. Only collect
+  # outputs created during this preparation session, never pre-existing profiles.
+  python3 - "$coverage_dir" <<'PYTHON'
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import uuid
+import sys
+
+coverage = Path(sys.argv[1])
+identity = json.loads((coverage / "result/source.json").read_text())
+if identity["head"] is not None:
+    initial = set(identity["initial_profiles"])
+    paths = os.fsdecode(subprocess.check_output([
+        "git", "ls-files", "--others", "--exclude-standard", "-z", "--", "*.profraw"
+    ])).split("\0")
+    for name in filter(None, paths):
+        source = Path(name)
+        if name in initial or source.is_symlink() or not source.is_file():
+            continue
+        if source.name == "default.profraw" or source.name.startswith("default_"):
+            shutil.move(source, coverage / "data" / f"subprocess-{uuid.uuid4().hex}.profraw")
+PYTHON
 }
 
 report_coverage() {
+  collect_profiles
+  # Compiler-cache backups can contain coverage maps from older source revisions.
+  # Keep the build cache intact and expose only published Cargo artifacts to grcov.
+  rm -rf "${coverage_dir}/report-binaries"
+  python3 - "${CARGO_TARGET_DIR}/debug/deps" "${coverage_dir}/report-binaries" <<'PYTHON'
+import os
+import shutil
+import sys
+shutil.copytree(sys.argv[1], sys.argv[2], copy_function=os.link,
+                ignore=shutil.ignore_patterns(".kache-prestage-*"))
+PYTHON
   grcov "${coverage_dir}/data" \
     --llvm \
     --branch \
@@ -57,27 +133,32 @@ report_coverage() {
     --ignore-not-existing \
     --ignore '../*' \
     --ignore '/*' \
-    --binary-path "${CARGO_TARGET_DIR}/debug/deps" \
+    --binary-path "${coverage_dir}/report-binaries" \
     --output-types html,cobertura,lcov,markdown \
     --output-path "${coverage_dir}/result"
 
   test -s "${coverage_dir}/result/lcov"
   test -s "${coverage_dir}/result/cobertura.xml"
   cp "${coverage_dir}/result/lcov" "${coverage_dir}/result/lcov.info"
+  rm -rf "${coverage_dir}/report-binaries"
 }
 
 # CI keeps one instrumented build and accumulates profiles across package steps.
 case "${1:-}" in
   --test-package)
-    [[ $# -eq 2 && -n "$2" ]]
+    [[ $# -ge 2 && -n "$2" ]]
+    selected_package="$2"
+    shift 2
     MF_TEST_BUILD_CACHE_SESSION="$(cat "${coverage_dir}/build-cache-session")"
     export MF_TEST_BUILD_CACHE_SESSION
     # Some packages, such as derive macros, are tested only by their consumers.
+    status=0
     cargo nextest run \
       --cargo-metadata "${coverage_dir}/cargo-metadata.json" \
       --binaries-metadata "${coverage_dir}/binaries.json" \
-      -E "package(=$2)" --no-tests warn
-    exit 0
+      -E "package(=$selected_package)" --no-tests warn "$@" || status=$?
+    collect_profiles
+    exit "$status"
     ;;
   --prune-cache)
     [[ $# -eq 1 ]]
@@ -109,7 +190,8 @@ test_packages=(--workspace)
 if [[ "${1:-}" == "--affected-plan" ]]; then
   plan="${2:?--affected-plan requires a JSON plan path}"
   shift 2
-  jq -e '(.packages | type == "array") and all(.packages[]; type == "string" and length > 0)' "$plan" > /dev/null
+  jq -e '(.packages | type == "array") and all(.packages[]; type == "string" and length > 0)
+    and ((has("tests") | not) or .tests == [])' "$plan" > /dev/null
   test_packages=()
   while IFS= read -r package; do
     test_packages+=(-p "$package")
@@ -129,5 +211,10 @@ if [[ "$phase" == "prepare" ]]; then
     --list-type binaries-only --message-format json > "${coverage_dir}/binaries.json"
   exit 0
 fi
-cargo nextest run --locked --all-features "${test_packages[@]}" "$@"
+status=0
+cargo nextest run --locked --all-features "${test_packages[@]}" "$@" || status=$?
+collect_profiles
+if [[ "$status" -ne 0 ]]; then
+  exit "$status"
+fi
 report_coverage
