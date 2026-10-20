@@ -1577,7 +1577,7 @@ fn enqueue_emission(
     emission: EventEmission,
 ) -> Result<MessageId, StreamError> {
     let domain = plan.output_domain(index);
-    ExecutionContext::for_message(&plan.nodes()[index], emission.result.clone()).context(
+    crate::ExecutionOutputs::validate_result(&plan.nodes()[index], &emission.result).context(
         WorkflowSnafu {
             message: MessageId {
                 domain,

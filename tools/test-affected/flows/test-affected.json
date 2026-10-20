@@ -298,14 +298,14 @@
       "id": "require_local_settings",
       "kind": "builtin.assert",
       "config": {
-        "message": "Local comparison mode, precision, or configuration is invalid"
-      },
-      "inputs": {
+        "message": "Local comparison mode, precision, or configuration is invalid",
         "condition": {
-          "from": {
-            "node": "local_settings",
-            "port": "valid"
-          }
+          "source": {
+            "output": "local_settings.valid",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
         }
       }
     },
@@ -410,14 +410,14 @@
       "id": "require_checkout",
       "kind": "builtin.assert",
       "config": {
-        "message": "CI planning requires a clean two-parent merge checkout with complete history"
-      },
-      "inputs": {
+        "message": "CI planning requires a clean two-parent merge checkout with complete history",
         "condition": {
-          "from": {
-            "node": "checkout_identity",
-            "port": "valid"
-          }
+          "source": {
+            "output": "checkout_identity.valid",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
         }
       }
     },
@@ -581,14 +581,14 @@
       "id": "require_ci_settings",
       "kind": "builtin.assert",
       "config": {
-        "message": "CI planning requires valid PR parameters and does not support local test execution"
-      },
-      "inputs": {
+        "message": "CI planning requires valid PR parameters and does not support local test execution",
         "condition": {
-          "from": {
-            "node": "ci_settings",
-            "port": "valid"
-          }
+          "source": {
+            "output": "ci_settings.valid",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
         }
       }
     },
@@ -665,14 +665,14 @@
       "id": "require_current_identity",
       "kind": "builtin.assert",
       "config": {
-        "message": "Current PR, workflow attempt, and tested merge identities disagree"
-      },
-      "inputs": {
+        "message": "Current PR, workflow attempt, and tested merge identities disagree",
         "condition": {
-          "from": {
-            "node": "current_identity",
-            "port": "valid"
-          }
+          "source": {
+            "output": "current_identity.valid",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
         }
       }
     },
@@ -785,14 +785,14 @@
       "id": "require_manual_identity",
       "kind": "builtin.assert",
       "config": {
-        "message": "Manual PR validation requires the current pinned PR merge snapshot"
-      },
-      "inputs": {
+        "message": "Manual PR validation requires the current pinned PR merge snapshot",
         "condition": {
-          "from": {
-            "node": "manual_identity",
-            "port": "valid"
-          }
+          "source": {
+            "output": "manual_identity.valid",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
         }
       }
     },
@@ -1991,14 +1991,14 @@
       "id": "require_search_completion",
       "kind": "builtin.assert",
       "config": {
-        "message": "Baseline search terminated without a complete decision"
-      },
-      "inputs": {
+        "message": "Baseline search terminated without a complete decision",
         "condition": {
-          "from": {
-            "node": "search",
-            "port": "done"
-          }
+          "source": {
+            "output": "search.done",
+            "path": ""
+          },
+          "operator": "eq",
+          "value": true
         }
       }
     },
@@ -2229,6 +2229,10 @@
       "to_node": "local_settings"
     },
     {
+      "from_node": "local_settings",
+      "to_node": "require_local_settings"
+    },
+    {
       "from_node": "require_local_settings",
       "to_node": "local_request"
     },
@@ -2243,12 +2247,24 @@
       "to_node": "ci_settings"
     },
     {
+      "from_node": "ci_settings",
+      "to_node": "require_ci_settings"
+    },
+    {
       "from_node": "require_ci_settings",
       "to_node": "current_run"
     },
     {
+      "from_node": "checkout_identity",
+      "to_node": "require_checkout"
+    },
+    {
       "from_node": "require_checkout",
       "to_node": "current_run"
+    },
+    {
+      "from_node": "current_identity",
+      "to_node": "require_current_identity"
     },
     {
       "from_node": "require_current_identity",
@@ -2258,6 +2274,10 @@
       "from_node": "manual",
       "from_output": "manual",
       "to_node": "manual_path"
+    },
+    {
+      "from_node": "manual_identity",
+      "to_node": "require_manual_identity"
     },
     {
       "from_node": "require_manual_identity",
@@ -2312,6 +2332,11 @@
       "from_node": "candidate_route",
       "from_output": "search",
       "to_node": "search"
+    },
+    {
+      "from_node": "search",
+      "to_node": "require_search_completion",
+      "from_output": "done"
     },
     {
       "from_node": "require_search_completion",

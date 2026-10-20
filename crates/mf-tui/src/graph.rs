@@ -1212,6 +1212,25 @@ mod rendering_tests {
     use super::*;
     use routing::{Point, RoutingStats};
 
+    #[test]
+    fn incomplete_node_details_distinguish_last_known_status_from_missing_history() {
+        let layout = crossing_layout(EdgeKind::Data, EdgeKind::Control, true);
+        let node = &layout.nodes[0];
+        let mut observed = NodeObservation::pending(&node.id, &node.kind);
+        observed.status = NodeStatus::Interrupted;
+        observed.possibly_missing_events = true;
+        observed.last_known = Some(NodeStatus::Running);
+        assert_eq!(
+            node_detail(node, Some(&observed), 0),
+            "last running; missing"
+        );
+        observed.last_known = None;
+        assert_eq!(
+            node_detail(node, Some(&observed), 0),
+            "missing events | fixture.node"
+        );
+    }
+
     fn crossing_layout(
         horizontal: EdgeKind,
         vertical: EdgeKind,

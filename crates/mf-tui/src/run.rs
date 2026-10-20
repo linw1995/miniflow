@@ -1639,6 +1639,51 @@ mod tests {
     }
 
     #[test]
+    fn incomplete_invocations_remain_visible_in_node_and_workflow_details() {
+        use crate::state::{NodeStatus, StreamInvocationObservation, StreamSnapshot};
+        use mf_telemetry::stream::{StreamIdentity, StreamTrigger};
+
+        let mut snapshot = crate::state::SessionState::new(scope_fixture(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let node = &mut snapshot.nodes[0];
+        node.status = NodeStatus::Interrupted;
+        node.possibly_missing_events = true;
+        node.last_known = Some(NodeStatus::Running);
+        snapshot.stream = Some(StreamSnapshot {
+            invocations: vec![StreamInvocationObservation {
+                identity: StreamIdentity {
+                    invocation: 1,
+                    trigger: StreamTrigger::Startup,
+                    message: None,
+                    parent: None,
+                },
+                path: vec![],
+                node: node.clone(),
+                loop_summary: None,
+                completed_passes: 0,
+                active_pass: None,
+            }],
+            ..Default::default()
+        });
+        let capture = CaptureView {
+            stdout_open: false,
+            stderr_open: false,
+            stderr_tail: String::new(),
+            stderr_dropped: 0,
+            error: None,
+        };
+        let text = details_text(snapshot.nodes.first(), None, &snapshot, &capture, "");
+        assert!(text.contains("Status: Interrupted"));
+        assert!(text.contains("Node observation may be incomplete"));
+        assert!(text.contains("Unresolved invocation outcomes: 1"));
+
+        let text = details_text(None, None, &snapshot, &capture, "");
+        assert!(!text.contains("Node observation may be incomplete"));
+        assert!(text.contains("Unresolved invocation outcomes: 1"));
+    }
+
+    #[test]
     fn observation_elapsed_stops_after_process_completion() {
         let mut command = Command::new("sh");
         command.args(["-c", "exit 0"]);

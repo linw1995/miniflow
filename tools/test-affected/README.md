@@ -13,6 +13,13 @@ It produces a test plan and optional validation provenance; a separate script co
 never downloaded automatically. Ordinary tests use a local fake server. Use `nix develop` for tools
 and the pinned rust-analyzer when running real-server checks.
 
+Invariant checks reuse the upstream `builtin.assert` structured conditions without input or output ports.
+Explicit node-success edges order Task predicate producers, assertions, and dependent Tasks.
+The search Loop gates its assertion through the `done` output prerequisite because Loop containers
+cannot source node-success edges. Condition references alone do not schedule execution.
+Standalone interruption uses the upstream runner's cancellation handling, while providers and
+the test consumer retain ownership of child-process cleanup.
+
 ```sh
 nix develop --command cargo check -p mfn-lsp -p mfn-test-affected
 nix develop --command python3 -m unittest discover -s scripts -p test_tool_boundaries.py

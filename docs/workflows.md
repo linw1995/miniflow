@@ -94,7 +94,7 @@ Declare the package for each built-in kind you use. `mfn-core` provides the basi
 | `mfn-core` | [`builtin.parameters`](#parameters) | Named parameters with types, optional `env` and `default`, and `secret` (default `true`) | One typed startup input per parameter | One matching typed output per parameter |
 | `mfn-core` | `builtin.identity` | None | Required `input`: any value | `value`: the unchanged input, with its known type |
 | `mfn-core` | `builtin.if_else` | Nonempty ordered `branches` | None; activated by execution prerequisites | One boolean activation output per branch, plus `else` |
-| `mfn-core` | `builtin.assert` | Static failure `message` | Boolean `condition` | `passed` forwards true with its metadata; false fails execution |
+| `mfn-core` | [`builtin.assert`](#assertions) | Required structured `condition` and static failure `message` | None; reads explicit upstream outputs from context | None; false fails execution |
 | `mfn-core` | `builtin.iteration` | Body graph, mode, and item error policy | Required `items`: array or object | `results`: collected array |
 | `mfn-core` | [`builtin.batch`](#batch-collection) | Positive `max_items` and `max_wait_ms`; streaming mode | Required `item`: `T` | `items`: whole ordered `List(T)` batches |
 | `mfn-core` | [`workflow.loop`](#structured-loop) | Top-level `loop`: required `max_iterations`, `variables`, and `body`; optional `until` | One required initial-value input per variable | One required final-value output per variable |
@@ -179,6 +179,45 @@ Run the complete [scalar example](../examples/cel-scalar.json) or [typed-list ex
 with the [repository development commands](compiling.md#repository-development). They produce `{"doubled":42}`
 and `{"doubled":[2,4]}` respectively. Replace the examples' local package paths with published package versions
 when compiling outside the checkout.
+
+### Assertions
+
+`builtin.assert` uses the same structured `condition` as [IfElse](#if-else-if-and-else): `source`, `operator`,
+and an optional comparison `value`. It succeeds when the condition matches and fails execution with its configured
+static `message` otherwise. Invalid conditions fail at build time; unavailable comparison operands and evaluation
+errors fail execution with source, path, and operator context. Diagnostics do not include source values. Keep secrets
+out of the static message.
+
+Assert has no input or output ports. Condition references must name an explicit upstream output and do not add execution
+dependencies. In version `2026-10-19`, use node-success edges to order the producer, assertion, and subsequent Task:
+
+```json
+{
+  "nodes": [
+    {
+      "id": "validate",
+      "kind": "builtin.assert",
+      "config": {
+        "condition": {
+          "source": {"output": "check.result", "path": "/valid"},
+          "operator": "eq",
+          "value": true
+        },
+        "message": "current identity is inconsistent"
+      }
+    }
+  ],
+  "edges": [
+    {"from_node": "check", "to_node": "validate"},
+    {"from_node": "validate", "to_node": "continue"}
+  ]
+}
+```
+
+This fragment assumes `check.result` contains a `valid` field and `continue` is another Task in the same scope.
+All IfElse operators, JSON Pointer rules, numeric comparisons, and existence semantics apply to Assert. Use Code for
+compound expressions, then assert its boolean result with `eq` and `value: true`.
+An assertion on a skipped branch is itself skipped and does not activate its success dependents.
 
 ### Parameters
 

@@ -4,6 +4,7 @@ mod context;
 mod definition;
 mod execution_domains;
 mod execution_inputs;
+mod execution_outputs;
 mod flow;
 #[cfg(feature = "async")]
 mod future_execution;
@@ -36,8 +37,8 @@ pub use cancellation::Cancelled;
 pub use cancellation::StreamCancellation;
 pub use config_template::{ConfigTemplate, ConfigTemplateError};
 pub use context::{
-    ContextValue, ExecutionContext, ExecutionDependency, ExecutionScope, GeneratedNodeResult,
-    NodeResult, TypedNodeResult, execute_generated_node_in_context, execute_node_in_context,
+    ExecutionContext, ExecutionDependency, ExecutionScope, GeneratedNodeResult, NodeResult,
+    TypedNodeResult, execute_generated_node_in_context, execute_node_in_context,
     execute_resolved_node_in_context, select_context_output,
 };
 pub use definition::{
@@ -51,6 +52,7 @@ pub use definition::{
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
 pub use execution_inputs::{ExecutionInputs, InputResolution, resolve_workflow_inputs};
+pub use execution_outputs::{ContextValue, ExecutionOutputs};
 pub use flow::{
     Flow, FlowConnection, FlowNode, FlowOutput, FlowOutputs, FlowPlan, FlowRuntime,
     GeneratedDomainExecutor, NodeId, RuntimeOptions, TaskFlowNode,

@@ -76,14 +76,14 @@ and MUST NOT change either node's JSON or skip behavior.
 
 ### Requirement: Assert an explicit Flow invariant
 
-The core provider SHALL expose `builtin.assert` as a Task with one boolean condition input and a static configured diagnostic. True SHALL forward the original value and sensitivity through a passed output. False SHALL fail execution without publishing an output or exposing the input value. Invalid inputs and cancellation SHALL remain errors.
+The core provider SHALL expose `builtin.assert` as a Task with an IfElse-compatible structured condition, a static diagnostic, and no ports. A match SHALL succeed; a mismatch SHALL fail without exposing source values. Invalid conditions, unavailable comparison operands, and cancellation SHALL remain errors. Explicit prerequisites SHALL order producers before assertions, whose success edges SHALL gate dependent Tasks. Condition references SHALL NOT add execution dependencies.
 
 #### Scenario: Stop invalid current identity
 
 - **WHEN** a Code predicate produces false for a required execution invariant
 - **THEN** the assertion fails with its configured diagnostic and downstream planning does not execute
 
-#### Scenario: Preserve a sensitive successful condition
+#### Scenario: Gate dependent work without forwarding values
 
-- **WHEN** a true condition carries secret metadata
-- **THEN** the passed output retains its shared identity and metadata
+- **WHEN** a condition compares an upstream boolean output with true and the assertion completes
+- **THEN** node-success dependencies permit downstream work without publishing a passed output or disclosing the condition value

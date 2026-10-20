@@ -72,20 +72,33 @@ fn workflow_manifest() -> Result<mf_runtime::WorkflowManifest, mf_runtime::Workf
 }
 
 fn main() -> std::process::ExitCode {
-    match run() {
+    #[cfg(unix)]
+    let mut signals = match mf_runtime::RunnerSignals::new() {
+        Ok(signals) => signals,
+        Err(error) => {
+            eprintln!("{error}");
+            return std::process::ExitCode::FAILURE;
+        }
+    };
+    let result = run(#[cfg(unix)] &mut signals);
+    let code = match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
             if let Some(mf_runtime::RunnerArgumentError::Cli { source }) = error.downcast_ref() {
                 let _ = source.print();
-                return std::process::ExitCode::from(source.exit_code() as u8);
+                std::process::ExitCode::from(source.exit_code() as u8)
+            } else {
+                eprintln!("{error}");
+                std::process::ExitCode::FAILURE
             }
-            eprintln!("{error}");
-            std::process::ExitCode::FAILURE
         }
-    }
+    };
+    #[cfg(unix)]
+    let code = signals.exit_code().unwrap_or(code);
+    code
 }
 
-fn run() -> Result<(), Box<dyn std::error::Error>> {
+fn run(#[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<(), Box<dyn std::error::Error>> {
     let manifest = workflow_manifest()?;
     let targets: Vec<mf_runtime::NodeTarget> = serde_json::from_str(
         include_str!(concat!(env!("OUT_DIR"), "/node-targets.json")),
@@ -95,14 +108,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     )?;
     if let Some(id) = invocation.node.as_deref() {
         let target = mf_runtime::NodeTarget::find(&targets, id)?;
-        return execute_selected(target, invocation.inputs, invocation.context, invocation.verbose);
+        return execute_selected(target, invocation.inputs, invocation.context, invocation.verbose, #[cfg(unix)] signals);
     }
     let arguments = invocation.inputs;
     #[cfg(feature = "streaming")]
-    { execute_stream(arguments, invocation.verbose) }
+    { execute_stream(arguments, invocation.verbose, #[cfg(unix)] signals) }
     #[cfg(not(feature = "streaming"))]
     {
-        let outputs = execute(arguments, invocation.verbose)?;
+        let outputs = execute(arguments, invocation.verbose, #[cfg(unix)] signals)?;
         println!("{}", serde_json::to_string(&outputs)?);
         Ok(())
     }
@@ -113,10 +126,9 @@ fn execute_selected(
     inputs: mf_runtime::WorkflowArguments,
     context: mf_runtime::WorkflowArguments,
     verbose: u8,
+    #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut stdio = mf_runtime::StreamStdio::claim()?;
-    #[cfg(unix)]
-    let mut signals = mf_runtime::RunnerSignals::new()?;
     #[cfg(feature = "telemetry")]
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
@@ -187,10 +199,8 @@ fn execute_selected(
 }
 
 #[cfg(feature = "streaming")]
-fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Result<(), Box<dyn std::error::Error>> {
+fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<(), Box<dyn std::error::Error>> {
     let mut stdio = mf_runtime::StreamStdio::claim()?;
-    #[cfg(unix)]
-    let mut signals = mf_runtime::RunnerSignals::new()?;
     #[cfg(feature = "telemetry")]
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
@@ -276,7 +286,7 @@ fn capture_requested() -> bool {
 }
 
 #[cfg(not(feature = "streaming"))]
-fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     #[cfg(feature = "telemetry")]
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
@@ -295,7 +305,7 @@ fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Result<mf_r
                 #[cfg(not(feature = "telemetry"))]
                 eprintln!("data history unavailable: recompile the runner without --no-telemetry");
             }
-            return execute_workflow(None, None, arguments);
+            return execute_workflow(None, None, arguments, #[cfg(unix)] signals);
         };
         let description = workflow_manifest()?.description()?;
         #[cfg(feature = "telemetry")]
@@ -330,7 +340,7 @@ fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8) -> Result<mf_r
             if capture_requested() { eprintln!("data history unavailable: recompile the runner without --no-telemetry"); }
             None
         };
-        execute_workflow(observation, snapshots, arguments)
+        execute_workflow(observation, snapshots, arguments, #[cfg(unix)] signals)
     })();
     #[cfg(feature = "telemetry")]
     if let Some(providers) = providers {
@@ -350,9 +360,7 @@ fn snapshot_recorder_for_id(workflow_id: mf_telemetry::identity::WorkflowId, run
 }
 
 #[cfg(not(feature = "streaming"))]
-fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: Option<mf_runtime::SnapshotRecording>, arguments: mf_runtime::WorkflowArguments) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
-    #[cfg(unix)]
-    let mut signals = mf_runtime::RunnerSignals::new()?;
+fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: Option<mf_runtime::SnapshotRecording>, arguments: mf_runtime::WorkflowArguments, #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     let result = mf_runtime::ExecutionContext::run(observation, |state| -> Result<_, Box<dyn std::error::Error>> {
         #[cfg(unix)]
         signals.bind(state.cancellation())?;

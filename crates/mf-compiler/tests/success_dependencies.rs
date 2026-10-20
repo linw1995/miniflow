@@ -125,6 +125,125 @@ fn zero_output_success_orders_forks_and_joins_without_observation() {
     assert_eq!(calls[3], "a_join");
 }
 
+fn assertion_graph(condition: bool, path: &Path) -> WorkflowDefinition {
+    definition(
+        vec![
+            json!({"id":"condition","kind":"builtin.parameters","config":{"parameters":{
+                "value":{"type":"bool","default":condition}
+            }}}),
+            json!({"id":"validate","kind":"builtin.assert","config":{
+                "message":"current identity is inconsistent",
+                "condition":{"source":{"output":"condition.value","path":""},"operator":"eq","value":true}
+            }}),
+            task("after_assert", path),
+        ],
+        json!([{"from_node":"condition","to_node":"validate"}, {"from_node":"validate","to_node":"after_assert"}]),
+    )
+}
+
+#[test]
+fn assertions_fail_execution_before_success_dependents_run() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("trace");
+    for condition in [false, true] {
+        let result = execute(&assertion_graph(condition, &path));
+        if condition {
+            result.unwrap();
+            assert_eq!(trace(&path), ["after_assert"]);
+        } else {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("current identity is inconsistent")
+            );
+            assert!(trace(&path).is_empty());
+        }
+    }
+}
+
+#[test]
+fn assertions_require_explicit_upstream_references_and_keep_source_values_private() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("trace");
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let mut graph = assertion_graph(true, &path);
+    graph.order_edges.remove(0);
+    assert!(
+        compile_definition(&graph, &registry)
+            .unwrap_err()
+            .to_string()
+            .contains("explicit dependency")
+    );
+    let mut graph = assertion_graph(true, &path);
+    graph.nodes[1].config["condition"]["source"]["output"] = json!("missing.value");
+    assert!(
+        compile_definition(&graph, &registry)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown")
+    );
+
+    for (value, pointer, operator, reason) in [
+        (json!({"sensitive value":true}), "", "eq", "scalar"),
+        (json!("sensitive value"), "", "gt", "numeric"),
+        (json!({}), "/missing", "eq", "missing"),
+    ] {
+        let mut graph = assertion_graph(true, &path);
+        graph.nodes[0].config["parameters"]["value"] = json!({"type":"any", "default":value});
+        graph.nodes[1].config["condition"]["source"]["path"] = json!(pointer);
+        graph.nodes[1].config["condition"]["operator"] = json!(operator);
+        graph.nodes[1].config["condition"]["value"] = json!(1);
+        let error = execute(&graph).unwrap_err();
+        let diagnostic = format!("{error:?}");
+        assert!(error.to_string().contains(reason));
+        assert!(error.to_string().contains("condition.value"));
+        assert!(!diagnostic.contains("sensitive value"));
+        assert!(std::error::Error::source(&error).is_some());
+        assert!(trace(&path).is_empty());
+    }
+}
+
+#[test]
+fn assertions_distinguish_skipped_outputs_from_omitted_outputs() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("trace");
+    for (skipped, operator, expected) in [
+        (true, "not_exists", None),
+        (true, "exists", Some("current identity is inconsistent")),
+        (
+            true,
+            "eq",
+            Some("source output is skipped or field is missing"),
+        ),
+        (false, "not_exists", Some("missing")),
+    ] {
+        let mut graph = assertion_graph(true, &path);
+        graph.nodes[0] = serde_json::from_value(json!({
+            "id":"condition", "kind":"fixture.context", "config":{
+                "ports":["value"], "skipped":if skipped { json!(["value"]) } else { json!([]) }
+            }
+        }))
+        .unwrap();
+        graph.nodes[1].config["condition"]["operator"] = json!(operator);
+        if operator != "eq" {
+            graph.nodes[1].config["condition"]
+                .as_object_mut()
+                .unwrap()
+                .remove("value");
+        }
+        let result = execute(&graph);
+        if let Some(message) = expected {
+            assert!(result.unwrap_err().to_string().contains(message));
+            assert!(trace(&path).is_empty());
+        } else {
+            result.unwrap();
+            assert_eq!(trace(&path), ["after_assert"]);
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+}
+
 #[test]
 fn success_is_distinct_from_an_optional_output_skip() {
     let root = tempfile::tempdir().unwrap();
@@ -583,6 +702,7 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
     const DENY_SUCCESS_ENV: &str = "MF_TEST_SUCCESS_CONTRACT_DRIFT";
     cases[0].nodes[0].config["deny_success_env"] = json!(DENY_SUCCESS_ENV);
     cases.extend([-1, 1].map(|value| exclusive_success_graph(value, &path)));
+    cases.push(assertion_graph(true, &path));
     let mut value = task("value", &path);
     value["config"]["ports"] = json!(["value"]);
     value["config"]["outputs"] = json!({"value":42});
@@ -771,6 +891,19 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
             }
         } else {
             assert_eq!(actual_trace, expected_trace);
+        }
+        if graph.nodes.iter().any(|node| node.kind == "builtin.assert") {
+            fs::remove_file(&path).unwrap();
+            let failed = Command::new(common::runner_executable(&project, "release"))
+                .args(["--inputs", r#"{"condition.value":false}"#])
+                .output()
+                .unwrap();
+            assert!(!failed.status.success());
+            assert!(
+                String::from_utf8_lossy(&failed.stderr)
+                    .contains("current identity is inconsistent")
+            );
+            assert!(trace(&path).is_empty());
         }
     }
 }
