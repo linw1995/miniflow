@@ -332,6 +332,43 @@ impl WorkerHandle<WorkerJob> {
 
 pub type RuntimeWorkerHandle = WorkerHandle<WorkerJob>;
 
+/// Owned by the outer execution; contexts only retain weak references so queued
+/// jobs cannot keep the pool alive or join their own worker during shutdown.
+pub(super) struct ExecutionWorkers {
+    pool: Mutex<Option<WorkerPool<WorkerJob>>>,
+    limit: usize,
+}
+
+impl ExecutionWorkers {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            pool: Mutex::new(None),
+            limit,
+        }
+    }
+
+    pub fn handle(&self) -> Option<RuntimeWorkerHandle> {
+        self.pool.lock().unwrap().as_ref().map(WorkerPool::handle)
+    }
+
+    pub fn initialize(&self) -> Result<RuntimeWorkerHandle, WorkerPoolError> {
+        let mut pool = self.pool.lock().unwrap();
+        if pool.is_none() {
+            *pool = Some(WorkerPool::new(self.limit, WorkerJob::run)?);
+        }
+        Ok(pool.as_ref().unwrap().handle())
+    }
+}
+
+impl std::fmt::Debug for ExecutionWorkers {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExecutionWorkers")
+            .field("limit", &self.limit)
+            .field("handle", &self.handle())
+            .finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,6 +377,35 @@ mod tests {
         sync::atomic::{AtomicUsize, Ordering},
         time::Duration,
     };
+
+    #[test]
+    fn concurrent_initialization_shares_one_execution_pool() {
+        let workers = ExecutionWorkers::new(4);
+        assert!(workers.handle().is_none());
+        let starts = std::sync::Barrier::new(4);
+        let handles = thread::scope(|scope| {
+            let starts = &starts;
+            let workers = &workers;
+            let jobs: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(move || {
+                        starts.wait();
+                        workers.initialize().unwrap()
+                    })
+                })
+                .collect();
+            jobs.into_iter()
+                .map(|job| job.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            handles
+                .iter()
+                .all(|handle| handle.state.ptr_eq(&handles[0].state))
+        );
+        drop(workers);
+        assert!(handles.iter().all(|handle| !handle.is_active()));
+    }
 
     #[test]
     fn reuses_bounded_workers_and_drains_accepted_jobs_on_drop() {

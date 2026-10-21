@@ -1,7 +1,7 @@
 use crate::ValueRef as Value;
 use crate::node::LoopVariableTypeSnafu;
 use crate::runner::{ContextSnafu, NodeExecutionSnafu};
-use crate::worker::{RuntimeWorkerHandle, WorkerJob, WorkerPool};
+use crate::worker::{ExecutionWorkers, RuntimeWorkerHandle};
 use crate::{
     ContextValue, ExecutionOutputs, FlowNode, Inputs, NodeExecutionError, Outputs,
     WorkflowRunError, output_id,
@@ -14,7 +14,7 @@ use snafu::ResultExt;
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::sync::{
-    Arc,
+    Arc, Weak,
     atomic::{AtomicUsize, Ordering},
 };
 
@@ -209,6 +209,7 @@ pub struct ExecutionContext {
     stdin: Option<std::sync::Arc<std::sync::Mutex<crate::TextInput>>>,
     cancellation: crate::StreamCancellation,
     worker_handle: Option<RuntimeWorkerHandle>,
+    execution_workers: Weak<ExecutionWorkers>,
     worker_limit: NonZeroUsize,
     #[cfg(feature = "async")]
     future_executor: Arc<crate::future_execution::FutureExecutor>,
@@ -232,6 +233,7 @@ impl Default for ExecutionContext {
             stdin: None,
             cancellation: crate::StreamCancellation::default(),
             worker_handle: None,
+            execution_workers: Weak::new(),
             worker_limit: crate::RuntimeOptions::default().max_parallel_domains,
             #[cfg(feature = "async")]
             future_executor: Arc::default(),
@@ -316,6 +318,7 @@ impl ExecutionContext {
             scope_prefix: self.scope_prefix.clone(),
             inputs: crate::ExecutionInputs::default(),
             worker_handle: self.worker_handle.clone(),
+            execution_workers: self.execution_workers.clone(),
             worker_limit: self.worker_limit,
             #[cfg(feature = "async")]
             future_executor: self.future_executor.clone(),
@@ -398,15 +401,35 @@ impl ExecutionContext {
     pub fn worker_handle(&self) -> Option<RuntimeWorkerHandle> {
         self.worker_handle
             .as_ref()
-            .filter(|handle| handle.is_active())
+            .filter(|handle| handle.worker_count() > 0 && handle.is_active())
             .cloned()
+            .or_else(|| self.execution_workers.upgrade()?.handle())
+    }
+
+    pub(super) fn worker_scope(&mut self) -> Arc<ExecutionWorkers> {
+        if let Some(workers) = self.execution_workers.upgrade() {
+            return workers;
+        }
+        let workers = Arc::new(ExecutionWorkers::new(self.worker_limit.get()));
+        self.execution_workers = Arc::downgrade(&workers);
+        workers
+    }
+
+    pub(super) fn initialize_workers(&self) -> Result<RuntimeWorkerHandle, crate::WorkerPoolError> {
+        if let Some(handle) = self.worker_handle() {
+            return Ok(handle);
+        }
+        self.execution_workers
+            .upgrade()
+            .expect("parallel execution owns a worker scope")
+            .initialize()
     }
 
     /// Runs independent synchronous jobs through the active runtime worker pool.
     ///
-    /// The builder receives the context after a temporary pool has been attached
-    /// for direct node invocations. `max_jobs` bounds the number of jobs prepared
-    /// by the builder and limits any temporary pool to the same runtime setting.
+    /// The builder receives a context sharing the execution's lazy worker scope.
+    /// Direct node invocations own a temporary scope. `max_jobs` bounds the number
+    /// of jobs prepared by the builder; zero skips the builder entirely.
     pub fn run_parallel<T, F>(
         &mut self,
         max_jobs: usize,
@@ -419,18 +442,22 @@ impl ExecutionContext {
         if max_jobs == 0 {
             return Ok(Vec::new());
         }
-        if let Some(handle) = self.worker_handle() {
-            return Ok(handle.run_parallel(build_jobs(self)));
-        }
-
-        let worker_count = max_jobs.min(self.worker_limit.get());
-        let workers = WorkerPool::new(worker_count, WorkerJob::run)?;
-        let handle = workers.handle();
-        self.worker_handle = Some(handle.clone());
+        let _workers = self.worker_scope();
         let jobs = build_jobs(self);
-        let result = handle.run_parallel(jobs);
-        self.worker_handle = None;
-        Ok(result)
+        if jobs.len() <= 1 || self.worker_limit.get() == 1 {
+            let results: Vec<_> = jobs
+                .into_iter()
+                .map(|job| std::panic::catch_unwind(std::panic::AssertUnwindSafe(job)))
+                .collect();
+            return Ok(results
+                .into_iter()
+                .map(|result| match result {
+                    Ok(value) => value,
+                    Err(payload) => std::panic::resume_unwind(payload),
+                })
+                .collect());
+        }
+        Ok(self.initialize_workers()?.run_parallel(jobs))
     }
 
     pub fn replace_execution_position(&mut self, position: Option<usize>) -> Option<usize> {
@@ -479,6 +506,7 @@ impl ExecutionContext {
             stdin: self.stdin.clone(),
             cancellation: self.cancellation.clone(),
             worker_handle: self.worker_handle.clone(),
+            execution_workers: self.execution_workers.clone(),
             worker_limit: self.worker_limit,
             #[cfg(feature = "async")]
             future_executor: self.future_executor.clone(),
@@ -551,6 +579,7 @@ impl ExecutionContext {
         let mut child = Self::for_body(observation);
         child.cancellation = self.cancellation.clone();
         child.worker_handle = self.worker_handle.clone();
+        child.execution_workers = self.execution_workers.clone();
         child.worker_limit = self.worker_limit;
         #[cfg(feature = "async")]
         {
@@ -1194,6 +1223,77 @@ mod tests {
     };
 
     struct EmitNode(Outputs);
+
+    #[test]
+    fn worker_scope_is_lazy_shared_and_closed_at_execution_end() {
+        let mut context = ExecutionContext::default();
+        let workers = context.worker_scope();
+        let mut domain = context.fork_domain_with_observation(None);
+        let body = context.fork_body(None);
+        let stream = context.fork_stream(None);
+        assert!(context.worker_handle().is_none());
+        assert!(domain.worker_handle().is_none());
+        let caller = std::thread::current().id();
+        let threads = domain
+            .run_parallel(1, |_| vec![|| std::thread::current().id()])
+            .unwrap();
+        assert_eq!(threads, [caller]);
+        assert!(context.worker_handle().is_none());
+
+        domain.run_parallel(2, |_| vec![|| (), || ()]).unwrap();
+        let handle = context.worker_handle().unwrap();
+        assert_eq!(handle.worker_count(), context.worker_limit().get());
+        assert!(body.worker_handle().is_some());
+        assert!(stream.worker_handle().is_some());
+        drop(domain);
+        assert!(handle.is_active());
+        drop(workers);
+        assert!(!handle.is_active());
+        assert!(context.worker_handle().is_none());
+        assert!(body.worker_handle().is_none());
+    }
+
+    #[test]
+    fn direct_parallel_invocations_share_workers_with_prepared_children() {
+        let mut context = ExecutionContext::default();
+        let handles = context
+            .run_parallel(2, |context| {
+                (0..2)
+                    .map(|_| {
+                        let mut child = context.fork_body(None);
+                        move || {
+                            let handle = child.worker_handle().unwrap();
+                            child.run_parallel(2, |_| vec![|| (), || ()]).unwrap();
+                            assert!(handle.is_active());
+                            handle
+                        }
+                    })
+                    .collect()
+            })
+            .unwrap();
+        assert!(handles.iter().all(|handle| !handle.is_active()));
+        assert!(context.worker_handle().is_none());
+    }
+
+    #[test]
+    fn serial_parallel_invocations_drain_before_resuming_a_panic() {
+        let mut context = ExecutionContext::default();
+        context.configure_worker_limit(NonZeroUsize::new(1).unwrap());
+        let completed = Arc::new(AtomicUsize::new(0));
+        let finished = completed.clone();
+        let jobs: Vec<Box<dyn FnOnce() + Send>> = vec![
+            Box::new(|| panic!("serial task panicked")),
+            Box::new(move || {
+                finished.fetch_add(1, Ordering::SeqCst);
+            }),
+        ];
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            context.run_parallel(2, |_| jobs)
+        }));
+        assert!(result.is_err());
+        assert_eq!(completed.load(Ordering::SeqCst), 1);
+        assert!(context.worker_handle().is_none());
+    }
 
     impl TaskNode for EmitNode {
         fn execute(

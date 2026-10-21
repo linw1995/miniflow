@@ -414,20 +414,9 @@ impl Flow {
         } else {
             1
         };
-        // Keep the pool alive across all domains, Loop passes, and Iteration items,
-        // including workflows whose top-level plan contains only one domain.
-        let _owned_workers = if !domains.is_empty()
-            && state
-                .worker_handle()
-                .is_none_or(|handle| handle.worker_count() == 0)
-        {
-            let pool =
-                crate::WorkerPool::new(state.worker_limit().get(), crate::worker::WorkerJob::run)?;
-            state.set_worker_handle(pool.handle());
-            Some(pool)
-        } else {
-            None
-        };
+        // Nested parallel work initializes this scope's pool on demand and shares
+        // it across domains, Loop passes, and Iteration items.
+        let _owned_workers = state.worker_scope();
         self.execute_domains(domains, state, worker_limit)?;
         let mut workflow_outputs = FlowOutputs::new();
         for output in self.inner.plan.outputs.iter() {
@@ -469,9 +458,7 @@ impl Flow {
             return self.execute_serial_domains(plan, state);
         }
         let worker_limit = worker_limit.min(plan.len());
-        let handle = state
-            .worker_handle()
-            .expect("Flow execution owns a worker pool");
+        let handle = state.initialize_workers()?;
         let worker_limit = worker_limit.min(handle.worker_count());
         let mut failures = Vec::new();
         let mut panics: Vec<(usize, Box<dyn Any + Send>)> = Vec::new();
