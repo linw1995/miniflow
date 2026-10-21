@@ -1895,6 +1895,7 @@ mod tests {
                     input: None,
                     source_node: "start".into(),
                     source_output: "item".into(),
+                    source_key: "start.item".into(),
                 }],
             ]
             .into_iter()
@@ -2024,6 +2025,7 @@ mod tests {
             input: Some(input.to_owned().into()),
             source_node: source.to_owned().into(),
             source_output: output.to_owned().into(),
+            source_key: format!("{source}.{output}").into(),
         };
         let domain =
             |id: usize,

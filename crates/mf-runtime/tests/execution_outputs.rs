@@ -16,6 +16,7 @@ fn node(id: &str) -> FlowNode<()> {
             ],
         }
         .into(),
+        output_keys: Default::default(),
     }
 }
 

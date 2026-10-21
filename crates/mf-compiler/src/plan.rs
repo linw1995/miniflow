@@ -1088,6 +1088,10 @@ fn dependency_layout_tokens(
             let values = dependencies.iter().filter_map(|dependency| {
                 let source = LitStr::new(dependency.source_node(), Span::call_site());
                 let output = dependency.source_output()?;
+                let key = LitStr::new(
+                    &mf_runtime::output_id(dependency.source_node(), output),
+                    Span::call_site(),
+                );
                 let output = LitStr::new(output, Span::call_site());
                 let input = match dependency.input() {
                     Some(input) => {
@@ -1101,6 +1105,7 @@ fn dependency_layout_tokens(
                     input: #input,
                     source_node: std::borrow::Cow::Borrowed(#source),
                     source_output: std::borrow::Cow::Borrowed(#output),
+                    source_key: std::borrow::Cow::Borrowed(#key),
                 } })
             });
             quote! { std::borrow::Cow::Borrowed(&[#(#values),*]) }
@@ -1466,10 +1471,15 @@ fn task_layout_tokens(
         let index = indices[&output.node];
         let name = LitStr::new(&output.name, Span::call_site());
         let port = LitStr::new(&output.port, Span::call_site());
+        let key = LitStr::new(
+            &mf_runtime::output_id(output.node.as_str(), &output.port),
+            Span::call_site(),
+        );
         let optional = output.optional;
         quote! { mf_runtime::FlowOutput {
             name: std::borrow::Cow::Borrowed(#name), node_id: mf_runtime::NodeId::new(#index),
             port: std::borrow::Cow::Borrowed(#port), optional: #optional,
+            key: std::borrow::Cow::Borrowed(#key),
         } }
     });
     let guards = task_guard_tokens(definition, order, scope, domains);
@@ -1552,9 +1562,8 @@ fn success_guard_tokens(
             let source = LitStr::new(&condition.source, Span::call_site());
             let clauses = condition.clauses.into_iter().map(|clause| {
                 let available = clause.into_iter().map(|(node, port)| {
-                    let node = LitStr::new(&node, Span::call_site());
-                    let port = LitStr::new(&port, Span::call_site());
-                    quote! { ctx.output_available(#node, #port)? }
+                    let key = LitStr::new(&mf_runtime::output_id(&node, &port), Span::call_site());
+                    quote! { ctx.output_available_key(#key)? }
                 });
                 quote! { (false #(| #available)*) }
             });

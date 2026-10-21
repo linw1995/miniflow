@@ -16,6 +16,8 @@ pub struct FlowDependency {
     pub input: Option<Cow<'static, str>>,
     pub source_node: Cow<'static, str>,
     pub source_output: Cow<'static, str>,
+    /// Precomputed `output_id` of the source node port.
+    pub source_key: Cow<'static, str>,
 }
 
 impl FlowDependency {
@@ -25,6 +27,7 @@ impl FlowDependency {
             input: self.input.as_deref(),
             source_node: self.source_node.as_ref(),
             source_output: self.source_output.as_ref(),
+            source_key: std::borrow::Cow::Borrowed(self.source_key.as_ref()),
         }
     }
 }
@@ -84,6 +87,7 @@ impl PreparedStream {
                     definition_id: node.definition_id,
                     metadata: node.metadata,
                     node: task,
+                    output_keys: node.output_keys,
                 }
             })
             .collect();

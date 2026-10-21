@@ -115,11 +115,15 @@ impl ExecutionOutputs {
     }
 
     pub fn output_available(&self, node: &str, port: &str) -> Result<bool, NodeExecutionError> {
-        let key = output_id(node, port);
-        if self.is_transferred(&key) {
+        self.output_available_key(&output_id(node, port))
+    }
+
+    /// Reads availability through a precomputed `output_id` key.
+    pub fn output_available_key(&self, key: &str) -> Result<bool, NodeExecutionError> {
+        if self.is_transferred(key) {
             return Ok(true);
         }
-        self.output(&key)
+        self.output(key)
             .map(|value| matches!(value, ContextValue::Value(_)))
     }
 
@@ -150,14 +154,35 @@ impl ExecutionOutputs {
         nodes: impl IntoIterator<Item = &'a FlowNode<N>>,
     ) {
         for node in nodes {
-            for port in &node.metadata.ports.outputs {
-                let id = output_id(node.definition_id.as_str(), &port.name);
-                if let Some(entry) = source.entry(&id)
+            for id in node.output_keys() {
+                if let Some(entry) = source.entry(id)
                     && !matches!(entry, OutputEntry::Missing)
                 {
-                    self.writes.insert_mut(id, entry.clone());
+                    self.writes.insert_mut(id.clone(), entry.clone());
                 }
             }
+        }
+    }
+
+    /// Selects through a precomputed `output_id` key.
+    pub fn select_output_key(
+        &self,
+        name: &str,
+        node: &str,
+        key: &str,
+        optional: bool,
+    ) -> Result<Option<ValueRef>, WorkflowRunError> {
+        match self.output(key).context(OutputSelectionSnafu {
+            definition_id: node,
+            output: name,
+        })? {
+            ContextValue::Value(value) => Ok(Some(value.clone())),
+            ContextValue::Skipped if optional => Ok(None),
+            ContextValue::Skipped => ContextSnafu {
+                definition_id: node,
+                message: format!("workflow output `{name}` requires skipped output `{key}`"),
+            }
+            .fail(),
         }
     }
 
@@ -168,23 +193,7 @@ impl ExecutionOutputs {
         port: &str,
         optional: bool,
     ) -> Result<Option<ValueRef>, WorkflowRunError> {
-        match self
-            .output(&output_id(node, port))
-            .context(OutputSelectionSnafu {
-                definition_id: node,
-                output: name,
-            })? {
-            ContextValue::Value(value) => Ok(Some(value.clone())),
-            ContextValue::Skipped if optional => Ok(None),
-            ContextValue::Skipped => ContextSnafu {
-                definition_id: node,
-                message: format!(
-                    "workflow output `{name}` requires skipped output `{}`",
-                    output_id(node, port)
-                ),
-            }
-            .fail(),
-        }
+        self.select_output_key(name, node, &output_id(node, port), optional)
     }
 
     /// Validates the complete result without publishing any values.
@@ -233,26 +242,26 @@ impl ExecutionOutputs {
             None => return self.publish(node, None),
         };
         validate_skipped_outputs(node, &skipped, |name| produced.contains(&name))?;
+        // Validate every produced name before writing, so a rejected result
+        // leaves existing dynamic and typed outputs untouched.
+        let mut transferred = Vec::with_capacity(produced.len());
         for name in &produced {
-            ensure!(
-                node.metadata
-                    .ports
-                    .outputs
-                    .iter()
-                    .any(|port| port.name == *name),
-                ContextSnafu {
+            let Some(key) = node.output_key(name) else {
+                return ContextSnafu {
                     definition_id: node.definition_id.as_str(),
                     message: format!("produced undeclared output `{name}`"),
                 }
-            );
+                .fail();
+            };
+            transferred.push(key.to_owned());
         }
-        for name in &produced {
-            let key = output_id(node.definition_id.as_str(), name);
+        for key in transferred {
             self.writes.insert_mut(key, OutputEntry::Transferred);
         }
         for name in skipped {
-            let key = output_id(node.definition_id.as_str(), &name);
-            self.writes.insert_mut(key, OutputEntry::Skipped);
+            if let Some(key) = node.output_key(&name) {
+                self.writes.insert_mut(key.to_owned(), OutputEntry::Skipped);
+            }
         }
         Ok(())
     }
@@ -262,7 +271,6 @@ impl ExecutionOutputs {
         node: &FlowNode<N>,
         result: Option<NodeResult>,
     ) -> Result<(), WorkflowRunError> {
-        let id = node.definition_id.as_str();
         if let Some(result) = &result {
             Self::validate_result(node, result)?;
         }
@@ -270,28 +278,28 @@ impl ExecutionOutputs {
             Some(result) => {
                 // Produced and skipped entries replace typed evidence directly. Only omitted
                 // ports need tombstones to prevent inherited evidence from resurfacing.
-                for port in &node.metadata.ports.outputs {
+                for (port, key) in node.metadata.ports.outputs.iter().zip(node.output_keys()) {
                     let name: &str = port.name.as_ref();
                     if result.outputs.contains_key(name) || result.skipped.contains(name) {
                         continue;
                     }
-                    let key = output_id(id, name);
-                    if self.is_transferred(&key) {
-                        self.writes.insert_mut(key, OutputEntry::Missing);
+                    if self.is_transferred(key) {
+                        self.writes.insert_mut(key.clone(), OutputEntry::Missing);
                     }
                 }
-                for (port, value) in result.outputs {
-                    self.set_value(output_id(id, &port), value);
+                for (name, value) in result.outputs {
+                    let key = node.output_key(&name).expect("validated declared output");
+                    self.set_value(key.to_owned(), value);
                 }
-                for port in result.skipped {
-                    self.writes
-                        .insert_mut(output_id(id, &port), OutputEntry::Skipped);
+                for name in result.skipped {
+                    if let Some(key) = node.output_key(&name) {
+                        self.writes.insert_mut(key.to_owned(), OutputEntry::Skipped);
+                    }
                 }
             }
             None => {
-                for port in &node.metadata.ports.outputs {
-                    self.writes
-                        .insert_mut(output_id(id, &port.name), OutputEntry::Skipped);
+                for key in node.output_keys() {
+                    self.writes.insert_mut(key.clone(), OutputEntry::Skipped);
                 }
             }
         }

@@ -47,6 +47,10 @@ impl<'a> ExecutionDependency<'a> {
                 input,
                 source_node,
                 source_output,
+                source_key: std::borrow::Cow::Owned(mf_runtime::output_id(
+                    source_node,
+                    source_output,
+                )),
             }),
             Self::NodeSuccess { .. } => None,
         }
@@ -95,6 +99,7 @@ impl FlowDependency {
                 input: input.clone(),
                 source_node: source_node.clone(),
                 source_output: source_output.clone(),
+                source_key: mf_runtime::output_id(source_node, source_output).into(),
             }),
             Self::NodeSuccess { .. } => None,
         }
@@ -172,9 +177,9 @@ fn bind_condition(clauses: BTreeSet<Clause>) -> Predicate {
     for clause in clauses {
         let mut disjunction: Predicate = Box::new(|_| Ok(false));
         for (source, port) in clause {
+            let key = mf_runtime::output_id(&source, &port);
             let previous = disjunction;
-            disjunction =
-                Box::new(move |ctx| Ok(previous(ctx)? | ctx.output_available(&source, &port)?));
+            disjunction = Box::new(move |ctx| Ok(previous(ctx)? | ctx.output_available_key(&key)?));
         }
         let previous = conjunction;
         conjunction = Box::new(move |ctx| Ok(previous(ctx)? & disjunction(ctx)?));

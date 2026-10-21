@@ -12,6 +12,7 @@ fn node() -> FlowNode<()> {
             inputs: vec![PortSpec::new("value", ValueType::Int64, true)],
             outputs: vec![],
         }),
+        output_keys: Default::default(),
     }
 }
 
@@ -31,6 +32,7 @@ fn dependency<'a>(input: Option<&'a str>, source: &'a str) -> ExecutionDependenc
         input,
         source_node: source,
         source_output: "value",
+        source_key: format!("{source}.value").into(),
     }
 }
 
@@ -107,6 +109,7 @@ fn candidate(source: &str) -> ExecutionDependency<'_> {
         input: Some("value"),
         source_node: source,
         source_output: "value",
+        source_key: format!("{source}.value").into(),
     }
 }
 

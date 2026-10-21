@@ -77,6 +77,7 @@ fn dependency() -> ExecutionDependency<'static> {
         input: Some("input"),
         source_node: "source",
         source_output: "value",
+        source_key: "source.value".into(),
     }
 }
 
@@ -200,6 +201,7 @@ fn skip_missing_dependencies_and_input_checks_precede_typed_decoding() {
         input: None,
         source_node: "missing",
         source_output: "value",
+        source_key: "missing.value".into(),
     };
     let error = execute_node_in_context(&node, &[dependency(), missing], &mut ctx).unwrap_err();
     assert!(matches!(error, WorkflowRunError::Dependency { .. }));

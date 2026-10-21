@@ -522,11 +522,13 @@ impl FlowBuilder {
                     port: output.port.clone(),
                 }
             );
+            let key = mf_runtime::output_id(output.node.as_str(), &output.port);
             resolved_outputs.push(FlowOutput {
                 name: output.name,
                 node_id,
                 port: output.port,
                 optional: output.optional,
+                key: key.into(),
             });
         }
 
