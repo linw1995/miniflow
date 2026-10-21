@@ -762,8 +762,18 @@ impl PreparedStream {
         let coordinator = thread::Builder::new()
             .name("workflow-stream".into())
             .spawn(move || {
+                // Release the lazy backend on this blocking thread, after frames and workers.
+                #[cfg(feature = "async")]
+                let future_executor = Arc::new(crate::future_execution::FutureExecutor::default());
                 let result = catch_unwind(AssertUnwindSafe(|| {
-                    coordinate(&coordinator_shared, &plan, options.clock.as_ref(), &workers)
+                    coordinate(
+                        &coordinator_shared,
+                        &plan,
+                        options.clock.as_ref(),
+                        &workers,
+                        #[cfg(feature = "async")]
+                        &future_executor,
+                    )
                 }));
                 if let Err(payload) = result {
                     let mut state = coordinator_shared
@@ -951,8 +961,13 @@ fn coordinate(
     plan: &Arc<StreamPlan>,
     clock: &dyn StreamClock,
     workers: &WorkerPool<crate::worker::WorkerJob>,
+    #[cfg(feature = "async")] future_executor: &Arc<crate::future_execution::FutureExecutor>,
 ) {
     let mut guard = shared.state.lock().unwrap();
+    #[cfg(feature = "async")]
+    if let Some(frame) = guard.domains[0].frame.as_mut() {
+        frame.context.set_future_executor(future_executor.clone());
+    }
     loop {
         while let Some(completion) = guard.completions.pop_front() {
             if !completion.producer {
@@ -1001,7 +1016,15 @@ fn coordinate(
         if let Some(domain) = guard.delivered.take() {
             release_domain(&mut guard, domain);
         }
-        match tick(guard, plan, workers, clock, shared) {
+        match tick(
+            guard,
+            plan,
+            workers,
+            clock,
+            shared,
+            #[cfg(feature = "async")]
+            future_executor,
+        ) {
             Ok((next_guard, progress)) => {
                 guard = next_guard;
                 shared.changed.notify_all();
@@ -1049,6 +1072,7 @@ fn tick<'a>(
     workers: &WorkerPool<crate::worker::WorkerJob>,
     clock: &dyn StreamClock,
     shared: &'a Arc<Shared>,
+    #[cfg(feature = "async")] future_executor: &Arc<crate::future_execution::FutureExecutor>,
 ) -> Result<(MutexGuard<'a, State>, bool), StreamError> {
     let mut progress = false;
     for source in plan.message_sources().iter().skip(1) {
@@ -1103,6 +1127,8 @@ fn tick<'a>(
                     message: queued.message,
                 },
             )?;
+        #[cfg(feature = "async")]
+        context.set_future_executor(future_executor.clone());
         if let Some(capture) = &shared.snapshots {
             context.set_snapshot_recorder(capture.clone());
         }

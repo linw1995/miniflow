@@ -281,6 +281,14 @@ impl ExecutionContext {
         self.cancellation.clone()
     }
 
+    #[cfg(feature = "async")]
+    pub(super) fn set_future_executor(
+        &mut self,
+        executor: Arc<crate::future_execution::FutureExecutor>,
+    ) {
+        self.future_executor = executor;
+    }
+
     pub fn stdin_line(&self) -> Result<Option<String>, crate::StreamError> {
         let input = self.stdin.as_ref().ok_or_else(|| {
             crate::stream_instance::ExecutionSnafu {
@@ -1225,6 +1233,46 @@ mod tests {
             .into(),
         };
         context.outputs.publish(&node, None).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "async")]
+    fn message_contexts_share_only_the_injected_executor() {
+        let source = FlowNode {
+            definition_id: "source".into(),
+            node: (),
+            metadata: NodePorts {
+                inputs: vec![],
+                outputs: vec![port("value", ValueType::Int64, true)],
+            }
+            .into(),
+        };
+        let executor = Arc::default();
+        let mut contexts = [1, 2].map(|value| {
+            let mut context = ExecutionContext::for_message(
+                &source,
+                Outputs::from([("value".into(), json!(value).into())]).into(),
+            )
+            .unwrap();
+            context.set_future_executor(Arc::clone(&executor));
+            context
+        });
+        contexts[0].remaining_steps.0.store(0, Ordering::Release);
+        assert!(contexts[0].reserve_step("task").is_err());
+        assert!(contexts[1].reserve_step("task").is_ok());
+        contexts[0]
+            .cancellation()
+            .cancel(crate::StreamError::Execution {
+                message: "first message cancelled".into(),
+            });
+        assert!(contexts[0].execute_future(async {}, None).is_err());
+        assert!(contexts[1].execute_future(async {}, None).is_ok());
+        for (index, context) in contexts.iter().enumerate() {
+            assert_eq!(
+                context.output("source.value").unwrap(),
+                ContextValue::Value(&json!(index + 1).into())
+            );
+        }
     }
 
     #[test]
