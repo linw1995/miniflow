@@ -334,7 +334,7 @@ pub type RuntimeWorkerHandle = WorkerHandle<WorkerJob>;
 
 /// Owned by the outer execution; contexts only retain weak references so queued
 /// jobs cannot keep the pool alive or join their own worker during shutdown.
-pub(super) struct ExecutionWorkers {
+pub struct ExecutionWorkers {
     pool: Mutex<Option<WorkerPool<WorkerJob>>>,
     limit: usize,
 }

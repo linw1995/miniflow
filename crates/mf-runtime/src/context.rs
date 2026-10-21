@@ -406,7 +406,9 @@ impl ExecutionContext {
             .or_else(|| self.execution_workers.upgrade()?.handle())
     }
 
-    pub(super) fn worker_scope(&mut self) -> Arc<ExecutionWorkers> {
+    /// Keeps this execution's lazy worker pool alive across related contexts.
+    /// Hold the returned owner until all work in those contexts has completed.
+    pub fn worker_scope(&mut self) -> Arc<ExecutionWorkers> {
         if let Some(workers) = self.execution_workers.upgrade() {
             return workers;
         }
@@ -415,7 +417,11 @@ impl ExecutionContext {
         workers
     }
 
-    pub(super) fn initialize_workers(&self) -> Result<RuntimeWorkerHandle, crate::WorkerPoolError> {
+    /// Reuses active workers or initializes the pool owned by `worker_scope`.
+    ///
+    /// # Panics
+    /// Panics if no active worker handle or live worker scope is available.
+    pub fn initialize_workers(&self) -> Result<RuntimeWorkerHandle, crate::WorkerPoolError> {
         if let Some(handle) = self.worker_handle() {
             return Ok(handle);
         }
