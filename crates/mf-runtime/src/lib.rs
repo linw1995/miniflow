@@ -118,7 +118,9 @@ pub use typed_outputs::{
 };
 
 pub use value::{ValueKind, ValueRef};
-pub use worker::{RuntimeWorkerHandle, WorkerHandle, WorkerJob, WorkerPool, WorkerPoolError};
+pub use worker::{
+    ExecutionWorkers, RuntimeWorkerHandle, WorkerHandle, WorkerJob, WorkerPool, WorkerPoolError,
+};
 
 pub use snapshot::{
     NodeSnapshot, SNAPSHOT_VERSION, Snapshot, SnapshotEntry, SnapshotError, SnapshotEvent,

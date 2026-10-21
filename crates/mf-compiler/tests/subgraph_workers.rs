@@ -17,6 +17,7 @@ struct WorkerProbe {
     workers: usize,
     pool_workers: usize,
     threads: Mutex<BTreeSet<String>>,
+    handle: Mutex<Option<mf_runtime::RuntimeWorkerHandle>>,
 }
 
 impl TaskNode for WorkerProbe {
@@ -25,19 +26,27 @@ impl TaskNode for WorkerProbe {
         _: Inputs,
         context: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
-        assert_eq!(
-            context
-                .worker_handle()
-                .expect("workflow owns a worker pool")
-                .worker_count(),
-            self.pool_workers
-        );
         assert_eq!(context.worker_limit().get(), self.workers);
         let threads = context.run_parallel(2, |_| {
             (0..2)
                 .map(|_| || format!("{:?}", thread::current().id()))
                 .collect()
         })?;
+        let mut previous = self.handle.lock().unwrap();
+        if let Some(handle) = previous.as_ref() {
+            assert!(handle.is_active(), "subgraph invocations reuse the pool");
+        }
+        *previous = context.worker_handle();
+        if let Some(handle) = previous.as_ref() {
+            assert_eq!(handle.worker_count(), self.pool_workers);
+        } else {
+            assert_eq!(self.workers, 1);
+            assert!(
+                threads
+                    .iter()
+                    .all(|id| *id == format!("{:?}", thread::current().id()))
+            );
+        }
         let mut recorded = self.threads.lock().unwrap();
         recorded.extend(threads);
         Ok(Outputs::from([(
@@ -58,6 +67,7 @@ fn probe_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
                 .unwrap_or_else(|| config["workers"].as_u64().unwrap())
                 as usize,
             threads: Mutex::default(),
+            handle: Mutex::default(),
         })),
         mf_runtime::NodePorts {
             inputs: Vec::new(),
@@ -68,6 +78,37 @@ fn probe_factory(config: Value) -> Result<PreparedNode, NodeBuildError> {
 
 inventory::submit! {
     NodeRegistration { kind: "test.worker_probe", factory: mf_runtime::NodeFactory::Plain(probe_factory) }
+}
+
+struct SerialProbe;
+
+impl TaskNode for SerialProbe {
+    fn execute(
+        &self,
+        _: Inputs,
+        context: &mut ExecutionContext,
+    ) -> Result<NodeResult, NodeExecutionError> {
+        assert!(context.worker_handle().is_none());
+        Ok(Outputs::from([("value".into(), json!([]).into())]).into())
+    }
+}
+
+fn serial_probe_factory(_: Value) -> Result<PreparedNode, NodeBuildError> {
+    Ok(PreparedNode::from_parts(
+        mf_runtime::NodeExecution::Task(Box::new(SerialProbe)),
+        mf_runtime::NodePorts {
+            inputs: Vec::new(),
+            outputs: vec![PortSpec::new(
+                "value",
+                ValueType::List(Box::new(ValueType::String)),
+                true,
+            )],
+        },
+    ))
+}
+
+inventory::submit! {
+    NodeRegistration { kind: "test.serial_probe", factory: mf_runtime::NodeFactory::Plain(serial_probe_factory) }
 }
 
 fn workflow(kind: &str, workers: usize) -> WorkflowDefinition {
@@ -110,12 +151,40 @@ fn workflow(kind: &str, workers: usize) -> WorkflowDefinition {
 }
 
 #[test]
+fn serial_flows_and_subgraphs_do_not_start_workers() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    let simple = json!({
+        "version": "2026-09-29", "dependencies": {},
+        "nodes": [{"id": "probe", "kind": "test.serial_probe"}]
+    });
+    let mut definitions = vec![simple];
+    for kind in ["loop", "sequential"] {
+        let mut definition = serde_json::to_value(workflow(kind, 4)).unwrap();
+        let body = if kind == "loop" {
+            &mut definition["nodes"][1]["loop"]["body"]
+        } else {
+            &mut definition["nodes"][1]["config"]["body"]
+        };
+        body["nodes"][0] = json!({"id": "probe", "kind": "test.serial_probe"});
+        definitions.push(definition);
+    }
+    for definition in definitions {
+        let definition = serde_json::from_value(definition).unwrap();
+        let plan = compile_definition(&definition, &registry).unwrap();
+        let flow = instantiate_compiled(&plan, &registry).unwrap();
+        assert_eq!(flow.execution_domains().len(), 1);
+        flow.execute().unwrap();
+    }
+}
+
+#[test]
 fn subgraphs_share_workflow_workers() {
     let registry = NodeRegistry::from_inventory().unwrap();
     for kind in ["loop", "sequential", "parallel"] {
         for workers in [1, 6] {
             let plan = compile_definition(&workflow(kind, workers), &registry).unwrap();
             let flow = instantiate_compiled(&plan, &registry).unwrap();
+            assert_eq!(flow.execution_domains().len(), 1);
             let output = flow
                 .execute_with_options(RuntimeOptions {
                     max_parallel_domains: NonZeroUsize::new(workers).unwrap(),
