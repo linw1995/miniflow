@@ -6,6 +6,7 @@ mod evidence;
 pub mod git;
 mod git_evidence;
 mod github;
+pub mod graph;
 pub mod model;
 mod plan;
 #[cfg(unix)]

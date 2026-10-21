@@ -5,8 +5,8 @@
 
 ## 2. Graph store
 
-- [ ] 2.1 Add the versioned SQLite schema (records, tests, files, interval coverage) in the existing unpublished tooling package with the workspace Diesel dependency, typed errors, and query-only readers.
-- [ ] 2.2 Implement graph indexing from per-test coverage exports with commit, run, and execution-signature binding; extend existing verification and commit this group.
+- [x] 2.1 Add the versioned SQLite schema (records, tests, files, interval coverage) in the existing unpublished tooling package with the workspace Diesel dependency, typed errors, and query-only readers.
+- [x] 2.2 Implement graph indexing from per-test coverage exports with commit, run, and execution-signature binding; extend existing verification and commit this group.
 
 ## 3. Default-branch generation and publication
 

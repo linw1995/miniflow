@@ -1831,8 +1831,11 @@ dependencies = [
 name = "mfn-test-affected"
 version = "0.1.0"
 dependencies = [
+ "diesel",
+ "diesel_migrations",
  "inventory",
  "libc",
+ "libsqlite3-sys",
  "mf-compiler",
  "mf-runtime",
  "mfn-code",

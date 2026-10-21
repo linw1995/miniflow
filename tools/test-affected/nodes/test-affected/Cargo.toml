@@ -32,6 +32,11 @@ proc-macro2 = { workspace = true, features = ["span-locations"] }
 quote.workspace = true
 syn = { workspace = true, features = ["full", "parsing", "printing", "visit"] }
 
+# Per-commit test coverage graph storage.
+diesel = { workspace = true, features = ["sqlite"] }
+diesel_migrations.workspace = true
+libsqlite3-sys = { workspace = true, features = ["bundled"] }
+
 [dev-dependencies]
 # Compiled and in-memory Flow verification.
 mf-compiler = { workspace = true, features = ["codegen"] }
