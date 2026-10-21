@@ -476,18 +476,17 @@ impl Flow {
         let mut failures = Vec::new();
         let mut panics: Vec<(usize, Box<dyn Any + Send>)> = Vec::new();
         let (sender, receiver) = mpsc::channel();
+        let mut remaining: Vec<_> = plan
+            .domains()
+            .iter()
+            .map(|domain| domain.predecessors.len())
+            .collect();
         let mut ready: BTreeSet<_> = plan
             .domains()
             .iter()
-            .filter(|domain| domain.predecessors.is_empty())
+            .filter(|domain| remaining[domain.id] == 0)
             .map(|domain| (domain.first_position, domain.id))
             .collect();
-        let mut scheduled: Vec<_> = plan
-            .domains()
-            .iter()
-            .map(|domain| domain.predecessors.is_empty())
-            .collect();
-        let mut completed_domains = vec![false; plan.len()];
         let mut running = 0;
 
         loop {
@@ -497,20 +496,7 @@ impl Flow {
                 };
                 let domain = &plan.domains()[domain_id];
                 if domain.first_position > state.scope_exit_cutoff() {
-                    scheduled[domain_id] = true;
-                    completed_domains[domain_id] = true;
-                    for successor in domain.successors.iter() {
-                        let successor = &plan.domains()[*successor];
-                        if !scheduled[successor.id]
-                            && successor
-                                .predecessors
-                                .iter()
-                                .all(|predecessor| completed_domains[*predecessor])
-                        {
-                            scheduled[successor.id] = true;
-                            ready.insert((successor.first_position, successor.id));
-                        }
-                    }
+                    release_domain_successors(plan, &mut remaining, &mut ready, domain_id);
                     continue;
                 }
                 let mut context = state.fork_domain_snapshot(
@@ -575,19 +561,7 @@ impl Flow {
                             .iter()
                             .map(|node_id| &self.inner.nodes[node_id.index()]),
                     );
-                    completed_domains[domain_id] = true;
-                    for successor in domain.successors.iter() {
-                        let successor = &plan.domains()[*successor];
-                        if !scheduled[successor.id]
-                            && successor
-                                .predecessors
-                                .iter()
-                                .all(|predecessor| completed_domains[*predecessor])
-                        {
-                            scheduled[successor.id] = true;
-                            ready.insert((successor.first_position, successor.id));
-                        }
-                    }
+                    release_domain_successors(plan, &mut remaining, &mut ready, domain_id);
                 }
                 Ok(Err(error)) => {
                     failures.push((plan.domains()[domain_id].first_position, error));
@@ -675,5 +649,20 @@ impl Flow {
             }
         }
         Ok(())
+    }
+}
+
+fn release_domain_successors(
+    plan: &ExecutionDomains,
+    remaining: &mut [usize],
+    ready: &mut BTreeSet<(usize, usize)>,
+    domain_id: usize,
+) {
+    for successor in plan.domains()[domain_id].successors.iter() {
+        let successor = &plan.domains()[*successor];
+        remaining[successor.id] -= 1;
+        if remaining[successor.id] == 0 {
+            ready.insert((successor.first_position, successor.id));
+        }
     }
 }
