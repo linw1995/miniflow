@@ -1,7 +1,7 @@
 ## 1. Feasibility spike
 
-- [ ] 1.1 Emit per-test LLVM profiles on a default-branch coverage run; measure added wall time and export cost against the existing coverage job budget.
-- [ ] 1.2 Build a prototype interval-compressed SQLite graph from the export; measure file size and changed-range query latency; record results under target/ and decide go/no-go.
+- [x] 1.1 Emit per-test LLVM profiles on a default-branch coverage run; measure added wall time and export cost against the existing coverage job budget.
+- [x] 1.2 Build a prototype interval-compressed SQLite graph from the export; measure file size and changed-range query latency; record results under target/ and decide go/no-go.
 
 ## 2. Graph store
 
