@@ -200,6 +200,10 @@ struct Frame {
     message: MessageId,
     context: ExecutionContext,
     execution_domains: Vec<ExecutionDomainState>,
+    remaining: usize,
+    pending_deps: Vec<usize>,
+    rank: Vec<usize>,
+    ready: BTreeSet<(usize, usize)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -216,22 +220,58 @@ impl Frame {
         message_domain: usize,
         plan: &StreamPlan,
     ) -> Self {
+        let domains = plan.execution_domains_for_message(message_domain);
         let mut execution_domains =
             vec![ExecutionDomainState::Complete; plan.execution_domains().len()];
-        for &domain in plan.execution_domains_for_message(message_domain) {
+        let mut rank = vec![usize::MAX; plan.execution_domains().len()];
+        for (position, &domain) in domains.iter().enumerate() {
             execution_domains[domain] = ExecutionDomainState::Pending;
+            rank[domain] = position;
+        }
+        let mut pending_deps = vec![usize::MAX; plan.execution_domains().len()];
+        let mut ready = BTreeSet::new();
+        for &domain in domains {
+            let pending = plan
+                .execution_domain(domain)
+                .predecessors
+                .iter()
+                .filter(|&&predecessor| {
+                    execution_domains[predecessor] == ExecutionDomainState::Pending
+                })
+                .count();
+            pending_deps[domain] = pending;
+            if pending == 0 {
+                ready.insert((rank[domain], domain));
+            }
         }
         Self {
             message,
             context,
             execution_domains,
+            remaining: domains.len(),
+            pending_deps,
+            rank,
+            ready,
         }
     }
 
-    fn complete(&self, message_domain: usize, plan: &StreamPlan) -> bool {
-        plan.execution_domains_for_message(message_domain)
-            .iter()
-            .all(|&domain| self.execution_domains[domain] == ExecutionDomainState::Complete)
+    fn complete(&self) -> bool {
+        self.remaining == 0
+    }
+
+    fn domain_completed(&mut self, plan: &StreamPlan, execution_domain: usize) {
+        self.execution_domains[execution_domain] = ExecutionDomainState::Complete;
+        self.remaining -= 1;
+        for &successor in plan.execution_domain(execution_domain).successors.iter() {
+            let pending = &mut self.pending_deps[successor];
+            if *pending == usize::MAX || *pending == 0 {
+                continue;
+            }
+            *pending -= 1;
+            if *pending == 0 {
+                self.ready.insert((self.rank[successor], successor));
+            }
+        }
     }
 }
 
@@ -1003,8 +1043,7 @@ fn coordinate(
                         .iter()
                         .map(|node_id| &plan.nodes()[node_id.index()]),
                 );
-                frame.execution_domains[completion.execution_domain] =
-                    ExecutionDomainState::Complete;
+                frame.domain_completed(plan, completion.execution_domain);
             }
         }
         if let Err(failure) = check_failure(&mut guard, shared) {
@@ -1146,7 +1185,7 @@ fn tick<'a>(
         let Some(mut frame) = guard.domains[message_domain].frame.take() else {
             continue;
         };
-        if frame.complete(message_domain, plan) {
+        if frame.complete() {
             take_sequence(&mut guard.summary.completed_frames)?;
             if plan.selected_domain() == Some(message_domain) {
                 let mut outputs = FlowOutputs::new();
@@ -1177,20 +1216,30 @@ fn tick<'a>(
             continue;
         }
 
-        let ready_domains = plan.execution_domains_for_message(message_domain).to_vec();
-        for execution_domain in ready_domains {
-            if frame.execution_domains[execution_domain] != ExecutionDomainState::Pending {
-                continue;
-            }
+        let mut deferred = Vec::new();
+        let mut cursor = None;
+        loop {
+            let next = match cursor {
+                None => frame.ready.first().copied(),
+                Some(last) => frame
+                    .ready
+                    .range((
+                        std::ops::Bound::Excluded((last, usize::MAX)),
+                        std::ops::Bound::Unbounded,
+                    ))
+                    .next()
+                    .copied(),
+            };
+            let Some((rank, execution_domain)) = next else {
+                break;
+            };
+            frame.ready.remove(&(rank, execution_domain));
+            cursor = Some(rank);
             let execution = plan.execution_domain(execution_domain);
-            if execution.predecessors.iter().any(|predecessor| {
-                frame.execution_domains[*predecessor] != ExecutionDomainState::Complete
-            }) {
-                continue;
-            }
             let index = execution.nodes[0].index();
             if let Some(operator) = guard.operators[index].as_ref() {
                 if !operator.pending.is_empty() {
+                    deferred.push((rank, execution_domain));
                     continue;
                 }
                 let is_producer = matches!(&operator.executor, OperatorExecutor::Producer(_));
@@ -1257,11 +1306,12 @@ fn tick<'a>(
                             shared,
                             plan,
                         )?;
-                        frame.execution_domains[execution_domain] = if detached {
-                            ExecutionDomainState::Complete
+                        if detached {
+                            frame.domain_completed(plan, execution_domain);
                         } else {
-                            ExecutionDomainState::Running
-                        };
+                            frame.execution_domains[execution_domain] =
+                                ExecutionDomainState::Running;
+                        }
                         progress = true;
                         continue;
                     }
@@ -1286,7 +1336,7 @@ fn tick<'a>(
                 if is_producer && message_domain == 0 {
                     guard.operators[index].as_mut().unwrap().closed = true;
                 }
-                frame.execution_domains[execution_domain] = ExecutionDomainState::Complete;
+                frame.domain_completed(plan, execution_domain);
                 progress = true;
             } else if guard.active_workers < workers.worker_count() {
                 let observation = shared.observation.as_ref().map(|observation| {
@@ -1314,7 +1364,9 @@ fn tick<'a>(
                         guard.active_workers += 1;
                         progress = true;
                     }
-                    Err(mpsc::TrySendError::Full(_)) => {}
+                    Err(mpsc::TrySendError::Full(_)) => {
+                        deferred.push((rank, execution_domain));
+                    }
                     Err(mpsc::TrySendError::Disconnected(_)) => {
                         return ExecutionSnafu {
                             message: "domain worker queue unavailable",
@@ -1322,10 +1374,15 @@ fn tick<'a>(
                         .fail();
                     }
                 }
+            } else {
+                deferred.push((rank, execution_domain));
             }
         }
+        for entry in deferred {
+            frame.ready.insert(entry);
+        }
 
-        if frame.complete(message_domain, plan) {
+        if frame.complete() {
             take_sequence(&mut guard.summary.completed_frames)?;
             if plan.selected_domain() == Some(message_domain) {
                 let mut outputs = FlowOutputs::new();
@@ -1896,5 +1953,212 @@ mod tests {
                 .contains("future timer")
         );
         assert!(instance.join().is_err());
+    }
+
+    #[test]
+    fn wide_fan_in_frames_complete_in_message_order() {
+        struct Emitter;
+        impl EventNode for Emitter {
+            fn on_event(
+                &mut self,
+                event: NodeEvent,
+                _: &EventContext<'_>,
+            ) -> Result<EventEffects, crate::NodeExecutionError> {
+                let emissions = match event {
+                    NodeEvent::Input(_) => (0..3)
+                        .map(|seed| crate::EventEmission {
+                            result: crate::Outputs::from([(
+                                "seed".into(),
+                                serde_json::json!(seed).into(),
+                            )])
+                            .into(),
+                            batch: None,
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                Ok(EventEffects {
+                    emissions,
+                    timer: TimerUpdate::Keep,
+                })
+            }
+        }
+        struct Forward;
+        impl crate::TaskNode for Forward {
+            fn execute(
+                &self,
+                inputs: Inputs,
+                _: &mut ExecutionContext,
+            ) -> Result<NodeResult, NodeExecutionError> {
+                Ok(crate::Outputs::from([("item".into(), inputs["seed"].clone())]).into())
+            }
+        }
+        struct Join;
+        impl crate::TaskNode for Join {
+            fn execute(
+                &self,
+                inputs: Inputs,
+                _: &mut ExecutionContext,
+            ) -> Result<NodeResult, NodeExecutionError> {
+                let sum: i64 = ["a", "b", "c", "d"]
+                    .iter()
+                    .map(|name| inputs[*name].as_i64().unwrap())
+                    .sum();
+                Ok(crate::Outputs::from([("sum".into(), serde_json::json!(sum).into())]).into())
+            }
+        }
+        fn ports(inputs: &[&'static str], outputs: &[&'static str]) -> crate::NodePorts {
+            crate::NodePorts {
+                inputs: inputs
+                    .iter()
+                    .map(|name| crate::PortSpec::new(name, crate::ValueType::Int64, true))
+                    .collect(),
+                outputs: outputs
+                    .iter()
+                    .map(|name| crate::PortSpec::new(name, crate::ValueType::Int64, true))
+                    .collect(),
+            }
+        }
+        let dependency = |input: &str, source: &str, output: &str| crate::FlowDependency {
+            exclusive: false,
+            input: Some(input.to_owned().into()),
+            source_node: source.to_owned().into(),
+            source_output: output.to_owned().into(),
+        };
+        let domain =
+            |id: usize,
+             node: usize,
+             predecessors: Vec<usize>,
+             successors: Vec<usize>,
+             visibility: &'static [&'static str]| crate::ExecutionDomain {
+                id,
+                nodes: vec![crate::NodeId::new(node)].into(),
+                positions: vec![node].into(),
+                predecessors: predecessors.into(),
+                successors: successors.into(),
+                first_position: node,
+                snapshot_visibility: crate::OutputVisibility::Borrowed(visibility),
+            };
+        let plan = PreparedStream::from_plan(
+            StreamExecution {
+                mode: crate::StreamMode::Stream,
+                limits: Default::default(),
+            },
+            vec![
+                crate::FlowNode::new(
+                    "emitter",
+                    crate::PreparedNode::from_parts(
+                        crate::NodeExecution::Event(Box::new(Emitter)),
+                        ports(&[], &["seed"]),
+                    ),
+                ),
+                crate::FlowNode::new(
+                    "a",
+                    crate::PreparedNode::from_parts(
+                        crate::NodeExecution::Task(Box::new(Forward)),
+                        ports(&["seed"], &["item"]),
+                    ),
+                ),
+                crate::FlowNode::new(
+                    "b",
+                    crate::PreparedNode::from_parts(
+                        crate::NodeExecution::Task(Box::new(Forward)),
+                        ports(&["seed"], &["item"]),
+                    ),
+                ),
+                crate::FlowNode::new(
+                    "c",
+                    crate::PreparedNode::from_parts(
+                        crate::NodeExecution::Task(Box::new(Forward)),
+                        ports(&["seed"], &["item"]),
+                    ),
+                ),
+                crate::FlowNode::new(
+                    "d",
+                    crate::PreparedNode::from_parts(
+                        crate::NodeExecution::Task(Box::new(Forward)),
+                        ports(&["seed"], &["item"]),
+                    ),
+                ),
+                crate::FlowNode::new(
+                    "join",
+                    crate::PreparedNode::from_parts(
+                        crate::NodeExecution::Task(Box::new(Join)),
+                        ports(&["a", "b", "c", "d"], &["sum"]),
+                    ),
+                ),
+            ],
+            vec![
+                Vec::new(),
+                vec![dependency("seed", "emitter", "seed")],
+                vec![dependency("seed", "emitter", "seed")],
+                vec![dependency("seed", "emitter", "seed")],
+                vec![dependency("seed", "emitter", "seed")],
+                vec![
+                    dependency("a", "a", "item"),
+                    dependency("b", "b", "item"),
+                    dependency("c", "c", "item"),
+                    dependency("d", "d", "item"),
+                ],
+            ]
+            .into_iter()
+            .map(std::borrow::Cow::Owned)
+            .collect::<Vec<_>>()
+            .into(),
+            crate::MessageDomains::from_parts(
+                vec![None, Some(0)].into(),
+                vec![1, 1, 1, 1, 1, 1].into(),
+                Some(1),
+                crate::ExecutionDomains::from_parts(
+                    vec![
+                        domain(0, 0, vec![], vec![1, 2, 3, 4], &[]),
+                        domain(1, 1, vec![0], vec![5], &["emitter.seed"]),
+                        domain(2, 2, vec![0], vec![5], &["emitter.seed"]),
+                        domain(3, 3, vec![0], vec![5], &["emitter.seed"]),
+                        domain(4, 4, vec![0], vec![5], &["emitter.seed"]),
+                        domain(
+                            5,
+                            5,
+                            vec![1, 2, 3, 4],
+                            vec![],
+                            &["a.item", "b.item", "c.item", "d.item", "emitter.seed"],
+                        ),
+                    ]
+                    .into(),
+                    vec![
+                        std::borrow::Cow::Owned(vec![]),
+                        std::borrow::Cow::Owned(vec![0]),
+                        std::borrow::Cow::Owned(vec![0]),
+                        std::borrow::Cow::Owned(vec![0]),
+                        std::borrow::Cow::Owned(vec![0]),
+                        std::borrow::Cow::Owned(vec![0, 1, 2, 3, 4]),
+                    ]
+                    .into(),
+                ),
+                vec![
+                    std::borrow::Cow::Owned(vec![0]),
+                    std::borrow::Cow::Owned(vec![1, 2, 3, 4, 5]),
+                ]
+                .into(),
+                vec![0, 1, 1, 1, 1, 1].into(),
+            ),
+            vec![crate::WorkflowOutputDefinition {
+                name: "sum".into(),
+                node: "join".into(),
+                port: "sum".into(),
+                optional: false,
+            }]
+            .into(),
+            Default::default(),
+        );
+        let instance = plan.start().unwrap();
+
+        for expected in [0, 4, 8] {
+            let output = instance.recv().unwrap().expect("frame output");
+            assert_eq!(output.outputs["sum"].as_i64(), Some(expected));
+        }
+        assert!(instance.recv().unwrap().is_none());
+        let summary = instance.join().unwrap();
+        assert_eq!(summary.completed_frames, 4);
     }
 }
