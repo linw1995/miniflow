@@ -52,6 +52,8 @@
               ./scripts/nextest-build-cache.py
               ./scripts/cargo_cache.py
               ./scripts/nextest-cargo.sh
+              ./scripts/pr_validation.py
+              ./scripts/coverage_selection.py
               ./LICENSE
               ./about.hbs
               ./about.toml
