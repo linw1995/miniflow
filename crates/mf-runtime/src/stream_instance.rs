@@ -1,7 +1,7 @@
 use crate::{
     EventContext, EventEffects, EventEmission, EventNode, ExecutionContext, FlowOutputs, Inputs,
-    NodeEvent, NodeExecution, NodeExecutionError, NodeResult, PreparedStream, StreamExecution,
-    StreamNode, StreamPlan, TimerUpdate, WorkerPool,
+    MessageSchedule, NodeEvent, NodeExecution, NodeExecutionError, NodeResult, PreparedStream,
+    StreamExecution, StreamNode, StreamPlan, TimerUpdate, WorkerPool,
 };
 use mf_telemetry::{
     event::FailurePhase,
@@ -199,11 +199,10 @@ pub struct StreamMetrics {
 struct Frame {
     message: MessageId,
     context: ExecutionContext,
-    execution_domains: Vec<ExecutionDomainState>,
+    states: Vec<ExecutionDomainState>,
     remaining: usize,
     pending_deps: Vec<usize>,
-    rank: Vec<usize>,
-    ready: BTreeSet<(usize, usize)>,
+    ready: BTreeSet<usize>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -214,43 +213,19 @@ enum ExecutionDomainState {
 }
 
 impl Frame {
-    fn new(
-        message: MessageId,
-        context: ExecutionContext,
-        message_domain: usize,
-        plan: &StreamPlan,
-    ) -> Self {
-        let domains = plan.execution_domains_for_message(message_domain);
-        let mut execution_domains =
-            vec![ExecutionDomainState::Complete; plan.execution_domains().len()];
-        let mut rank = vec![usize::MAX; plan.execution_domains().len()];
-        for (position, &domain) in domains.iter().enumerate() {
-            execution_domains[domain] = ExecutionDomainState::Pending;
-            rank[domain] = position;
-        }
-        let mut pending_deps = vec![usize::MAX; plan.execution_domains().len()];
-        let mut ready = BTreeSet::new();
-        for &domain in domains {
-            let pending = plan
-                .execution_domain(domain)
-                .predecessors
-                .iter()
-                .filter(|&&predecessor| {
-                    execution_domains[predecessor] == ExecutionDomainState::Pending
-                })
-                .count();
-            pending_deps[domain] = pending;
-            if pending == 0 {
-                ready.insert((rank[domain], domain));
-            }
-        }
+    fn new(message: MessageId, context: ExecutionContext, schedule: &MessageSchedule) -> Self {
+        let ready = schedule
+            .initial_deps
+            .iter()
+            .enumerate()
+            .filter_map(|(rank, &pending)| (pending == 0).then_some(rank))
+            .collect();
         Self {
             message,
             context,
-            execution_domains,
-            remaining: domains.len(),
-            pending_deps,
-            rank,
+            states: vec![ExecutionDomainState::Pending; schedule.domains.len()],
+            remaining: schedule.domains.len(),
+            pending_deps: schedule.initial_deps.to_vec(),
             ready,
         }
     }
@@ -259,17 +234,15 @@ impl Frame {
         self.remaining == 0
     }
 
-    fn domain_completed(&mut self, plan: &StreamPlan, execution_domain: usize) {
-        self.execution_domains[execution_domain] = ExecutionDomainState::Complete;
+    fn domain_completed(&mut self, schedule: &MessageSchedule, execution_domain: usize) {
+        let rank = schedule.local[execution_domain];
+        self.states[rank] = ExecutionDomainState::Complete;
         self.remaining -= 1;
-        for &successor in plan.execution_domain(execution_domain).successors.iter() {
+        for &successor in schedule.successors[rank].iter() {
             let pending = &mut self.pending_deps[successor];
-            if *pending == usize::MAX || *pending == 0 {
-                continue;
-            }
             *pending -= 1;
             if *pending == 0 {
-                self.ready.insert((self.rank[successor], successor));
+                self.ready.insert(successor);
             }
         }
     }
@@ -739,8 +712,7 @@ impl PreparedStream {
                 sequence: 0,
             },
             context,
-            0,
-            &prepared,
+            prepared.message_schedule(0),
         ));
         domains[0].occupied = true;
         let operators = operator_states
@@ -1043,7 +1015,10 @@ fn coordinate(
                         .iter()
                         .map(|node_id| &plan.nodes()[node_id.index()]),
                 );
-                frame.domain_completed(plan, completion.execution_domain);
+                frame.domain_completed(
+                    plan.message_schedule(message_domain),
+                    completion.execution_domain,
+                );
             }
         }
         if let Err(failure) = check_failure(&mut guard, shared) {
@@ -1177,7 +1152,11 @@ fn tick<'a>(
         if let Some(observation) = &shared.observation {
             context.set_frame_observation(observation.frame(stream_message(queued.message)));
         }
-        guard.domains[domain].frame = Some(Frame::new(queued.message, context, domain, plan));
+        guard.domains[domain].frame = Some(Frame::new(
+            queued.message,
+            context,
+            plan.message_schedule(domain),
+        ));
         guard.domains[domain].occupied = true;
         progress = true;
     }
@@ -1216,6 +1195,7 @@ fn tick<'a>(
             continue;
         }
 
+        let schedule = plan.message_schedule(message_domain);
         let mut deferred = Vec::new();
         let mut cursor = None;
         loop {
@@ -1223,23 +1203,21 @@ fn tick<'a>(
                 None => frame.ready.first().copied(),
                 Some(last) => frame
                     .ready
-                    .range((
-                        std::ops::Bound::Excluded((last, usize::MAX)),
-                        std::ops::Bound::Unbounded,
-                    ))
+                    .range((std::ops::Bound::Excluded(last), std::ops::Bound::Unbounded))
                     .next()
                     .copied(),
             };
-            let Some((rank, execution_domain)) = next else {
+            let Some(rank) = next else {
                 break;
             };
-            frame.ready.remove(&(rank, execution_domain));
+            frame.ready.remove(&rank);
             cursor = Some(rank);
+            let execution_domain = schedule.domains[rank];
             let execution = plan.execution_domain(execution_domain);
             let index = execution.nodes[0].index();
             if let Some(operator) = guard.operators[index].as_ref() {
                 if !operator.pending.is_empty() {
-                    deferred.push((rank, execution_domain));
+                    deferred.push(rank);
                     continue;
                 }
                 let is_producer = matches!(&operator.executor, OperatorExecutor::Producer(_));
@@ -1307,10 +1285,9 @@ fn tick<'a>(
                             plan,
                         )?;
                         if detached {
-                            frame.domain_completed(plan, execution_domain);
+                            frame.domain_completed(schedule, execution_domain);
                         } else {
-                            frame.execution_domains[execution_domain] =
-                                ExecutionDomainState::Running;
+                            frame.states[rank] = ExecutionDomainState::Running;
                         }
                         progress = true;
                         continue;
@@ -1336,7 +1313,7 @@ fn tick<'a>(
                 if is_producer && message_domain == 0 {
                     guard.operators[index].as_mut().unwrap().closed = true;
                 }
-                frame.domain_completed(plan, execution_domain);
+                frame.domain_completed(schedule, execution_domain);
                 progress = true;
             } else if guard.active_workers < workers.worker_count() {
                 let observation = shared.observation.as_ref().map(|observation| {
@@ -1360,12 +1337,12 @@ fn tick<'a>(
                     run_domain_job(job, job_shared, job_plan)
                 })) {
                     Ok(()) => {
-                        frame.execution_domains[execution_domain] = ExecutionDomainState::Running;
+                        frame.states[rank] = ExecutionDomainState::Running;
                         guard.active_workers += 1;
                         progress = true;
                     }
                     Err(mpsc::TrySendError::Full(_)) => {
-                        deferred.push((rank, execution_domain));
+                        deferred.push(rank);
                     }
                     Err(mpsc::TrySendError::Disconnected(_)) => {
                         return ExecutionSnafu {
@@ -1375,7 +1352,7 @@ fn tick<'a>(
                     }
                 }
             } else {
-                deferred.push((rank, execution_domain));
+                deferred.push(rank);
             }
         }
         for entry in deferred {

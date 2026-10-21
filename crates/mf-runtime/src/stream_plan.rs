@@ -36,6 +36,18 @@ pub type GeneratedStreamDomainExecutor = dyn Fn(&StreamPlan, &mut crate::Executi
     + Send
     + Sync;
 
+/// Precomputed scheduling layout for one message domain.
+pub struct MessageSchedule {
+    /// Execution domain ids in rank order (== execution_domains_for_message).
+    pub domains: Box<[usize]>,
+    /// Global execution domain -> local rank; usize::MAX when not in this message.
+    pub local: Box<[usize]>,
+    /// Initial pending predecessor count per local rank (in-message predecessors only).
+    pub initial_deps: Box<[usize]>,
+    /// Local successor ranks per local rank (in-message successors only).
+    pub successors: Box<[Box<[usize]>]>,
+}
+
 pub struct StreamPlan {
     execution: StreamExecution,
     nodes: Vec<FlowNode<Option<Box<dyn TaskNode>>>>,
@@ -44,6 +56,7 @@ pub struct StreamPlan {
     outputs: Cow<'static, [WorkflowOutputDefinition]>,
     input_schema: crate::WorkflowInputSchema,
     generated_domains: BTreeMap<usize, Arc<GeneratedStreamDomainExecutor>>,
+    schedules: Vec<MessageSchedule>,
 }
 
 pub struct PreparedStream {
@@ -91,6 +104,7 @@ impl PreparedStream {
                 }
             })
             .collect();
+        let schedules = build_message_schedules(&domains);
         let plan = StreamPlan {
             execution,
             nodes,
@@ -99,6 +113,7 @@ impl PreparedStream {
             outputs,
             input_schema,
             generated_domains: BTreeMap::new(),
+            schedules,
         };
         Self {
             plan,
@@ -141,6 +156,9 @@ impl StreamPlan {
     }
     pub fn message_sources(&self) -> &[Option<usize>] {
         self.domains.sources()
+    }
+    pub fn message_schedule(&self, message_domain: usize) -> &MessageSchedule {
+        &self.schedules[message_domain]
     }
     pub fn execution_domains(&self) -> &ExecutionDomains {
         self.domains.execution_domains()
@@ -223,4 +241,46 @@ impl StreamPlan {
         }
         Ok(())
     }
+}
+
+fn build_message_schedules(domains: &MessageDomains) -> Vec<MessageSchedule> {
+    let execution_domains = domains.execution_domains();
+    let count = execution_domains.len();
+    (0..domains.sources().len())
+        .map(|message| {
+            let message_domains = domains.execution_domains_for_message(message);
+            let mut local = vec![usize::MAX; count];
+            for (rank, &domain) in message_domains.iter().enumerate() {
+                local[domain] = rank;
+            }
+            let initial_deps = message_domains
+                .iter()
+                .map(|&domain| {
+                    execution_domains.domains()[domain]
+                        .predecessors
+                        .iter()
+                        .filter(|&&predecessor| local[predecessor] != usize::MAX)
+                        .count()
+                })
+                .collect();
+            let successors = message_domains
+                .iter()
+                .map(|&domain| {
+                    execution_domains.domains()[domain]
+                        .successors
+                        .iter()
+                        .filter_map(|&successor| {
+                            (local[successor] != usize::MAX).then_some(local[successor])
+                        })
+                        .collect()
+                })
+                .collect();
+            MessageSchedule {
+                domains: message_domains.to_vec().into_boxed_slice(),
+                local: local.into_boxed_slice(),
+                initial_deps,
+                successors,
+            }
+        })
+        .collect()
 }

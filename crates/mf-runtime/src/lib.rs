@@ -104,7 +104,9 @@ pub use stream_instance::{
     StreamMetrics, StreamOptions, StreamOutput, StreamSummary,
 };
 pub use stream_io::{StreamStdio, TextInput};
-pub use stream_plan::{FlowDependency, GeneratedStreamDomainExecutor, PreparedStream, StreamPlan};
+pub use stream_plan::{
+    FlowDependency, GeneratedStreamDomainExecutor, MessageSchedule, PreparedStream, StreamPlan,
+};
 pub use subgraph::PreparedSubgraph;
 pub use typed_inputs::{
     InputDecodeError, InputField, InputValue, NodeInputs, Nullable, Shared, decode_default_input,
