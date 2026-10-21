@@ -150,6 +150,7 @@ fn prepare(inspect: Inspect) -> PreparedStream {
                         input: Some(port.into()),
                         source_node: "source".into(),
                         source_output: port.into(),
+                        source_key: format!("source.{port}").into(),
                     })
                     .collect(),
             ),

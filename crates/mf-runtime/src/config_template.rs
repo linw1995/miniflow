@@ -285,6 +285,7 @@ mod tests {
                 outputs: vec![crate::PortSpec::new("key", crate::ValueType::String, false)],
             }
             .into(),
+            output_keys: Default::default(),
         };
         crate::execute_generated_node_in_context(&source, [], &mut context, &[], |_, _| {
             Ok(crate::GeneratedNodeResult::Dynamic(crate::NodeResult {

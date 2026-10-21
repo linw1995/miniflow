@@ -36,9 +36,40 @@ pub struct FlowNode<N = Option<crate::NodeExecution>> {
     pub definition_id: DefinitionId,
     pub node: N,
     pub metadata: NodeMetadata,
+    /// Lazily computed `output_id` keys aligned with `metadata.ports.outputs`.
+    #[doc(hidden)]
+    pub output_keys: std::sync::OnceLock<Box<[String]>>,
 }
 
 pub type TaskFlowNode = FlowNode<Box<dyn TaskNode>>;
+
+impl<N> FlowNode<N> {
+    /// Cached `output_id` keys aligned by index with `metadata.ports.outputs`.
+    ///
+    /// Computed on first access, so node metadata must be final before any
+    /// execution-path read.
+    pub fn output_keys(&self) -> &[String] {
+        self.output_keys.get_or_init(|| {
+            self.metadata
+                .ports
+                .outputs
+                .iter()
+                .map(|port| crate::output_id(self.definition_id.as_str(), &port.name))
+                .collect()
+        })
+    }
+
+    /// The cached `output_id` key of a declared output port.
+    pub fn output_key(&self, port: &str) -> Option<&str> {
+        let index = self
+            .metadata
+            .ports
+            .outputs
+            .iter()
+            .position(|candidate| candidate.name == port)?;
+        Some(&self.output_keys()[index])
+    }
+}
 
 impl FlowNode {
     pub fn new(definition_id: impl Into<DefinitionId>, prepared: PreparedNode) -> Self {
@@ -46,6 +77,7 @@ impl FlowNode {
             definition_id: definition_id.into(),
             metadata: prepared.metadata,
             node: Some(prepared.execution),
+            output_keys: std::sync::OnceLock::new(),
         }
     }
 
@@ -55,6 +87,7 @@ impl FlowNode {
             definition_id: self.definition_id,
             metadata: self.metadata,
             node: task,
+            output_keys: self.output_keys,
         })
     }
 }
@@ -75,6 +108,8 @@ pub struct FlowOutput {
     pub node_id: NodeId,
     pub port: Cow<'static, str>,
     pub optional: bool,
+    /// Precomputed `output_id` of the referenced node port.
+    pub key: Cow<'static, str>,
 }
 
 pub type FlowOutputs = crate::Outputs;
@@ -424,7 +459,7 @@ impl Flow {
                 .definition_id
                 .as_str();
             if let Some(value) =
-                state.select_output(&output.name, id, &output.port, output.optional)?
+                state.select_output_keyed(&output.name, id, &output.key, output.optional)?
             {
                 workflow_outputs.insert(output.name.clone().into_owned(), value);
             }

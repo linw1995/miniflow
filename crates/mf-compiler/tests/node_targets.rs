@@ -104,6 +104,7 @@ fn target_records_reuse_preparation_and_bind_original_contracts() {
                     definition_id: node.definition_id.clone(),
                     metadata,
                     node: Box::new(Probe),
+                    output_keys: Default::default(),
                 }
             })
             .collect();
@@ -138,6 +139,7 @@ fn target_records_reuse_preparation_and_bind_original_contracts() {
                 definition_id: node.definition_id.clone(),
                 metadata,
                 node: Box::new(Probe),
+                output_keys: Default::default(),
             }
         })
         .collect();

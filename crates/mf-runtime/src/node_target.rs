@@ -298,6 +298,7 @@ impl NodeTarget {
                 definition_id: node.definition_id.clone(),
                 metadata: node.metadata.clone(),
                 node: task,
+                output_keys: Default::default(),
             },
         })
     }

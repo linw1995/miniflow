@@ -146,7 +146,7 @@ impl ExecutionInputs {
         let mut selected = Vec::new();
         let mut groups: BTreeMap<&str, CandidateValues> = BTreeMap::new();
         for dependency in dependencies {
-            let value = lookup(dependency).with_context(|_| DependencySnafu {
+            let value = lookup(dependency.clone()).with_context(|_| DependencySnafu {
                 definition_id: id,
                 input: dependency.input.unwrap_or("<control>"),
             })?;

@@ -302,6 +302,7 @@ fn generated_calls_preserve_missing_before_skip_without_input_assembly() {
             input: None,
             source_node: "gate",
             source_output: "trigger",
+            source_key: "gate.trigger".into(),
         }];
         if missing {
             dependencies.push(mf_runtime::ExecutionDependency {
@@ -309,6 +310,7 @@ fn generated_calls_preserve_missing_before_skip_without_input_assembly() {
                 input: None,
                 source_node: "missing",
                 source_output: "value",
+                source_key: "missing.value".into(),
             });
         }
         let result = mf_runtime::execute_generated_node_in_context(

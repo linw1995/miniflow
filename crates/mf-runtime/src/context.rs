@@ -361,12 +361,12 @@ impl ExecutionContext {
         node: &FlowNode<N>,
     ) -> Result<Outputs, WorkflowRunError> {
         let mut outputs = Outputs::new();
-        for port in &node.metadata.ports.outputs {
-            let id = node.definition_id.as_str();
-            if !port.required && !self.outputs.contains_output(&output_id(id, &port.name)) {
+        let id = node.definition_id.as_str();
+        for (port, key) in node.metadata.ports.outputs.iter().zip(node.output_keys()) {
+            if !port.required && !self.outputs.contains_output(key) {
                 continue;
             }
-            if let Some(value) = self.select_output(&port.name, id, &port.name, !port.required)? {
+            if let Some(value) = self.select_output_keyed(&port.name, id, key, !port.required)? {
                 outputs.insert(port.name.to_string(), value);
             }
         }
@@ -564,10 +564,7 @@ impl ExecutionContext {
             node,
             !self.scopes.is_empty(),
             dependencies.iter().map(crate::FlowDependency::borrowed),
-            |dependency| {
-                self.output(&output_id(dependency.source_node, dependency.source_output))
-                    .map(Some)
-            },
+            |dependency| self.output(dependency.source_key.as_ref()).map(Some),
             &mut inputs,
         )?;
         Ok((inputs, resolution))
@@ -747,7 +744,19 @@ impl ExecutionContext {
         port: &str,
         optional: bool,
     ) -> Result<Option<Value>, WorkflowRunError> {
-        let result = select_context_output(self, name, node, port, optional);
+        let key = output_id(node, port);
+        self.select_output_keyed(name, node, &key, optional)
+    }
+
+    /// Selects through a precomputed `output_id` key, with the same instrumentation.
+    pub(crate) fn select_output_keyed(
+        &mut self,
+        name: &str,
+        node: &str,
+        key: &str,
+        optional: bool,
+    ) -> Result<Option<Value>, WorkflowRunError> {
+        let result = self.outputs.select_output_key(name, node, key, optional);
         if let (Err(error), Some(run)) = (&result, self.observation.as_mut()) {
             run.output_selection_failed(error.to_string());
         }
@@ -757,6 +766,11 @@ impl ExecutionContext {
     /// Reads availability without decoding a transferred typed value.
     pub fn output_available(&self, node: &str, port: &str) -> Result<bool, NodeExecutionError> {
         self.outputs.output_available(node, port)
+    }
+
+    /// Reads availability through a precomputed `output_id` key.
+    pub fn output_available_key(&self, key: &str) -> Result<bool, NodeExecutionError> {
+        self.outputs.output_available_key(key)
     }
 
     pub fn resolve_node_inputs<'a, N>(
@@ -772,15 +786,15 @@ impl ExecutionContext {
             !self.scopes.is_empty(),
             dependencies,
             |dependency| {
-                let key = output_id(dependency.source_node, dependency.source_output);
+                let key = dependency.source_key.as_ref();
                 if dependency
                     .input
                     .is_some_and(|input| transferred_inputs.contains(&input))
-                    && self.outputs.is_transferred(&key)
+                    && self.outputs.is_transferred(key)
                 {
                     return Ok(None);
                 }
-                self.output(&key).map(Some)
+                self.output(key).map(Some)
             },
             inputs,
             causes,
@@ -918,13 +932,15 @@ impl ExecutionContext {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ExecutionDependency<'a> {
     /// Candidates with the same target input form one exclusive group.
     pub exclusive: bool,
     pub input: Option<&'a str>,
     pub source_node: &'a str,
     pub source_output: &'a str,
+    /// Precomputed `output_id` of the source node port.
+    pub source_key: std::borrow::Cow<'a, str>,
 }
 
 enum StepObservation {
@@ -1010,7 +1026,7 @@ pub fn execute_node_in_context(
         ordered.sort();
         std::borrow::Cow::Owned(ordered)
     };
-    execute_ordered_task_in_context(node, node.node.as_ref(), dependencies.iter().copied(), ctx)
+    execute_ordered_task_in_context(node, node.node.as_ref(), dependencies.iter().cloned(), ctx)
 }
 
 pub(super) fn execute_ordered_task_in_context<'a, N>(
@@ -1337,6 +1353,7 @@ mod tests {
                 outputs: vec![port(name, ValueType::Any, false)],
             }
             .into(),
+            output_keys: Default::default(),
         };
         context.outputs.publish(&node, None).unwrap();
     }
@@ -1352,6 +1369,7 @@ mod tests {
                 outputs: vec![port("value", ValueType::Int64, true)],
             }
             .into(),
+            output_keys: Default::default(),
         };
         let executor = Arc::default();
         let mut contexts = [1, 2].map(|value| {
@@ -1414,11 +1432,13 @@ mod tests {
             definition_id: "outer".into(),
             node: (),
             metadata: Default::default(),
+            output_keys: Default::default(),
         };
         let inner = FlowNode {
             definition_id: "inner".into(),
             node: (),
             metadata: Default::default(),
+            output_keys: Default::default(),
         };
         let mut context = ExecutionContext::default();
         for panic in [false, true] {
@@ -1458,6 +1478,7 @@ mod tests {
                 inputs: vec![port("value", ValueType::Int64, true)],
                 outputs: vec![],
             }),
+            output_keys: Default::default(),
         };
         let schema = serde_json::from_value(json!({
             "inputs": {"target": {"value": {"type": "int", "required": true}}},
@@ -1515,6 +1536,7 @@ mod tests {
                 inputs: vec![port("value", ValueType::Int64, true)],
                 outputs: vec![],
             }),
+            output_keys: Default::default(),
         };
         for case in ["ready", "skipped", "missing", "wrong_type"] {
             let value = if case == "ready" {
@@ -1540,12 +1562,14 @@ mod tests {
                     input: Some("value".into()),
                     source_node: "source".into(),
                     source_output: "value".into(),
+                    source_key: "source.value".into(),
                 },
                 crate::FlowDependency {
                     exclusive: false,
                     input: None,
                     source_node: "gate".into(),
                     source_output: "value".into(),
+                    source_key: "gate.value".into(),
                 },
             ];
             if case == "missing" {
@@ -1554,6 +1578,7 @@ mod tests {
                     input: None,
                     source_node: "absent".into(),
                     source_output: "value".into(),
+                    source_key: "absent.value".into(),
                 });
             }
             let event = context.event_inputs(&node, &dependencies);
@@ -1640,6 +1665,7 @@ mod tests {
                     outputs: vec![port("value", ValueType::Int64, true)],
                 }
                 .into(),
+                output_keys: Default::default(),
             };
             state
                 .outputs
@@ -1781,6 +1807,7 @@ mod tests {
             input: Some("payload"),
             source_node: "source",
             source_output: "value",
+            source_key: "source.value".into(),
         };
         let error = execute_node_in_context(&node, &[dependency], &mut context).unwrap_err();
         assert!(matches!(
@@ -1827,6 +1854,7 @@ mod tests {
             input: Some("unexpected"),
             source_node: "source",
             source_output: "value",
+            source_key: "source.value".into(),
         };
         let error = execute_node_in_context(&node, &[dependency], &mut context)
             .unwrap_err()
@@ -1863,6 +1891,7 @@ mod tests {
                         input: Some("value"),
                         source_node: "source",
                         source_output: "value",
+                        source_key: "source.value".into(),
                     }],
                     context,
                 );
@@ -1932,6 +1961,7 @@ mod tests {
             input: Some("payload"),
             source_node: "branch",
             source_output: "off",
+            source_key: "branch.off".into(),
         };
         let mut context = ExecutionContext::default();
         skip_output(&mut context, "branch", "off");
@@ -1941,9 +1971,10 @@ mod tests {
                 input,
                 source_node: "source",
                 source_output: "missing",
+                source_key: "source.missing".into(),
             };
-            let error =
-                execute_node_in_context(&node, &[skipped, missing], &mut context).unwrap_err();
+            let error = execute_node_in_context(&node, &[skipped.clone(), missing], &mut context)
+                .unwrap_err();
             assert!(matches!(
                 &error,
                 WorkflowRunError::Dependency { definition_id, input: actual, .. }
@@ -2010,6 +2041,7 @@ mod tests {
                     node_id: crate::NodeId::new(0),
                     port: "value".into(),
                     optional: false,
+                    key: "source.value".into(),
                 }]
                 .into(),
                 execution_domains: crate::ExecutionDomains::from_parts(
@@ -2086,6 +2118,7 @@ mod tests {
                             input: Some("payload".into()),
                             source_node: "source".into(),
                             source_output: "value".into(),
+                            source_key: "source.value".into(),
                         }]),
                     ]
                     .into(),
@@ -2095,6 +2128,7 @@ mod tests {
                         node_id: crate::NodeId::new(1),
                         port: "value".into(),
                         optional: false,
+                        key: "consumer.value".into(),
                     }]
                     .into(),
                     execution_domains: crate::ExecutionDomains::from_parts(
