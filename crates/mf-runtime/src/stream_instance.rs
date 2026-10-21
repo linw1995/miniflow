@@ -1270,13 +1270,9 @@ fn tick<'a>(
                         observation.frame(stream_message(frame.message))
                     }
                 });
-                let visible_outputs = plan.visible_outputs_for_execution(execution_domain);
                 let context = frame
                     .context
-                    .fork_domain_with_observation_and_visible_outputs(
-                        observation,
-                        &visible_outputs,
-                    );
+                    .fork_domain_snapshot(observation, execution.snapshot_visibility.clone());
                 let job_shared = Arc::clone(shared);
                 let job_plan = Arc::clone(plan);
                 let job = DomainJob {
@@ -1835,6 +1831,7 @@ mod tests {
                             predecessors: vec![].into(),
                             successors: vec![1].into(),
                             first_position: 0,
+                            snapshot_visibility: crate::OutputVisibility::Borrowed(&[]),
                         },
                         crate::ExecutionDomain {
                             id: 1,
@@ -1843,6 +1840,7 @@ mod tests {
                             predecessors: vec![0].into(),
                             successors: vec![].into(),
                             first_position: 1,
+                            snapshot_visibility: crate::OutputVisibility::Borrowed(&[]),
                         },
                     ]
                     .into(),

@@ -9,6 +9,7 @@ use snafu::ResultExt;
 use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
+    sync::Arc,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -26,8 +27,8 @@ struct CandidateValues {
 /// Input state for one execution context, including its current startup binding.
 #[derive(Clone, Debug, Default)]
 pub struct ExecutionInputs {
-    arguments: WorkflowArguments,
-    binding: Option<BoundInputs>,
+    arguments: Arc<WorkflowArguments>,
+    binding: Option<Arc<BoundInputs>>,
 }
 
 #[derive(Clone, Debug)]
@@ -40,7 +41,7 @@ struct BoundInputs {
 impl ExecutionInputs {
     /// Replaces explicit arguments and invalidates every previously resolved source.
     pub fn set_arguments(&mut self, arguments: WorkflowArguments) {
-        self.arguments = arguments;
+        self.arguments = Arc::new(arguments);
         self.binding = None;
     }
 
@@ -56,11 +57,11 @@ impl ExecutionInputs {
         let arguments = resolve_workflow_inputs(schema, &self.arguments, environment)?;
         schema.validate_stdin(&arguments, stdin_available)?;
         let stdin_owner = schema.stdin_owner(&arguments)?.map(str::to_owned);
-        self.binding = Some(BoundInputs {
+        self.binding = Some(Arc::new(BoundInputs {
             arguments,
             nodes: schema.inputs.keys().cloned().collect(),
             stdin_owner,
-        });
+        }));
         Ok(())
     }
 

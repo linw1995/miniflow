@@ -4,8 +4,9 @@ use crate::{
     FlowNode, GeneratedNodeResult, NodeExecutionError, NodeResult, Outputs, ValueRef,
     WorkflowRunError, output_id,
 };
+use rpds::HashTrieMapSync;
 use snafu::{ResultExt, ensure};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{collections::BTreeSet, sync::Arc};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum ContextValue<'a> {
@@ -13,38 +14,104 @@ pub enum ContextValue<'a> {
     Skipped,
 }
 
-/// Output state for one execution context, including generated typed presence.
+/// Sorted output keys fixed by the compiler, shared by every invocation of a domain.
+#[derive(Clone, Debug)]
+pub enum OutputVisibility {
+    Borrowed(&'static [&'static str]),
+    Owned(Arc<[String]>),
+}
+
+impl PartialEq for OutputVisibility {
+    fn eq(&self, other: &Self) -> bool {
+        self.keys().eq(other.keys())
+    }
+}
+
+impl Eq for OutputVisibility {}
+
+impl OutputVisibility {
+    pub fn from_sorted(keys: Vec<String>) -> Self {
+        debug_assert!(keys.windows(2).all(|pair| pair[0] < pair[1]));
+        Self::Owned(keys.into())
+    }
+
+    pub fn keys(&self) -> impl Iterator<Item = &str> {
+        let (borrowed, owned): (&[&str], &[String]) = match self {
+            Self::Borrowed(keys) => (keys, &[]),
+            Self::Owned(keys) => (&[], keys),
+        };
+        borrowed
+            .iter()
+            .copied()
+            .chain(owned.iter().map(String::as_str))
+    }
+
+    fn contains(&self, key: &str) -> bool {
+        match self {
+            Self::Borrowed(keys) => keys.binary_search(&key).is_ok(),
+            Self::Owned(keys) => keys
+                .binary_search_by(|candidate| candidate.as_str().cmp(key))
+                .is_ok(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum OutputEntry {
+    Value(ValueRef),
+    Skipped,
+    Transferred,
+    Missing,
+}
+
+/// A shared execution snapshot with isolated writes, distinct from observation history.
 #[derive(Clone, Debug, Default)]
 pub struct ExecutionOutputs {
-    // A present None is an explicit skip; an absent key is a missing output.
-    outputs: BTreeMap<String, Option<ValueRef>>,
-    typed_outputs: BTreeSet<String>,
+    writes: HashTrieMapSync<String, OutputEntry>,
+    parent: Option<Arc<Self>>,
+    visibility: Option<OutputVisibility>,
 }
 
 impl ExecutionOutputs {
     pub fn from_values(values: Outputs) -> Self {
         Self {
-            outputs: values
+            writes: values
                 .into_iter()
-                .map(|(id, value)| (id, Some(value)))
+                .map(|(id, value)| (id, OutputEntry::Value(value)))
                 .collect(),
-            typed_outputs: BTreeSet::new(),
+            ..Self::default()
         }
     }
 
     /// Stores an already validated scope value or external context value.
     pub fn set_value(&mut self, id: String, value: ValueRef) {
-        self.typed_outputs.remove(&id);
-        self.outputs.insert(id, Some(value));
+        self.writes.insert_mut(id, OutputEntry::Value(value));
+    }
+
+    fn entry(&self, id: &str) -> Option<&OutputEntry> {
+        if let Some(entry) = self.writes.get(id) {
+            return Some(entry);
+        }
+        let entry = self.parent.as_ref()?.entry(id)?;
+        // Generated transfer evidence has always survived domain visibility filtering.
+        (matches!(entry, OutputEntry::Transferred)
+            || self
+                .visibility
+                .as_ref()
+                .is_none_or(|visibility| visibility.contains(id)))
+        .then_some(entry)
     }
 
     /// Whether a dynamic output is present, including an explicit skip.
     pub fn contains_output(&self, id: &str) -> bool {
-        self.outputs.contains_key(id)
+        matches!(
+            self.entry(id),
+            Some(OutputEntry::Value(_) | OutputEntry::Skipped)
+        )
     }
 
     pub fn is_transferred(&self, id: &str) -> bool {
-        self.typed_outputs.contains(id)
+        matches!(self.entry(id), Some(OutputEntry::Transferred))
     }
 
     pub fn output_available(&self, node: &str, port: &str) -> Result<bool, NodeExecutionError> {
@@ -57,28 +124,23 @@ impl ExecutionOutputs {
     }
 
     pub fn output(&self, id: &str) -> Result<ContextValue<'_>, NodeExecutionError> {
-        match self.outputs.get(id) {
-            Some(Some(value)) => Ok(ContextValue::Value(value)),
-            Some(None) => Ok(ContextValue::Skipped),
-            None => ExecutionFailedSnafu {
+        match self.entry(id) {
+            Some(OutputEntry::Value(value)) => Ok(ContextValue::Value(value)),
+            Some(OutputEntry::Skipped) => Ok(ContextValue::Skipped),
+            _ => ExecutionFailedSnafu {
                 message: format!("missing context output `{id}`"),
             }
             .fail(),
         }
     }
 
-    /// Copies only visible dynamic entries while retaining generated transfer evidence.
-    pub fn fork_visible(&self, visible: &BTreeSet<String>) -> Self {
+    /// Freezes the current state without visiting outputs or copying their keys.
+    /// Visibility applies only to inherited entries; local writes remain readable.
+    pub fn fork_snapshot(&self, visibility: Option<OutputVisibility>) -> Self {
         Self {
-            outputs: visible
-                .iter()
-                .filter_map(|id| {
-                    self.outputs
-                        .get(id)
-                        .map(|value| (id.clone(), value.clone()))
-                })
-                .collect(),
-            typed_outputs: self.typed_outputs.clone(),
+            parent: Some(Arc::new(self.clone())),
+            visibility,
+            ..Self::default()
         }
     }
 
@@ -90,12 +152,10 @@ impl ExecutionOutputs {
         for node in nodes {
             for port in &node.metadata.ports.outputs {
                 let id = output_id(node.definition_id.as_str(), &port.name);
-                if source.typed_outputs.contains(&id) {
-                    self.outputs.remove(&id);
-                    self.typed_outputs.insert(id);
-                } else if let Some(value) = source.outputs.get(&id) {
-                    self.typed_outputs.remove(&id);
-                    self.outputs.insert(id, value.clone());
+                if let Some(entry) = source.entry(&id)
+                    && !matches!(entry, OutputEntry::Missing)
+                {
+                    self.writes.insert_mut(id, entry.clone());
                 }
             }
         }
@@ -188,13 +248,11 @@ impl ExecutionOutputs {
         }
         for name in &produced {
             let key = output_id(node.definition_id.as_str(), name);
-            self.outputs.remove(&key);
-            self.typed_outputs.insert(key);
+            self.writes.insert_mut(key, OutputEntry::Transferred);
         }
         for name in skipped {
             let key = output_id(node.definition_id.as_str(), &name);
-            self.typed_outputs.remove(&key);
-            self.outputs.insert(key, None);
+            self.writes.insert_mut(key, OutputEntry::Skipped);
         }
         Ok(())
     }
@@ -208,32 +266,34 @@ impl ExecutionOutputs {
         if let Some(result) = &result {
             Self::validate_result(node, result)?;
         }
-        // Validate the complete result before making any values visible.
-        for port in &node.metadata.ports.outputs {
-            self.typed_outputs.remove(&output_id(id, &port.name));
-        }
         match result {
             Some(result) => {
-                self.outputs.extend(
-                    result
-                        .outputs
-                        .into_iter()
-                        .map(|(port, value)| (output_id(id, &port), Some(value))),
-                );
-                self.outputs.extend(
-                    result
-                        .skipped
-                        .into_iter()
-                        .map(|port| (output_id(id, &port), None)),
-                );
+                // Produced and skipped entries replace typed evidence directly. Only omitted
+                // ports need tombstones to prevent inherited evidence from resurfacing.
+                for port in &node.metadata.ports.outputs {
+                    let name: &str = port.name.as_ref();
+                    if result.outputs.contains_key(name) || result.skipped.contains(name) {
+                        continue;
+                    }
+                    let key = output_id(id, name);
+                    if self.is_transferred(&key) {
+                        self.writes.insert_mut(key, OutputEntry::Missing);
+                    }
+                }
+                for (port, value) in result.outputs {
+                    self.set_value(output_id(id, &port), value);
+                }
+                for port in result.skipped {
+                    self.writes
+                        .insert_mut(output_id(id, &port), OutputEntry::Skipped);
+                }
             }
-            None => self.outputs.extend(
-                node.metadata
-                    .ports
-                    .outputs
-                    .iter()
-                    .map(|port| (output_id(id, &port.name), None)),
-            ),
+            None => {
+                for port in &node.metadata.ports.outputs {
+                    self.writes
+                        .insert_mut(output_id(id, &port.name), OutputEntry::Skipped);
+                }
+            }
         }
         Ok(())
     }

@@ -699,11 +699,12 @@ impl FlowBuilder {
                 }
             }
         }
-        partition_execution_domains(
+        let domains = partition_execution_domains(
             &self.execution_order,
             &edges,
             &vec![false; self.execution_order.len()],
-        )
+        );
+        bind_domain_snapshots(domains, &self.nodes, |_| None)
     }
 }
 #[derive(Debug, Snafu)]
@@ -918,6 +919,7 @@ pub fn partition_execution_domains(
                 predecessors: Vec::new().into(),
                 successors: Vec::new().into(),
                 first_position: position,
+                snapshot_visibility: mf_runtime::OutputVisibility::Borrowed(&[]),
             });
             domain_id
         });
@@ -968,6 +970,35 @@ pub fn partition_execution_domains(
             .into(),
     )
 }
+/// Freezes inherited output visibility after ports and message ownership are resolved.
+pub fn bind_domain_snapshots<N>(
+    domains: ExecutionDomains,
+    nodes: &[FlowNode<N>],
+    message_source: impl Fn(usize) -> Option<usize>,
+) -> ExecutionDomains {
+    let visibility = domains
+        .domains()
+        .iter()
+        .map(|domain| {
+            let ancestors = domains
+                .ancestor_domains(domain.id)
+                .iter()
+                .flat_map(|&ancestor| domains.domains()[ancestor].nodes.iter().copied());
+            let keys: BTreeSet<_> = ancestors
+                .chain(message_source(domain.id).map(NodeId::new))
+                .flat_map(|id| {
+                    let node = &nodes[id.index()];
+                    node.metadata.ports.outputs.iter().map(move |port| {
+                        mf_runtime::output_id(node.definition_id.as_str(), &port.name)
+                    })
+                })
+                .collect();
+            mf_runtime::OutputVisibility::from_sorted(keys.into_iter().collect())
+        })
+        .collect();
+    domains.with_snapshot_visibility(visibility)
+}
+
 /// Validates message ownership and partitions execution domains for a stream graph.
 pub fn build_message_domains(
     nodes: &[FlowNode],
@@ -1189,6 +1220,9 @@ pub fn build_message_domains(
         execution_domains_by_message[message_domain].push(execution_domain.id);
         message_domain_by_execution[execution_domain.id] = message_domain;
     }
+    let execution_domains = bind_domain_snapshots(execution_domains, nodes, |id| {
+        sources[message_domain_by_execution[id]]
+    });
     Ok(mf_runtime::MessageDomains::from_parts(
         sources.into(),
         output_domains.into(),

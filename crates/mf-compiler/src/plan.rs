@@ -949,7 +949,12 @@ impl CompiledWorkflow {
         registry: &mf_runtime::NodeRegistry,
         standard: bool,
     ) -> Result<GeneratedExecutionArtifacts, PlanError> {
-        let (nodes, order) = crate::compiler::prepare_definition(&self.definition, registry)?;
+        let mut body_layouts = BTreeMap::new();
+        let (nodes, order) = crate::compiler::prepare_definition_with_layouts(
+            &self.definition,
+            registry,
+            Some(&mut body_layouts),
+        )?;
         if order != self.execution_order {
             return InvalidExecutionOrderSnafu.fail();
         }
@@ -1028,7 +1033,14 @@ impl CompiledWorkflow {
                 &order,
                 message.execution_domains(),
             ));
-            collect_body_layouts(&self.definition, &order, "stream", &mut layouts)?;
+            collect_body_layouts(
+                &self.definition,
+                &order,
+                "stream",
+                &mut Vec::new(),
+                &body_layouts,
+                &mut layouts,
+            )?;
         } else {
             let flow = flow.into_tasks().map_err(crate::WorkflowBuildError::from)?;
             typed_plan = crate::plan_typed_segments(&flow, standard, true);
@@ -1041,7 +1053,14 @@ impl CompiledWorkflow {
                 "root",
                 flow.execution_domains(),
             ));
-            collect_body_layouts(&self.definition, &order, "root", &mut layouts)?;
+            collect_body_layouts(
+                &self.definition,
+                &order,
+                "root",
+                &mut Vec::new(),
+                &body_layouts,
+                &mut layouts,
+            )?;
         }
         let syntax: syn::File =
             syn::parse2(quote! { #(#layouts)* }).context(GeneratedSyntaxSnafu)?;
@@ -1384,8 +1403,10 @@ fn domain_tokens(plan: &mf_runtime::ExecutionDomains) -> TokenStream {
         let positions = domain.positions.iter();
         let predecessors = domain.predecessors.iter();
         let successors = domain.successors.iter();
+        let visibility = domain.snapshot_visibility.keys();
         quote! { mf_runtime::ExecutionDomain {
             id: #id, first_position: #first,
+            snapshot_visibility: mf_runtime::OutputVisibility::Borrowed(&[#(#visibility),*]),
             nodes: std::borrow::Cow::Borrowed(&[#(#nodes),*]),
             positions: std::borrow::Cow::Borrowed(&[#(#positions),*]),
             predecessors: std::borrow::Cow::Borrowed(&[#(#predecessors),*]),
@@ -1465,6 +1486,8 @@ fn collect_body_layouts(
     definition: &WorkflowDefinition,
     order: &[DefinitionId],
     scope: &str,
+    path: &mut Vec<DefinitionId>,
+    body_layouts: &BTreeMap<Vec<DefinitionId>, mf_runtime::ExecutionDomains>,
     layouts: &mut Vec<TokenStream>,
 ) -> Result<(), PlanError> {
     for (index, id) in order.iter().enumerate() {
@@ -1489,29 +1512,12 @@ fn collect_body_layouts(
             continue;
         };
         let body_order = crate::compiler::structural_order_graph(&body)?;
-        let indices: BTreeMap<_, _> = body_order
-            .iter()
-            .enumerate()
-            .map(|(index, id)| (id.as_str(), index))
-            .collect();
-        let incoming = crate::compiler::incoming_dependencies(&body);
-        let mut edges = Vec::new();
-        for (target, id) in body_order.iter().enumerate() {
-            for dependency in incoming.get(id.as_str()).into_iter().flatten() {
-                edges.push((indices[dependency.source_node()], target));
-            }
-        }
-        let node_order: Vec<_> = (0..body_order.len()).map(mf_runtime::NodeId::new).collect();
-        let domains =
-            crate::partition_execution_domains(&node_order, &edges, &vec![false; body_order.len()]);
+        path.push(id.clone());
+        let domains = &body_layouts[path.as_slice()];
         let body_scope = format!("{scope}_{index}");
-        layouts.push(task_layout_tokens(
-            &body,
-            &body_order,
-            &body_scope,
-            &domains,
-        ));
-        collect_body_layouts(&body, &body_order, &body_scope, layouts)?;
+        layouts.push(task_layout_tokens(&body, &body_order, &body_scope, domains));
+        collect_body_layouts(&body, &body_order, &body_scope, path, body_layouts, layouts)?;
+        path.pop();
     }
     Ok(())
 }

@@ -513,8 +513,10 @@ impl Flow {
                     }
                     continue;
                 }
-                let visible_outputs = self.visible_outputs(plan, domain_id);
-                let mut context = state.fork_domain_with_visible_outputs(&visible_outputs);
+                let mut context = state.fork_domain_snapshot(
+                    state.observation().cloned(),
+                    domain.snapshot_visibility.clone(),
+                );
                 let sender = sender.clone();
                 let parent_context = opentelemetry::Context::current();
                 let flow = self.shared_clone();
@@ -628,8 +630,10 @@ impl Flow {
             if domain.first_position > state.scope_exit_cutoff() {
                 continue;
             }
-            let visible_outputs = self.visible_outputs(plan, domain.id);
-            let mut context = state.fork_domain_with_visible_outputs(&visible_outputs);
+            let mut context = state.fork_domain_snapshot(
+                state.observation().cloned(),
+                domain.snapshot_visibility.clone(),
+            );
             if let Err(error) = self.execute_domain(domain, &mut context) {
                 state.select_observation_failure(&error);
                 return Err(error);
@@ -671,22 +675,5 @@ impl Flow {
             }
         }
         Ok(())
-    }
-
-    fn visible_outputs(&self, plan: &ExecutionDomains, domain_id: usize) -> BTreeSet<String> {
-        let mut visible = BTreeSet::new();
-        for &ancestor in plan.ancestor_domains(domain_id) {
-            for node_id in plan.domains()[ancestor].nodes.iter() {
-                let node = &self.inner.nodes[node_id.index()];
-                visible.extend(
-                    node.metadata
-                        .ports
-                        .outputs
-                        .iter()
-                        .map(|port| crate::output_id(node.definition_id.as_str(), &port.name)),
-                );
-            }
-        }
-        visible
     }
 }

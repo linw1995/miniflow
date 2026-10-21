@@ -150,28 +150,6 @@ impl StreamPlan {
     pub fn message_domain_for_execution(&self, id: usize) -> usize {
         self.domains.message_domain_for_execution(id)
     }
-    pub fn visible_outputs_for_execution(&self, id: usize) -> std::collections::BTreeSet<String> {
-        let message_domain = self.message_domain_for_execution(id);
-        let mut visible_nodes = std::collections::BTreeSet::new();
-        for &ancestor in self.execution_domains().ancestor_domains(id) {
-            visible_nodes.extend(self.execution_domain(ancestor).nodes.iter().copied());
-        }
-        if let Some(source) = self.message_sources()[message_domain] {
-            visible_nodes.insert(crate::NodeId::new(source));
-        }
-        let mut visible_outputs = std::collections::BTreeSet::new();
-        for node_id in visible_nodes {
-            let node = &self.nodes[node_id.index()];
-            visible_outputs.extend(
-                node.metadata
-                    .ports
-                    .outputs
-                    .iter()
-                    .map(|port| crate::output_id(node.definition_id.as_str(), &port.name)),
-            );
-        }
-        visible_outputs
-    }
     pub fn output_domain(&self, node: usize) -> usize {
         self.domains.output_domain(node)
     }

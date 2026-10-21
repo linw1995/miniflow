@@ -16,6 +16,8 @@ pub struct ExecutionDomain {
     pub successors: Cow<'static, [usize]>,
     /// Position of this domain's first node in the Flow execution order.
     pub first_position: usize,
+    /// Compiler-fixed visibility of the inherited execution snapshot.
+    pub snapshot_visibility: crate::OutputVisibility,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -32,6 +34,14 @@ impl ExecutionDomains {
         ancestors: Cow<'static, [Cow<'static, [usize]>]>,
     ) -> Self {
         Self { domains, ancestors }
+    }
+
+    pub fn with_snapshot_visibility(mut self, visibility: Vec<crate::OutputVisibility>) -> Self {
+        assert_eq!(visibility.len(), self.domains.len());
+        for (domain, visibility) in self.domains.to_mut().iter_mut().zip(visibility) {
+            domain.snapshot_visibility = visibility;
+        }
+        self
     }
 
     pub fn domains(&self) -> &[ExecutionDomain] {
