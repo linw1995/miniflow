@@ -1,7 +1,7 @@
 use crate::{
     TestCase,
     graph::{
-        CoverageManifest, LineRange, SCHEMA_VERSION,
+        CoverageManifest,
         error::*,
         lcov,
         schema::{coverage, files, records, tests as graph_tests},
@@ -25,6 +25,20 @@ use std::{
 };
 
 const MIGRATIONS: EmbeddedMigrations = embed_migrations!("migrations");
+
+/// Schema version recorded in every commit record. Readers compare it
+/// against their own expectation before consuming a graph.
+pub const SCHEMA_VERSION: i64 = 1;
+
+/// Inclusive line interval within one workspace source file.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
+)]
+#[serde(deny_unknown_fields)]
+pub struct LineRange {
+    pub start: u32,
+    pub end: u32,
+}
 const CONNECTION_PRAGMAS: &str = "PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;";
 const READER_PRAGMAS: &str =
     "PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON; PRAGMA query_only = ON;";

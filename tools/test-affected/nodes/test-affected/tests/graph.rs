@@ -289,6 +289,123 @@ fn missing_commits_files_and_empty_ranges_yield_no_selectors() {
 }
 
 #[test]
+fn error_variants_expose_display_messages_and_source_chains() {
+    use std::error::Error as _;
+    let clock_error = (std::time::UNIX_EPOCH - std::time::Duration::from_secs(1))
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_err();
+    let variants: Vec<(Error, bool)> = vec![
+        (
+            Error::Missing {
+                path: "graph.sqlite".into(),
+            },
+            false,
+        ),
+        (
+            Error::Path {
+                path: "graph.sqlite".into(),
+            },
+            false,
+        ),
+        (
+            Error::Connect {
+                path: "graph.sqlite".into(),
+                source: diesel::ConnectionError::InvalidConnectionUrl("sqlite://x".into()),
+            },
+            true,
+        ),
+        (
+            Error::Migration {
+                path: "graph.sqlite".into(),
+                source: Box::new(std::io::Error::other("failed")),
+            },
+            true,
+        ),
+        (
+            Error::Database {
+                operation: "read coverage graph records",
+                source: diesel::result::Error::NotFound,
+            },
+            true,
+        ),
+        (
+            // Transparent: the inner error is the representation, not a source.
+            Error::Query {
+                source: diesel::result::Error::NotFound,
+            },
+            false,
+        ),
+        (
+            Error::DuplicateCommit {
+                commit_sha: "1".repeat(40),
+            },
+            false,
+        ),
+        (
+            Error::InvalidManifest {
+                field: "tests",
+                reason: "test identities must be unique",
+            },
+            false,
+        ),
+        (
+            Error::Io {
+                action: "read coverage manifest",
+                path: "manifest.json".into(),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "gone"),
+            },
+            true,
+        ),
+        (
+            Error::Json {
+                action: "decode coverage manifest",
+                source: serde_json::from_str::<()>("not json").unwrap_err(),
+            },
+            true,
+        ),
+        (
+            Error::Lcov {
+                path: "test.lcov".into(),
+                record: "SF",
+            },
+            false,
+        ),
+        (
+            Error::LcovNumber {
+                path: "test.lcov".into(),
+                record: "DA",
+                source: "ten".parse::<u32>().unwrap_err(),
+            },
+            true,
+        ),
+        (Error::InvalidRange { start: 0, end: 5 }, false),
+        (
+            Error::Clock {
+                source: clock_error,
+            },
+            true,
+        ),
+        (
+            Error::Timestamp {
+                source: i64::try_from(u64::MAX).unwrap_err(),
+            },
+            true,
+        ),
+    ];
+    for (variant, sourced) in &variants {
+        let display = variant.to_string();
+        assert!(!display.is_empty(), "{variant:?}");
+        assert_eq!(variant.source().is_some(), *sourced, "{variant:?}");
+    }
+    // Distinct variants carry distinct messages.
+    let messages: std::collections::BTreeSet<_> = variants
+        .iter()
+        .map(|(variant, _)| variant.to_string())
+        .collect();
+    assert_eq!(messages.len(), variants.len());
+}
+
+#[test]
 fn has_file_distinguishes_absent_files_per_commit() {
     let (directory, graph, manifest) = fixture();
     let root = directory.path();

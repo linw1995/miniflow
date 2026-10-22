@@ -31,18 +31,4 @@ mod store;
 
 pub use error::Error;
 pub use manifest::{CoverageManifest, CoveredTest};
-pub use store::{GraphReader, GraphWriter, IndexedCommit, Record};
-
-/// Schema version recorded in every commit record. Readers compare it
-/// against their own expectation before consuming a graph.
-pub const SCHEMA_VERSION: i64 = 1;
-
-/// Inclusive line interval within one workspace source file.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
-)]
-#[serde(deny_unknown_fields)]
-pub struct LineRange {
-    pub start: u32,
-    pub end: u32,
-}
+pub use store::{GraphReader, GraphWriter, IndexedCommit, LineRange, Record, SCHEMA_VERSION};
