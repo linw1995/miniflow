@@ -724,6 +724,8 @@ Finite and streaming runners SHALL share MF_CAPTURE_SNAPSHOTS, SnapshotRecording
 the snapshot protocol, exporter, receiver, and caller-owned history. Runtime SHALL
 only publish common notifications. Missing records SHALL leave explicit incomplete
 history rather than requiring stream-only gap recovery, omission, or eviction policies.
+Generated runners SHALL read MF_SNAPSHOT_DICTIONARY_LIMIT to bound producer dictionary
+retention; absent or invalid values retain unbounded retention.
 
 #### Scenario: Capture either execution mode
 
@@ -744,6 +746,16 @@ history rather than requiring stream-only gap recovery, omission, or eviction po
 
 - **WHEN** either mode exports snapshots
 - **THEN** native context, timestamps, sequence order, numeric types, and distinct equal emissions are preserved
+
+#### Scenario: Bound the runner producer dictionary
+
+- **WHEN** a generated runner enables snapshot capture with a valid MF_SNAPSHOT_DICTIONARY_LIMIT
+- **THEN** its producer dictionary is bounded and evicted values are redefined under new value IDs while the receiver retains the complete stream
+
+#### Scenario: Fall back on a missing or invalid dictionary limit
+
+- **WHEN** MF_SNAPSHOT_DICTIONARY_LIMIT is absent or not a valid value
+- **THEN** capture retains the full dictionary and an invalid value produces a diagnostic without changing the workflow result
 
 ### Requirement: Preserve repeated snapshot observation boundaries
 
@@ -780,3 +792,27 @@ snapshot protocol version 1. Display and Debug SHALL use the same projection.
 - **WHEN** a caller uses Display or Debug on a value containing secrets
 - **THEN** marked subtrees are replaced completely with placeholders
 - **AND** business serialization continues to return original JSON data
+
+### Requirement: Bound producer snapshot dictionary retention
+
+SnapshotRecording SHALL default to unbounded dictionary retention and SHALL accept an
+opt-in bounded retention with a maximum retained value count. Bounded retention SHALL
+evict least-recently-used live deduplication entries and redefine an evicted value
+under a new value ID when it reappears. The wire format, protocol version, receiver
+store, and history contracts SHALL remain unchanged, and the receiver SHALL retain the
+complete stream including redefinitions.
+
+#### Scenario: Default to unbounded retention
+
+- **WHEN** a recording is created without a retention limit
+- **THEN** its deduplication dictionary retains every distinct value for the session
+
+#### Scenario: Redefine an evicted value
+
+- **WHEN** bounded retention evicts a live dictionary entry and the value reappears
+- **THEN** the producer defines it again under a new value ID and the receiver reconstructs the complete stream
+
+#### Scenario: Preserve assigned-ID accounting
+
+- **WHEN** a bounded recording assigns value IDs across redefinitions
+- **THEN** the total assigned-ID count remains observable, keeps growing, and matches the receiver's stored value count
