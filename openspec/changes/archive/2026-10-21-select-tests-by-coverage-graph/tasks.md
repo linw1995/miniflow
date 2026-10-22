@@ -21,5 +21,5 @@
 
 ## 5. Review and archive
 
-- [ ] 5.1 Ablate amplification rules and provenance fields; remove unnecessary abstractions; run focused tests and required hooks.
-- [ ] 5.2 Compare selection size and duration against package-level selection on representative historical PRs; synchronize docs/ci.md and AGENTS.md; archive in a separate commit.
+- [x] 5.1 Ablate amplification rules and provenance fields; remove unnecessary abstractions; run focused tests and required hooks.
+- [x] 5.2 Compare selection size and duration against package-level selection on representative historical PRs; synchronize docs/ci.md and AGENTS.md; archive in a separate commit.
