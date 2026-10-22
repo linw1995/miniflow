@@ -196,7 +196,7 @@ case "${1:-}" in
     collect_profiles
     if [[ "$status" -eq 0 ]]; then
       completion=()
-      if [[ ( $# -gt 0 || "$selected_package" == mfn-lsp ) && "$*" != "--run-ignored all" ]]; then
+      if [[ $# -gt 0 && "$*" != "--run-ignored all" ]]; then
         completion+=(--partial)
       fi
       python3 -B scripts/coverage_selection.py complete --package "$selected_package" "${completion[@]}"
@@ -288,9 +288,6 @@ if [[ $# -gt 0 && "$*" != "--run-ignored all" ]]; then
   completion+=(--partial)
 fi
 python3 -B scripts/coverage_selection.py complete "${completion[@]}"
-if [[ "$*" != "--run-ignored all" ]] && jq -e '.packages | index("mfn-lsp")' "${coverage_dir}/selection.json" > /dev/null; then
-  python3 -B scripts/coverage_selection.py complete --package mfn-lsp --partial
-fi
 report_coverage
 if [[ -n "$coverage_graph" ]]; then
   build_coverage_graph "$coverage_graph"

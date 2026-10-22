@@ -8,10 +8,9 @@ publish = false
 description = "Commit comparison and affected-test planning for repository development"
 
 [dependencies]
-# Node contracts, registration, and semantic evidence.
+# Node contracts, registration, and planning evidence.
 inventory.workspace = true
 mf-runtime = { workspace = true, features = ["tokio"] }
-mfn-lsp.workspace = true
 
 # Comparison facts, test plans, and typed diagnostics.
 serde = { workspace = true, features = ["derive"] }
@@ -26,11 +25,6 @@ zip = { workspace = true, features = ["deflate-flate2-zlib-rs"] }
 # Owned processes and bounded input/output transport.
 libc.workspace = true
 tempfile.workspace = true
-
-# Rust source ownership and isolated test-body analysis.
-proc-macro2 = { workspace = true, features = ["span-locations"] }
-quote.workspace = true
-syn = { workspace = true, features = ["full", "parsing", "printing", "visit"] }
 
 # Per-commit test coverage graph storage.
 diesel = { workspace = true, features = ["sqlite"] }

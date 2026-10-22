@@ -1,11 +1,9 @@
 use crate::{
-    classify::{isolated_changes, plain_attributes},
     error::*,
     git::{command, verify_snapshot},
     graph,
     model::*,
 };
-use mfn_lsp::{AnalysisOutcome, GapKind};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use snafu::{ResultExt, ensure};
@@ -35,38 +33,13 @@ struct Dependency {
 }
 #[derive(Deserialize)]
 struct Target {
-    name: String,
-    kind: Vec<String>,
-    src_path: PathBuf,
     test: bool,
 }
 
-pub fn make_plan(
-    comparison: &Comparison,
-    outcome: &AnalysisOutcome,
-    options: &PlanOptions,
-) -> Result<TestPlan, Error> {
+pub fn make_plan(comparison: &Comparison, options: &PlanOptions) -> Result<TestPlan, Error> {
     let started = Instant::now();
-    ensure!(
-        outcome.request == comparison.request,
-        InvalidSnafu {
-            message: "analysis request differs from the Git comparison"
-        }
-    );
-    ensure!(
-        outcome
-            .evidence
-            .iter()
-            .map(|s| &s.snapshot)
-            .chain(outcome.gaps.iter().map(|g| &g.snapshot))
-            .all(|id| comparison.request.snapshots.iter().any(|s| &s.id == id)),
-        InvalidSnafu {
-            message: "analysis evidence belongs to an unrequested snapshot"
-        }
-    );
     verify_snapshot(&comparison.base_root, &comparison.base)?;
     verify_snapshot(&comparison.head_root, &comparison.head)?;
-    validate_configuration(outcome, &options.configuration)?;
     let metadata: Metadata = serde_json::from_str(&command(
         &comparison.head_root,
         "cargo",
@@ -135,17 +108,13 @@ pub fn make_plan(
             .iter()
             .filter(|(root, _)| absolute.starts_with(root))
             .max_by_key(|(root, _)| root.components().count());
-        if let Some((root, owner)) = owner {
+        if let Some((_root, owner)) = owner {
             direct.insert(owner.clone());
             reasons
                 .entry(owner.clone())
                 .or_default()
                 .push(format!("Changed file: {}", change.path));
             if options.exact_tests
-                && let Some(selected) = isolated_tests(comparison, change, &packages[owner], root)
-            {
-                tests.extend(selected);
-            } else if options.exact_tests
                 && change.path.ends_with(".rs")
                 && let Some(open) = graph.open.as_mut()
             {
@@ -214,16 +183,6 @@ pub fn make_plan(
         }
     }
     let baseline = closure(&direct, &dependencies);
-    for gap in outcome
-        .gaps
-        .iter()
-        .filter(|g| matches!(g.kind, GapKind::AnalyzerFailure | GapKind::Limit))
-    {
-        fallback.push(format!(
-            "Semantic analyzer {} failed for {}: {}; retaining the full workspace",
-            gap.operation, gap.snapshot, gap.message
-        ));
-    }
     let (baseline, selected) = if fallback.is_empty() {
         (baseline, closure(&production, &dependencies))
     } else {
@@ -242,15 +201,6 @@ pub fn make_plan(
                 "Depends on a changed production package or is covered by fallback".into()
             });
     }
-    for test in &tests {
-        reasons
-            .entry(test.package.clone())
-            .or_default()
-            .push(format!(
-                "Verified isolated test body: {}::{}",
-                test.binary, test.name
-            ));
-    }
     let mut plan = TestPlan {
         comparison_mode: comparison.comparison_mode,
         repository: comparison.repository.clone(),
@@ -267,17 +217,8 @@ pub fn make_plan(
         reasons,
         fallback_reasons: fallback,
         ignored_files,
-        analysis_status: outcome.status.clone(),
         baseline_count: None,
         selected_count: None,
-        observed_relationships: outcome
-            .evidence
-            .iter()
-            .flat_map(|s| &s.documents)
-            .flat_map(|d| &d.symbols)
-            .map(|s| s.references.len() + s.incoming_calls.len())
-            .sum(),
-        analysis_ms: outcome.elapsed_ms,
         planning_ms: 0,
         coverage_graph: graph.plan,
     };
@@ -574,133 +515,6 @@ fn shared_consumers(path: &str) -> &'static [&'static str] {
         "tools/test-affected/run-tests.py" => &["mfn-test-affected"],
         _ => &[],
     }
-}
-
-fn validate_configuration(
-    outcome: &AnalysisOutcome,
-    config: &BuildConfiguration,
-) -> Result<(), Error> {
-    ensure!(
-        !(config.all_features && (!config.features.is_empty() || config.no_default_features)),
-        InvalidSnafu {
-            message: "all_features cannot be combined with explicit/no-default features"
-        }
-    );
-    if outcome.server.profile == mfn_lsp::Profile::RustAnalyzer
-        && outcome.status != mfn_lsp::Status::NotRequested
-    {
-        let cargo = &outcome.request.initialization_options["cargo"];
-        ensure!(
-            cargo["target"].as_str() == config.target.as_deref(),
-            InvalidSnafu {
-                message: "LSP and test target configurations differ"
-            }
-        );
-        if config.all_features {
-            ensure!(
-                cargo["features"] == "all",
-                InvalidSnafu {
-                    message: "LSP must analyze all selected features"
-                }
-            );
-        } else {
-            ensure!(
-                cargo["features"].is_null() || cargo["features"].is_array(),
-                InvalidSnafu {
-                    message: "LSP and test feature configurations differ"
-                }
-            );
-            let features: Vec<String> = cargo["features"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect();
-            ensure!(
-                features == config.features
-                    && cargo["noDefaultFeatures"].as_bool().unwrap_or(false)
-                        == config.no_default_features,
-                InvalidSnafu {
-                    message: "LSP and test feature configurations differ"
-                }
-            );
-        }
-    }
-    Ok(())
-}
-
-fn isolated_tests(
-    comparison: &Comparison,
-    change: &Change,
-    package: &Package,
-    root: &Path,
-) -> Option<Vec<TestCase>> {
-    if !change.path.ends_with(".rs") {
-        return None;
-    }
-    let old = fs::read_to_string(comparison.base_root.join(&change.path)).ok()?;
-    let new = fs::read_to_string(comparison.head_root.join(&change.path)).ok()?;
-    let absolute = comparison.head_root.join(&change.path);
-    let integration = package
-        .targets
-        .iter()
-        .find(|t| t.kind.iter().any(|k| k == "test") && t.src_path == absolute);
-    let changed = isolated_changes(&old, &new, integration.is_some())?;
-    let (binary, prefix) = if let Some(target) = integration {
-        (format!("{}::{}", package.name, target.name), String::new())
-    } else {
-        // Only conventional library module paths are narrowed; unusual #[path] modules retain baseline.
-        let source_root = root.join("src");
-        let relative = absolute.strip_prefix(&source_root).ok()?;
-        package.targets.iter().find(|t| {
-            t.kind.iter().any(|k| k == "lib") && t.src_path == source_root.join("lib.rs")
-        })?;
-        let mut components: Vec<_> = relative
-            .components()
-            .map(|c| c.as_os_str().to_str().map(str::to_owned))
-            .collect::<Option<_>>()?;
-        let filename = components.pop()?;
-        let stem = filename.strip_suffix(".rs")?;
-        if !matches!(stem, "lib" | "mod") {
-            components.push(stem.into());
-        }
-        let mut module_file = source_root.join("lib.rs");
-        let mut module_directory = source_root.clone();
-        for component in &components {
-            let parsed = syn::parse_file(&fs::read_to_string(&module_file).ok()?).ok()?;
-            parsed.items.iter().find(|item| matches!(item, syn::Item::Mod(m) if m.ident == component && m.content.is_none() && plain_attributes(&m.attrs)))?;
-            let flat = module_directory.join(format!("{component}.rs"));
-            let nested = module_directory.join(component).join("mod.rs");
-            module_file = if flat.is_file() && !nested.exists() {
-                flat
-            } else if nested.is_file() && !flat.exists() {
-                nested
-            } else {
-                return None;
-            };
-            module_directory = module_directory.join(component);
-        }
-        if module_file != absolute {
-            return None;
-        }
-        let prefix = if components.is_empty() {
-            String::new()
-        } else {
-            format!("{}::", components.join("::"))
-        };
-        (package.name.clone(), prefix)
-    };
-    Some(
-        changed
-            .into_iter()
-            .map(|name| TestCase {
-                package: package.name.clone(),
-                binary: binary.clone(),
-                name: format!("{prefix}{name}"),
-            })
-            .collect(),
-    )
 }
 
 fn closure(

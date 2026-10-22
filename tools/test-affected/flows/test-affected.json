@@ -16,10 +16,6 @@
       "package": "mfn-code",
       "path": "../../../crates/builtin-nodes/code"
     },
-    "lsp": {
-      "package": "mfn-lsp",
-      "path": "../nodes/lsp"
-    },
     "tests": {
       "package": "mfn-test-affected",
       "path": "../nodes/test-affected"
@@ -324,7 +320,7 @@
           "run": "bool"
         },
         "code": {
-          "request": "{'execution':{'enabled':run},'mode':mode,'base':base,'head':head,'analyze':precision=='tests','options':{'configuration':config,'inventory':inventory,'exact_tests':precision=='tests'},'initialization_options':{'cargo':{'features':config.all_features?'all':config.features,'target':config.target,'noDefaultFeatures':config.no_default_features,'buildScripts':{'enable':false},'sysroot':null},'procMacro':{'enable':false},'checkOnSave':false,'cachePriming':{'enable':false}}}"
+          "request": "{'execution':{'enabled':run},'mode':mode,'base':base,'head':head,'options':{'configuration':config,'inventory':inventory,'exact_tests':precision=='tests'}}"
         }
       },
       "inputs": {
@@ -2024,7 +2020,7 @@
           "c": "object"
         },
         "code": {
-          "request": "{'execution':{'enabled':false},'mode':'snapshot','base':comparison.base,'head':comparison.head,'analyze':true,'require_checkout':true,'options':{'configuration':{'all_features':true,'target':c.signature.target},'exact_tests':true},'initialization_options':{'cargo':{'features':'all','target':c.signature.target,'noDefaultFeatures':false,'buildScripts':{'enable':false},'sysroot':null},'procMacro':{'enable':false},'checkOnSave':false,'cachePriming':{'enable':false}},'validation':{'context':c,'comparison':comparison}}"
+          "request": "{'execution':{'enabled':false},'mode':'snapshot','base':comparison.base,'head':comparison.head,'require_checkout':true,'options':{'configuration':{'all_features':true,'target':c.signature.target},'exact_tests':true},'validation':{'context':c,'comparison':comparison}}"
         }
       },
       "inputs": {
@@ -3004,45 +3000,13 @@
       }
     },
     {
-      "id": "analyze",
-      "kind": "lsp.analyze",
-      "config": {
-        "command": "rust-analyzer",
-        "profile": "rust_analyzer",
-        "extensions": [
-          "rs"
-        ],
-        "deadline_ms": 120000
-      },
-      "inputs": {
-        "request": {
-          "from": {
-            "node": "changes",
-            "port": "request"
-          }
-        },
-        "context": {
-          "from": {
-            "node": "analysis_context",
-            "port": "context"
-          }
-        }
-      }
-    },
-    {
       "id": "plan",
       "kind": "test_affected.plan",
       "config": {},
       "inputs": {
-        "outcome": {
-          "from": {
-            "node": "analyze",
-            "port": "outcome"
-          }
-        },
         "context": {
           "from": {
-            "node": "analyze",
+            "node": "analysis_context",
             "port": "context"
           }
         }

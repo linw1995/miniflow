@@ -1,17 +1,16 @@
 # test-affected
 
 Repository developer tooling for [issue #91](https://github.com/linw1995/miniflow/issues/91).
-The unpublished `mfn-lsp` and `mfn-test-affected` packages share workspace checks but are not
-product release dependencies, support packages, or bundled examples.
+The unpublished `mfn-test-affected` package shares workspace checks but is not
+a product release dependency, support package, or bundled example.
 
 One Flow routes local and CI inputs through `builtin.parameters` and `builtin.if_else`.
 The local branch builds a comparison request with Code. The CI branch uses Code, Loop,
 and bounded GitHub/Git reads to find the nearest compatible successful validation.
 Exclusive input edges converge both requests before the shared `git.diff` (Task) ->
-`lsp.analyze` (Stream) -> `test_affected.plan` (Task) path.
-It produces a test plan and optional validation provenance; a separate script consumes the plan. LSP servers are explicitly configured,
-never downloaded automatically. Ordinary tests use a local fake server. Use `nix develop` for tools
-and the pinned rust-analyzer when running real-server checks.
+`test_affected.plan` (Task) path.
+It produces a test plan and optional validation provenance; a separate script consumes the plan.
+Ordinary tests use a local fake server. Use `nix develop` for tools.
 
 Invariant checks reuse the upstream `builtin.assert` structured conditions without input or output ports.
 Explicit node-success edges order Task predicate producers, assertions, and dependent Tasks.
@@ -21,37 +20,8 @@ Standalone interruption uses the upstream runner's cancellation handling, while 
 the test consumer retain ownership of child-process cleanup.
 
 ```sh
-nix develop --command cargo check -p mfn-lsp -p mfn-test-affected
+nix develop --command cargo check -p mfn-test-affected
 nix develop --command python3 -m unittest discover -s scripts -p test_tool_boundaries.py
-```
-
-## LSP node
-
-`lsp.analyze` is a `TypedStreamNode`. Its input ports are `request` and opaque `context`;
-its outputs are `outcome` and the unchanged `context` (including secret metadata).
-A request identifies snapshots by `id`, absolute `root`, and `documents` with relative paths
-and UTF-8 byte ranges. `initialization_options` is forwarded to the server unchanged.
-
-The node configuration selects `command`, optional `args`, optional source `extensions`,
-and `profile` (`standard` by default, or `rust_analyzer` for its explicit readiness notification). Limits default to 120000 ms, 2048 requests per snapshot, and 16 MiB per result budget.
-Queries use statically advertised standard symbol, reference, and call-hierarchy capabilities.
-Standard semantic messages use `lsp-types` for parameters, results, and capability declarations.
-The bounded transport retains pre-allocation message limits, cancellation, and process ownership;
-malformed semantic results become analysis gaps. Protocol-library types remain inside the provider,
-while Flow evidence keeps its existing JSON format and opaque call-hierarchy data.
-The Rust profile adds readiness handling only; it does not query `relatedTests` or expose an unused
-extension-result registry. Dynamic capability registration is not advertised or supported.
-The deadline spans the entire batch. Each snapshot gets one session, reused for all its queries.
-
-Every completed batch emits exactly one `analyzed`, `incomplete`, or `not_requested` outcome.
-Unsupported capabilities and remote analysis failures are evidence gaps, not proof that tests are
-independent. Empty batches do not start a server. Cancellation, invalid requests, cleanup failures,
-and emitter failures stop the node without publishing fallback. All child processes are reaped
-before the terminal result is admitted. Progress adds diagnostic span events, never business messages.
-The initial transport uses Unix nonblocking pipes; other platforms report an unsupported transport.
-
-```sh
-nix develop --command cargo nextest run -p mfn-lsp
 ```
 
 ## Git facts and test plans
@@ -93,48 +63,40 @@ unavailable historical fetches are data for the Flow to interpret.
 `artifacts`, and optional `options`. It resolves local revisions and compares their merge base
 with head. Snapshots are detached Git worktrees under `target/test-affected/snapshots/` by default;
 they remain available after the Flow finishes. Missing refs are errors, not automatic fetches.
-The node's configured `initialization_options` are forwarded to analysis without Rust-specific policy.
 Set the Git node's `comparison_mode` configuration to `snapshot` for a direct comparison
 between two supplied local snapshots. The default `merge-base` retains branch-comparison behavior.
 The plan records the selected mode and resolved revisions. CI baseline eligibility remains
 outside the node; the node never fetches missing historical merge objects.
 
 Alternatively, supply `request` with `mode` (`worktree`, `commit`, `merge-base`, or `snapshot`),
-optional `base`, `head` (default `HEAD`), `analyze` (default true), `require_checkout`, `options`,
-optional opaque `initialization_options`, opaque `validation` provenance, and optional opaque
-`execution` context forwarded through analysis and planning. Do not combine it with legacy `base`/`head`/`options` inputs.
+optional `base`, `head` (default `HEAD`), `require_checkout`, `options`,
+opaque `validation` provenance, and optional opaque
+`execution` context forwarded to planning. Do not combine it with legacy `base`/`head`/`options` inputs.
 Worktree mode snapshots current files through a temporary copy of the caller's index,
 including staged ignored files and nonignored untracked files, without changing the original
 index or branch. Commit mode uses the first parent, or an empty snapshot for a root commit.
 `require_checkout` enforces a clean caller checkout at the requested head for CI.
-Setting `analyze` to false retains Git changes while emitting an empty semantic batch.
 Set `options.exact_tests` to false for conservative package-only planning.
 
-`test_affected.plan` consumes only the analysis output and its opaque comparison context. It uses
+`test_affected.plan` consumes the opaque comparison context. It uses
 Cargo metadata for all declared dependency kinds and owns the shared
 [input policy](../../docs/ci.md#affected-package-tests). Package manifests retain owner/consumer scope; known repository configuration
 is deferred to full main/nightly verification. Known shared executables select their consumers, while
-unknown inputs and analyzer failures retain full fallback. Source diffs remain the impact seed even when
-call edges do not change. LSP evidence alone never excludes unobserved tests.
+unknown inputs retain full-workspace fallback. Source diffs are the impact seed.
 
-The initial narrowing rule accepts directly declared private `#[test]` functions in conventional
-library modules or integration targets when only their bodies changed. It checks unchanged surrounding
-code, unique test identifiers, known test macros, and absence of out-of-line children or visible shared
-resource access in the test scope. Unknown patterns retain package scope. This is a deliberately limited
-source ownership rule, not a proof of arbitrary program effects or test independence.
-
-After test-body isolation, a resolved coverage graph narrows each remaining changed Rust file to the
+A resolved coverage graph narrows each changed Rust file to the
 exact tests covering its base-side line ranges. Files the graph predates (changed between the graph
 commit and the comparison base), files with uncovered changed ranges, and files absent from the graph
 widen back to the existing package plus reverse-dependency scope; every widening records its reason in
 the plan's `coverage_graph` outcome next to the graph's commit/run/schema provenance. Graph-derived
-selectors join the same exact `tests` list as isolated test bodies, so both consumers widen identity
-mismatches to the recorded baseline. Graph unavailability never forces full-workspace fallback;
-unknown inputs and analyzer failures still do.
+selectors flow through the same exact-filter consumers, so identity
+mismatches widen to the recorded baseline. Graph unavailability never forces full-workspace fallback;
+unknown inputs still do.
 
 The plan records source/tree/toolchain and build-environment identity, conservative `baseline_packages`,
 retained whole `packages`, exact `tests` (`package`, `binary`, `name`), reasons, and deferred
-`ignored_files`. Older saved plans without `ignored_files` remain accepted by the consumer. Counts remain null
+`ignored_files`. Older saved plans without `ignored_files` or the coverage-graph outcome, and plans
+carrying the removed analysis fields, remain accepted by the consumer. Counts remain null
 without a supplied matching inventory. Options accept `configuration` (`target`, `all_features`,
 `features`, `no_default_features`) and an optional `inventory` path. Default test configuration is
 all features on the host target. The planning path does not build or execute tests.
@@ -193,7 +155,7 @@ nix develop --command cargo run -p mf-cli --features development-support -- \
 Omit `--params.run true` to emit only a plan. Enabled local execution invokes the existing
 consumer through `process.run`, passing the plan on stdin. The consumer also accepts a path
 or `-` directly; its stdout contains one JSON report and child diagnostics use stderr.
-The execution branch uses the consumer at `tools/test-affected/run-tests.py` in the analyzed
+The execution branch uses the consumer at `tools/test-affected/run-tests.py` in the compared
 repository. Custom definitions can configure another program or consumer path.
 
 The local compile command retains telemetry support so TUI can observe execution.
@@ -216,7 +178,7 @@ Local parameters:
 | `mode` | `worktree` | `worktree`, `commit`, `merge-base`, or `snapshot` |
 | `base` | null | Local base ref for merge-base or snapshot comparison |
 | `head` | `HEAD` | Commit or head ref to analyze |
-| `precision` | `tests` | `tests` permits semantic refinement; `packages` skips LSP work |
+| `precision` | `tests` | `tests` permits coverage-graph narrowing; `packages` keeps package scope |
 | `configuration` | `{}` | Local target/features/all-features/no-default-features settings |
 | `inventory` | null | Optional matching nextest inventory |
 | `artifacts` | null | Optional absolute snapshot directory |
@@ -235,12 +197,11 @@ only to GitHub reads. Manual PR dispatch supplies `MF_MERGE_SHA` and must identi
 pinned merge. `MF_CUMULATIVE=true` bypasses historical candidate discovery. Local execution
 needs none of these CI values and performs no GitHub request.
 
-CI enables semantic analysis and exact-test refinement under the `flow-pr-v3` compatibility policy.
-Production changes and analysis failures retain conservative package scope. Candidate
+CI enables exact-test refinement under the `flow-pr-v3` compatibility policy.
+Production changes not resolved by a compatible coverage graph retain conservative package scope. Candidate
 metadata is inspected first; artifacts and missing merge objects are read lazily in source
 ancestry order. A usable record stops the Loop immediately. Incompatible or unavailable
 history produces a cumulative affected comparison, while invalid current identity fails.
-All comparison provenance crosses the LSP boundary through its context output.
 
 Plan-only output is one `{"plan": ..., "validation": ...}` record. Local validation is null; CI
 validation contains the current execution context and comparison for coverage and final recording.
@@ -249,20 +210,8 @@ and inventory/test durations. Empty plans return `executed: false`; failed tests
 CI retains external coverage and success-record publication. Source compilation/build-cache
 preparation, Flow evidence/analysis/planning, and actual test execution remain separate costs.
 
-## Explicit real-server verification
-
-The real-server smoke test is ignored by ordinary suites. CI and nightly coverage explicitly select
-the pinned server and run this check alongside the protocol fixtures. To run it locally, select a
-server from the pinned development environment:
-
-```sh
-nix develop --command env MF_LSP_SMOKE_SERVER=rust-analyzer \
-  cargo nextest run -p mfn-lsp --test smoke --run-ignored all
-```
-
 CI invokes this same Flow and consumes mixed package/exact-test plans. Coverage preparation checks
 the runnable inventory before executing each package's filter. Complete crate suites may upload
 source-scoped coverage; partial suites retain reports only as artifacts and for the incremental gate.
-Semantic fallback is decided after analysis, so some full-suite plans still pay for LSP work. Measure compilation,
-initialization, evidence discovery, analysis/planning, and script build/list/test time separately.
+Measure compilation, evidence discovery, planning, and script build/list/test time separately.
 The policy identifier and validation record version live in the `validation_policy` constant.

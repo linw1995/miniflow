@@ -1,4 +1,3 @@
-use mfn_lsp::{AnalysisOutcome, Gap, GapKind, Profile, ServerConfig, Status};
 use mfn_test_affected::{PlanOptions, git, make_plan};
 use serde_json::json;
 use std::{
@@ -10,26 +9,8 @@ use std::{
 mod common;
 use common::*;
 
-fn outcome(comparison: &mfn_test_affected::Comparison) -> AnalysisOutcome {
-    AnalysisOutcome {
-        request: comparison.request.clone(),
-        server: ServerConfig {
-            command: "unused".into(),
-            args: vec![],
-            profile: Profile::Standard,
-            extensions: vec![],
-            deadline_ms: 1000,
-            max_requests: 10,
-            max_bytes: 8192,
-        },
-        status: Status::Analyzed,
-        evidence: vec![],
-        gaps: vec![],
-        elapsed_ms: 1,
-    }
-}
 fn compare(root: &Path, base: &str, head: &str) -> mfn_test_affected::Comparison {
-    git::compare(root, base, head, None, json!({})).unwrap()
+    git::compare(root, base, head, None).unwrap()
 }
 
 /// The normalized execution signature a compatible graph must bind to;
@@ -137,7 +118,7 @@ fn graph_options(graph: mfn_test_affected::CoverageGraphInput) -> PlanOptions {
 }
 
 #[test]
-fn combines_isolated_tests_with_production_consumers_and_keeps_caller_checkout() {
+fn combines_changed_packages_with_consumers_and_keeps_caller_checkout() {
     let (directory, base) = fixture();
     let root = directory.path();
     write(root, "core/src/lib.rs", &SOURCE.replace("1, 1", "2, 2"));
@@ -148,16 +129,13 @@ fn combines_isolated_tests_with_production_consumers_and_keeps_caller_checkout()
     );
     let head = commit(root);
     let comparison = compare(root, &base, &head);
-    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    let plan = make_plan(&comparison, &PlanOptions::default()).unwrap();
     assert_eq!(plan.baseline_packages, ["sample-app", "sample-core"]);
 
-    assert_eq!(plan.packages, ["sample-app"]);
-    assert_eq!(plan.tests.len(), 1);
-    assert_eq!(plan.tests[0].name, "tests::changed");
-    assert_eq!(plan.tests[0].binary, "sample-core");
+    assert_eq!(plan.packages, ["sample-app", "sample-core"]);
+    assert!(plan.tests.is_empty());
     assert!(plan.selected_count.is_none());
-    let input = mfn_lsp::AnalyzeOutput {
-        outcome: serde_json::to_value(outcome(&comparison)).unwrap().into(),
+    let input = mfn_test_affected::PlanInput {
         context: mf_runtime::ValueRef::from(json!({"comparison":comparison,"options":{}}))
             .into_secret(),
     };
@@ -181,7 +159,7 @@ fn combines_isolated_tests_with_production_consumers_and_keeps_caller_checkout()
 }
 
 #[test]
-fn retains_behavior_changes_shared_inputs_and_analyzer_failures() {
+fn retains_behavior_changes_shared_inputs_and_unknown_input_fallback() {
     let (directory, base) = fixture();
     let root = directory.path();
     write(
@@ -191,35 +169,19 @@ fn retains_behavior_changes_shared_inputs_and_analyzer_failures() {
     );
     let head = commit(root);
     let comparison = compare(root, &base, &head);
-    let mut analysis = outcome(&comparison);
-    let plan = make_plan(&comparison, &analysis, &PlanOptions::default()).unwrap();
+    let plan = make_plan(&comparison, &PlanOptions::default()).unwrap();
     assert_eq!(plan.packages, ["sample-app", "sample-core"]);
-    analysis.gaps.push(Gap {
-        snapshot: comparison.request.snapshots[1].id.clone(),
-        operation: "initialize".into(),
-        kind: GapKind::AnalyzerFailure,
-        message: "unavailable".into(),
-    });
-    analysis.status = Status::Incomplete;
-    let fallback = make_plan(&comparison, &analysis, &PlanOptions::default()).unwrap();
-    assert_eq!(fallback.packages.len(), 3);
-    assert!(
-        fallback
-            .fallback_reasons
-            .iter()
-            .any(|reason| reason.contains("unavailable"))
-    );
     write(root, ".config/nextest.toml", "[profile.default]\n");
     let next = commit(root);
     let comparison = compare(root, &base, &next);
-    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    let plan = make_plan(&comparison, &PlanOptions::default()).unwrap();
     assert_eq!(plan.packages, ["sample-app", "sample-core"]);
     assert_eq!(plan.ignored_files, [".config/nextest.toml"]);
     assert!(plan.fallback_reasons.is_empty());
     write(root, "scripts/unknown.sh", "exit 0\n");
     let next = commit(root);
     let comparison = compare(root, &base, &next);
-    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    let plan = make_plan(&comparison, &PlanOptions::default()).unwrap();
     assert_eq!(plan.packages.len(), 3);
     assert!(plan.fallback_reasons[0].contains("scripts/unknown.sh"));
 }
@@ -245,24 +207,11 @@ fn resolves_merge_base_and_rejects_changed_snapshots_and_analysis_identities() {
             .collect::<Vec<_>>(),
         ["docs/feature.md"]
     );
-    let analysis = outcome(&comparison);
-    let plan = make_plan(&comparison, &analysis, &PlanOptions::default()).unwrap();
+    let plan = make_plan(&comparison, &PlanOptions::default()).unwrap();
     assert!(plan.packages.is_empty() && plan.tests.is_empty());
-    let mut wrong = analysis.clone();
-    wrong.request.snapshots[1].id = "wrong".into();
-    assert!(make_plan(&comparison, &wrong, &PlanOptions::default()).is_err());
-    let mut wrong = analysis.clone();
-    wrong.evidence.push(mfn_lsp::SnapshotEvidence {
-        snapshot: "another-snapshot".into(),
-        server_info: json!(null),
-        position_encoding: "utf-16".into(),
-        progress_notifications: 0,
-        documents: vec![],
-    });
-    assert!(make_plan(&comparison, &wrong, &PlanOptions::default()).is_err());
     write(&comparison.head_root, "core/src/lib.rs", "changed\n");
-    assert!(make_plan(&comparison, &analysis, &PlanOptions::default()).is_err());
-    assert!(git::compare(root, "missing", &head, None, json!({})).is_err());
+    assert!(make_plan(&comparison, &PlanOptions::default()).is_err());
+    assert!(git::compare(root, "missing", &head, None).is_err());
     let nested = root.join("target/not-a-worktree");
     fs::create_dir_all(&nested).unwrap();
     assert!(git::verify_snapshot(&nested, &git::revision(root, "HEAD").unwrap()).is_err());
@@ -275,7 +224,29 @@ fn script_verifies_selection_runs_cases_and_preserves_empty_stale_and_failed_pla
     write(root, "core/src/lib.rs", &SOURCE.replace("1, 1", "2, 2"));
     let head = commit(root);
     let comparison = compare(root, &base, &head);
-    let mut plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    let toolchain = git::command(root, "rustc", &["-vV"]).unwrap();
+    let graph = write_graph(
+        root,
+        "script",
+        &base,
+        graph_signature(&toolchain, "ci"),
+        vec![(
+            "sample-core",
+            "sample-core",
+            "tests::changed",
+            vec![("core/src/lib.rs", vec![(2, 1)])],
+        )],
+    );
+    let options = {
+        let base = base.clone();
+        move || PlanOptions {
+            coverage_graph: Some(graph_source(graph.clone(), &base)),
+            ..Default::default()
+        }
+    };
+    let mut plan = make_plan(&comparison, &options()).unwrap();
+    assert_eq!(plan.tests.len(), 1);
+    assert_eq!(plan.tests[0].name, "tests::changed");
     let passing_plan = plan.clone();
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../run-tests.py");
     let path = root.join("target/plan.json");
@@ -306,7 +277,14 @@ fn script_verifies_selection_runs_cases_and_preserves_empty_stale_and_failed_pla
             .ignored_files
             .is_empty()
     );
-    fs::write(&path, legacy.to_string()).unwrap();
+    // Plans saved by older planners lack the coverage graph outcome and may
+    // still carry the removed analysis fields; the consumer tolerates both.
+    let legacy = legacy.as_object_mut().unwrap();
+    legacy.remove("coverage_graph");
+    legacy.insert("analysis_status".into(), json!("analyzed"));
+    legacy.insert("analysis_ms".into(), json!(1));
+    legacy.insert("observed_relationships".into(), json!(0));
+    fs::write(&path, serde_json::to_string(&legacy).unwrap()).unwrap();
     let output = Command::new("python3")
         .arg(&script)
         .arg(&path)
@@ -335,10 +313,9 @@ fn script_verifies_selection_runs_cases_and_preserves_empty_stale_and_failed_pla
     );
     let counted = make_plan(
         &comparison,
-        &outcome(&comparison),
         &PlanOptions {
             inventory: Some(inventory.clone()),
-            ..Default::default()
+            ..options()
         },
     )
     .unwrap();
@@ -361,10 +338,9 @@ fn script_verifies_selection_runs_cases_and_preserves_empty_stale_and_failed_pla
         fs::write(&inventory, supplied.to_string()).unwrap();
         let result = make_plan(
             &comparison,
-            &outcome(&comparison),
             &PlanOptions {
                 inventory: Some(inventory.clone()),
-                ..Default::default()
+                ..options()
             },
         );
         if case == "missing_case" {
@@ -395,7 +371,7 @@ fn script_verifies_selection_runs_cases_and_preserves_empty_stale_and_failed_pla
     );
     let failing = commit(root);
     let comparison = compare(root, &head, &failing);
-    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    let plan = make_plan(&comparison, &options()).unwrap();
     let output = run(&plan, &[]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("FAIL"));
@@ -408,26 +384,13 @@ fn script_verifies_selection_runs_cases_and_preserves_empty_stale_and_failed_pla
 }
 
 #[test]
-fn rejects_feature_configuration_drift_and_partial_inventories() {
+fn rejects_partial_inventories() {
     let (directory, base) = fixture();
     let root = directory.path();
     write(root, "core/src/lib.rs", &SOURCE.replace("1, 1", "2, 2"));
     let head = commit(root);
-    let comparison = git::compare(
-        root,
-        &base,
-        &head,
-        None,
-        json!({"cargo":{"features":"all"}}),
-    )
-    .unwrap();
-    let mut analysis = outcome(&comparison);
-    analysis.server.profile = Profile::RustAnalyzer;
-    let mut options = PlanOptions::default();
-    options.configuration.all_features = false;
-    assert!(make_plan(&comparison, &analysis, &options).is_err());
-    options.configuration.all_features = true;
-    let plan = make_plan(&comparison, &analysis, &options).unwrap();
+    let comparison = compare(root, &base, &head);
+    let plan = make_plan(&comparison, &PlanOptions::default()).unwrap();
     let inventory = root.join("target/partial.json");
     fs::write(
         &inventory,
@@ -436,101 +399,11 @@ fn rejects_feature_configuration_drift_and_partial_inventories() {
         .to_string(),
     )
     .unwrap();
-    options.inventory = Some(inventory);
-    assert!(make_plan(&comparison, &analysis, &options).is_err());
-}
-
-#[test]
-fn maps_conventional_modules_and_integration_targets_but_retains_ambiguous_paths() {
-    let (directory, _) = fixture();
-    let root = directory.path();
-    write(root, "core/src/lib.rs", "mod flat; mod nested;\n");
-    write(root, "core/src/flat.rs", SOURCE);
-    write(root, "core/src/nested/mod.rs", SOURCE);
-    write(
-        root,
-        "core/tests/external.rs",
-        "#[test] fn external() { assert_eq!(1, 1); }\n",
-    );
-    let base = commit(root);
-    for path in [
-        "core/src/flat.rs",
-        "core/src/nested/mod.rs",
-        "core/tests/external.rs",
-    ] {
-        let text = fs::read_to_string(root.join(path)).unwrap();
-        write(root, path, &text.replace("1, 1", "2, 2"));
-    }
-    let head = commit(root);
-    let comparison = compare(root, &base, &head);
-    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
-    assert!(plan.packages.is_empty());
-    assert_eq!(
-        plan.tests
-            .iter()
-            .map(|t| (t.binary.as_str(), t.name.as_str()))
-            .collect::<Vec<_>>(),
-        [
-            ("sample-core", "flat::tests::changed"),
-            ("sample-core", "nested::tests::changed"),
-            ("sample-core::external", "external"),
-        ]
-    );
-
-    // Two candidate module files cannot establish one executable identity.
-    write(root, "core/src/flat/mod.rs", SOURCE);
-    let ambiguous_base = commit(root);
-    write(root, "core/src/flat.rs", &SOURCE.replace("1, 1", "3, 3"));
-    let head = commit(root);
-    let comparison = compare(root, &ambiguous_base, &head);
-    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
-    assert_eq!(plan.packages, ["sample-app", "sample-core"]);
-    assert!(plan.tests.is_empty());
-}
-
-#[test]
-fn feature_profiles_must_match_the_execution_configuration() {
-    let (directory, base) = fixture();
-    let root = directory.path();
-    write(root, "core/src/lib.rs", &SOURCE.replace("1, 1", "2, 2"));
-    let head = commit(root);
-    let mut comparison = compare(root, &base, &head);
-    let mut options = PlanOptions::default();
-    options.configuration.all_features = false;
-    options.configuration.features = vec!["selected".into()];
-    options.configuration.no_default_features = true;
-    for (cargo, valid) in [
-        (
-            json!({"features":["selected"],"noDefaultFeatures":true}),
-            true,
-        ),
-        (
-            json!({"features":["other"],"noDefaultFeatures":true}),
-            false,
-        ),
-        (
-            json!({"features":["selected"],"noDefaultFeatures":false}),
-            false,
-        ),
-        (
-            json!({"features":["selected"],"noDefaultFeatures":true,"target":"other-target"}),
-            false,
-        ),
-    ] {
-        comparison.request.initialization_options = json!({"cargo":cargo});
-        let mut analysis = outcome(&comparison);
-        analysis.server.profile = Profile::RustAnalyzer;
-        assert_eq!(make_plan(&comparison, &analysis, &options).is_ok(), valid);
-    }
-    options.configuration.all_features = true;
-    assert!(make_plan(&comparison, &outcome(&comparison), &options).is_err());
-    options.configuration.features.clear();
-    options.configuration.no_default_features = false;
-    let mut analysis = outcome(&comparison);
-    analysis.server.profile = Profile::RustAnalyzer;
-    analysis.request.initialization_options = json!({"cargo":{"features":[]}});
-    comparison.request = analysis.request.clone();
-    assert!(make_plan(&comparison, &analysis, &options).is_err());
+    let options = PlanOptions {
+        inventory: Some(inventory),
+        ..Default::default()
+    };
+    assert!(make_plan(&comparison, &options).is_err());
 }
 
 #[test]
@@ -544,10 +417,10 @@ fn additions_deletions_and_manifest_changes_preserve_conservative_scope() {
     let head = commit(root);
     let comparison = compare(root, &base, &head);
     assert_eq!(comparison.changes.len(), 3);
-    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    let plan = make_plan(&comparison, &PlanOptions::default()).unwrap();
     assert_eq!(plan.packages, ["sample-app", "sample-core"]);
     assert!(plan.tests.is_empty());
-    assert!(git::compare(root, &base, &head, Some(Path::new("relative")), json!({})).is_err());
+    assert!(git::compare(root, &base, &head, Some(Path::new("relative"))).is_err());
     let manifest = fs::read_to_string(root.join("core/Cargo.toml")).unwrap();
     write(
         root,
@@ -556,7 +429,7 @@ fn additions_deletions_and_manifest_changes_preserve_conservative_scope() {
     );
     let next = commit(root);
     let comparison = compare(root, &head, &next);
-    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    let plan = make_plan(&comparison, &PlanOptions::default()).unwrap();
     assert_eq!(plan.packages, ["sample-app", "sample-core"]);
     assert!(plan.fallback_reasons.is_empty());
 }
@@ -608,7 +481,6 @@ fn records_coverage_graph_provenance_and_degradation_reasons() {
     // widen to package scope with a recorded reason.
     let plan = make_plan(
         &comparison,
-        &outcome(&comparison),
         &options(source(inert(
             "compatible",
             &base,
@@ -655,7 +527,7 @@ fn records_coverage_graph_provenance_and_degradation_reasons() {
             "execution signature differs",
         ),
     ] {
-        let plan = make_plan(&comparison, &outcome(&comparison), &options(graph)).unwrap();
+        let plan = make_plan(&comparison, &options(graph)).unwrap();
         let graph = plan.coverage_graph.unwrap();
         assert!(graph.commit.is_none(), "{fragment}");
         assert!(
@@ -668,7 +540,6 @@ fn records_coverage_graph_provenance_and_degradation_reasons() {
     // The acquisition side can report unavailability directly.
     let plan = make_plan(
         &comparison,
-        &outcome(&comparison),
         &options(CoverageGraphInput::Unavailable {
             reason: "no eligible ancestor".into(),
         }),
@@ -695,7 +566,6 @@ fn records_coverage_graph_provenance_and_degradation_reasons() {
         + "\n";
     let plan = make_plan(
         &comparison,
-        &outcome(&comparison),
         &options(source(inert(
             "other-host",
             &base,
@@ -726,7 +596,6 @@ fn records_coverage_graph_provenance_and_degradation_reasons() {
             + "\n";
         let plan = make_plan(
             &comparison,
-            &outcome(&comparison),
             &options(source(inert(
                 &format!("mismatch-{marker}"),
                 &base,
@@ -746,7 +615,7 @@ fn records_coverage_graph_provenance_and_degradation_reasons() {
         );
     }
     // Without a descriptor the plan carries no graph outcome at all.
-    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    let plan = make_plan(&comparison, &PlanOptions::default()).unwrap();
     assert!(plan.coverage_graph.is_none());
 }
 
@@ -786,12 +655,7 @@ fn narrows_package_scope_through_coverage_graph_with_conservative_widening() {
             ),
         ],
     );
-    let plan = make_plan(
-        &comparison,
-        &outcome(&comparison),
-        &graph_options(graph_source(graph, &base)),
-    )
-    .unwrap();
+    let plan = make_plan(&comparison, &graph_options(graph_source(graph, &base))).unwrap();
     assert!(plan.packages.is_empty());
     assert_eq!(
         plan.tests
@@ -844,12 +708,7 @@ fn narrows_package_scope_through_coverage_graph_with_conservative_widening() {
             vec![("core/src/lib.rs", vec![(1, 1)])],
         )],
     );
-    let plan = make_plan(
-        &comparison,
-        &outcome(&comparison),
-        &graph_options(graph_source(graph, &base)),
-    )
-    .unwrap();
+    let plan = make_plan(&comparison, &graph_options(graph_source(graph, &base))).unwrap();
     assert_eq!(plan.packages, ["sample-app", "sample-core"]);
     assert!(plan.tests.is_empty());
     let provenance = plan.coverage_graph.unwrap();
@@ -873,12 +732,7 @@ fn narrows_package_scope_through_coverage_graph_with_conservative_widening() {
             vec![("core/src/other.rs", vec![(1, 1)])],
         )],
     );
-    let plan = make_plan(
-        &comparison,
-        &outcome(&comparison),
-        &graph_options(graph_source(graph, &head)),
-    )
-    .unwrap();
+    let plan = make_plan(&comparison, &graph_options(graph_source(graph, &head))).unwrap();
     assert_eq!(plan.packages, ["sample-app", "sample-core"]);
     let provenance = plan.coverage_graph.unwrap();
     assert_eq!(provenance.widened.len(), 1);
@@ -926,7 +780,6 @@ fn narrows_package_scope_through_coverage_graph_with_conservative_widening() {
     );
     let plan = make_plan(
         &comparison,
-        &outcome(&comparison),
         &graph_options(graph_source(graph, &with_extra)),
     )
     .unwrap();
@@ -937,28 +790,24 @@ fn narrows_package_scope_through_coverage_graph_with_conservative_widening() {
     assert_eq!(provenance.widened[0].file, "core/src/extra.rs");
     assert!(provenance.widened[0].reason.contains("no test covers"));
 
-    // Test-body isolation wins over the graph: the file is never queried.
+    // Test-body-only changes are ordinary graph queries now: with an empty
+    // graph the file is absent and widens to package scope.
     write(root, "app/src/lib.rs", &SOURCE.replace("1, 1", "9, 9"));
-    let isolated = commit(root);
-    let comparison = compare(root, &mixed, &isolated);
-    let graph = write_graph(root, "isolation", &mixed, signature.clone(), vec![]);
-    let plan = make_plan(
-        &comparison,
-        &outcome(&comparison),
-        &graph_options(graph_source(graph, &mixed)),
-    )
-    .unwrap();
-    assert_eq!(plan.tests.len(), 1);
-    assert_eq!(plan.tests[0].name, "tests::changed");
-    assert!(plan.coverage_graph.unwrap().widened.is_empty());
+    let test_body = commit(root);
+    let comparison = compare(root, &mixed, &test_body);
+    let graph = write_graph(root, "test-body", &mixed, signature.clone(), vec![]);
+    let plan = make_plan(&comparison, &graph_options(graph_source(graph, &mixed))).unwrap();
+    assert!(plan.tests.is_empty());
+    assert_eq!(plan.packages, ["sample-app"]);
+    let provenance = plan.coverage_graph.unwrap();
+    assert_eq!(provenance.widened.len(), 1);
+    assert_eq!(provenance.widened[0].file, "app/src/lib.rs");
 
     // Unknown inputs keep the full-workspace fallback and clear graph
     // selectors; the graph provenance remains recorded.
     let mut comparison = compare(root, &head, &newer);
     comparison.changes.push(mfn_test_affected::Change {
         path: "scripts/unknown.sh".into(),
-        before: vec![],
-        after: vec![],
         before_lines: vec![],
     });
     let graph = write_graph(
@@ -975,7 +824,6 @@ fn narrows_package_scope_through_coverage_graph_with_conservative_widening() {
     );
     let plan = make_plan(
         &comparison,
-        &outcome(&comparison),
         &graph_options(graph_source(graph.clone(), &head)),
     )
     .unwrap();
@@ -989,7 +837,6 @@ fn narrows_package_scope_through_coverage_graph_with_conservative_widening() {
     let comparison = compare(root, &newer, &newer);
     let plan = make_plan(
         &comparison,
-        &outcome(&comparison),
         &graph_options(graph_source(empty_graph, &newer)),
     )
     .unwrap();
@@ -1000,7 +847,7 @@ fn narrows_package_scope_through_coverage_graph_with_conservative_widening() {
     let comparison = compare(root, &head, &newer);
     let mut options = graph_options(graph_source(graph, &head));
     options.exact_tests = false;
-    let plan = make_plan(&comparison, &outcome(&comparison), &options).unwrap();
+    let plan = make_plan(&comparison, &options).unwrap();
     assert_eq!(
         plan.coverage_graph.unwrap().reason.as_deref(),
         Some("exact test selection is disabled for this plan")
@@ -1031,12 +878,7 @@ fn graph_derived_selectors_execute_through_the_plan_consumer() {
             vec![("core/src/lib.rs", vec![(1, 1)])],
         )],
     );
-    let plan = make_plan(
-        &comparison,
-        &outcome(&comparison),
-        &graph_options(graph_source(graph, &base)),
-    )
-    .unwrap();
+    let plan = make_plan(&comparison, &graph_options(graph_source(graph, &base))).unwrap();
     assert_eq!(plan.tests.len(), 1);
     assert_eq!(plan.tests[0].name, "tests::stable");
     let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../run-tests.py");
@@ -1102,8 +944,7 @@ fn task_boundaries_preserve_error_sources_and_reject_cancelled_work() {
             .downcast_ref::<mfn_test_affected::Error>()
             .is_some()
     );
-    let plan_input = || mfn_lsp::AnalyzeOutput {
-        outcome: json!(null).into(),
+    let plan_input = || mfn_test_affected::PlanInput {
         context: json!({}).into(),
     };
     let error = mfn_test_affected::PlanNode
@@ -1193,11 +1034,9 @@ fn shared_input_policy_scopes_known_consumers() {
     ] {
         comparison.changes = vec![mfn_test_affected::Change {
             path: path.into(),
-            before: vec![],
-            after: vec![],
             before_lines: vec![],
         }];
-        let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+        let plan = make_plan(&comparison, &PlanOptions::default()).unwrap();
         assert_eq!(plan.packages, expected, "{path}");
         assert_eq!(
             plan.ignored_files,
@@ -1212,7 +1051,7 @@ fn shared_input_policy_scopes_known_consumers() {
     write(directory.path(), "examples/unknown.json", "{}\n");
     let head = commit(directory.path());
     let comparison = compare(directory.path(), &base, &head);
-    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    let plan = make_plan(&comparison, &PlanOptions::default()).unwrap();
     assert_eq!(plan.packages.len(), 3);
     assert!(!plan.fallback_reasons.is_empty());
 }
@@ -1259,20 +1098,19 @@ fn snapshot_mode_preserves_incremental_base_and_plan_provenance() {
         first_merge.trim(),
         second_merge.trim(),
         None,
-        json!({}),
         ComparisonMode::Snapshot,
     )
     .unwrap();
     assert_eq!(comparison.base, first_merge.trim());
     assert_eq!(comparison.changes.len(), 1);
     assert_eq!(comparison.changes[0].path, "app/src/lib.rs");
-    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    let plan = make_plan(&comparison, &PlanOptions::default()).unwrap();
     assert_eq!(plan.comparison_mode, ComparisonMode::Snapshot);
     assert_eq!(plan.packages, ["sample-app"]);
     let cumulative = compare(root, first_merge.trim(), second_merge.trim());
     assert_ne!(cumulative.base, comparison.base);
     assert_eq!(cumulative.changes.len(), 2);
-    let broader = make_plan(&cumulative, &outcome(&cumulative), &PlanOptions::default()).unwrap();
+    let broader = make_plan(&cumulative, &PlanOptions::default()).unwrap();
     assert_eq!(broader.baseline_packages.len(), 2);
     assert!(serde_json::from_value::<GitConfig>(json!({"comparison_mode":"unknown"})).is_err());
     let config: GitConfig = serde_json::from_value(json!({"comparison_mode":"snapshot"})).unwrap();
@@ -1300,23 +1138,17 @@ fn worktree_and_root_commit_requests_preserve_source_and_index() {
     let (directory, first) = fixture();
     let root = directory.path();
     let first_request: ComparisonRequest = serde_json::from_value(
-        json!({"mode":"commit","head":first,"analyze":false,"options":{"exact_tests":false}}),
+        json!({"mode":"commit","head":first,"options":{"exact_tests":false}}),
     )
     .unwrap();
-    let first_comparison = git::compare_request(root, &first_request, None, json!({})).unwrap();
+    let first_comparison = git::compare_request(root, &first_request, None).unwrap();
     assert_eq!(first_comparison.comparison_mode, ComparisonMode::Commit);
     assert!(
         git::command(&first_comparison.base_root, "git", &["ls-tree", "HEAD"])
             .unwrap()
             .is_empty()
     );
-    assert!(first_comparison.request.snapshots.is_empty());
-    let first_plan = make_plan(
-        &first_comparison,
-        &outcome(&first_comparison),
-        &first_request.options,
-    )
-    .unwrap();
+    let first_plan = make_plan(&first_comparison, &first_request.options).unwrap();
     assert_eq!(first_plan.packages.len(), 3);
 
     write(
@@ -1333,11 +1165,9 @@ fn worktree_and_root_commit_requests_preserve_source_and_index() {
     git::command(root, "git", &["add", "-f", "private-staged.txt"]).unwrap();
     write(root, "ignored.txt", "not part of the snapshot\n");
     let index = fs::read(root.join(".git/index")).unwrap();
-    let request: ComparisonRequest = serde_json::from_value(
-        json!({"mode":"worktree","analyze":false,"options":{"exact_tests":false}}),
-    )
-    .unwrap();
-    let comparison = git::compare_request(root, &request, None, json!({})).unwrap();
+    let request: ComparisonRequest =
+        serde_json::from_value(json!({"mode":"worktree","options":{"exact_tests":false}})).unwrap();
+    let comparison = git::compare_request(root, &request, None).unwrap();
     assert_eq!(comparison.comparison_mode, ComparisonMode::Worktree);
     assert_eq!(comparison.base, base);
     assert_ne!(comparison.head, base);
@@ -1367,13 +1197,13 @@ fn worktree_and_root_commit_requests_preserve_source_and_index() {
             .unwrap()
             .is_empty()
     );
-    let repeated = git::compare_request(root, &request, None, json!({})).unwrap();
+    let repeated = git::compare_request(root, &request, None).unwrap();
     assert_eq!(repeated.head, comparison.head);
     let strict: ComparisonRequest = serde_json::from_value(
         json!({"mode":"snapshot","base":base,"head":base,"require_checkout":true}),
     )
     .unwrap();
-    assert!(git::compare_request(root, &strict, None, json!({})).is_err());
+    assert!(git::compare_request(root, &strict, None).is_err());
     let shallow = tempfile::tempdir().unwrap();
     let source = url::Url::from_directory_path(root).unwrap();
     git::command(
@@ -1383,18 +1213,18 @@ fn worktree_and_root_commit_requests_preserve_source_and_index() {
     )
     .unwrap();
     let commit_request: ComparisonRequest =
-        serde_json::from_value(json!({"mode":"commit","analyze":false})).unwrap();
-    assert!(git::compare_request(shallow.path(), &commit_request, None, json!({})).is_err());
+        serde_json::from_value(json!({"mode":"commit"})).unwrap();
+    assert!(git::compare_request(shallow.path(), &commit_request, None).is_err());
 }
 
 #[test]
 fn normalized_requests_retain_provenance_and_package_only_scope() {
-    use mf_runtime::{ExecutionContext, TypedStreamNode, TypedTaskNode};
+    use mf_runtime::{ExecutionContext, TypedTaskNode};
     let (directory, base) = fixture();
     let root = directory.path();
     write(root, "core/src/lib.rs", &SOURCE.replace("1, 1", "2, 2"));
     let head = commit(root);
-    let request = mf_runtime::ValueRef::from(json!({"mode":"snapshot","base":base,"head":head,"analyze":false,"require_checkout":true,"options":{"exact_tests":false},"validation":{"run":42},"execution":{"enabled":true,"opaque":{"key":42}}})).into_secret();
+    let request = mf_runtime::ValueRef::from(json!({"mode":"snapshot","base":base,"head":head,"require_checkout":true,"options":{"exact_tests":false},"validation":{"run":42},"execution":{"enabled":true,"opaque":{"key":42}}})).into_secret();
     let analysis_input = mfn_test_affected::GitNode {
         config: Default::default(),
     }
@@ -1412,27 +1242,15 @@ fn normalized_requests_retain_provenance_and_package_only_scope() {
     .unwrap()
     .outputs;
     assert!(analysis_input.context.is_secret());
-    let mut analyzer = mfn_lsp::AnalyzeNode::new(ServerConfig {
-        command: "/missing-server-must-not-run".into(),
-        ..outcome(&compare(root, &base, &head)).server
-    })
-    .unwrap();
-    let mut final_output = None;
-    analyzer
+    let output = mfn_test_affected::PlanNode
         .execute(
-            analysis_input,
-            &mut ExecutionContext::default(),
-            &mut |result| {
-                final_output = Some(
-                    mfn_test_affected::PlanNode
-                        .execute(result.outputs, &mut ExecutionContext::default())?
-                        .outputs,
-                );
-                Ok(())
+            mfn_test_affected::PlanInput {
+                context: analysis_input.context,
             },
+            &mut ExecutionContext::default(),
         )
-        .unwrap();
-    let output = final_output.unwrap();
+        .unwrap()
+        .outputs;
     assert!(
         output.plan.is_secret() && output.validation.is_secret() && output.execution.is_secret()
     );
@@ -1445,7 +1263,6 @@ fn normalized_requests_retain_provenance_and_package_only_scope() {
         serde_json::from_value(serde_json::to_value(output.plan).unwrap()).unwrap();
     assert_eq!(plan.packages, ["sample-app", "sample-core"]);
     assert!(plan.tests.is_empty());
-    assert_eq!(plan.analysis_status, Status::NotRequested);
     let plan_file = root.join("target/package-plan.json");
     fs::write(
         &plan_file,

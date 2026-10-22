@@ -11,7 +11,7 @@ def inventory():
         package: {"package-name": package, "testcases": {
             name: {"ignored": ignored, "filter-match": {"status": "matches"}}
             for name, ignored in [("changed", False), ("stable", False), ("smoke", True)]
-        }} for package in ["full", "partial", "mfn-lsp"]
+        }} for package in ["full", "partial", "extra"]
     }}
 
 
@@ -21,15 +21,15 @@ def case(package, name):
 
 class SelectionTests(unittest.TestCase):
     def test_mixed_selection_and_inventory_proven_complete_crates(self):
-        plan = {"baseline_packages": ["full", "partial", "mfn-lsp"], "packages": ["full"],
-                "tests": [case("partial", "changed"), case("mfn-lsp", "changed"), case("mfn-lsp", "stable")]}
+        plan = {"baseline_packages": ["full", "partial", "extra"], "packages": ["full"],
+                "tests": [case("partial", "changed"), case("extra", "changed")]}
         result = selection.resolve(plan, inventory())
         self.assertEqual(result["complete_packages"], ["full"])
-        self.assertEqual(result["partial_packages"], ["mfn-lsp", "partial"])
+        self.assertEqual(result["partial_packages"], ["extra", "partial"])
         self.assertIn("test(=changed)", result["filters"]["partial"])
-        plan["tests"] += [case("partial", "stable"), case("mfn-lsp", "smoke")]
+        plan["tests"] += [case("partial", "stable"), case("extra", "stable")]
         result = selection.resolve(plan, inventory())
-        self.assertEqual(result["complete_packages"], ["full", "mfn-lsp", "partial"])
+        self.assertEqual(result["complete_packages"], ["extra", "full", "partial"])
         self.assertEqual(result["partial_packages"], [])
         self.assertEqual(result["filters"]["partial"], "package(=partial)")
 

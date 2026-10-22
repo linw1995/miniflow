@@ -1,4 +1,3 @@
-use mfn_lsp::{AnalysisRequest, SourceRange};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{collections::BTreeMap, path::PathBuf};
@@ -7,11 +6,9 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[serde(deny_unknown_fields)]
 pub struct Change {
     pub path: String,
-    pub before: Vec<SourceRange>,
-    pub after: Vec<SourceRange>,
     /// Base-side changed line intervals from the Git hunk headers, used for
-    /// coverage graph queries. Empty for older serialized comparisons and
-    /// for hunks without base-side lines; both widen conservatively.
+    /// coverage graph queries. Empty for hunks without base-side lines;
+    /// those widen conservatively.
     #[serde(default)]
     pub before_lines: Vec<crate::graph::LineRange>,
 }
@@ -37,7 +34,6 @@ pub struct Comparison {
     pub base_root: PathBuf,
     pub head_root: PathBuf,
     pub changes: Vec<Change>,
-    pub request: AnalysisRequest,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -89,12 +85,8 @@ pub struct ComparisonRequest {
     pub base: Option<String>,
     #[serde(default = "default_head")]
     pub head: String,
-    #[serde(default = "default_analysis")]
-    pub analyze: bool,
     #[serde(default)]
     pub require_checkout: bool,
-    #[serde(default)]
-    pub initialization_options: Option<Value>,
     #[serde(default)]
     pub options: PlanOptions,
     #[serde(default)]
@@ -104,9 +96,6 @@ pub struct ComparisonRequest {
 }
 fn default_head() -> String {
     "HEAD".into()
-}
-fn default_analysis() -> bool {
-    true
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -182,11 +171,8 @@ pub struct TestPlan {
     pub fallback_reasons: Vec<String>,
     #[serde(default)]
     pub ignored_files: Vec<String>,
-    pub analysis_status: mfn_lsp::Status,
     pub baseline_count: Option<usize>,
     pub selected_count: Option<usize>,
-    pub observed_relationships: usize,
-    pub analysis_ms: u64,
     pub planning_ms: u64,
     #[serde(default)]
     pub coverage_graph: Option<GraphPlan>,

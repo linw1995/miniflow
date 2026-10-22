@@ -39,13 +39,12 @@ def validate_selection(plan):
 def resolve(plan, inventory):
     packages, tests, baseline = validate_selection(plan)
     available = runner.identities(inventory)
-    # Ordinary steps skip ignored cases; the LSP step explicitly includes them.
+    # Ignored cases are never part of the runnable selection.
     runnable = {
         (suite["package-name"], binary, name)
         for binary, suite in inventory["rust-suites"].items()
         for name, case in suite["testcases"].items()
-        if case["filter-match"]["status"] == "matches"
-        and (not case["ignored"] or suite["package-name"] == "mfn-lsp")
+        if case["filter-match"]["status"] == "matches" and not case["ignored"]
     }
     exact = {(t["package"], t["binary"], t["name"]) for t in tests}
     fallback = None
