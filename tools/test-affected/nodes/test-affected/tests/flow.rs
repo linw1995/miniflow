@@ -20,6 +20,20 @@ use std::{
     process::Command,
 };
 
+/// Mirrors the plan-side platform-independent toolchain identity
+/// (`rustc -vV` release and commit hash; the host line is irrelevant).
+fn graph_toolchain_identity(verbose: &str) -> String {
+    let release = verbose
+        .lines()
+        .find_map(|line| line.strip_prefix("release: "))
+        .unwrap();
+    let commit = verbose
+        .lines()
+        .find_map(|line| line.strip_prefix("commit-hash: "))
+        .unwrap();
+    format!("rustc {release} ({commit})")
+}
+
 fn definition(root: &Path) -> Value {
     let package = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut value: Value = serde_json::from_str(
@@ -453,7 +467,7 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
                 .map(|value| (name.to_owned(), json!(value)))
         })
         .collect();
-        json!({"environment":environment,"features":"all","profile":"ci","target":std::env::var("CARGO_BUILD_TARGET").ok(),"toolchain":toolchain})
+        json!({"environment":environment,"features":"all","profile":"ci","target":std::env::var("CARGO_BUILD_TARGET").ok(),"toolchain":graph_toolchain_identity(&toolchain)})
             .to_string()
     };
     let graphs_dir = root.join("target/graphs");

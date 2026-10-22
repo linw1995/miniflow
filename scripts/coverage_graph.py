@@ -35,6 +35,21 @@ def llvm_tools():
     return tools / "llvm-profdata", tools / "llvm-cov"
 
 
+def toolchain_identity(verbose):
+    # The platform-independent toolchain identity bound into graph signatures:
+    # line coverage attributes source lines to tests regardless of the host
+    # architecture, so only release and commit-hash participate. Consumers on
+    # other platforms stay sound through inventory widen-on-mismatch.
+    fields = {}
+    for line in verbose.splitlines():
+        key, separator, value = line.partition(": ")
+        if separator:
+            fields.setdefault(key, value.strip())
+    if not fields.get("release") or not fields.get("commit-hash"):
+        raise ValueError("rustc -vV output lacks a release or commit-hash identity")
+    return f"rustc {fields['release']} ({fields['commit-hash']})"
+
+
 def execution_signature(source):
     # Normalized JSON aligned with the coverage identity scripts/run-cov.sh
     # records in result/source.json; see the graph module documentation.
@@ -43,7 +58,7 @@ def execution_signature(source):
         "features": source["features"],
         "profile": source["profile"],
         "target": source["target"],
-        "toolchain": source["toolchain"],
+        "toolchain": toolchain_identity(source["toolchain"]),
     }, sort_keys=True)
 
 

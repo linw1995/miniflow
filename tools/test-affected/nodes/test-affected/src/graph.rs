@@ -9,10 +9,11 @@
 //!
 //! The execution `signature` is normalized JSON text describing the
 //! producing environment, aligned with the coverage identity recorded by
-//! `scripts/run-cov.sh`: the pinned toolchain (`rustc -vV`), the cargo
-//! feature set, the build target, the nextest profile, and the
-//! coverage-relevant environment (`RUSTFLAGS`, `CARGO_ENCODED_RUSTFLAGS`,
-//! `CARGO_INCREMENTAL`, `CARGO_PROFILE_DEV_DEBUG`,
+//! `scripts/run-cov.sh`: the platform-independent toolchain identity
+//! (`rustc -vV` release and commit hash; line-to-test mapping does not depend
+//! on the host architecture), the cargo feature set, the build target, the
+//! nextest profile, and the coverage-relevant environment (`RUSTFLAGS`,
+//! `CARGO_ENCODED_RUSTFLAGS`, `CARGO_INCREMENTAL`, `CARGO_PROFILE_DEV_DEBUG`,
 //! `CARGO_PROFILE_TEST_DEBUG`). The store persists and exposes it; deciding
 //! whether a graph is compatible with the current execution is the caller's
 //! responsibility.

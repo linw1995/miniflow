@@ -389,7 +389,9 @@ fn open_coverage_graph(
     }
     let signature: Value = serde_json::from_str(&record.signature)
         .map_err(|_| "coverage graph execution signature is malformed".to_string())?;
-    if signature != execution_signature(&options.configuration, &source.profile, toolchain) {
+    let expected = execution_signature(&options.configuration, &source.profile, toolchain)
+        .map_err(|error| format!("cannot bind the current execution signature: {error}"))?;
+    if signature != expected {
         return Err("coverage graph execution signature differs from the current execution".into());
     }
     let lagging = if source.commit == comparison.base {
@@ -455,7 +457,7 @@ fn execution_signature(
     configuration: &BuildConfiguration,
     profile: &str,
     toolchain: &str,
-) -> Value {
+) -> Result<Value, String> {
     let environment: serde_json::Map<_, _> = [
         "RUSTFLAGS",
         "CARGO_ENCODED_RUSTFLAGS",
@@ -470,7 +472,7 @@ fn execution_signature(
             .map(|value| (name.to_owned(), Value::from(value)))
     })
     .collect();
-    json!({
+    Ok(json!({
         "environment": environment,
         "features": if configuration.all_features {
             Value::from("all")
@@ -479,8 +481,27 @@ fn execution_signature(
         },
         "profile": profile,
         "target": configuration.target,
-        "toolchain": toolchain,
-    })
+        "toolchain": toolchain_identity(toolchain)?,
+    }))
+}
+
+/// The platform-independent toolchain identity bound into graph signatures.
+/// Line coverage attributes source lines to tests regardless of the host
+/// architecture, so only the release and commit hash participate; platform
+/// differences stay sound through the consumers' inventory widen-on-mismatch
+/// (over-selection is harmless, missed selection is impossible). The full
+/// `rustc -vV` text is retained elsewhere for exact environment reproduction.
+fn toolchain_identity(verbose: &str) -> Result<String, String> {
+    let field = |name: &str| {
+        verbose
+            .lines()
+            .find_map(|line| line.strip_prefix(name).map(str::trim))
+            .filter(|value| !value.is_empty())
+    };
+    match (field("release:"), field("commit-hash:")) {
+        (Some(release), Some(commit_hash)) => Ok(format!("rustc {release} ({commit_hash})")),
+        _ => Err("rustc -vV output lacks a release or commit-hash identity".into()),
+    }
 }
 
 fn deferred_input(path: &str) -> bool {

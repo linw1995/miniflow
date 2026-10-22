@@ -29,8 +29,12 @@ A successful default-branch push coverage run also collects per-test line covera
 (a nextest run-wrapper gives each test its own LLVM profile) and indexes it into an
 immutable, versioned SQLite coverage graph mapping workspace line intervals to the
 distinct covering tests. Each graph binds its commit, producing run and attempt,
-schema version, and execution signature (pinned toolchain, features, target,
-profile, and coverage-relevant environment). Publication rides the existing
+schema version, and execution signature (platform-independent toolchain identity —
+the `rustc -vV` release and commit hash, without the host triple — plus features,
+target, profile, and coverage-relevant environment). Since line-to-test attribution
+does not depend on the host architecture, a Linux-produced graph is consumable
+elsewhere: foreign platform selectors widen to the recorded baseline through
+inventory identity matching, and foreign covered lines can only over-select. Publication rides the existing
 artifact pipeline as `coverage-graph-<run>-<attempt>` (`graph.sqlite` plus
 `graph.metadata.json`) and happens only when the full default-branch coverage
 completes successfully; PR, dispatch, and local runs never collect or publish a

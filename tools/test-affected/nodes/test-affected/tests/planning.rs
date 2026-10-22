@@ -49,8 +49,22 @@ fn graph_signature(toolchain: &str, profile: &str) -> String {
             .map(|value| (name.to_owned(), json!(value)))
     })
     .collect();
-    json!({"environment":environment,"features":"all","profile":profile,"target":std::env::var("CARGO_BUILD_TARGET").ok(),"toolchain":toolchain})
+    json!({"environment":environment,"features":"all","profile":profile,"target":std::env::var("CARGO_BUILD_TARGET").ok(),"toolchain":toolchain_identity(toolchain)})
         .to_string()
+}
+
+/// Mirrors the plan-side platform-independent toolchain identity
+/// (`rustc -vV` release and commit hash; the host line is irrelevant).
+fn toolchain_identity(verbose: &str) -> String {
+    let release = verbose
+        .lines()
+        .find_map(|line| line.strip_prefix("release: "))
+        .unwrap();
+    let commit = verbose
+        .lines()
+        .find_map(|line| line.strip_prefix("commit-hash: "))
+        .unwrap();
+    format!("rustc {release} ({commit})")
 }
 
 /// (package, binary, test name, covered file -> hit lines) for one test.
@@ -664,6 +678,73 @@ fn records_coverage_graph_provenance_and_degradation_reasons() {
         plan.coverage_graph.unwrap().reason.as_deref(),
         Some("no eligible ancestor")
     );
+
+    // A graph produced on another host with the same toolchain release and
+    // commit is compatible: the host line never participates.
+    let other_host = toolchain
+        .lines()
+        .map(|line| {
+            if line.starts_with("host: ") {
+                "host: x86_64-unknown-linux-gnu".into()
+            } else {
+                line.into()
+            }
+        })
+        .collect::<Vec<String>>()
+        .join("\n")
+        + "\n";
+    let plan = make_plan(
+        &comparison,
+        &outcome(&comparison),
+        &options(source(inert(
+            "other-host",
+            &base,
+            graph_signature(&other_host, "ci"),
+        ))),
+    )
+    .unwrap();
+    let graph = plan.coverage_graph.unwrap();
+    assert_eq!(graph.commit.as_deref(), Some(base.as_str()));
+    assert!(graph.reason.is_none(), "{graph:?}");
+
+    // A different toolchain release or commit still rejects the graph.
+    for (marker, replacement) in [
+        ("release: ", "release: 0.0.0"),
+        ("commit-hash: ", "commit-hash: 0"),
+    ] {
+        let mismatched = toolchain
+            .lines()
+            .map(|line| {
+                if line.starts_with(marker) {
+                    replacement.into()
+                } else {
+                    line.into()
+                }
+            })
+            .collect::<Vec<String>>()
+            .join("\n")
+            + "\n";
+        let plan = make_plan(
+            &comparison,
+            &outcome(&comparison),
+            &options(source(inert(
+                &format!("mismatch-{marker}"),
+                &base,
+                graph_signature(&mismatched, "ci"),
+            ))),
+        )
+        .unwrap();
+        let graph = plan.coverage_graph.unwrap();
+        assert!(graph.commit.is_none(), "{marker}");
+        assert!(
+            graph
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("execution signature differs"),
+            "{marker}: {graph:?}"
+        );
+    }
     // Without a descriptor the plan carries no graph outcome at all.
     let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
     assert!(plan.coverage_graph.is_none());

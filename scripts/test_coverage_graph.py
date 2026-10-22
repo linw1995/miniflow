@@ -77,15 +77,31 @@ class ExportPlanning(unittest.TestCase):
 
 class Signature(unittest.TestCase):
     def test_signature_is_normalized_and_scoped(self):
+        verbose = ("rustc 1.99.0 (1234abcd 2026-10-21)\nbinary: rustc\ncommit-hash: 1234abcd\n"
+                   "commit-date: 2026-10-21\nhost: x86_64-unknown-linux-gnu\nrelease: 1.99.0\n")
         source = {"head": "0" * 40, "tree": "1" * 40, "dirty": False,
                   "initial_profiles": [], "input_environment": {"RUSTFLAGS": "-Cinstrument-coverage"},
-                  "toolchain": "rustc 1.99.0", "features": "all", "target": None,
+                  "toolchain": verbose, "features": "all", "target": None,
                   "profile": "ci"}
         signature = json.loads(coverage_graph.execution_signature(source))
         self.assertEqual(sorted(signature),
                          ["environment", "features", "profile", "target", "toolchain"])
         self.assertEqual(signature["environment"], {"RUSTFLAGS": "-Cinstrument-coverage"})
         self.assertEqual(signature, json.loads(coverage_graph.execution_signature(dict(source))))
+
+    def test_toolchain_identity_ignores_host_and_rejects_incomplete_output(self):
+        verbose = ("rustc 1.99.0 (1234abcd 2026-10-21)\nbinary: rustc\ncommit-hash: 1234abcd\n"
+                   "commit-date: 2026-10-21\nhost: aarch64-apple-darwin\nrelease: 1.99.0\n"
+                   "LLVM version: 21.1.3\n")
+        identity = coverage_graph.toolchain_identity(verbose)
+        self.assertEqual(identity, "rustc 1.99.0 (1234abcd)")
+        # The same release and commit on another host map to one identity.
+        linux = verbose.replace("host: aarch64-apple-darwin", "host: x86_64-unknown-linux-gnu")
+        self.assertEqual(coverage_graph.toolchain_identity(linux), identity)
+        for broken in ["rustc 1.99.0\n", "release: 1.99.0\n", "commit-hash: 1234abcd\n",
+                       "release: \ncommit-hash: 1234abcd\n"]:
+            with self.assertRaises(ValueError, msg=broken):
+                coverage_graph.toolchain_identity(broken)
 
 
 if __name__ == "__main__":
