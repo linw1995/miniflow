@@ -49,6 +49,22 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(result["complete_packages"], ["partial"])
         self.assertIsNotNone(result["fallback"])
 
+    def test_graph_derived_selectors_pass_through_with_provenance(self):
+        # Plans carrying coverage-graph provenance keep their exact selectors.
+        provenance = {"commit": "a" * 40, "run_id": "7", "attempt": 1, "schema_version": 1,
+                      "reason": None, "widened": []}
+        plan = {"baseline_packages": ["full", "partial"], "packages": [],
+                "tests": [case("partial", "changed")], "coverage_graph": provenance}
+        result = selection.resolve(plan, inventory())
+        self.assertIsNone(result["fallback"])
+        self.assertEqual(result["partial_packages"], ["partial"])
+        self.assertIn("test(=changed)", result["filters"]["partial"])
+        # Identity mismatches widen to the recorded baseline with a diagnostic.
+        plan["tests"] = [case("partial", "missing")]
+        result = selection.resolve(plan, inventory())
+        self.assertEqual(result["complete_packages"], ["full", "partial"])
+        self.assertIsNotNone(result["fallback"])
+
     def test_reports_exclude_partial_unexecuted_and_dependency_sources(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

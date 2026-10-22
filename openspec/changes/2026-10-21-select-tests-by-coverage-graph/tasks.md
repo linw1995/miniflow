@@ -17,7 +17,7 @@
 
 - [x] 4.1 Resolve the nearest compatible default-branch ancestor graph through existing lazy bounded acquisition, shared by CI and local planning.
 - [x] 4.2 Map changed ranges to exact selectors with the three amplification rules (graph-lagging files, uncovered ranges, absent files) and record provenance and reasons in the plan.
-- [ ] 4.3 Preserve existing tiers and fallbacks; verify graph-derived selectors through both exact-filter consumers, including widen-on-mismatch; commit this group.
+- [x] 4.3 Preserve existing tiers and fallbacks; verify graph-derived selectors through both exact-filter consumers, including widen-on-mismatch; commit this group.
 
 ## 5. Review and archive
 

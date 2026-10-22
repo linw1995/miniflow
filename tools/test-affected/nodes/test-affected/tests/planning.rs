@@ -927,6 +927,77 @@ fn narrows_package_scope_through_coverage_graph_with_conservative_widening() {
 }
 
 #[test]
+fn graph_derived_selectors_execute_through_the_plan_consumer() {
+    let (directory, base) = fixture();
+    let root = directory.path();
+    write(
+        root,
+        "core/src/lib.rs",
+        &SOURCE.replace("-> u32 { 1 }", "-> u32 { 2 }"),
+    );
+    let head = commit(root);
+    let comparison = compare(root, &base, &head);
+    let toolchain = git::command(root, "rustc", &["-vV"]).unwrap();
+    let graph = write_graph(
+        root,
+        "execute",
+        &base,
+        graph_signature(&toolchain, "ci"),
+        vec![(
+            "sample-core",
+            "sample-core",
+            "tests::stable",
+            vec![("core/src/lib.rs", vec![(1, 1)])],
+        )],
+    );
+    let plan = make_plan(
+        &comparison,
+        &outcome(&comparison),
+        &graph_options(graph_source(graph, &base)),
+    )
+    .unwrap();
+    assert_eq!(plan.tests.len(), 1);
+    assert_eq!(plan.tests[0].name, "tests::stable");
+    let script = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../run-tests.py");
+    let path = root.join("target/plan.json");
+    let run = |plan: &mfn_test_affected::TestPlan, args: &[&str]| {
+        fs::write(&path, serde_json::to_vec(plan).unwrap()).unwrap();
+        Command::new("python3")
+            .arg(&script)
+            .arg(&path)
+            .env("CARGO_TARGET_DIR", root.join("target/shared-build"))
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    // The graph-derived selector executes exactly the covering test.
+    let output = run(&plan, &[]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("\"selected_count\": 1"), "{stdout}");
+    assert!(stdout.contains("\"executed\": true"), "{stdout}");
+    // A stale graph identity widens to the recorded baseline with a diagnostic.
+    let mut stale = plan.clone();
+    stale.tests[0].name = "no_longer_listed".into();
+    let output = run(&stale, &["--list-only"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("exact identities are absent from the runnable head inventory"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("\"selected_count\": 4"), "{stdout}");
+}
+
+#[test]
 fn task_boundaries_preserve_error_sources_and_reject_cancelled_work() {
     use mf_runtime::{ExecutionContext, TypedTaskNode};
     use std::error::Error as _;
