@@ -407,6 +407,22 @@ fn rejects_partial_inventories() {
 }
 
 #[test]
+fn rejects_workspaces_without_packages() {
+    let (directory, base) = fixture();
+    let root = directory.path();
+    write(
+        root,
+        "Cargo.toml",
+        "[workspace]\nmembers = []\nresolver = \"3\"\n",
+    );
+    git::command(root, "cargo", &["generate-lockfile", "--offline"]).unwrap();
+    let head = commit(root);
+    let comparison = compare(root, &base, &head);
+    let error = make_plan(&comparison, &PlanOptions::default()).unwrap_err();
+    assert!(error.to_string().contains("workspace contains no packages"));
+}
+
+#[test]
 fn additions_deletions_and_manifest_changes_preserve_conservative_scope() {
     let (directory, _) = fixture();
     let root = directory.path();

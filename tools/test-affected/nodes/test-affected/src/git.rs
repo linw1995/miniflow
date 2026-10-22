@@ -179,14 +179,7 @@ pub fn compare_with_mode(
         ],
     )?;
     let mut changes = Vec::new();
-    let mut fields = statuses.split('\0').filter(|s| !s.is_empty());
-    while let Some(status) = fields.next() {
-        let path = fields.next().ok_or_else(|| {
-            InvalidSnafu {
-                message: "Git diff status lacks a path",
-            }
-            .build()
-        })?;
+    for (status, path) in diff_entries(&statuses)? {
         let patch = command(
             &repository,
             "git",
@@ -231,6 +224,21 @@ pub fn compare_with_mode(
         head_root: roots.remove(0),
         changes,
     })
+}
+
+fn diff_entries(output: &str) -> Result<Vec<(&str, &str)>, Error> {
+    let mut fields = output.split('\0').filter(|s| !s.is_empty());
+    let mut entries = Vec::new();
+    while let Some(status) = fields.next() {
+        let path = fields.next().ok_or_else(|| {
+            InvalidSnafu {
+                message: "Git diff status lacks a path",
+            }
+            .build()
+        })?;
+        entries.push((status, path));
+    }
+    Ok(entries)
 }
 
 fn common_dir(root: &Path) -> Result<std::path::PathBuf, Error> {
@@ -407,4 +415,23 @@ fn snapshot_commit(
     Ok(command_env(repository, "git", &args, &environment)?
         .trim()
         .into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::diff_entries;
+
+    #[test]
+    fn pairs_diff_statuses_with_their_paths() {
+        assert_eq!(
+            diff_entries("M\0src/lib.rs\0D\0src/old.rs\0").unwrap(),
+            [("M", "src/lib.rs"), ("D", "src/old.rs")]
+        );
+    }
+
+    #[test]
+    fn rejects_truncated_diff_status_output() {
+        let error = diff_entries("M\0src/lib.rs\0D").unwrap_err();
+        assert!(error.to_string().contains("Git diff status lacks a path"));
+    }
 }
