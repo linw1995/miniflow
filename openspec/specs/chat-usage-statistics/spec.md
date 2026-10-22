@@ -2,13 +2,13 @@
 
 ## Purpose
 
-Account for model calls from conversation and title workflows and expose reproducible usage summaries that distinguish reported token counts from unknown consumption.
+Account for conversation and title model calls within composed workflows and expose reproducible usage summaries that distinguish reported token counts from unknown consumption.
 
 ## Requirements
 
 ### Requirement: Preserve call identity and purpose
 
-Each begun model-call record SHALL retain its stable call identity, session identity, profile and actual model identity, purpose, and lifecycle timestamps. Conversation calls SHALL link to their turn. Title calls SHALL be distinguishable from conversation calls. A scheduled call that has not begun MUST NOT count as an attempted model call.
+Each reported model attempt SHALL retain its stable call identity, actual model identity, lifecycle timestamp, and optional purpose/profile attribution. Its owning execution SHALL retain session and turn identity. Conversation calls SHALL link to their turn. Title calls SHALL be distinguishable from conversation calls. A legacy scheduled call that never began MUST NOT count as an attempted model call.
 
 #### Scenario: Count both application call types
 
@@ -17,7 +17,7 @@ Each begun model-call record SHALL retain its stable call identity, session iden
 
 #### Scenario: Query a pending title request
 
-- **WHEN** a title request is scheduled but has not begun execution
+- **WHEN** a legacy title request was scheduled but never began execution
 - **THEN** it does not increase attempted-call counts or reported token subtotals
 
 ### Requirement: Store usage with the corresponding response
@@ -148,3 +148,20 @@ Chat replies SHALL expose usages without a parallel scalar usage field. New repl
 - **WHEN** a legacy successful call has a model and reported token counters but no usage list
 - **THEN** one usage record retains its call identity, model, start time, and only the reported counters
 - **AND** replay and statistics use the migrated list without double counting the historical columns
+
+### Requirement: Preserve per-call attribution through composition
+
+CallUsage SHALL expose optional attribution with independent optional purpose and profile labels. Labels
+SHALL be nonblank public strings. The LLM node SHALL report configured attribution on success and captured
+failure. Statistics SHALL use each reported label and fall back independently to the owning invocation
+when absent. Existing databases SHALL retain their accounting through a forward migration.
+
+#### Scenario: Compose a title call using another profile
+
+- **WHEN** one result combines conversation and title usage with different profiles
+- **THEN** purpose and profile filters distinguish their respective calls despite sharing one execution
+
+#### Scenario: Preserve legacy attribution
+
+- **WHEN** an existing usage record has no attribution object
+- **THEN** statistics preserve the owning record's purpose and profile

@@ -28,7 +28,7 @@ The chat host SHALL initialize SQLite storage and apply bundled pending migratio
 
 ### Requirement: Expose application storage operations as nodes
 
-The `mf-chat` package SHALL expose typed `mf_chat.*` nodes for initialization, session management, turn transitions, title persistence, and usage queries. Direct database APIs and node adapters SHALL call the same storage handlers. Host storage operations MUST NOT construct or execute wrapper workflows. Preparing or inspecting these nodes MUST NOT open storage, apply migrations, or execute queries.
+The `mf-chat` package SHALL expose typed `mf_chat.*` nodes for initialization, session management, turn transitions including optional title persistence, and usage queries. Direct database APIs and node adapters SHALL call the same storage handlers. Host storage operations MUST NOT construct or execute wrapper workflows. Preparing or inspecting these nodes MUST NOT open storage, apply migrations, or execute queries.
 
 #### Scenario: Prepare without a database
 
@@ -95,7 +95,7 @@ Beginning a turn SHALL atomically persist its user message, running state, and m
 
 ### Requirement: Commit replies and call facts atomically
 
-Successful completion SHALL save the assistant message, reported model-call metadata, and successful turn state in one transaction. The host MUST NOT report a turn as committed until this transaction succeeds. A failed transaction SHALL leave no partial completed reply or usage update. This transaction MUST NOT schedule title work.
+Successful completion SHALL save the assistant message, reported model-call metadata, optional title, and successful turn state in one transaction. The host MUST NOT report a turn as committed until this transaction succeeds. A failed transaction SHALL leave no partial completed reply or usage update. This transaction MUST NOT schedule title work.
 
 #### Scenario: Fail partway through completion
 
@@ -187,7 +187,18 @@ The backend SHALL use persisted successful turns to determine whether a session 
 - **WHEN** a successful completion is saved and then replayed
 - **THEN** one successful turn and one assistant message remain, without updating a separate completion counter
 
-#### Scenario: Reject title scheduling after a reply commits
+#### Scenario: Reject a composed title write
 
-- **WHEN** title request insertion fails after a successful conversation
-- **THEN** the reply, usages, and successful turn remain committed and title scheduling can be attempted separately
+- **WHEN** a database write fails while applying a valid title in a composed completion
+- **THEN** the assistant message, usages, title, and successful turn state roll back together
+- **AND** the retained final result can be saved again without repeating model work
+
+### Requirement: Distinguish provisional display titles from manual names
+
+Hosts MAY supply a provisional placeholder when creating a session. A placeholder SHALL remain eligible
+for workflow-generated replacement; an explicitly manual name SHALL take precedence over generated titles.
+
+#### Scenario: Create a terminal conversation from a prompt
+
+- **WHEN** the terminal uses the first prompt line as its initial display title
+- **THEN** the session title source is provisional rather than manual

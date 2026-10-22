@@ -294,11 +294,10 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
     let usage = database.usage(Default::default()).unwrap();
     assert_eq!(usage.overall.attempted_calls, 6);
     assert_eq!(usage.overall.total_tokens.missing_calls, 1);
-    assert!(database.pending_titles(10).unwrap().is_empty());
     assert!(
         sessions
             .iter()
-            .all(|session| session.title_source == "manual")
+            .all(|session| session.title_source == "provisional")
     );
     application_exit(
         &binary,
@@ -452,7 +451,7 @@ fn application_exit(
 }
 
 fn loop_conversations() {
-    use mf_chat::executable::CompletionState;
+    use mf_chat::contract::CompletionState;
     use mf_tui::chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions};
 
     let mut failure =
@@ -529,10 +528,10 @@ fn loop_conversations() {
                         let CompletionState::Committed(completion) = resolution.state else {
                             panic!("expected committed loop result")
                         };
-                        assert_eq!(completion.reply.text, "final answer");
-                        assert_eq!(completion.reply.usages.unwrap().len(), 2);
+                        assert_eq!(completion.result.text, "final answer");
+                        assert_eq!(completion.result.usages.len(), 2);
                         assert_eq!(
-                            serde_json::to_value(completion.reply.metadata).unwrap(),
+                            serde_json::to_value(completion.result.metadata).unwrap(),
                             serde_json::json!({"strategy":"iterative"})
                         );
                     } else {

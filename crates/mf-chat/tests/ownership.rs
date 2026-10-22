@@ -1,5 +1,5 @@
-use mf_chat::executable::{InvocationState, TurnExit};
-use mf_chat::{ChatDatabase, ModelProfile, Reply};
+use mf_chat::contract::{InvocationState, TurnExit};
+use mf_chat::{ChatDatabase, ConversationResult, ModelProfile};
 use serde_json::json;
 
 #[test]
@@ -43,11 +43,12 @@ fn exact_cleanup_keeps_other_sessions_and_committed_success() {
     database
         .complete_turn(
             second.invocation.clone(),
-            Reply {
-                usages: None,
+            ConversationResult {
+                usages: Vec::new(),
                 metadata: None,
                 text: "saved".into(),
                 finish_reason: None,
+                ..Default::default()
             },
         )
         .unwrap();

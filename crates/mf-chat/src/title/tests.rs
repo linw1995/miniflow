@@ -1,246 +1,216 @@
-use super::*;
-fn identity() -> ModelIdentity {
-    ModelIdentity {
-        profile: "default".into(),
-        model: Some("model".into()),
-    }
+use crate::{
+    ChatDatabase, ConversationResult, ModelIdentity, UsageAttribution, UsageGrouping, UsageQuery,
+};
+
+fn begin(database: &ChatDatabase, session_id: &str) -> crate::nodes::TurnStarted {
+    database
+        .begin_turn(
+            session_id,
+            "hello",
+            ModelIdentity {
+                profile: "default".into(),
+                model: None,
+            },
+            None,
+            1024,
+        )
+        .unwrap()
 }
-fn reply(text: &str) -> Reply {
-    Reply {
-        usages: Some(vec![mfn_llm::CallUsage {
+
+fn result(title: &str) -> ConversationResult {
+    ConversationResult {
+        text: "answer".into(),
+        title: Some(title.into()),
+        usages: vec![mfn_llm::CallUsage {
+            attribution: Some(UsageAttribution {
+                purpose: Some("title".into()),
+                profile: Some("summary".into()),
+            }),
             started_at: None,
-            call_id: "reported-call".into(),
+            call_id: "title-call".into(),
             node: None,
-            model: "model".into(),
+            model: "summary-model".into(),
             usage: Some(std::collections::BTreeMap::from([(
                 "output_tokens".into(),
-                1,
+                5,
             )])),
             error: None,
-        }]),
-        metadata: None,
-        text: text.into(),
-        finish_reason: None,
+        }],
+        ..Default::default()
     }
 }
 
 #[test]
-fn explicit_scheduling_is_idempotent_and_manual_titles_win() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
-    let owner = database.create_session("default", None, None).unwrap();
-    let turn = database
-        .begin_turn(&owner.id, "question", identity(), None, 1024)
+fn title_and_reply_commit_atomically_and_replay_without_reapplying() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("chat.sqlite");
+    let database = ChatDatabase::open(&path).unwrap();
+    let session = database.create_session("default", None, None).unwrap();
+    let begun = begin(&database, &session.id);
+    let context = begun.request.context.unwrap().title;
+    assert_eq!(context.source, "provisional");
+    assert!(!context.attempted);
+    let completion = database
+        .complete_turn(begun.invocation.clone(), result("  Generated  "))
         .unwrap();
-    database
-        .complete_turn(turn.invocation.clone(), reply("answer"))
-        .unwrap();
-    database
-        .complete_turn(turn.invocation, reply("answer"))
-        .unwrap();
-    assert!(database.pending_titles(10).unwrap().is_empty());
-    assert!(database.schedule_titles(10).unwrap());
-    assert!(!database.schedule_titles(10).unwrap());
-    let calls = database.pending_titles(10).unwrap();
-    assert_eq!(calls.len(), 1);
-    assert!(matches!(
-        prepare(PrepareTitleInputs {
-            database_path: database.path().to_str().unwrap().into(),
-            call_id: calls[0].id.clone(),
-            model: identity(),
-            max_bytes: 0,
-        }),
-        Err(ChatError::Invalid {
-            field: "max_bytes",
-            ..
-        })
-    ));
-    assert!(matches!(
-        retry(crate::nodes::SessionInputs {
-            database_path: database.path().to_str().unwrap().into(),
-            session_id: owner.id.clone(),
-        }),
-        Err(ChatError::TitleBusy { .. })
-    ));
-    let started = prepare(PrepareTitleInputs {
-        database_path: database.path().to_str().unwrap().into(),
-        call_id: calls[0].id.clone(),
-        model: identity(),
-        max_bytes: 1024,
-    })
-    .unwrap();
-    assert_eq!(started.request.as_ref().unwrap().history, None);
-    database.rename_session(&owner.id, "Manual").unwrap();
-    let result = database
-        .complete_title(
-            started.invocation.clone(),
-            started.title_revision,
-            reply("Generated"),
-        )
-        .unwrap();
-    assert_eq!(result.outcome, TitleOutcome::Stale);
-    let completion = CompleteTitleInputs {
-        database_path: database.path().to_str().unwrap().into(),
-        invocation: started.invocation.clone(),
-        title_revision: started.title_revision,
-        response: reply("Different response"),
-    };
-    assert!(matches!(
-        complete(completion.clone()),
-        Err(ChatError::Conflict { .. })
-    ));
-    let mut foreign = completion;
-    foreign.invocation.session_id = "different".into();
-    assert!(matches!(complete(foreign), Err(ChatError::Conflict { .. })));
-    assert!(matches!(
-        retry(crate::nodes::SessionInputs {
-            database_path: database.path().to_str().unwrap().into(),
-            session_id: owner.id.clone(),
-        }),
-        Err(ChatError::Invalid { field: "title", .. })
-    ));
-    assert_eq!(database.session(&owner.id).unwrap().title, "Manual");
-    assert_eq!(
-        database.call(&started.invocation.call_id).unwrap().usages,
-        reply("Generated").usages
-    );
+    assert_eq!(database.session(&session.id).unwrap().title, "Generated");
+    database.rename_session(&session.id, "Manual").unwrap();
     assert_eq!(
         database
-            .messages(&owner.id, 10, None)
-            .unwrap()
-            .messages
-            .len(),
-        2
+            .complete_turn(begun.invocation.clone(), completion.result.clone())
+            .unwrap(),
+        completion
     );
-    let other = database.create_session("default", None, None).unwrap();
-    let turn = database
-        .begin_turn(&other.id, "other", identity(), None, 1024)
-        .unwrap();
-    database
-        .complete_turn(turn.invocation, reply("answer"))
-        .unwrap();
-    assert!(database.schedule_titles(10).unwrap());
-    let call = database.pending_titles(10).unwrap().pop().unwrap();
-    database
-        .rename_session(&other.id, "Already manual")
-        .unwrap();
-    let started = prepare(PrepareTitleInputs {
-        database_path: database.path().to_str().unwrap().into(),
-        call_id: call.id.clone(),
-        model: identity(),
-        max_bytes: 1024,
-    })
-    .unwrap();
-    assert!(started.request.is_none());
-    assert_eq!(database.call(&call.id).unwrap().started_at, None);
-    assert_eq!(database.call(&call.id).unwrap().state, "skipped");
+    assert_eq!(database.session(&session.id).unwrap().title, "Manual");
+    let mut conflicting = completion.result.clone();
+    conflicting.title = Some("Different".into());
+    assert!(
+        database
+            .complete_turn(begun.invocation.clone(), conflicting)
+            .is_err()
+    );
+    drop(database);
+    let reopened = ChatDatabase::open(&path).unwrap();
+    assert!(
+        matches!(reopened.inspect_invocation(&begun.invocation).unwrap(), crate::contract::InvocationState::Committed(saved) if saved == completion)
+    );
+    let other = reopened.create_session("default", None, None).unwrap();
+    assert!(
+        !begin(&reopened, &other.id)
+            .request
+            .context
+            .unwrap()
+            .title
+            .attempted
+    );
+    let next = begin(&reopened, &session.id);
+    let context = next.request.context.unwrap().title;
+    assert!(context.attempted);
+    assert_eq!(context.source, "manual");
+    assert_eq!(context.revision, 2);
 }
 
 #[test]
-fn pending_titles_survive_restart_and_rejected_titles_keep_usage() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("chat.sqlite");
+fn stale_or_rejected_titles_keep_reply_and_per_call_attribution() {
+    for title in ["Generated", "\n\t", "bad\ntitle", &"x".repeat(121)] {
+        let root = tempfile::tempdir().unwrap();
+        let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
+        let session = database.create_session("default", None, None).unwrap();
+        let begun = begin(&database, &session.id);
+        if title == "Generated" {
+            database.rename_session(&session.id, "Manual").unwrap();
+        }
+        let completion = database
+            .complete_turn(begun.invocation.clone(), result(title))
+            .unwrap();
+        assert_eq!(completion.result.title.as_deref(), Some(title));
+        let owner = database.session(&session.id).unwrap();
+        assert_eq!(
+            owner.title_source,
+            if title == "Generated" {
+                "manual"
+            } else {
+                "provisional"
+            }
+        );
+        assert_eq!(
+            database
+                .messages(&session.id, 10, None)
+                .unwrap()
+                .messages
+                .len(),
+            2
+        );
+        for (group, expected) in [
+            (UsageGrouping::Purpose, "title"),
+            (UsageGrouping::Profile, "summary"),
+        ] {
+            let usage = database
+                .usage(UsageQuery {
+                    purpose: Some(crate::CallPurpose::Title),
+                    group_by: Some(group),
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(usage.overall.attempted_calls, 1);
+            assert_eq!(usage.overall.output_tokens.known_subtotal, Some(5));
+            assert_eq!(usage.groups[0].key, expected);
+        }
+        assert!(
+            begin(&database, &session.id)
+                .request
+                .context
+                .unwrap()
+                .title
+                .attempted
+        );
+    }
+}
+
+#[test]
+fn failed_title_usage_is_an_attempt_even_without_a_title_output() {
+    let root = tempfile::tempdir().unwrap();
+    let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
+    let session = database.create_session("default", None, None).unwrap();
+    let begun = begin(&database, &session.id);
+    let mut output = result("unused");
+    output.title = None;
+    output.usages[0].error = Some("provider unavailable".into());
+    database.complete_turn(begun.invocation, output).unwrap();
+    assert!(
+        begin(&database, &session.id)
+            .request
+            .context
+            .unwrap()
+            .title
+            .attempted
+    );
+    assert_eq!(
+        database.usage(Default::default()).unwrap().overall.statuses["failed"],
+        1
+    );
+}
+
+#[test]
+fn upgrading_retires_pending_title_jobs_and_preserves_recorded_attempts() {
+    use diesel::{prelude::*, sql_types::Text};
+    use diesel_migrations::MigrationHarness;
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("chat.sqlite");
     let database = ChatDatabase::open(&path).unwrap();
-    let owner = database.create_session("default", None, None).unwrap();
-    let turn = database
-        .begin_turn(&owner.id, "question", identity(), None, 1024)
+    let pending = database.create_session("default", None, None).unwrap();
+    let attempted = database.create_session("default", None, None).unwrap();
+    let mut connection = crate::storage::connect(&path).unwrap();
+    connection
+        .revert_last_migration(crate::storage::MIGRATIONS)
         .unwrap();
-    database
-        .complete_turn(turn.invocation, reply("answer"))
-        .unwrap();
-    assert!(database.schedule_titles(10).unwrap());
-    let call = database.pending_titles(10).unwrap().pop().unwrap();
+    for (id, owner, state) in [
+        ("pending", &pending.id, "pending"),
+        ("attempted", &attempted.id, "running"),
+    ] {
+        diesel::sql_query("INSERT INTO model_calls (id, session_id, purpose, profile, state, title_revision, started_at) VALUES (?, ?, 'title', 'default', ?, 0, CASE WHEN ? = 'running' THEN 1 ELSE NULL END)")
+            .bind::<Text, _>(id).bind::<Text, _>(owner).bind::<Text, _>(state).bind::<Text, _>(state)
+            .execute(&mut connection).unwrap();
+    }
+    drop(connection);
     drop(database);
     let database = ChatDatabase::open(&path).unwrap();
-    assert_eq!(database.pending_titles(10).unwrap()[0].id, call.id);
-    let started = prepare(PrepareTitleInputs {
-        database_path: path.to_str().unwrap().into(),
-        call_id: call.id.clone(),
-        model: identity(),
-        max_bytes: 1024,
-    })
-    .unwrap();
-    let result = database
-        .complete_title(
-            started.invocation,
-            started.title_revision,
-            reply("two\nlines"),
-        )
-        .unwrap();
-    assert_eq!(result.outcome, TitleOutcome::Rejected);
-    assert_eq!(
-        database.call(&call.id).unwrap().usages,
-        reply("two\nlines").usages
+    assert_eq!(database.call("pending").unwrap().state, "skipped");
+    assert_eq!(database.call("attempted").unwrap().state, "interrupted");
+    assert!(
+        !begin(&database, &pending.id)
+            .request
+            .context
+            .unwrap()
+            .title
+            .attempted
     );
-    let next = database.retry_title(&owner.id).unwrap();
-    assert_ne!(next.id, call.id);
-    let started = prepare(PrepareTitleInputs {
-        database_path: path.to_str().unwrap().into(),
-        call_id: next.id.clone(),
-        model: identity(),
-        max_bytes: 1024,
-    })
-    .unwrap();
-    database
-        .fail_call(&next.id, "failed", "title failed")
-        .unwrap();
-    assert!(started.request.is_some());
-    assert!(!database.schedule_titles(10).unwrap());
-    assert_eq!(database.history(&owner.id, 1024).unwrap().history.len(), 2);
-}
-
-#[test]
-fn scheduling_failure_does_not_rollback_replies_and_uses_the_first_successful_turn() {
-    use diesel::connection::SimpleConnection;
-
-    let directory = tempfile::tempdir().unwrap();
-    let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
-    let owner = database.create_session("default", None, None).unwrap();
-    let failed = database
-        .begin_turn(&owner.id, "failed", identity(), None, 1024)
-        .unwrap();
-    database
-        .fail_turn(failed.invocation, "failed", "provider failed")
-        .unwrap();
-    assert!(!database.schedule_titles(10).unwrap());
-    let manual = database
-        .create_session("default", None, Some("Manual".into()))
-        .unwrap();
-    let manual_turn = database
-        .begin_turn(&manual.id, "question", identity(), None, 1024)
-        .unwrap();
-    database
-        .complete_turn(manual_turn.invocation, reply("answer"))
-        .unwrap();
-    assert!(!database.schedule_titles(10).unwrap());
-    let mut connection = storage::connect(database.path()).unwrap();
-    connection.batch_execute("CREATE TRIGGER reject_title_schedule BEFORE INSERT ON model_calls WHEN NEW.purpose = 'title' BEGIN SELECT RAISE(ABORT, 'injected scheduling failure'); END;").unwrap();
-    let first = database
-        .begin_turn(&owner.id, "first success", identity(), None, 1024)
-        .unwrap();
-    database
-        .complete_turn(first.invocation.clone(), reply("answer"))
-        .unwrap();
-    assert!(database.pending_titles(10).unwrap().is_empty());
-    assert!(database.schedule_titles(10).is_err());
-    assert_eq!(
-        database.turn(&first.invocation.turn_id).unwrap().state,
-        "succeeded"
+    assert!(
+        begin(&database, &attempted.id)
+            .request
+            .context
+            .unwrap()
+            .title
+            .attempted
     );
-    let next = database
-        .begin_turn(&owner.id, "later success", identity(), None, 1024)
-        .unwrap();
-    database
-        .complete_turn(next.invocation, reply("another answer"))
-        .unwrap();
-    connection
-        .batch_execute("DROP TRIGGER reject_title_schedule;")
-        .unwrap();
-    assert!(database.schedule_titles(10).unwrap());
-    assert!(!database.schedule_titles(10).unwrap());
-    assert_eq!(
-        database.pending_titles(10).unwrap()[0].turn_id.as_deref(),
-        Some(first.invocation.turn_id.as_str())
-    );
-    assert_eq!(database.history(&owner.id, 1024).unwrap().history.len(), 4);
 }

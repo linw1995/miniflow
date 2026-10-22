@@ -43,8 +43,19 @@ pub struct UsageNode {
     pub path: Vec<UsageScope>,
 }
 
+/// Workflow-owned labels for accounting, independent of provider and node identity.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]
+pub struct UsageAttribution {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize, NodeValue)]
 pub struct CallUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attribution: Option<UsageAttribution>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<i64>,
     pub call_id: String,
@@ -94,6 +105,7 @@ struct Config {
     timeout_ms: u64,
     max_output_bytes: usize,
     capture_errors: bool,
+    attribution: Option<UsageAttribution>,
 }
 
 #[derive(Debug, Snafu)]
@@ -235,6 +247,16 @@ impl PreparedConfig {
 
 fn validate_field(field: &str, value: &ValueRef) -> Result<(), LlmConfigError> {
     let requirement = match field {
+        "attribution" if value.contains_secret() => Some("public accounting labels"),
+        "attribution"
+            if value
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|label| label.as_str().is_some_and(|label| label.trim().is_empty())) =>
+        {
+            Some("nonblank accounting labels")
+        }
         "model" if value.contains_secret() => Some("a public model identifier"),
         "model" if value.as_str().unwrap().trim().is_empty() => Some("a nonblank identifier"),
         "api_key" if value.as_str().unwrap().is_empty() => Some("a nonempty credential"),
@@ -483,10 +505,11 @@ impl LlmNode {
             .messages(messages)
             .temperature(config.temperature)
             .max_tokens(config.max_tokens);
-        if let Some(system) = inputs.system {
+        if let Some(system) = inputs.system.filter(|system| !system.is_empty()) {
             request = request.preamble(system);
         }
         let mut usage = CallUsage {
+            attribution: config.attribution.clone(),
             started_at: Some(
                 i64::try_from(
                     std::time::SystemTime::now()

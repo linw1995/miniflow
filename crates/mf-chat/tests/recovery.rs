@@ -1,6 +1,6 @@
 use diesel::{Connection, connection::SimpleConnection};
-use mf_chat::executable::{CompletionState, ConversationExit, MAX_RECOVERY_BYTES, TurnExit};
-use mf_chat::{ChatDatabase, ModelProfile, Reply};
+use mf_chat::contract::{CompletionState, ConversationExit, MAX_RECOVERY_BYTES, TurnExit};
+use mf_chat::{ChatDatabase, ConversationResult, ModelProfile};
 use mf_runtime::NodeValue;
 use serde_json::json;
 
@@ -22,6 +22,7 @@ fn begin(database: &ChatDatabase) -> mf_chat::Invocation {
 }
 fn usages() -> Vec<mfn_llm::CallUsage> {
     vec![mfn_llm::CallUsage {
+        attribution: None,
         started_at: Some(86_399_999),
         call_id: "provider-call".into(),
         node: Some(mfn_llm::UsageNode {
@@ -40,12 +41,13 @@ fn metadata() -> mfn_llm::MessageMetadata {
         json!([{"uri":"https://example.com/reference"}]).into(),
     )])
 }
-fn reply() -> Reply {
-    Reply {
-        usages: Some(usages()),
+fn reply() -> ConversationResult {
+    ConversationResult {
+        usages: usages(),
         metadata: Some(metadata()),
         text: "paid reply".into(),
         finish_reason: None,
+        ..Default::default()
     }
 }
 fn stdout(text: &str) -> Vec<u8> {
@@ -105,7 +107,7 @@ fn parent_save_retry_retains_the_original_reply_without_starting_another_call() 
             .metadata,
         Some(metadata())
     );
-    assert_eq!(saved.reply, reply());
+    assert_eq!(saved.result, reply());
     assert_eq!(database.save_recovered(pending).unwrap(), saved);
     let mut conflicting = reply();
     conflicting.metadata = None;
@@ -170,7 +172,7 @@ fn committed_reply_wins_over_broken_output_and_late_cancellation() {
 }
 
 #[test]
-fn retained_replies_keep_database_and_purpose_ownership_until_abandoned() {
+fn retained_replies_keep_database_ownership_until_abandoned() {
     let root = tempfile::tempdir().unwrap();
     let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
     let invocation = begin(&database);
@@ -188,10 +190,6 @@ fn retained_replies_keep_database_and_purpose_ownership_until_abandoned() {
     };
     let mut wrong = pending.clone();
     wrong.database_path = root.path().join("other.sqlite");
-    assert!(database.save_recovered(wrong.clone()).is_err());
-    assert!(database.abandon_recovered(&wrong).is_err());
-    wrong = pending.clone();
-    wrong.purpose = mf_chat::CallPurpose::Title;
     assert!(database.save_recovered(wrong.clone()).is_err());
     assert!(database.abandon_recovered(&wrong).is_err());
     database.abandon_recovered(&pending).unwrap();
@@ -472,11 +470,12 @@ fn unreported_workflow_invocations_are_not_counted_as_zero_model_calls() {
     database
         .complete_turn(
             known_empty.invocation,
-            Reply {
+            ConversationResult {
                 text: "no model was needed".into(),
-                usages: Some(Vec::new()),
+                usages: Vec::new(),
                 metadata: None,
                 finish_reason: None,
+                ..Default::default()
             },
         )
         .unwrap();

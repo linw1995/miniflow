@@ -4,11 +4,8 @@ use std::{error::Error, io, path::PathBuf};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ChatError {
-    #[snafu(display("model call failed: {message}"))]
-    ModelFailure {
-        message: String,
-        usages: Vec<mfn_llm::CallUsage>,
-    },
+    #[snafu(display("conversation workflow failed: {message}"))]
+    WorkflowFailure { message: String },
     #[snafu(transparent)]
     Inputs {
         source: mf_runtime::WorkflowInputError,
@@ -19,8 +16,6 @@ pub enum ChatError {
     Manifest {
         source: mf_runtime::WorkflowManifestError,
     },
-    #[snafu(display("chat session {id:?} already has an active title request"))]
-    TitleBusy { id: String },
     #[snafu(transparent)]
     Description {
         source: mf_compiler::DescriptionError,

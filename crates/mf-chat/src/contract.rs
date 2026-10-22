@@ -1,12 +1,128 @@
-//! Parent-owned chat invocation state and executable contracts.
+//! Application context and results shared by embedded and executable conversation workflows.
 
-use crate::{ChatError, Completion, Invocation, error::*, turn};
-use mf_runtime::{NodeValue, WorkflowArguments, WorkflowInputSchema, WorkflowManifest};
+use crate::{ChatError, Invocation, error::*, turn};
+use mf_runtime::{NodeValue, NodeValues, WorkflowArguments, WorkflowInputSchema, WorkflowManifest};
+use serde::{Deserialize, Serialize};
 use snafu::{OptionExt, ensure};
 use std::collections::BTreeMap;
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
+pub struct TitleContext {
+    pub source: String,
+    pub revision: i64,
+    pub attempted: bool,
+    pub enabled: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
+pub struct ConversationContext {
+    pub title: TitleContext,
+}
+
+#[derive(Clone, Debug, NodeValue)]
+pub struct ConversationInputs {
+    pub prompt: String,
+    pub system: Option<String>,
+    pub history: Option<Vec<mfn_llm::ChatMessage>>,
+    pub context: Option<ConversationContext>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
+pub struct ConversationResult {
+    pub status: String,
+    #[value(default)]
+    #[serde(default)]
+    pub text: String,
+    pub usages: Vec<mfn_llm::CallUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<mfn_llm::MessageMetadata>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
+pub struct Completion {
+    pub invocation: Invocation,
+    pub result: ConversationResult,
+}
+
+impl Default for ConversationResult {
+    fn default() -> Self {
+        Self {
+            status: "succeeded".into(),
+            text: String::new(),
+            usages: Vec::new(),
+            metadata: None,
+            finish_reason: None,
+            error: None,
+            title: None,
+        }
+    }
+}
+
+impl ConversationResult {
+    pub fn decode(mut values: NodeValues) -> Result<Self, ChatError> {
+        let ports = Self::ports();
+        values.retain(|name, _| ports.iter().any(|port| port.name == *name));
+        let result = Self::from_values(values)?;
+        result.validate()?;
+        Ok(result)
+    }
+
+    pub fn validate(&self) -> Result<(), ChatError> {
+        turn::validate_usages(&self.usages)?;
+        match self.status.as_str() {
+            "succeeded" => ensure!(
+                !self.text.is_empty() && self.error.as_ref().is_none_or(String::is_empty),
+                InvalidSnafu {
+                    field: "workflow result",
+                    reason: "success requires nonempty text and no error"
+                }
+            ),
+            "failed" => ensure!(
+                self.title.is_none()
+                    && self
+                        .error
+                        .as_ref()
+                        .is_some_and(|error| !error.trim().is_empty()),
+                InvalidSnafu {
+                    field: "workflow result",
+                    reason: "failure requires an error summary and cannot update the title"
+                }
+            ),
+            _ => {
+                return InvalidSnafu {
+                    field: "workflow result",
+                    reason: "requires succeeded or failed status",
+                }
+                .fail();
+            }
+        }
+        Ok(())
+    }
+}
+
+fn input(input: ConversationInputs) -> Result<ConversationInputs, ChatError> {
+    Ok(input)
+}
+
+register_operation!(
+    "mf_chat.conversation.input",
+    ConversationInput,
+    ConversationInputs,
+    ConversationInputs,
+    input
+);
+
 mod recovery;
-pub use recovery::{CompletionState, ConversationExit, MAX_RECOVERY_BYTES, ReconciledCompletion};
+pub use recovery::{
+    CompletionState, ConversationExit, MAX_RECOVERY_BYTES, ReconciledCompletion,
+    UncommittedCompletion,
+};
 
 #[derive(Clone, Debug)]
 pub struct ChatContract {
@@ -26,7 +142,7 @@ impl ChatContract {
         );
         let mut configuration = manifest.input_schema.clone();
         let mut inputs = BTreeMap::new();
-        for expected in mfn_llm::LlmInputs::ports() {
+        for expected in crate::ConversationInputs::ports() {
             let candidates: Vec<_> = manifest
                 .input_schema
                 .inputs
@@ -39,7 +155,7 @@ impl ChatContract {
                 candidates.len() <= 1 && (!expected.required || candidates.len() == 1),
                 InvalidSnafu {
                     field: "chat inputs",
-                    reason: "requires an unambiguous prompt and optional system and history inputs"
+                    reason: "requires an unambiguous prompt and optional system, history, and context inputs"
                 }
             );
             if let Some((node, port)) = candidates.first() {
@@ -82,7 +198,7 @@ impl ChatContract {
 
     pub fn arguments(
         &self,
-        mut input: mfn_llm::LlmInputs,
+        mut input: crate::ConversationInputs,
         parameters: &WorkflowArguments,
     ) -> Result<WorkflowArguments, ChatError> {
         self.parameters.validate(parameters)?;
@@ -149,7 +265,7 @@ impl crate::ChatDatabase {
             "running" => Ok(InvocationState::Running),
             "succeeded" => Ok(InvocationState::Committed(Completion {
                 invocation: invocation.clone(),
-                reply: turn::saved_reply(&call)?,
+                result: turn::saved_result(&call)?,
             })),
             "failed" | "cancelled" | "interrupted" => Ok(InvocationState::Finished(turn)),
             _ => ConflictSnafu {

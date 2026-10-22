@@ -203,6 +203,13 @@ pub fn history(
 }
 
 fn create(input: CreateSessionInputs) -> Result<SessionOutputs, ChatError> {
+    create_with_source(input, false)
+}
+
+fn create_with_source(
+    input: CreateSessionInputs,
+    provisional: bool,
+) -> Result<SessionOutputs, ChatError> {
     ensure!(
         !input.session_id.is_empty(),
         InvalidSnafu {
@@ -217,7 +224,7 @@ fn create(input: CreateSessionInputs) -> Result<SessionOutputs, ChatError> {
             reason: "must be nonblank"
         }
     );
-    let source = if input.title.is_some() {
+    let source = if input.title.is_some() && !provisional {
         "manual"
     } else {
         "provisional"
@@ -459,17 +466,40 @@ impl ChatDatabase {
         system: Option<String>,
         title: Option<String>,
     ) -> Result<Session, ChatError> {
-        let result: SessionOutputs = create(CreateSessionInputs {
-            database_path: self
-                .path()
-                .to_str()
-                .context(PathSnafu { path: self.path() })?
-                .into(),
-            session_id: uuid::Uuid::new_v4().to_string(),
-            profile: profile.into(),
-            system,
-            title,
-        })?;
+        self.create_session_record(profile, system, title, false)
+    }
+
+    /// Creates a replaceable display title rather than a user-assigned name.
+    pub fn create_provisional_session(
+        &self,
+        profile: &str,
+        system: Option<String>,
+        title: String,
+    ) -> Result<Session, ChatError> {
+        self.create_session_record(profile, system, Some(title), true)
+    }
+
+    fn create_session_record(
+        &self,
+        profile: &str,
+        system: Option<String>,
+        title: Option<String>,
+        provisional: bool,
+    ) -> Result<Session, ChatError> {
+        let result: SessionOutputs = create_with_source(
+            CreateSessionInputs {
+                database_path: self
+                    .path()
+                    .to_str()
+                    .context(PathSnafu { path: self.path() })?
+                    .into(),
+                session_id: uuid::Uuid::new_v4().to_string(),
+                profile: profile.into(),
+                system,
+                title,
+            },
+            provisional,
+        )?;
         Ok(result.session)
     }
 

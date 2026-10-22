@@ -124,4 +124,5 @@ pub struct ModelCall {
     #[diesel(deserialize_as = crate::storage::StoredJson<mfn_llm::MessageMetadata>)]
     #[diesel(serialize_as = crate::storage::StoredJson<mfn_llm::MessageMetadata>)]
     pub metadata: Option<mfn_llm::MessageMetadata>,
+    pub result_title: Option<String>,
 }

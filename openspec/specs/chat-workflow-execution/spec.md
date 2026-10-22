@@ -2,18 +2,18 @@
 
 ## Purpose
 
-Execute persistent conversations and independent session title generation through embedded Rust workflow modules with explicit host ownership of invocation lifecycle.
+Execute persistent conversations with optional session titles through one embedded Rust workflow with explicit host ownership of invocation lifecycle.
 
 ## Requirements
 
 ### Requirement: Embed the application workflows
 
-The package SHALL embed conversation and session title definitions as Rust modules using the existing workflow embedding facility. Built hosts SHALL execute them without workflow source files, generated source files, build tools, or spawning standalone workflow runners.
+The package SHALL embed a composed conversation definition as a Rust module using the existing workflow embedding facility. Built hosts SHALL execute them without workflow source files, generated source files, build tools, or spawning standalone workflow runners.
 
 #### Scenario: Run without definition files
 
 - **WHEN** a built host runs with workflow and generated source files removed
-- **THEN** both embedded workflows remain executable with their configured runtime resources
+- **THEN** the composed workflow remains executable with their configured runtime resources
 
 #### Scenario: Rebuild a workflow change
 
@@ -27,7 +27,7 @@ The host SHALL apply the selected nonsecret model configuration during flow prep
 #### Scenario: Select a different title model
 
 - **WHEN** title generation uses a model configuration different from conversation generation
-- **THEN** each workflow uses its selected model and records that identity with its own call
+- **THEN** each model node uses its selected configuration and reports its identity and attribution through the shared usages output
 
 #### Scenario: Reject invalid preparation
 
@@ -36,7 +36,7 @@ The host SHALL apply the selected nonsecret model configuration during flow prep
 
 ### Requirement: Execute conversations through the embedded flow
 
-The conversation flow SHALL begin a durable turn, supply ordered history and a separate prompt to the existing LLM implementation through an application adapter, and persist its terminal response through storage nodes. System instructions SHALL remain separate from history. Returned results SHALL identify their session, turn, and call.
+The host SHALL begin a durable turn, pass ordered history, prompt, and application context through the common conversation input contract, and persist the final result. The conversation flow SHALL compose model work without accessing storage. System instructions SHALL remain separate from history. Returned results SHALL identify their session, turn, and call.
 
 #### Scenario: Complete two conversation turns
 
@@ -52,7 +52,7 @@ The conversation flow SHALL begin a durable turn, supply ordered history and a s
 #### Scenario: Omit optional model fields
 
 - **WHEN** system instructions or response usage and finish metadata are absent
-- **THEN** required object request and response values still route through the conversation flow
+- **THEN** the shared contract still routes the primary response and usage list
 - **AND** response persistence executes without introducing placeholder metadata
 
 ### Requirement: Keep active sessions independent
@@ -86,48 +86,52 @@ The host SHALL finalize begun work after provider failure, deadline expiry, or c
 
 ### Requirement: Retry persistence without another model request
 
-If response persistence fails after the LLM node has produced a valid result, the host SHALL expose an uncommitted completion with its identities and retainable response data. Retrying that completion SHALL invoke only persistence. It MUST NOT issue another model request or report the turn committed before storage succeeds.
+If response persistence fails after the workflow has delivered a valid final result, the host SHALL expose an uncommitted completion with its identities and retainable response data. Retrying that completion SHALL invoke only persistence. It MUST NOT issue another model request or report the turn committed before storage succeeds.
 
 #### Scenario: Recover from a transient completion failure
 
 - **WHEN** a completion write fails and its retained response is submitted again after storage recovers
 - **THEN** the original response and call facts are persisted once without contacting the model again
 
-### Requirement: Schedule the first automatic title independently
+### Requirement: Compose optional titles in the conversation workflow
 
-With automatic titles enabled, the host SHALL explicitly schedule titles after conversation persistence and during startup or polling. Candidates SHALL be provisional sessions with a successful turn and no previous title call; scheduling SHALL use the first successful turn and be idempotent. Disabling automatic titles SHALL suppress automatic scheduling and dispatch. Explicit scheduling and retry SHALL remain available.
+The host SHALL supply title source, revision, recorded-attempt state, and enabled policy as application
+context. The workflow SHALL decide whether to produce an optional title. The default flow SHALL call
+the title model only after a successful primary call when the session is provisional, titles are enabled,
+and no title attempt has been recorded. The host MUST NOT schedule independent title jobs or inspect
+intermediate nodes to decide recovery. One submission SHALL finish after the composed execution.
 
 #### Scenario: Complete the first turn
 
-- **WHEN** the first turn of a provisionally titled session commits
-- **THEN** its response is available before title scheduling or generation
-- **AND** the automatic host separately queues at most one title request
+- **WHEN** a provisional session completes its first successful composed execution
+- **THEN** the result includes the answer, optional title, and explicitly combined usage records
+- **AND** the host saves the completion in one transaction
 
-#### Scenario: Restart before title scheduling
+#### Scenario: Disable automatic titles or reuse a named session
 
-- **WHEN** the host restarts after a successful turn commits but before any title request is queued
-- **THEN** automatic dispatch discovers that session and schedules its first successful turn once
+- **WHEN** the context disables titles, records a prior attempt, or identifies a non-provisional title
+- **THEN** the default flow skips the title model and returns only conversation usages
 
-#### Scenario: Restart before title execution
+#### Scenario: Handle a title provider failure in the flow
 
-- **WHEN** the host restarts with a never-started pending title request
-- **THEN** that request retains its identity and remains eligible for execution
+- **WHEN** the default flow receives a captured title provider failure
+- **THEN** it returns the successful primary answer, no title, and both calls' usage records
+- **AND** the host persists that result without introducing a separate title retry
 
-#### Scenario: Disable automatic titles
+#### Scenario: Cancel before a final result
 
-- **WHEN** automatic titles are disabled and a conversation commits
-- **THEN** no title request is automatically queued or started
-- **AND** explicit scheduling and dispatch remain available
+- **WHEN** cancellation prevents delivery of the composed result
+- **THEN** the host finalizes the invocation without recovering intermediate replies or guessing usage
 
-#### Scenario: Fail title generation
+#### Scenario: Upgrade pending legacy title jobs
 
-- **WHEN** the title provider fails or its call is cancelled or interrupted
-- **THEN** the conversation remains committed and its provisional title remains available
-- **AND** later conversations and automatic dispatch do not repeat that title attempt
+- **WHEN** an existing database contains never-started pending title jobs
+- **THEN** migration retires those jobs and startup does not dispatch them
+- **AND** previously started title attempts remain available in future title context
 
 ### Requirement: Preserve manual titles and account for discarded results
 
-Title generation SHALL use a completed conversation snapshot and captured title revision. The result SHALL apply only while the title remains provisional at that revision. Manual renames MUST take precedence. A valid generated result SHALL retain its call facts even when the title update is skipped, and MUST NOT append chat messages.
+Title generation SHALL use the primary answer and an admission-time title revision. The result SHALL apply only while the title remains provisional at that revision. Manual renames MUST take precedence. A valid generated result SHALL retain its call facts even when the title update is skipped, and MUST NOT append chat messages.
 
 #### Scenario: Rename during generation
 
@@ -138,7 +142,7 @@ Title generation SHALL use a completed conversation snapshot and captured title 
 #### Scenario: Generate a title successfully
 
 - **WHEN** a valid title is produced for a matching provisional title revision
-- **THEN** the title and its call facts are persisted without changing conversation messages
+- **THEN** the title is applied in the primary completion transaction without creating a separate title message
 
 ### Requirement: Join active work before host teardown
 
@@ -146,6 +150,6 @@ Shutdown SHALL stop accepting requests, cancel or complete active workflows, fin
 
 #### Scenario: Close with conversation and title calls active
 
-- **WHEN** the host closes while conversation and title workflows are running
+- **WHEN** the host closes while composed conversation workflows are running
 - **THEN** their local execution is joined and database ownership is released only after finalization is attempted
 - **AND** unresolved work is recoverable as interrupted on the next open

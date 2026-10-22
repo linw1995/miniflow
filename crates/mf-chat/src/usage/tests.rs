@@ -1,6 +1,6 @@
 use super::*;
 use crate::schema::model_calls;
-use crate::{ModelIdentity, Reply, nodes::PrepareTitleInputs};
+use crate::{ConversationResult, ModelIdentity};
 
 fn identity() -> ModelIdentity {
     ModelIdentity {
@@ -19,18 +19,20 @@ fn complete(
     database
         .complete_turn(
             begun.invocation.clone(),
-            Reply {
-                usages: Some(vec![mfn_llm::CallUsage {
+            ConversationResult {
+                usages: vec![mfn_llm::CallUsage {
+                    attribution: None,
                     started_at: None,
                     call_id: "reported-call".into(),
                     node: None,
                     model: "test-model".into(),
                     usage,
                     error: None,
-                }]),
+                }],
                 metadata: None,
                 text: "answer".into(),
                 finish_reason: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -209,66 +211,6 @@ fn utc_start_bounds_are_inclusive_exclusive_and_group_pages_do_not_change_totals
 }
 
 #[test]
-fn pending_titles_do_not_count_but_discarded_title_results_keep_their_usage() {
-    let directory = tempfile::tempdir().unwrap();
-    let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
-    let owner = database.create_session("default", None, None).unwrap();
-    complete(&database, &owner.id, None);
-    assert_eq!(
-        database
-            .usage(UsageQuery::default())
-            .unwrap()
-            .overall
-            .attempted_calls,
-        1
-    );
-    database.schedule_titles(10).unwrap();
-    let title = database.pending_titles(10).unwrap().pop().unwrap();
-    let prepared: crate::nodes::TitleStarted = crate::title::prepare(PrepareTitleInputs {
-        database_path: database.path().to_str().unwrap().into(),
-        call_id: title.id.clone(),
-        model: identity(),
-        max_bytes: 1024,
-    })
-    .unwrap();
-    database.rename_session(&owner.id, "Manual").unwrap();
-    let response = Reply {
-        usages: Some(vec![mfn_llm::CallUsage {
-            started_at: None,
-            call_id: "reported-title".into(),
-            node: None,
-            model: "test-model".into(),
-            usage: Some(BTreeMap::from([("output_tokens".into(), 5)])),
-            error: None,
-        }]),
-        metadata: None,
-        text: "Generated".into(),
-        finish_reason: None,
-    };
-    database
-        .complete_title(
-            prepared.invocation.clone(),
-            prepared.title_revision,
-            response.clone(),
-        )
-        .unwrap();
-    database
-        .complete_title(prepared.invocation, prepared.title_revision, response)
-        .unwrap();
-    let usage = database
-        .usage(UsageQuery {
-            purpose: Some(CallPurpose::Title),
-            group_by: Some(UsageGrouping::Purpose),
-            ..Default::default()
-        })
-        .unwrap();
-    assert_eq!(usage.overall.attempted_calls, 1);
-    assert_eq!(usage.overall.output_tokens.known_subtotal, Some(5));
-    assert_eq!(usage.groups[0].key, "title");
-    assert_eq!(database.session(&owner.id).unwrap().title, "Manual");
-}
-
-#[test]
 fn model_profile_and_purpose_groups_preserve_attribution_and_validate_cursors() {
     let directory = tempfile::tempdir().unwrap();
     let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
@@ -285,18 +227,20 @@ fn model_profile_and_purpose_groups_preserve_attribution_and_validate_cursors() 
         database
             .complete_turn(
                 begun.invocation,
-                Reply {
-                    usages: Some(vec![mfn_llm::CallUsage {
+                ConversationResult {
+                    usages: vec![mfn_llm::CallUsage {
+                        attribution: None,
                         started_at: None,
                         call_id: "reported-call".into(),
                         node: None,
                         model: model.into(),
                         usage: Some(BTreeMap::from([("output_tokens".into(), tokens)])),
                         error: None,
-                    }]),
+                    }],
                     metadata: None,
                     text: "answer".into(),
                     finish_reason: None,
+                    ..Default::default()
                 },
             )
             .unwrap();

@@ -207,7 +207,7 @@ fn separate_invocations_have_no_implicit_conversation_memory() {
     ]);
     let result = probe(
         &server,
-        json!({"inputs": [{"prompt": "a", "history": [{"role": "assistant", "content": "previous"}]}, {"prompt": "b"}, {"prompt": "c", "history": []}]}),
+        json!({"inputs": [{"prompt": "a", "history": [{"role": "assistant", "content": "previous"}]}, {"prompt": "b", "system": ""}, {"prompt": "c", "history": []}]}),
         json!({}),
     );
     assert!(
@@ -560,4 +560,28 @@ fn captured_response_validation_failure_keeps_reported_tokens() {
         json!({"input_tokens":2,"output_tokens":1,"total_tokens":3})
     );
     assert_eq!(server.requests().len(), 1);
+}
+
+#[test]
+fn attribution_is_reported_for_success_and_captured_failure_without_entering_provider_payloads() {
+    let mut failed = Reply::json(json!({"error":{"message":"unavailable"}}));
+    failed.status = 503;
+    let server = Server::start(vec![Reply::text("answer"), failed]);
+    let attribution = json!({"purpose":"title", "profile":"summary-profile"});
+    let result = probe(
+        &server,
+        json!({"inputs":[{"prompt":"first"},{"prompt":"second"}]}),
+        json!({"capture_errors":true,"attribution":attribution}),
+    );
+    for (index, status) in ["succeeded", "failed"].into_iter().enumerate() {
+        assert_eq!(result["results"][index]["outputs"]["status"], status);
+        assert_eq!(
+            result["results"][index]["outputs"]["usages"][0]["attribution"],
+            attribution
+        );
+    }
+    for request in server.requests() {
+        assert!(request.body.get("attribution").is_none());
+        assert!(!request.body.to_string().contains("summary-profile"));
+    }
 }

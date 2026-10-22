@@ -4,7 +4,7 @@ use crate::{
     manifest::{ManifestReadError, read_manifest},
     run::{LocalObservation, LocalOutcome, LocalRun, RunError, RunOptions},
 };
-use mf_chat::executable::{
+use mf_chat::contract::{
     ChatContract, CompletionState, ConversationExit, ReconciledCompletion, TurnExit,
 };
 use mf_chat::{ChatDatabase, Invocation, MessagePage, Session, SessionPage, UncommittedCompletion};
@@ -343,8 +343,11 @@ impl Controller {
                         .chars()
                         .take(48)
                         .collect();
-                    self.database
-                        .create_session(&self.launch.options.profile, None, Some(title))?
+                    self.database.create_provisional_session(
+                        &self.launch.options.profile,
+                        None,
+                        title,
+                    )?
                 };
                 self.submit(session, prompt, None)?;
             }
@@ -399,7 +402,7 @@ impl Controller {
         {
             match self.database.complete_turn(
                 pending.completion.invocation.clone(),
-                pending.completion.reply.clone(),
+                pending.completion.result.clone(),
             ) {
                 Ok(completion) => resolution.state = CompletionState::Committed(completion),
                 Err(source) => resolution.diagnostics.push(source),
@@ -493,7 +496,7 @@ impl Controller {
             command,
             description,
             mf_telemetry::identity::RunId::new(),
-            mf_chat::executable::MAX_RECOVERY_BYTES as u64,
+            mf_chat::contract::MAX_RECOVERY_BYTES as u64,
         )?;
         self.emit(ChatEvent::Observing(run.observation()));
         loop {

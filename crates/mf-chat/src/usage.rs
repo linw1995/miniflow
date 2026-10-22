@@ -1,5 +1,5 @@
 use crate::{
-    CallPurpose, ChatDatabase, ChatError,
+    ChatDatabase, ChatError,
     error::*,
     schema::{model_calls as invocations, usage_facts as model_calls},
     session, storage,
@@ -23,6 +23,15 @@ extern "SQL" {
     #[aggregate]
     #[sql_name = "SUM"]
     fn sum_i64(value: Nullable<BigInt>) -> Nullable<BigInt>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, NodeEnum)]
+#[serde(rename_all = "snake_case")]
+pub enum CallPurpose {
+    #[value(rename = "conversation")]
+    Conversation,
+    #[value(rename = "title")]
+    Title,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, NodeEnum)]

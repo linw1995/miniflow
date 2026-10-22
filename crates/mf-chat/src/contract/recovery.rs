@@ -1,24 +1,10 @@
 //! Bounded model replies retained by the owning application for save-only retry.
 
 use super::{InvocationState, TurnExit};
-use crate::{
-    CallPurpose, ChatDatabase, ChatError, Completion, Invocation, UncommittedCompletion, error::*,
-    turn,
-};
-use mf_runtime::NodeValue;
-use snafu::{IntoError, OptionExt, ResultExt, ensure};
+use crate::{ChatDatabase, ChatError, Completion, Invocation, error::*, turn};
+use snafu::{IntoError, ResultExt, ensure};
 
 pub const MAX_RECOVERY_BYTES: usize = 16 * 1024 * 1024;
-
-#[derive(NodeValue)]
-struct WorkflowResult {
-    status: String,
-    text: Option<String>,
-    metadata: Option<mfn_llm::MessageMetadata>,
-    usages: Vec<mfn_llm::CallUsage>,
-    finish_reason: Option<String>,
-    error: Option<String>,
-}
 
 enum Delivered {
     Succeeded(Completion),
@@ -28,67 +14,41 @@ enum Delivered {
     },
 }
 
-fn decode_result(bytes: &[u8], invocation: &Invocation) -> Result<Delivered, ChatError> {
+fn decode_result(bytes: &[u8]) -> Result<crate::ConversationResult, ChatError> {
     ensure!(
         bytes.len() <= MAX_RECOVERY_BYTES,
         RecoveryTooLargeSnafu {
             limit: MAX_RECOVERY_BYTES
         }
     );
-    let mut values: mf_runtime::NodeValues =
-        mf_runtime::decode_unique_json(bytes).context(JsonSnafu)?;
-    values.retain(|name, _| {
-        matches!(
-            name.as_str(),
-            "status" | "text" | "metadata" | "usages" | "finish_reason" | "error"
-        )
-    });
-    let result = WorkflowResult::from_values(values)?;
-    match result.status.as_str() {
-        "succeeded" => {
-            ensure!(
-                result.error.as_ref().is_none_or(|error| error.is_empty()),
-                InvalidSnafu {
-                    field: "workflow result",
-                    reason: "success cannot include an error"
-                }
-            );
-            let text = result.text.context(InvalidSnafu {
-                field: "workflow result",
-                reason: "success requires text",
-            })?;
-            let reply = crate::Reply {
-                text,
-                metadata: result.metadata,
-                usages: Some(result.usages),
-                finish_reason: result.finish_reason,
-            };
-            turn::validate_reply(&reply)?;
-            Ok(Delivered::Succeeded(Completion {
-                invocation: invocation.clone(),
-                reply,
-            }))
-        }
-        "failed" => {
-            turn::validate_usages(&result.usages)?;
-            let error = result
-                .error
-                .filter(|error| !error.trim().is_empty())
-                .context(InvalidSnafu {
-                    field: "workflow result",
-                    reason: "failure requires an error summary",
-                })?;
-            Ok(Delivered::Failed {
-                error,
-                usages: result.usages,
-            })
-        }
-        _ => InvalidSnafu {
-            field: "workflow result",
-            reason: "requires succeeded or failed status",
-        }
-        .fail(),
+    let values = mf_runtime::decode_unique_json(bytes).context(JsonSnafu)?;
+    let result = crate::ConversationResult::decode(values)?;
+    Ok(result)
+}
+
+fn delivered(
+    mut result: crate::ConversationResult,
+    invocation: &Invocation,
+) -> Result<Delivered, ChatError> {
+    result.validate()?;
+    if result.status == "succeeded" {
+        result.error = None;
+        Ok(Delivered::Succeeded(Completion {
+            invocation: invocation.clone(),
+            result,
+        }))
+    } else {
+        Ok(Delivered::Failed {
+            error: result.error.expect("validated failure has an error"),
+            usages: result.usages,
+        })
     }
+}
+
+#[derive(Clone, Debug)]
+pub struct UncommittedCompletion {
+    pub database_path: std::path::PathBuf,
+    pub completion: Completion,
 }
 
 #[derive(Clone, Debug)]
@@ -116,11 +76,25 @@ impl ChatDatabase {
         &self,
         exit: ConversationExit<'_>,
     ) -> Result<ReconciledCompletion, ChatError> {
-        let stored = self.inspect_invocation(exit.invocation)?;
+        self.reconcile_result(
+            exit.invocation,
+            exit.stdout.map(decode_result),
+            exit.outcome,
+            exit.summary,
+        )
+    }
+
+    pub fn reconcile_result(
+        &self,
+        invocation: &Invocation,
+        result: Option<Result<crate::ConversationResult, ChatError>>,
+        outcome: TurnExit,
+        summary: &str,
+    ) -> Result<ReconciledCompletion, ChatError> {
+        let stored = self.inspect_invocation(invocation)?;
         let mut diagnostics = Vec::new();
-        let delivered = exit
-            .stdout
-            .map(|bytes| decode_result(bytes, exit.invocation));
+        let delivered =
+            result.map(|result| result.and_then(|result| delivered(result, invocation)));
         if let InvocationState::Committed(saved) = stored {
             match delivered {
                 Some(Ok(Delivered::Succeeded(completion))) if completion != saved => diagnostics
@@ -154,7 +128,6 @@ impl ChatDatabase {
                     state: CompletionState::Uncommitted(UncommittedCompletion {
                         database_path: self.path().to_owned(),
                         completion,
-                        purpose: CallPurpose::Conversation,
                     }),
                     diagnostics,
                 });
@@ -162,13 +135,13 @@ impl ChatDatabase {
             Some(Ok(Delivered::Failed { error, usages }))
                 if matches!(stored, InvocationState::Running) =>
             {
-                self.fail_turn_with_usages(exit.invocation.clone(), &error, usages)?;
+                self.fail_turn_with_usages(invocation.clone(), &error, usages)?;
             }
             Some(Ok(Delivered::Failed { error, usages })) => {
                 if let InvocationState::Finished(turn) = &stored
                     && turn.state == "failed"
                 {
-                    let call = self.call(&exit.invocation.call_id)?;
+                    let call = self.call(&invocation.call_id)?;
                     if call.usages.as_deref() == Some(usages.as_slice())
                         && call.error.as_deref() == Some(turn::failure_summary(&error))
                     {
@@ -196,8 +169,7 @@ impl ChatDatabase {
             ),
             None => {}
         }
-        let finalized =
-            self.finalize_invocation(exit.invocation.clone(), exit.outcome, exit.summary)?;
+        let finalized = self.finalize_invocation(invocation.clone(), outcome, summary)?;
         let state = match finalized {
             InvocationState::NotBegun => CompletionState::NotBegun,
             InvocationState::Committed(completion) => CompletionState::Committed(completion),
@@ -215,13 +187,6 @@ impl ChatDatabase {
 
     pub fn save_recovered(&self, pending: UncommittedCompletion) -> Result<Completion, ChatError> {
         ensure!(
-            pending.purpose == CallPurpose::Conversation,
-            InvalidSnafu {
-                field: "purpose",
-                reason: "use title recovery for a title response"
-            }
-        );
-        ensure!(
             pending.database_path == self.path(),
             InvalidSnafu {
                 field: "database_path",
@@ -230,7 +195,7 @@ impl ChatDatabase {
         );
         match self.complete_turn(
             pending.completion.invocation.clone(),
-            pending.completion.reply.clone(),
+            pending.completion.result.clone(),
         ) {
             Ok(completion) => Ok(completion),
             Err(source) => Err(UncommittedSnafu {
@@ -245,10 +210,10 @@ impl ChatDatabase {
         pending: &UncommittedCompletion,
     ) -> Result<InvocationState, ChatError> {
         ensure!(
-            pending.database_path == self.path() && pending.purpose == CallPurpose::Conversation,
+            pending.database_path == self.path(),
             InvalidSnafu {
                 field: "retained completion",
-                reason: "belongs to another database or call purpose"
+                reason: "belongs to another database"
             }
         );
         self.finalize_invocation(

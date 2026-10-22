@@ -82,7 +82,6 @@ fn packaged_inputs_include_workflows_migrations_and_host_fixture() {
     let files = String::from_utf8(output.stdout).unwrap();
     for required in [
         "workflows/conversation.json",
-        "workflows/session_title.json",
         "migrations/00000000000001_chat_storage/up.sql",
         "migrations/00000000000001_chat_storage/down.sql",
         "tests/fixtures/host/src/main.rs",
@@ -136,9 +135,9 @@ fn source_free_host_preserves_multi_session_retry_title_and_statistics() {
     failed.status = 500;
     let server = Server::start(vec![
         Reply::text("answer A"),
+        Reply::text("Summary A"),
         failed,
         Reply::text("answer B"),
-        Reply::text("Summary A"),
         Reply::text("Summary B"),
     ]);
     let mut command = Command::new(&binary);
