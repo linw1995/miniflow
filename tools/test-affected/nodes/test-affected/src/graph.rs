@@ -23,12 +23,12 @@
 //! workspace source files; consecutive hits compress into inclusive
 //! [`LineRange`] intervals.
 
-mod error;
 mod lcov;
 mod manifest;
 mod schema;
 mod store;
 
-pub use error::Error;
 pub use manifest::{CoverageManifest, CoveredTest};
-pub use store::{GraphReader, GraphWriter, IndexedCommit, LineRange, Record, SCHEMA_VERSION};
+pub use store::{
+    Error, GraphReader, GraphWriter, IndexedCommit, LineRange, Record, SCHEMA_VERSION,
+};

@@ -1,6 +1,6 @@
 use crate::graph::{
     LineRange,
-    error::{Error, IoSnafu, LcovNumberSnafu, LcovSnafu},
+    store::{Error, IoSnafu, LcovNumberSnafu, LcovSnafu},
 };
 use snafu::{OptionExt, ResultExt, ensure};
 use std::{

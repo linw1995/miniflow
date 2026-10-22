@@ -1,4 +1,4 @@
-use crate::graph::error::{Error, IoSnafu, JsonSnafu};
+use crate::graph::store::{Error, IoSnafu, JsonSnafu};
 use serde::{Deserialize, Serialize};
 use snafu::ResultExt;
 use std::{

@@ -392,16 +392,14 @@ fn error_variants_expose_display_messages_and_source_chains() {
             true,
         ),
     ];
+    let mut messages = std::collections::BTreeSet::new();
     for (variant, sourced) in &variants {
-        let display = variant.to_string();
-        assert!(!display.is_empty(), "{variant:?}");
+        let message = variant.to_string();
+        assert!(!message.is_empty(), "{variant:?}");
         assert_eq!(variant.source().is_some(), *sourced, "{variant:?}");
+        messages.insert(message);
     }
     // Distinct variants carry distinct messages.
-    let messages: std::collections::BTreeSet<_> = variants
-        .iter()
-        .map(|(variant, _)| variant.to_string())
-        .collect();
     assert_eq!(messages.len(), variants.len());
 }
 
