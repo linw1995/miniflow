@@ -302,8 +302,8 @@ impl SnapshotExporter {
             packet.write_to(&mut record, self.workflow.as_str(), self.run.as_str())?;
             self.logger.emit(record);
             self.buffered += 1;
-            // Waiting before filling the queue prevents a dropped value definition from
-            // invalidating every later reference to that value.
+            // Waiting before filling the queue preserves a contiguous observation sequence
+            // without dropping node records during bursts.
             if self.buffered == SNAPSHOT_BATCH_SIZE {
                 self.flush()?;
             }

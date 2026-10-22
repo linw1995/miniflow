@@ -706,12 +706,11 @@ fn raw_log_limits_do_not_stop_lifecycle_reduction_or_snapshot_assembly() {
         200
     );
     let bodies = [
-        serde_json::json!({"record":"header","version":1}),
-        serde_json::json!({"record":"value","id":0,"value":{"kind":"object","data":{}}}),
-        serde_json::json!({"record":"node","scope":[],"node":"step","inputs":0,"outputs":0,"skipped":[],"outcome":"succeeded"}),
+        serde_json::json!({"record":"header","version":mf_telemetry::capture::SNAPSHOT_VERSION}),
+        serde_json::json!({"record":"node","scope":[],"node":"step","inputs":{},"outputs":{},"skipped":[],"outcome":"succeeded"}),
         serde_json::json!({"record":"end"}),
     ];
-    let records = bodies
+    let records: Vec<_> = bodies
         .into_iter()
         .enumerate()
         .flat_map(|(sequence, body)| {
@@ -727,6 +726,7 @@ fn raw_log_limits_do_not_stop_lifecycle_reduction_or_snapshot_assembly() {
                 .collect::<Vec<_>>()
         })
         .collect();
+    let expected_drops = 2 + records.len() as u64;
     let mut request = ExportLogsServiceRequest::decode(logs(records).as_slice()).unwrap();
     request.resource_logs[0].scope_logs[0]
         .scope
@@ -747,7 +747,7 @@ fn raw_log_limits_do_not_stop_lifecycle_reduction_or_snapshot_assembly() {
     assert_eq!(state.lifecycle.local_drops, 0);
     assert_eq!(state.lifecycle.observation_errors, 0);
     assert_eq!(receiver.log_snapshot().records.len(), 4096);
-    assert_eq!(receiver.log_snapshot().local_drops, 6);
+    assert_eq!(receiver.log_snapshot().local_drops, expected_drops);
     let data = receiver.span_data(&[1; 16], &[2; 8]);
     assert!(data.node.is_some());
     assert_eq!(data.status, "Complete");

@@ -82,11 +82,8 @@ fn check_capture(with_observation: bool) {
         .map(|byte| format!("{byte:02x}"))
         .collect();
     let bodies = [
-        serde_json::json!({"record":"header","version":1}),
-        serde_json::json!({"record":"value","id":0,"value":{"kind":"string","data":"history-payload-42"}}),
-        serde_json::json!({"record":"value","id":1,"value":{"kind":"object","data":{"result":0}}}),
-        serde_json::json!({"record":"value","id":2,"value":{"kind":"object","data":{}}}),
-        serde_json::json!({"record":"node","scope":[],"node":"step","inputs":2,"outputs":1,"skipped":[],"outcome":"succeeded"}),
+        serde_json::json!({"record":"header","version":mf_telemetry::capture::SNAPSHOT_VERSION}),
+        serde_json::json!({"record":"node","scope":[],"node":"step","inputs":{},"outputs":{"result":"history-payload-42"},"skipped":[],"outcome":"succeeded"}),
         serde_json::json!({"record":"end"}),
     ];
     let snapshots = bodies

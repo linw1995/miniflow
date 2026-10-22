@@ -1,8 +1,11 @@
+#[path = "common/snapshots.rs"]
+mod snapshots;
+use snapshots::Snapshots;
 extern crate mfn_core as _;
 mod common;
 
 use mf_compiler::{NodeRegistry, WorkflowDefinition, compile_definition, instantiate_compiled};
-use mf_runtime::{ExecutionContext, SnapshotRecording, WorkflowArguments};
+use mf_runtime::{ExecutionContext, WorkflowArguments};
 use serde_json::{Value, json};
 use std::{error::Error, process::Command};
 
@@ -135,7 +138,7 @@ fn parameters_probe() {
     graph.edges.push(serde_json::from_value(json!({"from_node":"params", "from_output":"token", "to_node":"copy", "to_input":"input"})).unwrap());
     let plan = compile_definition(&graph, &registry).unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
-    let recording = SnapshotRecording::memory();
+    let recording = Snapshots::memory();
     let mut context = ExecutionContext::default();
     context.set_snapshot_recorder(recording.recorder());
     let output = flow.execute_in_context(&mut context).unwrap();
@@ -300,7 +303,7 @@ fn reusing_a_context_rebinds_defaults_and_preserves_existing_secret_values() {
 fn assert_failure(registry: &NodeRegistry, descriptor: Value, inputs: Value, message: &str) {
     let plan = compile_definition(&definition(json!({"value": descriptor})), registry).unwrap();
     let flow = instantiate_compiled(&plan, registry).unwrap();
-    let recording = SnapshotRecording::memory();
+    let recording = Snapshots::memory();
     let mut context = ExecutionContext::default();
     context.set_workflow_arguments(WorkflowArguments::try_from(inputs).unwrap());
     context.set_snapshot_recorder(recording.recorder());

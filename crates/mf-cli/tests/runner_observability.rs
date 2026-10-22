@@ -694,9 +694,9 @@ fn generated_runner_describes_embedded_graph_and_exports_correlated_otel() {
     assert_eq!(history.status, "Complete");
     assert_eq!(history.history_len, 6);
     let history_root = &history.entries.last().unwrap().snapshot;
-    assert!(
-        history_root.node(&[], "a").unwrap().outputs["value"]
-            .ptr_eq(&history_root.node(&[], "b").unwrap().inputs["input"])
+    assert_eq!(
+        history_root.node(&[], "a").unwrap().outputs["value"],
+        history_root.node(&[], "b").unwrap().inputs["input"],
     );
     assert_eq!(
         history_root.node(&[], "b").unwrap().outputs["result.alpha"],
@@ -1065,7 +1065,7 @@ fn streaming_runner_exports_message_lifecycles_without_changing_results() {
         .flat_map(|scope| scope.log_records)
         .collect::<Vec<_>>();
     let mut assembler = mf_telemetry::snapshot::Assembler::default();
-    let mut store = mf_runtime::SnapshotStore::default();
+    let mut store = mf_tui::snapshots::SnapshotStore::default();
     for record in &data {
         for body in assembler.push(record.clone()).unwrap() {
             store.apply(serde_json::from_value(body).unwrap()).unwrap();

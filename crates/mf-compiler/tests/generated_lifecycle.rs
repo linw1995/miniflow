@@ -1,9 +1,12 @@
+#[path = "common/snapshots.rs"]
+mod snapshots;
 use mf_compiler::build_flow;
 use mf_runtime::{
     ExecutionContext, FlowNode, GeneratedDomainExecutor, GeneratedNodeResult, NodePorts, NodeValue,
     TypedConstructor, TypedNodeResult, TypedNodeValue, TypedTaskHandle, TypedTaskNode,
 };
 use serde_json::json;
+use snapshots::Snapshots;
 use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
@@ -157,7 +160,7 @@ fn direct_transfer_preserves_owned_allocation_and_repeated_invocations() {
 fn invalid_unused_outputs_fail_before_a_successor_and_match_dynamic_errors() {
     let run = flow(true);
     let typed = run.flow.execute().unwrap_err();
-    let recorder = mf_runtime::SnapshotRecording::memory();
+    let recorder = Snapshots::memory();
     let mut ctx = ExecutionContext::default();
     ctx.set_snapshot_recorder(recorder.recorder());
     let dynamic = run.flow.execute_in_context(&mut ctx).unwrap_err();
@@ -172,7 +175,7 @@ fn invalid_unused_outputs_fail_before_a_successor_and_match_dynamic_errors() {
 fn snapshot_fallback_keeps_intermediate_values_and_the_same_instances() {
     let run = flow(false);
     run.flow.execute().unwrap();
-    let recorder = mf_runtime::SnapshotRecording::memory();
+    let recorder = Snapshots::memory();
     let mut ctx = ExecutionContext::default();
     ctx.set_snapshot_recorder(recorder.recorder());
     assert_eq!(

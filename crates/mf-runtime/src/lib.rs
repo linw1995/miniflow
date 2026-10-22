@@ -124,11 +124,7 @@ pub use worker::{
     ExecutionWorkers, RuntimeWorkerHandle, WorkerHandle, WorkerJob, WorkerPool, WorkerPoolError,
 };
 
-pub use snapshot::{
-    NodeSnapshot, SNAPSHOT_VERSION, Snapshot, SnapshotEntry, SnapshotError, SnapshotEvent,
-    SnapshotOutcome, SnapshotRecord, SnapshotRecorder, SnapshotRecording, SnapshotStore,
-    ValueDefinition, ValueId,
-};
+pub use snapshot::{NodeSnapshot, SnapshotEvent, SnapshotOutcome, SnapshotRecorder};
 
 pub use workflow_inputs::{
     InputBinding, MAX_WORKFLOW_INPUT_BYTES, StdinRequirement, WorkflowArguments, WorkflowInput,

@@ -32,7 +32,8 @@ signal-hook.workspace = true
 tempfile.workspace = true
 object.workspace = true
 
-# Snapshot values, integrity checks, and diagnostics.
+# Snapshot values, immutable history, integrity checks, and diagnostics.
+rpds.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 snafu.workspace = true

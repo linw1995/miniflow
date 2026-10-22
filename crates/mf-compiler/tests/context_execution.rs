@@ -1,3 +1,6 @@
+#[path = "common/snapshots.rs"]
+mod snapshots;
+use snapshots::Snapshots;
 mod common;
 #[path = "fixtures/multi-nodes/src/context_fixture.rs"]
 mod fixture;
@@ -122,8 +125,8 @@ fn optional_selection_defaults_round_trip_and_remain_strict() {
 
 #[test]
 fn snapshots_distinguish_null_skips_and_publication_failures() {
-    use mf_runtime::{ExecutionContext, SnapshotOutcome, SnapshotRecording};
-    let recorder = SnapshotRecording::memory();
+    use mf_runtime::{ExecutionContext, SnapshotOutcome};
+    let recorder = Snapshots::memory();
     let mut context = ExecutionContext::default();
     context.set_snapshot_recorder(recorder.recorder());
     flow(graph()).execute_in_context(&mut context).unwrap();
@@ -145,7 +148,7 @@ fn snapshots_distinguish_null_skips_and_publication_failures() {
 
     let mut invalid = graph();
     invalid["nodes"][0]["config"]["outputs"]["extra"] = json!(true);
-    let recorder = SnapshotRecording::memory();
+    let recorder = Snapshots::memory();
     let mut context = ExecutionContext::default();
     context.set_snapshot_recorder(recorder.recorder());
     assert!(flow(invalid).execute_in_context(&mut context).is_err());

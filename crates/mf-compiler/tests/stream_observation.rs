@@ -1,3 +1,6 @@
+#[path = "common/snapshots.rs"]
+mod snapshots;
+use snapshots::Snapshots;
 #[path = "fixtures/controlled_source.rs"]
 mod controlled;
 use controlled::SourceRun;
@@ -27,13 +30,13 @@ use std::{
 
 #[test]
 fn snapshots_are_live_and_distinguish_buffering_from_timer_outputs() {
-    use mf_runtime::{SnapshotOutcome, SnapshotRecording};
+    use mf_runtime::SnapshotOutcome;
     let harness = Harness::new(true);
     let plan = plan(definition());
     let observation = plan
         .start_stream_observation(&harness.observer(), RunId::new())
         .unwrap();
-    let recording = SnapshotRecording::memory();
+    let recording = Snapshots::memory();
     let clock = Arc::new(Clock::default());
     let instance = start_stream(
         &plan,
@@ -108,7 +111,7 @@ fn snapshots_are_live_and_distinguish_buffering_from_timer_outputs() {
             .node(&[], "feed")
             .unwrap()
             .outputs
-            .ptr_eq(&emitted[1].snapshot.node(&[], "feed").unwrap().outputs)
+            .eq(&emitted[1].snapshot.node(&[], "feed").unwrap().outputs)
     );
     assert_eq!(
         recording.current().node(&[], "collect").unwrap().outputs["items"],
@@ -121,7 +124,7 @@ fn secret_emissions_survive_batching_without_entering_snapshot_definitions() {
     let plan = plan(definition());
     let captured = Arc::new(Mutex::new(Vec::new()));
     let records = captured.clone();
-    let recording = mf_runtime::SnapshotRecording::with_sink(move |record| {
+    let recording = Snapshots::with_sink(move |record| {
         records.lock().unwrap().push(record.clone());
         Ok(())
     })
@@ -156,15 +159,13 @@ fn secret_emissions_survive_batching_without_entering_snapshot_definitions() {
             .unwrap()
             .contains("987654321")
     );
-    let mut store = mf_runtime::SnapshotStore::default();
-    for record in records.iter().cloned() {
-        store.apply(record).unwrap();
-    }
-    assert!(store.is_complete());
-    assert_eq!(
-        store.current().node(&[], "collect").unwrap().outputs["items"],
-        json!(["[REDACTED]", 7])
-    );
+    assert_eq!(records.last().unwrap()["record"], "end");
+    let collected = records
+        .iter()
+        .rev()
+        .find(|record| record["record"] == "node" && record["node"] == "collect")
+        .unwrap();
+    assert_eq!(collected["outputs"]["items"], json!(["[REDACTED]", 7]));
 }
 
 struct PartialCapture;
@@ -217,7 +218,7 @@ fn partial_event_publication_keeps_only_admitted_data_and_failed_outcome() {
     let observation = plan
         .start_stream_observation(&harness.observer(), RunId::new())
         .unwrap();
-    let capture = mf_runtime::SnapshotRecording::memory();
+    let capture = Snapshots::memory();
     let instance = mf_compiler::start_stream(
         &plan,
         &NodeRegistry::from_inventory().unwrap(),
@@ -641,7 +642,7 @@ fn task_failures_preserve_outcomes_and_raw_snapshots_need_no_telemetry() {
     )));
 
     let value = json!({"items":[null, true, 7]});
-    let recording = mf_runtime::SnapshotRecording::memory();
+    let recording = Snapshots::memory();
     let plan = self::plan(
         json!({"version":"2026-10-03", "execution":{"mode":"stream"}, "dependencies":{},
         "nodes":[{"id":"copy", "kind":"builtin.identity"}],
@@ -689,7 +690,7 @@ fn loop_paths_and_iteration_details_keep_the_containing_message_identity() {
     let observation = plan
         .start_stream_observation(&harness.observer(), RunId::new())
         .unwrap();
-    let capture = mf_runtime::SnapshotRecording::memory();
+    let capture = Snapshots::memory();
     let instance = start_stream(
         &plan,
         &NodeRegistry::from_inventory().unwrap(),

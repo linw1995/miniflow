@@ -619,7 +619,7 @@ Compilation SHALL enable its existing build summary at any positive level.
 
 ### Requirement: Correlate opt-in snapshots with active spans
 
-Opt-in snapshot LogRecords emitted under a valid active span SHALL preserve its native trace and span IDs. All fragments of one snapshot record SHALL preserve the same association. Existing snapshot bodies, sequence, digest, value references, and workflow/run identities SHALL retain their meanings. Correlation MUST NOT require embedding full business values in span attributes.
+Opt-in snapshot LogRecords emitted under a valid active span SHALL preserve its native trace and span IDs. All fragments of one snapshot record SHALL preserve the same association. Snapshot sequence, digest, and workflow/run identities SHALL retain their meanings independently of the self-contained payload format. Correlation MUST NOT require embedding full business values in span attributes.
 
 #### Scenario: Export node input and output snapshots
 
@@ -698,13 +698,14 @@ owners SHALL finish capture, and consumers SHALL manage historical retention.
 
 Finite and streaming execution SHALL share the opt-in SnapshotRecorder callback
 and ordinary-task capture boundary. The runtime recorder SHALL only notify current
-node snapshots and scope. It MUST NOT contain stream identity or run binding. Caller-owned recording SHALL
-manage dictionaries, encoding, history, and diagnostics. The runtime MUST NOT keep
+node snapshots and scope. It MUST NOT contain stream identity, run binding, dictionaries,
+or historical roots. Observation publication SHALL own encoding and diagnostics;
+the receiver SHALL own historical retention and replay. The runtime MUST NOT keep
 a separate stream data observer or duplicate task capture path.
 
 #### Scenario: Observe a finite task through the common recorder
 
-- **WHEN** a caller records a finite task with SnapshotRecording
+- **WHEN** a caller observes a finite task through SnapshotRecorder
 - **THEN** redacted current values, skips, failures, public subtree sharing, and finite wire semantics are preserved through its common SnapshotRecorder handle
 
 #### Scenario: Preserve equal stream emissions
@@ -720,8 +721,8 @@ a separate stream data observer or duplicate task capture path.
 
 ### Requirement: Reuse the complete snapshot pipeline across execution modes
 
-Finite and streaming runners SHALL share MF_CAPTURE_SNAPSHOTS, SnapshotRecording,
-the snapshot protocol, exporter, receiver, and caller-owned history. Runtime SHALL
+Finite and streaming runners SHALL share MF_CAPTURE_SNAPSHOTS, SnapshotPublisher,
+the snapshot protocol, exporter, and receiver-owned history. Runtime SHALL
 only publish common notifications. Missing records SHALL leave explicit incomplete
 history rather than requiring stream-only gap recovery, omission, or eviction policies.
 
@@ -730,9 +731,9 @@ history rather than requiring stream-only gap recovery, omission, or eviction po
 - **WHEN** a finite or streaming runner enables snapshot capture
 - **THEN** the same recorder, exporter, and decoder handle its node snapshots
 
-#### Scenario: Lose a snapshot definition
+#### Scenario: Lose a snapshot record
 
-- **WHEN** ordered reconstruction cannot resolve a missing record or definition
+- **WHEN** ordered reconstruction detects a missing record
 - **THEN** previously reconstructed history stays inspectable and capture is marked incomplete
 
 #### Scenario: Disable capture
@@ -758,11 +759,10 @@ This behavior SHALL be independent of execution mode and require no additional i
 
 ### Requirement: Redact secret values before observation
 
-Snapshot callbacks and direct recording SHALL replace marked subtrees with the
-fixed JSON string [REDACTED] before callbacks, deduplication, dictionary encoding,
-retention, or OTel export. Public fields SHALL retain their values. Finite and
-streaming capture, including nested scopes, SHALL share this rule without changing
-snapshot protocol version 1. Display and Debug SHALL use the same projection.
+Runtime snapshot callbacks SHALL replace marked subtrees with the fixed JSON string
+[REDACTED] before observers receive values, publish records, retain history, or export
+through OTel. Public fields SHALL retain their values. Finite and streaming capture,
+including nested scopes, SHALL share this rule. Display and Debug SHALL use the same projection.
 
 #### Scenario: Inspect mixed public and sensitive data
 
@@ -773,10 +773,45 @@ snapshot protocol version 1. Display and Debug SHALL use the same projection.
 #### Scenario: Record equal public and secret aliases
 
 - **WHEN** a recorder observes a public value and a marked alias with equal business data in either order
-- **THEN** dictionary aliasing and completed-state deduplication MUST NOT substitute the public payload for the secret placeholder or suppress the changed observed state
+- **THEN** completed-state deduplication MUST NOT substitute the public payload for the secret placeholder or suppress the changed observed state
 
 #### Scenario: Format a secret value for diagnostics
 
 - **WHEN** a caller uses Display or Debug on a value containing secrets
 - **THEN** marked subtrees are replaced completely with placeholders
 - **AND** business serialization continues to return original JSON data
+
+### Requirement: Retain snapshot history only at the observation receiver
+
+Publishers SHALL send self-contained node inputs and outputs keyed by port name,
+retaining no prior payloads, dictionaries, or historical roots. Receivers SHALL retain
+immutable scope/node history, share unchanged nodes, and preserve repeated Started
+and Emitted boundaries. Both sides SHALL validate the current record and transport
+format. Earlier unreleased formats impose no compatibility requirements.
+
+#### Scenario: Publish many distinct node values
+
+- **WHEN** a run publishes successive distinct outputs
+- **THEN** each node record contains the complete values and publication releases prior payloads
+- **AND** no value IDs or eviction policy are required at the producer
+
+#### Scenario: Inspect overwritten node values
+
+- **WHEN** a node publishes a new value in the same scope
+- **THEN** the receiver exposes the new current value and older historical roots keep the prior value
+
+#### Scenario: Reject malformed self-contained records
+
+- **WHEN** node inputs or outputs are not objects
+- **THEN** the publisher reports a typed diagnostic without sending the invalid node record
+- **AND** the receiver rejects invalid external records before changing historical state
+
+#### Scenario: Preserve numeric payloads
+
+- **WHEN** node values contain unsigned 64-bit integers, integers, floats, or negative zero
+- **THEN** direct and fragmented OTLP records preserve their numeric representation
+
+#### Scenario: Reject an unsupported format
+
+- **WHEN** a snapshot transport or header does not match the current format
+- **THEN** capture rejects it explicitly before applying node state

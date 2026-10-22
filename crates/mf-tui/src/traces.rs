@@ -611,7 +611,7 @@ impl DataList {
     }
 }
 
-fn data_row(entry: &mf_runtime::SnapshotEntry, metadata: &SnapshotMetadata) -> String {
+fn data_row(entry: &crate::snapshots::SnapshotEntry, metadata: &SnapshotMetadata) -> String {
     let node = entry
         .snapshot
         .node(&entry.scope, &entry.node)
@@ -666,15 +666,14 @@ fn data_preview(
     finished: bool,
 ) -> String {
     let mut text = format!(
-        "{} | {}\nRows={} values={}\n",
+        "{} | {}\nRows={}\n",
         snapshot.status,
         if following {
             "Following tail"
         } else {
             "Inspecting selection"
         },
-        snapshot.history_len,
-        snapshot.value_count
+        snapshot.history_len
     );
     if let Some(index) = index {
         let entry = &snapshot.entries[index];
@@ -1215,7 +1214,7 @@ mod tests {
             );
         }
         let data = |value| {
-            let recording = mf_runtime::SnapshotRecording::memory();
+            let recording = crate::snapshots::TestHistory::memory();
             recording.record(
                 vec![],
                 "node",
@@ -1414,7 +1413,7 @@ mod tests {
 
     #[test]
     fn data_lists_filter_native_context_and_preserve_selection() {
-        let recording = mf_runtime::SnapshotRecording::memory();
+        let recording = crate::snapshots::TestHistory::memory();
         for value in [42, 73, 99] {
             recording.record(
                 vec![mf_telemetry::event::LoopPathEntry {

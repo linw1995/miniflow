@@ -1759,6 +1759,7 @@ dependencies = [
  "process-wrap",
  "prost",
  "ratatui",
+ "rpds",
  "rust-sugiyama",
  "rustix",
  "serde_json",
