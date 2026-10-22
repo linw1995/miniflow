@@ -3,9 +3,8 @@
 ## Repository developer tools
 
 Providers used by repository tooling live under `tools/test-affected/nodes/`, not among built-in providers.
-`mfn-lsp` and `mfn-test-affected` use ordinary node contracts, are unpublished workspace members,
-and must not become dependencies of product packages. Their ordinary tests use local protocol fixtures;
-real-server checks require an explicitly configured server from the pinned development environment.
+`mfn-test-affected` uses ordinary node contracts, is an unpublished workspace member,
+and must not become a dependency of product packages. Its ordinary tests use local fixtures.
 
 ## Implement a node
 
@@ -544,13 +543,13 @@ Data observation is opt-in: attach a `SnapshotRecorder` callback to an `Executio
 `StreamOptions.snapshots`. Ordinary execution retains current bindings without notifications.
 The handle only delivers current `SnapshotEvent` values; encoding and history belong to the caller.
 
-For history in either execution mode, own a `SnapshotRecording::memory()` or `SnapshotRecording::with_sink(...)`
-and attach its `recorder()` handle. That owner shares immutable roots, interns equal values, and
-preserves separate Loop/Iteration scope paths. Equal completed states reuse their root; `Started` and `Emitted` notifications preserve
-distinct equal-valued invocations and publications. Call the
-owner's `finish()` after execution and inspect its typed `diagnostic()` separately from business
-results. Generated runners request the same OTLP snapshot backend through
-`MF_CAPTURE_SNAPSHOTS=1` in either execution mode. Build validation and manifest inspection do not capture data.
+For export in either execution mode, connect the callback to
+`mf_telemetry::capture::SnapshotPublisher` and finish publication after execution.
+The publisher keeps only sink lifecycle and diagnostics; it sends complete redacted
+node values without a dictionary. Historical roots and Loop/Iteration scope paths
+are retained by the observation receiver. Equal completed states can reuse their root;
+`Started` and `Emitted` remain separate history entries. Capture diagnostics are
+separate from business results. See [snapshot capture](observability.md#shared-snapshot-capture).
 
 The runtime calls the task's single execution method. Loop assignment and exit use engine-owned scope
 operations; publication remains validated by the runtime. A Loop body has its own output scope for
@@ -769,7 +768,7 @@ quota in this layer.
 
 A custom `StreamClock` must advance monotonically and wake registered instances. Deadline expiry
 makes an emission ready; downstream execution remains subject to capacity. Optional snapshot
-capture uses the same notification and caller-owned recording path as finite execution. Streaming definitions also compile to standalone JSON Lines runners and support
+capture uses the same notification, observation publisher, and receiver-owned history as finite execution. Streaming definitions also compile to standalone JSON Lines runners and support
 stream-specific observation. See [streaming runners](compiling.md#streaming-runners).
 
 Run the producer/consumer example with `cargo run -p mf-compiler --example stream` inside `nix develop`.

@@ -45,7 +45,7 @@ jobs:
       - name: Test and build
         run: |
           cargo fetch --locked
-          cargo test --locked --workspace --exclude mfn-lsp --exclude mfn-test-affected --all-targets --all-features
+          cargo test --locked --workspace --exclude mfn-test-affected --all-targets --all-features
           cargo build --locked --release
       - name: Generate third-party notices
         run: |

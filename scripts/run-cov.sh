@@ -18,6 +18,28 @@ export RUSTFLAGS="-Cinstrument-coverage -Ccodegen-units=1 -Copt-level=0"
 export LLVM_PROFILE_FILE="${coverage_dir}/data/mf-%p-%m.profraw"
 export MF_COVERAGE_BINARIES_DIR="${coverage_dir}/extra-binaries"
 
+# Full coverage runs may opt into per-test profile collection for the
+# coverage graph; --coverage-graph must precede every other argument.
+coverage_graph=""
+if [[ "${1:-}" == "--coverage-graph" ]]; then
+  coverage_graph="${2:?--coverage-graph requires an output SQLite path}"
+  shift 2
+fi
+
+coverage_graph_requested() {
+  [[ -f "${coverage_dir}/coverage-graph.path" ]]
+}
+
+activate_per_test_profiles() {
+  MF_COVERAGE_PER_TEST_DIR="${coverage_dir}/per-test"
+  export MF_COVERAGE_PER_TEST_DIR
+  mkdir -p "$MF_COVERAGE_PER_TEST_DIR"
+}
+
+build_coverage_graph() {
+  python3 -B scripts/coverage_graph.py build --coverage-dir "$coverage_dir" --output "$1"
+}
+
 mark_target_directory() {
   # Cargo may omit tags under another cache directory, but clean requires one.
   mkdir -p "$1"
@@ -32,8 +54,10 @@ mark_fixture_target() {
 
 reset_reports() {
   rm -rf "${coverage_dir}/data" "${coverage_dir}/result" "$MF_COVERAGE_BINARIES_DIR"
+  rm -rf "${coverage_dir}/per-test" "${coverage_dir}/graph-export"
   rm -f "${coverage_dir}/binaries.json" "${coverage_dir}/cargo-metadata.json"
   rm -f "${coverage_dir}/selection.json" "${coverage_dir}/inventory.json"
+  rm -f "${coverage_dir}/coverage-graph.path"
   mkdir -p "${coverage_dir}/data" "${coverage_dir}/result" "$MF_COVERAGE_BINARIES_DIR"
   MF_TEST_BUILD_CACHE_SESSION="$(python3 -c 'import uuid; print(uuid.uuid4())')"
   export MF_TEST_BUILD_CACHE_SESSION
@@ -141,7 +165,13 @@ for manifest in sorted(extra.glob("*.paths.json")):
         mappings[source] = target
 (destination.parent / "path-mapping.json").write_text(json.dumps(mappings))
 PYTHON
-  grcov "${coverage_dir}/data" \
+  grcov_inputs=("${coverage_dir}/data")
+  # Per-test profiles replace the shared data/ profiles on graph runs; merge
+  # both directories so the aggregate report keeps its current meaning.
+  if coverage_graph_requested; then
+    grcov_inputs+=("${coverage_dir}/per-test")
+  fi
+  grcov "${grcov_inputs[@]}" \
     --llvm \
     --branch \
     --source-dir "${workspace_root}" \
@@ -166,6 +196,9 @@ case "${1:-}" in
     [[ $# -ge 2 && -n "$2" ]]
     selected_package="$2"
     shift 2
+    if coverage_graph_requested; then
+      activate_per_test_profiles
+    fi
     expression="$(python3 -B scripts/coverage_selection.py filter --package "$selected_package")"
     MF_TEST_BUILD_CACHE_SESSION="$(cat "${coverage_dir}/build-cache-session")"
     export MF_TEST_BUILD_CACHE_SESSION
@@ -178,7 +211,7 @@ case "${1:-}" in
     collect_profiles
     if [[ "$status" -eq 0 ]]; then
       completion=()
-      if [[ ( $# -gt 0 || "$selected_package" == mfn-lsp ) && "$*" != "--run-ignored all" ]]; then
+      if [[ $# -gt 0 && "$*" != "--run-ignored all" ]]; then
         completion+=(--partial)
       fi
       python3 -B scripts/coverage_selection.py complete --package "$selected_package" "${completion[@]}"
@@ -201,6 +234,9 @@ case "${1:-}" in
   --report)
     [[ $# -eq 1 ]]
     report_coverage
+    if coverage_graph_requested; then
+      build_coverage_graph "$(cat "${coverage_dir}/coverage-graph.path")"
+    fi
     exit 0
     ;;
 esac
@@ -230,6 +266,17 @@ if [[ "${1:-}" == "--affected-plan" ]]; then
   fi
 fi
 
+# Per-test profile collection covers full runs only; PR selection runs must
+# never produce or publish a graph.
+if [[ -n "$coverage_graph" ]]; then
+  if [[ ${#selection_plan[@]} -gt 0 ]]; then
+    echo "error: --coverage-graph cannot be combined with --affected-plan" >&2
+    exit 1
+  fi
+  printf '%s\n' "$coverage_graph" > "${coverage_dir}/coverage-graph.path"
+  activate_per_test_profiles
+fi
+
 prepare_coverage
 # Preserve feature unification and reuse one instrumented build for inventory and execution.
 cargo metadata --offline --locked --all-features --format-version 1 > "${coverage_dir}/cargo-metadata.json"
@@ -256,7 +303,7 @@ if [[ $# -gt 0 && "$*" != "--run-ignored all" ]]; then
   completion+=(--partial)
 fi
 python3 -B scripts/coverage_selection.py complete "${completion[@]}"
-if [[ "$*" != "--run-ignored all" ]] && jq -e '.packages | index("mfn-lsp")' "${coverage_dir}/selection.json" > /dev/null; then
-  python3 -B scripts/coverage_selection.py complete --package mfn-lsp --partial
-fi
 report_coverage
+if [[ -n "$coverage_graph" ]]; then
+  build_coverage_graph "$coverage_graph"
+fi

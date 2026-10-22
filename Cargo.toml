@@ -23,9 +23,6 @@ mfn-code = { path = "crates/builtin-nodes/code", version = "0.1.0" }
 mfn-core = { path = "crates/builtin-nodes/core", version = "0.1.0" }
 mfn-llm = { path = "crates/builtin-nodes/llm", version = "0.1.0" }
 
-# Repository developer tooling.
-mfn-lsp = { path = "tools/test-affected/nodes/lsp" }
-
 # Serialization and error reporting.
 serde = "1.0.229"
 serde_json = "1.0.151"
@@ -50,7 +47,6 @@ quote = "1.0.47"
 syn = { version = "3.0.6", default-features = false }
 
 # Language-server protocol types.
-lsp-types = "0.97.0"
 
 # Telemetry APIs, exporters, and protobuf messages.
 opentelemetry = { version = "0.33.0", default-features = false }

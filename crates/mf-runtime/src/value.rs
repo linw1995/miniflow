@@ -7,7 +7,7 @@ use std::{
     collections::BTreeMap,
     fmt,
     ops::Index,
-    sync::{Arc, LazyLock, Weak},
+    sync::{Arc, LazyLock},
 };
 
 #[derive(Clone, Debug)]
@@ -111,9 +111,6 @@ impl ValueRef {
     }
     pub fn kind(&self) -> &ValueKind {
         &self.kind
-    }
-    pub(super) fn downgrade(&self) -> Weak<ValueKind> {
-        Arc::downgrade(&self.kind)
     }
     pub fn ptr_eq(&self, other: &Self) -> bool {
         self.secret == other.secret && Arc::ptr_eq(&self.kind, &other.kind)

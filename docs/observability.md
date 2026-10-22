@@ -321,81 +321,100 @@ endpoint are configured. TUI execution sets this flag in either mode and uses it
 endpoint. Ordinary execution does not allocate a snapshot recorder. Runners built with
 `--no-telemetry` report that data history requires a telemetry-enabled build.
 
-Both finite and streaming execution attach the same `SnapshotRecorder` notification handle.
-It sends current `SnapshotEvent` values and retains no history or encoding state. Callers that
-want dictionary encoding and immutable history own a `SnapshotRecording` and attach
-`recording.recorder()`; its store and sink policy are independent of execution. Equal completed node states retain their existing deduplication; `Started` and `Emitted`
-notifications preserve repeated equal-valued invocations and sends in either execution mode. Snapshot events and storage contain no
-stream identity or run binding. Finite wire records retain their version 1 representation.
+Both finite and streaming execution attach the same `mf_runtime::SnapshotRecorder`
+notification handle. It publishes node scope, outcome, and redacted inputs/outputs;
+it retains no history, value dictionary, or encoding state. `SnapshotEvent` values
+are independent observation boundaries. Runtime execution snapshots used for
+branch isolation and output routing are separate from this observation history.
 
-Snapshot events use the `mf.snapshot` instrumentation scope and the standard OTLP `LogRecord`
-body. Each record includes `mf.workflow.id`, `mf.run.id`, `mf.snapshot.version` (currently 1),
-`mf.snapshot.sequence` (starting at zero), and a SHA-256 `mf.snapshot.digest` byte array.
-The digest uses the canonical typed-body encoding implemented by `mf-telemetry::snapshot`; map key order is ignored.
-`mf.snapshot.record` carries a structured map containing a stream header, a value definition,
-a node change, or an end marker. Values are defined once; arrays, objects, and node inputs/outputs
-reference value IDs. Typed number definitions use decimal text to preserve unsigned 64-bit integers
-and integer/float distinctions. The receiver reconstructs immutable roots with shared descendants.
+The observation publisher (`mf_telemetry::capture::SnapshotPublisher`) owns only
+sink lifecycle and typed capture diagnostics. Each node record contains its actual
+inputs and outputs, keyed by port name. It needs no `ValueId`, deduplication cache,
+LRU policy, or historical roots. Payloads are released after publication.
 
-Bodies larger than 32 KiB are encoded as a standard Protobuf `AnyValue` and split across
-`mf.snapshot.fragment` events. Their structured bodies contain `index`, `total`, and `payload`
-(bytes). The receiver verifies the assembled digest before admitting a record. Sequence numbers
-make retransmissions idempotent and allow reordering; up to 1,024 incomplete or out-of-order records
-may wait for a gap to close. Complete history and values are retained throughout the session.
+Snapshot events use the `mf.snapshot` instrumentation scope and the standard OTLP
+`LogRecord` body. Each packet includes `mf.workflow.id`, `mf.run.id`,
+`mf.snapshot.version` (currently 2), `mf.snapshot.sequence` (starting at zero),
+and a SHA-256 `mf.snapshot.digest` byte array. The digest uses the canonical
+typed-body encoding implemented by `mf-telemetry::snapshot`; map key order is ignored.
+`mf.snapshot.record` carries a structured map containing a version-2 header,
+a self-contained node snapshot, or an end marker. There are no value-definition
+records or references to earlier payloads. Signed integers and floats use native
+OTLP values, preserving integer/float distinctions and negative zero. Unsigned
+integers above `i64::MAX` use an eight-byte little-endian OTLP byte value reserved
+by transport version 2. JSON payloads have no competing byte-value representation.
+At envelope depth 16, container subtrees use UTF-8 JSON bytes prefixed with `mf.json:`
+and a NUL byte, keeping protobuf nesting below its decoder limit. Full records remain
+self-contained; both ends enforce a maximum JSON body depth of 128.
 
-Snapshot publication uses a dedicated log processor on the same OTLP endpoint, with 64-record
-batches and a 128-record queue. The producer waits for a flush every 64 packets, preventing queue
-overflow during bursts. Export failures disable further capture and produce a diagnostic without
-changing the workflow result. A missing definition, conflicting retransmission, or incomplete tail
-is shown as incomplete history; previously received snapshots remain available. Capture uses no
-temporary files or file polling.
+Bodies larger than 32 KiB are encoded as Protobuf `AnyValue` and split across
+`mf.snapshot.fragment` events. Their structured bodies contain `index`, `total`,
+and `payload` (bytes). The receiver verifies the assembled digest before admitting
+a record. Sequences identify observations, not business values: they make
+retransmissions idempotent, allow reordering, and expose missing records. Up to
+1,024 incomplete or out-of-order records may wait for a gap to close.
+
+The TUI receiver owns `SnapshotStore`, current state, and complete session history.
+Each admitted node snapshot updates an immutable scope/node map, and history stores
+the resulting root. Unchanged nodes and map branches remain shared; older roots
+continue to expose their original values. Equal completed states do not add history,
+while `Started` and `Emitted` retain repeated invocation boundaries. Identical
+payloads received for different nodes are not globally interned. Receiver memory
+can grow with retained observations; producer dictionary retention is no longer
+part of the design. This is in-memory session history, not durable recording.
+
+Snapshot publication uses a dedicated log processor on the same OTLP endpoint,
+with 64-record batches and a 128-record queue. The producer waits for a flush every
+64 packets to prevent queue overflow during bursts. Export failures disable further
+capture and produce a diagnostic without changing the workflow result. Conflicting
+retransmissions, missing records, or an incomplete tail leave explicit incomplete
+history; previously received snapshots remain available. Capture uses no temporary
+files or file polling.
 
 ## Shared snapshot capture
 
-Finite and streaming generated runners enable business-data recording with
-`MF_CAPTURE_SNAPSHOTS=1`. TUI requests it for either mode through the child environment.
-Ordinary execution and local verbosity do not request values. Missing exporters and
-telemetry-disabled builds report capture availability without changing business results.
-Recompile existing runners to use the shared capture path.
+Finite and streaming generated runners enable capture with `MF_CAPTURE_SNAPSHOTS=1`.
+TUI requests it for either mode through the child environment. Ordinary execution
+and local verbosity do not request values. Missing exporters and telemetry-disabled
+builds report capture availability without changing business results.
 
-Both modes use `SnapshotRecording`, snapshot protocol version 1, `SnapshotExporter`,
-and the same receiver/store. There is no separate streaming value model or protocol.
-The exporter captures native trace/span context synchronously before SDK batching.
-Packet sequences order reconstruction and retransmissions; timestamps describe observation
-time and are not unique identities. Missing definitions can prevent later reconstruction;
-received history remains inspectable with an incomplete-history diagnostic.
+Both modes use the same publisher, version-2 snapshot records, `SnapshotExporter`,
+and receiver-owned history. The exporter captures native trace/span context
+synchronously before SDK batching. Timestamps describe observation time and are
+not unique identities. Since the project has not released, capture follows the current
+contract directly. The receiver validates transport and record headers without providing
+migration or compatibility layers for earlier development formats.
 
 ### Programmatic capture
 
-Attach the same `SnapshotRecorder` notification handle through finite execution context
-or `StreamOptions.snapshots`. It receives node, scope, redacted immutable values, and
-outcome without requiring telemetry or run binding. Callbacks run outside scheduler locks
-and must not unwind. The caller chooses recording and retention policy.
+Attach a `SnapshotRecorder` through an execution context or `StreamOptions.snapshots`.
+Callbacks receive redacted immutable values without requiring a telemetry backend.
+They run outside scheduler locks and must not unwind. The observer chooses how to
+consume, export, or retain these events.
 
 ```rust
-let recording = mf_runtime::SnapshotRecording::memory();
-let instance = mf_compiler::start_stream(
-    &plan,
-    &registry,
-    mf_runtime::StreamOptions {
-        snapshots: Some(recording.recorder()),
-        arguments,
-        ..Default::default()
-    },
-)?;
-while let Some(output) = instance.recv()? {
-    handle_output(output)?;
+let publisher = mf_telemetry::capture::SnapshotPublisher::new(move |record| {
+    let complete = record["record"] == "end";
+    exporter.emit(record)?;
+    if complete {
+        exporter.finish()?;
+    }
+    Ok(())
+})?;
+let capture = publisher.clone();
+let recorder = mf_runtime::SnapshotRecorder::new(move |event| capture.record(event));
+context.set_snapshot_recorder(recorder);
+let result = flow.execute_in_context(&mut context);
+publisher.finish();
+if let Some(error) = publisher.diagnostic() {
+    eprintln!("data history incomplete: {error}");
 }
-instance.join()?;
-recording.finish();
+let outputs = result?;
 ```
 
-For OTLP export, use `SnapshotRecording::with_sink` with `SnapshotExporter`, exactly
-as for finite execution, and finish recording on both success and failure. Export
-backpressure and typed capture diagnostics retain their existing snapshot behavior.
-The recording/receiver owns dictionary values and historical roots; retained memory
-can grow with distinct values and execution scopes. Runtime execution owns no history
-container, value limit, capture queue, or eviction policy.
+Finish publication after execution on both success and failure. Custom callbacks can
+collect events directly for tests or embedded observers; they do not need an encoder
+or a runtime-owned history API. Receivers independently choose retention policy.
 
 ### Secret runtime values
 
@@ -429,11 +448,9 @@ the fixed string `[REDACTED]`. Fully secret containers hide their keys, lengths,
 and descendants; mixed containers retain public fields. The placeholder carries
 no original-value hash, prefix, or length and is not a distinct JSON type.
 
-Both snapshot callbacks and direct `SnapshotRecording` calls redact inputs and
-outputs before retention, deduplication, dictionary definitions, and OTLP export.
-Finite and streaming snapshots share this boundary, including Loop and Iteration
-scopes. Snapshot protocol version 1 stays unchanged; receivers see ordinary JSON
-placeholders. Raw strings explicitly copied from secrets into custom errors,
+Runtime snapshot callbacks redact inputs and outputs before observation publication,
+receiver retention, or OTLP export. Finite and streaming snapshots share this boundary,
+including Loop and Iteration scopes. Receivers see ordinary JSON placeholders. Raw strings explicitly copied from secrets into custom errors,
 logs, span attributes, or object keys are outside this value-metadata boundary.
 Use value formatting or `redacted()` for diagnostics rather than raw accessors or
 business serialization. Secret metadata does not provide memory zeroization.
@@ -694,8 +711,8 @@ after joining the instance. Generated runners configure the existing bounded OTL
 attempt bounded shutdown on success and failure. Disabled export, queue pressure, and unreachable
 Collectors do not change workflow results or trigger retries.
 
-Programmatic `StreamOptions.snapshots` uses the common notification handle and caller-owned
-`SnapshotRecording`. `MF_CAPTURE_SNAPSHOTS=1` selects the same backend in either runner mode.
+Programmatic `StreamOptions.snapshots` uses the common notification handle; publication
+belongs to the observer and historical retention belongs to the receiver. `MF_CAPTURE_SNAPSHOTS=1` selects the same backend in either runner mode.
 Validation and description modes remain free of execution and ignore capture/export setup.
 
 ## Isolated task observations
@@ -725,11 +742,11 @@ and lifecycle reduction. Both Data list scopes read that same history. The recei
 native correlation, sequence, and timestamp alongside each admitted snapshot entry, including
 entries without a retained span. It caches views until new capture evidence arrives.
 
-Dictionary definitions and historical roots remain available for the collected session;
+Received node snapshots and historical roots remain available for the collected session;
 there is no stream-only eviction or omission policy. Missing records, conflicting evidence,
-invalid definitions, or an absent end record produce explicit capture diagnostics without
+invalid node payloads, or an absent end record produce explicit capture diagnostics without
 changing workflow outcomes or lifecycle integrity. A gap waits for ordered reconstruction
-rather than exposing a value whose definitions have not arrived. Already reconstructed
+rather than presenting a partial observation sequence as complete. Already reconstructed
 history remains available after collection finishes.
 
 ## Exclusive input provenance

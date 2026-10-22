@@ -8,11 +8,11 @@ Without that evidence, CI selects from the entire PR diff against the current
 merge's actual first parent. Stale base metadata from the event is never used.
 
 All analysis, compilation, and execution use the current merged tree. The selection
-starts with changed packages and every declared reverse dependency. CI enables
-`lsp.analyze` and permits exact-case refinement for verified isolated test-body changes.
-Production changes retain package scope. Known repository
-configuration is deferred to full main/nightly verification; unknown inputs or
-analyzer failures select the workspace. An empty plan skips Rust tests and reports
+starts with changed packages and every declared reverse dependency. Production changes
+retain package scope unless a compatible coverage graph narrows them
+to exact test selectors. Known repository
+configuration is deferred to full main/nightly verification; unknown inputs select the
+workspace. An empty plan skips Rust tests and reports
 coverage as not applicable, while lint and build checks still apply.
 
 Selected tests run once with coverage. The local gate measures changed executable
@@ -23,6 +23,25 @@ or unpublishable validation cannot advance the reusable baseline.
 
 Pushes to `main` and manual dispatch without PR inputs run complete Linux coverage.
 Nightly retains complete Linux/macOS verification. Test or report failures fail CI.
+
+A successful default-branch push coverage run also collects per-test line coverage
+(a nextest run-wrapper gives each test its own LLVM profile) and indexes it into an
+immutable, versioned SQLite coverage graph mapping workspace line intervals to the
+distinct covering tests. Each graph binds its commit, producing run and attempt,
+schema version, and execution signature (platform-independent toolchain identity —
+the `rustc -vV` release and commit hash, without the host triple — plus features,
+target, profile, and coverage-relevant environment). Since line-to-test attribution
+does not depend on the host architecture, a Linux-produced graph is consumable
+elsewhere: foreign platform selectors widen to the recorded baseline through
+inventory identity matching, and foreign covered lines can only over-select. Publication rides the existing
+artifact pipeline as `coverage-graph-<run>-<attempt>` (`graph.sqlite` plus
+`graph.metadata.json`) and happens only when the full default-branch coverage
+completes successfully; PR, dispatch, and local runs never collect or publish a
+graph. A full-suite graph measures about 30 MB per commit; every main run
+regenerates it, only the latest compatible ancestor matters to consumers, and the
+standard Actions artifact retention applies. A local full-coverage run opts into
+the same collection with `scripts/run-cov.sh --coverage-graph <path>`, which
+cannot combine with `--affected-plan` and never publishes.
 
 Formatting, package builds, Clippy, repository hooks, and CI script tests
 also run in CI. Main additionally builds and checks the macOS package;
@@ -130,7 +149,7 @@ PRs upload only these complete crate reports. A package with only some tests sel
 retains partial LCOV in Actions artifacts and still participates in the changed-line
 gate; its partial report is never uploaded as complete crate coverage. Reports omit
 dependency-owned sources and crates without source mappings. Completeness refers to
-the configured nextest suite, including the explicitly enabled LSP smoke test.
+the configured nextest suite.
 Main/nightly publish the same crate flags alongside the full `rust` report, without
 carry-forward. Crate reports are not cumulative PR patch coverage. The old
 Codecov patch status is disabled and the required local `coverage`/`validation`
@@ -170,10 +189,10 @@ suite already run by CI coverage.
 
 One planning Flow serves local and PR CI execution. `builtin.if_else` selects the local
 comparison path or the CI success-history path; exclusive input bindings converge before
-Git comparison, optional LSP analysis, and the shared Rust planner. Cargo metadata supplies
+Git comparison and the shared Rust planner. Cargo metadata supplies
 package ownership and every declared local dependency kind, including inactive optional,
-platform, test, and build dependencies. CI selects whole packages; local callers may request
-semantic test refinement. Main and nightly retain full suites.
+platform, test, and build dependencies. CI narrows through a compatible coverage graph;
+local callers may request the same with test precision. Main and nightly retain full suites.
 
 From the repository root, compile once with pinned tools:
 
@@ -205,15 +224,32 @@ to use the coverage pipeline rather than this local nextest consumer.
 Use `--params.mode commit --params.head HEAD` for a first-parent comparison, including
 root commits. Use `--params.mode merge-base --params.base origin/main --params.head HEAD`
 for a branch comparison, or `snapshot` to compare supplied local revisions directly.
-Local modes do not query GitHub or fetch refs. Worktree mode creates an immutable runnable
+Local modes do not fetch refs and query GitHub only for coverage graph acquisition when
+a repository identity is supplied. Worktree mode creates an immutable runnable
 snapshot; committed comparisons do not include uncommitted edits. CI requires a clean
 checkout of the actual tested merge.
 
 The output contains `plan` and optional CI `validation` provenance. Plans report whole
 `packages`, exact `tests`, conservative `baseline_packages`, reasons, deferred
-`ignored_files`, and source/configuration identity. `packages` precision skips semantic
-LSP work. `tests` precision may narrow verified isolated test changes. The consumer handles
+`ignored_files`, and source/configuration identity. `packages` precision keeps package
+scope. `tests` precision may narrow through a compatible coverage graph. The consumer handles
 both scopes and never turns an empty plan into unfiltered nextest execution.
+
+With `tests` precision, a compatible coverage graph can narrow production changes
+below package scope. Planning resolves the nearest compatible default-branch ancestor
+graph of the comparison base through the same lazy, bounded, ancestry-ordered artifact
+acquisition used for validation records, then maps each changed base-side line range to
+the exact tests that covered it. Files that changed between the graph commit and the
+comparison base, changed ranges with no covering test, and files absent from the graph
+widen back to package plus reverse-dependency scope with per-file reasons. The plan
+records graph provenance (commit, run, attempt, schema version) and every widening under
+`coverage_graph`. An unavailable, incompatible, or malformed graph degrades to
+package-level selection with a recorded reason and never forces full-workspace fallback;
+unknown inputs still do. Graph-derived selectors flow through the
+same exact-filter consumers, so identity mismatches against
+the runnable inventory widen to the recorded baseline. Local planning acquires graphs only
+when `--params.github_repository` is supplied (authenticated through `GH_TOKEN`), and
+stays offline otherwise.
 
 The coverage script accepts whole packages and exact test identities and executes its
 current checkout; it does not implement the snapshot consumer. To reproduce a saved
@@ -240,16 +276,20 @@ Input classification has one owner in the shared Flow planner:
 | Input | PR Rust selection |
 | --- | --- |
 | Files inside a workspace package, including manifests, fixture lockfiles, documentation, and deleted sources | Owner and transitive reverse dependencies |
+| Deleted sources whose base-side package is absent from the compared head | No additional packages; full main/nightly runs provide the backstop |
 | Root `Cargo.toml` / `Cargo.lock`, Flake/toolchain, Cargo and nextest configuration | No additional packages; full main/nightly runs provide the backstop |
 | `docs/`, `openspec/`, `.github/`, known root documentation, lint/release metadata, and CI-only scripts | No additional packages; run relevant non-Rust checks separately |
 | `examples/`, `scripts/nextest-build-cache.py`, `scripts/nextest-cargo.sh`, `scripts/cargo_cache.py` | `mf-cli`, `mf-compiler`, and reverse dependencies |
 | `scripts/check-release-support.sh` | `mf-cli` and reverse dependencies |
 | `tools/test-affected/flows/`, `tools/test-affected/run-tests.py`, and removal of the legacy selector | `mfn-test-affected` and reverse dependencies |
-| Other inputs, including removed package sources, or missing all expected shared consumers | Full workspace |
+| Other unclassified inputs, or known shared inputs missing all expected consumers | Full workspace |
 
 The bounded deferred-file list lives in the Rust planner's `deferred_input` helper;
-plans expose matched paths in `ignored_files`. Package ownership takes priority,
-so a package fixture named `Cargo.toml` or `README.md` is not ignored. Main and
+plans expose matched paths in `ignored_files`. Deletions resolve ownership from the
+comparison base before the head, so a package that still exists keeps its deleted
+sources while a removed package defers instead of becoming an unknown input. Package
+ownership takes priority, so a package fixture named `Cargo.toml` or `README.md` is
+not ignored. Main and
 nightly still execute full suites. Deferring dependency and execution configuration
 can delay detection of cross-package regressions until those runs; this is an
 explicit PR coverage tradeoff. Unknown paths remain conservative. Update consumer
@@ -258,9 +298,8 @@ mappings when shared executable inputs gain new users.
 Build scripts and generated runners can consume inputs beyond Cargo's declared
 graph, so selected scope is not a proof of semantic independence.
 
-Package-level planning does not start an LSP server. Local semantic refinement uses
-standard LSP queries with configured features and a bounded analysis deadline. Analyzer
-failures retain conservative fallback; unsupported capabilities are evidence gaps. Invalid
+Package-level planning is the default; test precision narrows through the coverage graph,
+whose unavailability retains conservative package scope. Invalid
 Git refs, missing required local history, mismatched snapshots, and failed Cargo metadata
 stop execution rather than produce an unreliable plan. Declared dependency closure is
 conservative, not a proof of arbitrary program effects or cross-platform independence.

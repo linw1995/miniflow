@@ -14,8 +14,9 @@ otlp = ["snapshot", "dep:opentelemetry_sdk", "dep:opentelemetry-otlp", "dep:reqw
 [dependencies]
 # Observation APIs and wire contracts.
 opentelemetry = { workspace = true, features = ["logs", "trace"] }
-serde = { workspace = true, features = ["derive"] }
-serde_json.workspace = true
+serde = { workspace = true, features = ["derive", "rc"] }
+# Deep snapshot subtrees must preserve the float bits used by their digests.
+serde_json = { workspace = true, features = ["float_roundtrip"] }
 snafu.workspace = true
 
 # Workflow hashes, snapshot integrity, and run identifiers.

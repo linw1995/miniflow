@@ -1,3 +1,6 @@
+#[path = "common/snapshots.rs"]
+mod snapshots;
+use snapshots::Snapshots;
 #[path = "fixtures/controlled_source.rs"]
 mod controlled;
 use controlled::SourceRun;
@@ -268,7 +271,7 @@ fn data_capture_preserves_admitted_outputs_when_a_producer_fails() {
         let observation = plan
             .start_stream_observation(&harness.observer(), RunId::new())
             .unwrap();
-        let capture = mf_runtime::SnapshotRecording::memory();
+        let capture = Snapshots::memory();
         let instance = start(
             value,
             StreamOptions {

@@ -41,9 +41,6 @@ flags:
   mfn-llm:
     paths: [crates/builtin-nodes/llm/]
     carryforward: false
-  mfn-lsp:
-    paths: [tools/test-affected/nodes/lsp/]
-    carryforward: false
   mfn-test-affected:
     paths: [tools/test-affected/nodes/test-affected/]
     carryforward: false

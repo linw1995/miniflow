@@ -1,3 +1,6 @@
+#[path = "common/snapshots.rs"]
+mod snapshots;
+use snapshots::Snapshots;
 mod common;
 extern crate mfn_code as _;
 extern crate mfn_core as _;
@@ -89,7 +92,7 @@ fn code_outputs_retain_secrets_in_workflow_observations() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&definition, &registry).unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
-    let recording = mf_runtime::SnapshotRecording::memory();
+    let recording = Snapshots::memory();
     let mut context = mf_runtime::ExecutionContext::default();
     context.set_snapshot_recorder(recording.recorder());
     let result = flow.execute_in_context(&mut context).unwrap();

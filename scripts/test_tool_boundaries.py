@@ -8,7 +8,7 @@ import unittest
 
 
 ROOT = Path(__file__).resolve().parent.parent
-TOOLS = {"mfn-lsp", "mfn-test-affected"}
+TOOLS = {"mfn-test-affected"}
 
 
 class ToolBoundaries(unittest.TestCase):

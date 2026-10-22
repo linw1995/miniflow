@@ -1,4 +1,7 @@
 #![cfg(unix)]
+#[path = "common/snapshots.rs"]
+mod snapshots;
+use snapshots::Snapshots;
 mod common;
 
 extern crate mfn_code as _;
@@ -9,9 +12,7 @@ use mf_compiler::{
     CompileRequest, NodeRegistry, RunnerOptions, SupportPackages, WorkflowDefinition,
     compile_definition, compile_project_with_options, instantiate_compiled, instantiate_stream,
 };
-use mf_runtime::{
-    ExecutionContext, FlowRuntime, SnapshotRecording, StreamOptions, WorkflowArguments,
-};
+use mf_runtime::{ExecutionContext, FlowRuntime, StreamOptions, WorkflowArguments};
 use mfn_llm::test_support::{Reply, Server, messages};
 use serde_json::{Value, json};
 use std::{fs, path::Path, process::Command};
@@ -41,7 +42,7 @@ fn memory(definition: &WorkflowDefinition, inputs: &Value) -> Vec<Value> {
         results
     } else {
         let flow = instantiate_compiled(&plan, &registry).unwrap();
-        let recording = SnapshotRecording::memory();
+        let recording = Snapshots::memory();
         let mut context = ExecutionContext::default();
         context.set_snapshot_recorder(recording.recorder());
         let mut results = Vec::new();
@@ -200,7 +201,7 @@ fn invalid_dynamic_configuration_retains_safe_typed_errors() {
         let plan =
             compile_definition(&serde_json::from_value(definition).unwrap(), &registry).unwrap();
         let flow = instantiate_compiled(&plan, &registry).unwrap();
-        let recording = SnapshotRecording::memory();
+        let recording = Snapshots::memory();
         let mut context = ExecutionContext::default();
         context.set_snapshot_recorder(recording.recorder());
         context.set_workflow_arguments(arguments(&json!({"params.api_key":"synthetic-key", "params.prompt":"Hello", "params.invalid":value})));

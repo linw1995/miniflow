@@ -1,12 +1,11 @@
 use crate::{
-    classify::{isolated_changes, plain_attributes},
     error::*,
     git::{command, verify_snapshot},
+    graph,
     model::*,
 };
-use mfn_lsp::{AnalysisOutcome, GapKind};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use snafu::{ResultExt, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -34,40 +33,12 @@ struct Dependency {
 }
 #[derive(Deserialize)]
 struct Target {
-    name: String,
-    kind: Vec<String>,
-    src_path: PathBuf,
     test: bool,
 }
 
-pub fn make_plan(
-    comparison: &Comparison,
-    outcome: &AnalysisOutcome,
-    options: &PlanOptions,
-) -> Result<TestPlan, Error> {
-    let started = Instant::now();
-    ensure!(
-        outcome.request == comparison.request,
-        InvalidSnafu {
-            message: "analysis request differs from the Git comparison"
-        }
-    );
-    ensure!(
-        outcome
-            .evidence
-            .iter()
-            .map(|s| &s.snapshot)
-            .chain(outcome.gaps.iter().map(|g| &g.snapshot))
-            .all(|id| comparison.request.snapshots.iter().any(|s| &s.id == id)),
-        InvalidSnafu {
-            message: "analysis evidence belongs to an unrequested snapshot"
-        }
-    );
-    verify_snapshot(&comparison.base_root, &comparison.base)?;
-    verify_snapshot(&comparison.head_root, &comparison.head)?;
-    validate_configuration(outcome, &options.configuration)?;
+fn workspace_packages(root: &Path) -> Result<BTreeMap<String, Package>, Error> {
     let metadata: Metadata = serde_json::from_str(&command(
-        &comparison.head_root,
+        root,
         "cargo",
         &[
             "metadata",
@@ -82,19 +53,16 @@ pub fn make_plan(
         action: "read Cargo workspace metadata",
     })?;
     let members: BTreeSet<_> = metadata.workspace_members.into_iter().collect();
-    let packages: BTreeMap<_, _> = metadata
+    Ok(metadata
         .packages
         .into_iter()
         .filter(|p| members.contains(&p.id))
         .map(|p| (p.name.clone(), p))
-        .collect();
-    ensure!(
-        !packages.is_empty(),
-        InvalidSnafu {
-            message: "workspace contains no packages"
-        }
-    );
-    let roots: BTreeMap<_, _> = packages
+        .collect())
+}
+
+fn package_roots(packages: &BTreeMap<String, Package>) -> BTreeMap<PathBuf, String> {
+    packages
         .values()
         .map(|p| {
             (
@@ -102,7 +70,29 @@ pub fn make_plan(
                 p.name.clone(),
             )
         })
-        .collect();
+        .collect()
+}
+
+fn owning_package<'a>(roots: &'a BTreeMap<PathBuf, String>, path: &Path) -> Option<&'a String> {
+    roots
+        .iter()
+        .filter(|(root, _)| path.starts_with(root))
+        .max_by_key(|(root, _)| root.components().count())
+        .map(|(_, name)| name)
+}
+
+pub fn make_plan(comparison: &Comparison, options: &PlanOptions) -> Result<TestPlan, Error> {
+    let started = Instant::now();
+    verify_snapshot(&comparison.base_root, &comparison.base)?;
+    verify_snapshot(&comparison.head_root, &comparison.head)?;
+    let packages = workspace_packages(&comparison.head_root)?;
+    ensure!(
+        !packages.is_empty(),
+        InvalidSnafu {
+            message: "workspace contains no packages"
+        }
+    );
+    let roots = package_roots(&packages);
     let dependencies: BTreeMap<String, BTreeSet<String>> = packages
         .values()
         .map(|p| {
@@ -116,29 +106,93 @@ pub fn make_plan(
             (p.name.clone(), deps)
         })
         .collect();
+    let tree = command(&comparison.head_root, "git", &["rev-parse", "HEAD^{tree}"])?
+        .trim()
+        .into();
+    let toolchain = command(&comparison.head_root, "rustc", &["-vV"])?;
+    let mut graph = resolve_coverage_graph(comparison, options, &toolchain);
     let mut reasons = BTreeMap::<String, Vec<String>>::new();
     let mut direct = BTreeSet::new();
     let mut production = BTreeSet::new();
     let mut tests = BTreeSet::new();
     let mut fallback = Vec::new();
     let mut ignored_files = Vec::new();
+    let mut base_roots = None;
     for change in &comparison.changes {
         let path = Path::new(&change.path);
         let absolute = comparison.head_root.join(path);
-        let owner = roots
-            .iter()
-            .filter(|(root, _)| absolute.starts_with(root))
-            .max_by_key(|(root, _)| root.components().count());
-        if let Some((root, owner)) = owner {
+        let base_owner = if change.deleted {
+            let base_roots = match base_roots.as_ref() {
+                Some(base_roots) => base_roots,
+                None => {
+                    base_roots.insert(package_roots(&workspace_packages(&comparison.base_root)?))
+                }
+            };
+            owning_package(base_roots, &comparison.base_root.join(path))
+        } else {
+            None
+        };
+        let owner = base_owner.or_else(|| owning_package(&roots, &absolute));
+        if let Some(owner) = owner {
+            if !packages.contains_key(owner) {
+                // The base owner disappeared from the compared head, so the
+                // full main/nightly runs provide the backstop.
+                ignored_files.push(change.path.clone());
+                continue;
+            }
+            let owner = owner.clone();
             direct.insert(owner.clone());
-            reasons
-                .entry(owner.clone())
-                .or_default()
-                .push(format!("Changed file: {}", change.path));
+            reasons.entry(owner.clone()).or_default().push(format!(
+                "{}: {}",
+                if change.deleted {
+                    "Deleted file"
+                } else {
+                    "Changed file"
+                },
+                change.path
+            ));
             if options.exact_tests
-                && let Some(selected) = isolated_tests(comparison, change, &packages[owner], root)
+                && change.path.ends_with(".rs")
+                && let Some(open) = graph.open.as_mut()
             {
-                tests.extend(selected);
+                // The graph narrows one file at a time; unresolved files keep
+                // the existing package scope with a recorded reason.
+                match graph_select(open, change) {
+                    Ok(selected) => {
+                        reasons.entry(owner.clone()).or_default().push(format!(
+                            "Coverage graph {}: mapped {} to {} exact tests",
+                            open.record.commit_sha,
+                            change.path,
+                            selected.len()
+                        ));
+                        for test in &selected {
+                            if direct.insert(test.package.clone()) {
+                                reasons
+                                    .entry(test.package.clone())
+                                    .or_default()
+                                    .push(format!(
+                                        "Coverage graph {}: covers changed lines in {}",
+                                        open.record.commit_sha, change.path
+                                    ));
+                            }
+                        }
+                        tests.extend(selected);
+                    }
+                    Err(reason) => {
+                        production.insert(owner.clone());
+                        reasons.entry(owner.clone()).or_default().push(format!(
+                            "Coverage graph {}: retained package scope for {}: {}",
+                            open.record.commit_sha, change.path, reason
+                        ));
+                        if let Some(plan) = graph.plan.as_mut() {
+                            plan.widened.push(GraphWidening {
+                                file: change.path.clone(),
+                                package: owner.clone(),
+                                reason,
+                            });
+                        }
+                    }
+                }
             } else {
                 production.insert(owner.clone());
             }
@@ -166,16 +220,6 @@ pub fn make_plan(
         }
     }
     let baseline = closure(&direct, &dependencies);
-    for gap in outcome
-        .gaps
-        .iter()
-        .filter(|g| matches!(g.kind, GapKind::AnalyzerFailure | GapKind::Limit))
-    {
-        fallback.push(format!(
-            "Semantic analyzer {} failed for {}: {}; retaining the full workspace",
-            gap.operation, gap.snapshot, gap.message
-        ));
-    }
     let (baseline, selected) = if fallback.is_empty() {
         (baseline, closure(&production, &dependencies))
     } else {
@@ -194,19 +238,6 @@ pub fn make_plan(
                 "Depends on a changed production package or is covered by fallback".into()
             });
     }
-    for test in &tests {
-        reasons
-            .entry(test.package.clone())
-            .or_default()
-            .push(format!(
-                "Verified isolated test body: {}::{}",
-                test.binary, test.name
-            ));
-    }
-    let tree = command(&comparison.head_root, "git", &["rev-parse", "HEAD^{tree}"])?
-        .trim()
-        .into();
-    let toolchain = command(&comparison.head_root, "rustc", &["-vV"])?;
     let mut plan = TestPlan {
         comparison_mode: comparison.comparison_mode,
         repository: comparison.repository.clone(),
@@ -223,24 +254,232 @@ pub fn make_plan(
         reasons,
         fallback_reasons: fallback,
         ignored_files,
-        analysis_status: outcome.status.clone(),
         baseline_count: None,
         selected_count: None,
-        observed_relationships: outcome
-            .evidence
-            .iter()
-            .flat_map(|s| &s.documents)
-            .flat_map(|d| &d.symbols)
-            .map(|s| s.references.len() + s.incoming_calls.len())
-            .sum(),
-        analysis_ms: outcome.elapsed_ms,
         planning_ms: 0,
+        coverage_graph: graph.plan,
     };
     if let Some(path) = &options.inventory {
         apply_inventory(&mut plan, path, &packages)?;
     }
     plan.planning_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     Ok(plan)
+}
+
+/// An opened, validated coverage graph ready for changed-range queries.
+struct OpenGraph {
+    reader: graph::GraphReader,
+    record: graph::Record,
+    /// Files that changed between the graph commit and the comparison base;
+    /// empty when the graph commit is the base itself.
+    lagging: BTreeSet<String>,
+}
+
+struct GraphResolution {
+    open: Option<OpenGraph>,
+    plan: Option<GraphPlan>,
+}
+
+/// Validates the supplied coverage graph descriptor against the graph itself
+/// and the current execution. Every failure degrades to a recorded reason;
+/// planning never fails because of the graph.
+fn resolve_coverage_graph(
+    comparison: &Comparison,
+    options: &PlanOptions,
+    toolchain: &str,
+) -> GraphResolution {
+    let Some(input) = &options.coverage_graph else {
+        return GraphResolution {
+            open: None,
+            plan: None,
+        };
+    };
+    // Acquisition-side unavailability is preserved as-is, whatever the plan
+    // precision.
+    let source = match input {
+        CoverageGraphInput::Unavailable { reason } => {
+            return GraphResolution {
+                open: None,
+                plan: Some(GraphPlan {
+                    reason: Some(reason.clone()),
+                    ..Default::default()
+                }),
+            };
+        }
+        CoverageGraphInput::Resolved(source) => source,
+    };
+    if !options.exact_tests {
+        return GraphResolution {
+            open: None,
+            plan: Some(GraphPlan {
+                reason: Some("exact test selection is disabled for this plan".into()),
+                ..Default::default()
+            }),
+        };
+    }
+    match open_coverage_graph(comparison, options, source, toolchain) {
+        Ok(open) => GraphResolution {
+            plan: Some(GraphPlan {
+                commit: Some(open.record.commit_sha.clone()),
+                run_id: Some(open.record.run_id.clone()),
+                attempt: u32::try_from(open.record.attempt).ok(),
+                schema_version: Some(open.record.schema_version),
+                ..Default::default()
+            }),
+            open: Some(open),
+        },
+        Err(reason) => GraphResolution {
+            open: None,
+            plan: Some(GraphPlan {
+                reason: Some(reason),
+                ..Default::default()
+            }),
+        },
+    }
+}
+
+fn open_coverage_graph(
+    comparison: &Comparison,
+    options: &PlanOptions,
+    source: &GraphSource,
+    toolchain: &str,
+) -> Result<OpenGraph, String> {
+    let mut reader = graph::GraphReader::open(&source.path)
+        .map_err(|error| format!("coverage graph is unreadable: {error}"))?;
+    let record = reader
+        .record(&source.commit)
+        .map_err(|error| format!("coverage graph record is unreadable: {error}"))?
+        .ok_or_else(|| {
+            format!(
+                "coverage graph has no record for the resolved commit {}",
+                source.commit
+            )
+        })?;
+    if record.schema_version != graph::SCHEMA_VERSION {
+        return Err(format!(
+            "coverage graph schema version {} is not supported version {}",
+            record.schema_version,
+            graph::SCHEMA_VERSION
+        ));
+    }
+    if record.run_id != source.run_id || record.attempt != i64::from(source.attempt) {
+        return Err("coverage graph identity does not match the run it was acquired from".into());
+    }
+    let signature: Value = serde_json::from_str(&record.signature)
+        .map_err(|_| "coverage graph execution signature is malformed".to_string())?;
+    let expected = execution_signature(&options.configuration, &source.profile, toolchain)
+        .map_err(|error| format!("cannot bind the current execution signature: {error}"))?;
+    if signature != expected {
+        return Err("coverage graph execution signature differs from the current execution".into());
+    }
+    let lagging = if source.commit == comparison.base {
+        BTreeSet::new()
+    } else {
+        command(
+            &comparison.repository,
+            "git",
+            &[
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                &source.commit,
+                &comparison.base,
+                "--",
+            ],
+        )
+        .map_err(|error| {
+            format!("cannot compare the coverage graph commit to the comparison base: {error}")
+        })?
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect()
+    };
+    Ok(OpenGraph {
+        reader,
+        record,
+        lagging,
+    })
+}
+
+/// Maps one changed file to the distinct tests covering its base-side line
+/// ranges. Unresolved files widen to package scope with the returned reason;
+/// query failures widen the same way, never failing the plan.
+fn graph_select(graph: &mut OpenGraph, change: &Change) -> Result<Vec<TestCase>, String> {
+    if graph.lagging.contains(&change.path) {
+        return Err(
+            "the file changed between the coverage graph commit and the comparison base".into(),
+        );
+    }
+    let known = graph
+        .reader
+        .has_file(&graph.record.commit_sha, &change.path)
+        .map_err(|error| format!("coverage graph file query failed: {error}"))?;
+    if !known {
+        return Err("the file is absent from the coverage graph".into());
+    }
+    let selected = graph
+        .reader
+        .tests_covering(&graph.record.commit_sha, &change.path, &change.before_lines)
+        .map_err(|error| format!("coverage graph range query failed: {error}"))?;
+    if selected.is_empty() {
+        return Err("no test covers the changed ranges".into());
+    }
+    Ok(selected)
+}
+
+/// The normalized execution signature coverage graphs are bound to; aligned
+/// with the coverage identity recorded by `scripts/run-cov.sh`.
+fn execution_signature(
+    configuration: &BuildConfiguration,
+    profile: &str,
+    toolchain: &str,
+) -> Result<Value, String> {
+    let environment: serde_json::Map<_, _> = [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_INCREMENTAL",
+        "CARGO_PROFILE_DEV_DEBUG",
+        "CARGO_PROFILE_TEST_DEBUG",
+    ]
+    .into_iter()
+    .filter_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| (name.to_owned(), Value::from(value)))
+    })
+    .collect();
+    Ok(json!({
+        "environment": environment,
+        "features": if configuration.all_features {
+            Value::from("all")
+        } else {
+            json!(configuration.features)
+        },
+        "profile": profile,
+        "target": configuration.target,
+        "toolchain": toolchain_identity(toolchain)?,
+    }))
+}
+
+/// The platform-independent toolchain identity bound into graph signatures.
+/// Line coverage attributes source lines to tests regardless of the host
+/// architecture, so only the release and commit hash participate; platform
+/// differences stay sound through the consumers' inventory widen-on-mismatch
+/// (over-selection is harmless, missed selection is impossible). The full
+/// `rustc -vV` text is retained elsewhere for exact environment reproduction.
+fn toolchain_identity(verbose: &str) -> Result<String, String> {
+    let field = |name: &str| {
+        verbose
+            .lines()
+            .find_map(|line| line.strip_prefix(name).map(str::trim))
+            .filter(|value| !value.is_empty())
+    };
+    match (field("release:"), field("commit-hash:")) {
+        (Some(release), Some(commit_hash)) => Ok(format!("rustc {release} ({commit_hash})")),
+        _ => Err("rustc -vV output lacks a release or commit-hash identity".into()),
+    }
 }
 
 fn deferred_input(path: &str) -> bool {
@@ -313,133 +552,6 @@ fn shared_consumers(path: &str) -> &'static [&'static str] {
         "tools/test-affected/run-tests.py" => &["mfn-test-affected"],
         _ => &[],
     }
-}
-
-fn validate_configuration(
-    outcome: &AnalysisOutcome,
-    config: &BuildConfiguration,
-) -> Result<(), Error> {
-    ensure!(
-        !(config.all_features && (!config.features.is_empty() || config.no_default_features)),
-        InvalidSnafu {
-            message: "all_features cannot be combined with explicit/no-default features"
-        }
-    );
-    if outcome.server.profile == mfn_lsp::Profile::RustAnalyzer
-        && outcome.status != mfn_lsp::Status::NotRequested
-    {
-        let cargo = &outcome.request.initialization_options["cargo"];
-        ensure!(
-            cargo["target"].as_str() == config.target.as_deref(),
-            InvalidSnafu {
-                message: "LSP and test target configurations differ"
-            }
-        );
-        if config.all_features {
-            ensure!(
-                cargo["features"] == "all",
-                InvalidSnafu {
-                    message: "LSP must analyze all selected features"
-                }
-            );
-        } else {
-            ensure!(
-                cargo["features"].is_null() || cargo["features"].is_array(),
-                InvalidSnafu {
-                    message: "LSP and test feature configurations differ"
-                }
-            );
-            let features: Vec<String> = cargo["features"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .map(str::to_owned)
-                .collect();
-            ensure!(
-                features == config.features
-                    && cargo["noDefaultFeatures"].as_bool().unwrap_or(false)
-                        == config.no_default_features,
-                InvalidSnafu {
-                    message: "LSP and test feature configurations differ"
-                }
-            );
-        }
-    }
-    Ok(())
-}
-
-fn isolated_tests(
-    comparison: &Comparison,
-    change: &Change,
-    package: &Package,
-    root: &Path,
-) -> Option<Vec<TestCase>> {
-    if !change.path.ends_with(".rs") {
-        return None;
-    }
-    let old = fs::read_to_string(comparison.base_root.join(&change.path)).ok()?;
-    let new = fs::read_to_string(comparison.head_root.join(&change.path)).ok()?;
-    let absolute = comparison.head_root.join(&change.path);
-    let integration = package
-        .targets
-        .iter()
-        .find(|t| t.kind.iter().any(|k| k == "test") && t.src_path == absolute);
-    let changed = isolated_changes(&old, &new, integration.is_some())?;
-    let (binary, prefix) = if let Some(target) = integration {
-        (format!("{}::{}", package.name, target.name), String::new())
-    } else {
-        // Only conventional library module paths are narrowed; unusual #[path] modules retain baseline.
-        let source_root = root.join("src");
-        let relative = absolute.strip_prefix(&source_root).ok()?;
-        package.targets.iter().find(|t| {
-            t.kind.iter().any(|k| k == "lib") && t.src_path == source_root.join("lib.rs")
-        })?;
-        let mut components: Vec<_> = relative
-            .components()
-            .map(|c| c.as_os_str().to_str().map(str::to_owned))
-            .collect::<Option<_>>()?;
-        let filename = components.pop()?;
-        let stem = filename.strip_suffix(".rs")?;
-        if !matches!(stem, "lib" | "mod") {
-            components.push(stem.into());
-        }
-        let mut module_file = source_root.join("lib.rs");
-        let mut module_directory = source_root.clone();
-        for component in &components {
-            let parsed = syn::parse_file(&fs::read_to_string(&module_file).ok()?).ok()?;
-            parsed.items.iter().find(|item| matches!(item, syn::Item::Mod(m) if m.ident == component && m.content.is_none() && plain_attributes(&m.attrs)))?;
-            let flat = module_directory.join(format!("{component}.rs"));
-            let nested = module_directory.join(component).join("mod.rs");
-            module_file = if flat.is_file() && !nested.exists() {
-                flat
-            } else if nested.is_file() && !flat.exists() {
-                nested
-            } else {
-                return None;
-            };
-            module_directory = module_directory.join(component);
-        }
-        if module_file != absolute {
-            return None;
-        }
-        let prefix = if components.is_empty() {
-            String::new()
-        } else {
-            format!("{}::", components.join("::"))
-        };
-        (package.name.clone(), prefix)
-    };
-    Some(
-        changed
-            .into_iter()
-            .map(|name| TestCase {
-                package: package.name.clone(),
-                binary: binary.clone(),
-                name: format!("{prefix}{name}"),
-            })
-            .collect(),
-    )
 }
 
 fn closure(

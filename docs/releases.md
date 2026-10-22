@@ -8,8 +8,8 @@ The refined port-type API changes `ValueType` from `Copy` to `Clone` and enforce
 
 ## Developer-tool exclusion
 
-`mfn-lsp` and `mfn-test-affected` are unpublished repository tools. Release tests exclude them,
-they are absent from the support-package prerequisites, and product packages must not depend on them.
+`mfn-test-affected` is an unpublished repository tool. Release tests exclude it,
+it is absent from the support-package prerequisites, and product packages must not depend on it.
 Release archives contain only the CLI and its licensing files. `generate-third-party-notices.sh --release`
 audits the CLI dependency closure, including shared product dependencies; its default mode continues
 to audit the entire development workspace. The tool package versions do not govern release branches.

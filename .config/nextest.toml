@@ -1,8 +1,13 @@
 nextest-version = { required = "0.9.145" }
-experimental = ["setup-scripts"]
+experimental = ["setup-scripts", "wrapper-scripts"]
 
 [test-groups.shared-cargo]
 max-threads = 1
+
+[scripts.wrapper.per-test-profraw]
+# Transparent unless MF_COVERAGE_PER_TEST_DIR is set by scripts/run-cov.sh
+# during full coverage-graph collection.
+command = { command-line = "scripts/profraw-wrapper.sh", relative-to = "workspace-root" }
 
 [scripts.setup.package-dependencies]
 command = ["cargo", "fetch", "--locked"]
@@ -13,6 +18,13 @@ capture-stderr = true
 command = ["python3", "scripts/nextest-build-cache.py"]
 capture-stdout = true
 capture-stderr = true
+
+[[profile.default.scripts]]
+platform = 'cfg(unix)'
+# Per-test LLVM profile attribution for coverage-graph collection; the
+# wrapper is a no-op unless MF_COVERAGE_PER_TEST_DIR is set.
+filter = 'all()'
+run-wrapper = 'per-test-profraw'
 
 [[profile.default.scripts]]
 platform = 'cfg(unix)'

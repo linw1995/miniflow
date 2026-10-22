@@ -154,7 +154,7 @@ fn execute_selected(
         }
     } else { None };
     #[cfg(not(feature = "telemetry"))]
-    let snapshots: Option<mf_runtime::SnapshotRecording> = {
+    let snapshots: Option<SnapshotExport> = {
         if capture_requested() { eprintln!("data history unavailable: recompile the runner without --no-telemetry"); }
         None
     };
@@ -232,7 +232,7 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(u
         }
     } else { None };
     #[cfg(not(feature = "telemetry"))]
-    let snapshots: Option<mf_runtime::SnapshotRecording> = {
+    let snapshots: Option<SnapshotExport> = {
         if capture_requested() { eprintln!("data capture unavailable: telemetry-enabled build required"); }
         None
     };
@@ -246,7 +246,7 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(u
         prepared.plan().input_schema().validate(&arguments)?;
         let needs_stdin = prepared.plan().input_schema().stdin_owner(&arguments)?.is_some();
         let stdin = if needs_stdin { stdio.take_input() } else { None };
-        let instance = mf_runtime::FlowRuntime::default().start_stream(prepared, mf_runtime::StreamOptions { observation: observation.clone(), snapshots: snapshots.as_ref().map(mf_runtime::SnapshotRecording::recorder), arguments, stdin, ..Default::default() })?;
+        let instance = mf_runtime::FlowRuntime::default().start_stream(prepared, mf_runtime::StreamOptions { observation: observation.clone(), snapshots: snapshots.as_ref().map(SnapshotExport::recorder), arguments, stdin, ..Default::default() })?;
         #[cfg(unix)]
         signals.bind(instance.cancellation())?;
         stdio.run(instance)?;
@@ -349,18 +349,32 @@ fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(unix)] s
     result
 }
 
+struct SnapshotExport(mf_telemetry::capture::SnapshotPublisher);
+
+impl SnapshotExport {
+    fn recorder(&self) -> mf_runtime::SnapshotRecorder {
+        let publisher = self.0.clone();
+        mf_runtime::SnapshotRecorder::new(move |event| publisher.record(event))
+    }
+    fn finish(&self) { self.0.finish(); }
+    fn diagnostic(&self) -> Option<std::sync::Arc<mf_telemetry::capture::SnapshotPublishError>> {
+        self.0.diagnostic()
+    }
+}
+
 #[cfg(feature = "telemetry")]
-fn snapshot_recorder_for_id(workflow_id: mf_telemetry::identity::WorkflowId, run_id: mf_telemetry::identity::RunId) -> Result<mf_runtime::SnapshotRecording, Box<dyn std::error::Error>> {
+fn snapshot_recorder_for_id(workflow_id: mf_telemetry::identity::WorkflowId, run_id: mf_telemetry::identity::RunId) -> Result<SnapshotExport, Box<dyn std::error::Error>> {
     let mut exporter = mf_telemetry::otlp::SnapshotExporter::from_env(workflow_id, run_id)?;
-    Ok(mf_runtime::SnapshotRecording::with_sink(move |record| {
-        exporter.emit(serde_json::to_value(record)?)?;
-        if matches!(record, mf_runtime::SnapshotRecord::End) { exporter.finish()?; }
+    Ok(SnapshotExport(mf_telemetry::capture::SnapshotPublisher::new(move |record| {
+        let complete = record["record"] == "end";
+        exporter.emit(record)?;
+        if complete { exporter.finish()?; }
         Ok(())
-    })?)
+    })?))
 }
 
 #[cfg(not(feature = "streaming"))]
-fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: Option<mf_runtime::SnapshotRecording>, arguments: mf_runtime::WorkflowArguments, #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: Option<SnapshotExport>, arguments: mf_runtime::WorkflowArguments, #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     let result = mf_runtime::ExecutionContext::run(observation, |state| -> Result<_, Box<dyn std::error::Error>> {
         #[cfg(unix)]
         signals.bind(state.cancellation())?;
