@@ -42,7 +42,7 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
         &binary,
         ChatOptions {
             database_path: path.clone(),
-            profile: "default".into(),
+            profile: "assistant-flow".into(),
             run: RunOptions {
                 arguments: vec![
                     "--input.model=fixture-model".into(),
@@ -108,6 +108,17 @@ fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
     let id = session_id.unwrap();
     assert_eq!(database.session(&id).unwrap().title, "Generated title");
     assert_eq!(database.history(&id, 4096).unwrap().history.len(), 4);
+    assert_eq!(
+        database
+            .usage(mf_chat::UsageQuery {
+                profile: Some("assistant-flow".into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .overall
+            .attempted_calls,
+        3,
+    );
     assert_eq!(server.requests().len(), 3);
     assert!(
         messages(&server.requests()[2])

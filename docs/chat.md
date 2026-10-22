@@ -116,8 +116,8 @@ mf run ./chat-title-flow --tui --chat --chat-db state/chat.sqlite --input.model 
 
 Both model configurations belong to this user flow; change `title_model.config` to use a different model
 or provider. `HostConfig::automatic_titles = false` supplies a disabled context policy to embedded
-backends. Both calls report their own purpose and profile through `usages[].attribution`. This example
-preserves a successful answer when the title provider reports failure, retains the failed call's usage,
+backends. Both calls report their purpose through `usages[].attribution`. The example uses one
+configuration and omits the optional profile label. It preserves a successful answer when the title provider reports failure, retains the failed call's usage,
 and omits the title output. This policy is expressed by its branches. The application flow only persists
 the final protocol result.
 
@@ -248,7 +248,7 @@ outputs, including returned history, do not change persisted conversation state.
       "call_id": "call-001",
       "node": {"id": "answer", "kind": "builtin.llm", "path": [{"node": "repeat", "index": 0}]},
       "model": "example-model",
-      "attribution": {"purpose": "conversation", "profile": "default"},
+      "attribution": {"purpose": "conversation"},
       "usage": {"input_tokens": 120, "output_tokens": 35, "total_tokens": 155}
     }
   ]
@@ -261,6 +261,29 @@ Configure these labels on `builtin.llm` or assign them while composing usage lis
 them on successful and captured failed attempts. Accounting uses each supplied label independently,
 falling back to the invocation's purpose or profile when absent. This preserves historical records and
 workflows that omit attribution. Labels do not change provider behavior or node identity.
+
+Use `profile` only when a user workflow needs to distinguish multiple configuration choices, such as
+`quality` and `economy`. Workflows using one configuration can omit it, as the title example does.
+This per-call label is independent of the owning workflow profile and never selects a model, provider,
+credential, or flow. The owning invocation remains unchanged; usage statistics use the supplied label
+when present and the invocation's profile otherwise.
+
+Labels can be supplied by configuration templates, so the same compiled workflow can report a different
+profile for each invocation:
+
+```json
+{
+  "attribution": {"$ref": "params.call_attribution"}
+}
+```
+
+Declare `params.call_attribution` as an object parameter with `secret: false`. Supply
+`{"purpose":"conversation","profile":"quality"}` to identify a selected configuration, or
+`{"purpose":"conversation"}` to omit the profile. A node can construct the same object and provide
+its output through `$ref`; preserve an explicit producer-to-LLM prerequisite. Templates resolve the
+whole configuration field, so reference the attribution object rather than nesting `$ref` under
+`profile`. Labels must remain nonblank public strings, including when computed at runtime.
+
 Each attempt also reports its start time in UTC Unix milliseconds; statistics use that time when available.
 The node path identifies enclosing loop invocations; repeated executions of one node have distinct call IDs.
 Node identity is available independently of observation. Direct node calls outside a workflow may lack node
@@ -310,7 +333,7 @@ A failed result still reports all collected calls and a nonblank error summary, 
       "call_id": "call-002",
       "node": {"id": "answer", "kind": "builtin.llm"},
       "model": "example-model",
-      "attribution": {"purpose": "conversation", "profile": "default"},
+      "attribution": {"purpose": "conversation"},
       "error": "Provider unavailable"
     }
   ]

@@ -73,23 +73,60 @@ fn parameter_definition() -> Value {
 
 #[test]
 fn parameter_templates_configure_memory_and_standalone_llm_requests() {
-    let first = Server::start(vec![Reply::text("first"); 3]);
+    fn stable(mut outputs: Vec<Value>) -> Vec<Value> {
+        for output in &mut outputs {
+            for usage in output["usages"].as_array_mut().unwrap() {
+                let usage = usage.as_object_mut().unwrap();
+                usage.remove("call_id");
+                usage.remove("started_at");
+            }
+        }
+        outputs
+    }
+    let first = Server::start(vec![Reply::text("first"); 6]);
     let second = Server::start(vec![Reply::text("second"); 3]);
-    let definition = parameter_definition();
+    let mut definition = parameter_definition();
+    definition["nodes"][0]["config"]["parameters"]["call_attribution"] =
+        json!({"type":"object", "secret":false});
+    definition["nodes"][1]["config"]["attribution"] = json!({"$ref":"params.call_attribution"});
+    definition["outputs"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!({"name":"usages", "node":"chat", "port":"usages"}));
     let root = tempfile::tempdir().unwrap();
     let executable = compile(&definition, root.path());
     assert!(first.requests().is_empty());
     let mut invocations = Vec::new();
     let mut expected = Vec::new();
-    for (server, key, model, temperature, max_tokens) in [
-        (&first, "synthetic-first-key", "first-model", 0.1, 16),
-        (&second, "synthetic-second-key", "second-model", 0.8, 32),
+    for (server, key, model, profile, temperature, max_tokens) in [
+        (
+            &first,
+            "synthetic-first-key",
+            "first-model",
+            Some("quality"),
+            0.1,
+            16,
+        ),
+        (
+            &second,
+            "synthetic-second-key",
+            "second-model",
+            Some("economy"),
+            0.8,
+            32,
+        ),
+        (&first, "synthetic-first-key", "first-model", None, 0.1, 16),
     ] {
+        let mut attribution = json!({"purpose":"conversation"});
+        if let Some(profile) = profile {
+            attribution["profile"] = profile.into();
+        }
         let inputs = json!({"params.api_key":key, "params.base_url":server.base_url,
             "params.model":model, "params.prompt":"Hello", "params.temperature":temperature,
-            "params.max_tokens":max_tokens});
-        let output = run(&executable, &inputs);
-        assert_eq!(output, run_memory(&definition, &inputs));
+            "params.max_tokens":max_tokens, "params.call_attribution":attribution});
+        let output = stable(run(&executable, &inputs));
+        assert_eq!(output[0]["usages"][0]["attribution"], attribution);
+        assert_eq!(output, stable(run_memory(&definition, &inputs)));
         expected.extend(output);
         invocations.push(inputs);
         for request in server.requests() {
@@ -97,10 +134,17 @@ fn parameter_templates_configure_memory_and_standalone_llm_requests() {
             assert_eq!(request.body["model"], model);
             assert_eq!(request.body["temperature"], temperature);
             assert_eq!(request.body["max_tokens"], max_tokens);
+            assert!(request.body.get("attribution").is_none());
+            if let Some(profile) = profile {
+                assert!(!request.body.to_string().contains(profile));
+            }
         }
     }
-    assert_eq!(run_memory(&definition, &json!(invocations)), expected);
-    assert_eq!(first.requests().len(), 3);
+    assert_eq!(
+        stable(run_memory(&definition, &json!(invocations))),
+        expected
+    );
+    assert_eq!(first.requests().len(), 6);
     assert_eq!(second.requests().len(), 3);
     assert!(
         first.requests()[2]
@@ -147,6 +191,7 @@ fn invalid_dynamic_configuration_retains_safe_typed_errors() {
         ("max_tokens", json!(0)),
         ("timeout_ms", json!(0)),
         ("max_output_bytes", json!(0)),
+        ("attribution", json!({"profile":"synthetic-secret-value"})),
     ] {
         let mut definition = parameter_definition();
         definition["nodes"][0]["config"]["parameters"]["invalid"] = json!({"type":"any"});

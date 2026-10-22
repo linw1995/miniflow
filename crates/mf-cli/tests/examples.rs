@@ -19,7 +19,7 @@ fn chat_usage(path: Value) -> Value {
 fn title_usage(node: &str, purpose: &str) -> Value {
     let mut usage = chat_usage(json!([]));
     usage["node"]["id"] = node.into();
-    usage["attribution"] = json!({"purpose":purpose,"profile":"default"});
+    usage["attribution"] = json!({"purpose":purpose});
     usage
 }
 

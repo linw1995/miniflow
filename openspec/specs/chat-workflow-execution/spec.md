@@ -29,8 +29,8 @@ application lifecycle graph.
 
 The host SHALL validate the selected user workflow and resolve its configuration parameters before
 creating running work. It MUST NOT identify, configure, or depend on internal model nodes. Preparation
-MUST NOT open the database or contact providers. Each reported call SHALL retain its workflow-selected
-profile and actual model attribution.
+MUST NOT open the database or contact providers. Each reported call SHALL retain its actual model
+identity and MAY report a workflow-selected configuration profile label.
 
 #### Scenario: Select a different title model
 

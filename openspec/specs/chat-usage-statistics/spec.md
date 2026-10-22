@@ -154,12 +154,26 @@ Chat replies SHALL expose usages without a parallel scalar usage field. New repl
 CallUsage SHALL expose optional attribution with independent optional purpose and profile labels. Labels
 SHALL be nonblank public strings. The LLM node SHALL report configured attribution on success and captured
 failure. Statistics SHALL use each reported label and fall back independently to the owning invocation
-when absent. Existing databases SHALL retain their accounting through a forward migration.
+when absent. The per-call profile label SHALL be optional and identify a configuration choice owned by
+the user workflow; it MUST NOT select configuration or alter the owning invocation. Single-configuration
+workflows MAY omit it. Configuration templates SHALL support runtime labels from public parameter or
+node outputs. Existing databases SHALL retain their accounting through a forward migration.
 
 #### Scenario: Compose a title call using another profile
 
 - **WHEN** one result combines conversation and title usage with different profiles
 - **THEN** purpose and profile filters distinguish their respective calls despite sharing one execution
+
+#### Scenario: Resolve a configuration label at runtime
+
+- **WHEN** the same compiled workflow receives different public profile labels on successive invocations
+- **THEN** each reported call retains the label supplied for its own invocation
+- **AND** labels are excluded from provider request payloads
+
+#### Scenario: Omit an unnecessary configuration label
+
+- **WHEN** a single-configuration workflow reports a purpose without a profile label
+- **THEN** the usage record preserves the omission and statistics use the owning invocation's profile
 
 #### Scenario: Preserve legacy attribution
 

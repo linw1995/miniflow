@@ -70,8 +70,7 @@
         },
         "capture_errors": true,
         "attribution": {
-          "purpose": "conversation",
-          "profile": "default"
+          "purpose": "conversation"
         },
         "base_url": {
           "$ref": "input.base_url"
@@ -192,8 +191,7 @@
         },
         "capture_errors": true,
         "attribution": {
-          "purpose": "title",
-          "profile": "default"
+          "purpose": "title"
         },
         "base_url": {
           "$ref": "input.base_url"
