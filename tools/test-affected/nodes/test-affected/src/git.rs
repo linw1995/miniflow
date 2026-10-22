@@ -165,13 +165,13 @@ pub fn compare_with_mode(
             action: "resolve snapshot",
         })?);
     }
-    let paths = command(
+    let statuses = command(
         &repository,
         "git",
         &[
             "diff",
             "--no-renames",
-            "--name-only",
+            "--name-status",
             "-z",
             &base,
             &head,
@@ -179,7 +179,14 @@ pub fn compare_with_mode(
         ],
     )?;
     let mut changes = Vec::new();
-    for path in paths.split('\0').filter(|s| !s.is_empty()) {
+    let mut fields = statuses.split('\0').filter(|s| !s.is_empty());
+    while let Some(status) = fields.next() {
+        let path = fields.next().ok_or_else(|| {
+            InvalidSnafu {
+                message: "Git diff status lacks a path",
+            }
+            .build()
+        })?;
         let patch = command(
             &repository,
             "git",
@@ -198,6 +205,7 @@ pub fn compare_with_mode(
         )?;
         let mut change = Change {
             path: path.into(),
+            deleted: status == "D",
             before_lines: Vec::new(),
         };
         for line in patch.lines().filter(|line| line.starts_with("@@ ")) {

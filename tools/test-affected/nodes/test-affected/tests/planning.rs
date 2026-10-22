@@ -435,6 +435,90 @@ fn additions_deletions_and_manifest_changes_preserve_conservative_scope() {
 }
 
 #[test]
+fn deleted_sources_follow_base_package_ownership_after_a_move() {
+    let (directory, _) = fixture();
+    let root = directory.path();
+    write(
+        root,
+        "legacy/Cargo.toml",
+        "[package]\nname = \"sample-legacy\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(root, "legacy/src/lib.rs", "pub fn legacy() -> u32 { 1 }\n");
+    let manifest =
+        "[workspace]\nmembers = [\"core\", \"app\", \"other\", \"legacy\"]\nresolver = \"3\"\n";
+    write(root, "Cargo.toml", manifest);
+    git::command(root, "cargo", &["generate-lockfile", "--offline"]).unwrap();
+    let base = commit(root);
+    git::command(root, "git", &["mv", "legacy", "moved"]).unwrap();
+    write(
+        root,
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"core\", \"app\", \"other\", \"moved\"]\nresolver = \"3\"\n",
+    );
+    git::command(root, "cargo", &["generate-lockfile", "--offline"]).unwrap();
+    let head = commit(root);
+    let comparison = compare(root, &base, &head);
+    assert!(
+        comparison
+            .changes
+            .iter()
+            .any(|change| { change.path == "legacy/src/lib.rs" && change.deleted })
+    );
+    let plan = make_plan(&comparison, &PlanOptions::default()).unwrap();
+    assert_eq!(plan.packages, ["sample-legacy"]);
+    assert!(plan.fallback_reasons.is_empty());
+}
+
+#[test]
+fn removed_package_sources_defer_without_forcing_workspace_fallback() {
+    let (directory, _) = fixture();
+    let root = directory.path();
+    write(
+        root,
+        "legacy/Cargo.toml",
+        "[package]\nname = \"sample-legacy\"\nversion = \"0.1.0\"\nedition = \"2024\"\n",
+    );
+    write(root, "legacy/src/lib.rs", "pub fn legacy() -> u32 { 1 }\n");
+    write(
+        root,
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"core\", \"app\", \"other\", \"legacy\"]\nresolver = \"3\"\n",
+    );
+    git::command(root, "cargo", &["generate-lockfile", "--offline"]).unwrap();
+    let base = commit(root);
+    fs::remove_dir_all(root.join("legacy")).unwrap();
+    write(
+        root,
+        "Cargo.toml",
+        "[workspace]\nmembers = [\"core\", \"app\", \"other\"]\nresolver = \"3\"\n",
+    );
+    git::command(root, "cargo", &["generate-lockfile", "--offline"]).unwrap();
+    let head = commit(root);
+    let comparison = compare(root, &base, &head);
+    assert!(
+        comparison
+            .changes
+            .iter()
+            .any(|change| { change.path == "legacy/src/lib.rs" && change.deleted })
+    );
+    let plan = make_plan(&comparison, &PlanOptions::default()).unwrap();
+    assert!(plan.packages.is_empty());
+    assert!(plan.tests.is_empty());
+    assert!(plan.fallback_reasons.is_empty());
+    for path in [
+        "Cargo.lock",
+        "Cargo.toml",
+        "legacy/Cargo.toml",
+        "legacy/src/lib.rs",
+    ] {
+        assert!(
+            plan.ignored_files.iter().any(|ignored| ignored == path),
+            "{path}"
+        );
+    }
+}
+
+#[test]
 fn records_coverage_graph_provenance_and_degradation_reasons() {
     use mfn_test_affected::{CoverageGraphInput, GraphSource};
     let (directory, base) = fixture();
@@ -808,6 +892,7 @@ fn narrows_package_scope_through_coverage_graph_with_conservative_widening() {
     let mut comparison = compare(root, &head, &newer);
     comparison.changes.push(mfn_test_affected::Change {
         path: "scripts/unknown.sh".into(),
+        deleted: false,
         before_lines: vec![],
     });
     let graph = write_graph(
@@ -1034,6 +1119,7 @@ fn shared_input_policy_scopes_known_consumers() {
     ] {
         comparison.changes = vec![mfn_test_affected::Change {
             path: path.into(),
+            deleted: path == "removed/src/lib.rs",
             before_lines: vec![],
         }];
         let plan = make_plan(&comparison, &PlanOptions::default()).unwrap();

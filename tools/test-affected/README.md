@@ -81,8 +81,10 @@ Set `options.exact_tests` to false for conservative package-only planning.
 `test_affected.plan` consumes the opaque comparison context. It uses
 Cargo metadata for all declared dependency kinds and owns the shared
 [input policy](../../docs/ci.md#affected-package-tests). Package manifests retain owner/consumer scope; known repository configuration
-is deferred to full main/nightly verification. Known shared executables select their consumers, while
-unknown inputs retain full-workspace fallback. Source diffs are the impact seed.
+is deferred to full main/nightly verification. Deleted sources are attributed through the base
+workspace; when their owning package is absent from the compared head they are deferred instead of
+forcing full-workspace fallback. Known shared executables select their consumers, while unknown
+inputs retain full-workspace fallback. Source diffs are the impact seed.
 
 A resolved coverage graph narrows each changed Rust file to the
 exact tests covering its base-side line ranges. Files the graph predates (changed between the graph

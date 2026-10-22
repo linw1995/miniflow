@@ -270,16 +270,20 @@ Input classification has one owner in the shared Flow planner:
 | Input | PR Rust selection |
 | --- | --- |
 | Files inside a workspace package, including manifests, fixture lockfiles, documentation, and deleted sources | Owner and transitive reverse dependencies |
+| Deleted sources whose base-side package is absent from the compared head | No additional packages; full main/nightly runs provide the backstop |
 | Root `Cargo.toml` / `Cargo.lock`, Flake/toolchain, Cargo and nextest configuration | No additional packages; full main/nightly runs provide the backstop |
 | `docs/`, `openspec/`, `.github/`, known root documentation, lint/release metadata, and CI-only scripts | No additional packages; run relevant non-Rust checks separately |
 | `examples/`, `scripts/nextest-build-cache.py`, `scripts/nextest-cargo.sh`, `scripts/cargo_cache.py` | `mf-cli`, `mf-compiler`, and reverse dependencies |
 | `scripts/check-release-support.sh` | `mf-cli` and reverse dependencies |
 | `tools/test-affected/flows/`, `tools/test-affected/run-tests.py`, and removal of the legacy selector | `mfn-test-affected` and reverse dependencies |
-| Other inputs, including removed package sources, or missing all expected shared consumers | Full workspace |
+| Other unclassified inputs, or known shared inputs missing all expected consumers | Full workspace |
 
 The bounded deferred-file list lives in the Rust planner's `deferred_input` helper;
-plans expose matched paths in `ignored_files`. Package ownership takes priority,
-so a package fixture named `Cargo.toml` or `README.md` is not ignored. Main and
+plans expose matched paths in `ignored_files`. Deletions resolve ownership from the
+comparison base before the head, so a package that still exists keeps its deleted
+sources while a removed package defers instead of becoming an unknown input. Package
+ownership takes priority, so a package fixture named `Cargo.toml` or `README.md` is
+not ignored. Main and
 nightly still execute full suites. Deferring dependency and execution configuration
 can delay detection of cross-package regressions until those runs; this is an
 explicit PR coverage tradeoff. Unknown paths remain conservative. Update consumer

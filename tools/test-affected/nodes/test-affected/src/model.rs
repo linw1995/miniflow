@@ -6,6 +6,10 @@ use std::{collections::BTreeMap, path::PathBuf};
 #[serde(deny_unknown_fields)]
 pub struct Change {
     pub path: String,
+    /// Whether the path exists only on the base side. Deletions are attributed
+    /// through the base workspace so removed packages can defer to full runs.
+    #[serde(default)]
+    pub deleted: bool,
     /// Base-side changed line intervals from the Git hunk headers, used for
     /// coverage graph queries. Empty for hunks without base-side lines;
     /// those widen conservatively.

@@ -36,12 +36,9 @@ struct Target {
     test: bool,
 }
 
-pub fn make_plan(comparison: &Comparison, options: &PlanOptions) -> Result<TestPlan, Error> {
-    let started = Instant::now();
-    verify_snapshot(&comparison.base_root, &comparison.base)?;
-    verify_snapshot(&comparison.head_root, &comparison.head)?;
+fn workspace_packages(root: &Path) -> Result<BTreeMap<String, Package>, Error> {
     let metadata: Metadata = serde_json::from_str(&command(
-        &comparison.head_root,
+        root,
         "cargo",
         &[
             "metadata",
@@ -56,19 +53,16 @@ pub fn make_plan(comparison: &Comparison, options: &PlanOptions) -> Result<TestP
         action: "read Cargo workspace metadata",
     })?;
     let members: BTreeSet<_> = metadata.workspace_members.into_iter().collect();
-    let packages: BTreeMap<_, _> = metadata
+    Ok(metadata
         .packages
         .into_iter()
         .filter(|p| members.contains(&p.id))
         .map(|p| (p.name.clone(), p))
-        .collect();
-    ensure!(
-        !packages.is_empty(),
-        InvalidSnafu {
-            message: "workspace contains no packages"
-        }
-    );
-    let roots: BTreeMap<_, _> = packages
+        .collect())
+}
+
+fn package_roots(packages: &BTreeMap<String, Package>) -> BTreeMap<PathBuf, String> {
+    packages
         .values()
         .map(|p| {
             (
@@ -76,7 +70,29 @@ pub fn make_plan(comparison: &Comparison, options: &PlanOptions) -> Result<TestP
                 p.name.clone(),
             )
         })
-        .collect();
+        .collect()
+}
+
+fn owning_package<'a>(roots: &'a BTreeMap<PathBuf, String>, path: &Path) -> Option<&'a String> {
+    roots
+        .iter()
+        .filter(|(root, _)| path.starts_with(root))
+        .max_by_key(|(root, _)| root.components().count())
+        .map(|(_, name)| name)
+}
+
+pub fn make_plan(comparison: &Comparison, options: &PlanOptions) -> Result<TestPlan, Error> {
+    let started = Instant::now();
+    verify_snapshot(&comparison.base_root, &comparison.base)?;
+    verify_snapshot(&comparison.head_root, &comparison.head)?;
+    let packages = workspace_packages(&comparison.head_root)?;
+    ensure!(
+        !packages.is_empty(),
+        InvalidSnafu {
+            message: "workspace contains no packages"
+        }
+    );
+    let roots = package_roots(&packages);
     let dependencies: BTreeMap<String, BTreeSet<String>> = packages
         .values()
         .map(|p| {
@@ -101,19 +117,40 @@ pub fn make_plan(comparison: &Comparison, options: &PlanOptions) -> Result<TestP
     let mut tests = BTreeSet::new();
     let mut fallback = Vec::new();
     let mut ignored_files = Vec::new();
+    let mut base_roots = None;
     for change in &comparison.changes {
         let path = Path::new(&change.path);
         let absolute = comparison.head_root.join(path);
-        let owner = roots
-            .iter()
-            .filter(|(root, _)| absolute.starts_with(root))
-            .max_by_key(|(root, _)| root.components().count());
-        if let Some((_root, owner)) = owner {
+        let base_owner = if change.deleted {
+            let base_roots = match base_roots.as_ref() {
+                Some(base_roots) => base_roots,
+                None => {
+                    base_roots.insert(package_roots(&workspace_packages(&comparison.base_root)?))
+                }
+            };
+            owning_package(base_roots, &comparison.base_root.join(path))
+        } else {
+            None
+        };
+        let owner = base_owner.or_else(|| owning_package(&roots, &absolute));
+        if let Some(owner) = owner {
+            if !packages.contains_key(owner) {
+                // The base owner disappeared from the compared head, so the
+                // full main/nightly runs provide the backstop.
+                ignored_files.push(change.path.clone());
+                continue;
+            }
+            let owner = owner.clone();
             direct.insert(owner.clone());
-            reasons
-                .entry(owner.clone())
-                .or_default()
-                .push(format!("Changed file: {}", change.path));
+            reasons.entry(owner.clone()).or_default().push(format!(
+                "{}: {}",
+                if change.deleted {
+                    "Deleted file"
+                } else {
+                    "Changed file"
+                },
+                change.path
+            ));
             if options.exact_tests
                 && change.path.ends_with(".rs")
                 && let Some(open) = graph.open.as_mut()
