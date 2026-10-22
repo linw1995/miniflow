@@ -65,6 +65,22 @@ ZIP `member`, and JSON Pointer `pointer`/`fields` projection. The result contain
 Required acquisition errors fail; optional historical errors remain explicit unavailable evidence.
 Cancellation always fails. The node neither chooses records nor interprets validation policy.
 
+`github.download` is the file-materializing counterpart for artifacts too large or too
+binary for JSON evidence, such as coverage graphs. It downloads one artifact archive and
+extracts its configured plain-name `members` into an absolute `directory`, optionally
+returning one parsed `metadata_member` (bounded JSON) for in-flow validation. It shares
+the `github.read` path, token, deadline, budget, and availability contract.
+
+Both GitHub readers serve the two acquisition channels: PR-run validation records
+(`pr-validation-<run>-<attempt>`) and default-branch coverage graphs
+(`coverage-graph-<run>-<attempt>`). The coverage-graph branch lists successful
+default-branch push runs, orders candidates by ancestry distance from the resolved
+comparison base, and downloads the nearest artifact whose metadata binds the run and the
+flow's `graph_policy` schema version. The plan node revalidates the graph itself
+(commit record, run identity, schema version, and execution signature) before use; every
+mismatch degrades to a recorded `coverage_graph` reason, never an error. Local planning
+shares the same branch and stays offline unless `github_repository` is supplied.
+
 `git.inspect` reads the current commit/tree/parents, clean/shallow state, and optional
 `revisions` relative to `ancestor_of`, reporting availability and ancestor distance.
 It does not fetch. `git.fetch` explicitly obtains one full `commit` ID through a configured

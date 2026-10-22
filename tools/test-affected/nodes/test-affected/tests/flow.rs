@@ -312,7 +312,7 @@ impl Drop for GithubFixture {
 }
 fn configure_github(nodes: &mut Value, base: &str) {
     for node in nodes.as_array_mut().unwrap() {
-        if node["kind"] == "github.read" {
+        if node["kind"] == "github.read" || node["kind"] == "github.download" {
             node["config"]["api_base"] = json!(base);
         }
         if let Some(body) = node.get_mut("loop").and_then(|v| v.get_mut("body")) {
@@ -433,6 +433,56 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
     .map(|key| (key.to_owned(), json!(std::env::var(key).ok())))
     .collect();
     let signature = json!({"policy":"flow-pr-v3","coverage_target":95.0,"toolchain":toolchain,"features":"all","profile":"ci","target":std::env::var("CARGO_BUILD_TARGET").ok(),"environment":environment});
+    // The coverage-graph signature omits policy fields and records only the
+    // environment variables that are set, matching scripts/run-cov.sh.
+    let graph_signature = {
+        let environment: serde_json::Map<_, _> = [
+            "RUSTFLAGS",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_INCREMENTAL",
+            "CARGO_PROFILE_DEV_DEBUG",
+            "CARGO_PROFILE_TEST_DEBUG",
+        ]
+        .into_iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| (name.to_owned(), json!(value)))
+        })
+        .collect();
+        json!({"environment":environment,"features":"all","profile":"ci","target":std::env::var("CARGO_BUILD_TARGET").ok(),"toolchain":toolchain})
+            .to_string()
+    };
+    let graphs_dir = root.join("target/graphs");
+    let build_graph = |commit: &str, run: u64, hits: &[(u32, u32)]| {
+        use mfn_test_affected::graph::{CoverageManifest, CoveredTest, GraphWriter};
+        let lcov_dir = graphs_dir.join(format!("lcov-{run}"));
+        fs::create_dir_all(&lcov_dir).unwrap();
+        let mut export = "SF:core/src/lib.rs\n".to_string();
+        for (line, count) in hits {
+            export.push_str(&format!("DA:{line},{count}\n"));
+        }
+        export.push_str("end_of_record\n");
+        let lcov = lcov_dir.join("stable.lcov");
+        fs::write(&lcov, export).unwrap();
+        let manifest = CoverageManifest {
+            commit_sha: commit.into(),
+            run_id: run.to_string(),
+            attempt: 1,
+            signature: graph_signature.clone(),
+            tests: vec![CoveredTest {
+                package: "sample-core".into(),
+                binary: "sample-core".into(),
+                name: "tests::stable".into(),
+                lcov,
+            }],
+        };
+        let path = graphs_dir.join(format!("graph-{run}.sqlite"));
+        let mut writer = GraphWriter::create(&path).unwrap();
+        writer.index(&manifest, root).unwrap();
+        path
+    };
+    let graph_metadata = |commit: &str, run: u64| json!({"commit_sha":commit,"run_id":run.to_string(),"attempt":1,"schema_version":1,"signature":graph_signature});
     let record = |id: u64, head: &str, merge: &str| {
         let tree =
             git::command(origin, "git", &["rev-parse", &format!("{merge}^{{tree}}")]).unwrap();
@@ -441,7 +491,11 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
     let current =
         json!({"id":99,"run_attempt":1,"workflow_id":7,"head_sha":head,"event":"pull_request"});
     let runs = json!([{"id":11,"run_attempt":1,"workflow_id":7,"head_sha":prior,"status":"completed","conclusion":"success"},{"id":17,"run_attempt":1,"workflow_id":7,"head_sha":nearest,"status":"completed","conclusion":"success"}]);
-    let initial = json!({"current":current,"pull":{"head":{"sha":head},"merge_commit_sha":tested},"runs":runs,"records":{"11":record(11,&prior,&older_merge),"17":record(17,&nearest,&newer_merge)}});
+    let initial = json!({"current":current,"pull":{"head":{"sha":head},"merge_commit_sha":tested},"runs":runs,"records":{"11":record(11,&prior,&older_merge),"17":record(17,&nearest,&newer_merge)},
+        "graph_runs":[{"id":23,"run_attempt":1,"head_sha":base,"status":"completed","conclusion":"success"},{"id":29,"run_attempt":1,"head_sha":prior,"status":"completed","conclusion":"success"}],
+        // The default graphs cover only the unhit line 2 of core/src/lib.rs, so
+        // changed-line queries widen conservatively until narrowing lands.
+        "graphs":{"23":{"sqlite":build_graph(&base,23,&[(2,1)]),"metadata":graph_metadata(&base,23)},"29":{"sqlite":build_graph(&prior,29,&[(2,1)]),"metadata":graph_metadata(&prior,29)}}});
     let server = GithubFixture::new(&initial);
     let mut flow = definition(root);
     configure_github(&mut flow["nodes"], &server.base);
@@ -477,6 +531,9 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
         "explicit",
         "manual",
         "invalid_current",
+        "graph_absent",
+        "graph_incompatible",
+        "graph_foreign",
         "ci_execution",
         "invalid_record",
         "failed_run",
@@ -497,6 +554,11 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
         let (scope, packages, expected_base) = match case {
             "local" => {
                 args.as_object_mut().unwrap().remove("params.ci");
+                // Local planning stays offline unless a repository identity is
+                // explicitly supplied for coverage graph acquisition.
+                args.as_object_mut()
+                    .unwrap()
+                    .remove("params.github_repository");
                 args["params.mode"] = json!("snapshot");
                 args["params.base"] = json!(base);
                 args["params.head"] = json!(head);
@@ -642,6 +704,22 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
                     older_merge.as_str(),
                 )
             }
+            "graph_absent" => {
+                state["graph_runs"] = json!([]);
+                (Some("incremental"), vec![], newer_merge.as_str())
+            }
+            "graph_incompatible" => {
+                for run in ["23", "29"] {
+                    state["graphs"][run]["metadata"]["schema_version"] = json!(999);
+                }
+                (Some("incremental"), vec![], newer_merge.as_str())
+            }
+            "graph_foreign" => {
+                // The nearest run's artifact binds a foreign commit; the
+                // search advances to the older eligible ancestor.
+                state["graphs"]["29"]["metadata"]["commit_sha"] = json!(base);
+                (Some("incremental"), vec![], newer_merge.as_str())
+            }
             "ci_execution" => {
                 args["params.run"] = json!(true);
                 (None, vec![], "")
@@ -695,13 +773,58 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
         assert!(generated.get("execution").is_none(), "{case}");
         assert_eq!(generated["plan"]["packages"], json!(packages), "{case}");
         assert_eq!(generated["plan"]["base"], expected_base, "{case}");
-        if case == "incremental" {
+        let graph = &generated["plan"]["coverage_graph"];
+        match case {
+            "local" => {
+                assert_eq!(
+                    graph["reason"],
+                    "No GitHub repository identity supplied for coverage graph acquisition",
+                    "{case}"
+                );
+                assert!(graph["commit"].is_null(), "{case}");
+            }
+            "graph_absent" => {
+                assert_eq!(
+                    graph["reason"], "No successful default-branch coverage run found",
+                    "{case}"
+                );
+            }
+            "graph_incompatible" => {
+                assert_eq!(
+                    graph["reason"],
+                    "No compatible coverage graph artifact on any eligible default-branch ancestor",
+                    "{case}"
+                );
+            }
+            _ => {
+                let (graph_commit, graph_run) = if case != "graph_foreign" && expected_base != base
+                {
+                    (prior.as_str(), "29")
+                } else {
+                    (base.as_str(), "23")
+                };
+                assert_eq!(graph["commit"], graph_commit, "{case}");
+                assert_eq!(graph["run_id"], graph_run, "{case}");
+                assert_eq!(graph["attempt"], 1, "{case}");
+                assert_eq!(graph["schema_version"], 1, "{case}");
+                assert!(graph["reason"].is_null(), "{case}");
+                assert_eq!(graph["widened"], json!([]), "{case}");
+            }
+        }
+        if matches!(
+            case,
+            "incremental" | "graph_absent" | "graph_incompatible" | "graph_foreign"
+        ) {
             assert_eq!(
                 generated["plan"]["tests"],
-                json!([{"package":"sample-app","binary":"sample-app","name":"tests::changed"}])
+                json!([{"package":"sample-app","binary":"sample-app","name":"tests::changed"}]),
+                "{case}"
             );
         } else {
-            assert!(generated["plan"]["tests"].as_array().unwrap().is_empty());
+            assert!(
+                generated["plan"]["tests"].as_array().unwrap().is_empty(),
+                "{case}"
+            );
         }
         assert_eq!(
             generated["plan"]["analysis_status"],
@@ -725,6 +848,10 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
         assert_eq!(generated["validation"], memory["validation"], "{case}");
         assert_eq!(
             generated["plan"]["packages"], memory["plan"]["packages"],
+            "{case}"
+        );
+        assert_eq!(
+            generated["plan"]["coverage_graph"], memory["plan"]["coverage_graph"],
             "{case}"
         );
         assert!(!String::from_utf8_lossy(&result.stdout).contains("fixture-token"));
@@ -773,7 +900,9 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
             assert!(!server.requests().contains("/runs/17/artifacts"));
         }
         if case == "explicit" || case == "manual" {
-            assert!(!server.requests().contains("/workflows/"));
+            // The baseline record channel stays idle; coverage graph
+            // acquisition is independent of the baseline search policy.
+            assert!(!server.requests().contains("branch=topic"), "{case}");
         }
     }
     assert_eq!(git::command(root, "git", &["show-ref"]).unwrap(), refs);

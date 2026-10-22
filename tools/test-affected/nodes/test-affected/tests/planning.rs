@@ -458,6 +458,142 @@ fn additions_deletions_and_manifest_changes_preserve_conservative_scope() {
 }
 
 #[test]
+fn records_coverage_graph_provenance_and_degradation_reasons() {
+    use mfn_test_affected::graph::{CoverageManifest, CoveredTest, GraphWriter};
+    use mfn_test_affected::{CoverageGraphInput, GraphSource};
+    let (directory, base) = fixture();
+    let root = directory.path();
+    write(
+        root,
+        "core/src/lib.rs",
+        &SOURCE.replace("-> u32 { 1 }", "-> u32 { 2 }"),
+    );
+    let head = commit(root);
+    let comparison = compare(root, &base, &head);
+    let toolchain = git::command(root, "rustc", &["-vV"]).unwrap();
+    let signature = |profile: &str| {
+        let environment: serde_json::Map<_, _> = [
+            "RUSTFLAGS",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_INCREMENTAL",
+            "CARGO_PROFILE_DEV_DEBUG",
+            "CARGO_PROFILE_TEST_DEBUG",
+        ]
+        .into_iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| (name.to_owned(), json!(value)))
+        })
+        .collect();
+        json!({"environment":environment,"features":"all","profile":profile,"target":std::env::var("CARGO_BUILD_TARGET").ok(),"toolchain":toolchain})
+            .to_string()
+    };
+    let graph_at = |name: &str, commit: &str, signature: String| {
+        let lcov = root.join(format!("target/{name}.lcov"));
+        fs::write(&lcov, "SF:core/src/lib.rs\nDA:1,1\nend_of_record\n").unwrap();
+        let path = root.join(format!("target/{name}.sqlite"));
+        let mut writer = GraphWriter::create(&path).unwrap();
+        writer
+            .index(
+                &CoverageManifest {
+                    commit_sha: commit.into(),
+                    run_id: "7".into(),
+                    attempt: 3,
+                    signature,
+                    tests: vec![CoveredTest {
+                        package: "sample-core".into(),
+                        binary: "sample-core".into(),
+                        name: "tests::stable".into(),
+                        lcov,
+                    }],
+                },
+                root,
+            )
+            .unwrap();
+        path
+    };
+    let source = |path: PathBuf| {
+        CoverageGraphInput::Resolved(GraphSource {
+            path,
+            commit: base.clone(),
+            run_id: "7".into(),
+            attempt: 3,
+            profile: "ci".into(),
+        })
+    };
+    let options = |graph| PlanOptions {
+        coverage_graph: Some(graph),
+        ..Default::default()
+    };
+
+    // A compatible graph records its provenance without changing selection yet.
+    let plan = make_plan(
+        &comparison,
+        &outcome(&comparison),
+        &options(source(graph_at("compatible", &base, signature("ci")))),
+    )
+    .unwrap();
+    let graph = plan.coverage_graph.unwrap();
+    assert_eq!(graph.commit.as_deref(), Some(base.as_str()));
+    assert_eq!(graph.run_id.as_deref(), Some("7"));
+    assert_eq!(graph.attempt, Some(3));
+    assert_eq!(graph.schema_version, Some(1));
+    assert!(graph.reason.is_none() && graph.widened.is_empty());
+    assert_eq!(plan.packages, ["sample-app", "sample-core"]);
+
+    // Every incompatibility degrades with a recorded reason, never an error.
+    for (graph, fragment) in [
+        (source(root.join("target/absent.sqlite")), "unreadable"),
+        (
+            // The descriptor names a commit the graph never indexed.
+            source(graph_at("foreign", &head, signature("ci"))),
+            "no record for the resolved commit",
+        ),
+        (
+            CoverageGraphInput::Resolved(GraphSource {
+                run_id: "8".into(),
+                ..match source(graph_at("bound", &base, signature("ci"))) {
+                    CoverageGraphInput::Resolved(source) => source,
+                    _ => unreachable!(),
+                }
+            }),
+            "does not match the run",
+        ),
+        (
+            source(graph_at("other-profile", &base, signature("other"))),
+            "execution signature differs",
+        ),
+    ] {
+        let plan = make_plan(&comparison, &outcome(&comparison), &options(graph)).unwrap();
+        let graph = plan.coverage_graph.unwrap();
+        assert!(graph.commit.is_none(), "{fragment}");
+        assert!(
+            graph.reason.as_deref().unwrap().contains(fragment),
+            "{fragment}: {graph:?}"
+        );
+        assert_eq!(plan.packages, ["sample-app", "sample-core"], "{fragment}");
+    }
+
+    // The acquisition side can report unavailability directly.
+    let plan = make_plan(
+        &comparison,
+        &outcome(&comparison),
+        &options(CoverageGraphInput::Unavailable {
+            reason: "no eligible ancestor".into(),
+        }),
+    )
+    .unwrap();
+    assert_eq!(
+        plan.coverage_graph.unwrap().reason.as_deref(),
+        Some("no eligible ancestor")
+    );
+    // Without a descriptor the plan carries no graph outcome at all.
+    let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
+    assert!(plan.coverage_graph.is_none());
+}
+
+#[test]
 fn task_boundaries_preserve_error_sources_and_reject_cancelled_work() {
     use mf_runtime::{ExecutionContext, TypedTaskNode};
     use std::error::Error as _;

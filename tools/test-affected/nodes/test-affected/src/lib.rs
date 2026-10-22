@@ -181,14 +181,34 @@ impl TypedTaskNode for PlanNode {
         .context(error::JsonSnafu {
             action: "decode Git comparison",
         })?;
-        let options = serde_json::from_value(
-            serde_json::to_value(&input.context["options"]).context(error::JsonSnafu {
-                action: "decode plan option value",
-            })?,
-        )
-        .context(error::JsonSnafu {
-            action: "decode plan options",
-        })?;
+        let options: crate::model::PlanOptions = {
+            let mut options: crate::model::PlanOptions = serde_json::from_value(
+                serde_json::to_value(&input.context["options"]).context(error::JsonSnafu {
+                    action: "decode plan option value",
+                })?,
+            )
+            .context(error::JsonSnafu {
+                action: "decode plan options",
+            })?;
+            let graph = input
+                .context
+                .as_object()
+                .and_then(|context| context.get("coverage_graph"))
+                .filter(|value| !value.is_null());
+            if let Some(graph) = graph {
+                options.coverage_graph = Some(
+                    serde_json::from_value(serde_json::to_value(graph).context(
+                        error::JsonSnafu {
+                            action: "encode coverage graph descriptor",
+                        },
+                    )?)
+                    .context(error::JsonSnafu {
+                        action: "decode coverage graph descriptor",
+                    })?,
+                );
+            }
+            options
+        };
         let outcome = serde_json::from_value(serde_json::to_value(&input.outcome).context(
             error::JsonSnafu {
                 action: "decode analysis value",

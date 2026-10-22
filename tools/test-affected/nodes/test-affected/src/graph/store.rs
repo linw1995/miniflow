@@ -303,6 +303,24 @@ impl GraphReader {
             })
     }
 
+    /// Returns whether the graph holds any coverage rows for `path` at
+    /// `commit_sha`. Distinguishes "the graph does not know this file" from
+    /// "the changed ranges have no covering test".
+    pub fn has_file(&mut self, commit_sha: &str, path: &str) -> Result<bool, Error> {
+        let rows = coverage::table
+            .filter(coverage::commit_sha.eq(commit_sha))
+            .filter(
+                coverage::file_id
+                    .eq_any(files::table.filter(files::path.eq(path)).select(files::id)),
+            )
+            .count()
+            .get_result::<i64>(&mut self.connection)
+            .context(DatabaseSnafu {
+                operation: "check coverage graph file",
+            })?;
+        Ok(rows > 0)
+    }
+
     /// Maps changed inclusive line ranges in one workspace-relative file to
     /// the distinct tests covering them at `commit_sha`, in one indexed
     /// query. Unknown commits, files, and uncovered ranges yield no rows.

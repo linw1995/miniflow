@@ -48,9 +48,11 @@ def load_plan(path):
     if isinstance(data, dict):
         data.setdefault("ignored_files", [])
         data.setdefault("comparison_mode", "merge-base")
+        # Older saved plans predate coverage-graph provenance.
+        data.setdefault("coverage_graph", None)
     required = {"comparison_mode", "ignored_files", "repository", "base", "head", "snapshot", "tree", "configuration", "toolchain", "build_environment",
                 "baseline_packages", "packages", "tests", "reasons", "fallback_reasons", "analysis_status",
-                "baseline_count", "selected_count", "observed_relationships", "analysis_ms", "planning_ms"}
+                "baseline_count", "selected_count", "observed_relationships", "analysis_ms", "planning_ms", "coverage_graph"}
     if not isinstance(data, dict) or set(data) != required:
         raise PlanError("expected a complete test-affected plan or its Flow output wrapper")
     if data["comparison_mode"] not in ("merge-base", "snapshot", "worktree", "commit"):
@@ -90,6 +92,15 @@ def load_plan(path):
         raise PlanError("invalid build environment")
     if len({tuple(sorted(t.items())) for t in data["tests"]}) != len(data["tests"]):
         raise PlanError("duplicate exact test identity")
+    graph = data["coverage_graph"]
+    if graph is not None:
+        if not isinstance(graph, dict):
+            raise PlanError("invalid coverage graph outcome")
+        for name in ("commit", "run_id", "attempt", "schema_version", "reason"):
+            if graph.get(name) is not None and not isinstance(graph[name], (str, int)):
+                raise PlanError("invalid coverage graph provenance")
+        if not isinstance(graph.get("widened", []), list):
+            raise PlanError("invalid coverage graph widening records")
     return data
 
 

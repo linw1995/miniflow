@@ -289,6 +289,50 @@ fn missing_commits_files_and_empty_ranges_yield_no_selectors() {
 }
 
 #[test]
+fn has_file_distinguishes_absent_files_per_commit() {
+    let (directory, graph, manifest) = fixture();
+    let root = directory.path();
+    let mut writer = GraphWriter::create(&graph).unwrap();
+    writer.index(&manifest, root).unwrap();
+    let gamma = lcov(
+        root,
+        "gamma.lcov",
+        &hit(&root.join("crates/core/src/only-second.rs"), &[(3, 1)]),
+    );
+    let second = export(
+        "2222222222222222222222222222222222222222",
+        vec![test(GAMMA.0, GAMMA.1, GAMMA.2, gamma)],
+    );
+    writer.index(&second, root).unwrap();
+    drop(writer);
+    let mut reader = GraphReader::open(&graph).unwrap();
+    let first = "1111111111111111111111111111111111111111";
+    assert!(reader.has_file(first, "crates/core/src/lib.rs").unwrap());
+    assert!(reader.has_file(first, "crates/core/src/extra.rs").unwrap());
+    assert!(
+        !reader
+            .has_file(first, "crates/core/src/missing.rs")
+            .unwrap()
+    );
+    // The file table is shared; per-commit presence still differs.
+    assert!(
+        !reader
+            .has_file(first, "crates/core/src/only-second.rs")
+            .unwrap()
+    );
+    assert!(
+        reader
+            .has_file(&second.commit_sha, "crates/core/src/only-second.rs")
+            .unwrap()
+    );
+    assert!(
+        !reader
+            .has_file("missing", "crates/core/src/lib.rs")
+            .unwrap()
+    );
+}
+
+#[test]
 fn rejects_malformed_manifests_exports_and_identities() {
     let (directory, graph, manifest) = fixture();
     let root = directory.path();

@@ -2,11 +2,12 @@ use crate::{
     classify::{isolated_changes, plain_attributes},
     error::*,
     git::{command, verify_snapshot},
+    graph,
     model::*,
 };
 use mfn_lsp::{AnalysisOutcome, GapKind};
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 use snafu::{ResultExt, ensure};
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
@@ -116,6 +117,11 @@ pub fn make_plan(
             (p.name.clone(), deps)
         })
         .collect();
+    let tree = command(&comparison.head_root, "git", &["rev-parse", "HEAD^{tree}"])?
+        .trim()
+        .into();
+    let toolchain = command(&comparison.head_root, "rustc", &["-vV"])?;
+    let graph = resolve_coverage_graph(options, &toolchain);
     let mut reasons = BTreeMap::<String, Vec<String>>::new();
     let mut direct = BTreeSet::new();
     let mut production = BTreeSet::new();
@@ -203,10 +209,6 @@ pub fn make_plan(
                 test.binary, test.name
             ));
     }
-    let tree = command(&comparison.head_root, "git", &["rev-parse", "HEAD^{tree}"])?
-        .trim()
-        .into();
-    let toolchain = command(&comparison.head_root, "rustc", &["-vV"])?;
     let mut plan = TestPlan {
         comparison_mode: comparison.comparison_mode,
         repository: comparison.repository.clone(),
@@ -235,12 +237,110 @@ pub fn make_plan(
             .sum(),
         analysis_ms: outcome.elapsed_ms,
         planning_ms: 0,
+        coverage_graph: graph,
     };
     if let Some(path) = &options.inventory {
         apply_inventory(&mut plan, path, &packages)?;
     }
     plan.planning_ms = started.elapsed().as_millis().min(u64::MAX as u128) as u64;
     Ok(plan)
+}
+
+/// Validates the supplied coverage graph descriptor against the graph itself
+/// and the current execution. Every failure degrades to a recorded reason;
+/// planning never fails because of the graph.
+fn resolve_coverage_graph(options: &PlanOptions, toolchain: &str) -> Option<GraphPlan> {
+    let input = options.coverage_graph.as_ref()?;
+    let source = match input {
+        CoverageGraphInput::Unavailable { reason } => {
+            return Some(GraphPlan {
+                reason: Some(reason.clone()),
+                ..Default::default()
+            });
+        }
+        CoverageGraphInput::Resolved(source) => source,
+    };
+    match validate_coverage_graph(options, source, toolchain) {
+        Ok(record) => Some(GraphPlan {
+            commit: Some(record.commit_sha),
+            run_id: Some(record.run_id),
+            attempt: u32::try_from(record.attempt).ok(),
+            schema_version: Some(record.schema_version),
+            ..Default::default()
+        }),
+        Err(reason) => Some(GraphPlan {
+            reason: Some(reason),
+            ..Default::default()
+        }),
+    }
+}
+
+fn validate_coverage_graph(
+    options: &PlanOptions,
+    source: &GraphSource,
+    toolchain: &str,
+) -> Result<graph::Record, String> {
+    let mut reader = graph::GraphReader::open(&source.path)
+        .map_err(|error| format!("coverage graph is unreadable: {error}"))?;
+    let record = reader
+        .record(&source.commit)
+        .map_err(|error| format!("coverage graph record is unreadable: {error}"))?
+        .ok_or_else(|| {
+            format!(
+                "coverage graph has no record for the resolved commit {}",
+                source.commit
+            )
+        })?;
+    if record.schema_version != graph::SCHEMA_VERSION {
+        return Err(format!(
+            "coverage graph schema version {} is not supported version {}",
+            record.schema_version,
+            graph::SCHEMA_VERSION
+        ));
+    }
+    if record.run_id != source.run_id || record.attempt != i64::from(source.attempt) {
+        return Err("coverage graph identity does not match the run it was acquired from".into());
+    }
+    let signature: Value = serde_json::from_str(&record.signature)
+        .map_err(|_| "coverage graph execution signature is malformed".to_string())?;
+    if signature != execution_signature(&options.configuration, &source.profile, toolchain) {
+        return Err("coverage graph execution signature differs from the current execution".into());
+    }
+    Ok(record)
+}
+
+/// The normalized execution signature coverage graphs are bound to; aligned
+/// with the coverage identity recorded by `scripts/run-cov.sh`.
+fn execution_signature(
+    configuration: &BuildConfiguration,
+    profile: &str,
+    toolchain: &str,
+) -> Value {
+    let environment: serde_json::Map<_, _> = [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_INCREMENTAL",
+        "CARGO_PROFILE_DEV_DEBUG",
+        "CARGO_PROFILE_TEST_DEBUG",
+    ]
+    .into_iter()
+    .filter_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| (name.to_owned(), Value::from(value)))
+    })
+    .collect();
+    json!({
+        "environment": environment,
+        "features": if configuration.all_features {
+            Value::from("all")
+        } else {
+            json!(configuration.features)
+        },
+        "profile": profile,
+        "target": configuration.target,
+        "toolchain": toolchain,
+    })
 }
 
 fn deferred_input(path: &str) -> bool {

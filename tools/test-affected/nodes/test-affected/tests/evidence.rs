@@ -88,6 +88,31 @@ impl Server {
                         zip.write_all(record.to_string().as_bytes()).unwrap();
                         (200, zip.finish().unwrap().into_inner())
                     }
+                    "/download" | "/download-incomplete" | "/download-large" => {
+                        let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+                        zip.start_file("graph.sqlite", zip::write::SimpleFileOptions::default())
+                            .unwrap();
+                        let sqlite = if path == "/download-large" {
+                            vec![b'x'; 4096]
+                        } else {
+                            b"sqlite-fixture".to_vec()
+                        };
+                        zip.write_all(&sqlite).unwrap();
+                        if path != "/download-incomplete" {
+                            zip.start_file(
+                                "graph.metadata.json",
+                                zip::write::SimpleFileOptions::default(),
+                            )
+                            .unwrap();
+                            zip.write_all(
+                                json!({"commit_sha":"abc","schema_version":1})
+                                    .to_string()
+                                    .as_bytes(),
+                            )
+                            .unwrap();
+                        }
+                        (200, zip.finish().unwrap().into_inner())
+                    }
                     _ => {
                         assert!(path.starts_with("/runs?branch=topic%2Fa%26b"), "{path}");
                         (
@@ -291,6 +316,104 @@ fn invalid_evidence_configuration_is_not_a_history_gap() {
     ] {
         assert!(invoke(kind, config, input, &mut ExecutionContext::default()).is_err());
     }
+}
+
+#[test]
+fn downloads_artifact_members_to_disk_with_bounded_metadata() {
+    let server = Server::new();
+    let directory = tempfile::tempdir().unwrap();
+    let target = || directory.path().join("graph").to_str().unwrap().to_owned();
+    let config = || json!({"api_base":server.base,"required":false,"members":["graph.sqlite","graph.metadata.json"],"metadata_member":"graph.metadata.json"});
+    let result = invoke(
+        "github.download",
+        config(),
+        json!({"path":"/download","directory":target(),"token":"fixture-token"}),
+        &mut ExecutionContext::default(),
+    )
+    .unwrap();
+    assert_eq!(result.outputs["result"]["available"], json!(true));
+    assert_eq!(
+        result.outputs["result"]["value"]["members"],
+        json!(["graph.sqlite", "graph.metadata.json"])
+    );
+    assert_eq!(
+        result.outputs["result"]["value"]["metadata"]["commit_sha"],
+        json!("abc")
+    );
+    assert_eq!(
+        std::fs::read(directory.path().join("graph/graph.sqlite")).unwrap(),
+        b"sqlite-fixture"
+    );
+    assert!(
+        !serde_json::to_string(&result.outputs)
+            .unwrap()
+            .contains("fixture-token")
+    );
+
+    // Missing members and oversized members are degradations, not failures.
+    for (path, config, reason) in [
+        ("/download-incomplete", config(), "invalid_data"),
+        (
+            "/download-large",
+            json!({"api_base":server.base,"required":false,"members":["graph.sqlite"],"max_member_bytes":1024}),
+            "limit",
+        ),
+        ("/missing", config(), "response"),
+    ] {
+        let result = invoke(
+            "github.download",
+            config,
+            json!({"path":path,"directory":target()}),
+            &mut ExecutionContext::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            result.outputs["result"]["available"],
+            json!(false),
+            "{path}"
+        );
+        assert_eq!(result.outputs["result"]["reason"], json!(reason), "{path}");
+    }
+
+    // Invalid paths and directories are configuration errors, not degradations.
+    for input in [
+        json!({"path":"//other-host/secret","directory":target()}),
+        json!({"path":"/download","directory":"relative/target"}),
+    ] {
+        assert!(
+            invoke(
+                "github.download",
+                config(),
+                input,
+                &mut ExecutionContext::default()
+            )
+            .is_err()
+        );
+    }
+
+    // Member names must stay plain archive file names.
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for members in [
+        json!([]),
+        json!(["../escape"]),
+        json!(["nested/graph.sqlite"]),
+    ] {
+        assert!(
+            registry
+                .get("github.download")
+                .unwrap()
+                .instantiate(json!({"members":members}))
+                .is_err(),
+            "{members}"
+        );
+    }
+    assert!(
+        registry
+            .get("github.download")
+            .unwrap()
+            .instantiate(json!({"members":["graph.sqlite"],"metadata_member":"other.json"}))
+            .is_err()
+    );
 }
 
 #[test]
