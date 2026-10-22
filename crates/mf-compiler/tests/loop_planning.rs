@@ -1,3 +1,6 @@
+#[path = "common/snapshots.rs"]
+mod snapshots;
+use snapshots::Snapshots;
 #[path = "fixtures/observation_capture.rs"]
 mod capture;
 mod common;
@@ -788,7 +791,7 @@ fn snapshots_preserve_inputs_and_outputs_from_all_loop_passes() {
     let registry = NodeRegistry::from_inventory().unwrap();
     let plan = compile_definition(&parse(definition()), &registry).unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
-    let recorder = mf_runtime::SnapshotRecording::memory();
+    let recorder = Snapshots::memory();
     let mut context = ExecutionContext::default();
     context.set_snapshot_recorder(recorder.recorder());
     assert_eq!(

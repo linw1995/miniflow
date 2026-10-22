@@ -1,14 +1,18 @@
 //! Shared business value history received through OTLP logs.
 use crate::traces::SpanKey;
-use mf_runtime::{NodeSnapshot, SnapshotEntry, SnapshotRecord, SnapshotStore, ValueRef};
+use mf_runtime::{NodeSnapshot, SnapshotOutcome, ValueRef};
 use mf_telemetry::snapshot::Assembler;
+use mf_telemetry::{capture::SNAPSHOT_VERSION, event::LoopPathEntry};
 use opentelemetry_proto::tonic::{common::v1::any_value, logs::v1::LogRecord};
+use rpds::RedBlackTreeMapSync;
 use snafu::{ResultExt, Snafu, ensure};
 use std::{
     collections::BTreeMap,
     io::{self, Write},
     sync::Arc,
 };
+
+pub type SnapshotRecord = mf_telemetry::capture::SnapshotRecord<ValueRef>;
 
 #[derive(Debug, Snafu)]
 pub enum CaptureError {
@@ -19,7 +23,7 @@ pub enum CaptureError {
     #[snafu(display("invalid snapshot record: {source}"))]
     Record { source: serde_json::Error },
     #[snafu(transparent)]
-    Store { source: mf_runtime::SnapshotError },
+    Store { source: SnapshotStoreError },
     #[snafu(display("snapshot sequence {sequence} has conflicting trace context"))]
     ConflictingContext { sequence: usize },
     #[snafu(display("snapshot capture is closed"))]
@@ -30,6 +34,134 @@ pub enum CaptureError {
         "snapshot history is incomplete at sequence {sequence}; received history remains available"
     ))]
     Incomplete { sequence: usize },
+}
+
+#[derive(Debug, Snafu)]
+pub enum SnapshotStoreError {
+    #[snafu(display("{message}"))]
+    Invalid { message: &'static str },
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct Snapshot {
+    scopes:
+        RedBlackTreeMapSync<Vec<LoopPathEntry>, RedBlackTreeMapSync<Arc<str>, Arc<NodeSnapshot>>>,
+}
+
+impl Snapshot {
+    pub fn node(&self, scope: &[LoopPathEntry], node: &str) -> Option<&Arc<NodeSnapshot>> {
+        self.scopes.get(scope)?.get(node)
+    }
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        self.scopes.ptr_eq(&other.scopes)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SnapshotEntry {
+    pub scope: Vec<LoopPathEntry>,
+    pub node: Arc<str>,
+    pub snapshot: Snapshot,
+}
+
+/// Receiver-owned immutable history. No value dictionary is required for replay.
+#[derive(Debug, Default)]
+pub struct SnapshotStore {
+    current: Snapshot,
+    history: Vec<SnapshotEntry>,
+    initialized: bool,
+    complete: bool,
+}
+
+impl SnapshotStore {
+    pub fn current(&self) -> &Snapshot {
+        &self.current
+    }
+    pub fn history(&self) -> &[SnapshotEntry] {
+        &self.history
+    }
+    pub fn is_initialized(&self) -> bool {
+        self.initialized
+    }
+    pub fn is_complete(&self) -> bool {
+        self.complete
+    }
+    pub fn apply(&mut self, record: SnapshotRecord) -> Result<bool, SnapshotStoreError> {
+        ensure!(
+            !self.complete,
+            InvalidSnafu {
+                message: "snapshot record followed the end marker"
+            }
+        );
+        if let SnapshotRecord::Header { version } = record {
+            ensure!(
+                !self.initialized && version == SNAPSHOT_VERSION,
+                InvalidSnafu {
+                    message: "unsupported or repeated snapshot header; recompile the runner for this receiver"
+                }
+            );
+            self.initialized = true;
+            return Ok(false);
+        }
+        ensure!(
+            self.initialized,
+            InvalidSnafu {
+                message: "snapshot stream omitted its header"
+            }
+        );
+        match record {
+            SnapshotRecord::Node {
+                scope,
+                node,
+                inputs,
+                outputs,
+                skipped,
+                outcome,
+                error,
+            } => {
+                ensure!(
+                    inputs.is_object() && outputs.is_object(),
+                    InvalidSnafu {
+                        message: "node snapshots require input and output objects"
+                    }
+                );
+                let next = NodeSnapshot {
+                    inputs,
+                    outputs,
+                    skipped,
+                    outcome,
+                    error,
+                };
+                let previous = self.current.node(&scope, &node);
+                let equal = previous.is_some_and(|previous| previous.as_ref() == &next);
+                if equal && !matches!(outcome, SnapshotOutcome::Started | SnapshotOutcome::Emitted)
+                {
+                    return Ok(false);
+                }
+                // Repeated invocation boundaries remain visible, while an unchanged node
+                // can share its immutable payload with its previous occurrence.
+                let next = if equal {
+                    previous.unwrap().clone()
+                } else {
+                    Arc::new(next)
+                };
+                let mut nodes = self.current.scopes.get(&scope).cloned().unwrap_or_default();
+                nodes.insert_mut(node.clone(), next);
+                self.current.scopes.insert_mut(scope.clone(), nodes);
+                self.history.push(SnapshotEntry {
+                    scope,
+                    node,
+                    snapshot: self.current.clone(),
+                });
+                Ok(true)
+            }
+            SnapshotRecord::End => {
+                self.complete = true;
+                Ok(false)
+            }
+            SnapshotRecord::Header { .. } => unreachable!("headers were handled above"),
+        }
+    }
 }
 
 const PREVIEW_BYTES: usize = 64 * 1024;
@@ -62,7 +194,6 @@ pub struct SnapshotMetadata {
 #[derive(Clone, Debug, Default)]
 pub struct HistorySnapshot {
     pub history_len: usize,
-    pub value_count: usize,
     pub selected: usize,
     pub first: usize,
     pub entries: Vec<SnapshotEntry>,
@@ -211,7 +342,6 @@ impl SnapshotCapture {
         let status = self.status();
         HistorySnapshot {
             history_len: history.len(),
-            value_count: self.store.value_count(),
             selected,
             first,
             entries: history.iter().skip(first).take(rows).cloned().collect(),
@@ -277,12 +407,62 @@ fn value_preview(value: &ValueRef) -> String {
 }
 
 #[cfg(test)]
+pub struct TestHistory(std::sync::Mutex<SnapshotStore>);
+#[cfg(test)]
+impl TestHistory {
+    pub fn memory() -> Self {
+        let mut store = SnapshotStore::default();
+        store
+            .apply(SnapshotRecord::Header {
+                version: SNAPSHOT_VERSION,
+            })
+            .unwrap();
+        Self(std::sync::Mutex::new(store))
+    }
+    pub fn record(&self, scope: Vec<LoopPathEntry>, node: &str, snapshot: NodeSnapshot) {
+        self.0
+            .lock()
+            .unwrap()
+            .apply(
+                mf_runtime::SnapshotEvent {
+                    scope,
+                    node: node.into(),
+                    snapshot,
+                }
+                .into(),
+            )
+            .unwrap();
+    }
+    pub fn history(&self) -> Vec<SnapshotEntry> {
+        self.0.lock().unwrap().history().to_vec()
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use mf_runtime::{NodeSnapshot, SnapshotOutcome, SnapshotRecord, SnapshotRecording};
+    use mf_runtime::{NodeSnapshot, SnapshotOutcome};
+    use mf_telemetry::capture::SnapshotPublisher;
     use mf_telemetry::snapshot::packets;
     use serde_json::json;
     use std::sync::{Arc, Mutex};
+
+    struct TestPublisher(SnapshotPublisher);
+    impl TestPublisher {
+        fn record(&self, scope: Vec<LoopPathEntry>, node: &str, snapshot: NodeSnapshot) {
+            let publisher = self.0.clone();
+            mf_runtime::SnapshotRecorder::new(move |event| publisher.record(event)).record(
+                mf_runtime::SnapshotEvent {
+                    scope,
+                    node: node.into(),
+                    snapshot,
+                },
+            );
+        }
+        fn finish(&self) {
+            self.0.finish();
+        }
+    }
 
     fn snapshot(value: ValueRef) -> NodeSnapshot {
         NodeSnapshot {
@@ -293,19 +473,53 @@ mod tests {
             error: None,
         }
     }
-    fn recorder(capture: Arc<Mutex<SnapshotCapture>>) -> SnapshotRecording {
+    fn recorder(capture: Arc<Mutex<SnapshotCapture>>) -> TestPublisher {
         let mut sequence = 0;
-        SnapshotRecording::with_sink(move |record| {
-            for packet in packets(sequence, serde_json::to_value(record).unwrap())? {
-                capture
-                    .lock()
-                    .unwrap()
-                    .admit(packet.into_log_record("workflow", "run"))?;
-            }
-            sequence += 1;
-            Ok(())
-        })
-        .unwrap()
+        TestPublisher(
+            SnapshotPublisher::new(move |record| {
+                for packet in packets(sequence, record)? {
+                    capture
+                        .lock()
+                        .unwrap()
+                        .admit(packet.into_log_record("workflow", "run"))?;
+                }
+                sequence += 1;
+                Ok(())
+            })
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn receiver_validates_session_order_and_versions_before_changing_history() {
+        let mut store = SnapshotStore::default();
+        assert!(store.apply(SnapshotRecord::End).is_err());
+        assert!(store.apply(SnapshotRecord::Header { version: 1 }).is_err());
+        store
+            .apply(SnapshotRecord::Header {
+                version: SNAPSHOT_VERSION,
+            })
+            .unwrap();
+        assert!(
+            store
+                .apply(SnapshotRecord::Header {
+                    version: SNAPSHOT_VERSION
+                })
+                .is_err()
+        );
+        let event = mf_runtime::SnapshotEvent {
+            scope: vec![],
+            node: "node".into(),
+            snapshot: snapshot(42.into()),
+        };
+        assert!(store.apply(event.clone().into()).unwrap());
+        let first = store.current().clone();
+        assert!(!store.apply(event.into()).unwrap());
+        assert!(store.current().ptr_eq(&first));
+        assert_eq!(store.history().len(), 1);
+        store.apply(SnapshotRecord::End).unwrap();
+        assert!(store.apply(SnapshotRecord::End).is_err());
+        assert!(store.is_complete());
     }
 
     #[test]
@@ -326,7 +540,7 @@ mod tests {
     }
 
     #[test]
-    fn otlp_history_shares_payloads_and_preserves_historical_roots() {
+    fn otlp_history_preserves_historical_roots_and_unchanged_nodes() {
         let capture = Arc::new(Mutex::new(SnapshotCapture::default()));
         let recorder = recorder(capture.clone());
         let value = ValueRef::from(json!({"payload": "unique payload", "count": 1}));
@@ -362,10 +576,21 @@ mod tests {
             json!(1)
         );
         let latest = capture.store.current();
-        assert!(
-            first.node(&[], "first").unwrap().outputs["value"]["payload"]
-                .ptr_eq(&latest.node(&[], "first").unwrap().outputs["value"]["payload"])
+        assert_eq!(
+            first.node(&[], "first").unwrap().outputs["value"]["count"],
+            json!(1)
         );
+        assert_eq!(
+            latest.node(&[], "first").unwrap().outputs["value"]["count"],
+            json!(2)
+        );
+        assert!(Arc::ptr_eq(
+            capture.store.history()[1]
+                .snapshot
+                .node(&[], "second")
+                .unwrap(),
+            latest.node(&[], "second").unwrap(),
+        ));
         let window = capture.view(None, 1);
         assert_eq!(window.entries.len(), 1);
         assert_eq!(window.history_len, 5);
@@ -373,10 +598,10 @@ mod tests {
     }
 
     #[test]
-    fn missing_records_and_value_references_leave_explicit_incomplete_history() {
+    fn missing_records_and_invalid_node_payloads_leave_explicit_incomplete_history() {
         let mut capture = SnapshotCapture::default();
         let header = serde_json::to_value(SnapshotRecord::Header {
-            version: mf_runtime::SNAPSHOT_VERSION,
+            version: SNAPSHOT_VERSION,
         })
         .unwrap();
         for packet in packets(0, header).unwrap() {
@@ -404,11 +629,16 @@ mod tests {
         let mut capture = SnapshotCapture::default();
         for (sequence, record) in [
             SnapshotRecord::Header {
-                version: mf_runtime::SNAPSHOT_VERSION,
+                version: SNAPSHOT_VERSION,
             },
-            SnapshotRecord::Value {
-                id: 0,
-                value: mf_runtime::ValueDefinition::Array(vec![1]),
+            SnapshotRecord::Node {
+                scope: vec![],
+                node: "invalid".into(),
+                inputs: ValueRef::null(),
+                outputs: ValueRef::object([]),
+                skipped: Arc::from([]),
+                outcome: SnapshotOutcome::Succeeded,
+                error: None,
             },
         ]
         .into_iter()
@@ -424,9 +654,9 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .to_string()
-                .contains("unknown snapshot value")
+                .contains("node snapshots require input and output objects")
         );
-        assert_eq!(capture.store.value_count(), 0);
+        assert!(capture.store.history().is_empty());
     }
 
     #[test]
@@ -440,21 +670,16 @@ mod tests {
     fn reordered_records_keep_repeated_nodes_associated_with_their_own_spans() {
         let mut capture = SnapshotCapture::default();
         let bodies = [
-            json!({"record":"header","version":1}),
-            json!({"record":"value","id":0,"value":{"kind":"object","data":{}}}),
-            json!({"record":"value","id":1,"value":{"kind":"string","data":"first invocation"}}),
-            json!({"record":"value","id":2,"value":{"kind":"object","data":{"result":1}}}),
-            json!({"record":"node","scope":[],"node":"same","inputs":0,"outputs":2,"skipped":[],"outcome":"succeeded"}),
-            json!({"record":"value","id":3,"value":{"kind":"string","data":"second invocation"}}),
-            json!({"record":"value","id":4,"value":{"kind":"object","data":{"result":3}}}),
-            json!({"record":"node","scope":[],"node":"same","inputs":0,"outputs":4,"skipped":[],"outcome":"succeeded"}),
+            json!({"record":"header","version":SNAPSHOT_VERSION}),
+            json!({"record":"node","scope":[],"node":"same","inputs":{},"outputs":{"result":"first invocation"},"skipped":[],"outcome":"succeeded"}),
+            json!({"record":"node","scope":[],"node":"same","inputs":{},"outputs":{"result":"second invocation"},"skipped":[],"outcome":"succeeded"}),
             json!({"record":"end"}),
         ];
         for (sequence, body) in bodies.into_iter().enumerate().rev() {
             for packet in packets(sequence, body).unwrap() {
                 let mut record = packet.into_log_record("workflow", "run");
                 record.trace_id = vec![1; 16];
-                record.span_id = vec![if sequence < 5 { 1 } else { 2 }; 8];
+                record.span_id = vec![if sequence < 2 { 1 } else { 2 }; 8];
                 capture.admit(record).unwrap();
             }
         }
@@ -476,7 +701,7 @@ mod tests {
                 .iter()
                 .map(|metadata| metadata.sequence)
                 .collect::<Vec<_>>(),
-            [4, 7]
+            [1, 2]
         );
         assert_eq!(
             history.metadata[0].correlation,
@@ -494,12 +719,9 @@ mod tests {
     #[test]
     fn fragmented_node_records_preserve_context_and_reject_conflicting_fragments() {
         let mut capture = SnapshotCapture::default();
-        for (sequence, body) in [
-            json!({"record":"header","version":1}),
-            json!({"record":"value","id":0,"value":{"kind":"object","data":{}}}),
-        ]
-        .into_iter()
-        .enumerate()
+        for (sequence, body) in [json!({"record":"header","version":SNAPSHOT_VERSION})]
+            .into_iter()
+            .enumerate()
         {
             for packet in packets(sequence, body).unwrap() {
                 capture
@@ -507,8 +729,8 @@ mod tests {
                     .unwrap();
             }
         }
-        let body = json!({"record":"node","scope":[],"node":"step","inputs":0,"outputs":0,"skipped":[],"outcome":"failed","error":"x".repeat(100_000)});
-        let mut records: Vec<_> = packets(2, body.clone())
+        let body = json!({"record":"node","scope":[],"node":"step","inputs":{},"outputs":{},"skipped":[],"outcome":"failed","error":"x".repeat(100_000)});
+        let mut records: Vec<_> = packets(1, body.clone())
             .unwrap()
             .map(|packet| {
                 let mut record = packet.into_log_record("workflow", "run");
@@ -539,11 +761,11 @@ mod tests {
         let error = capture.admit(records[0].clone()).unwrap_err();
         assert!(matches!(
             error.as_ref(),
-            CaptureError::ConflictingContext { sequence: 2 }
+            CaptureError::ConflictingContext { sequence: 1 }
         ));
         assert!(matches!(
             capture.admit(records[0].clone()).unwrap_err().as_ref(),
-            CaptureError::ConflictingContext { sequence: 2 }
+            CaptureError::ConflictingContext { sequence: 1 }
         ));
     }
 
@@ -556,7 +778,7 @@ mod tests {
         let mut capture = capture.lock().unwrap();
         capture.finish();
         assert!(capture.data(&[1; 16], &[2; 8]).node.is_none());
-        let duplicate = packets(0, json!({"record":"header","version":1}))
+        let duplicate = packets(0, json!({"record":"header","version":SNAPSHOT_VERSION}))
             .unwrap()
             .next()
             .unwrap()

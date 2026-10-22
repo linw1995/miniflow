@@ -1,3 +1,6 @@
+#[path = "common/snapshots.rs"]
+mod snapshots;
+use snapshots::Snapshots;
 #[path = "fixtures/observation_capture.rs"]
 mod capture;
 mod common;
@@ -919,7 +922,7 @@ fn snapshots_retain_every_iteration_item_in_sequential_and_parallel_runs() {
         let registry = NodeRegistry::from_inventory().unwrap();
         let plan = compile_definition(&definition, &registry).unwrap();
         let flow = instantiate_compiled(&plan, &registry).unwrap();
-        let recorder = mf_runtime::SnapshotRecording::memory();
+        let recorder = Snapshots::memory();
         let mut context = mf_runtime::ExecutionContext::default();
         assert!(context.snapshot_recorder().is_none());
         context.set_snapshot_recorder(recorder.recorder());

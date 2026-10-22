@@ -1,4 +1,7 @@
 #![cfg(feature = "codegen")]
+#[path = "common/snapshots.rs"]
+mod snapshots;
+use snapshots::Snapshots;
 extern crate mfn_code as _;
 extern crate mfn_core as _;
 
@@ -583,7 +586,7 @@ fn isolated_identity_counts_spans_and_snapshots_follow_the_selected_task() {
             let observation = record
                 .start_observation(&harness.observer(), mf_telemetry::identity::RunId::new())
                 .unwrap();
-            let snapshots = mf_runtime::SnapshotRecording::memory();
+            let snapshots = Snapshots::memory();
             let result: Result<_, Box<dyn std::error::Error>> =
                 mf_runtime::ExecutionContext::run(Some(observation), |state| {
                     state.set_snapshot_recorder(snapshots.recorder());
@@ -754,8 +757,8 @@ fn selected_metadata_excludes_values_and_snapshot_sink_failures_preserve_results
     let observation = record
         .start_observation(&harness.observer(), mf_telemetry::identity::RunId::new())
         .unwrap();
-    let snapshots = mf_runtime::SnapshotRecording::with_sink(|record| {
-        if matches!(record, mf_runtime::SnapshotRecord::Node { .. }) {
+    let snapshots = Snapshots::with_sink(|record| {
+        if record["record"] == "node" {
             Err(std::io::Error::other("snapshot sink unavailable").into())
         } else {
             Ok(())

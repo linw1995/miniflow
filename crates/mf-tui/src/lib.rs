@@ -17,7 +17,7 @@ pub mod run;
 pub mod state;
 pub mod traces;
 
-mod snapshots;
+pub mod snapshots;
 pub use snapshots::{HistorySnapshot, SnapshotMetadata, SpanData};
 
 #[cfg(all(test, unix))]

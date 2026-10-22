@@ -1,3 +1,6 @@
+#[path = "common/snapshots.rs"]
+mod snapshots;
+use snapshots::Snapshots;
 mod common;
 
 extern crate mfn_core as _;
@@ -100,7 +103,7 @@ fn secret_arguments_survive_typed_nodes_and_edges_but_are_redacted_from_snapshot
     let plan = compile_definition(&definition, &registry).unwrap();
     let flow = instantiate_compiled(&plan, &registry).unwrap();
     let secret = mf_runtime::ValueRef::from(json!({"token": "sentinel-secret"})).into_secret();
-    let recording = mf_runtime::SnapshotRecording::memory();
+    let recording = Snapshots::memory();
     let mut context = ExecutionContext::default();
     context.set_workflow_arguments(WorkflowArguments(BTreeMap::from([(
         "first.input".into(),

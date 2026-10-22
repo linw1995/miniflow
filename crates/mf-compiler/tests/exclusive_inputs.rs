@@ -1,3 +1,6 @@
+#[path = "common/snapshots.rs"]
+mod snapshots;
+use snapshots::Snapshots;
 #[path = "fixtures/observation_capture.rs"]
 mod capture;
 #[path = "fixtures/controlled_source.rs"]
@@ -220,7 +223,7 @@ fn typed_plans_fall_back_at_groups_and_isolated_nodes_accept_resolved_inputs() {
 
 #[test]
 fn observed_selections_and_snapshots_preserve_provenance_without_secret_values() {
-    use mf_runtime::{ExecutionContext, SnapshotRecording, WorkflowArguments};
+    use mf_runtime::{ExecutionContext, WorkflowArguments};
     use mf_telemetry::{event::Event, identity::RunId};
     let mut value: Value =
         serde_json::from_str(include_str!("../../../examples/exclusive-inputs.json")).unwrap();
@@ -240,7 +243,7 @@ fn observed_selections_and_snapshots_preserve_provenance_without_secret_values()
             compile_definition(&serde_json::from_value(value.clone()).unwrap(), &registry).unwrap();
         let flow = instantiate_compiled(&plan, &registry).unwrap();
         let harness = capture::Harness::new(false);
-        let recording = SnapshotRecording::memory();
+        let recording = Snapshots::memory();
         let observation = plan
             .start_observation(&harness.observer(), RunId::new())
             .unwrap();

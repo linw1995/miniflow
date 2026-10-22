@@ -16,9 +16,12 @@ use std::{
 pub const SCOPE: &str = "mf.snapshot";
 pub const RECORD_EVENT: &str = "mf.snapshot.record";
 pub const FRAGMENT_EVENT: &str = "mf.snapshot.fragment";
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 pub const CHUNK_BYTES: usize = 32 * 1024;
 pub const MAX_PENDING_RECORDS: usize = 1024;
+const MAX_BODY_DEPTH: usize = 128;
+const JSON_SUBTREE_DEPTH: usize = 16;
+const JSON_SUBTREE_PREFIX: &[u8] = b"mf.json:\0";
 
 #[derive(Debug, Snafu)]
 pub enum SnapshotError {
@@ -35,6 +38,8 @@ pub enum SnapshotError {
     },
     #[snafu(display("invalid snapshot protobuf: {source}"))]
     Protobuf { source: prost::DecodeError },
+    #[snafu(display("invalid snapshot JSON subtree: {source}"))]
+    Json { source: serde_json::Error },
 }
 
 fn digest(value: &Value) -> [u8; 32] {
@@ -522,13 +527,46 @@ fn fields(value: AnyValue) -> Result<BTreeMap<String, AnyValue>, SnapshotError> 
     }
     Ok(fields)
 }
-fn encode(value: Value, depth: usize) -> Result<AnyValue, SnapshotError> {
+fn check_depth(value: &Value, depth: usize) -> Result<(), SnapshotError> {
     ensure!(
-        depth <= 16,
+        depth <= MAX_BODY_DEPTH,
         InvalidSnafu {
             message: "snapshot envelope nesting exceeded the limit"
         }
     );
+    match value {
+        Value::Array(items) => {
+            for item in items {
+                check_depth(item, depth + 1)?;
+            }
+        }
+        Value::Object(entries) => {
+            for item in entries.values() {
+                check_depth(item, depth + 1)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn encode(value: Value, depth: usize) -> Result<AnyValue, SnapshotError> {
+    ensure!(
+        depth <= MAX_BODY_DEPTH,
+        InvalidSnafu {
+            message: "snapshot envelope nesting exceeded the limit"
+        }
+    );
+    // A JSON container expands into several nested protobuf messages. Keep deep
+    // subtrees opaque so valid values cannot exceed the OTLP decoder's recursion budget.
+    if depth == JSON_SUBTREE_DEPTH && matches!(value, Value::Array(_) | Value::Object(_)) {
+        check_depth(&value, depth)?;
+        let mut bytes = JSON_SUBTREE_PREFIX.to_vec();
+        serde_json::to_writer(&mut bytes, &value).context(JsonSnafu)?;
+        return Ok(AnyValue {
+            value: Some(any_value::Value::BytesValue(bytes)),
+        });
+    }
     let value = match value {
         Value::Null => None,
         Value::Bool(value) => Some(any_value::Value::BoolValue(value)),
@@ -537,10 +575,20 @@ fn encode(value: Value, depth: usize) -> Result<AnyValue, SnapshotError> {
             any_value::Value::DoubleValue(value.as_f64().context(InvalidSnafu {
                 message: "invalid floating-point value",
             })?)
+        } else if let Some(value) = value.as_i64() {
+            any_value::Value::IntValue(value)
         } else {
-            any_value::Value::IntValue(value.as_i64().context(InvalidSnafu {
-                message: "OTLP integer exceeds signed 64-bit range",
-            })?)
+            // JSON has no byte values. Transport v2 reserves this representation
+            // for unsigned integers outside OTLP's signed integer range.
+            any_value::Value::BytesValue(
+                value
+                    .as_u64()
+                    .context(InvalidSnafu {
+                        message: "invalid unsigned snapshot integer",
+                    })?
+                    .to_le_bytes()
+                    .to_vec(),
+            )
         }),
         Value::Array(values) => Some(any_value::Value::ArrayValue(ArrayValue {
             values: values
@@ -565,7 +613,7 @@ fn encode(value: Value, depth: usize) -> Result<AnyValue, SnapshotError> {
 }
 fn decode(value: AnyValue, depth: usize) -> Result<Value, SnapshotError> {
     ensure!(
-        depth <= 16,
+        depth <= MAX_BODY_DEPTH,
         InvalidSnafu {
             message: "snapshot envelope nesting exceeded the limit"
         }
@@ -575,6 +623,22 @@ fn decode(value: AnyValue, depth: usize) -> Result<Value, SnapshotError> {
         Some(any_value::Value::StringValue(value)) => Value::String(value),
         Some(any_value::Value::BoolValue(value)) => Value::Bool(value),
         Some(any_value::Value::IntValue(value)) => Value::from(value),
+        Some(any_value::Value::BytesValue(bytes)) => {
+            if bytes.len() == 8 {
+                Value::from(u64::from_le_bytes(
+                    bytes.try_into().expect("checked integer width"),
+                ))
+            } else {
+                let json = bytes
+                    .strip_prefix(JSON_SUBTREE_PREFIX)
+                    .context(InvalidSnafu {
+                        message: "invalid snapshot byte value",
+                    })?;
+                let value = serde_json::from_slice(json).context(JsonSnafu)?;
+                check_depth(&value, depth)?;
+                value
+            }
+        }
         Some(any_value::Value::DoubleValue(value)) => {
             Value::Number(serde_json::Number::from_f64(value).context(InvalidSnafu {
                 message: "non-finite snapshot number",
@@ -673,6 +737,100 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn deep_values_survive_protobuf_transport_without_dictionary_references() {
+        for size in [0, CHUNK_BYTES * 2] {
+            for depth in [16, 48, 120] {
+                let mut value = json!({"text": "x".repeat(size), "number": u64::MAX, "zero": -0.0});
+                for _ in 0..depth {
+                    value = json!([value]);
+                }
+                let original = json!({"record": "node", "inputs": {}, "outputs": {"value": value}});
+                let mut assembler = Assembler::default();
+                let mut received = Vec::new();
+                for packet in packets(0, original.clone()).unwrap() {
+                    let encoded = packet.into_log_record("workflow", "run").encode_to_vec();
+                    let record = LogRecord::decode(encoded.as_slice()).unwrap();
+                    received.extend(assembler.push(record).unwrap());
+                }
+                assert_eq!(
+                    serde_json::to_string(&received[0]).unwrap(),
+                    serde_json::to_string(&original).unwrap()
+                );
+            }
+        }
+        let mut too_deep = Value::Null;
+        for _ in 0..=MAX_BODY_DEPTH {
+            too_deep = json!([too_deep]);
+        }
+        assert!(packets(0, too_deep).is_err());
+        let mut malformed = JSON_SUBTREE_PREFIX.to_vec();
+        malformed.extend_from_slice(b"invalid");
+        assert!(matches!(
+            decode(
+                AnyValue {
+                    value: Some(any_value::Value::BytesValue(malformed))
+                },
+                0
+            ),
+            Err(SnapshotError::Json { .. })
+        ));
+    }
+
+    #[test]
+    fn self_contained_values_preserve_numbers_in_direct_and_fragmented_records() {
+        for size in [0, CHUNK_BYTES * 2] {
+            let original = json!({
+                "record": "node", "inputs": {},
+                "outputs": {"numbers": [0, 0.0, -0.0, i64::MIN, u64::MAX, 1.5], "text": "x".repeat(size)}
+            });
+            let mut assembler = Assembler::default();
+            let received: Vec<_> = packets(0, original.clone())
+                .unwrap()
+                .flat_map(|packet| {
+                    assembler
+                        .push(packet.into_log_record("workflow", "run"))
+                        .unwrap()
+                })
+                .collect();
+            assert_eq!(
+                serde_json::to_string(&received[0]).unwrap(),
+                serde_json::to_string(&original).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_transport_versions_are_rejected_explicitly() {
+        let mut record = packets(0, json!({"record":"header", "version":1}))
+            .unwrap()
+            .next()
+            .unwrap()
+            .into_log_record("workflow", "run");
+        record
+            .attributes
+            .iter_mut()
+            .find(|attribute| attribute.key == "mf.snapshot.version")
+            .unwrap()
+            .value = Some(integer(1));
+        assert!(
+            Assembler::default()
+                .push(record)
+                .unwrap_err()
+                .to_string()
+                .contains("unsupported snapshot transport version")
+        );
+        assert!(
+            decode(
+                AnyValue {
+                    value: Some(any_value::Value::BytesValue(vec![0]))
+                },
+                0
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn malformed_fragment_protobuf_preserves_the_decode_error() {
         use std::error::Error;
         let body = object([
@@ -740,11 +898,14 @@ mod tests {
             .next()
             .unwrap()
             .into_log_record("workflow", "run");
-        let second = packets(1, json!({"record":"value","id":0,"value":{"kind":"null"}}))
-            .unwrap()
-            .next()
-            .unwrap()
-            .into_log_record("workflow", "run");
+        let second = packets(
+            1,
+            json!({"record":"node","inputs":{},"outputs":{"value":null}}),
+        )
+        .unwrap()
+        .next()
+        .unwrap()
+        .into_log_record("workflow", "run");
         assert!(matches!(
             first.body.as_ref().unwrap().value,
             Some(any_value::Value::KvlistValue(_))
@@ -761,7 +922,8 @@ mod tests {
 
     #[test]
     fn large_values_use_bounded_protobuf_fragments_without_a_json_string_envelope() {
-        let original = json!({"record":"value","id":0,"value":{"kind":"string","data":"\u{754c}".repeat(CHUNK_BYTES)}});
+        let original =
+            json!({"record":"node","inputs":{},"outputs":{"value":"\u{754c}".repeat(CHUNK_BYTES)}});
         let mut logs: Vec<_> = packets(0, original.clone())
             .unwrap()
             .map(|packet| packet.into_log_record("workflow", "run"))

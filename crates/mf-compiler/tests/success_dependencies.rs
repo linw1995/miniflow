@@ -1,3 +1,6 @@
+#[path = "common/snapshots.rs"]
+mod snapshots;
+use snapshots::Snapshots;
 #[path = "fixtures/observation_capture.rs"]
 mod capture;
 mod common;
@@ -74,7 +77,7 @@ fn compiled_success_conditions_preserve_exclusive_alternatives_and_snapshot_skip
         for snapshots in [false, true] {
             let _ = std::fs::remove_file(&path);
             let mut ctx = mf_runtime::ExecutionContext::default();
-            let recording = mf_runtime::SnapshotRecording::memory();
+            let recording = Snapshots::memory();
             if snapshots {
                 ctx.set_snapshot_recorder(recording.recorder());
             }

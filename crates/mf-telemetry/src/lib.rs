@@ -1,5 +1,6 @@
 //! Observation contracts without provider installation or network initialization.
 
+pub mod capture;
 pub mod description;
 pub mod event;
 pub mod identity;

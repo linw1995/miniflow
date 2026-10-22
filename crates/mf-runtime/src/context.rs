@@ -1582,8 +1582,11 @@ mod tests {
                 });
             }
             let event = context.event_inputs(&node, &dependencies);
-            let recording = crate::SnapshotRecording::memory();
-            context.set_snapshot_recorder(recording.recorder());
+            let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let received = captured.clone();
+            context.set_snapshot_recorder(crate::SnapshotRecorder::new(move |event| {
+                received.lock().unwrap().push(event)
+            }));
             let task = execute_generated_node_in_context(
                 &node,
                 dependencies.iter().map(crate::FlowDependency::borrowed),
@@ -1595,8 +1598,7 @@ mod tests {
                     Ok(GeneratedNodeResult::Dynamic(Outputs::new().into()))
                 },
             );
-            let snapshot = recording.current();
-            let snapshot = snapshot.node(&[], "target").unwrap();
+            let snapshot = captured.lock().unwrap().pop().unwrap().snapshot;
             assert_eq!(snapshot.inputs["value"], json!("[REDACTED]"));
             match (event, task) {
                 (Ok(Some(inputs)), Ok(())) => {

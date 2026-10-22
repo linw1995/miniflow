@@ -16,7 +16,7 @@ tokio = ["async", "dep:tokio"]
 mf-telemetry.workspace = true
 opentelemetry.workspace = true
 
-# Node registration and persistent snapshot state.
+# Node registration and persistent execution state.
 inventory.workspace = true
 rpds.workspace = true
 
