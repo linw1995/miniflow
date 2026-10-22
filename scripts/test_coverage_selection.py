@@ -11,7 +11,7 @@ def inventory():
         package: {"package-name": package, "testcases": {
             name: {"ignored": ignored, "filter-match": {"status": "matches"}}
             for name, ignored in [("changed", False), ("stable", False), ("smoke", True)]
-        }} for package in ["full", "partial", "mfn-lsp"]
+        }} for package in ["full", "partial", "extra"]
     }}
 
 
@@ -21,15 +21,15 @@ def case(package, name):
 
 class SelectionTests(unittest.TestCase):
     def test_mixed_selection_and_inventory_proven_complete_crates(self):
-        plan = {"baseline_packages": ["full", "partial", "mfn-lsp"], "packages": ["full"],
-                "tests": [case("partial", "changed"), case("mfn-lsp", "changed"), case("mfn-lsp", "stable")]}
+        plan = {"baseline_packages": ["full", "partial", "extra"], "packages": ["full"],
+                "tests": [case("partial", "changed"), case("extra", "changed")]}
         result = selection.resolve(plan, inventory())
         self.assertEqual(result["complete_packages"], ["full"])
-        self.assertEqual(result["partial_packages"], ["mfn-lsp", "partial"])
+        self.assertEqual(result["partial_packages"], ["extra", "partial"])
         self.assertIn("test(=changed)", result["filters"]["partial"])
-        plan["tests"] += [case("partial", "stable"), case("mfn-lsp", "smoke")]
+        plan["tests"] += [case("partial", "stable"), case("extra", "stable")]
         result = selection.resolve(plan, inventory())
-        self.assertEqual(result["complete_packages"], ["full", "mfn-lsp", "partial"])
+        self.assertEqual(result["complete_packages"], ["extra", "full", "partial"])
         self.assertEqual(result["partial_packages"], [])
         self.assertEqual(result["filters"]["partial"], "package(=partial)")
 
@@ -47,6 +47,22 @@ class SelectionTests(unittest.TestCase):
         result = selection.resolve({"packages": [], "baseline_packages": ["partial"],
                                     "tests": [case("partial", "changed")]}, cases)
         self.assertEqual(result["complete_packages"], ["partial"])
+        self.assertIsNotNone(result["fallback"])
+
+    def test_graph_derived_selectors_pass_through_with_provenance(self):
+        # Plans carrying coverage-graph provenance keep their exact selectors.
+        provenance = {"commit": "a" * 40, "run_id": "7", "attempt": 1, "schema_version": 1,
+                      "reason": None, "widened": []}
+        plan = {"baseline_packages": ["full", "partial"], "packages": [],
+                "tests": [case("partial", "changed")], "coverage_graph": provenance}
+        result = selection.resolve(plan, inventory())
+        self.assertIsNone(result["fallback"])
+        self.assertEqual(result["partial_packages"], ["partial"])
+        self.assertIn("test(=changed)", result["filters"]["partial"])
+        # Identity mismatches widen to the recorded baseline with a diagnostic.
+        plan["tests"] = [case("partial", "missing")]
+        result = selection.resolve(plan, inventory())
+        self.assertEqual(result["complete_packages"], ["full", "partial"])
         self.assertIsNotNone(result["fallback"])
 
     def test_reports_exclude_partial_unexecuted_and_dependency_sources(self):

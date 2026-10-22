@@ -3,7 +3,6 @@ mod common;
 
 extern crate mfn_code as _;
 extern crate mfn_core as _;
-extern crate mfn_lsp as _;
 extern crate mfn_test_affected as _;
 
 use common::*;
@@ -20,7 +19,21 @@ use std::{
     process::Command,
 };
 
-fn definition(root: &Path) -> Value {
+/// Mirrors the plan-side platform-independent toolchain identity
+/// (`rustc -vV` release and commit hash; the host line is irrelevant).
+fn graph_toolchain_identity(verbose: &str) -> String {
+    let release = verbose
+        .lines()
+        .find_map(|line| line.strip_prefix("release: "))
+        .unwrap();
+    let commit = verbose
+        .lines()
+        .find_map(|line| line.strip_prefix("commit-hash: "))
+        .unwrap();
+    format!("rustc {release} ({commit})")
+}
+
+fn definition() -> Value {
     let package = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut value: Value = serde_json::from_str(
         &fs::read_to_string(package.join("../../flows/test-affected.json")).unwrap(),
@@ -44,16 +57,6 @@ fn definition(root: &Path) -> Value {
         package.join("../../run-tests.py").canonicalize().unwrap(),
         "-"
     ]);
-    let analyzer = value["nodes"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|node| node["kind"] == "lsp.analyze")
-        .unwrap();
-    analyzer["config"] = json!({
-        "command":"python3", "profile":"standard", "extensions":["rs"], "deadline_ms":5000,
-        "args":[package.join("../lsp/tests/fixtures/server.py").canonicalize().unwrap(), "normal", root.join("target/server")]
-    });
     value
 }
 
@@ -63,13 +66,15 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
     let root = directory.path();
     write(root, "core/src/lib.rs", &SOURCE.replace("1, 1", "2, 2"));
     let head = commit(root);
-    let value = definition(root);
+    let value = definition();
     let registry = NodeRegistry::from_inventory().unwrap();
     let workflow: WorkflowDefinition = serde_json::from_value(value.clone()).unwrap();
     let compiled = compile_definition(&workflow, &registry).unwrap();
     let prepared = instantiate_stream(&compiled, &registry).unwrap();
-    assert!(!root.join("target/server.pid").exists());
-    let arguments = json!({"params.repository":root,"params.mode":"snapshot","params.base":base,"params.head":head});
+    let arguments = json!({"params.repository":root,"params.mode":"snapshot","params.base":base,"params.head":head,
+        // Pin offline: without an explicit argument this parameter binds
+        // GITHUB_REPOSITORY from the environment and would reach the real API.
+        "params.github_repository":""});
     let instance = FlowRuntime::default()
         .start_stream(
             prepared,
@@ -84,23 +89,10 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
         serde_json::from_value(serde_json::to_value(&output.outputs["plan"]).unwrap()).unwrap();
     assert!(instance.recv().unwrap().is_none());
     let summary = instance.join().unwrap();
-    assert_eq!(summary.emitted_messages, 1);
-    assert_eq!(memory.tests.len(), 1);
-    assert_eq!(memory.tests[0].name, "tests::changed");
-    assert_eq!(memory.analysis_status, mfn_lsp::Status::Analyzed);
-
-    let mut bypass = value.clone();
-    let plan = bypass["nodes"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|node| node["id"] == "plan")
-        .unwrap();
-    plan["inputs"]["context"]["from"]["node"] = json!("changes");
-    let workflow: WorkflowDefinition = serde_json::from_value(bypass).unwrap();
-    let result =
-        compile_definition(&workflow, &registry).and_then(|p| instantiate_stream(&p, &registry));
-    assert!(result.is_err());
+    // The planning path is Task-only: no stream producer emits messages.
+    assert_eq!(summary.emitted_messages, 0);
+    assert!(memory.tests.is_empty());
+    assert_eq!(memory.packages, ["sample-app", "sample-core"]);
 
     let flow = root.join("target/test.flow.json");
     fs::write(&flow, serde_json::to_vec_pretty(&value).unwrap()).unwrap();
@@ -110,7 +102,6 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
         .join("../../../../crates")
         .canonicalize()
         .unwrap();
-    let prior_requests = fs::read(root.join("target/server")).unwrap();
     compile_project_with_options(
         &CompileRequest {
             definition: &flow,
@@ -122,10 +113,6 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
         &RunnerOptions { telemetry: false },
     )
     .unwrap();
-    assert_eq!(
-        fs::read(root.join("target/server")).unwrap(),
-        prior_requests
-    );
     let output = Command::new(&executable)
         .current_dir(std::env::temp_dir())
         .env("GITHUB_ACTIONS", "true")
@@ -151,7 +138,7 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
     let mut execute = arguments.clone();
     execute["params.run"] = json!(true);
     let memory_execution = memory_result(&value, &execute).unwrap();
-    assert_eq!(memory_execution["execution"]["selected_count"], json!(1));
+    assert_eq!(memory_execution["execution"]["selected_count"], json!(4));
     assert_eq!(memory_execution["execution"]["executed"], json!(true));
     for empty in [false, true] {
         let mut execute = execute.clone();
@@ -172,36 +159,9 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
         assert_eq!(report["execution"]["executed"], json!(!empty));
         assert_eq!(
             report["execution"]["selected_count"],
-            json!(if empty { 0 } else { 1 })
+            json!(if empty { 0 } else { 4 })
         );
     }
-
-    // Even an unavailable server must not run when the chosen extension has no inputs.
-    let mut empty = value;
-    let analyzer = empty["nodes"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|node| node["kind"] == "lsp.analyze")
-        .unwrap();
-    analyzer["config"] = json!({"command":"/missing-language-server", "extensions":["unused"]});
-    let compiled = compile_definition(&serde_json::from_value(empty).unwrap(), &registry).unwrap();
-    let instance = FlowRuntime::default()
-        .start_stream(
-            instantiate_stream(&compiled, &registry).unwrap(),
-            StreamOptions {
-                arguments: WorkflowArguments::try_from(arguments.clone()).unwrap(),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-    let output = instance.recv().unwrap().unwrap();
-    let plan: TestPlan =
-        serde_json::from_value(serde_json::to_value(&output.outputs["plan"]).unwrap()).unwrap();
-    assert_eq!(plan.analysis_status, mfn_lsp::Status::NotRequested);
-    assert_eq!(plan.tests, memory.tests);
-    assert!(instance.recv().unwrap().is_none());
-    instance.join().unwrap();
 
     write(root, "core/src/lib.rs", &SOURCE.replace("1, 1", "2, 3"));
     execute["params.head"] = json!(commit(root));
@@ -312,7 +272,7 @@ impl Drop for GithubFixture {
 }
 fn configure_github(nodes: &mut Value, base: &str) {
     for node in nodes.as_array_mut().unwrap() {
-        if node["kind"] == "github.read" {
+        if node["kind"] == "github.read" || node["kind"] == "github.download" {
             node["config"]["api_base"] = json!(base);
         }
         if let Some(body) = node.get_mut("loop").and_then(|v| v.get_mut("body")) {
@@ -360,7 +320,8 @@ fn memory_result(definition: &Value, arguments: &Value) -> Result<Value, String>
     let finished = instance.join();
     match (result, finished) {
         (Ok(Some(message)), Ok(summary)) => {
-            assert_eq!(summary.emitted_messages, 1);
+            // The planning path is Task-only: no stream producer emits messages.
+            assert_eq!(summary.emitted_messages, 0);
             Ok(serde_json::to_value(message.outputs).unwrap())
         }
         (result, finished) => Err(format!("{result:?}; {finished:?}")),
@@ -433,6 +394,56 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
     .map(|key| (key.to_owned(), json!(std::env::var(key).ok())))
     .collect();
     let signature = json!({"policy":"flow-pr-v3","coverage_target":95.0,"toolchain":toolchain,"features":"all","profile":"ci","target":std::env::var("CARGO_BUILD_TARGET").ok(),"environment":environment});
+    // The coverage-graph signature omits policy fields and records only the
+    // environment variables that are set, matching scripts/run-cov.sh.
+    let graph_signature = {
+        let environment: serde_json::Map<_, _> = [
+            "RUSTFLAGS",
+            "CARGO_ENCODED_RUSTFLAGS",
+            "CARGO_INCREMENTAL",
+            "CARGO_PROFILE_DEV_DEBUG",
+            "CARGO_PROFILE_TEST_DEBUG",
+        ]
+        .into_iter()
+        .filter_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| (name.to_owned(), json!(value)))
+        })
+        .collect();
+        json!({"environment":environment,"features":"all","profile":"ci","target":std::env::var("CARGO_BUILD_TARGET").ok(),"toolchain":graph_toolchain_identity(&toolchain)})
+            .to_string()
+    };
+    let graphs_dir = root.join("target/graphs");
+    let build_graph = |name: &str, commit: &str, run: u64, hits: &[(u32, u32)]| {
+        use mfn_test_affected::graph::{CoverageManifest, CoveredTest, GraphWriter};
+        let lcov_dir = graphs_dir.join(format!("lcov-{name}"));
+        fs::create_dir_all(&lcov_dir).unwrap();
+        let mut export = "SF:core/src/lib.rs\n".to_string();
+        for (line, count) in hits {
+            export.push_str(&format!("DA:{line},{count}\n"));
+        }
+        export.push_str("end_of_record\n");
+        let lcov = lcov_dir.join("stable.lcov");
+        fs::write(&lcov, export).unwrap();
+        let manifest = CoverageManifest {
+            commit_sha: commit.into(),
+            run_id: run.to_string(),
+            attempt: 1,
+            signature: graph_signature.clone(),
+            tests: vec![CoveredTest {
+                package: "sample-core".into(),
+                binary: "sample-core".into(),
+                name: "tests::stable".into(),
+                lcov,
+            }],
+        };
+        let path = graphs_dir.join(format!("graph-{name}.sqlite"));
+        let mut writer = GraphWriter::create(&path).unwrap();
+        writer.index(&manifest, root).unwrap();
+        path
+    };
+    let graph_metadata = |commit: &str, run: u64| json!({"commit_sha":commit,"run_id":run.to_string(),"attempt":1,"schema_version":1,"signature":graph_signature});
     let record = |id: u64, head: &str, merge: &str| {
         let tree =
             git::command(origin, "git", &["rev-parse", &format!("{merge}^{{tree}}")]).unwrap();
@@ -441,9 +452,13 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
     let current =
         json!({"id":99,"run_attempt":1,"workflow_id":7,"head_sha":head,"event":"pull_request"});
     let runs = json!([{"id":11,"run_attempt":1,"workflow_id":7,"head_sha":prior,"status":"completed","conclusion":"success"},{"id":17,"run_attempt":1,"workflow_id":7,"head_sha":nearest,"status":"completed","conclusion":"success"}]);
-    let initial = json!({"current":current,"pull":{"head":{"sha":head},"merge_commit_sha":tested},"runs":runs,"records":{"11":record(11,&prior,&older_merge),"17":record(17,&nearest,&newer_merge)}});
+    let initial = json!({"current":current,"pull":{"head":{"sha":head},"merge_commit_sha":tested},"runs":runs,"records":{"11":record(11,&prior,&older_merge),"17":record(17,&nearest,&newer_merge)},
+        "graph_runs":[{"id":23,"run_attempt":1,"head_sha":base,"status":"completed","conclusion":"success"},{"id":29,"run_attempt":1,"head_sha":prior,"status":"completed","conclusion":"success"}],
+        // The default graphs cover only line 2 of core/src/lib.rs; the changed
+        // line 1 stays uncovered and widens conservatively to package scope.
+        "graphs":{"23":{"sqlite":build_graph("base",&base,23,&[(2,1)]),"metadata":graph_metadata(&base,23)},"29":{"sqlite":build_graph("prior",&prior,29,&[(2,1)]),"metadata":graph_metadata(&prior,29)}}});
     let server = GithubFixture::new(&initial);
-    let mut flow = definition(root);
+    let mut flow = definition();
     configure_github(&mut flow["nodes"], &server.base);
     let args = json!({"params.ci":true,"params.repository":root,"params.github_repository":"fixture/repo","params.run_id":99,"params.attempt":1,"params.pr":1,"params.branch":"topic","params.event":"pull_request","params.expected_head":head,"params.expected_merge":null,"params.profile":"ci","params.toolchain":toolchain.trim_end(),"params.token":"fixture-token","params.cumulative":false});
     let path = root.join("target/ci.flow.json");
@@ -477,6 +492,11 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
         "explicit",
         "manual",
         "invalid_current",
+        "graph_absent",
+        "graph_incompatible",
+        "graph_foreign",
+        "graph_narrows",
+        "graph_lagging",
         "ci_execution",
         "invalid_record",
         "failed_run",
@@ -497,6 +517,12 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
         let (scope, packages, expected_base) = match case {
             "local" => {
                 args.as_object_mut().unwrap().remove("params.ci");
+                // Local planning stays offline unless a repository identity is
+                // explicitly supplied for coverage graph acquisition. Pin the
+                // identity explicitly: the parameter binds GITHUB_REPOSITORY
+                // from the environment when the argument is absent, which
+                // differs between runners.
+                args["params.github_repository"] = json!("");
                 args["params.mode"] = json!("snapshot");
                 args["params.base"] = json!(base);
                 args["params.head"] = json!(head);
@@ -642,6 +668,55 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
                     older_merge.as_str(),
                 )
             }
+            "graph_absent" => {
+                state["graph_runs"] = json!([]);
+                (
+                    Some("incremental"),
+                    vec!["sample-app"],
+                    newer_merge.as_str(),
+                )
+            }
+            "graph_incompatible" => {
+                for run in ["23", "29"] {
+                    state["graphs"][run]["metadata"]["schema_version"] = json!(999);
+                }
+                (
+                    Some("incremental"),
+                    vec!["sample-app"],
+                    newer_merge.as_str(),
+                )
+            }
+            "graph_foreign" => {
+                // The nearest run's artifact binds a foreign commit; the
+                // search advances to the older eligible ancestor.
+                state["graphs"]["29"]["metadata"]["commit_sha"] = json!(base);
+                (
+                    Some("incremental"),
+                    vec!["sample-app"],
+                    newer_merge.as_str(),
+                )
+            }
+            "graph_narrows" => {
+                args["params.cumulative"] = json!(true);
+                // The graph at the comparison base covers the changed core
+                // line, narrowing the package to the covering test; the app
+                // change is absent from the graph and widens to its package.
+                state["graphs"]["23"]["sqlite"] =
+                    json!(build_graph("narrowing", &base, 23, &[(1, 1)]));
+                (Some("cumulative"), vec!["sample-app"], base.as_str())
+            }
+            "graph_lagging" => {
+                // The nearest graph predates the comparison base, which
+                // changed core/src/lib.rs since; the file widens to package
+                // scope even though the graph covers that line.
+                state["records"]["17"]["signature"]["policy"] = json!("old-policy");
+                state["graphs"].as_object_mut().unwrap().remove("29");
+                (
+                    Some("incremental"),
+                    vec!["sample-app", "sample-core"],
+                    older_merge.as_str(),
+                )
+            }
             "ci_execution" => {
                 args["params.run"] = json!(true);
                 (None, vec![], "")
@@ -656,7 +731,11 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
                 state["current"]["event"] = json!("workflow_dispatch");
                 (None, vec![], "")
             }
-            _ => (Some("incremental"), vec![], newer_merge.as_str()),
+            _ => (
+                Some("incremental"),
+                vec!["sample-app"],
+                newer_merge.as_str(),
+            ),
         };
         server.configure(&state);
         let memory = memory_result(&flow, &args);
@@ -695,23 +774,96 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
         assert!(generated.get("execution").is_none(), "{case}");
         assert_eq!(generated["plan"]["packages"], json!(packages), "{case}");
         assert_eq!(generated["plan"]["base"], expected_base, "{case}");
-        if case == "incremental" {
+        let graph = &generated["plan"]["coverage_graph"];
+        match case {
+            "local" => {
+                assert_eq!(
+                    graph["reason"],
+                    "No GitHub repository identity supplied for coverage graph acquisition",
+                    "{case}"
+                );
+                assert!(graph["commit"].is_null(), "{case}");
+            }
+            "graph_absent" => {
+                assert_eq!(
+                    graph["reason"], "No successful default-branch coverage run found",
+                    "{case}"
+                );
+            }
+            "graph_incompatible" => {
+                assert_eq!(
+                    graph["reason"],
+                    "No compatible coverage graph artifact on any eligible default-branch ancestor",
+                    "{case}"
+                );
+            }
+            _ => {
+                let (graph_commit, graph_run) =
+                    if matches!(case, "graph_foreign" | "graph_lagging") || expected_base == base {
+                        (base.as_str(), "23")
+                    } else {
+                        (prior.as_str(), "29")
+                    };
+                assert_eq!(graph["commit"], graph_commit, "{case}");
+                assert_eq!(graph["run_id"], graph_run, "{case}");
+                assert_eq!(graph["attempt"], 1, "{case}");
+                assert_eq!(graph["schema_version"], 1, "{case}");
+                assert!(graph["reason"].is_null(), "{case}");
+                // The default graphs know only core/src/lib.rs line 2, so the
+                // app change always widens as absent and the core change as
+                // uncovered, lagging, or narrowed.
+                let widened = &graph["widened"];
+                let expected: Vec<(&str, &str, &str)> = match case {
+                    "graph_lagging" => vec![
+                        (
+                            "app/src/lib.rs",
+                            "sample-app",
+                            "absent from the coverage graph",
+                        ),
+                        (
+                            "core/src/lib.rs",
+                            "sample-core",
+                            "changed between the coverage graph commit",
+                        ),
+                    ],
+                    _ if expected_base == newer_merge || case == "graph_narrows" => {
+                        vec![(
+                            "app/src/lib.rs",
+                            "sample-app",
+                            "absent from the coverage graph",
+                        )]
+                    }
+                    _ => vec![
+                        (
+                            "app/src/lib.rs",
+                            "sample-app",
+                            "absent from the coverage graph",
+                        ),
+                        ("core/src/lib.rs", "sample-core", "no test covers"),
+                    ],
+                };
+                assert_eq!(widened.as_array().unwrap().len(), expected.len(), "{case}");
+                for (entry, (file, package, reason)) in
+                    widened.as_array().unwrap().iter().zip(expected)
+                {
+                    assert_eq!(entry["file"], file, "{case}");
+                    assert_eq!(entry["package"], package, "{case}");
+                    assert!(entry["reason"].as_str().unwrap().contains(reason), "{case}");
+                }
+            }
+        }
+        if case == "graph_narrows" {
             assert_eq!(
                 generated["plan"]["tests"],
-                json!([{"package":"sample-app","binary":"sample-app","name":"tests::changed"}])
+                json!([{"package":"sample-core","binary":"sample-core","name":"tests::stable"}]),
+                "{case}"
             );
         } else {
-            assert!(generated["plan"]["tests"].as_array().unwrap().is_empty());
+            assert!(
+                generated["plan"]["tests"].as_array().unwrap().is_empty(),
+                "{case}"
+            );
         }
-        assert_eq!(
-            generated["plan"]["analysis_status"],
-            if case == "local" {
-                "not_requested"
-            } else {
-                "analyzed"
-            },
-            "{case}"
-        );
         if let Some(scope) = scope {
             assert_eq!(
                 generated["validation"]["comparison"]["scope"], scope,
@@ -725,6 +877,10 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
         assert_eq!(generated["validation"], memory["validation"], "{case}");
         assert_eq!(
             generated["plan"]["packages"], memory["plan"]["packages"],
+            "{case}"
+        );
+        assert_eq!(
+            generated["plan"]["coverage_graph"], memory["plan"]["coverage_graph"],
             "{case}"
         );
         assert!(!String::from_utf8_lossy(&result.stdout).contains("fixture-token"));
@@ -773,7 +929,9 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
             assert!(!server.requests().contains("/runs/17/artifacts"));
         }
         if case == "explicit" || case == "manual" {
-            assert!(!server.requests().contains("/workflows/"));
+            // The baseline record channel stays idle; coverage graph
+            // acquisition is independent of the baseline search policy.
+            assert!(!server.requests().contains("branch=topic"), "{case}");
         }
     }
     assert_eq!(git::command(root, "git", &["show-ref"]).unwrap(), refs);

@@ -33,10 +33,7 @@ class CoverageTests(unittest.TestCase):
                 self.assertLess(workflow.index("name: Prune coverage build cache"),
                                 workflow.index("name: Upload coverage artifact"))
                 for name, body in steps:
-                    suffix = " --run-ignored all" if name == "mfn-lsp" else ""
-                    self.assertIn(f"scripts/run-cov.sh --test-package {name}{suffix}\n", body)
-                    if name == "mfn-lsp":
-                        self.assertIn("env MF_LSP_SMOKE_SERVER=rust-analyzer", body)
+                    self.assertIn(f"scripts/run-cov.sh --test-package {name}\n", body)
                     if filename == "CI.yaml":
                         self.assertIn(
                             "if: steps.selection.outputs.scoped != 'true' || "

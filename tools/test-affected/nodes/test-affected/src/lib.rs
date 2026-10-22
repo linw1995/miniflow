@@ -1,11 +1,11 @@
 //! Git facts and conservative test plans for repository development.
 
-mod classify;
 mod error;
 mod evidence;
 pub mod git;
 mod git_evidence;
 mod github;
+pub mod graph;
 pub mod model;
 mod plan;
 #[cfg(unix)]
@@ -28,7 +28,6 @@ use std::path::Path;
 #[serde(default, deny_unknown_fields)]
 pub struct GitConfig {
     pub comparison_mode: ComparisonMode,
-    pub initialization_options: Value,
 }
 
 #[derive(NodeValue)]
@@ -45,9 +44,14 @@ pub struct GitNode {
     pub config: GitConfig,
 }
 
+#[derive(NodeValue)]
+pub struct GitOutput {
+    pub context: ValueRef,
+}
+
 impl TypedTaskNode for GitNode {
     type Input = GitInput;
-    type Output = mfn_lsp::AnalyzeInput;
+    type Output = GitOutput;
 
     fn execute(
         &self,
@@ -83,9 +87,7 @@ impl TypedTaskNode for GitNode {
                 mode: self.config.comparison_mode,
                 base: input.base,
                 head: input.head.unwrap_or_else(|| "HEAD".into()),
-                analyze: true,
                 require_checkout: false,
-                initialization_options: None,
                 options: input
                     .options
                     .map(|value| {
@@ -111,27 +113,16 @@ impl TypedTaskNode for GitNode {
                 Some(mf_runtime::Nullable::Value(path)) => Some(Path::new(path)),
                 _ => None,
             },
-            normalized
-                .initialization_options
-                .clone()
-                .unwrap_or_else(|| self.config.initialization_options.clone()),
         )?;
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());
         }
-        let request = ValueRef::from(serde_json::to_value(&comparison.request).context(
-            error::JsonSnafu {
-                action: "encode analysis request",
-            },
-        )?)
-        .inherit_secrets(sensitivity.iter());
-        let comparison = serde_json::to_value(comparison)
+        let comparison = serde_json::to_value(&comparison)
             .context(error::JsonSnafu {
                 action: "encode Git comparison",
             })?
             .into();
-        Ok(mfn_lsp::AnalyzeInput {
-            request,
+        Ok(GitOutput {
             context: ValueRef::object([
                 ("comparison".into(), comparison),
                 (
@@ -158,10 +149,15 @@ pub struct PlanOutput {
     pub execution: ValueRef,
 }
 
+#[derive(NodeValue)]
+pub struct PlanInput {
+    pub context: ValueRef,
+}
+
 pub struct PlanNode;
 
 impl TypedTaskNode for PlanNode {
-    type Input = mfn_lsp::AnalyzeOutput;
+    type Input = PlanInput;
     type Output = PlanOutput;
 
     fn execute(
@@ -180,23 +176,35 @@ impl TypedTaskNode for PlanNode {
         .context(error::JsonSnafu {
             action: "decode Git comparison",
         })?;
-        let options = serde_json::from_value(
-            serde_json::to_value(&input.context["options"]).context(error::JsonSnafu {
-                action: "decode plan option value",
-            })?,
-        )
-        .context(error::JsonSnafu {
-            action: "decode plan options",
-        })?;
-        let outcome = serde_json::from_value(serde_json::to_value(&input.outcome).context(
-            error::JsonSnafu {
-                action: "decode analysis value",
-            },
-        )?)
-        .context(error::JsonSnafu {
-            action: "decode analysis outcome",
-        })?;
-        let plan = make_plan(&comparison, &outcome, &options)?;
+        let options: crate::model::PlanOptions = {
+            let mut options: crate::model::PlanOptions = serde_json::from_value(
+                serde_json::to_value(&input.context["options"]).context(error::JsonSnafu {
+                    action: "decode plan option value",
+                })?,
+            )
+            .context(error::JsonSnafu {
+                action: "decode plan options",
+            })?;
+            let graph = input
+                .context
+                .as_object()
+                .and_then(|context| context.get("coverage_graph"))
+                .filter(|value| !value.is_null());
+            if let Some(graph) = graph {
+                options.coverage_graph = Some(
+                    serde_json::from_value(serde_json::to_value(graph).context(
+                        error::JsonSnafu {
+                            action: "encode coverage graph descriptor",
+                        },
+                    )?)
+                    .context(error::JsonSnafu {
+                        action: "decode coverage graph descriptor",
+                    })?,
+                );
+            }
+            options
+        };
+        let plan = make_plan(&comparison, &options)?;
         if let Some(error) = context.cancellation().failure() {
             return Err(error.into());
         }
@@ -218,7 +226,7 @@ impl TypedTaskNode for PlanNode {
             plan: ValueRef::from(serde_json::to_value(plan).context(error::JsonSnafu {
                 action: "encode test plan",
             })?)
-            .inherit_secrets([&input.context, &input.outcome]),
+            .inherit_secrets([&input.context]),
         }
         .into())
     }
