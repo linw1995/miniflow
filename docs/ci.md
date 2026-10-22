@@ -10,7 +10,8 @@ merge's actual first parent. Stale base metadata from the event is never used.
 All analysis, compilation, and execution use the current merged tree. The selection
 starts with changed packages and every declared reverse dependency. CI enables
 `lsp.analyze` and permits exact-case refinement for verified isolated test-body changes.
-Production changes retain package scope. Known repository
+Production changes retain package scope unless a compatible coverage graph narrows them
+to exact test selectors. Known repository
 configuration is deferred to full main/nightly verification; unknown inputs or
 analyzer failures select the workspace. An empty plan skips Rust tests and reports
 coverage as not applicable, while lint and build checks still apply.
@@ -23,6 +24,21 @@ or unpublishable validation cannot advance the reusable baseline.
 
 Pushes to `main` and manual dispatch without PR inputs run complete Linux coverage.
 Nightly retains complete Linux/macOS verification. Test or report failures fail CI.
+
+A successful default-branch push coverage run also collects per-test line coverage
+(a nextest run-wrapper gives each test its own LLVM profile) and indexes it into an
+immutable, versioned SQLite coverage graph mapping workspace line intervals to the
+distinct covering tests. Each graph binds its commit, producing run and attempt,
+schema version, and execution signature (pinned toolchain, features, target,
+profile, and coverage-relevant environment). Publication rides the existing
+artifact pipeline as `coverage-graph-<run>-<attempt>` (`graph.sqlite` plus
+`graph.metadata.json`) and happens only when the full default-branch coverage
+completes successfully; PR, dispatch, and local runs never collect or publish a
+graph. A full-suite graph measures about 30 MB per commit; every main run
+regenerates it, only the latest compatible ancestor matters to consumers, and the
+standard Actions artifact retention applies. A local full-coverage run opts into
+the same collection with `scripts/run-cov.sh --coverage-graph <path>`, which
+cannot combine with `--affected-plan` and never publishes.
 
 Formatting, package builds, Clippy, repository hooks, and CI script tests
 also run in CI. Main additionally builds and checks the macOS package;
@@ -199,7 +215,8 @@ to use the coverage pipeline rather than this local nextest consumer.
 Use `--params.mode commit --params.head HEAD` for a first-parent comparison, including
 root commits. Use `--params.mode merge-base --params.base origin/main --params.head HEAD`
 for a branch comparison, or `snapshot` to compare supplied local revisions directly.
-Local modes do not query GitHub or fetch refs. Worktree mode creates an immutable runnable
+Local modes do not fetch refs and query GitHub only for coverage graph acquisition when
+a repository identity is supplied. Worktree mode creates an immutable runnable
 snapshot; committed comparisons do not include uncommitted edits. CI requires a clean
 checkout of the actual tested merge.
 
@@ -208,6 +225,23 @@ The output contains `plan` and optional CI `validation` provenance. Plans report
 `ignored_files`, and source/configuration identity. `packages` precision skips semantic
 LSP work. `tests` precision may narrow verified isolated test changes. The consumer handles
 both scopes and never turns an empty plan into unfiltered nextest execution.
+
+With `tests` precision, a compatible coverage graph can also narrow production changes
+below package scope. Planning resolves the nearest compatible default-branch ancestor
+graph of the comparison base through the same lazy, bounded, ancestry-ordered artifact
+acquisition used for validation records, then maps each changed base-side line range to
+the exact tests that covered it. Test-body isolation takes precedence; the graph is never
+consulted for isolated files. Files that changed between the graph commit and the
+comparison base, changed ranges with no covering test, and files absent from the graph
+widen back to package plus reverse-dependency scope with per-file reasons. The plan
+records graph provenance (commit, run, attempt, schema version) and every widening under
+`coverage_graph`. An unavailable, incompatible, or malformed graph degrades to
+package-level selection with a recorded reason and never forces full-workspace fallback;
+unknown inputs and analyzer failures still do. Graph-derived selectors flow through the
+same exact-filter consumers as isolated test selections, so identity mismatches against
+the runnable inventory widen to the recorded baseline. Local planning acquires graphs only
+when `--params.github_repository` is supplied (authenticated through `GH_TOKEN`), and
+stays offline otherwise.
 
 The coverage script accepts whole packages and exact test identities and executes its
 current checkout; it does not implement the snapshot consumer. To reproduce a saved
