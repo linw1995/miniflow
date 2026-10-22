@@ -1,21 +1,18 @@
 use diesel::{Connection, connection::SimpleConnection};
 use mf_chat::contract::{CompletionState, ConversationExit, MAX_RECOVERY_BYTES, TurnExit};
-use mf_chat::{ChatDatabase, ConversationResult, ModelProfile};
+use mf_chat::{ChatDatabase, ConversationResult, ModelIdentity};
 use mf_runtime::NodeValue;
 use serde_json::json;
 
 fn begin(database: &ChatDatabase) -> mf_chat::Invocation {
     let session = database.create_session("default", None, None).unwrap();
-    let profile = ModelProfile::new("default", json!({"model":"fixture-model"})).unwrap();
+    let profile = ModelIdentity {
+        profile: "default".into(),
+        model: Some("fixture-model".into()),
+    };
     let invocation = mf_chat::Invocation::new(&session.id);
     let begun = database
-        .begin_turn_with_invocation(
-            invocation.clone(),
-            "prompt",
-            profile.identity().clone(),
-            None,
-            1024,
-        )
+        .begin_turn_with_invocation(invocation.clone(), "prompt", profile.clone(), None, 1024)
         .unwrap();
     assert_eq!(begun.invocation, invocation);
     invocation
@@ -411,15 +408,12 @@ fn returned_history_cannot_rewrite_saved_message_metadata() {
     let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
     let first = begin(&database);
     database.complete_turn(first.clone(), reply()).unwrap();
-    let profile = ModelProfile::new("default", json!({"model":"fixture-model"})).unwrap();
+    let profile = ModelIdentity {
+        profile: "default".into(),
+        model: Some("fixture-model".into()),
+    };
     let second = database
-        .begin_turn(
-            &first.session_id,
-            "next",
-            profile.identity().clone(),
-            None,
-            1024,
-        )
+        .begin_turn(&first.session_id, "next", profile.clone(), None, 1024)
         .unwrap();
     assert_eq!(
         second.request.history.unwrap()[1].metadata,

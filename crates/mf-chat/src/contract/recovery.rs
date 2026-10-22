@@ -2,7 +2,7 @@
 
 use super::{InvocationState, TurnExit};
 use crate::{ChatDatabase, ChatError, Completion, Invocation, error::*, turn};
-use snafu::{IntoError, ResultExt, ensure};
+use snafu::{IntoError, ensure};
 
 pub const MAX_RECOVERY_BYTES: usize = 16 * 1024 * 1024;
 
@@ -12,18 +12,6 @@ enum Delivered {
         error: String,
         usages: Vec<mfn_llm::CallUsage>,
     },
-}
-
-fn decode_result(bytes: &[u8]) -> Result<crate::ConversationResult, ChatError> {
-    ensure!(
-        bytes.len() <= MAX_RECOVERY_BYTES,
-        RecoveryTooLargeSnafu {
-            limit: MAX_RECOVERY_BYTES
-        }
-    );
-    let values = mf_runtime::decode_unique_json(bytes).context(JsonSnafu)?;
-    let result = crate::ConversationResult::decode(values)?;
-    Ok(result)
 }
 
 fn delivered(
@@ -78,7 +66,7 @@ impl ChatDatabase {
     ) -> Result<ReconciledCompletion, ChatError> {
         self.reconcile_result(
             exit.invocation,
-            exit.stdout.map(decode_result),
+            exit.stdout.map(crate::ConversationResult::from_json),
             exit.outcome,
             exit.summary,
         )

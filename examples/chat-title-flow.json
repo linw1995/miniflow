@@ -1,0 +1,380 @@
+{
+  "version": "2026-10-19",
+  "dependencies": {
+    "core": {
+      "package": "mfn-core",
+      "path": "../crates/builtin-nodes/core"
+    },
+    "code": {
+      "package": "mfn-code",
+      "path": "../crates/builtin-nodes/code"
+    },
+    "llm": {
+      "package": "mfn-llm",
+      "path": "../crates/builtin-nodes/llm"
+    }
+  },
+  "nodes": [
+    {
+      "id": "input",
+      "kind": "builtin.parameters",
+      "config": {
+        "parameters": {
+          "prompt": {
+            "type": "string"
+          },
+          "system": {
+            "type": "string",
+            "default": ""
+          },
+          "history": {
+            "type": {
+              "list": "object"
+            },
+            "default": []
+          },
+          "context": {
+            "type": "object",
+            "default": {
+              "title": {
+                "source": "provisional",
+                "revision": 0,
+                "attempted": false,
+                "enabled": true
+              }
+            }
+          },
+          "model": {
+            "type": "string",
+            "default": "your-model",
+            "secret": false
+          },
+          "base_url": {
+            "type": "string",
+            "default": "https://api.openai.com/v1",
+            "secret": false
+          },
+          "api_key": {
+            "type": "string",
+            "env": "MODEL_API_KEY"
+          }
+        }
+      }
+    },
+    {
+      "id": "model",
+      "kind": "builtin.llm",
+      "config": {
+        "model": {
+          "$ref": "input.model"
+        },
+        "capture_errors": true,
+        "attribution": {
+          "purpose": "conversation",
+          "profile": "default"
+        },
+        "base_url": {
+          "$ref": "input.base_url"
+        },
+        "api_key": {
+          "$ref": "input.api_key"
+        }
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "input",
+            "port": "prompt"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "input",
+            "port": "system"
+          }
+        },
+        "history": {
+          "from": {
+            "node": "input",
+            "port": "history"
+          }
+        }
+      }
+    },
+    {
+      "id": "eligible",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "context": "object",
+          "status": "string"
+        },
+        "code": {
+          "value": "status == 'succeeded' && context.title.enabled && context.title.source == 'provisional' && !context.title.attempted"
+        }
+      },
+      "inputs": {
+        "context": {
+          "from": {
+            "node": "input",
+            "port": "context"
+          }
+        },
+        "status": {
+          "from": {
+            "node": "model",
+            "port": "status"
+          }
+        }
+      }
+    },
+    {
+      "id": "title_route",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "yes",
+            "condition": {
+              "source": {
+                "output": "eligible.value",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": true
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "title_prompt",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "prompt": "string",
+          "text": "string"
+        },
+        "code": {
+          "value": "'user: ' + prompt + '\\nassistant: ' + text"
+        }
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "input",
+            "port": "prompt"
+          }
+        },
+        "text": {
+          "from": {
+            "node": "model",
+            "port": "text"
+          }
+        }
+      }
+    },
+    {
+      "id": "title_system",
+      "kind": "builtin.constant",
+      "config": {
+        "value": "Summarize this conversation as a concise single-line title in its language. Return only the title, at most 120 characters."
+      }
+    },
+    {
+      "id": "title_model",
+      "kind": "builtin.llm",
+      "config": {
+        "model": {
+          "$ref": "input.model"
+        },
+        "capture_errors": true,
+        "attribution": {
+          "purpose": "title",
+          "profile": "default"
+        },
+        "base_url": {
+          "$ref": "input.base_url"
+        },
+        "api_key": {
+          "$ref": "input.api_key"
+        }
+      },
+      "inputs": {
+        "prompt": {
+          "from": {
+            "node": "title_prompt",
+            "port": "value"
+          }
+        },
+        "system": {
+          "from": {
+            "node": "title_system",
+            "port": "value"
+          }
+        }
+      }
+    },
+    {
+      "id": "combined_usages",
+      "kind": "builtin.code",
+      "config": {
+        "language": "cel",
+        "inputs": {
+          "left": {
+            "list": "object"
+          },
+          "right": {
+            "list": "object"
+          }
+        },
+        "code": {
+          "value": "left + right"
+        }
+      },
+      "inputs": {
+        "left": {
+          "from": {
+            "node": "model",
+            "port": "usages"
+          }
+        },
+        "right": {
+          "from": {
+            "node": "title_model",
+            "port": "usages"
+          }
+        }
+      }
+    },
+    {
+      "id": "conversation_usages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "model",
+            "port": "usages"
+          }
+        }
+      }
+    },
+    {
+      "id": "usages",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "exclusive": [
+            {
+              "node": "combined_usages",
+              "port": "value"
+            },
+            {
+              "node": "conversation_usages",
+              "port": "value"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "title_success",
+      "kind": "builtin.if_else",
+      "config": {
+        "branches": [
+          {
+            "id": "yes",
+            "condition": {
+              "source": {
+                "output": "title_model.status",
+                "path": ""
+              },
+              "operator": "eq",
+              "value": "succeeded"
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "title",
+      "kind": "builtin.identity",
+      "inputs": {
+        "input": {
+          "from": {
+            "node": "title_model",
+            "port": "text"
+          }
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "from_node": "eligible",
+      "to_node": "title_route"
+    },
+    {
+      "from_node": "title_route",
+      "to_node": "title_prompt",
+      "from_output": "yes"
+    },
+    {
+      "from_node": "title_route",
+      "to_node": "conversation_usages",
+      "from_output": "else"
+    },
+    {
+      "from_node": "title_model",
+      "to_node": "title_success"
+    },
+    {
+      "from_node": "title_success",
+      "to_node": "title",
+      "from_output": "yes"
+    }
+  ],
+  "outputs": [
+    {
+      "name": "status",
+      "node": "model",
+      "port": "status"
+    },
+    {
+      "name": "text",
+      "node": "model",
+      "port": "text"
+    },
+    {
+      "name": "error",
+      "node": "model",
+      "port": "error",
+      "optional": true
+    },
+    {
+      "name": "metadata",
+      "node": "model",
+      "port": "metadata",
+      "optional": true
+    },
+    {
+      "name": "finish_reason",
+      "node": "model",
+      "port": "finish_reason",
+      "optional": true
+    },
+    {
+      "name": "usages",
+      "node": "usages",
+      "port": "value"
+    },
+    {
+      "name": "title",
+      "node": "title",
+      "port": "value",
+      "optional": true
+    }
+  ]
+}

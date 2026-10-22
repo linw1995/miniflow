@@ -1,15 +1,15 @@
-use mf_chat::{ChatHost, HostConfig, ModelProfile};
+use mf_chat::{ChatHost, HostConfig};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args_os()
         .nth(1)
         .ok_or("provide a database path")?;
-    let model = std::env::var("MF_CHAT_MODEL")?;
-    let mut config = serde_json::json!({ "model": model });
-    if let Ok(base_url) = std::env::var("MF_CHAT_BASE_URL") {
-        config["base_url"] = base_url.into();
-    }
-    let host = ChatHost::open(path, HostConfig::new(ModelProfile::new("default", config)?))?;
+    let workflow = std::env::args_os()
+        .nth(2)
+        .ok_or("provide a conversation workflow JSON path")?;
+    let definition = serde_json::from_str(&std::fs::read_to_string(workflow)?)?;
+    let profile = mf_chat::WorkflowProfile::new("default", definition, Default::default())?;
+    let host = ChatHost::open(path, HostConfig::new(profile))?;
     let session = host
         .database()
         .create_session("default", Some("Answer briefly".into()), None)?;

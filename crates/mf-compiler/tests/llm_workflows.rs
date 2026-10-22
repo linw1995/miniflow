@@ -413,7 +413,7 @@ fn llm_stream_tasks_and_skips_preserve_existing_execution_contracts() {
 #[test]
 fn composed_conversation_compiles_without_application_nodes() {
     let definition =
-        WorkflowDefinition::from_json(include_str!("../../mf-chat/workflows/conversation.json"))
+        WorkflowDefinition::from_json(include_str!("../../../examples/chat-title-flow.json"))
             .unwrap();
     let registry = NodeRegistry::from_inventory().unwrap();
     assert!(
@@ -427,6 +427,7 @@ fn composed_conversation_compiles_without_application_nodes() {
         &manifest.input_schema,
         &arguments(&json!({
             "input.prompt":"Hello",
+            "input.api_key":"synthetic-key",
             "input.context":{"title":{"source":"provisional","revision":0,"attempted":false,"enabled":true}}
         })),
         |_| None,

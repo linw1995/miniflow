@@ -3,7 +3,7 @@
 use crate::{ChatError, Invocation, error::*, turn};
 use mf_runtime::{NodeValue, NodeValues, WorkflowArguments, WorkflowInputSchema, WorkflowManifest};
 use serde::{Deserialize, Serialize};
-use snafu::{OptionExt, ensure};
+use snafu::{OptionExt, ResultExt, ensure};
 use std::collections::BTreeMap;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, NodeValue)]
@@ -65,6 +65,18 @@ impl Default for ConversationResult {
 }
 
 impl ConversationResult {
+    pub fn from_json(bytes: &[u8]) -> Result<Self, ChatError> {
+        ensure!(
+            bytes.len() <= recovery::MAX_RECOVERY_BYTES,
+            RecoveryTooLargeSnafu {
+                limit: recovery::MAX_RECOVERY_BYTES
+            }
+        );
+        let values = mf_runtime::decode_unique_json(bytes).context(JsonSnafu)?;
+        let result = Self::decode(values)?;
+        Ok(result)
+    }
+
     pub fn decode(mut values: NodeValues) -> Result<Self, ChatError> {
         let ports = Self::ports();
         values.retain(|name, _| ports.iter().any(|port| port.name == *name));

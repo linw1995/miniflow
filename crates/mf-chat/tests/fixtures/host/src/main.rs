@@ -1,16 +1,33 @@
-use mf_chat::{ChatHost, HostConfig, ModelProfile, UsageQuery};
+use mf_chat::{ChatHost, HostConfig, UsageQuery, WorkflowProfile};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let path = std::env::args_os()
         .nth(1)
         .ok_or("provide a database path")?;
-    let profile = || -> Result<ModelProfile, Box<dyn std::error::Error>> {
+    let profile = || -> Result<WorkflowProfile, Box<dyn std::error::Error>> {
         let base_url = std::env::var("MF_CHAT_FIXTURE_URL")?;
-        Ok(ModelProfile::new(
+        let mut definition: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../../examples/chat-title-flow.json"
+        ))?;
+        let parameters = definition["nodes"][0]["config"]["parameters"]
+            .as_object_mut()
+            .unwrap();
+        for field in ["model", "base_url", "api_key"] {
+            parameters.remove(field);
+        }
+        for node in definition["nodes"].as_array_mut().unwrap() {
+            if node["kind"] == "builtin.llm" {
+                let attribution = node["config"]["attribution"].clone();
+                node["config"] = serde_json::json!({
+                    "model":"fixture-model", "base_url":base_url, "api_key_env":"MF_CHAT_FIXTURE_KEY",
+                    "capture_errors":true,"attribution":attribution,
+                });
+            }
+        }
+        Ok(WorkflowProfile::new(
             "default",
-            serde_json::json!({
-                "model":"fixture-model", "base_url":base_url, "api_key_env":"MF_CHAT_FIXTURE_KEY",
-            }),
+            serde_json::from_value(definition)?,
+            Default::default(),
         )?)
     };
     let config = HostConfig::new(profile()?);

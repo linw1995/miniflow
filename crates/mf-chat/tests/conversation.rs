@@ -1,5 +1,5 @@
 use diesel::{Connection, connection::SimpleConnection};
-use mf_chat::{ChatDatabase, ChatError, ChatHost, HostConfig, ModelProfile};
+use mf_chat::{ChatDatabase, ChatError, ChatHost, HostConfig, WorkflowProfile};
 use mfn_llm::test_support::{Reply, Server, messages};
 use serde_json::{Value, json};
 use std::{
@@ -74,8 +74,40 @@ fn probe(server: &Server, scenario: &str, second_url: Option<&str>) -> Value {
     .unwrap()
 }
 
-fn profile(name: &str, url: &str) -> ModelProfile {
-    ModelProfile::new(name, json!({"model": name, "base_url": url, "api_key_env": "MF_CHAT_TEST_KEY", "timeout_ms": 3000})).unwrap()
+fn configured_profile(
+    name: &str,
+    config: Value,
+    title: Option<Value>,
+) -> Result<WorkflowProfile, ChatError> {
+    let mut definition: Value =
+        serde_json::from_str(include_str!("../../../examples/chat-title-flow.json")).unwrap();
+    let parameters = definition["nodes"][0]["config"]["parameters"]
+        .as_object_mut()
+        .unwrap();
+    for field in ["model", "base_url", "api_key"] {
+        parameters.remove(field);
+    }
+    for node in definition["nodes"].as_array_mut().unwrap() {
+        if node["kind"] == "builtin.llm" {
+            let purpose = node["config"]["attribution"]["purpose"].clone();
+            let config = if node["id"] == "title_model" {
+                title.as_ref().unwrap_or(&config)
+            } else {
+                &config
+            };
+            node["config"] = config.clone();
+            node["config"]["attribution"] = json!({"purpose":purpose,"profile":config["model"]});
+        }
+    }
+    WorkflowProfile::new(
+        name,
+        serde_json::from_value(definition).unwrap(),
+        Default::default(),
+    )
+}
+
+fn profile(name: &str, url: &str) -> WorkflowProfile {
+    configured_profile(name, json!({"model": name, "base_url": url, "api_key_env": "MF_CHAT_TEST_KEY", "timeout_ms": 3000, "capture_errors":true}), None).unwrap()
 }
 
 #[test]
@@ -167,17 +199,20 @@ fn execution_probe() {
     let mut config = HostConfig::new(profile("default", &url));
     config.automatic_titles = scenario.starts_with("title_");
     if scenario == "cleanup" {
-        config.profiles.insert("default".into(), ModelProfile::new("default", json!({"model":"default","base_url":url,"api_key_env":"MF_CHAT_TEST_KEY","capture_errors":false})).unwrap());
+        config.profiles.insert("default".into(), configured_profile("default", json!({"model":"default","base_url":url,"api_key_env":"MF_CHAT_TEST_KEY","capture_errors":false}), None).unwrap());
     }
     if scenario == "captured_failure" {
-        config.profiles.insert("default".into(), ModelProfile::new("default", json!({"model":"default","base_url":url,"api_key_env":"MF_CHAT_TEST_KEY","capture_errors":true})).unwrap());
+        config.profiles.insert("default".into(), configured_profile("default", json!({"model":"default","base_url":url,"api_key_env":"MF_CHAT_TEST_KEY","capture_errors":true}), None).unwrap());
     }
     if scenario == "conversation" || scenario == "title_auto" {
         config.observer = Some(mf_telemetry::observation::Observer::stderr(1));
     }
     if scenario == "title_auto" {
         config.automatic_titles = true;
-        config.title_profile = Some("second".into());
+        config.profiles.insert("default".into(), configured_profile("default",
+            json!({"model":"default","base_url":url,"api_key_env":"MF_CHAT_TEST_KEY","capture_errors":true}),
+            Some(json!({"model":"second","base_url":std::env::var("MF_CHAT_TEST_SECOND_URL").unwrap(),"api_key_env":"MF_CHAT_TEST_KEY","capture_errors":true})),
+        ).unwrap());
     }
     if scenario == "capacity" {
         config.max_active = 1;
@@ -584,11 +619,12 @@ fn close_joins_pending_work_before_releasing_ownership() {
 
 #[test]
 fn model_preparation_validates_config_without_resolving_credentials() {
-    assert!(ModelProfile::new(" ", json!({"model":"example"})).is_err());
-    assert!(ModelProfile::new("default", json!({"model":""})).is_err());
-    ModelProfile::new(
+    assert!(configured_profile(" ", json!({"model":"example"}), None).is_err());
+    assert!(configured_profile("default", json!({"model":""}), None).is_err());
+    configured_profile(
         "default",
         json!({"model":"example", "api_key_env":"MF_CHAT_MISSING_PREPARATION_KEY"}),
+        None,
     )
     .unwrap();
 }
@@ -606,9 +642,7 @@ fn invalid_host_configuration_is_rejected_before_database_initialization() {
     alias
         .profiles
         .insert("alias".into(), base.profiles["default"].clone());
-    let mut title = base.clone();
-    title.title_profile = Some("missing".into());
-    for config in [limits, profiles, alias, title] {
+    for config in [limits, profiles, alias] {
         assert!(ChatHost::open(&path, config).is_err());
         assert!(!path.exists());
     }
@@ -619,7 +653,7 @@ fn invalid_host_configuration_is_rejected_before_database_initialization() {
 fn rejected_submissions_leave_sessions_and_usage_unchanged() {
     let directory = tempfile::tempdir().unwrap();
     let model = profile("default", "http://127.0.0.1:1/v1");
-    assert_eq!(model.identity().profile, "default");
+    assert_eq!(model.name, "default");
     let host =
         ChatHost::open(directory.path().join("chat.sqlite"), HostConfig::new(model)).unwrap();
     let missing = host

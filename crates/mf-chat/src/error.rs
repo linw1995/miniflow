@@ -10,6 +10,8 @@ pub enum ChatError {
     Inputs {
         source: mf_runtime::WorkflowInputError,
     },
+    #[snafu(display("could not capture workflow result: {message}"))]
+    Capture { message: String },
     #[snafu(display("model reply exceeds the {limit}-byte limit"))]
     RecoveryTooLarge { limit: usize },
     #[snafu(transparent)]
@@ -20,16 +22,23 @@ pub enum ChatError {
     Description {
         source: mf_compiler::DescriptionError,
     },
-    #[snafu(display("chat model profile {name:?} does not exist"))]
+    #[snafu(display("chat workflow profile {name:?} does not exist"))]
     ProfileMissing { name: String },
     #[snafu(display("chat host is closed"))]
     Closed,
     #[snafu(display("chat host reached its {limit}-workflow capacity"))]
     Capacity { limit: usize },
-    #[snafu(display("could not prepare the chat model: {source}"))]
-    ModelBuild {
+    #[snafu(display("could not prepare the conversation backend: {source}"))]
+    BackendBuild {
         #[snafu(source(from(mf_runtime::NodeBuildError, Box::new)))]
         source: Box<mf_runtime::NodeBuildError>,
+    },
+    #[snafu(transparent)]
+    FlowBuild { source: mf_compiler::FlowBuildError },
+    #[snafu(display("conversation backend failed: {source}"))]
+    Backend {
+        outcome: crate::contract::TurnExit,
+        source: Box<dyn Error + Send + Sync>,
     },
     #[snafu(display("could not start chat worker: {source}"))]
     WorkerSpawn { source: io::Error },

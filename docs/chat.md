@@ -52,15 +52,24 @@ Opening a database under its ownership lock calls the recovery handler directly:
 
 ## Embedded conversation host
 
-`ChatHost` owns the database, model profiles, and blocking execution workers. Each submission runs
-the embedded `conversation` module with a fresh context and cancellation handle. The host admits the
-turn before execution and saves the final `ConversationResult` afterward. The flow declares inputs
-through `builtin.parameters` and uses only generic built-in nodes. Both execution backends bind
-those ports through the same `ConversationInputs` and `ChatContract`; the flow has no `mf-chat` node
-dependency. No standalone workflow runner is spawned.
+`ChatHost` owns the database, workflow profiles, admission limits, and execution workers. Each
+submission executes the embedded application `conversation` flow:
+
+```mermaid
+flowchart LR
+    Begin["mf_chat.turn.begin: load history and context"] --> Invoke["mf_chat.workflow.invoke: user workflow"]
+    Invoke --> Settle["mf_chat.turn.settle: persist result"]
+```
+
+The invocation node binds a `ConversationBackend` supplied by the host. Both the embedded Rust backend
+and the executable backend use the same `ConversationInputs` / `ConversationResult` protocol. The
+application flow owns durable turn admission and settlement; the user workflow owns answer generation,
+optional title generation, and explicit usage collection. User workflows need only generic nodes and
+have no `mf-chat` dependency. The application never identifies or reconfigures their internal model nodes.
 
 ```rust
-let profile = mf_chat::ModelProfile::new("default", serde_json::json!({"model":"your-model"}))?;
+let definition = serde_json::from_str(&std::fs::read_to_string("examples/chat-title-flow.json")?)?;
+let profile = mf_chat::WorkflowProfile::new("default", definition, Default::default())?;
 let host = mf_chat::ChatHost::open("state/chat.sqlite", mf_chat::HostConfig::new(profile))?;
 let session = host.database().create_session("default", Some("Answer briefly".into()), None)?;
 let mut job = host.submit(&session.id, "Hello")?;
@@ -74,32 +83,43 @@ host.close()?;
 
 `poll` is nonblocking, `join` waits for a result, and `cancel` requests cooperative cancellation. Dropping a job cancels that job; dropping or closing the host cancels and joins all its workers before releasing database ownership. The default host admits four active workflows, separately from the runtime's internal domain limit. A busy session or full host returns an explicit admission error.
 
-Profiles contain validated nonsecret LLM configuration. Credentials are read through the configured environment reference only during execution. Sessions keep their profile and system instructions; each call records the profile and model actually selected. An optional observer receives each configured flow's preparation and execution lifecycle.
+Profiles contain a validated user workflow and its resolved configuration parameters, or an injected
+`ConversationBackend`. Parameter environment bindings are resolved when a profile is constructed;
+model-specific environment references remain owned by the user workflow. Sessions keep their profile
+and system instructions. Actual model identities and per-call purpose/profile labels arrive through
+`usages`; the host does not select a separate title model. An optional observer receives the application
+flow and the supplied embedded workflow's preparation and execution lifecycle.
 
-The flow owns failure policy. The default flow uses `capture_errors` to report provider failures as data; the host persists the returned status and usages. An execution error or cancellation with no final result finalizes begun work through storage handlers independently of the cancelled execution context. The host does not inspect internal node outputs, recover intermediate replies, or retry a failed stage.
+The flow owns failure policy. The title example uses `capture_errors` to report provider failures as data; the host persists the returned status and usages. An execution error or cancellation with no final result finalizes begun work through storage handlers independently of the cancelled execution context. The host does not inspect internal node outputs, recover intermediate replies, or retry a failed stage.
 If cleanup also fails, `ChatError::Execution` retains both typed errors and invocation identities. A reply whose storage write fails returns `ChatError::Uncommitted`; pass its retained value to `retry_completion` or explicitly abandon it. Repeated persistence failures return the retained reply again and never resend a model request. `retry` starts a fresh model call for an unsuccessful original turn.
 
 Run the two-turn example with an available model and credentials in the environment:
 
 ```sh
-MF_CHAT_MODEL=your-model nix develop --command cargo run -p mf-chat --example conversation -- state/chat.sqlite
+MODEL_API_KEY=your-key nix develop --command cargo run -p mf-chat --example conversation -- state/chat.sqlite examples/chat-title-flow.json
 ```
 
-Set `MF_CHAT_BASE_URL` for an OpenAI-compatible endpoint. The example prints complete results with their session, turn, and call identities.
+Configure the model and endpoint in the supplied workflow. The example prints complete results with their session, turn, and call identities.
 
 ## Session title summaries
 
-The embedded conversation flow optionally generates a title after a successful primary model call. Its
-`context.title` input contains the current title source, revision, whether an attempt has been recorded,
-and whether automatic titles are enabled. The flow decides eligibility: provisional, enabled, and no prior
-attempt. It uses the current prompt and answer as the title source. The host supplies the state snapshot;
-workflow nodes do not read or write the database.
+The supplied user flow may generate a title after a successful primary call. Its `context.title` input
+contains the current title source, revision, whether an attempt has been recorded, and whether automatic
+titles are enabled. The [conversation and title example](../examples/chat-title-flow.json) decides
+eligibility from that context and uses the current prompt and answer as the title source. It can be
+compiled and used directly with `--chat`:
 
-`HostConfig::title_profile` selects another configured profile; leaving it unset uses the conversation
-profile. `automatic_titles = false` disables the default flow's title branch. Both calls report their
-own purpose and profile through `usages[].attribution`. The default flow preserves a successful answer
-when the title provider reports failure, retains that failed call's usage, and omits the title output.
-This policy is expressed by the flow's branches, not a host-side exception handler.
+```sh
+mf compile examples/chat-title-flow.json --output chat-title-flow
+mf run ./chat-title-flow --tui --chat --chat-db state/chat.sqlite --input.model your-model
+```
+
+Both model configurations belong to this user flow; change `title_model.config` to use a different model
+or provider. `HostConfig::automatic_titles = false` supplies a disabled context policy to embedded
+backends. Both calls report their own purpose and profile through `usages[].attribution`. This example
+preserves a successful answer when the title provider reports failure, retains the failed call's usage,
+and omits the title output. This policy is expressed by its branches. The application flow only persists
+the final protocol result.
 
 A submission finishes after the composed flow finishes. There is no separate background title job,
 startup scan, title retry API, or title completion queue. Cancellation before delivery can lose the
@@ -175,7 +195,8 @@ Their qualified names can belong to any startup node. Remaining declared inputs 
 resolve them with `mf_runtime::resolve_workflow_inputs` before admission. The contract rejects ambiguous or
 mistyped conversation ports, stdin-dependent execution, and streaming output protocols.
 
-Both the [single-call example](../examples/chat-flow.json) and the
+The [single-call example](../examples/chat-flow.json), the
+[conversation and title example](../examples/chat-title-flow.json), and the
 [loop example](../examples/chat-loop-flow.json) can be compiled directly:
 
 ```sh
@@ -184,7 +205,8 @@ nix develop --command cargo run -p mf-cli --features development-support -- comp
 
 The loop explicitly accumulates usage lists with `builtin.code` using `left + right` and stops after a reported model failure.
 Its model configuration is passed into the loop through declared variables. The runner receives conversation
-arguments and configuration, while the application owns database admission, process supervision, and saving.
+arguments and configuration. The application flow handles database admission and saving around that
+backend invocation; the terminal's backend supplies process supervision and child observation.
 
 ## History metadata
 
@@ -303,7 +325,12 @@ through its chosen branches and accumulators. Successful status permits absent o
 
 ## Persistence and recovery
 
-Allocate an `Invocation`, durably begin its turn, and pass the resulting request to `contract.arguments`.
+The embedded application flow uses `mf_chat.turn.begin`, a host-bound `mf_chat.workflow.invoke`, and
+`mf_chat.turn.settle` for both backends. The settlement node handles successful or failed protocol
+results; it does not implement model failure policy. Save-only retry and cleanup after an aborted graph
+remain direct storage operations so cancellation cannot prevent finalization.
+
+Direct API callers can allocate an `Invocation`, durably begin its turn, and pass the resulting request to `contract.arguments`.
 Supply `ModelIdentity { profile, model: None }` for workflow admission; actual model identities arrive
 in `usages`. New calls do not compute or require configuration fingerprints. In-process callers pass the typed result to `reconcile_result`. Executable callers capture stdout within
 `MAX_RECOVERY_BYTES` (16 MiB) and pass it to `reconcile_completion`. Recovery only needs the admitted

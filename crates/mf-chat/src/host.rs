@@ -1,14 +1,10 @@
 use crate::{
     ChatDatabase, ChatError, Completion, Invocation, ModelIdentity, UncommittedCompletion,
     error::*,
-    flows,
     nodes::{BeginTurnInputs, RecoveryInputs, RecoveryOutputs},
 };
-use mf_runtime::{
-    ExecutionContext, FlowRuntime, StreamCancellation, StreamError, WorkflowArguments,
-};
-use mf_telemetry::{identity::RunId, observation::Observer};
-use serde_json::Value;
+use mf_runtime::{StreamCancellation, StreamError};
+use mf_telemetry::observation::Observer;
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use std::{
     collections::BTreeMap,
@@ -23,61 +19,22 @@ use std::{
 extern crate mfn_code as _;
 extern crate mfn_core as _;
 
-#[derive(Clone, Debug)]
-pub struct ModelProfile {
-    config: Value,
-    identity: ModelIdentity,
-}
-
-impl ModelProfile {
-    pub fn new(name: impl Into<String>, config: Value) -> Result<Self, ChatError> {
-        let name = name.into();
-        ensure!(
-            !name.trim().is_empty(),
-            InvalidSnafu {
-                field: "profile",
-                reason: "must be nonblank"
-            }
-        );
-        mfn_llm::prepare_llm(config.clone()).context(ModelBuildSnafu)?;
-        let model = config
-            .get("model")
-            .and_then(Value::as_str)
-            .context(InvalidSnafu {
-                field: "model",
-                reason: "must be a string",
-            })?
-            .to_owned();
-        let identity = ModelIdentity {
-            profile: name,
-            model: Some(model),
-        };
-        Ok(Self { config, identity })
-    }
-
-    pub fn identity(&self) -> &ModelIdentity {
-        &self.identity
-    }
-}
-
 #[derive(Clone)]
 pub struct HostConfig {
-    pub profiles: BTreeMap<String, ModelProfile>,
+    pub profiles: BTreeMap<String, crate::WorkflowProfile>,
     pub max_active: usize,
     pub max_history_bytes: usize,
     pub observer: Option<Observer>,
-    pub title_profile: Option<String>,
     pub automatic_titles: bool,
 }
 
 impl HostConfig {
-    pub fn new(profile: ModelProfile) -> Self {
+    pub fn new(profile: crate::WorkflowProfile) -> Self {
         Self {
-            profiles: BTreeMap::from([(profile.identity.profile.clone(), profile)]),
+            profiles: BTreeMap::from([(profile.name.clone(), profile)]),
             max_active: 4,
             max_history_bytes: crate::DEFAULT_HISTORY_BYTES,
             observer: None,
-            title_profile: None,
             automatic_titles: true,
         }
     }
@@ -168,22 +125,16 @@ impl ChatHost {
             !config.profiles.is_empty(),
             InvalidSnafu {
                 field: "profiles",
-                reason: "must contain a model profile"
+                reason: "must contain a workflow profile"
             }
         );
         for (key, profile) in &config.profiles {
             ensure!(
-                key == &profile.identity.profile,
+                key == &profile.name,
                 InvalidSnafu {
                     field: "profiles",
                     reason: "keys must match profile names"
                 }
-            );
-        }
-        if let Some(key) = &config.title_profile {
-            ensure!(
-                config.profiles.contains_key(key),
-                ProfileMissingSnafu { name: key }
             );
         }
         let host = Self {
@@ -287,7 +238,7 @@ impl ChatHost {
             call_id: invocation.call_id.clone(),
             prompt: prompt.into(),
             model: ModelIdentity {
-                profile: profile.identity.profile.clone(),
+                profile: profile.name.clone(),
                 model: None,
             },
             retry_of,
@@ -437,7 +388,7 @@ impl Inner {
     fn conversation(
         &self,
         request: BeginTurnInputs,
-        profile: ModelProfile,
+        profile: crate::WorkflowProfile,
         cancellation: StreamCancellation,
     ) -> Result<Completion, ChatError> {
         let invocation = Invocation {
@@ -445,93 +396,27 @@ impl Inner {
             turn_id: request.turn_id.clone(),
             call_id: request.call_id.clone(),
         };
-        let mut plan = flows::conversation::plan()?;
-        let title_profile = self
-            .config
-            .title_profile
-            .as_ref()
-            .and_then(|name| self.config.profiles.get(name))
-            .unwrap_or(&profile);
-        for (id, profile) in [("model", &profile), ("title_model", title_profile)] {
-            let model = plan
-                .definition
-                .nodes
-                .iter_mut()
-                .find(|node| node.id.as_str() == id)
-                .context(InvalidSnafu {
-                    field: "conversation flow",
-                    reason: "requires its model nodes",
-                })?;
-            let mut attribution = model.config["attribution"].clone();
-            attribution["profile"] = profile.identity.profile.clone().into();
-            model
-                .config
-                .as_object_mut()
-                .expect("embedded model configuration is an object")
-                .extend(
-                    profile
-                        .config
-                        .as_object()
-                        .expect("validated model profile")
-                        .clone(),
-                );
-            model.config["attribution"] = attribution;
-        }
-        let registry = mf_runtime::NodeRegistry::from_inventory()?;
-        let contract = crate::contract::ChatContract::from_manifest(&plan.manifest(&registry)?)?;
-        let observation = self
-            .config
-            .observer
-            .as_ref()
-            .map(|observer| plan.start_observation(observer, RunId::new()))
-            .transpose()?;
-        let mut begun = crate::turn::begin(request)?;
-        if let Some(context) = &mut begun.request.context {
-            context.title.enabled = self.config.automatic_titles;
-        }
-        let result = ExecutionContext::run(observation, |context| -> Result<_, ChatError> {
-            context.set_cancellation(cancellation.clone());
-            context.set_workflow_arguments(
-                contract.arguments(begun.request, &WorkflowArguments::default())?,
-            );
-            let flow = mf_compiler::instantiate_compiled_with_observation(
-                &plan,
-                &registry,
-                context.observation_mut(),
-            )?;
-            Ok(FlowRuntime::default().execute_in_context(&flow, context)?)
-        });
-        let outputs = match result {
-            Ok(outputs) => outputs,
-            Err(source) => {
-                let state = if cancellation.failure().is_some() {
-                    "cancelled"
-                } else {
-                    "failed"
-                };
-                let cleanup = self
-                    .database
-                    .fail_turn(invocation.clone(), state, &source.to_string())
-                    .err()
-                    .map(Box::new);
-                return Err(ExecutionSnafu {
-                    invocation,
-                    cleanup,
-                }
-                .into_error(Box::new(source)));
-            }
-        };
-        let resolution = self.database.reconcile_result(
-            &invocation,
-            Some(crate::ConversationResult::decode(outputs)),
-            crate::contract::TurnExit::Failed,
-            "conversation workflow returned an invalid result",
+        let resolution = crate::workflow::run_conversation(
+            &self.database,
+            request,
+            profile.backend(),
+            cancellation,
+            self.config.automatic_titles,
+            self.config.observer.as_ref(),
         )?;
         match resolution.state {
-            crate::contract::CompletionState::Uncommitted(pending) => {
-                self.database.save_recovered(pending)
-            }
             crate::contract::CompletionState::Committed(completion) => Ok(completion),
+            crate::contract::CompletionState::Uncommitted(pending) => {
+                let source = resolution
+                    .diagnostics
+                    .into_iter()
+                    .next()
+                    .expect("failed persistence has a source");
+                Err(UncommittedSnafu {
+                    pending: Box::new(pending),
+                }
+                .into_error(Box::new(source)))
+            }
             crate::contract::CompletionState::Finished(turn) => {
                 let source = resolution
                     .diagnostics

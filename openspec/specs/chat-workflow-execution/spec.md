@@ -2,13 +2,18 @@
 
 ## Purpose
 
-Execute persistent conversations with optional session titles through one embedded Rust workflow with explicit host ownership of invocation lifecycle.
+Execute persistent conversations through an application workflow that hosts user workflows over a shared input/output protocol, including optional session titles.
 
 ## Requirements
 
 ### Requirement: Embed the application workflows
 
-The package SHALL embed a composed conversation definition as a Rust module using the existing workflow embedding facility. Built hosts SHALL execute them without workflow source files, generated source files, build tools, or spawning standalone workflow runners.
+The package SHALL embed an application conversation definition as a Rust module using the existing
+workflow embedding facility. Its graph SHALL express durable turn admission and history/context loading,
+invocation of a supplied backend, and result settlement through application-owned nodes. Built embedded
+backends SHALL execute without workflow source files, generated source files, build tools, or spawning
+standalone workflow runners. Executable backends SHALL invoke the supplied runner within the same
+application lifecycle graph.
 
 #### Scenario: Run without definition files
 
@@ -22,11 +27,14 @@ The package SHALL embed a composed conversation definition as a Rust module usin
 
 ### Requirement: Prepare the configured flow before beginning work
 
-The host SHALL apply the selected nonsecret model configuration during flow preparation and validate node contracts before creating running work. Conversation and title configurations SHALL be independently selectable. Preparation MUST NOT read credentials, open the database, or contact providers. Each call SHALL retain its selected profile and actual model attribution.
+The host SHALL validate the selected user workflow and resolve its configuration parameters before
+creating running work. It MUST NOT identify, configure, or depend on internal model nodes. Preparation
+MUST NOT open the database or contact providers. Each reported call SHALL retain its workflow-selected
+profile and actual model attribution.
 
 #### Scenario: Select a different title model
 
-- **WHEN** title generation uses a model configuration different from conversation generation
+- **WHEN** the supplied user workflow selects different models for title and conversation generation
 - **THEN** each model node uses its selected configuration and reports its identity and attribution through the shared usages output
 
 #### Scenario: Reject invalid preparation
@@ -36,12 +44,13 @@ The host SHALL apply the selected nonsecret model configuration during flow prep
 
 ### Requirement: Execute conversations through the embedded flow
 
-The host SHALL begin a durable turn, pass ordered history, prompt, and application context through
-the common conversation input contract, and persist the final result. The conversation flow SHALL
-compose model work using generic workflow nodes without accessing storage or requiring `mf-chat`
-node registration. Input and output protocol types SHALL remain application-side contracts rather
-than requiring a dedicated workflow adapter node. System instructions SHALL remain separate from
-history. Returned results SHALL identify their session, turn, and call.
+Both embedded and executable backends SHALL execute the application flow: `mf_chat.turn.begin` loads
+history and context, `mf_chat.workflow.invoke` calls the supplied user workflow through the common
+conversation protocol, and `mf_chat.turn.settle` saves the final result. The invocation node SHALL bind a
+per-host backend without global mutable registration. The user workflow SHALL define conversation,
+optional title generation, and usage collection without requiring `mf-chat` nodes or database access.
+System instructions SHALL remain separate from history. Returned completions SHALL identify their
+session, turn, and call.
 
 #### Scenario: Complete two conversation turns
 
@@ -101,7 +110,7 @@ If response persistence fails after the workflow has delivered a valid final res
 ### Requirement: Compose optional titles in the conversation workflow
 
 The host SHALL supply title source, revision, recorded-attempt state, and enabled policy as application
-context. The workflow SHALL decide whether to produce an optional title. The default flow SHALL call
+context. The workflow SHALL decide whether to produce an optional title. The supplied title example SHALL call
 the title model only after a successful primary call when the session is provisional, titles are enabled,
 and no title attempt has been recorded. The host MUST NOT schedule independent title jobs or inspect
 intermediate nodes to decide recovery. One submission SHALL finish after the composed execution.
@@ -115,11 +124,11 @@ intermediate nodes to decide recovery. One submission SHALL finish after the com
 #### Scenario: Disable automatic titles or reuse a named session
 
 - **WHEN** the context disables titles, records a prior attempt, or identifies a non-provisional title
-- **THEN** the default flow skips the title model and returns only conversation usages
+- **THEN** the title example skips the title model and returns only conversation usages
 
 #### Scenario: Handle a title provider failure in the flow
 
-- **WHEN** the default flow receives a captured title provider failure
+- **WHEN** the title example receives a captured title provider failure
 - **THEN** it returns the successful primary answer, no title, and both calls' usage records
 - **AND** the host persists that result without introducing a separate title retry
 

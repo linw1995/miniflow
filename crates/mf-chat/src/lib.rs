@@ -13,13 +13,14 @@ mod storage;
 mod title;
 mod turn;
 mod usage;
+pub mod workflow;
 
 pub use contract::{
     Completion, ConversationContext, ConversationInputs, ConversationResult, TitleContext,
     UncommittedCompletion,
 };
-pub use error::ChatError;
-pub use host::{ChatHost, ChatJob, HostConfig, ModelProfile};
+pub use error::{BackendSnafu, CaptureSnafu, ChatError};
+pub use host::{ChatHost, ChatJob, HostConfig};
 pub use models::{Message, ModelCall, Session, Turn};
 pub use session::{DEFAULT_HISTORY_BYTES, HistoryContext, MessagePage, MessageRecord, SessionPage};
 pub use storage::ChatDatabase;
@@ -30,3 +31,5 @@ pub use usage::{
 };
 
 pub use mfn_llm::{CallUsage, MessageMetadata, UsageAttribution, UsageNode, UsageScope};
+
+pub use workflow::{ConversationBackend, WorkflowProfile};

@@ -49,6 +49,12 @@ fn copy_chat_workspace(root: &Path, destination: &Path) {
     )
     .unwrap();
     fs::copy(root.join("Cargo.lock"), destination.join("Cargo.lock")).unwrap();
+    fs::create_dir_all(destination.join("examples")).unwrap();
+    fs::copy(
+        root.join("examples/chat-title-flow.json"),
+        destination.join("examples/chat-title-flow.json"),
+    )
+    .unwrap();
     copy_tree(
         &root.join("crates/mf-chat"),
         &destination.join("crates/mf-chat"),

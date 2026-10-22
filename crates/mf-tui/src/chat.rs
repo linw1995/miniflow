@@ -9,13 +9,13 @@ use mf_chat::contract::{
 };
 use mf_chat::{ChatDatabase, Invocation, MessagePage, Session, SessionPage, UncommittedCompletion};
 use mf_runtime::WorkflowManifest;
-use snafu::{IntoError, OptionExt, ResultExt, Snafu, ensure};
+use snafu::{OptionExt, ResultExt, Snafu, ensure};
 use std::{
     io,
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
         mpsc::{self, Receiver, RecvTimeoutError, SyncSender, TrySendError},
     },
@@ -58,11 +58,6 @@ pub enum ChatRunError {
     Closed,
     #[snafu(display("chat controller worker panicked"))]
     WorkerPanic,
-    #[snafu(display("{source}; invocation cleanup failed: {cleanup}"))]
-    Cleanup {
-        source: Box<ChatRunError>,
-        cleanup: Box<mf_chat::ChatError>,
-    },
     #[snafu(display("finish, cancel, or recover the current turn first"))]
     Busy,
     #[snafu(display("there is no reply to recover"))]
@@ -172,7 +167,7 @@ impl ChatController {
         let busy = Arc::new(AtomicBool::new(false));
         let cancel = Arc::new(AtomicBool::new(false));
         let controller = Controller {
-            launch,
+            launch: Arc::new(launch),
             database: Arc::clone(&database),
             input,
             output,
@@ -257,7 +252,7 @@ struct Retained {
     response: RetainedResponse,
 }
 struct Controller {
-    launch: ChatLaunch,
+    launch: Arc<ChatLaunch>,
     database: Arc<ChatDatabase>,
     input: Receiver<ChatCommand>,
     output: SyncSender<ChatEvent>,
@@ -267,16 +262,23 @@ struct Controller {
     retained: Option<Retained>,
 }
 impl Controller {
-    fn emit(&self, mut event: ChatEvent) {
-        while !self.closed.load(Ordering::Acquire) {
-            match self.output.try_send(event) {
-                Ok(()) => return,
-                Err(TrySendError::Full(pending)) => event = pending,
-                Err(TrySendError::Disconnected(_)) => return,
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
+    fn emit(&self, event: ChatEvent) {
+        emit(&self.output, &self.closed, event);
     }
+}
+
+fn emit(output: &SyncSender<ChatEvent>, closed: &AtomicBool, mut event: ChatEvent) {
+    while !closed.load(Ordering::Acquire) {
+        match output.try_send(event) {
+            Ok(()) => return,
+            Err(TrySendError::Full(pending)) => event = pending,
+            Err(TrySendError::Disconnected(_)) => return,
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+impl Controller {
     fn run(mut self) -> Result<(), ChatRunError> {
         while !self.closed.load(Ordering::Acquire) {
             match self.input.recv_timeout(Duration::from_millis(50)) {
@@ -372,45 +374,63 @@ impl Controller {
     ) -> Result<(), ChatRunError> {
         ensure!(self.retained.is_none(), BusySnafu);
         let invocation = Invocation::new(&session.id);
-        let result = self.execute_turn(&session, &invocation, &prompt, retry_of);
-        let outcome = match result {
-            Ok(outcome) => outcome,
-            Err(source) => {
-                let outcome = match &source {
-                    ChatRunError::Cancelled => TurnExit::Cancelled,
-                    ChatRunError::Observation {
-                        source: RunError::Supervise { .. },
-                    } => TurnExit::Interrupted,
-                    _ => TurnExit::Failed,
-                };
-                return match self.database.finalize_invocation(
-                    invocation,
-                    outcome,
-                    &source.to_string(),
-                ) {
-                    Ok(_) => Err(source),
-                    Err(cleanup) => Err(CleanupSnafu {
-                        cleanup: Box::new(cleanup),
-                    }
-                    .into_error(Box::new(source))),
-                };
-            }
+        let captured = Arc::new(Mutex::new(None));
+        let backend = ExternalBackend {
+            launch: Arc::clone(&self.launch),
+            session: session.clone(),
+            output: self.output.clone(),
+            closed: Arc::clone(&self.closed),
+            cancel: Arc::clone(&self.cancel),
+            captured: Arc::clone(&captured),
         };
-        let mut resolution = reconcile_turn(&self.database, &invocation, &outcome);
-        if let Ok(resolution) = &mut resolution
-            && let CompletionState::Uncommitted(pending) = &resolution.state
-        {
-            match self.database.complete_turn(
-                pending.completion.invocation.clone(),
-                pending.completion.result.clone(),
-            ) {
-                Ok(completion) => resolution.state = CompletionState::Committed(completion),
-                Err(source) => resolution.diagnostics.push(source),
-            }
+        let request = mf_chat::nodes::BeginTurnInputs {
+            database_path: self
+                .database
+                .path()
+                .to_str()
+                .context(OptionsSnafu {
+                    reason: "database path must be UTF-8",
+                })?
+                .into(),
+            session_id: session.id.clone(),
+            turn_id: invocation.turn_id.clone(),
+            call_id: invocation.call_id.clone(),
+            prompt,
+            model: mf_chat::ModelIdentity {
+                profile: session.profile,
+                model: None,
+            },
+            retry_of,
+            max_history_bytes: mf_chat::DEFAULT_HISTORY_BYTES,
+        };
+        let resolution = mf_chat::workflow::run_conversation(
+            &self.database,
+            request,
+            Arc::new(backend),
+            Default::default(),
+            true,
+            None,
+        );
+        let outcome = captured
+            .lock()
+            .expect("capture state was not poisoned")
+            .take();
+        if outcome.is_none() {
+            let mut resolution = resolution?;
+            ensure!(
+                !self.cancel.load(Ordering::Acquire) && !self.closed.load(Ordering::Acquire),
+                CancelledSnafu
+            );
+            return Err(resolution.diagnostics.remove(0).into());
         }
-        let status = outcome.status;
-        let stderr = outcome.stderr.clone();
-        let capture_error = outcome.capture_error.clone();
+        let status = outcome.as_ref().map(|outcome| outcome.status);
+        let stderr = outcome
+            .as_ref()
+            .map(|outcome| outcome.stderr.clone())
+            .unwrap_or_default();
+        let capture_error = outcome
+            .as_ref()
+            .and_then(|outcome| outcome.capture_error.clone());
         self.retained = match &resolution {
             Ok(ReconciledCompletion {
                 state: CompletionState::Uncommitted(pending),
@@ -421,7 +441,9 @@ impl Controller {
             }),
             Err(_) => Some(Retained {
                 invocation: invocation.clone(),
-                response: RetainedResponse::Exited(outcome),
+                response: RetainedResponse::Exited(
+                    outcome.expect("failed reconciliation retains the exit"),
+                ),
             }),
             _ => None,
         };
@@ -429,85 +451,11 @@ impl Controller {
         self.emit(ChatEvent::Finished {
             invocation,
             resolution,
-            status: Some(status),
+            status,
             stderr,
             capture_error,
         });
         Ok(())
-    }
-    fn execute_turn(
-        &self,
-        session: &Session,
-        invocation: &Invocation,
-        prompt: &str,
-        retry_of: Option<String>,
-    ) -> Result<LocalOutcome, ChatRunError> {
-        let started = self.database.begin_turn_with_invocation(
-            invocation.clone(),
-            prompt,
-            mf_chat::ModelIdentity {
-                profile: session.profile.clone(),
-                model: None,
-            },
-            retry_of,
-            mf_chat::DEFAULT_HISTORY_BYTES,
-        )?;
-        self.emit(ChatEvent::Submitted {
-            session: session.clone(),
-            invocation: invocation.clone(),
-            prompt: prompt.into(),
-        });
-        let arguments = self
-            .launch
-            .contract
-            .arguments(started.request, &self.launch.parameters)?;
-        let mut file = tempfile::NamedTempFile::new().context(IoSnafu {
-            operation: "create private workflow arguments",
-        })?;
-        serde_json::to_writer(&mut file, &arguments)?;
-        let size = file
-            .as_file()
-            .metadata()
-            .context(IoSnafu {
-                operation: "inspect private workflow arguments",
-            })?
-            .len();
-        ensure!(
-            size <= mf_runtime::MAX_WORKFLOW_INPUT_BYTES as u64,
-            mf_runtime::WorkflowInputTooLargeSnafu {
-                limit: mf_runtime::MAX_WORKFLOW_INPUT_BYTES
-            }
-        );
-        ensure!(
-            !self.cancel.load(Ordering::Acquire) && !self.closed.load(Ordering::Acquire),
-            CancelledSnafu
-        );
-        let mut command = Command::new(&self.launch.executable);
-        command.arg("--inputs-file").arg(file.path());
-        for _ in 0..self.launch.options.run.verbose.min(3) {
-            command.arg("--verbose");
-        }
-        let description = self
-            .launch
-            .manifest
-            .description()
-            .map_err(mf_chat::ChatError::from)?;
-        let mut run = LocalRun::start(
-            command,
-            description,
-            mf_telemetry::identity::RunId::new(),
-            mf_chat::contract::MAX_RECOVERY_BYTES as u64,
-        )?;
-        self.emit(ChatEvent::Observing(run.observation()));
-        loop {
-            if self.cancel.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
-                run.cancel();
-            }
-            if let Some(outcome) = run.poll()? {
-                return Ok(outcome);
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
     }
     fn recover(&mut self, abandon: bool) -> Result<(), ChatRunError> {
         let retained = self.retained.as_ref().context(MissingReplySnafu)?;
@@ -550,18 +498,135 @@ impl Controller {
     }
 }
 
-fn reconcile_turn(
-    database: &ChatDatabase,
-    invocation: &Invocation,
-    outcome: &LocalOutcome,
-) -> Result<ReconciledCompletion, mf_chat::ChatError> {
-    let reason = if outcome.interrupted {
+struct ExternalBackend {
+    launch: Arc<ChatLaunch>,
+    session: Session,
+    output: SyncSender<ChatEvent>,
+    closed: Arc<AtomicBool>,
+    cancel: Arc<AtomicBool>,
+    captured: Arc<Mutex<Option<LocalOutcome>>>,
+}
+
+impl mf_chat::ConversationBackend for ExternalBackend {
+    fn invoke(
+        &self,
+        invocation: &Invocation,
+        request: mf_chat::ConversationInputs,
+        _: &mut mf_runtime::ExecutionContext,
+        _: Option<&mf_telemetry::observation::Observer>,
+    ) -> Result<mf_chat::ConversationResult, mf_chat::ChatError> {
+        emit(
+            &self.output,
+            &self.closed,
+            ChatEvent::Submitted {
+                session: self.session.clone(),
+                invocation: invocation.clone(),
+                prompt: request.prompt.clone(),
+            },
+        );
+        let execution = self.execute(request);
+        let failure = match execution.as_ref().err() {
+            Some(ChatRunError::Cancelled) => TurnExit::Cancelled,
+            Some(ChatRunError::Observation {
+                source: RunError::Supervise { .. },
+            }) => TurnExit::Interrupted,
+            _ => TurnExit::Failed,
+        };
+        let outcome = execution
+            .boxed()
+            .context(mf_chat::BackendSnafu { outcome: failure })?;
+        let reason = exit_reason(&outcome);
+        let result = if let Some(message) = &outcome.capture_error {
+            mf_chat::CaptureSnafu { message }.fail()
+        } else {
+            mf_chat::ConversationResult::from_json(&outcome.stdout)
+        };
+        *self
+            .captured
+            .lock()
+            .expect("capture state was not poisoned") = Some(outcome);
+        result
+            .boxed()
+            .context(mf_chat::BackendSnafu { outcome: reason })
+    }
+}
+
+impl ExternalBackend {
+    fn execute(&self, request: mf_chat::ConversationInputs) -> Result<LocalOutcome, ChatRunError> {
+        let arguments = self
+            .launch
+            .contract
+            .arguments(request, &self.launch.parameters)?;
+        let mut file = tempfile::NamedTempFile::new().context(IoSnafu {
+            operation: "create private workflow arguments",
+        })?;
+        serde_json::to_writer(&mut file, &arguments)?;
+        let size = file
+            .as_file()
+            .metadata()
+            .context(IoSnafu {
+                operation: "inspect private workflow arguments",
+            })?
+            .len();
+        ensure!(
+            size <= mf_runtime::MAX_WORKFLOW_INPUT_BYTES as u64,
+            mf_runtime::WorkflowInputTooLargeSnafu {
+                limit: mf_runtime::MAX_WORKFLOW_INPUT_BYTES
+            }
+        );
+        ensure!(
+            !self.cancel.load(Ordering::Acquire) && !self.closed.load(Ordering::Acquire),
+            CancelledSnafu
+        );
+        let mut command = Command::new(&self.launch.executable);
+        command.arg("--inputs-file").arg(file.path());
+        for _ in 0..self.launch.options.run.verbose.min(3) {
+            command.arg("--verbose");
+        }
+        let description = self
+            .launch
+            .manifest
+            .description()
+            .map_err(mf_chat::ChatError::from)?;
+        let mut run = LocalRun::start(
+            command,
+            description,
+            mf_telemetry::identity::RunId::new(),
+            mf_chat::contract::MAX_RECOVERY_BYTES as u64,
+        )?;
+        emit(
+            &self.output,
+            &self.closed,
+            ChatEvent::Observing(run.observation()),
+        );
+        loop {
+            if self.cancel.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
+                run.cancel();
+            }
+            if let Some(outcome) = run.poll()? {
+                return Ok(outcome);
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+fn exit_reason(outcome: &LocalOutcome) -> TurnExit {
+    if outcome.interrupted {
         TurnExit::Cancelled
     } else if outcome.status.code().is_none() {
         TurnExit::Interrupted
     } else {
         TurnExit::Failed
-    };
+    }
+}
+
+fn reconcile_turn(
+    database: &ChatDatabase,
+    invocation: &Invocation,
+    outcome: &LocalOutcome,
+) -> Result<ReconciledCompletion, mf_chat::ChatError> {
+    let reason = exit_reason(outcome);
     database.reconcile_completion(ConversationExit {
         invocation,
         stdout: outcome
