@@ -121,7 +121,7 @@ pub fn make_plan(
         .trim()
         .into();
     let toolchain = command(&comparison.head_root, "rustc", &["-vV"])?;
-    let graph = resolve_coverage_graph(options, &toolchain);
+    let mut graph = resolve_coverage_graph(comparison, options, &toolchain);
     let mut reasons = BTreeMap::<String, Vec<String>>::new();
     let mut direct = BTreeSet::new();
     let mut production = BTreeSet::new();
@@ -145,6 +145,48 @@ pub fn make_plan(
                 && let Some(selected) = isolated_tests(comparison, change, &packages[owner], root)
             {
                 tests.extend(selected);
+            } else if options.exact_tests
+                && change.path.ends_with(".rs")
+                && let Some(open) = graph.open.as_mut()
+            {
+                // The graph narrows one file at a time; unresolved files keep
+                // the existing package scope with a recorded reason.
+                match graph_select(open, change) {
+                    Ok(selected) => {
+                        reasons.entry(owner.clone()).or_default().push(format!(
+                            "Coverage graph {}: mapped {} to {} exact tests",
+                            open.record.commit_sha,
+                            change.path,
+                            selected.len()
+                        ));
+                        for test in &selected {
+                            if direct.insert(test.package.clone()) {
+                                reasons
+                                    .entry(test.package.clone())
+                                    .or_default()
+                                    .push(format!(
+                                        "Coverage graph {}: covers changed lines in {}",
+                                        open.record.commit_sha, change.path
+                                    ));
+                            }
+                        }
+                        tests.extend(selected);
+                    }
+                    Err(reason) => {
+                        production.insert(owner.clone());
+                        reasons.entry(owner.clone()).or_default().push(format!(
+                            "Coverage graph {}: retained package scope for {}: {}",
+                            open.record.commit_sha, change.path, reason
+                        ));
+                        if let Some(plan) = graph.plan.as_mut() {
+                            plan.widened.push(GraphWidening {
+                                file: change.path.clone(),
+                                package: owner.clone(),
+                                reason,
+                            });
+                        }
+                    }
+                }
             } else {
                 production.insert(owner.clone());
             }
@@ -237,7 +279,7 @@ pub fn make_plan(
             .sum(),
         analysis_ms: outcome.elapsed_ms,
         planning_ms: 0,
-        coverage_graph: graph,
+        coverage_graph: graph.plan,
     };
     if let Some(path) = &options.inventory {
         apply_inventory(&mut plan, path, &packages)?;
@@ -246,40 +288,84 @@ pub fn make_plan(
     Ok(plan)
 }
 
+/// An opened, validated coverage graph ready for changed-range queries.
+struct OpenGraph {
+    reader: graph::GraphReader,
+    record: graph::Record,
+    /// Files that changed between the graph commit and the comparison base;
+    /// empty when the graph commit is the base itself.
+    lagging: BTreeSet<String>,
+}
+
+struct GraphResolution {
+    open: Option<OpenGraph>,
+    plan: Option<GraphPlan>,
+}
+
 /// Validates the supplied coverage graph descriptor against the graph itself
 /// and the current execution. Every failure degrades to a recorded reason;
 /// planning never fails because of the graph.
-fn resolve_coverage_graph(options: &PlanOptions, toolchain: &str) -> Option<GraphPlan> {
-    let input = options.coverage_graph.as_ref()?;
+fn resolve_coverage_graph(
+    comparison: &Comparison,
+    options: &PlanOptions,
+    toolchain: &str,
+) -> GraphResolution {
+    let Some(input) = &options.coverage_graph else {
+        return GraphResolution {
+            open: None,
+            plan: None,
+        };
+    };
+    // Acquisition-side unavailability is preserved as-is, whatever the plan
+    // precision.
     let source = match input {
         CoverageGraphInput::Unavailable { reason } => {
-            return Some(GraphPlan {
-                reason: Some(reason.clone()),
-                ..Default::default()
-            });
+            return GraphResolution {
+                open: None,
+                plan: Some(GraphPlan {
+                    reason: Some(reason.clone()),
+                    ..Default::default()
+                }),
+            };
         }
         CoverageGraphInput::Resolved(source) => source,
     };
-    match validate_coverage_graph(options, source, toolchain) {
-        Ok(record) => Some(GraphPlan {
-            commit: Some(record.commit_sha),
-            run_id: Some(record.run_id),
-            attempt: u32::try_from(record.attempt).ok(),
-            schema_version: Some(record.schema_version),
-            ..Default::default()
-        }),
-        Err(reason) => Some(GraphPlan {
-            reason: Some(reason),
-            ..Default::default()
-        }),
+    if !options.exact_tests {
+        return GraphResolution {
+            open: None,
+            plan: Some(GraphPlan {
+                reason: Some("exact test selection is disabled for this plan".into()),
+                ..Default::default()
+            }),
+        };
+    }
+    match open_coverage_graph(comparison, options, source, toolchain) {
+        Ok(open) => GraphResolution {
+            plan: Some(GraphPlan {
+                commit: Some(open.record.commit_sha.clone()),
+                run_id: Some(open.record.run_id.clone()),
+                attempt: u32::try_from(open.record.attempt).ok(),
+                schema_version: Some(open.record.schema_version),
+                ..Default::default()
+            }),
+            open: Some(open),
+        },
+        Err(reason) => GraphResolution {
+            open: None,
+            plan: Some(GraphPlan {
+                reason: Some(reason),
+                ..Default::default()
+            }),
+        },
     }
 }
 
-fn validate_coverage_graph(
+fn open_coverage_graph(
+    comparison: &Comparison,
     options: &PlanOptions,
     source: &GraphSource,
     toolchain: &str,
-) -> Result<graph::Record, String> {
+) -> Result<OpenGraph, String> {
     let mut reader = graph::GraphReader::open(&source.path)
         .map_err(|error| format!("coverage graph is unreadable: {error}"))?;
     let record = reader
@@ -306,7 +392,61 @@ fn validate_coverage_graph(
     if signature != execution_signature(&options.configuration, &source.profile, toolchain) {
         return Err("coverage graph execution signature differs from the current execution".into());
     }
-    Ok(record)
+    let lagging = if source.commit == comparison.base {
+        BTreeSet::new()
+    } else {
+        command(
+            &comparison.repository,
+            "git",
+            &[
+                "diff",
+                "--no-renames",
+                "--name-only",
+                "-z",
+                &source.commit,
+                &comparison.base,
+                "--",
+            ],
+        )
+        .map_err(|error| {
+            format!("cannot compare the coverage graph commit to the comparison base: {error}")
+        })?
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect()
+    };
+    Ok(OpenGraph {
+        reader,
+        record,
+        lagging,
+    })
+}
+
+/// Maps one changed file to the distinct tests covering its base-side line
+/// ranges. Unresolved files widen to package scope with the returned reason;
+/// query failures widen the same way, never failing the plan.
+fn graph_select(graph: &mut OpenGraph, change: &Change) -> Result<Vec<TestCase>, String> {
+    if graph.lagging.contains(&change.path) {
+        return Err(
+            "the file changed between the coverage graph commit and the comparison base".into(),
+        );
+    }
+    let known = graph
+        .reader
+        .has_file(&graph.record.commit_sha, &change.path)
+        .map_err(|error| format!("coverage graph file query failed: {error}"))?;
+    if !known {
+        return Err("the file is absent from the coverage graph".into());
+    }
+    let selected = graph
+        .reader
+        .tests_covering(&graph.record.commit_sha, &change.path, &change.before_lines)
+        .map_err(|error| format!("coverage graph range query failed: {error}"))?;
+    if selected.is_empty() {
+        return Err("no test covers the changed ranges".into());
+    }
+    Ok(selected)
 }
 
 /// The normalized execution signature coverage graphs are bound to; aligned

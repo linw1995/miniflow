@@ -32,6 +32,96 @@ fn compare(root: &Path, base: &str, head: &str) -> mfn_test_affected::Comparison
     git::compare(root, base, head, None, json!({})).unwrap()
 }
 
+/// The normalized execution signature a compatible graph must bind to;
+/// mirrors scripts/run-cov.sh and plan-side validation.
+fn graph_signature(toolchain: &str, profile: &str) -> String {
+    let environment: serde_json::Map<_, _> = [
+        "RUSTFLAGS",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_INCREMENTAL",
+        "CARGO_PROFILE_DEV_DEBUG",
+        "CARGO_PROFILE_TEST_DEBUG",
+    ]
+    .into_iter()
+    .filter_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| (name.to_owned(), json!(value)))
+    })
+    .collect();
+    json!({"environment":environment,"features":"all","profile":profile,"target":std::env::var("CARGO_BUILD_TARGET").ok(),"toolchain":toolchain})
+        .to_string()
+}
+
+/// (package, binary, test name, covered file -> hit lines) for one test.
+type CoveredTestSpec<'a> = (&'a str, &'a str, &'a str, Vec<(&'a str, Vec<(u32, u32)>)>);
+
+/// Writes a synthetic coverage graph; each covered test carries one lcov
+/// export per (file, hit lines) entry.
+fn write_graph(
+    root: &Path,
+    name: &str,
+    commit: &str,
+    signature: String,
+    covered: Vec<CoveredTestSpec<'_>>,
+) -> PathBuf {
+    use mfn_test_affected::graph::{CoverageManifest, CoveredTest, GraphWriter};
+    let tests = covered
+        .into_iter()
+        .enumerate()
+        .map(|(index, (package, binary, test, files))| {
+            let mut export = String::new();
+            for (file, hits) in files {
+                export.push_str(&format!("SF:{file}\n"));
+                for (line, count) in hits {
+                    export.push_str(&format!("DA:{line},{count}\n"));
+                }
+                export.push_str("end_of_record\n");
+            }
+            let lcov = root.join(format!("target/{name}-{index}.lcov"));
+            fs::write(&lcov, export).unwrap();
+            CoveredTest {
+                package: package.into(),
+                binary: binary.into(),
+                name: test.into(),
+                lcov,
+            }
+        })
+        .collect();
+    let path = root.join(format!("target/{name}.sqlite"));
+    let mut writer = GraphWriter::create(&path).unwrap();
+    writer
+        .index(
+            &CoverageManifest {
+                commit_sha: commit.into(),
+                run_id: "7".into(),
+                attempt: 3,
+                signature,
+                tests,
+            },
+            root,
+        )
+        .unwrap();
+    path
+}
+
+fn graph_source(path: PathBuf, commit: &str) -> mfn_test_affected::CoverageGraphInput {
+    mfn_test_affected::CoverageGraphInput::Resolved(mfn_test_affected::GraphSource {
+        path,
+        commit: commit.into(),
+        run_id: "7".into(),
+        attempt: 3,
+        profile: "ci".into(),
+    })
+}
+
+fn graph_options(graph: mfn_test_affected::CoverageGraphInput) -> PlanOptions {
+    PlanOptions {
+        coverage_graph: Some(graph),
+        ..Default::default()
+    }
+}
+
 #[test]
 fn combines_isolated_tests_with_production_consumers_and_keeps_caller_checkout() {
     let (directory, base) = fixture();
@@ -459,7 +549,6 @@ fn additions_deletions_and_manifest_changes_preserve_conservative_scope() {
 
 #[test]
 fn records_coverage_graph_provenance_and_degradation_reasons() {
-    use mfn_test_affected::graph::{CoverageManifest, CoveredTest, GraphWriter};
     use mfn_test_affected::{CoverageGraphInput, GraphSource};
     let (directory, base) = fixture();
     let root = directory.path();
@@ -471,47 +560,21 @@ fn records_coverage_graph_provenance_and_degradation_reasons() {
     let head = commit(root);
     let comparison = compare(root, &base, &head);
     let toolchain = git::command(root, "rustc", &["-vV"]).unwrap();
-    let signature = |profile: &str| {
-        let environment: serde_json::Map<_, _> = [
-            "RUSTFLAGS",
-            "CARGO_ENCODED_RUSTFLAGS",
-            "CARGO_INCREMENTAL",
-            "CARGO_PROFILE_DEV_DEBUG",
-            "CARGO_PROFILE_TEST_DEBUG",
-        ]
-        .into_iter()
-        .filter_map(|name| {
-            std::env::var(name)
-                .ok()
-                .map(|value| (name.to_owned(), json!(value)))
-        })
-        .collect();
-        json!({"environment":environment,"features":"all","profile":profile,"target":std::env::var("CARGO_BUILD_TARGET").ok(),"toolchain":toolchain})
-            .to_string()
-    };
-    let graph_at = |name: &str, commit: &str, signature: String| {
-        let lcov = root.join(format!("target/{name}.lcov"));
-        fs::write(&lcov, "SF:core/src/lib.rs\nDA:1,1\nend_of_record\n").unwrap();
-        let path = root.join(format!("target/{name}.sqlite"));
-        let mut writer = GraphWriter::create(&path).unwrap();
-        writer
-            .index(
-                &CoverageManifest {
-                    commit_sha: commit.into(),
-                    run_id: "7".into(),
-                    attempt: 3,
-                    signature,
-                    tests: vec![CoveredTest {
-                        package: "sample-core".into(),
-                        binary: "sample-core".into(),
-                        name: "tests::stable".into(),
-                        lcov,
-                    }],
-                },
-                root,
-            )
-            .unwrap();
-        path
+    // Line 2 is executable but outside the changed range, so the graph stays
+    // compatible without narrowing the selection.
+    let inert = |name: &str, commit: &str, signature: String| {
+        write_graph(
+            root,
+            name,
+            commit,
+            signature,
+            vec![(
+                "sample-core",
+                "sample-core",
+                "tests::stable",
+                vec![("core/src/lib.rs", vec![(2, 1)])],
+            )],
+        )
     };
     let source = |path: PathBuf| {
         CoverageGraphInput::Resolved(GraphSource {
@@ -527,11 +590,16 @@ fn records_coverage_graph_provenance_and_degradation_reasons() {
         ..Default::default()
     };
 
-    // A compatible graph records its provenance without changing selection yet.
+    // A compatible graph records its provenance; uncovered changed ranges
+    // widen to package scope with a recorded reason.
     let plan = make_plan(
         &comparison,
         &outcome(&comparison),
-        &options(source(graph_at("compatible", &base, signature("ci")))),
+        &options(source(inert(
+            "compatible",
+            &base,
+            graph_signature(&toolchain, "ci"),
+        ))),
     )
     .unwrap();
     let graph = plan.coverage_graph.unwrap();
@@ -539,7 +607,11 @@ fn records_coverage_graph_provenance_and_degradation_reasons() {
     assert_eq!(graph.run_id.as_deref(), Some("7"));
     assert_eq!(graph.attempt, Some(3));
     assert_eq!(graph.schema_version, Some(1));
-    assert!(graph.reason.is_none() && graph.widened.is_empty());
+    assert!(graph.reason.is_none());
+    assert_eq!(graph.widened.len(), 1);
+    assert_eq!(graph.widened[0].file, "core/src/lib.rs");
+    assert_eq!(graph.widened[0].package, "sample-core");
+    assert!(graph.widened[0].reason.contains("no test covers"));
     assert_eq!(plan.packages, ["sample-app", "sample-core"]);
 
     // Every incompatibility degrades with a recorded reason, never an error.
@@ -547,13 +619,13 @@ fn records_coverage_graph_provenance_and_degradation_reasons() {
         (source(root.join("target/absent.sqlite")), "unreadable"),
         (
             // The descriptor names a commit the graph never indexed.
-            source(graph_at("foreign", &head, signature("ci"))),
+            source(inert("foreign", &head, graph_signature(&toolchain, "ci"))),
             "no record for the resolved commit",
         ),
         (
             CoverageGraphInput::Resolved(GraphSource {
                 run_id: "8".into(),
-                ..match source(graph_at("bound", &base, signature("ci"))) {
+                ..match source(inert("bound", &base, graph_signature(&toolchain, "ci"))) {
                     CoverageGraphInput::Resolved(source) => source,
                     _ => unreachable!(),
                 }
@@ -561,7 +633,11 @@ fn records_coverage_graph_provenance_and_degradation_reasons() {
             "does not match the run",
         ),
         (
-            source(graph_at("other-profile", &base, signature("other"))),
+            source(inert(
+                "other-profile",
+                &base,
+                graph_signature(&toolchain, "other"),
+            )),
             "execution signature differs",
         ),
     ] {
@@ -591,6 +667,263 @@ fn records_coverage_graph_provenance_and_degradation_reasons() {
     // Without a descriptor the plan carries no graph outcome at all.
     let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
     assert!(plan.coverage_graph.is_none());
+}
+
+#[test]
+fn narrows_package_scope_through_coverage_graph_with_conservative_widening() {
+    let (directory, base) = fixture();
+    let root = directory.path();
+    let toolchain = git::command(root, "rustc", &["-vV"]).unwrap();
+    let signature = graph_signature(&toolchain, "ci");
+
+    // A fully covered production change narrows to exact selectors, including
+    // covering tests owned by another package.
+    write(
+        root,
+        "core/src/lib.rs",
+        &SOURCE.replace("-> u32 { 1 }", "-> u32 { 2 }"),
+    );
+    let head = commit(root);
+    let comparison = compare(root, &base, &head);
+    let graph = write_graph(
+        root,
+        "covering",
+        &base,
+        signature.clone(),
+        vec![
+            (
+                "sample-core",
+                "sample-core",
+                "tests::stable",
+                vec![("core/src/lib.rs", vec![(1, 1)])],
+            ),
+            (
+                "sample-app",
+                "sample-app::integration",
+                "hits_core",
+                vec![("core/src/lib.rs", vec![(1, 2)])],
+            ),
+        ],
+    );
+    let plan = make_plan(
+        &comparison,
+        &outcome(&comparison),
+        &graph_options(graph_source(graph, &base)),
+    )
+    .unwrap();
+    assert!(plan.packages.is_empty());
+    assert_eq!(
+        plan.tests
+            .iter()
+            .map(|test| (
+                test.package.as_str(),
+                test.binary.as_str(),
+                test.name.as_str()
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("sample-app", "sample-app::integration", "hits_core"),
+            ("sample-core", "sample-core", "tests::stable"),
+        ]
+    );
+    // Both the owning and the covering packages stay in the recorded baseline.
+    assert_eq!(plan.baseline_packages, ["sample-app", "sample-core"]);
+    let provenance = plan.coverage_graph.unwrap();
+    assert_eq!(provenance.commit.as_deref(), Some(base.as_str()));
+    assert!(provenance.widened.is_empty());
+    assert!(
+        plan.reasons["sample-core"]
+            .iter()
+            .any(|reason| reason.contains("mapped core/src/lib.rs to 2 exact tests"))
+    );
+    assert!(
+        plan.reasons["sample-app"]
+            .iter()
+            .any(|reason| reason.contains("covers changed lines in core/src/lib.rs"))
+    );
+
+    // A file changed between the graph commit and the comparison base widens
+    // to package scope: the graph predates it.
+    write(
+        root,
+        "core/src/lib.rs",
+        &SOURCE.replace("-> u32 { 1 }", "-> u32 { 3 }"),
+    );
+    let newer = commit(root);
+    let comparison = compare(root, &head, &newer);
+    let graph = write_graph(
+        root,
+        "lagging",
+        &base,
+        signature.clone(),
+        vec![(
+            "sample-core",
+            "sample-core",
+            "tests::stable",
+            vec![("core/src/lib.rs", vec![(1, 1)])],
+        )],
+    );
+    let plan = make_plan(
+        &comparison,
+        &outcome(&comparison),
+        &graph_options(graph_source(graph, &base)),
+    )
+    .unwrap();
+    assert_eq!(plan.packages, ["sample-app", "sample-core"]);
+    assert!(plan.tests.is_empty());
+    let provenance = plan.coverage_graph.unwrap();
+    assert_eq!(provenance.widened.len(), 1);
+    assert!(
+        provenance.widened[0]
+            .reason
+            .contains("changed between the coverage graph commit and the comparison base")
+    );
+
+    // A file absent from the graph widens to package scope.
+    let graph = write_graph(
+        root,
+        "absent-file",
+        &head,
+        signature.clone(),
+        vec![(
+            "sample-core",
+            "sample-core",
+            "tests::stable",
+            vec![("core/src/other.rs", vec![(1, 1)])],
+        )],
+    );
+    let plan = make_plan(
+        &comparison,
+        &outcome(&comparison),
+        &graph_options(graph_source(graph, &head)),
+    )
+    .unwrap();
+    assert_eq!(plan.packages, ["sample-app", "sample-core"]);
+    let provenance = plan.coverage_graph.unwrap();
+    assert_eq!(provenance.widened.len(), 1);
+    assert!(
+        provenance.widened[0]
+            .reason
+            .contains("absent from the coverage graph")
+    );
+
+    // Mixed files in one package: the resolved file contributes nothing once
+    // its sibling widens the package and its reverse dependencies.
+    write(
+        root,
+        "core/src/extra.rs",
+        "pub fn extra() -> u32 {\n    1\n}\n",
+    );
+    let with_extra = commit(root);
+    write(
+        root,
+        "core/src/lib.rs",
+        &SOURCE.replace("-> u32 { 1 }", "-> u32 { 4 }"),
+    );
+    write(
+        root,
+        "core/src/extra.rs",
+        "pub fn extra() -> u32 {\n    2\n}\n",
+    );
+    let mixed = commit(root);
+    let comparison = compare(root, &with_extra, &mixed);
+    let graph = write_graph(
+        root,
+        "mixed",
+        &with_extra,
+        signature.clone(),
+        vec![(
+            "sample-core",
+            "sample-core",
+            "tests::stable",
+            vec![
+                ("core/src/lib.rs", vec![(1, 1)]),
+                // extra.rs is known but its changed line 2 is not covered.
+                ("core/src/extra.rs", vec![(1, 1)]),
+            ],
+        )],
+    );
+    let plan = make_plan(
+        &comparison,
+        &outcome(&comparison),
+        &graph_options(graph_source(graph, &with_extra)),
+    )
+    .unwrap();
+    assert_eq!(plan.packages, ["sample-app", "sample-core"]);
+    assert!(plan.tests.is_empty());
+    let provenance = plan.coverage_graph.unwrap();
+    assert_eq!(provenance.widened.len(), 1);
+    assert_eq!(provenance.widened[0].file, "core/src/extra.rs");
+    assert!(provenance.widened[0].reason.contains("no test covers"));
+
+    // Test-body isolation wins over the graph: the file is never queried.
+    write(root, "app/src/lib.rs", &SOURCE.replace("1, 1", "9, 9"));
+    let isolated = commit(root);
+    let comparison = compare(root, &mixed, &isolated);
+    let graph = write_graph(root, "isolation", &mixed, signature.clone(), vec![]);
+    let plan = make_plan(
+        &comparison,
+        &outcome(&comparison),
+        &graph_options(graph_source(graph, &mixed)),
+    )
+    .unwrap();
+    assert_eq!(plan.tests.len(), 1);
+    assert_eq!(plan.tests[0].name, "tests::changed");
+    assert!(plan.coverage_graph.unwrap().widened.is_empty());
+
+    // Unknown inputs keep the full-workspace fallback and clear graph
+    // selectors; the graph provenance remains recorded.
+    let mut comparison = compare(root, &head, &newer);
+    comparison.changes.push(mfn_test_affected::Change {
+        path: "scripts/unknown.sh".into(),
+        before: vec![],
+        after: vec![],
+        before_lines: vec![],
+    });
+    let graph = write_graph(
+        root,
+        "fallback",
+        &head,
+        signature.clone(),
+        vec![(
+            "sample-core",
+            "sample-core",
+            "tests::stable",
+            vec![("core/src/lib.rs", vec![(1, 1)])],
+        )],
+    );
+    let plan = make_plan(
+        &comparison,
+        &outcome(&comparison),
+        &graph_options(graph_source(graph.clone(), &head)),
+    )
+    .unwrap();
+    assert_eq!(plan.packages.len(), 3);
+    assert!(plan.tests.is_empty());
+    assert!(plan.coverage_graph.unwrap().commit.is_some());
+    assert!(!plan.fallback_reasons.is_empty());
+
+    // Empty selections stay empty with the graph provenance recorded.
+    let empty_graph = write_graph(root, "empty", &newer, signature.clone(), vec![]);
+    let comparison = compare(root, &newer, &newer);
+    let plan = make_plan(
+        &comparison,
+        &outcome(&comparison),
+        &graph_options(graph_source(empty_graph, &newer)),
+    )
+    .unwrap();
+    assert!(plan.packages.is_empty() && plan.tests.is_empty());
+    assert!(plan.coverage_graph.unwrap().commit.is_some());
+
+    // Package precision records why the descriptor was not consumed.
+    let comparison = compare(root, &head, &newer);
+    let mut options = graph_options(graph_source(graph, &head));
+    options.exact_tests = false;
+    let plan = make_plan(&comparison, &outcome(&comparison), &options).unwrap();
+    assert_eq!(
+        plan.coverage_graph.unwrap().reason.as_deref(),
+        Some("exact test selection is disabled for this plan")
+    );
 }
 
 #[test]
@@ -710,6 +1043,7 @@ fn shared_input_policy_scopes_known_consumers() {
             path: path.into(),
             before: vec![],
             after: vec![],
+            before_lines: vec![],
         }];
         let plan = make_plan(&comparison, &outcome(&comparison), &PlanOptions::default()).unwrap();
         assert_eq!(plan.packages, expected, "{path}");

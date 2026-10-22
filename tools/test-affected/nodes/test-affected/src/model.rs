@@ -9,6 +9,11 @@ pub struct Change {
     pub path: String,
     pub before: Vec<SourceRange>,
     pub after: Vec<SourceRange>,
+    /// Base-side changed line intervals from the Git hunk headers, used for
+    /// coverage graph queries. Empty for older serialized comparisons and
+    /// for hunks without base-side lines; both widen conservatively.
+    #[serde(default)]
+    pub before_lines: Vec<crate::graph::LineRange>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]

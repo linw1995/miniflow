@@ -123,6 +123,15 @@ code, unique test identifiers, known test macros, and absence of out-of-line chi
 resource access in the test scope. Unknown patterns retain package scope. This is a deliberately limited
 source ownership rule, not a proof of arbitrary program effects or test independence.
 
+After test-body isolation, a resolved coverage graph narrows each remaining changed Rust file to the
+exact tests covering its base-side line ranges. Files the graph predates (changed between the graph
+commit and the comparison base), files with uncovered changed ranges, and files absent from the graph
+widen back to the existing package plus reverse-dependency scope; every widening records its reason in
+the plan's `coverage_graph` outcome next to the graph's commit/run/schema provenance. Graph-derived
+selectors join the same exact `tests` list as isolated test bodies, so both consumers widen identity
+mismatches to the recorded baseline. Graph unavailability never forces full-workspace fallback;
+unknown inputs and analyzer failures still do.
+
 The plan records source/tree/toolchain and build-environment identity, conservative `baseline_packages`,
 retained whole `packages`, exact `tests` (`package`, `binary`, `name`), reasons, and deferred
 `ignored_files`. Older saved plans without `ignored_files` remain accepted by the consumer. Counts remain null

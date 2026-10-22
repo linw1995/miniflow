@@ -233,6 +233,7 @@ pub fn compare_with_mode(
             path: path.into(),
             before: Vec::new(),
             after: Vec::new(),
+            before_lines: Vec::new(),
         };
         for line in patch.lines().filter(|line| line.starts_with("@@ ")) {
             let fields: Vec<_> = line.split_whitespace().collect();
@@ -244,6 +245,9 @@ pub fn compare_with_mode(
             );
             change.before.push(hunk_range(&before, &fields[1][1..])?);
             change.after.push(hunk_range(&after, &fields[2][1..])?);
+            if let Some(range) = hunk_lines(&fields[1][1..])? {
+                change.before_lines.push(range);
+            }
         }
         changes.push(change);
     }
@@ -322,6 +326,23 @@ fn hunk_range(source: &[u8], value: &str) -> Result<SourceRange, Error> {
             .unwrap_or(source.len())
     };
     Ok(SourceRange { start: from, end })
+}
+
+/// Parses a hunk header coordinate (`-start,count`) into the base-side
+/// inclusive line interval. Pure insertions (`count == 0`) have no base-side
+/// lines and yield no queryable range.
+fn hunk_lines(value: &str) -> Result<Option<crate::graph::LineRange>, Error> {
+    let (start, count) = value.split_once(',').unwrap_or((value, "1"));
+    let (Ok(start), Ok(count)) = (start.parse::<u32>(), count.parse::<u32>()) else {
+        return InvalidSnafu {
+            message: "invalid Git hunk coordinates",
+        }
+        .fail();
+    };
+    Ok((count > 0 && start >= 1).then(|| crate::graph::LineRange {
+        start,
+        end: start + count - 1,
+    }))
 }
 
 /// Resolves local comparison modes into immutable Git snapshots.

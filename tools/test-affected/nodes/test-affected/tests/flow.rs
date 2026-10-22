@@ -454,9 +454,9 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
             .to_string()
     };
     let graphs_dir = root.join("target/graphs");
-    let build_graph = |commit: &str, run: u64, hits: &[(u32, u32)]| {
+    let build_graph = |name: &str, commit: &str, run: u64, hits: &[(u32, u32)]| {
         use mfn_test_affected::graph::{CoverageManifest, CoveredTest, GraphWriter};
-        let lcov_dir = graphs_dir.join(format!("lcov-{run}"));
+        let lcov_dir = graphs_dir.join(format!("lcov-{name}"));
         fs::create_dir_all(&lcov_dir).unwrap();
         let mut export = "SF:core/src/lib.rs\n".to_string();
         for (line, count) in hits {
@@ -477,7 +477,7 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
                 lcov,
             }],
         };
-        let path = graphs_dir.join(format!("graph-{run}.sqlite"));
+        let path = graphs_dir.join(format!("graph-{name}.sqlite"));
         let mut writer = GraphWriter::create(&path).unwrap();
         writer.index(&manifest, root).unwrap();
         path
@@ -493,9 +493,9 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
     let runs = json!([{"id":11,"run_attempt":1,"workflow_id":7,"head_sha":prior,"status":"completed","conclusion":"success"},{"id":17,"run_attempt":1,"workflow_id":7,"head_sha":nearest,"status":"completed","conclusion":"success"}]);
     let initial = json!({"current":current,"pull":{"head":{"sha":head},"merge_commit_sha":tested},"runs":runs,"records":{"11":record(11,&prior,&older_merge),"17":record(17,&nearest,&newer_merge)},
         "graph_runs":[{"id":23,"run_attempt":1,"head_sha":base,"status":"completed","conclusion":"success"},{"id":29,"run_attempt":1,"head_sha":prior,"status":"completed","conclusion":"success"}],
-        // The default graphs cover only the unhit line 2 of core/src/lib.rs, so
-        // changed-line queries widen conservatively until narrowing lands.
-        "graphs":{"23":{"sqlite":build_graph(&base,23,&[(2,1)]),"metadata":graph_metadata(&base,23)},"29":{"sqlite":build_graph(&prior,29,&[(2,1)]),"metadata":graph_metadata(&prior,29)}}});
+        // The default graphs cover only line 2 of core/src/lib.rs; the changed
+        // line 1 stays uncovered and widens conservatively to package scope.
+        "graphs":{"23":{"sqlite":build_graph("base",&base,23,&[(2,1)]),"metadata":graph_metadata(&base,23)},"29":{"sqlite":build_graph("prior",&prior,29,&[(2,1)]),"metadata":graph_metadata(&prior,29)}}});
     let server = GithubFixture::new(&initial);
     let mut flow = definition(root);
     configure_github(&mut flow["nodes"], &server.base);
@@ -534,6 +534,8 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
         "graph_absent",
         "graph_incompatible",
         "graph_foreign",
+        "graph_narrows",
+        "graph_lagging",
         "ci_execution",
         "invalid_record",
         "failed_run",
@@ -720,6 +722,26 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
                 state["graphs"]["29"]["metadata"]["commit_sha"] = json!(base);
                 (Some("incremental"), vec![], newer_merge.as_str())
             }
+            "graph_narrows" => {
+                args["params.cumulative"] = json!(true);
+                // The graph at the comparison base covers the changed core
+                // line, narrowing the package to the covering test.
+                state["graphs"]["23"]["sqlite"] =
+                    json!(build_graph("narrowing", &base, 23, &[(1, 1)]));
+                (Some("cumulative"), vec![], base.as_str())
+            }
+            "graph_lagging" => {
+                // The nearest graph predates the comparison base, which
+                // changed core/src/lib.rs since; the file widens to package
+                // scope even though the graph covers that line.
+                state["records"]["17"]["signature"]["policy"] = json!("old-policy");
+                state["graphs"].as_object_mut().unwrap().remove("29");
+                (
+                    Some("incremental"),
+                    vec!["sample-app", "sample-core"],
+                    older_merge.as_str(),
+                )
+            }
             "ci_execution" => {
                 args["params.run"] = json!(true);
                 (None, vec![], "")
@@ -797,21 +819,48 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
                 );
             }
             _ => {
-                let (graph_commit, graph_run) = if case != "graph_foreign" && expected_base != base
-                {
-                    (prior.as_str(), "29")
-                } else {
-                    (base.as_str(), "23")
-                };
+                let (graph_commit, graph_run) =
+                    if matches!(case, "graph_foreign" | "graph_lagging") || expected_base == base {
+                        (base.as_str(), "23")
+                    } else {
+                        (prior.as_str(), "29")
+                    };
                 assert_eq!(graph["commit"], graph_commit, "{case}");
                 assert_eq!(graph["run_id"], graph_run, "{case}");
                 assert_eq!(graph["attempt"], 1, "{case}");
                 assert_eq!(graph["schema_version"], 1, "{case}");
                 assert!(graph["reason"].is_null(), "{case}");
-                assert_eq!(graph["widened"], json!([]), "{case}");
+                // Diffs from an older base change core/src/lib.rs line 1,
+                // which the default graphs do not cover.
+                let widened = &graph["widened"];
+                if expected_base == newer_merge || case == "graph_narrows" {
+                    assert_eq!(widened, &json!([]), "{case}");
+                } else {
+                    assert_eq!(widened.as_array().unwrap().len(), 1, "{case}");
+                    assert_eq!(widened[0]["file"], "core/src/lib.rs", "{case}");
+                    assert_eq!(widened[0]["package"], "sample-core", "{case}");
+                    let reason = widened[0]["reason"].as_str().unwrap();
+                    if case == "graph_lagging" {
+                        assert!(
+                            reason.contains("changed between the coverage graph commit"),
+                            "{case}"
+                        );
+                    } else {
+                        assert!(reason.contains("no test covers"), "{case}");
+                    }
+                }
             }
         }
-        if matches!(
+        if case == "graph_narrows" {
+            assert_eq!(
+                generated["plan"]["tests"],
+                json!([
+                    {"package":"sample-app","binary":"sample-app","name":"tests::changed"},
+                    {"package":"sample-core","binary":"sample-core","name":"tests::stable"}
+                ]),
+                "{case}"
+            );
+        } else if matches!(
             case,
             "incremental" | "graph_absent" | "graph_incompatible" | "graph_foreign"
         ) {
