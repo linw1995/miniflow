@@ -36,7 +36,12 @@ The host SHALL apply the selected nonsecret model configuration during flow prep
 
 ### Requirement: Execute conversations through the embedded flow
 
-The host SHALL begin a durable turn, pass ordered history, prompt, and application context through the common conversation input contract, and persist the final result. The conversation flow SHALL compose model work without accessing storage. System instructions SHALL remain separate from history. Returned results SHALL identify their session, turn, and call.
+The host SHALL begin a durable turn, pass ordered history, prompt, and application context through
+the common conversation input contract, and persist the final result. The conversation flow SHALL
+compose model work using generic workflow nodes without accessing storage or requiring `mf-chat`
+node registration. Input and output protocol types SHALL remain application-side contracts rather
+than requiring a dedicated workflow adapter node. System instructions SHALL remain separate from
+history. Returned results SHALL identify their session, turn, and call.
 
 #### Scenario: Complete two conversation turns
 

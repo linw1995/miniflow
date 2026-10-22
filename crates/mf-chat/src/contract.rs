@@ -106,18 +106,6 @@ impl ConversationResult {
     }
 }
 
-fn input(input: ConversationInputs) -> Result<ConversationInputs, ChatError> {
-    Ok(input)
-}
-
-register_operation!(
-    "mf_chat.conversation.input",
-    ConversationInput,
-    ConversationInputs,
-    ConversationInputs,
-    input
-);
-
 mod recovery;
 pub use recovery::{
     CompletionState, ConversationExit, MAX_RECOVERY_BYTES, ReconciledCompletion,

@@ -1,6 +1,7 @@
 #![cfg(unix)]
 mod common;
 
+extern crate mfn_code as _;
 extern crate mfn_core as _;
 extern crate mfn_llm as _;
 
@@ -407,4 +408,34 @@ fn llm_stream_tasks_and_skips_preserve_existing_execution_contracts() {
     assert_eq!(run_memory(&skipped, &json!({})), vec![json!({})]);
     assert_eq!(run(&executable, &json!({})), vec![json!({})]);
     assert_eq!(server.requests().len(), 4);
+}
+
+#[test]
+fn composed_conversation_compiles_without_application_nodes() {
+    let definition =
+        WorkflowDefinition::from_json(include_str!("../../mf-chat/workflows/conversation.json"))
+            .unwrap();
+    let registry = NodeRegistry::from_inventory().unwrap();
+    assert!(
+        registry
+            .iter()
+            .all(|registration| !registration.kind.starts_with("mf_chat."))
+    );
+    let plan = compile_definition(&definition, &registry).unwrap();
+    let manifest = plan.manifest(&registry).unwrap();
+    let arguments = mf_runtime::resolve_workflow_inputs(
+        &manifest.input_schema,
+        &arguments(&json!({
+            "input.prompt":"Hello",
+            "input.context":{"title":{"source":"provisional","revision":0,"attempted":false,"enabled":true}}
+        })),
+        |_| None,
+    ).unwrap();
+    manifest.input_schema.validate(&arguments).unwrap();
+    assert_eq!(arguments.0["input.system"].as_str(), Some(""));
+    assert_eq!(
+        serde_json::to_value(&arguments).unwrap()["input.history"],
+        json!([])
+    );
+    instantiate_compiled(&plan, &registry).unwrap();
 }

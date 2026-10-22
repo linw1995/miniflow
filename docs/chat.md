@@ -52,7 +52,12 @@ Opening a database under its ownership lock calls the recovery handler directly:
 
 ## Embedded conversation host
 
-`ChatHost` owns the database, model profiles, and blocking execution workers. Each submission runs the embedded `conversation` module with a fresh context and cancellation handle. The host admits the turn before execution and saves the final `ConversationResult` afterward. The flow uses `builtin.llm` and the same `ConversationInputs` and `ChatContract` as executable conversations. No standalone workflow runner is spawned.
+`ChatHost` owns the database, model profiles, and blocking execution workers. Each submission runs
+the embedded `conversation` module with a fresh context and cancellation handle. The host admits the
+turn before execution and saves the final `ConversationResult` afterward. The flow declares inputs
+through `builtin.parameters` and uses only generic built-in nodes. Both execution backends bind
+those ports through the same `ConversationInputs` and `ChatContract`; the flow has no `mf-chat` node
+dependency. No standalone workflow runner is spawned.
 
 ```rust
 let profile = mf_chat::ModelProfile::new("default", serde_json::json!({"model":"your-model"}))?;
