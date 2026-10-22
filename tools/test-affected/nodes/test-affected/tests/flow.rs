@@ -69,7 +69,10 @@ fn generated_flow_matches_memory_drains_once_and_rejects_cross_domain_bypass() {
     let compiled = compile_definition(&workflow, &registry).unwrap();
     let prepared = instantiate_stream(&compiled, &registry).unwrap();
     assert!(!root.join("target/server.pid").exists());
-    let arguments = json!({"params.repository":root,"params.mode":"snapshot","params.base":base,"params.head":head});
+    let arguments = json!({"params.repository":root,"params.mode":"snapshot","params.base":base,"params.head":head,
+        // Pin offline: without an explicit argument this parameter binds
+        // GITHUB_REPOSITORY from the environment and would reach the real API.
+        "params.github_repository":""});
     let instance = FlowRuntime::default()
         .start_stream(
             prepared,
@@ -557,10 +560,11 @@ fn unified_flow_replays_ci_evidence_and_keeps_local_execution_offline() {
             "local" => {
                 args.as_object_mut().unwrap().remove("params.ci");
                 // Local planning stays offline unless a repository identity is
-                // explicitly supplied for coverage graph acquisition.
-                args.as_object_mut()
-                    .unwrap()
-                    .remove("params.github_repository");
+                // explicitly supplied for coverage graph acquisition. Pin the
+                // identity explicitly: the parameter binds GITHUB_REPOSITORY
+                // from the environment when the argument is absent, which
+                // differs between runners.
+                args["params.github_repository"] = json!("");
                 args["params.mode"] = json!("snapshot");
                 args["params.base"] = json!(base);
                 args["params.head"] = json!(head);

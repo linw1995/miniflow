@@ -2083,7 +2083,7 @@
         },
         "code": {
           "enabled": "size(slug) > 0 && precision == 'tests'",
-          "reason": "size(slug) > 0 ? 'Coverage graph acquisition requires test precision' : 'No GitHub repository identity supplied for coverage graph acquisition'",
+          "reason": "size(slug) == 0 ? 'No GitHub repository identity supplied for coverage graph acquisition' : (precision != 'tests' ? 'Coverage graph acquisition requires test precision' : '')",
           "path": "'/repos/' + slug + '/actions/workflows/' + policy.workflow + '/runs'",
           "query": "{'branch': policy.branch, 'event': 'push', 'status': 'success', 'per_page': 100}",
           "base": "c.comparison.base",
