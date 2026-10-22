@@ -740,7 +740,13 @@ mod tests {
     fn deep_values_survive_protobuf_transport_without_dictionary_references() {
         for size in [0, CHUNK_BYTES * 2] {
             for depth in [16, 48, 120] {
-                let mut value = json!({"text": "x".repeat(size), "number": u64::MAX, "zero": -0.0});
+                // These bit patterns expose rounding errors in the default JSON float parser.
+                let ordinary = f64::from_bits(0x3ff9_4868_b3b0_4fc6);
+                let tiny = f64::from_bits(0x20fd_5db4_3a77_6693);
+                let mut value = json!({
+                    "text": "x".repeat(size), "number": u64::MAX, "zero": -0.0,
+                    "floats": [ordinary, -ordinary, tiny, f64::MIN_POSITIVE, f64::from_bits(1), f64::MAX]
+                });
                 for _ in 0..depth {
                     value = json!([value]);
                 }
