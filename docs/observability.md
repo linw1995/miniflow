@@ -381,8 +381,9 @@ builds report capture availability without changing business results.
 Both modes use the same publisher, version-2 snapshot records, `SnapshotExporter`,
 and receiver-owned history. The exporter captures native trace/span context
 synchronously before SDK batching. Timestamps describe observation time and are
-not unique identities. Version-1 dictionary runners must be recompiled: incompatible
-transport or record headers are rejected explicitly rather than decoded as new records.
+not unique identities. Since the project has not released, capture follows the current
+contract directly. The receiver validates transport and record headers without providing
+migration or compatibility layers for earlier development formats.
 
 ### Programmatic capture
 

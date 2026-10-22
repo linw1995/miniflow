@@ -10,7 +10,7 @@ receiver-owned history.
 - Keep runtime snapshot callbacks stateless and redacted.
 - Publish complete node records through an observation-owned publisher.
 - Move immutable history storage to the TUI receiver.
-- Remove runtime dictionary/history APIs and introduce snapshot protocol version 2.
+- Define the current snapshot contract without runtime dictionary/history APIs.
 
 ## Capabilities
 
@@ -24,6 +24,7 @@ None.
 
 ## Impact
 
-Generated runners must be rebuilt for the new protocol. Runtime history API callers
-must collect events or use observation-side storage. Repeated values can consume more
-transport bandwidth; producer retention no longer grows with distinct values.
+The project has not released, so the implementation adopts the current contracts
+directly. Applications collect runtime events or use observation-side storage.
+Repeated values can consume more transport bandwidth; producer retention no longer
+grows with distinct values.

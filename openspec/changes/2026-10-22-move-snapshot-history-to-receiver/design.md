@@ -12,7 +12,7 @@ finite/stream boundaries; it does not need to own their encoding or retention.
   Validate port objects before sending. Hold no prior payloads or value identities.
 - Retain persistent scope/node roots in `mf-tui::snapshots::SnapshotStore`. Preserve
   repeated invocation boundaries and reuse unchanged nodes, without global value interning.
-- Upgrade record and transport versions to 2. Reject old runners explicitly.
+- Validate the current record and transport format. Earlier unreleased contracts do not require compatibility handling.
 - Preserve existing bounded OTLP batching, sequence validation, context correlation, and
   fragmented records. Encode large unsigned integers as reserved eight-byte OTLP values.
   Encode deep container subtrees as tagged JSON bytes to stay within protobuf recursion
@@ -25,8 +25,9 @@ Complete records can repeat large payloads on the wire. Receiver history still g
 with the session, which is intentional. Disk persistence, historical eviction, and
 receiver-side global interning are not introduced by this change.
 
-## Migration
+## Current interfaces
 
-Recompile runners. Replace `SnapshotRecording` callbacks with `SnapshotRecorder` and
-an observation publisher or an application-owned event collector. Snapshot value IDs
-and dictionary definitions no longer exist in the protocol.
+Runtime observers attach `SnapshotRecorder` callbacks to an observation publisher or
+an application-owned event collector. The receiver owns history storage. The project
+has not released, so earlier development APIs and formats do not impose migration or
+compatibility requirements on these interfaces.

@@ -99,11 +99,11 @@ including nested scopes, SHALL share this rule. Display and Debug SHALL use the 
 
 ### Requirement: Retain snapshot history only at the observation receiver
 
-Snapshot publication SHALL send self-contained node inputs and outputs keyed by port
-name. The publisher SHALL NOT retain prior payloads, value dictionaries, or historical
-roots. The receiver SHALL preserve immutable scope/node history while sharing unchanged
-nodes. Repeated Started and Emitted boundaries SHALL remain separately inspectable.
-The protocol SHALL use version 2 and explicitly reject incompatible version-1 captures.
+Publishers SHALL send self-contained node inputs and outputs keyed by port name,
+retaining no prior payloads, dictionaries, or historical roots. Receivers SHALL retain
+immutable scope/node history, share unchanged nodes, and preserve repeated Started
+and Emitted boundaries. Both sides SHALL validate the current record and transport
+format. Earlier unreleased formats impose no compatibility requirements.
 
 #### Scenario: Publish many distinct node values
 
@@ -127,7 +127,7 @@ The protocol SHALL use version 2 and explicitly reject incompatible version-1 ca
 - **WHEN** node values contain unsigned 64-bit integers, integers, floats, or negative zero
 - **THEN** direct and fragmented OTLP records preserve their numeric representation
 
-#### Scenario: Receive an old dictionary runner
+#### Scenario: Reject an unsupported format
 
-- **WHEN** a version-1 snapshot transport or header reaches a version-2 receiver
-- **THEN** capture reports incompatibility explicitly and does not misinterpret dictionary records
+- **WHEN** a snapshot transport or header does not match the current format
+- **THEN** capture rejects it explicitly before applying node state
