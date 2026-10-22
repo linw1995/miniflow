@@ -10,8 +10,8 @@
 
 ## 3. Default-branch generation and publication
 
-- [ ] 3.1 Extend the main coverage job to collect per-test profiles, build the graph, and publish it through the existing artifact pipeline only after successful full coverage.
-- [ ] 3.2 Bind graph compatibility (schema version, execution signature) into record checks; verify PR and local runs cannot publish; commit this group.
+- [x] 3.1 Extend the main coverage job to collect per-test profiles, build the graph, and publish it through the existing artifact pipeline only after successful full coverage.
+- [x] 3.2 Bind graph compatibility (schema version, execution signature) into record checks; verify PR and local runs cannot publish; commit this group.
 
 ## 4. Planning consumption
 

@@ -1831,6 +1831,7 @@ dependencies = [
 name = "mfn-test-affected"
 version = "0.1.0"
 dependencies = [
+ "clap",
  "diesel",
  "diesel_migrations",
  "inventory",

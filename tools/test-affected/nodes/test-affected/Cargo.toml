@@ -37,6 +37,17 @@ diesel = { workspace = true, features = ["sqlite"] }
 diesel_migrations.workspace = true
 libsqlite3-sys = { workspace = true, features = ["bundled"] }
 
+# Coverage graph indexing command line.
+clap = { workspace = true, features = ["derive"] }
+
+[[bin]]
+name = "coverage-graph"
+path = "src/bin/coverage-graph.rs"
+# The command is an indexing tool, not a test target; keep it out of the
+# nextest inventory so package filters and coverage selection stay unchanged.
+test = false
+bench = false
+
 [dev-dependencies]
 # Compiled and in-memory Flow verification.
 mf-compiler = { workspace = true, features = ["codegen"] }

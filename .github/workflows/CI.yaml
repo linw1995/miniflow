@@ -144,9 +144,13 @@ jobs:
         if: steps.selection.outputs.scoped != 'true' || steps.selection.outputs.run == 'true'
         env:
           SCOPED_VALIDATION: ${{ steps.selection.outputs.scoped }}
+          # Only default-branch pushes collect and publish the coverage graph.
+          PUBLISH_COVERAGE_GRAPH: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         run: |
           if [[ "$SCOPED_VALIDATION" == "true" ]]; then
             nix develop --command bash scripts/run-cov.sh --prepare --affected-plan "$RUNNER_TEMP/pr-validation/plan.json"
+          elif [[ "$PUBLISH_COVERAGE_GRAPH" == "true" ]]; then
+            nix develop --command bash scripts/run-cov.sh --coverage-graph target/coverage/graph/graph.sqlite --prepare
           else
             nix develop --command bash scripts/run-cov.sh --prepare
           fi
@@ -213,6 +217,15 @@ jobs:
           path: target/coverage/result/
           if-no-files-found: error
           overwrite: true
+      - name: Upload coverage graph
+        # Hard isolation: graph publication exists only for successful
+        # default-branch push runs; PR and dispatch runs never collect it.
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && steps.report.outcome == 'success'
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-graph-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/coverage/graph/
+          if-no-files-found: error
       - name: Upload crate coverage (mf-chat)
         if: contains(fromJSON(steps.report.outputs.complete_packages || '[]'), 'mf-chat')
         uses: codecov/codecov-action@v7
