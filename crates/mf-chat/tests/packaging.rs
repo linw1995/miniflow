@@ -100,6 +100,107 @@ fn packaged_inputs_include_workflows_migrations_and_host_fixture() {
 }
 
 #[test]
+fn conversation_example_hosts_a_supplied_workflow() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let target = std::env::var_os("MF_TEST_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| root.join("target/chat-host-fixture"));
+    let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args([
+            "build",
+            "--release",
+            "--offline",
+            "-p",
+            "mf-chat",
+            "--example",
+            "conversation",
+        ])
+        .current_dir(root)
+        .env("CARGO_TARGET_DIR", &target)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let binary = target
+        .join("release/examples")
+        .join(format!("conversation{}", std::env::consts::EXE_SUFFIX));
+    if let Some(coverage) = std::env::var_os("MF_COVERAGE_BINARIES_DIR") {
+        fs::copy(
+            &binary,
+            Path::new(&coverage).join("mf-chat-conversation-example"),
+        )
+        .unwrap();
+    }
+    let server = Server::start(vec![
+        Reply::text("first answer"),
+        Reply::text("Generated title"),
+        Reply::text("second answer"),
+    ]);
+    let mut definition: Value =
+        serde_json::from_slice(&fs::read(root.join("examples/chat-title-flow.json")).unwrap())
+            .unwrap();
+    let parameters = &mut definition["nodes"][0]["config"]["parameters"];
+    parameters["model"]["default"] = "example-model".into();
+    parameters["base_url"]["default"] = server.base_url.clone().into();
+    parameters["api_key"]["env"] = "MF_CHAT_EXAMPLE_KEY".into();
+    let workflow = directory.path().join("user-flow.json");
+    fs::write(&workflow, serde_json::to_vec(&definition).unwrap()).unwrap();
+    let path = directory.path().join("chat.sqlite");
+    let mut command = Command::new(binary);
+    command
+        .arg(&path)
+        .arg(workflow)
+        .env("MF_CHAT_EXAMPLE_KEY", "synthetic-key")
+        .env("NO_PROXY", "127.0.0.1,localhost")
+        .env("no_proxy", "127.0.0.1,localhost");
+    for name in [
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+    ] {
+        command.env_remove(name);
+    }
+    let output = command.output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let completions: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(completions.len(), 2);
+    assert_eq!(completions[0]["result"]["text"], "first answer");
+    assert_eq!(completions[1]["result"]["text"], "second answer");
+    let database = mf_chat::ChatDatabase::open(path).unwrap();
+    let id = completions[0]["invocation"]["session_id"].as_str().unwrap();
+    assert_eq!(database.session(id).unwrap().title, "Generated title");
+    assert_eq!(database.history(id, 4096).unwrap().history.len(), 4);
+    assert_eq!(
+        database
+            .usage(Default::default())
+            .unwrap()
+            .overall
+            .attempted_calls,
+        3
+    );
+    assert_eq!(server.requests().len(), 3);
+}
+
+#[test]
 fn source_free_host_preserves_multi_session_retry_title_and_statistics() {
     let directory = tempfile::tempdir().unwrap();
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
