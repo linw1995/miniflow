@@ -12,6 +12,7 @@ pub mod stream;
 pub mod wire;
 
 pub const SNAPSHOT_CAPTURE_ENV: &str = "MF_CAPTURE_SNAPSHOTS";
+pub const SNAPSHOT_DICTIONARY_LIMIT_ENV: &str = "MF_SNAPSHOT_DICTIONARY_LIMIT";
 
 use snafu::{Snafu, ensure};
 

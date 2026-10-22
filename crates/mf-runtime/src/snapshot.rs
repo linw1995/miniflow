@@ -106,21 +106,58 @@ pub enum SnapshotRecord {
     End,
 }
 
+// Shared node-state transitions for the decoder store and the producer encoder.
+#[derive(Debug, Default)]
+struct SnapshotState {
+    current: Snapshot,
+    history: Vec<SnapshotEntry>,
+}
+
+impl SnapshotState {
+    fn apply_node(
+        &mut self,
+        scope: Vec<LoopPathEntry>,
+        node: Arc<str>,
+        next: NodeSnapshot,
+    ) -> bool {
+        if !matches!(
+            next.outcome,
+            SnapshotOutcome::Started | SnapshotOutcome::Emitted
+        ) && self
+            .current
+            .node(&scope, &node)
+            .is_some_and(|previous| previous.as_ref() == &next)
+        {
+            return false;
+        }
+        let mut nodes = self.current.scopes.get(&scope).cloned().unwrap_or_default();
+        nodes.insert_mut(node.clone(), Arc::new(next));
+        let mut scopes = self.current.scopes.clone();
+        scopes.insert_mut(scope.clone(), nodes);
+        self.current = Snapshot { scopes };
+        self.history.push(SnapshotEntry {
+            scope,
+            node,
+            snapshot: self.current.clone(),
+        });
+        true
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct SnapshotStore {
     values: Vec<ValueRef>,
-    current: Snapshot,
-    history: Vec<SnapshotEntry>,
+    state: SnapshotState,
     initialized: bool,
     complete: bool,
 }
 
 impl SnapshotStore {
     pub fn current(&self) -> &Snapshot {
-        &self.current
+        &self.state.current
     }
     pub fn history(&self) -> &[SnapshotEntry] {
-        &self.history
+        &self.state.history
     }
     pub fn value_count(&self) -> usize {
         self.values.len()
@@ -220,25 +257,7 @@ impl SnapshotStore {
                     outcome,
                     error,
                 };
-                if !matches!(outcome, SnapshotOutcome::Started | SnapshotOutcome::Emitted)
-                    && self
-                        .current
-                        .node(&scope, &node)
-                        .is_some_and(|previous| previous.as_ref() == &next)
-                {
-                    return Ok(false);
-                }
-                let mut nodes = self.current.scopes.get(&scope).cloned().unwrap_or_default();
-                nodes.insert_mut(node.clone(), Arc::new(next));
-                let mut scopes = self.current.scopes.clone();
-                scopes.insert_mut(scope.clone(), nodes);
-                self.current = Snapshot { scopes };
-                self.history.push(SnapshotEntry {
-                    scope,
-                    node,
-                    snapshot: self.current.clone(),
-                });
-                Ok(true)
+                Ok(self.state.apply_node(scope, node, next))
             }
             SnapshotRecord::End => {
                 self.complete = true;
@@ -285,28 +304,67 @@ type SnapshotSink =
     Box<dyn FnMut(&SnapshotRecord) -> Result<(), Box<dyn std::error::Error + Send + Sync>> + Send>;
 
 struct Recording {
-    store: SnapshotStore,
+    state: SnapshotState,
+    values: HashMap<ValueId, ValueRef>,
+    next_id: ValueId,
     interned: HashMap<u64, Vec<ValueId>>,
     aliases: HashMap<usize, (Weak<ValueKind>, ValueId)>,
+    bounded: Option<BoundedDedup>,
     sink: Option<SnapshotSink>,
     error: Option<Arc<SnapshotError>>,
+    complete: bool,
+    intern_depth: usize,
+}
+
+// LRU bookkeeping for a bounded dictionary: every live ID carries a tick and the
+// oldest tick evicts first. Reverse indexes keep eviction O(log n).
+#[derive(Debug)]
+struct BoundedDedup {
+    capacity: usize,
+    tick_of: HashMap<ValueId, u64>,
+    by_tick: BTreeMap<u64, ValueId>,
+    hash_of: HashMap<ValueId, u64>,
+    id_aliases: HashMap<ValueId, Vec<usize>>,
+    next_tick: u64,
+}
+
+impl BoundedDedup {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity: capacity.max(1),
+            tick_of: HashMap::new(),
+            by_tick: BTreeMap::new(),
+            hash_of: HashMap::new(),
+            id_aliases: HashMap::new(),
+            next_tick: 0,
+        }
+    }
 }
 
 impl Recording {
-    fn append(&mut self, record: SnapshotRecord) -> Result<(), SnapshotError> {
-        self.store.apply(record.clone())?;
-        // The consumer owns history; the producer keeps the current root and value pool.
-        if self.sink.is_some() {
-            self.store.history.clear();
-        }
-        self.write(&record)
-    }
     fn write(&mut self, record: &SnapshotRecord) -> Result<(), SnapshotError> {
         self.sink
             .as_mut()
             .map_or(Ok(()), |sink| sink(record).context(SinkSnafu))
     }
-    fn intern(&mut self, value: &ValueRef) -> Result<ValueId, SnapshotError> {
+    fn intern(&mut self, value: &ValueRef) -> Result<(ValueId, ValueRef), SnapshotError> {
+        self.intern_depth += 1;
+        let result = self.intern_inner(value);
+        self.intern_depth -= 1;
+        let id = result?;
+        // Read the canonical value back before eviction so node snapshots share the
+        // dictionary's allocations.
+        let canonical = self
+            .values
+            .get(&id)
+            .cloned()
+            .expect("a freshly interned value is live");
+        if self.intern_depth == 0 {
+            self.evict_to_capacity();
+        }
+        Ok((id, canonical))
+    }
+    fn intern_inner(&mut self, value: &ValueRef) -> Result<ValueId, SnapshotError> {
         let alias = matches!(
             value.kind(),
             ValueKind::String(_) | ValueKind::Array(_) | ValueKind::Object(_)
@@ -316,7 +374,9 @@ impl Recording {
             && let Some((previous, id)) = self.aliases.get(&(alias.as_ptr() as usize))
             && previous.ptr_eq(alias)
         {
-            return Ok(*id);
+            let id = *id;
+            self.touch(id);
+            return Ok(id);
         }
         let shared_alias = alias.as_ref().is_some_and(|alias| alias.strong_count() > 1);
         let definition = match value.kind() {
@@ -327,13 +387,13 @@ impl Recording {
             ValueKind::Array(items) => ValueDefinition::Array(
                 items
                     .iter()
-                    .map(|item| self.intern(item))
+                    .map(|item| self.intern(item).map(|(id, _)| id))
                     .collect::<Result<_, _>>()?,
             ),
             ValueKind::Object(entries) => ValueDefinition::Object(
                 entries
                     .iter()
-                    .map(|(key, value)| Ok((key.clone(), self.intern(value)?)))
+                    .map(|(key, value)| Ok((key.clone(), self.intern(value)?.0)))
                     .collect::<Result<_, SnapshotError>>()?,
             ),
         };
@@ -342,22 +402,23 @@ impl Recording {
                 if ids
                     .iter()
                     .zip(items.iter())
-                    .all(|(id, item)| self.store.values[*id].ptr_eq(item))
+                    .all(|(id, item)| self.values[id].ptr_eq(item))
                 {
                     value.clone()
                 } else {
-                    ValueRef::array(ids.iter().map(|id| self.store.values[*id].clone()))
+                    ValueRef::array(ids.iter().map(|id| self.values[id].clone()))
                 }
             }
             (ValueDefinition::Object(ids), ValueKind::Object(entries)) => {
-                if ids.iter().all(|(key, id)| {
-                    self.store.values[*id].ptr_eq(entries.get(key.as_ref()).unwrap())
-                }) {
+                if ids
+                    .iter()
+                    .all(|(key, id)| self.values[id].ptr_eq(entries.get(key.as_ref()).unwrap()))
+                {
                     value.clone()
                 } else {
                     ValueRef::object(
                         ids.iter()
-                            .map(|(key, id)| (key.clone(), self.store.values[*id].clone())),
+                            .map(|(key, id)| (key.clone(), self.values[id].clone())),
                     )
                 }
             }
@@ -365,35 +426,81 @@ impl Recording {
         };
         let hash = definition_hash(&definition);
         if let Some(candidates) = self.interned.get(&hash)
-            && let Some(&id) = candidates
-                .iter()
-                .find(|&&id| self.store.values[id] == canonical)
+            && let Some(&id) = candidates.iter().find(|&&id| self.values[&id] == canonical)
         {
             if shared_alias {
                 self.remember(alias, id);
             }
+            self.touch(id);
             return Ok(id);
         }
-        let id = self.store.values.len();
+        let id = self.next_id;
+        self.next_id += 1;
         let retain_alias = shared_alias || canonical.ptr_eq(value);
-        self.store.values.push(canonical);
+        self.values.insert(id, canonical);
         self.write(&SnapshotRecord::Value {
             id,
             value: definition,
         })?;
         self.interned.entry(hash).or_default().push(id);
+        if let Some(bounded) = &mut self.bounded {
+            bounded.hash_of.insert(id, hash);
+        }
         if retain_alias {
             self.remember(alias, id);
         }
+        self.touch(id);
         Ok(id)
+    }
+    fn touch(&mut self, id: ValueId) {
+        if let Some(bounded) = &mut self.bounded {
+            let tick = bounded.next_tick;
+            bounded.next_tick += 1;
+            if let Some(previous) = bounded.tick_of.insert(id, tick) {
+                bounded.by_tick.remove(&previous);
+            }
+            bounded.by_tick.insert(tick, id);
+        }
     }
     fn remember(&mut self, alias: Option<Weak<ValueKind>>, id: ValueId) {
         if let Some(alias) = alias {
-            self.aliases.insert(alias.as_ptr() as usize, (alias, id));
+            let pointer = alias.as_ptr() as usize;
+            self.aliases.insert(pointer, (alias, id));
+            if let Some(bounded) = &mut self.bounded {
+                bounded.id_aliases.entry(id).or_default().push(pointer);
+            }
         }
-        if self.aliases.len() > self.store.values.len().saturating_mul(2).saturating_add(64) {
+        if self.aliases.len() > self.values.len().saturating_mul(2).saturating_add(64) {
             self.aliases
                 .retain(|_, (value, _)| value.strong_count() != 0);
+        }
+    }
+    // Eviction runs only after the outermost intern completes so a parent definition
+    // never loses a child it just referenced. An evicted value is defined again under
+    // a new ID when it reappears, which keeps the wire format unchanged.
+    fn evict_to_capacity(&mut self) {
+        let Some(bounded) = &mut self.bounded else {
+            return;
+        };
+        while self.values.len() > bounded.capacity {
+            let Some((_, id)) = bounded.by_tick.pop_first() else {
+                break;
+            };
+            bounded.tick_of.remove(&id);
+            self.values.remove(&id);
+            if let Some(hash) = bounded.hash_of.remove(&id)
+                && let Some(candidates) = self.interned.get_mut(&hash)
+            {
+                candidates.retain(|&candidate| candidate != id);
+                if candidates.is_empty() {
+                    self.interned.remove(&hash);
+                }
+            }
+            if let Some(pointers) = bounded.id_aliases.remove(&id) {
+                for pointer in pointers {
+                    self.aliases.remove(&pointer);
+                }
+            }
         }
     }
 }
@@ -436,6 +543,20 @@ impl SnapshotRecorder {
     }
 }
 
+/// Dictionary retention policy for the producer-side snapshot encoder.
+///
+/// Bounding only affects the producer's deduplication cache: an evicted value is
+/// defined again under a new ID when it reappears, so the wire format and consumer
+/// stores are unaffected.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SnapshotRetention {
+    /// Retain every distinct value for the lifetime of the recording.
+    #[default]
+    Unbounded,
+    /// Bound the live deduplication dictionary, evicting least recently used values.
+    Bounded { max_values: usize },
+}
+
 /// Caller-owned dictionary encoding and retained snapshot history.
 #[derive(Clone)]
 pub struct SnapshotRecording(Arc<Mutex<Recording>>);
@@ -449,43 +570,53 @@ use std::fmt;
 
 impl SnapshotRecording {
     pub fn memory() -> Self {
-        let mut recording = Recording {
-            store: SnapshotStore::default(),
-            interned: HashMap::new(),
-            aliases: HashMap::new(),
-            sink: None,
-            error: None,
-        };
-        recording
-            .append(SnapshotRecord::Header {
-                version: SNAPSHOT_VERSION,
-            })
-            .expect("valid initial snapshot header");
-        Self(Arc::new(Mutex::new(recording)))
+        Self::new(None, SnapshotRetention::Unbounded)
+            .expect("writing the snapshot header without a sink cannot fail")
     }
     pub fn with_sink(
         sink: impl FnMut(&SnapshotRecord) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
         + Send
         + 'static,
     ) -> Result<Self, SnapshotError> {
-        let recorder = Self::memory();
-        {
-            let mut recording = recorder
-                .0
-                .lock()
-                .expect("snapshot recorder was not poisoned");
-            recording.sink = Some(Box::new(sink));
-            recording.write(&SnapshotRecord::Header {
-                version: SNAPSHOT_VERSION,
-            })?;
-        }
-        Ok(recorder)
+        Self::with_sink_and_retention(sink, SnapshotRetention::Unbounded)
+    }
+    pub fn with_sink_and_retention(
+        sink: impl FnMut(&SnapshotRecord) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+        + Send
+        + 'static,
+        retention: SnapshotRetention,
+    ) -> Result<Self, SnapshotError> {
+        Self::new(Some(Box::new(sink)), retention)
+    }
+    fn new(
+        sink: Option<SnapshotSink>,
+        retention: SnapshotRetention,
+    ) -> Result<Self, SnapshotError> {
+        let mut recording = Recording {
+            state: SnapshotState::default(),
+            values: HashMap::new(),
+            next_id: 0,
+            interned: HashMap::new(),
+            aliases: HashMap::new(),
+            bounded: match retention {
+                SnapshotRetention::Unbounded => None,
+                SnapshotRetention::Bounded { max_values } => Some(BoundedDedup::new(max_values)),
+            },
+            sink,
+            error: None,
+            complete: false,
+            intern_depth: 0,
+        };
+        recording.write(&SnapshotRecord::Header {
+            version: SNAPSHOT_VERSION,
+        })?;
+        Ok(Self(Arc::new(Mutex::new(recording))))
     }
     pub fn current(&self) -> Snapshot {
         self.0
             .lock()
             .expect("snapshot recorder was not poisoned")
-            .store
+            .state
             .current
             .clone()
     }
@@ -493,16 +624,17 @@ impl SnapshotRecording {
         self.0
             .lock()
             .expect("snapshot recorder was not poisoned")
-            .store
+            .state
             .history
             .clone()
     }
+    /// Total value IDs assigned so far. Bounded retention evicts live entries without
+    /// lowering this count, which matches the consumer's dictionary size.
     pub fn value_count(&self) -> usize {
         self.0
             .lock()
             .expect("snapshot recorder was not poisoned")
-            .store
-            .value_count()
+            .next_id
     }
     pub fn diagnostic(&self) -> Option<Arc<SnapshotError>> {
         self.0
@@ -534,14 +666,14 @@ impl SnapshotRecording {
         // Redact before deduplication, interning, retention, or calling an external sink.
         snapshot.redact();
         let mut recording = self.0.lock().expect("snapshot recorder was not poisoned");
-        if recording.error.is_some() || recording.store.complete {
+        if recording.error.is_some() || recording.complete {
             return;
         }
         if !matches!(
             snapshot.outcome,
             SnapshotOutcome::Started | SnapshotOutcome::Emitted
         ) && recording
-            .store
+            .state
             .current
             .node(&scope, &node)
             .is_some_and(|previous| previous.as_ref() == &snapshot)
@@ -549,18 +681,33 @@ impl SnapshotRecording {
             return;
         }
         let result = (|| {
-            let inputs = recording.intern(&snapshot.inputs)?;
-            let outputs = recording.intern(&snapshot.outputs)?;
-            recording.append(SnapshotRecord::Node {
-                scope,
-                node,
+            let (inputs, input_values) = recording.intern(&snapshot.inputs)?;
+            let (outputs, output_values) = recording.intern(&snapshot.outputs)?;
+            let record = SnapshotRecord::Node {
+                scope: scope.clone(),
+                node: node.clone(),
                 inputs,
                 outputs,
-                skipped: snapshot.skipped,
+                skipped: snapshot.skipped.clone(),
                 outcome: snapshot.outcome,
-                error: snapshot.error,
-            })?;
-            Ok::<(), SnapshotError>(())
+                error: snapshot.error.clone(),
+            };
+            recording.state.apply_node(
+                scope,
+                node,
+                NodeSnapshot {
+                    inputs: input_values,
+                    outputs: output_values,
+                    skipped: snapshot.skipped,
+                    outcome: snapshot.outcome,
+                    error: snapshot.error,
+                },
+            );
+            // The consumer owns history; the producer keeps the current root and value pool.
+            if recording.sink.is_some() {
+                recording.state.history.clear();
+            }
+            recording.write(&record)
         })();
         if let Err(error) = result {
             recording.error = Some(Arc::new(error));
@@ -568,12 +715,12 @@ impl SnapshotRecording {
     }
     pub fn finish(&self) {
         let mut recording = self.0.lock().expect("snapshot recorder was not poisoned");
-        if recording.store.complete || recording.error.is_some() {
+        if recording.complete || recording.error.is_some() {
             return;
         }
-        let result = recording.append(SnapshotRecord::End);
-        if let Err(error) = result {
-            recording.error = Some(Arc::new(error));
+        match recording.write(&SnapshotRecord::End) {
+            Ok(()) => recording.complete = true,
+            Err(error) => recording.error = Some(Arc::new(error)),
         }
     }
 }
@@ -590,6 +737,13 @@ mod tests {
             skipped: Arc::from([]),
             outcome: SnapshotOutcome::Succeeded,
             error: None,
+        }
+    }
+
+    fn emitted(value: ValueRef) -> NodeSnapshot {
+        NodeSnapshot {
+            outcome: SnapshotOutcome::Emitted,
+            ..completed(value)
         }
     }
 
@@ -760,6 +914,160 @@ mod tests {
         recorder.finish();
         recorder.record(vec![], "node", completed(2.into()));
         assert!(root.ptr_eq(&recorder.current()));
+    }
+
+    fn bounded_sink(max_values: usize) -> (SnapshotRecording, Arc<Mutex<Vec<SnapshotRecord>>>) {
+        let records = Arc::new(Mutex::new(Vec::new()));
+        let captured = records.clone();
+        let recording = SnapshotRecording::with_sink_and_retention(
+            move |record| {
+                captured.lock().unwrap().push(record.clone());
+                Ok(())
+            },
+            SnapshotRetention::Bounded { max_values },
+        )
+        .unwrap();
+        (recording, records)
+    }
+
+    fn replay(records: &[SnapshotRecord]) -> SnapshotStore {
+        let mut store = SnapshotStore::default();
+        for record in records.iter().cloned() {
+            store.apply(record).unwrap();
+        }
+        store
+    }
+
+    fn live_values(recording: &SnapshotRecording) -> usize {
+        recording.0.lock().unwrap().values.len()
+    }
+
+    #[test]
+    fn bounded_dictionary_evicts_and_redefines_values() {
+        let (recording, records) = bounded_sink(64);
+        for value in 0..1_000i64 {
+            recording.record(vec![], "node", completed(value.into()));
+            let live = live_values(&recording);
+            assert!(live <= 64, "live dictionary exceeded its capacity: {live}");
+        }
+        assert!(recording.history().is_empty());
+        assert_eq!(
+            recording.current().node(&[], "node").unwrap().outputs["value"],
+            json!(999)
+        );
+        recording.finish();
+        assert!(recording.diagnostic().is_none());
+        let records = records.lock().unwrap();
+        // Definitions only refer to earlier IDs, so the strict decoder replays the stream.
+        for record in records.iter() {
+            let SnapshotRecord::Value { id, value } = record else {
+                continue;
+            };
+            if let ValueDefinition::Array(items) = value {
+                assert!(items.iter().all(|child| child < id));
+            }
+            if let ValueDefinition::Object(entries) = value {
+                assert!(entries.values().all(|child| child < id));
+            }
+        }
+        let store = replay(&records);
+        assert!(store.is_complete());
+        assert_eq!(store.history().len(), 1_000);
+        assert_eq!(store.value_count(), recording.value_count());
+        assert_eq!(
+            store.current().node(&[], "node").unwrap().outputs["value"],
+            json!(999)
+        );
+    }
+
+    #[test]
+    fn evicted_value_receives_a_new_id_when_reencountered() {
+        let (recording, records) = bounded_sink(8);
+        recording.record(vec![], "node", completed("sentinel".into()));
+        for value in 0..100i64 {
+            recording.record(vec![], "node", completed(value.into()));
+        }
+        recording.record(vec![], "node", completed("sentinel".into()));
+        recording.finish();
+        let records = records.lock().unwrap();
+        let definitions: Vec<ValueId> = records
+            .iter()
+            .filter_map(|record| match record {
+                SnapshotRecord::Value {
+                    id,
+                    value: ValueDefinition::String(payload),
+                } if payload.as_ref() == "sentinel" => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(definitions.len(), 2);
+        assert_ne!(definitions[0], definitions[1]);
+        let store = replay(&records);
+        assert!(store.is_complete());
+        assert_eq!(store.history().len(), 102);
+        assert_eq!(store.value_count(), recording.value_count());
+        assert_eq!(
+            store.current().node(&[], "node").unwrap().outputs["value"],
+            json!("sentinel")
+        );
+    }
+
+    #[test]
+    fn hot_values_survive_lru_eviction() {
+        let (recording, records) = bounded_sink(8);
+        let hot = ValueRef::from("hot");
+        for value in 0..50i64 {
+            recording.record(vec![], "hot", emitted(hot.clone()));
+            recording.record(vec![], "cold", emitted(value.into()));
+        }
+        recording.finish();
+        let records = records.lock().unwrap();
+        let hot_definitions: Vec<ValueId> = records
+            .iter()
+            .filter_map(|record| match record {
+                SnapshotRecord::Value {
+                    id,
+                    value: ValueDefinition::String(payload),
+                } if payload.as_ref() == "hot" => Some(*id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hot_definitions.len(), 1);
+        let hot_outputs: Vec<ValueId> = records
+            .iter()
+            .filter_map(|record| match record {
+                SnapshotRecord::Node { node, outputs, .. } if node.as_ref() == "hot" => {
+                    Some(*outputs)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hot_outputs.len(), 50);
+        assert!(hot_outputs.iter().all(|outputs| *outputs == hot_outputs[0]));
+        let store = replay(&records);
+        assert!(store.is_complete());
+        assert_eq!(store.history().len(), 100);
+        assert_eq!(
+            store.current().node(&[], "hot").unwrap().outputs["value"],
+            json!("hot")
+        );
+    }
+
+    #[test]
+    fn single_large_value_exceeding_capacity_stays_valid() {
+        let (recording, records) = bounded_sink(4);
+        let big = ValueRef::array((0..100i64).map(ValueRef::from));
+        recording.record(vec![], "node", completed(big));
+        recording.finish();
+        assert!(recording.diagnostic().is_none());
+        assert!(live_values(&recording) <= 4);
+        let store = replay(&records.lock().unwrap());
+        assert!(store.is_complete());
+        assert_eq!(store.history().len(), 1);
+        assert_eq!(
+            store.current().node(&[], "node").unwrap().outputs["value"][99],
+            json!(99)
+        );
     }
 
     #[test]

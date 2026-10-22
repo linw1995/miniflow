@@ -324,7 +324,12 @@ endpoint. Ordinary execution does not allocate a snapshot recorder. Runners buil
 Both finite and streaming execution attach the same `SnapshotRecorder` notification handle.
 It sends current `SnapshotEvent` values and retains no history or encoding state. Callers that
 want dictionary encoding and immutable history own a `SnapshotRecording` and attach
-`recording.recorder()`; its store and sink policy are independent of execution. Equal completed node states retain their existing deduplication; `Started` and `Emitted`
+`recording.recorder()`; its store and sink policy are independent of execution. Callers may
+bound the producer's live deduplication dictionary by constructing the recording with
+`SnapshotRecording::with_sink_and_retention` and `SnapshotRetention::Bounded { max_values }`;
+least-recently-used values are then evicted, and an evicted value is defined again under a new
+value ID when it reappears. Such redefinition leaves the wire format and consumers unchanged.
+Equal completed node states retain their existing deduplication; `Started` and `Emitted`
 notifications preserve repeated equal-valued invocations and sends in either execution mode. Snapshot events and storage contain no
 stream identity or run binding. Finite wire records retain their version 1 representation.
 
@@ -341,7 +346,10 @@ Bodies larger than 32 KiB are encoded as a standard Protobuf `AnyValue` and spli
 `mf.snapshot.fragment` events. Their structured bodies contain `index`, `total`, and `payload`
 (bytes). The receiver verifies the assembled digest before admitting a record. Sequence numbers
 make retransmissions idempotent and allow reordering; up to 1,024 incomplete or out-of-order records
-may wait for a gap to close. Complete history and values are retained throughout the session.
+may wait for a gap to close. The receiver retains complete history and values throughout the
+session. Generated runners may bound the producer dictionary through
+`MF_SNAPSHOT_DICTIONARY_LIMIT`; evicted values are redefined under new value IDs on the wire
+while the receiver still retains the complete stream.
 
 Snapshot publication uses a dedicated log processor on the same OTLP endpoint, with 64-record
 batches and a 128-record queue. The producer waits for a flush every 64 packets, preventing queue
@@ -394,8 +402,11 @@ For OTLP export, use `SnapshotRecording::with_sink` with `SnapshotExporter`, exa
 as for finite execution, and finish recording on both success and failure. Export
 backpressure and typed capture diagnostics retain their existing snapshot behavior.
 The recording/receiver owns dictionary values and historical roots; retained memory
-can grow with distinct values and execution scopes. Runtime execution owns no history
-container, value limit, capture queue, or eviction policy.
+can grow with distinct values and execution scopes. A caller may opt into a bounded
+dictionary on the recording, which evicts least-recently-used values and redefines
+them under new value IDs, bounding producer memory while the receiver keeps the
+complete stream. Runtime execution itself still owns no history container or capture
+queue; any value limit or eviction policy belongs to the caller-owned recording.
 
 ### Secret runtime values
 

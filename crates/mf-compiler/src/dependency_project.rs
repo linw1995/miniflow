@@ -352,11 +352,21 @@ fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(unix)] s
 #[cfg(feature = "telemetry")]
 fn snapshot_recorder_for_id(workflow_id: mf_telemetry::identity::WorkflowId, run_id: mf_telemetry::identity::RunId) -> Result<mf_runtime::SnapshotRecording, Box<dyn std::error::Error>> {
     let mut exporter = mf_telemetry::otlp::SnapshotExporter::from_env(workflow_id, run_id)?;
-    Ok(mf_runtime::SnapshotRecording::with_sink(move |record| {
+    let retention = match std::env::var(mf_telemetry::SNAPSHOT_DICTIONARY_LIMIT_ENV) {
+        Ok(value) => match value.parse::<usize>() {
+            Ok(max_values) => mf_runtime::SnapshotRetention::Bounded { max_values },
+            Err(error) => {
+                eprintln!("invalid MF_SNAPSHOT_DICTIONARY_LIMIT: {error}; retaining the full snapshot dictionary");
+                mf_runtime::SnapshotRetention::Unbounded
+            }
+        },
+        Err(_) => mf_runtime::SnapshotRetention::Unbounded,
+    };
+    Ok(mf_runtime::SnapshotRecording::with_sink_and_retention(move |record| {
         exporter.emit(serde_json::to_value(record)?)?;
         if matches!(record, mf_runtime::SnapshotRecord::End) { exporter.finish()?; }
         Ok(())
-    })?)
+    }, retention)?)
 }
 
 #[cfg(not(feature = "streaming"))]

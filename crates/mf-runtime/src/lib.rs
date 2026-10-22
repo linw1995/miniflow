@@ -126,8 +126,8 @@ pub use worker::{
 
 pub use snapshot::{
     NodeSnapshot, SNAPSHOT_VERSION, Snapshot, SnapshotEntry, SnapshotError, SnapshotEvent,
-    SnapshotOutcome, SnapshotRecord, SnapshotRecorder, SnapshotRecording, SnapshotStore,
-    ValueDefinition, ValueId,
+    SnapshotOutcome, SnapshotRecord, SnapshotRecorder, SnapshotRecording, SnapshotRetention,
+    SnapshotStore, ValueDefinition, ValueId,
 };
 
 pub use workflow_inputs::{
