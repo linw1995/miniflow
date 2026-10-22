@@ -130,6 +130,25 @@ fn source_free_host_preserves_multi_session_retry_title_and_statistics() {
         &binary,
     )
     .unwrap();
+    // Preserve the executed binary's maps after deleting the source-free fixture.
+    if let Some(coverage) = std::env::var_os("MF_COVERAGE_BINARIES_DIR") {
+        let coverage = Path::new(&coverage);
+        fs::copy(&binary, coverage.join("mf-chat-host-fixture")).unwrap();
+        fs::write(
+            coverage.join("mf-chat-host-fixture.paths.json"),
+            serde_json::to_vec(&std::collections::BTreeMap::from([(
+                host.join("src/main.rs")
+                    .canonicalize()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_owned(),
+                "crates/mf-chat/tests/fixtures/host/src/main.rs",
+            )]))
+            .unwrap(),
+        )
+        .unwrap();
+    }
     fs::remove_dir_all(&copy).unwrap();
     let mut failed = Reply::json(json!({"error":{"message":"synthetic failure"}}));
     failed.status = 500;

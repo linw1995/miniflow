@@ -710,6 +710,9 @@ mod tests {
     fn configuration_rejects_unknown_fields_and_invalid_values() {
         for patch in [
             json!({"model": " "}),
+            json!({"attribution": {"purpose": " "}}),
+            json!({"attribution": {"profile": ""}}),
+            json!({"attribution": {"purpose": 42}}),
             json!({"stream": false}),
             json!({"api_key": "secret"}),
             json!({"provider": "unknown"}),

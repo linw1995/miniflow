@@ -370,6 +370,10 @@ fn application_context_is_bound_by_the_common_contract_and_optional_titles_are_p
         .unwrap();
     let contract = ChatContract::from_manifest(&manifest).unwrap();
     assert!(!contract.parameters.inputs["params"].contains_key("context"));
+    let context = started.request.context.clone().unwrap();
+    let encoded = serde_json::to_vec(&context).unwrap();
+    let decoded: mf_chat::ConversationContext = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(decoded, context);
     let arguments = contract
         .arguments(started.request.clone(), &parameters(&contract))
         .unwrap();

@@ -218,6 +218,17 @@ fn invalid_or_missing_results_finalize_only_the_admitted_invocation() {
         json!({"status":"unknown", "text":"reply", "usages":[]}),
         json!({"status":"succeeded", "text":"reply", "metadata":[], "usages":[]}),
         json!({"status":"succeeded", "text":true, "usages":[]}),
+        json!({"status":"succeeded", "text":"", "usages":[]}),
+        json!({"status":"succeeded", "text":"reply", "error":"failed", "usages":[]}),
+        json!({"status":"failed", "usages":[]}),
+        json!({"status":"failed", "error":" ", "usages":[]}),
+        json!({"status":"failed", "error":"failed", "title":"invalid update", "usages":[]}),
+        json!({"status":"succeeded", "text":"reply", "usages":[{
+            "call_id":"call", "model":"model", "attribution":{"purpose":" "}
+        }]}),
+        json!({"status":"succeeded", "text":"reply", "usages":[{
+            "call_id":"call", "model":"model", "attribution":{"profile":""}
+        }]}),
     ];
     for bytes in [
         None,
@@ -483,4 +494,74 @@ fn unreported_workflow_invocations_are_not_counted_as_zero_model_calls() {
     assert_eq!(statistics.overall.attempted_calls, 0);
     assert_eq!(statistics.unreported_invocations, 1);
     assert_eq!(statistics.overall.input_tokens.known_subtotal, None);
+}
+
+#[test]
+fn failed_results_cannot_overwrite_committed_or_different_terminal_results() {
+    let root = tempfile::tempdir().unwrap();
+    let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
+    let committed = begin(&database);
+    let saved = database.complete_turn(committed.clone(), reply()).unwrap();
+    let failed = mf_chat::ConversationResult {
+        status: "failed".into(),
+        error: Some("workflow failed".into()),
+        usages: usages(),
+        ..Default::default()
+    };
+    let resolution = database
+        .reconcile_result(
+            &committed,
+            Some(Ok(failed.clone())),
+            TurnExit::Failed,
+            "late failure",
+        )
+        .unwrap();
+    assert!(matches!(resolution.state, CompletionState::Committed(actual) if actual == saved));
+    assert_eq!(resolution.diagnostics.len(), 1);
+    let invocation = begin(&database);
+    let mut invalid_completion = failed.clone();
+    invalid_completion.text = "intermediate answer".into();
+    assert!(
+        database
+            .complete_turn(invocation.clone(), invalid_completion)
+            .is_err()
+    );
+    assert_eq!(database.turn(&invocation.turn_id).unwrap().state, "running");
+    database
+        .reconcile_result(
+            &invocation,
+            Some(Ok(failed.clone())),
+            TurnExit::Failed,
+            "failure",
+        )
+        .unwrap();
+    let original = database.call(&invocation.call_id).unwrap();
+    let mut conflicting = failed.clone();
+    conflicting.error = Some("different failure".into());
+    let resolution = database
+        .reconcile_result(
+            &invocation,
+            Some(Ok(conflicting)),
+            TurnExit::Failed,
+            "late failure",
+        )
+        .unwrap();
+    assert_eq!(resolution.diagnostics.len(), 1);
+    assert_eq!(database.call(&invocation.call_id).unwrap(), original);
+    let cancelled = begin(&database);
+    database
+        .fail_turn(cancelled.clone(), "cancelled", "cancelled")
+        .unwrap();
+    let resolution = database
+        .reconcile_result(
+            &cancelled,
+            Some(Ok(failed)),
+            TurnExit::Failed,
+            "late failure",
+        )
+        .unwrap();
+    assert_eq!(resolution.diagnostics.len(), 1);
+    assert!(
+        matches!(resolution.state, CompletionState::Finished(turn) if turn.state == "cancelled")
+    );
 }
