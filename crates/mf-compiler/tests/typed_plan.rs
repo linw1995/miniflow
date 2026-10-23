@@ -65,6 +65,18 @@ fn factory(config: Value) -> Result<mf_runtime::PreparedNode, mf_runtime::NodeBu
         Some("optional") => prepare::<Option<String>>(&config),
         _ => prepare::<String>(&config),
     }?;
+    if config["incremental"] == true {
+        prepared
+            .metadata
+            .stream_exports
+            .push(mf_runtime::StreamOutputContract {
+                name: "answer".into(),
+                path: vec!["nested".into()],
+                port: "delta".into(),
+                value_type: ValueType::String,
+                required: true,
+            });
+    }
     if config["dynamic"] == true {
         prepared.metadata.typed_generation = None;
     }
@@ -180,5 +192,18 @@ fn dynamic_providers_and_declaration_order_have_stable_reports() {
         plan.connections
             .iter()
             .all(|edge| edge.fallback == Some(TypedFallbackReason::ProviderMissing))
+    );
+}
+
+#[test]
+fn nested_live_exports_prevent_terminal_only_typed_segments() {
+    let mut value = chain();
+    value["nodes"][1]["config"] = json!({"incremental":true});
+    let (_, plan) = planned(value);
+    assert!(plan.segments.is_empty());
+    assert!(
+        plan.connections
+            .iter()
+            .all(|edge| edge.fallback == Some(TypedFallbackReason::IncrementalOutput))
     );
 }

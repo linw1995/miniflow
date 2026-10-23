@@ -107,7 +107,13 @@ impl crate::FlowRuntime {
                 [],
                 state,
             )?;
-            state.target_outputs(&target.node)
+            let outputs = state.target_outputs(&target.node)?;
+            if let Some(publisher) = state.live_publisher() {
+                publisher
+                    .flush(&state.cancellation())
+                    .context(crate::runner::LiveOutputSnafu)?;
+            }
+            Ok(outputs)
         })();
         if let Err(error) = &result {
             state.select_observation_failure(error);
@@ -277,9 +283,7 @@ impl NodeTarget {
             .into_iter()
             .flat_map(|(id, metadata)| {
                 metadata
-                    .ports
-                    .outputs
-                    .iter()
+                    .output_ports()
                     .map(move |port| (output_id(id, &port.name), &port.value_type))
             })
             .collect();
@@ -339,7 +343,7 @@ impl NodeTarget {
         })?;
         self.bind(
             node,
-            node.node.as_deref(),
+            stream.task_node(self.index),
             nodes
                 .iter()
                 .map(|node| (node.definition_id.as_str(), &node.metadata)),

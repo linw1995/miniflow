@@ -46,10 +46,10 @@ pub use cache::{BuildDirectory, CacheError, default_build_directory};
 pub use compatibility::{RuntimeCompatibilityError, validate_runtime_identity};
 pub use compiler::{
     CyclePath, DescriptionError, TypeInferenceState, WorkflowCompileError, WorkflowExecutionError,
-    compile_definition, describe_compiled, describe_interface, describe_workflow_inputs,
-    execute_compiled, execute_compiled_with_inputs, instantiate_compiled,
-    instantiate_compiled_with_observation, plan_definition, resolve_nodes, structural_order,
-    topological_order, validate_definition,
+    bind_stream_outputs, compile_definition, describe_compiled, describe_interface,
+    describe_workflow_contracts, describe_workflow_inputs, execute_compiled,
+    execute_compiled_with_inputs, instantiate_compiled, instantiate_compiled_with_observation,
+    plan_definition, resolve_nodes, structural_order, topological_order, validate_definition,
 };
 #[cfg(feature = "codegen")]
 pub use dependency_project::{

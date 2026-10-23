@@ -107,15 +107,18 @@ impl CompiledWorkflow {
         &self,
         registry: &mf_runtime::NodeRegistry,
     ) -> Result<mf_runtime::WorkflowManifest, PlanError> {
-        self.manifest_with_schema(crate::describe_workflow_inputs(self, registry)?)
+        let (inputs, outputs) = crate::compiler::describe_workflow_contracts(self, registry)?;
+        self.manifest_with_schema(inputs, outputs)
     }
 
     fn manifest_with_schema(
         &self,
         input_schema: mf_runtime::WorkflowInputSchema,
+        mut stream_outputs: Vec<mf_runtime::StreamOutputContract>,
     ) -> Result<mf_runtime::WorkflowManifest, PlanError> {
+        stream_outputs.sort_by(|a, b| a.name.cmp(&b.name));
         let manifest = mf_runtime::WorkflowManifest {
-            version: mf_runtime::WorkflowManifestVersion::V2026_10_16,
+            version: mf_runtime::WorkflowManifestVersion::V2026_10_23,
             definition: self.definition.clone(),
             execution_order: self
                 .execution_order
@@ -124,6 +127,7 @@ impl CompiledWorkflow {
                 .collect(),
             loop_orders: crate::compiler::loop_execution_orders(&self.definition)?,
             input_schema,
+            stream_outputs,
         };
         manifest.validate()?;
         Ok(manifest)
@@ -149,7 +153,7 @@ impl CompiledWorkflow {
         let output_types: BTreeMap<_, _> = nodes
             .iter()
             .flat_map(|node| {
-                node.metadata.ports.outputs.iter().map(move |port| {
+                node.metadata.output_ports().map(move |port| {
                     (
                         mf_runtime::output_id(node.definition_id.as_str(), &port.name),
                         port.value_type.clone(),
@@ -414,7 +418,7 @@ impl CompiledWorkflow {
             &self.definition,
             &self.execution_order,
             "root",
-            &[],
+            ScopeEnvironment::root(&self.definition),
             None,
             None,
             ScopeBuild::Dynamic,
@@ -532,7 +536,7 @@ fn generate_stream_artifacts(
         definition,
         order,
         "stream",
-        &[],
+        ScopeEnvironment::root(definition),
         None,
         None,
         ScopeBuild::PreparationOnly,
@@ -577,15 +581,35 @@ enum ScopeBuild<'a> {
 }
 
 #[cfg(feature = "codegen")]
+#[derive(Clone, Copy)]
+struct ScopeEnvironment<'a> {
+    observation_path: &'a [String],
+    source_path: &'a [DefinitionId],
+    exports: &'a [mf_runtime::WorkflowStreamOutputDefinition],
+}
+
+#[cfg(feature = "codegen")]
+impl<'a> ScopeEnvironment<'a> {
+    fn root(definition: &'a WorkflowDefinition) -> Self {
+        Self {
+            observation_path: &[],
+            source_path: &[],
+            exports: &definition.stream_outputs,
+        }
+    }
+}
+
+#[cfg(feature = "codegen")]
 fn generate_scope(
     definition: &WorkflowDefinition,
     order: &[DefinitionId],
     scope: &str,
-    static_scope: &[String],
+    environment: ScopeEnvironment<'_>,
     enclosing: Option<&LoopDefinition>,
     preparation_error_override: Option<&TokenStream>,
     build: ScopeBuild<'_>,
 ) -> Result<(Vec<TokenStream>, Vec<TokenStream>, syn::Ident), PlanError> {
+    let static_scope = environment.observation_path;
     let nodes_by_id: BTreeMap<_, _> = definition
         .nodes
         .iter()
@@ -595,6 +619,25 @@ fn generate_scope(
     let mut preparations = vec![quote! {
         let mut #inference_ident = mf_compiler::TypeInferenceState::default();
     }];
+    let export_ident = format_ident!("stream_exports_{scope}");
+    let selections = environment
+        .exports
+        .iter()
+        .filter(|output| {
+            output.path.len() == environment.source_path.len() + 1
+                && output.path.starts_with(environment.source_path)
+        })
+        .collect::<Vec<_>>();
+    if !selections.is_empty() {
+        let json = LitStr::new(
+            &serde_json::to_string(&selections).context(SerializeSnafu)?,
+            Span::call_site(),
+        );
+        preparations.push(quote! {
+            let #export_ident: Vec<mf_runtime::WorkflowStreamOutputDefinition> = serde_json::from_str(#json)
+                .boxed().context(mf_compiler::WorkflowMetadataSnafu { definition_id: "<live exports>" })?;
+        });
+    }
     let mut statements = Vec::new();
     let mut node_idents = Vec::with_capacity(order.len());
     let incoming = crate::compiler::incoming_dependencies(definition);
@@ -611,15 +654,29 @@ fn generate_scope(
         let kind_lit = LitStr::new(&node.kind, Span::call_site());
         let dependencies = incoming.get(id.as_str()).map_or(&[][..], Vec::as_slice);
         let bindings = dependency_tokens(dependencies);
+        let live_binding = if selections.is_empty() {
+            quote! {}
+        } else {
+            let path = environment
+                .source_path
+                .iter()
+                .chain(std::iter::once(id))
+                .map(|id| LitStr::new(id.as_str(), Span::call_site()));
+            quote! {
+                mf_compiler::bind_stream_outputs(&mut #node_ident, &[#(mf_runtime::DefinitionId::from(#path)),*], &#export_ident)
+                    .boxed().context(mf_compiler::WorkflowMetadataSnafu { definition_id: #id_lit })?;
+            }
+        };
         if matches!(node.kind.as_str(), crate::LOOP_KIND | ITERATION_KIND) {
             preparations.push(subgraph_preparation(
                 definition,
                 node,
                 scope,
                 index,
-                static_scope,
+                environment,
                 &bindings,
             )?);
+            preparations.push(live_binding);
             node_idents.push(node_ident);
             continue;
         }
@@ -659,6 +716,7 @@ fn generate_scope(
                 mf_runtime::verify_generated_metadata(&#node_ident.metadata, &expected)
                     .context(mf_compiler::WorkflowNodeConstructionSnafu { definition_id: mf_runtime::DefinitionId::from(#id_lit) })
                     .inspect_err(|error| { #preparation_report })?;
+                #live_binding
             });
             node_idents.push(node_ident);
             continue;
@@ -715,6 +773,7 @@ fn generate_scope(
                 .inspect_err(|error| { #preparation_report })
                 .boxed()
                 .context(mf_compiler::WorkflowMetadataSnafu { definition_id: #id_lit })?;
+            #live_binding
         });
         node_idents.push(node_ident);
     }
@@ -783,9 +842,10 @@ fn subgraph_preparation(
     node: &crate::NodeDefinition,
     scope: &str,
     index: usize,
-    static_scope: &[String],
+    environment: ScopeEnvironment<'_>,
     bindings: &[TokenStream],
 ) -> Result<TokenStream, PlanError> {
+    let static_scope = environment.observation_path;
     let node_ident = format_ident!("node_{scope}_{index}");
     let inference_ident = format_ident!("inference_{scope}");
     let body_ident = format_ident!("body_{scope}_{index}");
@@ -796,6 +856,8 @@ fn subgraph_preparation(
         Span::call_site(),
     );
     let mut body_static_scope = static_scope.to_vec();
+    let mut body_source_path = environment.source_path.to_vec();
+    body_source_path.push(node.id.clone());
     let (body, options, enclosing, preparation_error) = if node.kind == crate::LOOP_KIND {
         let definition =
             node.loop_definition
@@ -845,7 +907,11 @@ fn subgraph_preparation(
         &body,
         &order,
         &body_scope,
-        &body_static_scope,
+        ScopeEnvironment {
+            observation_path: &body_static_scope,
+            source_path: &body_source_path,
+            exports: environment.exports,
+        },
         enclosing,
         preparation_error.as_ref(),
         ScopeBuild::Dynamic,
@@ -904,11 +970,13 @@ fn subgraph_preparation(
             }
         }
     };
+    let body_exports = format_ident!("body_exports_{scope}_{index}");
     Ok(quote! {
         let #body_flow = (|| -> Result<mf_runtime::Flow, mf_compiler::WorkflowBuildError> {
             #(#preparations)*
             Ok(#body_flow)
         })().context(mf_compiler::WorkflowSubgraphSnafu { definition_id: #outer_id })?;
+        let #body_exports = #body_flow.stream_outputs();
         let #body_ident = mf_runtime::PreparedSubgraph::new(
             vec![#(#nodes),*], vec![#(#outputs),*],
             move |state| {
@@ -920,6 +988,7 @@ fn subgraph_preparation(
             registry, #outer_id, #kind, #config, #options, #body_ident,
         )
             .inspect_err(|error| { #report })?;
+        #node_ident.metadata.stream_exports = #body_exports;
         #inference_ident.resolve_node(&mut #node_ident, &[#(#bindings),*])
             .inspect_err(|error| { #report })
             .boxed()
@@ -960,6 +1029,10 @@ impl CompiledWorkflow {
         }
         let node_targets_json =
             serde_json::to_string(&self.node_targets(&nodes)?).context(SerializeSnafu)?;
+        let stream_outputs = nodes
+            .iter()
+            .flat_map(|node| node.metadata.stream_exports.iter().cloned())
+            .collect();
         let flow = crate::FlowBuilder::prepare(
             nodes,
             self.definition.edges.clone(),
@@ -1070,7 +1143,7 @@ impl CompiledWorkflow {
         }
         let syntax: syn::File =
             syn::parse2(quote! { #(#layouts)* }).context(GeneratedSyntaxSnafu)?;
-        let manifest = self.manifest_with_schema(schema)?;
+        let manifest = self.manifest_with_schema(schema, stream_outputs)?;
         Ok(GeneratedExecutionArtifacts {
             rust_source: prettyplease::unparse(&syntax),
             manifest_bytes: manifest.to_bytes()?,
@@ -1259,7 +1332,7 @@ fn typed_preparation_tokens(
         &workflow.definition,
         &workflow.execution_order,
         "root",
-        &[],
+        ScopeEnvironment::root(&workflow.definition),
         None,
         None,
         ScopeBuild::Typed(&constructors),

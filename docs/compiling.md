@@ -205,6 +205,49 @@ JSON and file transports also accept inline values, such as `--inputs='{"read.pa
 `--inputs-file=parameters.json`. A named string value starting with `--` must use inline syntax, such as
 `--read.path=--literal`; short-option-looking values such as `-v` remain literal when following a named input.
 
+## Finite live output
+
+New compiled finite workflows keep one final JSON object by default. Workflows declaring `stream_outputs`
+can opt into the versioned business-output protocol independently of telemetry:
+
+```sh
+./flow --count.count 1 --output-format events-jsonl --stream-output increments
+```
+
+This example assumes a combined counting provider with a public `increments` export. Repeat `--stream-output NAME`
+to select multiple exports; omission subscribes to all declared exports. Unknown or duplicate selections fail before
+business execution. An unselected export has no host consumer and can produce zero increments. These controls are
+runner options, so a workflow string such as `--read.path=--output-format` remains a literal input value.
+
+Each stdout line is one compact JSON record. A record carries wire version `1`, the execution run ID, an ordered
+sequence, and either a live event or a complete final output object. For example:
+
+```json
+{"version":1,"run_id":"0123456789abcdef0123456789abcdef","sequence":0,"record":{"kind":"event","event":{"export":"increments","source":["count"],"invocation":{"id":1,"node":"count","path":[]},"event":{"kind":"open"}}}}
+{"version":1,"run_id":"0123456789abcdef0123456789abcdef","sequence":1,"record":{"kind":"event","event":{"export":"increments","source":["count"],"invocation":{"id":1,"node":"count","path":[]},"event":{"kind":"value","value":0}}}}
+{"version":1,"run_id":"0123456789abcdef0123456789abcdef","sequence":2,"record":{"kind":"event","event":{"export":"increments","source":["count"],"invocation":{"id":1,"node":"count","path":[]},"event":{"kind":"close","completed":true}}}}
+{"version":1,"run_id":"0123456789abcdef0123456789abcdef","sequence":3,"record":{"kind":"final","outputs":{"total":1}}}
+```
+
+Open/close controls identify each invocation even when it produces no values. A skipped node produces no controls.
+The static source path preserves opaque IDs, while the dynamic invocation path preserves Loop/Iteration indices.
+Closing a stream ends that production invocation; the final result remains authoritative. The final record follows
+successful graph and export drain. Diagnostics and provider stdout are redirected to stderr in event mode.
+Failure can end without a final record; valid prefixes must not be treated as successful replies.
+
+The manifest and input-interface view revision `2026-10-23` expose the finite live capability and reflected export
+contracts. Generated preparation validates these contracts before execution, including nested bodies and isolated
+Task binding. Source paths are independent of observation's outer-only Iteration view. Pure native streaming
+workflows retain their existing result-line protocol; event mode is available for their isolated Task targets.
+Older JSON-only executables remain usable and must be recompiled to add the new protocol.
+
+Default transport bounds are 1 MiB per encoded event record, 16 MiB for the final output object, and 64 MiB cumulative
+wire data. The final frame has bounded framing overhead. Incremental readers also bound their partial-record buffer,
+reject duplicate keys, validate run/sequence/source/lifecycle/type contracts, and reject incomplete final records.
+A fully validated final value is retained if later process or protocol diagnostics arrive. Live capture retains only
+that final value and bounded in-flight records rather than spooling the entire event history. Capture and cancellation
+continue independently of terminal rendering.
+
 ## Streaming runners
 
 Use schema `2026-10-03` with `execution.mode` set to `stream`. Sources are explicit nodes. The repository

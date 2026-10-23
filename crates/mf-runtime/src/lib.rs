@@ -11,6 +11,7 @@ mod future_execution;
 mod iteration;
 mod live;
 mod live_channel;
+mod live_protocol;
 mod loop_node;
 mod message_domain;
 mod node;
@@ -69,6 +70,11 @@ pub use iteration::{
 };
 pub use live::{LiveOutputEvent, LiveOutputKind, LivePublisher};
 pub use live_channel::{LiveLimits, LiveMetrics, LiveReceiveError, LiveReceiver, live_channel};
+pub use live_protocol::{
+    DeliverySnafu as LiveProtocolDeliverySnafu, LIVE_PROTOCOL_VERSION, LiveOutputDecoder,
+    LiveOutputWriter, LiveProtocolError, LiveProtocolLimits, LiveRecord, LiveRecordKind,
+    MAX_LIVE_FINAL_BYTES,
+};
 pub use loop_node::{
     loop_variable_types, prepared_loop_assign, prepared_loop_exit, prepared_loop_source_types,
     prepared_scope_source,
@@ -141,7 +147,7 @@ pub use workflow_inputs::{
 };
 
 pub use runner_arguments::{
-    RunnerArgumentError, RunnerArguments, RunnerInvocation, runner_help_command,
+    RunnerArgumentError, RunnerArguments, RunnerInvocation, RunnerOutputFormat, runner_help_command,
 };
 #[cfg(unix)]
 pub use runner_signals::{RunnerSignalError, RunnerSignals};

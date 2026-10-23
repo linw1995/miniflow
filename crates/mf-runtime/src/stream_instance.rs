@@ -23,6 +23,14 @@ use std::{
 #[derive(Clone, Debug, Snafu)]
 pub enum StreamError {
     #[snafu(
+        display("live output protocol failed: {source}"),
+        visibility(pub(super))
+    )]
+    LiveProtocol {
+        #[snafu(source(from(crate::LiveProtocolError, Arc::new)))]
+        source: Arc<crate::LiveProtocolError>,
+    },
+    #[snafu(
         display("invalid stream runtime configuration: {message}"),
         visibility(pub)
     )]
@@ -114,7 +122,10 @@ impl StreamError {
             Self::InputFailure { .. } | Self::InputRecord { .. } | Self::InputValidation { .. } => {
                 "input"
             }
-            Self::Output { .. } | Self::OutputWrite { .. } | Self::OutputEncode { .. } => "output",
+            Self::Output { .. }
+            | Self::OutputWrite { .. }
+            | Self::OutputEncode { .. }
+            | Self::LiveProtocol { .. } => "output",
             Self::Resource { .. } => "resource",
             Self::Producer { source, .. } | Self::Event { source, .. } => {
                 if let NodeExecutionError::PluginFailed { source } = source.as_ref() {

@@ -27,12 +27,12 @@
 
 ## 4. Generated runners, manifests, and bounded transport
 
-- [ ] 4.1 Version manifest/interface export evidence and protocol capability using the prepared compilation result; verify offline inspection, host/target agreement, unsupported versions, and warm-build metadata regeneration.
-- [ ] 4.2 Generate combined execution and domain layouts without optimized-path duplication; verify external provider parity across in-memory, generated dynamic, and eligible typed/fallback paths.
-- [ ] 4.3 Support isolated combined Task execution with a discard sink by default; verify `--node` invokes only the selected node once and keeps existing input/context contracts.
-- [ ] 4.4 Add explicit finite `events-jsonl` mode with one ordered writer and unchanged final output payload; verify early flush, empty-stream controls, stderr separation, final-after-drain, and failure without a final record.
-- [ ] 4.5 Implement bounded incremental record decoding/capture without spooling live history into final JSON; verify split UTF-8/JSON, duplicate keys, sequence/lifecycle faults, unknown exports, size limits, truncated final records, and independently drained full pipes.
-- [ ] 4.6 Document invocation flags, wire limits, and legacy runner behavior in `docs/compiling.md`; verify ordinary JSON and existing top-level stream runner regressions remain unchanged.
+- [x] 4.1 Version manifest/interface export evidence and protocol capability using the prepared compilation result; verify offline inspection, host/target agreement, unsupported versions, and warm-build metadata regeneration.
+- [x] 4.2 Generate combined execution and domain layouts without optimized-path duplication; verify external provider parity across in-memory, generated dynamic, and eligible typed/fallback paths.
+- [x] 4.3 Support isolated combined Task execution with a discard sink by default; verify `--node` invokes only the selected node once and keeps existing input/context contracts.
+- [x] 4.4 Add explicit finite `events-jsonl` mode with one ordered writer and unchanged final output payload; verify early flush, empty-stream controls, stderr separation, final-after-drain, and failure without a final record.
+- [x] 4.5 Implement bounded incremental record decoding/capture without spooling live history into final JSON; verify split UTF-8/JSON, duplicate keys, sequence/lifecycle faults, unknown exports, size limits, truncated final records, and independently drained full pipes.
+- [x] 4.6 Document invocation flags, wire limits, and legacy runner behavior in `docs/compiling.md`; verify ordinary JSON and existing top-level stream runner regressions remain unchanged.
 
 ## 5. LLM combined execution
 

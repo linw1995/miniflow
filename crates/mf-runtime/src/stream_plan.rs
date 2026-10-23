@@ -76,6 +76,14 @@ impl std::fmt::Debug for PreparedStream {
 }
 
 impl PreparedStream {
+    pub fn task_node(&self, node: usize) -> Option<&dyn TaskNode> {
+        self.plan
+            .nodes
+            .get(node)?
+            .node
+            .as_deref()
+            .or_else(|| self.operator_states.get(node)?.as_ref()?.as_task_node())
+    }
     /// Binds executor state to an already validated executable layout.
     pub fn from_plan(
         execution: StreamExecution,
@@ -174,6 +182,12 @@ impl PreparedStream {
 }
 
 impl StreamPlan {
+    pub fn stream_outputs(&self) -> Vec<crate::StreamOutputContract> {
+        self.nodes
+            .iter()
+            .flat_map(|node| node.metadata.stream_exports.iter().cloned())
+            .collect()
+    }
     pub(super) fn emission_node(&self, node: usize) -> &FlowNode<()> {
         self.emission_nodes[node]
             .as_ref()

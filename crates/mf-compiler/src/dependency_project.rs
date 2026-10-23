@@ -106,29 +106,56 @@ fn run(#[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<(), Box<d
     let invocation = mf_runtime::RunnerInvocation::parse(
         std::env::args_os().skip(1), &manifest.input_schema, &targets,
     )?;
+    invocation.validate_output(&manifest)?;
     if let Some(id) = invocation.node.as_deref() {
         let target = mf_runtime::NodeTarget::find(&targets, id)?;
-        return execute_selected(target, invocation.inputs, invocation.context, invocation.verbose, #[cfg(unix)] signals);
+        return execute_selected(target, invocation, #[cfg(unix)] signals);
     }
     let arguments = invocation.inputs;
     #[cfg(feature = "streaming")]
-    { execute_stream(arguments, invocation.verbose, #[cfg(unix)] signals) }
+    {
+        if invocation.output_format != mf_runtime::RunnerOutputFormat::Json {
+            return Err("events-jsonl requires finite execution or an isolated Task target".into());
+        }
+        execute_stream(arguments, invocation.verbose, #[cfg(unix)] signals)
+    }
     #[cfg(not(feature = "streaming"))]
     {
-        let outputs = execute(arguments, invocation.verbose, #[cfg(unix)] signals)?;
-        println!("{}", serde_json::to_string(&outputs)?);
+        let run_id = run_id();
+        let live = if invocation.output_format == mf_runtime::RunnerOutputFormat::EventsJsonl {
+            Some(LiveRun::new(mf_runtime::StreamStdio::claim()?, &manifest, run_id, &invocation.stream_outputs)?)
+        } else { None };
+        let events = live.is_some();
+        let outputs = execute(arguments, invocation.verbose, run_id, live, #[cfg(unix)] signals)?;
+        if !events { println!("{}", serde_json::to_string(&outputs)?); }
         Ok(())
+    }
+}
+
+struct LiveRun {
+    writer: mf_runtime::LiveOutputWriter,
+    publisher: mf_runtime::LivePublisher,
+    stdin: Option<mf_runtime::TextInput>,
+}
+
+impl LiveRun {
+    fn new(mut stdio: mf_runtime::StreamStdio, manifest: &mf_runtime::WorkflowManifest, run_id: mf_telemetry::identity::RunId, names: &[String]) -> Result<Self, Box<dyn std::error::Error>> {
+        let stdin = stdio.take_input();
+        let writer = mf_runtime::LiveOutputWriter::new(run_id, &manifest.stream_outputs, Default::default(), move |bytes, cancellation| {
+            stdio.write_bytes(bytes, cancellation)
+        })?;
+        let publisher = if names.is_empty() { writer.publisher() } else { writer.publisher().select(names.iter().cloned()) };
+        Ok(Self { writer, publisher, stdin })
     }
 }
 
 fn execute_selected(
     target: &mf_runtime::NodeTarget,
-    inputs: mf_runtime::WorkflowArguments,
-    context: mf_runtime::WorkflowArguments,
-    verbose: u8,
+    invocation: mf_runtime::RunnerInvocation,
     #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut stdio = mf_runtime::StreamStdio::claim()?;
+    let mf_runtime::RunnerInvocation { inputs, context, verbose, output_format, stream_outputs, .. } = invocation;
+    let mut stdio = Some(mf_runtime::StreamStdio::claim()?);
     #[cfg(feature = "telemetry")]
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
@@ -140,6 +167,9 @@ fn execute_selected(
     let observer = None;
     let observer = observer.or_else(|| (verbose > 0).then(|| mf_telemetry::observation::Observer::stderr(verbose)));
     let run_id = run_id();
+    let mut live = if output_format == mf_runtime::RunnerOutputFormat::EventsJsonl {
+        Some(LiveRun::new(stdio.take().expect("claimed output"), &workflow_manifest()?, run_id, &stream_outputs)?)
+    } else { None };
     let observation = observer.and_then(|observer| {
         match target.start_observation(&observer, run_id) {
             Ok(observation) => Some(observation),
@@ -162,8 +192,10 @@ fn execute_selected(
         #[cfg(unix)]
         signals.bind(state.cancellation())?;
         if target.inputs.stdin_owner(&inputs)?.is_some() {
-            if let Some(input) = stdio.take_input() { state.set_stdin(input); }
+            let input = if let Some(live) = &mut live { live.stdin.take() } else { stdio.as_mut().expect("JSON output").take_input() };
+            if let Some(input) = input { state.set_stdin(input); }
         }
+        if let Some(live) = &live { state.set_live_publisher(live.publisher.clone()); }
         if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.recorder()); }
         let registry = mf_runtime::NodeRegistry::from_inventory()?;
         #[cfg(feature = "streaming")]
@@ -172,6 +204,7 @@ fn execute_selected(
                 if let Some(observation) = state.observation_mut() { observation.preparation_failed_unattributed(error.to_string()); }
             })?;
             workflow_manifest()?.validate_prepared_schema(prepared.plan().input_schema())?;
+            workflow_manifest()?.validate_prepared_stream_outputs(&prepared.plan().stream_outputs())?;
             let task = target.bind_stream(&prepared)?;
             mf_runtime::FlowRuntime::default().execute_target_in_context(&task, state, inputs, context)?
         };
@@ -179,12 +212,19 @@ fn execute_selected(
         let outputs = {
             let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
             workflow_manifest()?.validate_prepared_schema(flow.input_schema())?;
+            workflow_manifest()?.validate_prepared_stream_outputs(&flow.stream_outputs())?;
             let task = target.bind_flow(&flow)?;
             mf_runtime::FlowRuntime::default().execute_target_in_context(&task, state, inputs, context)?
         };
-        stdio.write_json(&outputs).inspect_err(|error| {
-            if let Some(observation) = state.observation_mut() { observation.output_selection_failed(error.to_string()); }
-        })?;
+        if let Some(live) = &live {
+            live.writer.finish(&outputs, &state.cancellation()).inspect_err(|error| {
+                if let Some(observation) = state.observation_mut() { observation.output_selection_failed(error.to_string()); }
+            })?;
+        } else {
+            stdio.as_mut().expect("JSON output").write_json(&outputs).inspect_err(|error| {
+                if let Some(observation) = state.observation_mut() { observation.output_selection_failed(error.to_string()); }
+            })?;
+        }
         Ok(())
     });
     if let Some(snapshots) = snapshots {
@@ -243,6 +283,7 @@ fn execute_stream(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(u
             if let Some(observation) = &observation { observation.preparation_failed(error.to_string()); }
         })?;
         workflow_manifest()?.validate_prepared_schema(prepared.plan().input_schema())?;
+        workflow_manifest()?.validate_prepared_stream_outputs(&prepared.plan().stream_outputs())?;
         prepared.plan().input_schema().validate(&arguments)?;
         let needs_stdin = prepared.plan().input_schema().stdin_owner(&arguments)?.is_some();
         let stdin = if needs_stdin { stdio.take_input() } else { None };
@@ -286,7 +327,7 @@ fn capture_requested() -> bool {
 }
 
 #[cfg(not(feature = "streaming"))]
-fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8, run_id: mf_telemetry::identity::RunId, live: Option<LiveRun>, #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     #[cfg(feature = "telemetry")]
     let providers = match mf_telemetry::otlp::TelemetryProviders::from_env() {
         Ok(providers) => providers,
@@ -305,12 +346,11 @@ fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(unix)] s
                 #[cfg(not(feature = "telemetry"))]
                 eprintln!("data history unavailable: recompile the runner without --no-telemetry");
             }
-            return execute_workflow(None, None, arguments, #[cfg(unix)] signals);
+            return execute_workflow(None, None, arguments, live, #[cfg(unix)] signals);
         };
         let description = workflow_manifest()?.description()?;
         #[cfg(feature = "telemetry")]
         let workflow_id = description.workflow_id.clone();
-        let run_id = run_id();
         let started = if description.version.supports_loops() {
             observer.start_with_description(description, run_id)
         } else {
@@ -340,7 +380,7 @@ fn execute(arguments: mf_runtime::WorkflowArguments, verbose: u8, #[cfg(unix)] s
             if capture_requested() { eprintln!("data history unavailable: recompile the runner without --no-telemetry"); }
             None
         };
-        execute_workflow(observation, snapshots, arguments, #[cfg(unix)] signals)
+        execute_workflow(observation, snapshots, arguments, live, #[cfg(unix)] signals)
     })();
     #[cfg(feature = "telemetry")]
     if let Some(providers) = providers {
@@ -374,7 +414,7 @@ fn snapshot_recorder_for_id(workflow_id: mf_telemetry::identity::WorkflowId, run
 }
 
 #[cfg(not(feature = "streaming"))]
-fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: Option<SnapshotExport>, arguments: mf_runtime::WorkflowArguments, #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
+fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: Option<SnapshotExport>, arguments: mf_runtime::WorkflowArguments, mut live: Option<LiveRun>, #[cfg(unix)] signals: &mut mf_runtime::RunnerSignals) -> Result<mf_runtime::FlowOutputs, Box<dyn std::error::Error>> {
     let result = mf_runtime::ExecutionContext::run(observation, |state| -> Result<_, Box<dyn std::error::Error>> {
         #[cfg(unix)]
         signals.bind(state.cancellation())?;
@@ -383,15 +423,25 @@ fn execute_workflow(observation: Option<mf_runtime::RunObservation>, snapshots: 
         {
             let manifest = workflow_manifest()?;
             let definition = &manifest.definition;
-            if definition.version.supports_startup_inputs() {
+            if let Some(live) = &mut live {
+                if let Some(input) = live.stdin.take() { state.set_stdin(input); }
+            } else if definition.version.supports_startup_inputs() {
                 state.set_stdin(mf_runtime::TextInput::claim()?);
             }
         }
+        if let Some(live) = &live { state.set_live_publisher(live.publisher.clone()); }
         if let Some(snapshots) = &snapshots { state.set_snapshot_recorder(snapshots.recorder()); }
         let registry = mf_runtime::NodeRegistry::from_inventory()?;
         let flow = workflow::prepare_workflow(&registry, state.observation_mut())?;
         workflow_manifest()?.validate_prepared_schema(flow.input_schema())?;
-        Ok(workflow::run_workflow_in_context(&flow, state)?)
+        workflow_manifest()?.validate_prepared_stream_outputs(&flow.stream_outputs())?;
+        let outputs = workflow::run_workflow_in_context(&flow, state)?;
+        if let Some(live) = &live {
+            live.writer.finish(&outputs, &state.cancellation()).inspect_err(|error| {
+                if let Some(observation) = state.observation_mut() { observation.output_selection_failed(error.to_string()); }
+            })?;
+        }
+        Ok(outputs)
     });
     if let Some(snapshots) = snapshots {
         snapshots.finish();

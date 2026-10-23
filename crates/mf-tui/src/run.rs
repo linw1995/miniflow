@@ -30,7 +30,7 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
 };
 use signal_hook::{SigId, consts::SIGINT, flag, low_level::unregister};
-use snafu::{ResultExt, Snafu};
+use snafu::{IntoError, ResultExt, Snafu};
 use std::{
     collections::{BTreeMap, VecDeque},
     env,
@@ -57,6 +57,12 @@ const INTERRUPT_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Snafu)]
 pub enum RunError {
+    #[snafu(display("could not prepare live output capture: {source}"))]
+    LiveSetup {
+        source: mf_runtime::LiveProtocolError,
+    },
+    #[snafu(transparent)]
+    LiveTransport { source: mf_runtime::StreamError },
     #[snafu(display("TUI requires terminal stdin and stderr"))]
     TerminalRequired,
     #[snafu(transparent)]
@@ -293,6 +299,46 @@ pub struct LocalOutcome {
     pub stdout: Vec<u8>,
     pub stderr: String,
     pub capture_error: Option<String>,
+    pub capture_failure: Option<Arc<CaptureFailure>>,
+    pub live_final: bool,
+    pub live_delivery_failure: Option<Arc<mf_runtime::StreamError>>,
+}
+
+#[derive(Debug, Snafu)]
+pub enum CaptureFailure {
+    #[snafu(display("live output capture failed: {source}"))]
+    Protocol {
+        #[snafu(source(from(mf_runtime::LiveProtocolError, Arc::new)))]
+        source: Arc<mf_runtime::LiveProtocolError>,
+    },
+    #[snafu(display("stdout {operation} failed: {source}"))]
+    Io {
+        operation: &'static str,
+        #[snafu(source(from(io::Error, Arc::new)))]
+        source: Arc<io::Error>,
+    },
+    #[snafu(display("could not retain final workflow JSON"))]
+    Encoding {
+        #[snafu(source(from(serde_json::Error, Arc::new)))]
+        source: Arc<serde_json::Error>,
+    },
+    #[snafu(display("stdout exceeded the {limit}-byte spool limit"))]
+    SpoolLimit { limit: u64 },
+    #[snafu(display("stdout pipe remained open after the drain deadline"))]
+    OpenPipe,
+}
+
+pub struct LiveCaptureOptions {
+    pub contracts: Vec<mf_runtime::StreamOutputContract>,
+    pub publisher: mf_runtime::LivePublisher,
+    pub cancellation: mf_runtime::StreamCancellation,
+    pub limits: mf_runtime::LiveProtocolLimits,
+}
+
+struct LiveCaptureState {
+    decoder: mf_runtime::LiveOutputDecoder,
+    publisher: mf_runtime::LivePublisher,
+    cancellation: mf_runtime::StreamCancellation,
 }
 pub struct LocalRun {
     child: ChildGuard,
@@ -307,16 +353,64 @@ pub struct LocalRun {
 }
 impl LocalRun {
     pub fn start(
-        mut command: Command,
+        command: Command,
         description: WorkflowDescription,
         run_id: RunId,
         stdout_limit: u64,
     ) -> Result<Self, RunError> {
+        Self::start_inner(command, description, run_id, stdout_limit, None)
+    }
+
+    pub fn start_live(
+        command: Command,
+        description: WorkflowDescription,
+        run_id: RunId,
+        options: LiveCaptureOptions,
+    ) -> Result<Self, RunError> {
+        Self::start_inner(
+            command,
+            description,
+            run_id,
+            options.limits.max_final_bytes as u64,
+            Some(options),
+        )
+    }
+
+    fn start_inner(
+        mut command: Command,
+        description: WorkflowDescription,
+        run_id: RunId,
+        stdout_limit: u64,
+        live: Option<LiveCaptureOptions>,
+    ) -> Result<Self, RunError> {
+        let live = live
+            .map(|options| {
+                let cancellation = mf_runtime::StreamCancellation::default();
+                options.cancellation.forward_to(&cancellation);
+                Ok::<_, mf_runtime::LiveProtocolError>(LiveCaptureState {
+                    decoder: mf_runtime::LiveOutputDecoder::new(
+                        run_id,
+                        &options.contracts,
+                        options.limits,
+                    )?,
+                    publisher: options.publisher,
+                    cancellation,
+                })
+            })
+            .transpose()
+            .context(LiveSetupSnafu)?;
+        if let Some(error) = live.as_ref().and_then(|live| live.cancellation.failure()) {
+            return Err(error.into());
+        }
         let receiver =
             LoopbackReceiver::bind(description.clone(), run_id).context(ReceiverSnafu)?;
         let capture = Arc::new(Mutex::new(Capture::new().context(SpoolSnafu)?));
         capture.lock().expect("capture lock was not poisoned").limit =
             stdout_limit.min(MAX_STDOUT_BYTES);
+        capture
+            .lock()
+            .expect("capture lock was not poisoned")
+            .live_mode = live.is_some();
         command
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -341,7 +435,10 @@ impl LocalRun {
             .context(SuperviseSnafu)?;
         Ok(Self {
             child,
-            capture: CaptureWorker::start(capture),
+            capture: match live {
+                Some(live) => CaptureWorker::start_with_live(capture, Some(live)),
+                None => CaptureWorker::start(capture),
+            },
             receiver,
             started: Instant::now(),
             exited: None,
@@ -361,6 +458,7 @@ impl LocalRun {
     }
     pub fn cancel(&mut self) {
         if !self.finished && self.interrupted_at.is_none() {
+            self.capture.cancel();
             let _ = nix::sys::signal::killpg(
                 nix::unistd::Pid::from_raw(self.child.child.id() as i32),
                 Signal::SIGINT,
@@ -372,57 +470,79 @@ impl LocalRun {
         if self.finished {
             return Ok(None);
         }
+        if self.capture.cancelled() && self.interrupted_at.is_none() {
+            self.cancel();
+        }
         if self.exited.is_none()
             && let Some(status) = self.child.child.try_wait().context(SuperviseSnafu)?
         {
             self.exited = Some((status, Instant::now()));
         }
         let view = self.capture.view();
-        if (view.error.is_some()
+        if ((view.error.is_some() && self.interrupted_at.is_none())
             || self
                 .interrupted_at
                 .is_some_and(|at| at.elapsed() >= INTERRUPT_TIMEOUT))
             && !self.killed
         {
-            self.child.child.start_kill().context(SuperviseSnafu)?;
+            if let Err(error) = self.child.child.start_kill() {
+                if error.raw_os_error() != Some(nix::libc::ESRCH) {
+                    return Err(error).context(SuperviseSnafu);
+                }
+                if let Some(status) = self.child.child.try_wait().context(SuperviseSnafu)? {
+                    self.exited = Some((status, Instant::now()));
+                } else {
+                    return Err(error).context(SuperviseSnafu);
+                }
+            }
             self.killed = true;
         }
         let Some((status, at)) = self.exited else {
             return Ok(None);
         };
-        if (view.stdout_open || view.stderr_open) && at.elapsed() < DRAIN_TIMEOUT {
+        if (view.stdout_open || view.stderr_open || self.capture.processing())
+            && (at.elapsed() < DRAIN_TIMEOUT || self.capture.live_pending())
+        {
             return Ok(None);
         }
         // Reap descendants even when they have already closed their inherited streams.
         let _ = self.child.child.start_kill();
-        self.capture.stop();
+        self.capture
+            .stop_with_abort(view.stdout_open || view.stderr_open);
         let mut capture = self
             .capture
             .capture
             .lock()
             .expect("capture lock was not poisoned");
         if capture.stdout.is_some() {
-            capture
-                .error
-                .get_or_insert_with(|| "stdout pipe remained open after the drain deadline".into());
+            capture.record_failure(OpenPipeSnafu.build());
         }
         capture.stdout = None;
         capture.stderr = None;
-        capture
-            .spool
-            .seek(SeekFrom::Start(0))
-            .context(SuperviseSnafu)?;
-        let mut stdout = Vec::new();
-        capture
-            .spool
-            .read_to_end(&mut stdout)
-            .context(SuperviseSnafu)?;
+        let live_final = capture.final_json.is_some();
+        let stdout = if capture.live_mode {
+            capture.final_json.take().unwrap_or_default()
+        } else {
+            capture
+                .spool
+                .seek(SeekFrom::Start(0))
+                .context(SuperviseSnafu)?;
+            let mut stdout = Vec::new();
+            capture
+                .spool
+                .read_to_end(&mut stdout)
+                .context(SuperviseSnafu)?;
+            stdout
+        };
         let outcome = LocalOutcome {
             status,
             interrupted: self.interrupted_at.is_some(),
             stdout,
             stderr: capture.stderr_display(),
             capture_error: capture.error.clone(),
+            capture_failure: capture.failure.clone(),
+            live_final,
+            live_delivery_failure: capture.live_delivery_failure.clone(),
         };
         self.child.running = false;
         self.receiver.finish();
@@ -527,6 +647,11 @@ struct Capture {
     stderr_tail: VecDeque<u8>,
     stderr_dropped: u64,
     error: Option<String>,
+    failure: Option<Arc<CaptureFailure>>,
+    live_mode: bool,
+    live_bytes: Vec<u8>,
+    final_json: Option<Vec<u8>>,
+    live_delivery_failure: Option<Arc<mf_runtime::StreamError>>,
 }
 
 #[derive(Clone, Debug)]
@@ -542,22 +667,112 @@ struct CaptureWorker {
     capture: Arc<Mutex<Capture>>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    cancellation: Option<mf_runtime::StreamCancellation>,
+    live_processing: Arc<AtomicBool>,
+    publishing_done: Arc<AtomicBool>,
+    live_mode: bool,
+    progress: Arc<Mutex<Instant>>,
 }
 
 impl CaptureWorker {
     fn start(capture: Arc<Mutex<Capture>>) -> Self {
+        Self::start_with_live(capture, None)
+    }
+
+    fn start_with_live(capture: Arc<Mutex<Capture>>, mut live: Option<LiveCaptureState>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
+        let processing = Arc::new(AtomicBool::new(false));
+        let publishing_done = Arc::new(AtomicBool::new(live.is_none()));
+        let progress = Arc::new(Mutex::new(Instant::now()));
+        let cancellation = live.as_ref().map(|live| live.cancellation.clone());
+        let live_mode = live.is_some();
         let shared_capture = Arc::clone(&capture);
         let shared_stop = Arc::clone(&stop);
+        let shared_processing = Arc::clone(&processing);
+        let shared_done = Arc::clone(&publishing_done);
+        let shared_progress = Arc::clone(&progress);
         let worker = thread::spawn(move || {
+            let mut codec_done = live.is_none();
             while !shared_stop.load(Ordering::Relaxed) {
-                let open = {
+                let (mut bytes, open, stdout_closed, process_live) = {
                     let mut capture = shared_capture
                         .lock()
                         .expect("capture lock was not poisoned");
                     capture.drain();
-                    capture.stdout.is_some() || capture.stderr.is_some()
+                    let bytes = std::mem::take(&mut capture.live_bytes);
+                    let stdout_closed = capture.stdout.is_none();
+                    let process_live = !codec_done && (!bytes.is_empty() || stdout_closed);
+                    if process_live {
+                        shared_processing.store(true, Ordering::Release);
+                    }
+                    (
+                        bytes,
+                        capture.stdout.is_some() || capture.stderr.is_some(),
+                        stdout_closed,
+                        process_live,
+                    )
                 };
+                if process_live {
+                    let live = live.as_mut().expect("live codec exists");
+                    let publisher = live.publisher.clone();
+                    let cancellation = live.cancellation.clone();
+                    let mut delivery_failure = None;
+                    let mut emit = |event| {
+                        let result = publisher.publish(event, &cancellation);
+                        if let Err(error) = &result {
+                            delivery_failure = Some(Arc::new(error.clone()));
+                        }
+                        if result.is_ok() {
+                            *shared_progress.lock().unwrap() = Instant::now();
+                        }
+                        result
+                    };
+                    let mut result = live.decoder.feed(&bytes, &mut emit);
+                    if result.is_ok() && stdout_closed {
+                        result = live.decoder.finish(&mut emit);
+                        codec_done = true;
+                    }
+                    let final_outputs = live.decoder.take_final_outputs();
+                    if final_outputs.is_some() {
+                        match publisher.flush(&cancellation) {
+                            Ok(()) => shared_done.store(true, Ordering::Release),
+                            Err(error) => {
+                                delivery_failure = Some(Arc::new(error.clone()));
+                                if result.is_ok() {
+                                    result =
+                                        Err(error).context(mf_runtime::LiveProtocolDeliverySnafu);
+                                }
+                            }
+                        }
+                    }
+                    if result.is_err() {
+                        codec_done = true;
+                    }
+                    let mut capture = shared_capture
+                        .lock()
+                        .expect("capture lock was not poisoned");
+                    if let Some(outputs) = final_outputs {
+                        match serde_json::to_vec(&outputs) {
+                            Ok(bytes) => capture.final_json = Some(bytes),
+                            Err(error) => capture.record_failure(EncodingSnafu.into_error(error)),
+                        }
+                    }
+                    if let Err(error) = result {
+                        capture.record_failure(ProtocolSnafu.into_error(error));
+                    }
+                    if delivery_failure.is_some() {
+                        capture.live_delivery_failure = delivery_failure;
+                    }
+                    shared_processing.store(false, Ordering::Release);
+                }
+                if !bytes.is_empty() {
+                    *shared_progress.lock().unwrap() = Instant::now();
+                    bytes.clear();
+                    shared_capture
+                        .lock()
+                        .expect("capture lock was not poisoned")
+                        .live_bytes = bytes;
+                }
                 if !open {
                     break;
                 }
@@ -568,7 +783,33 @@ impl CaptureWorker {
             capture,
             stop,
             worker: Some(worker),
+            cancellation,
+            live_processing: processing,
+            publishing_done,
+            live_mode,
+            progress,
         }
+    }
+
+    fn cancel(&self) {
+        if let Some(cancellation) = &self.cancellation {
+            cancellation.cancel_with_message("workflow capture stopped");
+        }
+    }
+
+    fn cancelled(&self) -> bool {
+        self.cancellation
+            .as_ref()
+            .is_some_and(|cancellation| cancellation.failure().is_some())
+    }
+
+    fn processing(&self) -> bool {
+        self.live_processing.load(Ordering::Acquire)
+    }
+
+    fn live_pending(&self) -> bool {
+        self.live_mode
+            && (self.processing() || self.progress.lock().unwrap().elapsed() < DRAIN_TIMEOUT)
     }
 
     fn view(&self) -> CaptureView {
@@ -579,8 +820,15 @@ impl CaptureWorker {
     }
 
     fn stop(&mut self) {
+        self.stop_with_abort(true);
+    }
+
+    fn stop_with_abort(&mut self, abort: bool) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(worker) = self.worker.take() {
+            if abort && !self.publishing_done.load(Ordering::Acquire) {
+                self.cancel();
+            }
             let _ = worker.join();
         }
     }
@@ -593,6 +841,10 @@ impl Drop for CaptureWorker {
 }
 
 impl Capture {
+    fn record_failure(&mut self, error: CaptureFailure) {
+        self.error.get_or_insert_with(|| error.to_string());
+        self.failure.get_or_insert_with(|| Arc::new(error));
+    }
     fn view(&self) -> CaptureView {
         CaptureView {
             stdout_open: self.stdout.is_some(),
@@ -613,6 +865,11 @@ impl Capture {
             stderr_tail: VecDeque::new(),
             stderr_dropped: 0,
             error: None,
+            failure: None,
+            live_mode: false,
+            live_bytes: Vec::new(),
+            final_json: None,
+            live_delivery_failure: None,
         })
     }
 
@@ -641,8 +898,7 @@ impl Capture {
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) => {
-                    self.error
-                        .get_or_insert_with(|| format!("stdout read failed: {error}"));
+                    self.record_failure(IoSnafu { operation: "read" }.into_error(error));
                     self.stdout = None;
                     break;
                 }
@@ -673,17 +929,23 @@ impl Capture {
         if self.error.is_some() {
             return;
         }
+        if self.live_mode {
+            self.live_bytes.extend_from_slice(bytes);
+            return;
+        }
         let allowed = (self.limit - self.written).min(bytes.len() as u64) as usize;
         if let Err(error) = self.spool.write_all(&bytes[..allowed]) {
-            self.error = Some(format!("stdout spool write failed: {error}"));
+            self.record_failure(
+                IoSnafu {
+                    operation: "spool write",
+                }
+                .into_error(error),
+            );
             return;
         }
         self.written += allowed as u64;
         if allowed < bytes.len() {
-            self.error = Some(format!(
-                "stdout exceeded the {}-byte spool limit",
-                self.limit
-            ));
+            self.record_failure(SpoolLimitSnafu { limit: self.limit }.build());
         }
     }
 
@@ -1857,6 +2119,226 @@ impl ObservationView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn live_wire(run: RunId) -> (Vec<mf_runtime::StreamOutputContract>, Vec<Vec<u8>>) {
+        let schema = vec![mf_runtime::StreamOutputContract {
+            name: "answer".into(),
+            path: vec!["produce".into()],
+            port: "delta".into(),
+            value_type: mf_runtime::ValueType::String,
+            required: true,
+        }];
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let output = bytes.clone();
+        let writer =
+            mf_runtime::LiveOutputWriter::new(run, &schema, Default::default(), move |bytes, _| {
+                output.lock().unwrap().extend_from_slice(bytes);
+                Ok(())
+            })
+            .unwrap();
+        let publisher = writer.publisher();
+        let cancellation = mf_runtime::StreamCancellation::default();
+        for event in [
+            mf_runtime::LiveOutputKind::Open,
+            mf_runtime::LiveOutputKind::Value {
+                value: "prefix".into(),
+            },
+            mf_runtime::LiveOutputKind::Close { completed: true },
+        ] {
+            publisher
+                .publish(
+                    mf_runtime::LiveOutputEvent {
+                        export: "answer".into(),
+                        source: vec!["produce".into()],
+                        invocation: mf_runtime::StreamInvocation {
+                            id: 1,
+                            node: "produce".into(),
+                            path: vec![],
+                        },
+                        event,
+                    },
+                    &cancellation,
+                )
+                .unwrap();
+        }
+        writer
+            .finish(
+                &mf_runtime::NodeValues::from([("text".into(), "complete".into())]),
+                &cancellation,
+            )
+            .unwrap();
+        let records = bytes
+            .lock()
+            .unwrap()
+            .split_inclusive(|byte| *byte == b'\n')
+            .map(<[u8]>::to_vec)
+            .collect();
+        (schema, records)
+    }
+
+    fn wait_for_outcome(run: &mut LocalRun) -> LocalOutcome {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(outcome) = run.poll().unwrap() {
+                return outcome;
+            }
+            assert!(Instant::now() < deadline, "local capture did not finish");
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    fn gated_writer(root: &Path, records: &[Vec<u8>]) -> (Command, PathBuf) {
+        let prefix = root.join("prefix");
+        let suffix = root.join("suffix");
+        let release = root.join("release");
+        std::fs::write(&prefix, records[..2].concat()).unwrap();
+        std::fs::write(&suffix, records[2..].concat()).unwrap();
+        let mut command = Command::new("python3");
+        command.arg("-c").arg("import os,sys,time;sys.stdout.buffer.write(open(sys.argv[1],'rb').read());sys.stdout.buffer.flush()\nwhile not os.path.exists(sys.argv[3]): time.sleep(0.005)\nsys.stdout.buffer.write(open(sys.argv[2],'rb').read());sys.stdout.buffer.flush()")
+            .arg(prefix).arg(suffix).arg(&release);
+        (command, release)
+    }
+
+    #[test]
+    fn live_capture_delivers_before_exit_and_retains_only_final_json() {
+        let root = tempfile::tempdir().unwrap();
+        let run_id = RunId::new();
+        let (schema, records) = live_wire(run_id);
+        let (command, release) = gated_writer(root.path(), &records);
+        let (publisher, receiver) = mf_runtime::live_channel(Default::default()).unwrap();
+        let mut run = LocalRun::start_live(
+            command,
+            scope_fixture(),
+            run_id,
+            LiveCaptureOptions {
+                contracts: schema,
+                publisher,
+                cancellation: Default::default(),
+                limits: Default::default(),
+            },
+        )
+        .unwrap();
+        let observation = run.observation();
+        assert!(matches!(
+            receiver.recv().unwrap().unwrap().event,
+            mf_runtime::LiveOutputKind::Open
+        ));
+        assert!(matches!(
+            receiver.recv().unwrap().unwrap().event,
+            mf_runtime::LiveOutputKind::Value { .. }
+        ));
+        assert!(run.poll().unwrap().is_none());
+        assert_eq!(
+            observation
+                .capture
+                .lock()
+                .unwrap()
+                .spool
+                .metadata()
+                .unwrap()
+                .len(),
+            0
+        );
+        std::fs::write(release, "release").unwrap();
+        let outcome = loop {
+            while receiver.try_recv().is_ok() {}
+            if let Some(outcome) = run.poll().unwrap() {
+                break outcome;
+            }
+            thread::sleep(Duration::from_millis(5));
+        };
+        assert!(outcome.status.success());
+        assert!(outcome.live_final);
+        assert!(outcome.capture_failure.is_none());
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&outcome.stdout).unwrap(),
+            serde_json::json!({"text":"complete"})
+        );
+        assert_eq!(
+            observation
+                .capture
+                .lock()
+                .unwrap()
+                .spool
+                .metadata()
+                .unwrap()
+                .len(),
+            0
+        );
+    }
+
+    #[test]
+    fn valid_live_final_is_retained_with_typed_late_protocol_diagnostics() {
+        let root = tempfile::tempdir().unwrap();
+        let run_id = RunId::new();
+        let (schema, records) = live_wire(run_id);
+        let input = root.path().join("wire");
+        std::fs::write(
+            &input,
+            [records.concat(), b"invalid late record\n".to_vec()].concat(),
+        )
+        .unwrap();
+        let mut command = Command::new("cat");
+        command.arg(input);
+        let mut run = LocalRun::start_live(
+            command,
+            scope_fixture(),
+            run_id,
+            LiveCaptureOptions {
+                contracts: schema,
+                publisher: mf_runtime::LivePublisher::new(|_, _| Ok(())),
+                cancellation: Default::default(),
+                limits: Default::default(),
+            },
+        )
+        .unwrap();
+        let outcome = wait_for_outcome(&mut run);
+        assert!(outcome.live_final);
+        assert!(matches!(
+            outcome.capture_failure.as_deref(),
+            Some(CaptureFailure::Protocol { .. })
+        ));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&outcome.stdout).unwrap(),
+            serde_json::json!({"text":"complete"})
+        );
+    }
+
+    #[test]
+    fn parent_cancellation_interrupts_live_capture_under_receiver_pressure() {
+        let root = tempfile::tempdir().unwrap();
+        let run_id = RunId::new();
+        let (schema, records) = live_wire(run_id);
+        let (command, _) = gated_writer(root.path(), &records);
+        let (publisher, receiver) = mf_runtime::live_channel(mf_runtime::LiveLimits {
+            max_pending_records: 1,
+            ..Default::default()
+        })
+        .unwrap();
+        let cancellation = mf_runtime::StreamCancellation::default();
+        let mut run = LocalRun::start_live(
+            command,
+            scope_fixture(),
+            run_id,
+            LiveCaptureOptions {
+                contracts: schema,
+                publisher,
+                cancellation: cancellation.clone(),
+                limits: Default::default(),
+            },
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while receiver.metrics().pending_records == 0 && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(receiver.metrics().pending_records, 1);
+        cancellation.cancel_with_message("host cancelled");
+        let outcome = wait_for_outcome(&mut run);
+        assert!(outcome.interrupted);
+        assert!(!outcome.live_final);
+        assert!(outcome.stdout.is_empty());
+    }
     use mf_runtime::StdinRequirement;
     use mf_telemetry::{
         Count,
@@ -2244,6 +2726,7 @@ mod tests {
             stdin.insert("source/id".into(), serde_json::json!(resource));
         }
         let manifest = mf_runtime::WorkflowManifest {
+            stream_outputs: Vec::new(),
             version: mf_runtime::WorkflowManifestVersion::V2026_10_16,
             definition: serde_json::from_value(definition).unwrap(),
             execution_order: vec!["source/id".into()],

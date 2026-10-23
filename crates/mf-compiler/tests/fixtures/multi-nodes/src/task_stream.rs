@@ -18,7 +18,10 @@ struct Increment {
     delta: usize,
 }
 
-struct Count;
+struct Count {
+    wait_path: Option<String>,
+    marker: Option<String>,
+}
 
 impl TypedTaskStreamNode for Count {
     type Input = Request;
@@ -28,12 +31,33 @@ impl TypedTaskStreamNode for Count {
     fn execute(
         &self,
         input: Request,
-        _: &mut ExecutionContext,
+        context: &mut ExecutionContext,
         emitter: &mut TypedEmitter<'_, '_, Increment>,
     ) -> Result<TypedNodeResult<Reply>, NodeExecutionError> {
+        if let Some(path) = &self.marker {
+            std::fs::write(path, "executed")
+                .map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
+        }
         if emitter.is_connected() {
             for delta in 0..input.count {
                 emitter.send(Increment { delta })?;
+                if delta == 0
+                    && let Some(path) = &self.wait_path
+                {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+                    while !std::path::Path::new(path).exists() {
+                        if let Some(error) = context.cancellation().failure() {
+                            return Err(error.into());
+                        }
+                        if std::time::Instant::now() >= deadline {
+                            return mf_runtime::NodeExecutionFailedSnafu {
+                                message: "fixture delivery gate timed out",
+                            }
+                            .fail();
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                }
             }
         }
         Ok(Reply { total: input.count }.into())
@@ -41,8 +65,23 @@ impl TypedTaskStreamNode for Count {
 }
 
 fn prepare(config: serde_json::Value) -> Result<PreparedNode, NodeBuildError> {
-    let _: serde_json::Map<String, serde_json::Value> = mf_runtime::deserialize_config(config)?;
-    PreparedNode::typed_task_stream(Count, NodeMetadata::default())
+    let config: serde_json::Map<String, serde_json::Value> =
+        mf_runtime::deserialize_config(config)?;
+    let wait_path = config
+        .get("wait_path")
+        .map(|value| mf_runtime::deserialize_config(value.clone()))
+        .transpose()?;
+    let marker = config
+        .get("marker")
+        .map(|value| mf_runtime::deserialize_config(value.clone()))
+        .transpose()?;
+    let mut prepared =
+        PreparedNode::typed_task_stream(Count { wait_path, marker }, NodeMetadata::default())?;
+    // Exercise rejection of providers that violate preparation stability.
+    if std::env::var_os("MF_FIXTURE_STREAM_CONTRACT_CHANGE").is_some() {
+        prepared.metadata.stream_outputs[0].value_type = mf_runtime::ValueType::String;
+    }
+    Ok(prepared)
 }
 
 inventory::submit! {

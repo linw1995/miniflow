@@ -1,7 +1,7 @@
 use crate::StreamError;
 use std::{
-    sync::{Arc, Mutex},
-    task::Waker,
+    sync::{Arc, Mutex, Weak},
+    task::{Wake, Waker},
 };
 
 #[derive(Clone, Debug, Default)]
@@ -16,6 +16,15 @@ struct CancellationState {
 }
 
 impl StreamCancellation {
+    pub fn cancel_with_message(&self, message: impl Into<String>) {
+        self.cancel(crate::stream_instance::ExecutionSnafu { message }.build());
+    }
+    pub fn forward_to(&self, target: &Self) {
+        self.register(Waker::from(Arc::new(CancellationRelay {
+            source: Arc::downgrade(&self.0),
+            target: Arc::downgrade(&target.0),
+        })));
+    }
     pub fn failure(&self) -> Option<StreamError> {
         self.0.lock().unwrap().failure.clone()
     }
@@ -67,6 +76,23 @@ impl StreamCancellation {
             cancellation: self.clone(),
             waiter: Arc::new(Mutex::new(None)),
             registered: false,
+        }
+    }
+}
+
+struct CancellationRelay {
+    source: Weak<Mutex<CancellationState>>,
+    target: Weak<Mutex<CancellationState>>,
+}
+
+impl Wake for CancellationRelay {
+    fn wake(self: Arc<Self>) {
+        let failure = self
+            .source
+            .upgrade()
+            .and_then(|source| source.lock().unwrap().failure.clone());
+        if let (Some(failure), Some(target)) = (failure, self.target.upgrade()) {
+            StreamCancellation(target).cancel(failure);
         }
     }
 }
@@ -123,6 +149,30 @@ mod tests {
     };
 
     struct WakeCount(std::sync::atomic::AtomicUsize);
+
+    #[test]
+    fn forwarding_is_one_way_and_preserves_existing_failure() {
+        let source = StreamCancellation::default();
+        let target = StreamCancellation::default();
+        source.forward_to(&target);
+        target.cancel_with_message("target stopped");
+        assert!(source.failure().is_none());
+        source.cancel_with_message("source stopped");
+        assert_eq!(
+            target.failure().unwrap().to_string(),
+            "stream execution failed: target stopped"
+        );
+
+        let late = StreamCancellation::default();
+        source.forward_to(&late);
+        assert_eq!(
+            late.failure().unwrap().to_string(),
+            "stream execution failed: source stopped"
+        );
+        let transient = StreamCancellation::default();
+        source.forward_to(&transient);
+        drop(transient);
+    }
 
     impl Wake for WakeCount {
         fn wake(self: Arc<Self>) {

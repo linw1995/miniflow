@@ -630,45 +630,10 @@ fn prepare_graph(
     for node in &mut nodes {
         let mut path = preparation.path.clone();
         path.push(node.definition_id.clone());
-        let mut exports = Vec::new();
-        for output in preparation
-            .exports
-            .iter()
-            .filter(|output| output.path == path)
-        {
-            let execution = node.node.as_ref().expect("prepared executor");
-            ensure!(
-                matches!(
-                    execution,
-                    mf_runtime::NodeExecution::TaskStream(_) | mf_runtime::NodeExecution::Stream(_)
-                ),
-                InvalidLiveExportSnafu {
-                    name: &output.name,
-                    message: "live exports require a combined or Stream producer; Event results use ordinary stream output selection",
-                }
-            );
-            let port = execution
-                .stream_outputs(&node.metadata)
-                .iter()
-                .find(|port| port.name == output.port)
-                .with_context(|| InvalidLiveExportSnafu {
-                    name: &output.name,
-                    message: format!("source port `{}` is not a stream output", output.port),
-                })?;
-            exports.push(mf_runtime::StreamOutputContract {
-                name: output.name.clone(),
-                path: path.clone(),
-                port: output.port.clone(),
-                value_type: port.value_type.clone(),
-                required: port.required,
-            });
-            preparation.resolved.insert(output.name.clone());
-        }
-        if let Some(mf_runtime::NodeExecution::TaskStream(executor)) = &mut node.node {
-            executor.set_stream_contract(&node.metadata.stream_outputs);
-            executor.set_exports(exports.clone());
-        }
-        node.metadata.stream_exports.extend(exports);
+        let exports = bind_stream_outputs(node, &path, preparation.exports)?;
+        preparation
+            .resolved
+            .extend(exports.into_iter().map(|output| output.name));
     }
     crate::construction::validate_exclusive_branches(order.iter().map(|id| {
         (
@@ -678,6 +643,54 @@ fn prepare_graph(
     }))
     .context(FlowConstructionSnafu)?;
     Ok((nodes, order))
+}
+
+pub fn bind_stream_outputs(
+    node: &mut FlowNode,
+    path: &[DefinitionId],
+    selections: &[mf_runtime::WorkflowStreamOutputDefinition],
+) -> Result<Vec<mf_runtime::StreamOutputContract>, WorkflowCompileError> {
+    let mut exports = Vec::new();
+    for output in selections.iter().filter(|output| output.path == path) {
+        let execution = node.node.as_ref().with_context(|| InvalidLiveExportSnafu {
+            name: &output.name,
+            message: "source has no prepared executor",
+        })?;
+        ensure!(
+            matches!(
+                execution,
+                mf_runtime::NodeExecution::TaskStream(_) | mf_runtime::NodeExecution::Stream(_)
+            ),
+            InvalidLiveExportSnafu {
+                name: &output.name,
+                message: "live exports require a combined or Stream producer; Event results use ordinary stream output selection",
+            }
+        );
+        let port = execution
+            .stream_outputs(&node.metadata)
+            .iter()
+            .find(|port| port.name == output.port)
+            .with_context(|| InvalidLiveExportSnafu {
+                name: &output.name,
+                message: format!("source port `{}` is not a stream output", output.port),
+            })?;
+        exports.push(mf_runtime::StreamOutputContract {
+            name: output.name.clone(),
+            path: path.to_vec(),
+            port: output.port.clone(),
+            value_type: port.value_type.clone(),
+            required: port.required,
+        });
+    }
+    if let Some(mf_runtime::NodeExecution::TaskStream(executor)) = &mut node.node {
+        executor.set_stream_contract(&node.metadata.stream_outputs);
+        executor.set_exports(exports.clone());
+    }
+    node.metadata
+        .stream_exports
+        .retain(|contract| contract.path != path);
+    node.metadata.stream_exports.extend(exports.iter().cloned());
+    Ok(exports)
 }
 
 pub fn incoming_dependencies(
@@ -1313,13 +1326,28 @@ pub fn describe_workflow_inputs(
     plan: &CompiledWorkflow,
     registry: &NodeRegistry,
 ) -> Result<mf_runtime::WorkflowInputSchema, WorkflowCompileError> {
+    describe_workflow_contracts(plan, registry).map(|(inputs, _)| inputs)
+}
+
+pub fn describe_workflow_contracts(
+    plan: &CompiledWorkflow,
+    registry: &NodeRegistry,
+) -> Result<
+    (
+        mf_runtime::WorkflowInputSchema,
+        Vec<mf_runtime::StreamOutputContract>,
+    ),
+    WorkflowCompileError,
+> {
     if plan.definition.execution.is_some() {
-        Ok(crate::instantiate_stream(plan, registry)?
-            .plan()
-            .input_schema()
-            .clone())
+        let prepared = crate::instantiate_stream(plan, registry)?;
+        Ok((
+            prepared.plan().input_schema().clone(),
+            prepared.plan().stream_outputs(),
+        ))
     } else {
-        Ok(instantiate_compiled(plan, registry)?.input_schema().clone())
+        let flow = instantiate_compiled(plan, registry)?;
+        Ok((flow.input_schema().clone(), flow.stream_outputs()))
     }
 }
 
@@ -1328,11 +1356,18 @@ pub fn describe_interface(
     registry: &NodeRegistry,
 ) -> Result<mf_runtime::WorkflowInterface, WorkflowCompileError> {
     let graph = describe_compiled(plan)?;
-    let schema = describe_workflow_inputs(plan, registry)?;
+    let (schema, stream_outputs) = describe_workflow_contracts(plan, registry)?;
+    let live_output = plan.definition.execution.is_none();
     let interface = mf_runtime::WorkflowInterface {
-        version: mf_runtime::WorkflowInterfaceVersion::for_schema(&schema),
+        version: if live_output || !stream_outputs.is_empty() {
+            mf_runtime::WorkflowInterfaceVersion::V2026_10_23
+        } else {
+            mf_runtime::WorkflowInterfaceVersion::for_schema(&schema)
+        },
         workflow_id: graph.workflow_id.clone(),
         schema,
+        live_output,
+        stream_outputs,
     };
     interface.validate_for_description(&graph)?;
     Ok(interface)

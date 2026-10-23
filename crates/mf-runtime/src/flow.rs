@@ -396,6 +396,14 @@ impl Flow {
         &self.inner.plan.execution_domains
     }
 
+    pub fn stream_outputs(&self) -> Vec<crate::StreamOutputContract> {
+        self.inner
+            .nodes
+            .iter()
+            .flat_map(|node| node.metadata.stream_exports.iter().cloned())
+            .collect()
+    }
+
     pub fn execute_with_inputs(
         &self,
         arguments: crate::WorkflowArguments,

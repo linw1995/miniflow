@@ -2,6 +2,64 @@ use mf_runtime::{WorkflowArguments, WorkflowInputSchema};
 use serde_json::json;
 
 #[test]
+fn invocation_selects_finite_live_protocol_without_consuming_workflow_values() {
+    let invocation = mf_runtime::RunnerInvocation::parse(
+        [
+            "--output-format",
+            "events-jsonl",
+            "--stream-output",
+            "answer",
+        ]
+        .map(Into::into),
+        &WorkflowInputSchema::default(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        invocation.output_format,
+        mf_runtime::RunnerOutputFormat::EventsJsonl
+    );
+    assert_eq!(invocation.stream_outputs, vec!["answer"]);
+    for flags in [
+        vec!["--stream-output", "answer"],
+        vec!["--output-format", "json", "--stream-output", "answer"],
+        vec![
+            "--output-format",
+            "events-jsonl",
+            "--stream-output",
+            "answer",
+            "--stream-output",
+            "answer",
+        ],
+        vec!["--output-format", "unknown"],
+    ] {
+        assert!(
+            mf_runtime::RunnerInvocation::parse(
+                flags.into_iter().map(Into::into),
+                &WorkflowInputSchema::default(),
+                &[]
+            )
+            .is_err()
+        );
+    }
+    let invocation = mf_runtime::RunnerInvocation::parse(
+        [
+            "--read.part.path=--output-format",
+            "--output-format",
+            "events-jsonl",
+        ]
+        .map(Into::into),
+        &schema(),
+        &[],
+    )
+    .unwrap();
+    assert_eq!(
+        invocation.inputs.0["read.part.path"].as_str(),
+        Some("--output-format")
+    );
+}
+
+#[test]
 fn runner_verbosity_preserves_workflow_values_and_transport_validation() {
     for (flags, expected) in [
         (vec!["-v", "--read.part.path", "-v"], "-v"),

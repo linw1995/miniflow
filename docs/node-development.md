@@ -688,6 +688,8 @@ while let Some(event) = receiver.recv()? {
 let final_outputs = worker.join().expect("workflow worker panicked")?;
 ```
 
+Use `publisher.select(["answer".into()])` to subscribe to specific export names. Other exports stay unconnected;
+subscription filtering applies before a provider checks consumer presence, rather than discarding data afterward.
 `LiveReceiver::try_recv` distinguishes empty, closed, and failed delivery. Receiver drop fails pending delivery;
 blocked senders and final drain honor cancellation. Terminal dependents can execute after the combined node
 returns, while whole-Flow success waits for live delivery to drain. The publisher is released at stream-instance

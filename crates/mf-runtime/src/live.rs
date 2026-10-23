@@ -2,7 +2,7 @@ use crate::{
     DefinitionId, EmissionError, EmissionSink, NodeResult, StreamCancellation, StreamError,
     StreamInvocation, StreamOutputContract, ValueRef,
 };
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -31,7 +31,10 @@ struct Callbacks {
 }
 
 #[derive(Clone)]
-pub struct LivePublisher(Arc<Callbacks>);
+pub struct LivePublisher {
+    callbacks: Arc<Callbacks>,
+    exports: Option<Arc<BTreeSet<String>>>,
+}
 
 impl std::fmt::Debug for LivePublisher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -56,10 +59,24 @@ impl LivePublisher {
         + 'static,
         flush: impl Fn(&StreamCancellation) -> Result<(), StreamError> + Send + Sync + 'static,
     ) -> Self {
-        Self(Arc::new(Callbacks {
-            publish: Box::new(publish),
-            flush: Box::new(flush),
-        }))
+        Self {
+            callbacks: Arc::new(Callbacks {
+                publish: Box::new(publish),
+                flush: Box::new(flush),
+            }),
+            exports: None,
+        }
+    }
+
+    pub fn select(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.exports = Some(Arc::new(names.into_iter().collect()));
+        self
+    }
+
+    pub fn is_subscribed(&self, name: &str) -> bool {
+        self.exports
+            .as_ref()
+            .is_none_or(|names| names.contains(name))
     }
 
     pub fn publish(
@@ -70,8 +87,11 @@ impl LivePublisher {
         if let Some(error) = cancellation.failure() {
             return Err(error);
         }
+        if !self.is_subscribed(&event.export) {
+            return Ok(());
+        }
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            (self.0.publish)(event, cancellation)
+            (self.callbacks.publish)(event, cancellation)
         }))
         .unwrap_or_else(|payload| Err(crate::stream_instance::panic_error(payload)))
     }
@@ -81,7 +101,7 @@ impl LivePublisher {
             return Err(error);
         }
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            (self.0.flush)(cancellation)
+            (self.callbacks.flush)(cancellation)
         }))
         .unwrap_or_else(|payload| Err(crate::stream_instance::panic_error(payload)))
     }
@@ -103,9 +123,17 @@ pub(super) fn with_exports<T>(
     else {
         return invoke(context, sink);
     };
+    let selected = exports
+        .iter()
+        .filter(|export| publisher.is_subscribed(&export.name))
+        .cloned()
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        return invoke(context, sink);
+    }
     let mut exported = ExportSink {
         publisher,
-        exports,
+        exports: &selected,
         invocation: StreamInvocation::new(context)?,
         cancellation: context.cancellation(),
     };

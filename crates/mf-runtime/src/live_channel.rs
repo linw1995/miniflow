@@ -123,7 +123,10 @@ impl io::Write for SizeWriter {
     }
 }
 
-fn record_size(event: &LiveOutputEvent, limit: usize) -> Result<usize, StreamError> {
+pub(super) fn encoded_size<T: serde::Serialize + ?Sized>(
+    event: &T,
+    limit: usize,
+) -> Result<usize, StreamError> {
     let mut writer = SizeWriter { size: 0, limit };
     serde_json::to_writer(&mut writer, event).context(crate::stream_instance::OutputEncodeSnafu)?;
     Ok(writer.size)
@@ -159,7 +162,7 @@ impl Sender {
         event: LiveOutputEvent,
         cancellation: &StreamCancellation,
     ) -> Result<(), StreamError> {
-        let bytes = match record_size(&event, self.0.limits.max_record_bytes) {
+        let bytes = match encoded_size(&event, self.0.limits.max_record_bytes) {
             Ok(bytes) => bytes,
             Err(error) => {
                 self.0

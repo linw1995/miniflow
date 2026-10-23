@@ -12,6 +12,8 @@ pub enum WorkflowInterfaceVersion {
     V2026_10_11,
     #[serde(rename = "2026-10-16")]
     V2026_10_16,
+    #[serde(rename = "2026-10-23")]
+    V2026_10_23,
 }
 
 impl WorkflowInterfaceVersion {
@@ -35,6 +37,10 @@ pub struct WorkflowInterface {
     pub version: WorkflowInterfaceVersion,
     pub workflow_id: mf_telemetry::identity::WorkflowId,
     pub schema: WorkflowInputSchema,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub live_output: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stream_outputs: Vec<crate::StreamOutputContract>,
 }
 
 impl WorkflowInterface {
@@ -53,6 +59,22 @@ impl WorkflowInterface {
         description: &mf_telemetry::description::WorkflowDescription,
     ) -> Result<(), WorkflowInputError> {
         use std::collections::BTreeSet;
+        ensure!(
+            self.version == WorkflowInterfaceVersion::V2026_10_23
+                || (!self.live_output && self.stream_outputs.is_empty()),
+            StreamSnafu {
+                name: "<interface>",
+                message: "live output contracts require interface version 2026-10-23"
+            }
+        );
+        ensure!(
+            !self.live_output || !description.is_streaming(),
+            StreamSnafu {
+                name: "<interface>",
+                message: "finite live-result protocol cannot describe native stream execution",
+            }
+        );
+        validate_stream_outputs(&self.stream_outputs)?;
         if self.version == WorkflowInterfaceVersion::V2026_10_11
             && WorkflowInterfaceVersion::for_schema(&self.schema) != self.version
         {
@@ -243,6 +265,13 @@ pub struct WorkflowArguments(pub Inputs);
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowInputError {
+    #[snafu(display("live output `{name}`: {message}"))]
+    Stream { name: String, message: String },
+    #[snafu(display("live output `{name}` has an invalid type: {source}"))]
+    StreamTypeDepth {
+        name: String,
+        source: crate::TypeDepthError,
+    },
     #[snafu(display("invalid workflow arguments: {source}"), visibility(pub))]
     Json { source: serde_json::Error },
     #[snafu(
@@ -275,6 +304,35 @@ pub enum WorkflowInputError {
         path: String,
         source: crate::TypeMismatch,
     },
+}
+
+pub(super) fn validate_stream_outputs(
+    outputs: &[crate::StreamOutputContract],
+) -> Result<(), WorkflowInputError> {
+    let mut names = std::collections::BTreeSet::new();
+    for output in outputs {
+        ensure!(
+            !output.name.trim().is_empty() && names.insert(&output.name),
+            StreamSnafu {
+                name: &output.name,
+                message: "names must be nonempty and unique",
+            }
+        );
+        ensure!(
+            !output.path.is_empty()
+                && output.path.iter().all(|id| !id.as_str().trim().is_empty())
+                && !output.port.is_empty(),
+            StreamSnafu {
+                name: &output.name,
+                message: "source path and port must be nonempty",
+            }
+        );
+        output
+            .value_type
+            .check_depth()
+            .context(StreamTypeDepthSnafu { name: &output.name })?;
+    }
+    Ok(())
 }
 
 fn invalid(path: String, message: impl Into<String>) -> WorkflowInputError {
