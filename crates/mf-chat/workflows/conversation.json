@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-03",
+  "version": "2026-10-19",
   "dependencies": {
     "chat": {
       "package": "mf-chat",
@@ -9,53 +9,62 @@
   "nodes": [
     {
       "id": "begin",
-      "kind": "mf_chat.turn.begin",
-      "config": {}
+      "kind": "mf_chat.turn.begin"
     },
     {
-      "id": "model",
-      "kind": "mf_chat.llm",
-      "config": {
-        "model": "configured-by-host"
+      "id": "workflow",
+      "kind": "mf_chat.workflow.invoke",
+      "inputs": {
+        "database_path": {
+          "from": {
+            "node": "begin",
+            "port": "database_path"
+          }
+        },
+        "invocation": {
+          "from": {
+            "node": "begin",
+            "port": "invocation"
+          }
+        },
+        "request": {
+          "from": {
+            "node": "begin",
+            "port": "request"
+          }
+        }
       }
     },
     {
-      "id": "complete",
-      "kind": "mf_chat.turn.complete",
-      "config": {}
-    }
-  ],
-  "edges": [
-    {
-      "from_node": "begin",
-      "from_output": "request",
-      "to_node": "model",
-      "to_input": "request"
-    },
-    {
-      "from_node": "begin",
-      "from_output": "database_path",
-      "to_node": "complete",
-      "to_input": "database_path"
-    },
-    {
-      "from_node": "begin",
-      "from_output": "invocation",
-      "to_node": "complete",
-      "to_input": "invocation"
-    },
-    {
-      "from_node": "model",
-      "from_output": "response",
-      "to_node": "complete",
-      "to_input": "response"
+      "id": "settle",
+      "kind": "mf_chat.turn.settle",
+      "inputs": {
+        "database_path": {
+          "from": {
+            "node": "workflow",
+            "port": "database_path"
+          }
+        },
+        "invocation": {
+          "from": {
+            "node": "workflow",
+            "port": "invocation"
+          }
+        },
+        "response": {
+          "from": {
+            "node": "workflow",
+            "port": "response"
+          }
+        }
+      }
     }
   ],
   "outputs": [
     {
-      "name": "completion",
-      "node": "complete",
-      "port": "completion"
+      "name": "settlement",
+      "node": "settle",
+      "port": "settlement"
     }
   ]
 }

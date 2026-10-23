@@ -139,6 +139,7 @@ fn one_execution_lane_rejects_queued_submissions_and_cancels_without_switching()
         panic!("expected admission")
     };
     assert_eq!(session.title, "first prompt");
+    assert_eq!(session.title_source, "provisional");
     assert!(matches!(next(&controller), ChatEvent::Observing(_)));
     assert!(matches!(
         ChatDatabase::open(&path),

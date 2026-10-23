@@ -16,7 +16,14 @@ fn chat_usage(path: Value) -> Value {
     json!({"started_at":0,"call_id":"generated", "node":{"id":"chat", "kind":"builtin.llm", "path":path}, "model":"example-model", "usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}})
 }
 
-fn examples() -> [(&'static str, Option<&'static str>, Value); 14] {
+fn title_usage(node: &str, purpose: &str) -> Value {
+    let mut usage = chat_usage(json!([]));
+    usage["node"]["id"] = node.into();
+    usage["attribution"] = json!({"purpose":purpose});
+    usage
+}
+
+fn examples() -> [(&'static str, Option<&'static str>, Value); 15] {
     [
         ("cel-list.json", None, json!({"doubled": [2, 4]})),
         ("cel-scalar.json", None, json!({"doubled": 42})),
@@ -29,6 +36,12 @@ fn examples() -> [(&'static str, Option<&'static str>, Value); 14] {
             "chat-loop-flow.json",
             None,
             json!({"status":"succeeded", "text":"reply", "error":"", "metadata":{"strategy":"iterative"}, "usages":[chat_usage(json!([{"node":"repeat","index":0}])), chat_usage(json!([{"node":"repeat","index":1}]))]}),
+        ),
+        (
+            "chat-title-flow.json",
+            None,
+            json!({"status":"succeeded","text":"reply","title":"reply","finish_reason":"stop",
+                "usages":[title_usage("model", "conversation"), title_usage("title_model", "title")]}),
         ),
         ("else-if.json", None, json!({"medium": {"amount": 500}})),
         (
@@ -165,6 +178,8 @@ fn documented_examples_compile_and_produce_expected_outputs() {
         if let Some(server) = &server {
             let inputs = if name == "llm-loop.json" {
                 json!({"repeat.prompt":"Hello", "repeat.history":[], "repeat.text":""})
+            } else if name == "chat-title-flow.json" {
+                json!({"input.prompt":"Hello", "input.model":"example-model", "input.base_url":server.base_url})
             } else if name.starts_with("chat-") {
                 json!({"params.prompt":"Hello", "params.model":"example-model", "params.base_url":server.base_url})
             } else if name == "llm-parameters.json" {

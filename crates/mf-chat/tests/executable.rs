@@ -1,4 +1,4 @@
-use mf_chat::executable::ChatContract;
+use mf_chat::contract::ChatContract;
 use mf_runtime::{NodeValue, WorkflowArguments, WorkflowManifest};
 use serde_json::json;
 
@@ -31,7 +31,8 @@ fn conversation_inputs_are_bound_separately_from_parameters() {
     let manifest = manifest();
     let contract = ChatContract::from_manifest(&manifest).unwrap();
     let parameters = parameters(&contract);
-    let input = mfn_llm::LlmInputs {
+    let input = mf_chat::ConversationInputs {
+        context: None,
         prompt: "hello".into(),
         system: None,
         history: None,
@@ -47,7 +48,8 @@ fn conversation_inputs_are_bound_separately_from_parameters() {
     assert!(
         contract
             .arguments(
-                mfn_llm::LlmInputs {
+                mf_chat::ConversationInputs {
+                    context: None,
                     prompt: "override".into(),
                     system: None,
                     history: None
@@ -149,7 +151,8 @@ fn history_metadata_round_trips_through_argument_binding() {
     )]);
     let arguments = contract
         .arguments(
-            mfn_llm::LlmInputs {
+            mf_chat::ConversationInputs {
+                context: None,
                 prompt: "continue".into(),
                 system: None,
                 history: Some(vec![mfn_llm::ChatMessage {
@@ -258,19 +261,19 @@ fn workflow_explicitly_combines_multiple_model_calls_on_success_and_failure() {
         assert_ne!(calls[0]["call_id"], calls[1]["call_id"]);
         let bytes = serde_json::to_vec(&outputs).unwrap();
         let resolution = database
-            .reconcile_completion(mf_chat::executable::ConversationExit {
+            .reconcile_completion(mf_chat::contract::ConversationExit {
                 invocation: &begun.invocation,
                 stdout: Some(&bytes),
-                outcome: mf_chat::executable::TurnExit::Failed,
+                outcome: mf_chat::contract::TurnExit::Failed,
                 summary: "workflow finished",
             })
             .unwrap();
         if fail_second {
             assert!(
-                matches!(resolution.state, mf_chat::executable::CompletionState::Finished(turn) if turn.state == "failed")
+                matches!(resolution.state, mf_chat::contract::CompletionState::Finished(turn) if turn.state == "failed")
             );
         } else {
-            let mf_chat::executable::CompletionState::Uncommitted(reply) = resolution.state else {
+            let mf_chat::contract::CompletionState::Uncommitted(reply) = resolution.state else {
                 panic!("expected unsaved reply");
             };
             database.save_recovered(reply).unwrap();
@@ -307,7 +310,8 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
         parameters
             .0
             .insert("params.base_url".into(), server.base_url.clone().into());
-        let input = mfn_llm::LlmInputs {
+        let input = mf_chat::ConversationInputs {
+            context: None,
             prompt: "hello".into(),
             system: None,
             history: None,
@@ -338,4 +342,108 @@ fn loop_explicitly_accumulates_call_usages_and_stops_after_failure() {
             assert_eq!(result["metadata"]["strategy"], "iterative");
         }
     }
+}
+
+#[test]
+fn application_context_is_bound_by_the_common_contract_and_optional_titles_are_persisted() {
+    let root = tempfile::tempdir().unwrap();
+    let database = mf_chat::ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
+    let session = database.create_session("default", None, None).unwrap();
+    let started = database
+        .begin_turn(
+            &session.id,
+            "hello",
+            mf_chat::ModelIdentity {
+                profile: "default".into(),
+                model: None,
+            },
+            None,
+            1024,
+        )
+        .unwrap();
+    let mut definition = manifest().definition;
+    definition.nodes[0].config["parameters"]["context"] = json!({"type":"object"});
+    let registry = mf_runtime::NodeRegistry::from_inventory().unwrap();
+    let manifest = mf_compiler::compile_definition(&definition, &registry)
+        .unwrap()
+        .manifest(&registry)
+        .unwrap();
+    let contract = ChatContract::from_manifest(&manifest).unwrap();
+    assert!(!contract.parameters.inputs["params"].contains_key("context"));
+    let context = started.request.context.clone().unwrap();
+    let encoded = serde_json::to_vec(&context).unwrap();
+    let decoded: mf_chat::ConversationContext = serde_json::from_slice(&encoded).unwrap();
+    assert_eq!(decoded, context);
+    let arguments = contract
+        .arguments(started.request.clone(), &parameters(&contract))
+        .unwrap();
+    manifest.input_schema.validate(&arguments).unwrap();
+    let context = serde_json::to_value(&arguments).unwrap()["params.context"].clone();
+    assert_eq!(
+        context["title"],
+        json!({"source":"provisional","revision":0,"attempted":false,"enabled":true})
+    );
+    let bytes = serde_json::to_vec(&json!({
+        "status":"succeeded","text":"answer","title":"Generated","usages":[{
+            "call_id":"title-attempt","model":"summary-model",
+            "attribution":{"purpose":"title","profile":"summary"}
+        }]
+    }))
+    .unwrap();
+    let resolution = database
+        .reconcile_completion(mf_chat::contract::ConversationExit {
+            invocation: &started.invocation,
+            stdout: Some(&bytes),
+            outcome: mf_chat::contract::TurnExit::Failed,
+            summary: "workflow exited",
+        })
+        .unwrap();
+    let mf_chat::contract::CompletionState::Uncommitted(pending) = resolution.state else {
+        panic!("expected a complete retained result");
+    };
+    assert_eq!(
+        pending.completion.result.title.as_deref(),
+        Some("Generated")
+    );
+    database.save_recovered(pending.clone()).unwrap();
+    database.save_recovered(pending).unwrap();
+    assert_eq!(database.session(&session.id).unwrap().title, "Generated");
+    assert_eq!(
+        database
+            .usage(mf_chat::UsageQuery {
+                purpose: Some(mf_chat::CallPurpose::Title),
+                ..Default::default()
+            })
+            .unwrap()
+            .overall
+            .attempted_calls,
+        1
+    );
+}
+
+#[test]
+fn common_results_preserve_sparse_fields_across_typed_and_json_transports() {
+    let result = mf_chat::ConversationResult {
+        text: "answer".into(),
+        usages: vec![mf_chat::CallUsage {
+            call_id: "call".into(),
+            model: "model".into(),
+            started_at: None,
+            node: None,
+            attribution: Some(mf_chat::UsageAttribution {
+                purpose: Some("title".into()),
+                profile: None,
+            }),
+            usage: None,
+            error: None,
+        }],
+        ..Default::default()
+    };
+    let bytes = serde_json::to_vec(&result).unwrap();
+    let values = mf_runtime::decode_unique_json(&bytes).unwrap();
+    assert_eq!(mf_chat::ConversationResult::decode(values).unwrap(), result);
+    assert_eq!(
+        mf_chat::ConversationResult::decode(result.clone().into_values().unwrap()).unwrap(),
+        result
+    );
 }

@@ -16,6 +16,7 @@ export CARGO_INCREMENTAL=0
 export CARGO_TARGET_DIR="${coverage_dir}/build"
 export RUSTFLAGS="-Cinstrument-coverage -Ccodegen-units=1 -Copt-level=0"
 export LLVM_PROFILE_FILE="${coverage_dir}/data/mf-%p-%m.profraw"
+export MF_COVERAGE_BINARIES_DIR="${coverage_dir}/extra-binaries"
 
 # Full coverage runs may opt into per-test profile collection for the
 # coverage graph; --coverage-graph must precede every other argument.
@@ -52,12 +53,12 @@ mark_fixture_target() {
 }
 
 reset_reports() {
-  rm -rf "${coverage_dir}/data" "${coverage_dir}/result"
+  rm -rf "${coverage_dir}/data" "${coverage_dir}/result" "$MF_COVERAGE_BINARIES_DIR"
   rm -rf "${coverage_dir}/per-test" "${coverage_dir}/graph-export"
   rm -f "${coverage_dir}/binaries.json" "${coverage_dir}/cargo-metadata.json"
   rm -f "${coverage_dir}/selection.json" "${coverage_dir}/inventory.json"
   rm -f "${coverage_dir}/coverage-graph.path"
-  mkdir -p "${coverage_dir}/data" "${coverage_dir}/result"
+  mkdir -p "${coverage_dir}/data" "${coverage_dir}/result" "$MF_COVERAGE_BINARIES_DIR"
   MF_TEST_BUILD_CACHE_SESSION="$(python3 -c 'import uuid; print(uuid.uuid4())')"
   export MF_TEST_BUILD_CACHE_SESSION
   printf '%s\n' "$MF_TEST_BUILD_CACHE_SESSION" > "${coverage_dir}/build-cache-session"
@@ -144,12 +145,25 @@ report_coverage() {
   # Compiler-cache backups can contain coverage maps from older source revisions.
   # Keep the build cache intact and expose only published Cargo artifacts to grcov.
   rm -rf "${coverage_dir}/report-binaries"
-  python3 - "${CARGO_TARGET_DIR}/debug/deps" "${coverage_dir}/report-binaries" <<'PYTHON'
+  python3 - "${CARGO_TARGET_DIR}/debug" "$MF_COVERAGE_BINARIES_DIR" "${coverage_dir}/report-binaries" <<'PYTHON'
+import json
 import os
+from pathlib import Path
 import shutil
 import sys
-shutil.copytree(sys.argv[1], sys.argv[2], copy_function=os.link,
-                ignore=shutil.ignore_patterns(".kache-prestage-*"))
+
+build, extra, destination = map(Path, sys.argv[1:])
+for name, source in [("deps", build / "deps"), ("build", build / "build"), ("fixtures", extra)]:
+    if source.is_dir():
+        shutil.copytree(source, destination / name, copy_function=os.link,
+                        ignore=shutil.ignore_patterns(".kache-prestage-*"))
+mappings = {}
+for manifest in sorted(extra.glob("*.paths.json")):
+    for source, target in json.loads(manifest.read_text()).items():
+        if source in mappings and mappings[source] != target:
+            raise ValueError(f"Conflicting coverage source mapping: {source}")
+        mappings[source] = target
+(destination.parent / "path-mapping.json").write_text(json.dumps(mappings))
 PYTHON
   grcov_inputs=("${coverage_dir}/data")
   # Per-test profiles replace the shared data/ profiles on graph runs; merge
@@ -165,6 +179,7 @@ PYTHON
     --ignore '../*' \
     --ignore '/*' \
     --binary-path "${coverage_dir}/report-binaries" \
+    --path-mapping "${coverage_dir}/path-mapping.json" \
     --output-types html,cobertura,lcov,markdown \
     --output-path "${coverage_dir}/result"
 

@@ -1,19 +1,21 @@
-use mf_chat::executable::{InvocationState, TurnExit};
-use mf_chat::{ChatDatabase, ModelProfile, Reply};
-use serde_json::json;
+use mf_chat::contract::{InvocationState, TurnExit};
+use mf_chat::{ChatDatabase, ConversationResult, ModelIdentity};
 
 #[test]
 fn exact_cleanup_keeps_other_sessions_and_committed_success() {
     let directory = tempfile::tempdir().unwrap();
     let database = ChatDatabase::open(directory.path().join("chat.sqlite")).unwrap();
-    let profile = ModelProfile::new("default", json!({"model":"fixture-model"})).unwrap();
+    let profile = ModelIdentity {
+        profile: "default".into(),
+        model: Some("fixture-model".into()),
+    };
     let a = database.create_session("default", None, None).unwrap();
     let b = database.create_session("default", None, None).unwrap();
     let first = database
-        .begin_turn(&a.id, "first", profile.identity().clone(), None, 1024)
+        .begin_turn(&a.id, "first", profile.clone(), None, 1024)
         .unwrap();
     let second = database
-        .begin_turn(&b.id, "second", profile.identity().clone(), None, 1024)
+        .begin_turn(&b.id, "second", profile.clone(), None, 1024)
         .unwrap();
     let mut wrong_session = first.invocation.clone();
     wrong_session.session_id = b.id.clone();
@@ -43,11 +45,12 @@ fn exact_cleanup_keeps_other_sessions_and_committed_success() {
     database
         .complete_turn(
             second.invocation.clone(),
-            Reply {
-                usages: None,
+            ConversationResult {
+                usages: Vec::new(),
                 metadata: None,
                 text: "saved".into(),
                 finish_reason: None,
+                ..Default::default()
             },
         )
         .unwrap();

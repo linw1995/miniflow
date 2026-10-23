@@ -1,27 +1,25 @@
 use diesel::{Connection, connection::SimpleConnection};
-use mf_chat::executable::{CompletionState, ConversationExit, MAX_RECOVERY_BYTES, TurnExit};
-use mf_chat::{ChatDatabase, ModelProfile, Reply};
+use mf_chat::contract::{CompletionState, ConversationExit, MAX_RECOVERY_BYTES, TurnExit};
+use mf_chat::{ChatDatabase, ConversationResult, ModelIdentity};
 use mf_runtime::NodeValue;
 use serde_json::json;
 
 fn begin(database: &ChatDatabase) -> mf_chat::Invocation {
     let session = database.create_session("default", None, None).unwrap();
-    let profile = ModelProfile::new("default", json!({"model":"fixture-model"})).unwrap();
+    let profile = ModelIdentity {
+        profile: "default".into(),
+        model: Some("fixture-model".into()),
+    };
     let invocation = mf_chat::Invocation::new(&session.id);
     let begun = database
-        .begin_turn_with_invocation(
-            invocation.clone(),
-            "prompt",
-            profile.identity().clone(),
-            None,
-            1024,
-        )
+        .begin_turn_with_invocation(invocation.clone(), "prompt", profile.clone(), None, 1024)
         .unwrap();
     assert_eq!(begun.invocation, invocation);
     invocation
 }
 fn usages() -> Vec<mfn_llm::CallUsage> {
     vec![mfn_llm::CallUsage {
+        attribution: None,
         started_at: Some(86_399_999),
         call_id: "provider-call".into(),
         node: Some(mfn_llm::UsageNode {
@@ -40,12 +38,13 @@ fn metadata() -> mfn_llm::MessageMetadata {
         json!([{"uri":"https://example.com/reference"}]).into(),
     )])
 }
-fn reply() -> Reply {
-    Reply {
-        usages: Some(usages()),
+fn reply() -> ConversationResult {
+    ConversationResult {
+        usages: usages(),
         metadata: Some(metadata()),
         text: "paid reply".into(),
         finish_reason: None,
+        ..Default::default()
     }
 }
 fn stdout(text: &str) -> Vec<u8> {
@@ -105,7 +104,7 @@ fn parent_save_retry_retains_the_original_reply_without_starting_another_call() 
             .metadata,
         Some(metadata())
     );
-    assert_eq!(saved.reply, reply());
+    assert_eq!(saved.result, reply());
     assert_eq!(database.save_recovered(pending).unwrap(), saved);
     let mut conflicting = reply();
     conflicting.metadata = None;
@@ -170,7 +169,7 @@ fn committed_reply_wins_over_broken_output_and_late_cancellation() {
 }
 
 #[test]
-fn retained_replies_keep_database_and_purpose_ownership_until_abandoned() {
+fn retained_replies_keep_database_ownership_until_abandoned() {
     let root = tempfile::tempdir().unwrap();
     let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
     let invocation = begin(&database);
@@ -188,10 +187,6 @@ fn retained_replies_keep_database_and_purpose_ownership_until_abandoned() {
     };
     let mut wrong = pending.clone();
     wrong.database_path = root.path().join("other.sqlite");
-    assert!(database.save_recovered(wrong.clone()).is_err());
-    assert!(database.abandon_recovered(&wrong).is_err());
-    wrong = pending.clone();
-    wrong.purpose = mf_chat::CallPurpose::Title;
     assert!(database.save_recovered(wrong.clone()).is_err());
     assert!(database.abandon_recovered(&wrong).is_err());
     database.abandon_recovered(&pending).unwrap();
@@ -220,6 +215,17 @@ fn invalid_or_missing_results_finalize_only_the_admitted_invocation() {
         json!({"status":"unknown", "text":"reply", "usages":[]}),
         json!({"status":"succeeded", "text":"reply", "metadata":[], "usages":[]}),
         json!({"status":"succeeded", "text":true, "usages":[]}),
+        json!({"status":"succeeded", "text":"", "usages":[]}),
+        json!({"status":"succeeded", "text":"reply", "error":"failed", "usages":[]}),
+        json!({"status":"failed", "usages":[]}),
+        json!({"status":"failed", "error":" ", "usages":[]}),
+        json!({"status":"failed", "error":"failed", "title":"invalid update", "usages":[]}),
+        json!({"status":"succeeded", "text":"reply", "usages":[{
+            "call_id":"call", "model":"model", "attribution":{"purpose":" "}
+        }]}),
+        json!({"status":"succeeded", "text":"reply", "usages":[{
+            "call_id":"call", "model":"model", "attribution":{"profile":""}
+        }]}),
     ];
     for bytes in [
         None,
@@ -402,15 +408,12 @@ fn returned_history_cannot_rewrite_saved_message_metadata() {
     let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
     let first = begin(&database);
     database.complete_turn(first.clone(), reply()).unwrap();
-    let profile = ModelProfile::new("default", json!({"model":"fixture-model"})).unwrap();
+    let profile = ModelIdentity {
+        profile: "default".into(),
+        model: Some("fixture-model".into()),
+    };
     let second = database
-        .begin_turn(
-            &first.session_id,
-            "next",
-            profile.identity().clone(),
-            None,
-            1024,
-        )
+        .begin_turn(&first.session_id, "next", profile.clone(), None, 1024)
         .unwrap();
     assert_eq!(
         second.request.history.unwrap()[1].metadata,
@@ -472,11 +475,12 @@ fn unreported_workflow_invocations_are_not_counted_as_zero_model_calls() {
     database
         .complete_turn(
             known_empty.invocation,
-            Reply {
+            ConversationResult {
                 text: "no model was needed".into(),
-                usages: Some(Vec::new()),
+                usages: Vec::new(),
                 metadata: None,
                 finish_reason: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -484,4 +488,74 @@ fn unreported_workflow_invocations_are_not_counted_as_zero_model_calls() {
     assert_eq!(statistics.overall.attempted_calls, 0);
     assert_eq!(statistics.unreported_invocations, 1);
     assert_eq!(statistics.overall.input_tokens.known_subtotal, None);
+}
+
+#[test]
+fn failed_results_cannot_overwrite_committed_or_different_terminal_results() {
+    let root = tempfile::tempdir().unwrap();
+    let database = ChatDatabase::open(root.path().join("chat.sqlite")).unwrap();
+    let committed = begin(&database);
+    let saved = database.complete_turn(committed.clone(), reply()).unwrap();
+    let failed = mf_chat::ConversationResult {
+        status: "failed".into(),
+        error: Some("workflow failed".into()),
+        usages: usages(),
+        ..Default::default()
+    };
+    let resolution = database
+        .reconcile_result(
+            &committed,
+            Some(Ok(failed.clone())),
+            TurnExit::Failed,
+            "late failure",
+        )
+        .unwrap();
+    assert!(matches!(resolution.state, CompletionState::Committed(actual) if actual == saved));
+    assert_eq!(resolution.diagnostics.len(), 1);
+    let invocation = begin(&database);
+    let mut invalid_completion = failed.clone();
+    invalid_completion.text = "intermediate answer".into();
+    assert!(
+        database
+            .complete_turn(invocation.clone(), invalid_completion)
+            .is_err()
+    );
+    assert_eq!(database.turn(&invocation.turn_id).unwrap().state, "running");
+    database
+        .reconcile_result(
+            &invocation,
+            Some(Ok(failed.clone())),
+            TurnExit::Failed,
+            "failure",
+        )
+        .unwrap();
+    let original = database.call(&invocation.call_id).unwrap();
+    let mut conflicting = failed.clone();
+    conflicting.error = Some("different failure".into());
+    let resolution = database
+        .reconcile_result(
+            &invocation,
+            Some(Ok(conflicting)),
+            TurnExit::Failed,
+            "late failure",
+        )
+        .unwrap();
+    assert_eq!(resolution.diagnostics.len(), 1);
+    assert_eq!(database.call(&invocation.call_id).unwrap(), original);
+    let cancelled = begin(&database);
+    database
+        .fail_turn(cancelled.clone(), "cancelled", "cancelled")
+        .unwrap();
+    let resolution = database
+        .reconcile_result(
+            &cancelled,
+            Some(Ok(failed)),
+            TurnExit::Failed,
+            "late failure",
+        )
+        .unwrap();
+    assert_eq!(resolution.diagnostics.len(), 1);
+    assert!(
+        matches!(resolution.state, CompletionState::Finished(turn) if turn.state == "cancelled")
+    );
 }

@@ -346,7 +346,7 @@ impl ChatView {
                             CompletionState::Committed(_) => self.notice = "Saved".into(),
                             CompletionState::Uncommitted(pending) => {
                                 self.retained = true;
-                                self.unsaved = Some(pending.completion.reply.text);
+                                self.unsaved = Some(pending.completion.result.text);
                                 self.notice =
                                     "Reply not saved. Ctrl+P to save or discard it".into();
                             }
@@ -962,10 +962,11 @@ mod tests {
                 4096,
             )
             .unwrap();
-        database.complete_turn(started.invocation, mf_chat::Reply {
+        database.complete_turn(started.invocation, mf_chat::ConversationResult {
             text: "Keep one execution lane and move infrequent actions into the command palette.".into(),
-            metadata: None, usages: Some(vec![]), finish_reason: None,
-        }).unwrap();
+            metadata: None, usages: vec![], finish_reason: None,
+        ..Default::default()
+}).unwrap();
         view.page = Some(database.messages(&session.id, 50, None).unwrap());
         view.session = Some(session);
         view.notice.clear();
@@ -1096,11 +1097,12 @@ mod tests {
                 database
                     .complete_turn(
                         started.invocation,
-                        mf_chat::Reply {
+                        mf_chat::ConversationResult {
                             text: format!("reply-{index}"),
                             metadata: None,
-                            usages: Some(vec![]),
+                            usages: vec![],
                             finish_reason: None,
+                            ..Default::default()
                         },
                     )
                     .unwrap();

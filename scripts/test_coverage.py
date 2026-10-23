@@ -69,9 +69,20 @@ setup = "check-session"
 ''')
             (root / "scripts/check-session.py").write_text('''import os
 from pathlib import Path
+import subprocess
+import json
+import shutil
+import tempfile
 session = os.environ["MF_TEST_BUILD_CACHE_SESSION"]
 assert session != "inherited-session"
 assert session == Path("target/coverage/build-cache-session").read_text().strip()
+binary = Path(os.environ["MF_COVERAGE_BINARIES_DIR"]) / "standalone-fixture"
+with tempfile.TemporaryDirectory() as directory:
+    source = Path(directory).resolve() / "fixture.rs"
+    shutil.copyfile("fixture.rs", source)
+    subprocess.run(["rustc", "--edition=2024", "-Cinstrument-coverage", str(source), "-o", str(binary)], check=True)
+    subprocess.run([str(binary)], check=True)
+    binary.with_suffix(".paths.json").write_text(json.dumps({str(source): "fixture.rs"}))
 ''')
             for script in ["run-cov.sh", "prune-test-cache.py", "cargo_cache.py", "coverage_selection.py"]:
                 shutil.copyfile(Path(__file__).resolve().parent / script, root / "scripts" / script)
@@ -115,6 +126,8 @@ edition = "2024"
 #[test]
 fn other_matches() { assert_eq!(other_value(), 3); }
 ''')
+            (root / "build.rs").write_text('fn main() { println!("cargo:rerun-if-changed=build.rs"); }\n')
+            (root / "fixture.rs").write_text('fn main() { assert_eq!(2 + 2, 4); }\n')
             (root / "src/lib.rs").write_text("pub mod alpha;\npub mod beta;\n")
             for module, value in [("alpha", 1), ("beta", 2)]:
                 (root / "src" / f"{module}.rs").write_text(f'''pub fn value() -> u32 {{
@@ -171,6 +184,10 @@ mod tests {{
                 ), block)
             self.assertGreater((root / "target/coverage/result/cobertura.xml").stat().st_size, 0)
             self.assertIn("other/src/lib.rs", report.read_text())
+            for source in ["build.rs", "fixture.rs"]:
+                block = next(block for block in blocks if f"SF:{source}\n" in block)
+                self.assertTrue(any(line.startswith("DA:") and int(line.split(",")[1]) > 0
+                                    for line in block.splitlines()), block)
             provenance = json.loads(report.with_name("source.json").read_text())
             context = {"merge": head, "tree": git("rev-parse", "HEAD^{tree}"),
                        "signature": {key: provenance[key] for key in ("toolchain", "target", "profile")}}

@@ -62,6 +62,7 @@ diesel::table! {
         disposition -> Nullable<Text>,
         usages -> Nullable<Text>,
         metadata -> Nullable<Text>,
+        result_title -> Nullable<Text>,
     }
 }
 

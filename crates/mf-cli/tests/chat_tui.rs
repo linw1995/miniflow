@@ -22,6 +22,111 @@ use std::{
 mod terminal;
 use terminal::Screen;
 
+#[test]
+fn supplied_title_workflow_runs_inside_the_application_lifecycle() {
+    use mf_chat::contract::CompletionState;
+    use mf_tui::{
+        chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions},
+        run::RunOptions,
+    };
+
+    let root = tempfile::tempdir().unwrap();
+    let server = Server::start(vec![
+        Reply::text("first answer"),
+        Reply::text("Generated title"),
+        Reply::text("second answer"),
+    ]);
+    let binary = compiled(root.path(), &server, "chat-title-flow.json");
+    let path = root.path().join("chat.sqlite");
+    let launch = ChatLaunch::prepare(
+        &binary,
+        ChatOptions {
+            database_path: path.clone(),
+            profile: "assistant-flow".into(),
+            run: RunOptions {
+                arguments: vec![
+                    "--input.model=fixture-model".into(),
+                    "--input.api_key=synthetic-key".into(),
+                ],
+                ..Default::default()
+            },
+        },
+    )
+    .unwrap();
+    let controller = ChatController::open(launch).unwrap();
+    let mut session_id = None;
+    for (prompt, expected, calls) in [("first", "first answer", 2), ("second", "second answer", 1)]
+    {
+        controller
+            .send(ChatCommand::Submit {
+                session_id: session_id.clone(),
+                prompt: prompt.into(),
+            })
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(Instant::now() < deadline, "conversation did not finish");
+            match controller.try_event() {
+                Some(ChatEvent::Submitted { session, .. }) => session_id = Some(session.id),
+                Some(ChatEvent::Observing(_)) | None => thread::sleep(Duration::from_millis(10)),
+                Some(ChatEvent::Finished { resolution, .. }) => {
+                    let resolution = resolution.unwrap();
+                    assert!(
+                        resolution.diagnostics.is_empty(),
+                        "{:?}",
+                        resolution.diagnostics
+                    );
+                    let CompletionState::Committed(completion) = resolution.state else {
+                        panic!("expected committed conversation")
+                    };
+                    assert_eq!(completion.result.text, expected);
+                    assert_eq!(completion.result.usages.len(), calls);
+                    assert_eq!(
+                        completion.result.title.as_deref(),
+                        (calls == 2).then_some("Generated title")
+                    );
+                    if calls == 2 {
+                        assert_eq!(
+                            completion.result.usages[1]
+                                .attribution
+                                .as_ref()
+                                .unwrap()
+                                .purpose
+                                .as_deref(),
+                            Some("title")
+                        );
+                    }
+                    break;
+                }
+                Some(ChatEvent::Error { source, .. }) => panic!("conversation failed: {source}"),
+                _ => panic!("unexpected controller event"),
+            }
+        }
+    }
+    controller.close().unwrap();
+    let database = ChatDatabase::open(path).unwrap();
+    let id = session_id.unwrap();
+    assert_eq!(database.session(&id).unwrap().title, "Generated title");
+    assert_eq!(database.history(&id, 4096).unwrap().history.len(), 4);
+    assert_eq!(
+        database
+            .usage(mf_chat::UsageQuery {
+                profile: Some("assistant-flow".into()),
+                ..Default::default()
+            })
+            .unwrap()
+            .overall
+            .attempted_calls,
+        3,
+    );
+    assert_eq!(server.requests().len(), 3);
+    assert!(
+        messages(&server.requests()[2])
+            .iter()
+            .any(|message| message["content"] == "first answer")
+    );
+}
+
 fn compiled(root: &Path, server: &Server, example: &str) -> std::path::PathBuf {
     let crates = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let definition = root.join("flow.json");
@@ -294,11 +399,10 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
     let usage = database.usage(Default::default()).unwrap();
     assert_eq!(usage.overall.attempted_calls, 6);
     assert_eq!(usage.overall.total_tokens.missing_calls, 1);
-    assert!(database.pending_titles(10).unwrap().is_empty());
     assert!(
         sessions
             .iter()
-            .all(|session| session.title_source == "manual")
+            .all(|session| session.title_source == "provisional")
     );
     application_exit(
         &binary,
@@ -452,7 +556,7 @@ fn application_exit(
 }
 
 fn loop_conversations() {
-    use mf_chat::executable::CompletionState;
+    use mf_chat::contract::CompletionState;
     use mf_tui::chat::{ChatCommand, ChatController, ChatEvent, ChatLaunch, ChatOptions};
 
     let mut failure =
@@ -524,15 +628,19 @@ fn loop_conversations() {
                     assert!(status.unwrap().success());
                     assert!(capture_error.is_none());
                     let resolution = resolution.unwrap();
-                    assert!(resolution.diagnostics.is_empty());
+                    assert!(
+                        resolution.diagnostics.is_empty(),
+                        "{:?}",
+                        resolution.diagnostics
+                    );
                     if prompt == "first turn" {
                         let CompletionState::Committed(completion) = resolution.state else {
                             panic!("expected committed loop result")
                         };
-                        assert_eq!(completion.reply.text, "final answer");
-                        assert_eq!(completion.reply.usages.unwrap().len(), 2);
+                        assert_eq!(completion.result.text, "final answer");
+                        assert_eq!(completion.result.usages.len(), 2);
                         assert_eq!(
-                            serde_json::to_value(completion.reply.metadata).unwrap(),
+                            serde_json::to_value(completion.result.metadata).unwrap(),
                             serde_json::json!({"strategy":"iterative"})
                         );
                     } else {

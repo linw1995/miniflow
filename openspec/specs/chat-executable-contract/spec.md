@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Define application-owned conversation admission, model accounting, and reply recovery for compiled
+Define application-owned conversation admission, model accounting, and reply recovery for embedded and compiled
 chat workflows independently of process supervision and terminal presentation.
 
 ## Requirements
@@ -36,11 +36,11 @@ whole workflow rather than selecting an internal model task.
 
 ### Requirement: Bind configuration separately from conversation inputs
 
-The backend SHALL bind an unambiguous prompt string and optional system/history inputs by their external
+The backend SHALL bind an unambiguous prompt string and optional system/history/context inputs by their external
 port names. It SHALL reject ambiguous or mistyped conversation inputs and expose all remaining startup
 parameters for ordinary resolution. Parameter node kinds, source node counts, and direct LLM edges SHALL
 NOT be required. The output interface SHALL declare status, text, and a nonoptional usages list; text may
-be absent on failure. Metadata, error, and finish_reason outputs are optional.
+be absent on failure. Metadata, error, finish_reason, and title outputs are optional. Both execution paths SHALL use the same ConversationInputs, ConversationResult, argument binding, and reconciliation.
 
 #### Scenario: Preserve application-owned conversation inputs
 
@@ -109,7 +109,7 @@ execution ownership and preserve an already committed success.
 
 The backend SHALL decode bounded unique-key JSON and require succeeded or failed status with a usages
 list. Success SHALL require nonempty text and no nonempty error. Failure SHALL require a nonblank error
-summary and SHALL NOT create an assistant message. Metadata belongs only to a successful new assistant
+summary and SHALL NOT create an assistant message or propose a title. Metadata belongs only to a successful new assistant
 message. Stored success MUST win over late errors or conflicting output, with separate diagnostics.
 
 #### Scenario: Persist a failed workflow result
@@ -130,7 +130,7 @@ message. Stored success MUST win over late errors or conflicting output, with se
 ### Requirement: Retry saving without invoking the model
 
 The backend SHALL save retained results only for their owning execution. Success retries SHALL retain
-text, metadata, and usages; failed-result retries SHALL retain the captured result until storage facts
+text, metadata, title, and usages; failed-result retries SHALL retain the captured result until storage facts
 can be reconciled. Repeated persistence MUST NOT duplicate messages or usage. Explicit abandon SHALL
 finalize unfinished work without model execution or overwriting committed success.
 
@@ -151,7 +151,7 @@ finalize unfinished work without model execution or overwriting committed succes
 
 #### Scenario: Reject a foreign recovery value
 
-- **WHEN** a retained completion names another database or a title call purpose
+- **WHEN** a retained completion names another database or another invocation
 - **THEN** conversation save and abandon operations reject it without modifying stored work
 
 #### Scenario: Lose an unsaved reply on application crash
@@ -169,3 +169,25 @@ ownership checks, and idempotent persistence SHALL remain in effect.
 
 - **WHEN** the application retains result bytes and the admitted invocation
 - **THEN** it can decode and save the result without loading the original executable or manifest
+
+### Requirement: Keep title eligibility and failure policy inside the flow
+
+The host SHALL pass a title-state snapshot as context and SHALL accept an optional title from a
+successful result. Flow branches SHALL determine title eligibility, usage composition, and handling
+of captured model failures. The host MUST NOT inspect internal model outputs or independently retry
+stages. Saving SHALL validate the captured title revision and preserve concurrent manual names.
+
+#### Scenario: Bind context without exposing an override parameter
+
+- **WHEN** a workflow declares a context startup input
+- **THEN** the application supplies title state and removes context from caller configuration parameters
+
+#### Scenario: Preserve workflows without optional title support
+
+- **WHEN** a workflow declares neither context nor title
+- **THEN** its existing prompt, history, and result contract remains executable
+
+#### Scenario: Retain a title across save retries
+
+- **WHEN** a successful result contains a title and its completion write fails
+- **THEN** retry retains the same title candidate and usages without another provider call

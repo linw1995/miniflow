@@ -242,6 +242,7 @@ mod tests {
             let metadata = (previous_version > 1)
                 .then(|| BTreeMap::from([("source".into(), "retained".into())]));
             let reported = mfn_llm::CallUsage {
+                attribution: None,
                 started_at: Some(1),
                 call_id: "reported-call".into(),
                 node: None,
@@ -252,17 +253,28 @@ mod tests {
             database
                 .complete_turn(
                     begun.invocation.clone(),
-                    crate::Reply {
+                    crate::ConversationResult {
                         text: "old reply".into(),
-                        usages: has_list.then(|| vec![reported.clone()]),
+                        usages: if has_list {
+                            vec![reported.clone()]
+                        } else {
+                            Vec::new()
+                        },
                         metadata: metadata.clone(),
                         finish_reason: None,
+                        ..Default::default()
                     },
                 )
                 .unwrap();
             let original = database.call(&begun.invocation.call_id).unwrap();
             let mut connection = connect(&path).unwrap();
-            for _ in previous_version..4 {
+            if !has_list {
+                diesel::update(model_calls::table.find(&begun.invocation.call_id))
+                    .set(model_calls::usages.eq::<Option<String>>(None))
+                    .execute(&mut connection)
+                    .unwrap();
+            }
+            for _ in previous_version..5 {
                 connection.revert_last_migration(MIGRATIONS).unwrap();
             }
             assert_eq!(
@@ -289,6 +301,7 @@ mod tests {
                 reported
             } else {
                 mfn_llm::CallUsage {
+                    attribution: None,
                     started_at: original.started_at,
                     call_id: original.id.clone(),
                     node: None,
@@ -313,14 +326,14 @@ mod tests {
                     .unwrap(),
                 "legacy-config"
             );
-            let crate::executable::InvocationState::Committed(saved) =
+            let crate::contract::InvocationState::Committed(saved) =
                 reopened.inspect_invocation(&begun.invocation).unwrap()
             else {
                 panic!("expected migrated completion");
             };
             assert_eq!(
                 reopened
-                    .complete_turn(begun.invocation, saved.reply.clone())
+                    .complete_turn(begun.invocation, saved.result.clone())
                     .unwrap(),
                 saved
             );

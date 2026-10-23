@@ -1,29 +1,35 @@
 //! Persistent chat operations shared by direct APIs and application-owned workflow nodes.
 
 mod error;
-pub mod executable;
 pub mod flows;
 mod host;
-mod model;
 mod models;
 #[macro_use]
 pub mod nodes;
+pub mod contract;
 mod schema;
 mod session;
 mod storage;
 mod title;
 mod turn;
 mod usage;
+pub mod workflow;
 
-pub use error::ChatError;
-pub use host::{ChatHost, ChatJob, HostConfig, ModelProfile, TitleJob, UncommittedCompletion};
+pub use contract::{
+    Completion, ConversationContext, ConversationInputs, ConversationResult, TitleContext,
+    UncommittedCompletion,
+};
+pub use error::{BackendSnafu, CaptureSnafu, ChatError};
+pub use host::{ChatHost, ChatJob, HostConfig};
 pub use models::{Message, ModelCall, Session, Turn};
 pub use session::{DEFAULT_HISTORY_BYTES, HistoryContext, MessagePage, MessageRecord, SessionPage};
 pub use storage::ChatDatabase;
-pub use title::{CallPurpose, TitleCompletion, TitleOutcome};
-pub use turn::{Completion, Invocation, ModelIdentity, Reply};
+pub use turn::{Invocation, ModelIdentity};
+pub use usage::CallPurpose;
 pub use usage::{
     TokenCounter, UsageGroup, UsageGrouping, UsageQuery, UsageStatistics, UsageSummary,
 };
 
-pub use mfn_llm::{CallUsage, MessageMetadata, UsageNode, UsageScope};
+pub use mfn_llm::{CallUsage, MessageMetadata, UsageAttribution, UsageNode, UsageScope};
+
+pub use workflow::{ConversationBackend, WorkflowProfile};

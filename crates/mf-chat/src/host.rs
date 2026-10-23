@@ -1,85 +1,40 @@
 use crate::{
-    CallPurpose, ChatDatabase, ChatError, Completion, Invocation, ModelIdentity, TitleCompletion,
-    TitleOutcome,
+    ChatDatabase, ChatError, Completion, Invocation, ModelIdentity, UncommittedCompletion,
     error::*,
-    flows,
-    nodes::{BeginTurnInputs, CompletionOutputs, FailTurnInputs, RecoveryInputs, RecoveryOutputs},
+    nodes::{BeginTurnInputs, RecoveryInputs, RecoveryOutputs},
 };
-use mf_runtime::{
-    ContextValue, ExecutionContext, FlowRuntime, NodeValue, StreamCancellation, StreamError,
-    WorkflowArguments,
-};
-use mf_telemetry::{identity::RunId, observation::Observer};
-use serde_json::Value;
+use mf_runtime::{StreamCancellation, StreamError};
+use mf_telemetry::observation::Observer;
 use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use std::{
-    collections::{BTreeMap, VecDeque},
-    path::{Path, PathBuf},
+    collections::BTreeMap,
+    path::Path,
     sync::{
         Arc, Mutex,
-        atomic::{AtomicUsize, Ordering},
         mpsc::{self, Receiver, TryRecvError},
     },
     thread::{self, JoinHandle},
 };
 
-mod title;
-
-#[derive(Clone, Debug)]
-pub struct ModelProfile {
-    config: Value,
-    identity: ModelIdentity,
-}
-
-impl ModelProfile {
-    pub fn new(name: impl Into<String>, config: Value) -> Result<Self, ChatError> {
-        let name = name.into();
-        ensure!(
-            !name.trim().is_empty(),
-            InvalidSnafu {
-                field: "profile",
-                reason: "must be nonblank"
-            }
-        );
-        mfn_llm::prepare_llm(config.clone()).context(ModelBuildSnafu)?;
-        let model = config
-            .get("model")
-            .and_then(Value::as_str)
-            .context(InvalidSnafu {
-                field: "model",
-                reason: "must be a string",
-            })?
-            .to_owned();
-        let identity = ModelIdentity {
-            profile: name,
-            model: Some(model),
-        };
-        Ok(Self { config, identity })
-    }
-
-    pub fn identity(&self) -> &ModelIdentity {
-        &self.identity
-    }
-}
+extern crate mfn_code as _;
+extern crate mfn_core as _;
 
 #[derive(Clone)]
 pub struct HostConfig {
-    pub profiles: BTreeMap<String, ModelProfile>,
+    pub profiles: BTreeMap<String, crate::WorkflowProfile>,
     pub max_active: usize,
     pub max_history_bytes: usize,
     pub observer: Option<Observer>,
-    pub title_profile: Option<String>,
     pub automatic_titles: bool,
 }
 
 impl HostConfig {
-    pub fn new(profile: ModelProfile) -> Self {
+    pub fn new(profile: crate::WorkflowProfile) -> Self {
         Self {
-            profiles: BTreeMap::from([(profile.identity.profile.clone(), profile)]),
+            profiles: BTreeMap::from([(profile.name.clone(), profile)]),
             max_active: 4,
             max_history_bytes: crate::DEFAULT_HISTORY_BYTES,
             observer: None,
-            title_profile: None,
             automatic_titles: true,
         }
     }
@@ -88,7 +43,6 @@ impl HostConfig {
 struct Active {
     invocation: Invocation,
     cancellation: StreamCancellation,
-    purpose: CallPurpose,
 }
 
 #[derive(Default)]
@@ -96,53 +50,26 @@ struct Workers {
     closed: bool,
     active: BTreeMap<String, Active>,
     handles: Vec<JoinHandle<()>>,
-    background: VecDeque<TitleJob>,
-    background_reserved: usize,
 }
 
 struct Inner {
     database: ChatDatabase,
     config: HostConfig,
     workers: Mutex<Workers>,
-    foreground_admissions: AtomicUsize,
-}
-
-struct ForegroundAdmission<'a>(&'a AtomicUsize);
-
-impl<'a> ForegroundAdmission<'a> {
-    fn enter(counter: &'a AtomicUsize) -> Self {
-        counter.fetch_add(1, Ordering::AcqRel);
-        Self(counter)
-    }
-}
-
-impl Drop for ForegroundAdmission<'_> {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::AcqRel);
-    }
 }
 
 pub struct ChatHost {
     inner: Arc<Inner>,
 }
 
-pub struct ChatJob<T = Completion> {
+pub struct ChatJob {
     invocation: Invocation,
     cancellation: StreamCancellation,
-    receiver: Receiver<Result<T, ChatError>>,
-    ready: Option<Result<T, ChatError>>,
+    receiver: Receiver<Result<Completion, ChatError>>,
+    ready: Option<Result<Completion, ChatError>>,
 }
 
-pub type TitleJob = ChatJob<TitleCompletion>;
-
-#[derive(Clone, Debug)]
-pub struct UncommittedCompletion {
-    pub database_path: PathBuf,
-    pub completion: Completion,
-    pub purpose: CallPurpose,
-}
-
-impl<T> ChatJob<T> {
+impl ChatJob {
     pub fn invocation(&self) -> &Invocation {
         &self.invocation
     }
@@ -171,7 +98,7 @@ impl<T> ChatJob<T> {
         self.ready.is_some()
     }
 
-    pub fn join(mut self) -> Result<T, ChatError> {
+    pub fn join(mut self) -> Result<Completion, ChatError> {
         if let Some(result) = self.ready.take() {
             return result;
         }
@@ -179,7 +106,7 @@ impl<T> ChatJob<T> {
     }
 }
 
-impl<T> Drop for ChatJob<T> {
+impl Drop for ChatJob {
     fn drop(&mut self) {
         self.cancel();
     }
@@ -198,22 +125,16 @@ impl ChatHost {
             !config.profiles.is_empty(),
             InvalidSnafu {
                 field: "profiles",
-                reason: "must contain a model profile"
+                reason: "must contain a workflow profile"
             }
         );
         for (key, profile) in &config.profiles {
             ensure!(
-                key == &profile.identity.profile,
+                key == &profile.name,
                 InvalidSnafu {
                     field: "profiles",
                     reason: "keys must match profile names"
                 }
-            );
-        }
-        if let Some(key) = &config.title_profile {
-            ensure!(
-                config.profiles.contains_key(key),
-                ProfileMissingSnafu { name: key }
             );
         }
         let host = Self {
@@ -221,12 +142,8 @@ impl ChatHost {
                 database: ChatDatabase::open(path)?,
                 config,
                 workers: Mutex::new(Workers::default()),
-                foreground_admissions: AtomicUsize::new(0),
             }),
         };
-        if host.inner.config.automatic_titles {
-            host.dispatch_titles()?;
-        }
         Ok(host)
     }
 
@@ -249,7 +166,6 @@ impl ChatHost {
         prompt: &str,
         retry_of: Option<String>,
     ) -> Result<ChatJob, ChatError> {
-        let _admission = ForegroundAdmission::enter(&self.inner.foreground_admissions);
         ensure!(
             !prompt.is_empty(),
             InvalidSnafu {
@@ -285,8 +201,7 @@ impl ChatHost {
             !workers
                 .active
                 .values()
-                .any(|active| active.purpose == CallPurpose::Conversation
-                    && active.invocation.session_id == session_id),
+                .any(|active| active.invocation.session_id == session_id),
             SessionBusySnafu { id: session_id }
         );
         ensure!(
@@ -306,7 +221,6 @@ impl ChatHost {
             Active {
                 invocation: invocation.clone(),
                 cancellation: cancellation.clone(),
-                purpose: CallPurpose::Conversation,
             },
         );
         let inner = Arc::clone(&self.inner);
@@ -323,7 +237,10 @@ impl ChatHost {
             turn_id: invocation.turn_id.clone(),
             call_id: invocation.call_id.clone(),
             prompt: prompt.into(),
-            model: profile.identity.clone(),
+            model: ModelIdentity {
+                profile: profile.name.clone(),
+                model: None,
+            },
             retry_of,
             max_history_bytes: self.inner.config.max_history_bytes,
         };
@@ -375,11 +292,7 @@ impl ChatHost {
                     .expect("worker state was not poisoned")
                     .active
                     .remove(&job_invocation.call_id);
-                let successful = result.is_ok();
                 let _ = sender.send(result);
-                if successful && inner.config.automatic_titles {
-                    let _ = inner.dispatch_titles();
-                }
             });
         match worker {
             Ok(worker) => workers.handles.push(worker),
@@ -410,9 +323,6 @@ impl ChatHost {
             ClosedSnafu
         );
         let completion = self.database().save_recovered(pending)?;
-        if self.inner.config.automatic_titles {
-            let _ = self.inner.dispatch_titles();
-        }
         Ok(completion)
     }
 
@@ -478,7 +388,7 @@ impl Inner {
     fn conversation(
         &self,
         request: BeginTurnInputs,
-        profile: ModelProfile,
+        profile: crate::WorkflowProfile,
         cancellation: StreamCancellation,
     ) -> Result<Completion, ChatError> {
         let invocation = Invocation {
@@ -486,95 +396,50 @@ impl Inner {
             turn_id: request.turn_id.clone(),
             call_id: request.call_id.clone(),
         };
-        let mut plan = flows::conversation::plan()?;
-        let model = plan
-            .definition
-            .nodes
-            .iter_mut()
-            .find(|node| node.id.as_str() == "model")
-            .context(InvalidSnafu {
-                field: "conversation flow",
-                reason: "requires its model node",
-            })?;
-        model.config = profile.config;
-        let observation = self
-            .config
-            .observer
-            .as_ref()
-            .map(|observer| plan.start_observation(observer, RunId::new()))
-            .transpose()?;
-        ExecutionContext::run(observation, |context| -> Result<Completion, ChatError> {
-            context.set_cancellation(cancellation.clone());
-            context.set_workflow_arguments(WorkflowArguments(
-                request
-                    .into_values()?
+        let resolution = crate::workflow::run_conversation(
+            &self.database,
+            request,
+            profile.backend(),
+            cancellation,
+            self.config.automatic_titles,
+            self.config.observer.as_ref(),
+        )?;
+        match resolution.state {
+            crate::contract::CompletionState::Committed(completion) => Ok(completion),
+            crate::contract::CompletionState::Uncommitted(pending) => {
+                let source = resolution
+                    .diagnostics
                     .into_iter()
-                    .map(|(name, value)| (format!("begin.{name}"), value))
-                    .collect(),
-            ));
-            let registry = mf_runtime::NodeRegistry::from_inventory()?;
-            let flow = mf_compiler::instantiate_compiled_with_observation(
-                &plan,
-                &registry,
-                context.observation_mut(),
-            )?;
-            let result = FlowRuntime::default().execute_in_context(&flow, context);
-            match result {
-                Ok(outputs) => Ok(CompletionOutputs::from_values(outputs)?.completion),
-                Err(source) => {
-                    let begun = matches!(
-                        context.output("begin.invocation"),
-                        Ok(ContextValue::Value(_))
-                    );
-                    if begun
-                        && let Ok(ContextValue::Value(response)) = context.output("model.response")
-                    {
-                        let reply =
-                            crate::model::ModelResponse::from_values(mf_runtime::Inputs::from([
-                                ("response".into(), response.clone()),
-                            ]))?
-                            .response;
-                        return Err(UncommittedSnafu {
-                            pending: Box::new(UncommittedCompletion {
-                                purpose: CallPurpose::Conversation,
-                                database_path: self.database.path().to_owned(),
-                                completion: Completion { invocation, reply },
-                            }),
-                        }
-                        .into_error(Box::new(ChatError::from(source))));
-                    }
-                    let cleanup = if begun {
-                        let state = if cancellation.failure().is_some() {
-                            "cancelled"
-                        } else {
-                            "failed"
-                        };
-                        crate::turn::fail(FailTurnInputs {
-                            usages: crate::model::failure_usages(&source),
-                            database_path: self
-                                .database
-                                .path()
-                                .to_str()
-                                .context(PathSnafu {
-                                    path: self.database.path(),
-                                })?
-                                .into(),
-                            invocation: invocation.clone(),
-                            state: state.into(),
-                            error: source.to_string(),
-                        })
-                        .err()
-                        .map(Box::new)
-                    } else {
-                        None
-                    };
-                    Err(ExecutionSnafu {
-                        invocation,
-                        cleanup,
-                    }
-                    .into_error(Box::new(ChatError::from(source))))
+                    .next()
+                    .expect("failed persistence has a source");
+                Err(UncommittedSnafu {
+                    pending: Box::new(pending),
                 }
+                .into_error(Box::new(source)))
             }
-        })
+            crate::contract::CompletionState::Finished(turn) => {
+                let source = resolution
+                    .diagnostics
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| {
+                        WorkflowFailureSnafu {
+                            message: turn
+                                .error
+                                .unwrap_or_else(|| "conversation workflow failed".into()),
+                        }
+                        .build()
+                    });
+                Err(ExecutionSnafu {
+                    invocation,
+                    cleanup: None,
+                }
+                .into_error(Box::new(source)))
+            }
+            crate::contract::CompletionState::NotBegun => ConflictSnafu {
+                id: invocation.call_id,
+            }
+            .fail(),
+        }
     }
 }

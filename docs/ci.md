@@ -53,7 +53,13 @@ dependencies, so stale coverage mappings cannot contribute to a new report.
 Reporting uses a temporary hard-linked binary view that omits `.kache-prestage-*`
 compiler-cache backups. These backups can survive Cargo cleanup and contain old
 source mappings; source files and coverage thresholds are not excluded or changed.
-The temporary view is removed after report generation without modifying the cache.
+The view includes current dependency artifacts and build-script binaries. Fixtures
+that delete their build directories retain executed binaries in the session-scoped
+`MF_COVERAGE_BINARIES_DIR`. For copied sources, a `*.paths.json` file maps absolute
+build-time source filenames to checkout-relative filenames for grcov. Conflicting
+mappings fail reporting instead of silently selecting one source.
+Preparation clears this directory so previous fixture mappings cannot leak into a
+new run. The temporary view is removed after reporting without modifying the cache.
 Preparation records pre-existing untracked profile paths. Package execution and
 reporting collect only new default LLVM profiles left by credential-isolated
 subprocesses into the current session's data directory. Pre-existing profiles are

@@ -12,6 +12,8 @@ mf-runtime.workspace = true
 mf-telemetry.workspace = true
 mf-compiler.workspace = true
 mfn-llm.workspace = true
+mfn-code.workspace = true
+mfn-core.workspace = true
 inventory.workspace = true
 
 # Portable database storage and migrations.
@@ -28,8 +30,6 @@ uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 # Built-in node fixtures.
-mfn-code.workspace = true
-mfn-core.workspace = true
 mfn-llm = { workspace = true, features = ["test-support"] }
 
 # Isolated databases and packaging fixtures.
