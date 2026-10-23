@@ -62,7 +62,7 @@ pub enum StreamError {
         #[snafu(source(from(crate::WorkflowRunError, Arc::new)))]
         source: Arc<crate::WorkflowRunError>,
     },
-    #[snafu(display("stream output failed: {message}"))]
+    #[snafu(display("stream output failed: {message}"), visibility(pub(super)))]
     Output { message: String },
     #[snafu(display("stream output failed: {source}"), visibility(pub))]
     OutputWrite {
@@ -163,6 +163,7 @@ pub struct StreamOptions {
     pub snapshots: Option<crate::SnapshotRecorder>,
     pub arguments: crate::WorkflowArguments,
     pub stdin: Option<crate::TextInput>,
+    pub live: Option<crate::LivePublisher>,
 }
 impl Default for StreamOptions {
     fn default() -> Self {
@@ -172,6 +173,7 @@ impl Default for StreamOptions {
             snapshots: None,
             arguments: crate::WorkflowArguments::default(),
             stdin: None,
+            live: None,
         }
     }
 }
@@ -279,9 +281,14 @@ enum OperatorExecutor {
 }
 
 struct Producer {
-    node: Option<Box<dyn StreamNode>>,
+    node: Option<ProducerNode>,
     worker: Option<WorkerPool<ProducerJob>>,
     active: bool,
+}
+
+enum ProducerNode {
+    Stream(Box<dyn StreamNode>),
+    TaskStream(Box<crate::TaskStreamExecutor>),
 }
 
 struct ProducerJob {
@@ -330,6 +337,7 @@ struct Shared {
     execution: StreamExecution,
     observation: Option<StreamObservation>,
     snapshots: Option<crate::SnapshotRecorder>,
+    live: Mutex<Option<crate::LivePublisher>>,
     cancellation: crate::StreamCancellation,
     worker_limit: std::num::NonZeroUsize,
 }
@@ -382,6 +390,10 @@ fn capture_snapshot(
 }
 
 impl crate::EmissionSink for ProducerEmitter<'_> {
+    fn is_connected(&self) -> bool {
+        self.plan.has_emission_consumers(self.index)
+    }
+
     /// Wait for queue capacity and transfer one validated result to the runtime.
     /// Failure wakes waiting senders. Success does not imply downstream completion.
     fn send(&mut self, result: NodeResult) -> Result<(), StreamError> {
@@ -413,11 +425,6 @@ impl ProducerEmitter<'_> {
             }
             state = self.shared.changed.wait(state).unwrap();
         }
-        let captured_ports = self
-            .shared
-            .snapshots
-            .as_ref()
-            .map(|_| result.outputs.clone());
         let ports = result.outputs.keys().cloned().collect::<Vec<_>>();
         let admitted: Result<(), StreamError> = (|| {
             let emitted = self.emitted.checked_add(1).context(ResourceSnafu {
@@ -435,17 +442,6 @@ impl ProducerEmitter<'_> {
         }
         self.shared.changed.notify_all();
         drop(state);
-        if admitted.is_ok()
-            && let Some(ports) = captured_ports
-        {
-            capture_snapshot(
-                self.shared,
-                self.plan.nodes()[self.index].definition_id.as_str(),
-                &Inputs::new(),
-                &ports,
-                crate::SnapshotOutcome::Emitted,
-            );
-        }
         admitted
     }
 }
@@ -463,7 +459,7 @@ impl Producer {
             let plan = Arc::clone(plan);
             self.worker = Some(
                 WorkerPool::new(1, move |job| {
-                    run_producer(&mut **node.lock().unwrap(), job, &shared, &plan);
+                    run_producer(&mut node.lock().unwrap(), job, &shared, &plan);
                 })
                 .context(WorkerStartupSnafu)?,
             );
@@ -480,7 +476,7 @@ impl Producer {
 }
 
 fn run_producer(
-    node: &mut dyn StreamNode,
+    node: &mut ProducerNode,
     mut job: ProducerJob,
     shared: &Arc<Shared>,
     plan: &Arc<StreamPlan>,
@@ -496,29 +492,46 @@ fn run_producer(
         publication_failed: false,
     };
     let failure = shared.state.lock().unwrap().failure.clone();
-    let mut emitter = Emitter::new(
-        plan.nodes()[index].definition_id.clone(),
-        &plan.nodes()[index].metadata.ports.outputs,
-        job.context.cancellation(),
-        &mut sink,
-    );
     let result = if let Some(error) = failure {
         Err(error)
     } else {
         if let Some(callback) = job.callback.as_mut() {
             callback.started();
         }
-        capture_snapshot(
-            shared,
-            plan.nodes()[index].definition_id.as_str(),
-            &job.inputs,
-            &crate::Outputs::new(),
-            crate::SnapshotOutcome::Started,
-        );
-        catch_unwind(AssertUnwindSafe(|| {
-            let result = node.execute(job.inputs, &mut job.context, &mut emitter);
-            emitter.finish()?;
-            result
+        catch_unwind(AssertUnwindSafe(|| match node {
+            ProducerNode::Stream(node) => {
+                capture_snapshot(
+                    shared,
+                    plan.nodes()[index].definition_id.as_str(),
+                    &job.inputs,
+                    &crate::Outputs::new(),
+                    crate::SnapshotOutcome::Started,
+                );
+                job.context
+                    .with_node(plan.nodes()[index].definition_id.clone(), |context| {
+                        crate::live::with_exports(
+                            &plan.nodes()[index].metadata.stream_exports,
+                            context,
+                            &mut sink,
+                            |context, sink| {
+                                let mut emitter = Emitter::new(
+                                    plan.nodes()[index].definition_id.clone(),
+                                    &plan.emission_node(index).metadata.ports.outputs,
+                                    context.cancellation(),
+                                    sink,
+                                );
+                                emitter.set_snapshot_context(context);
+                                let result = node.execute(job.inputs, context, &mut emitter);
+                                emitter.finish()?;
+                                result
+                            },
+                        )
+                    })
+            }
+            ProducerNode::TaskStream(node) => {
+                job.context
+                    .execute_task_stream(&plan.nodes()[index], node, job.inputs, &mut sink)
+            }
         }))
         .unwrap_or_else(|payload| Err(panic_error(payload).into()))
         .context(ProducerSnafu {
@@ -534,13 +547,24 @@ fn run_producer(
                 .map_or(Ok(()), Err)
         })
     };
-    let publication_failed = emitter.failure().is_some();
-    drop(emitter);
+    if result.is_ok() && matches!(node, ProducerNode::TaskStream(_)) {
+        for port in &plan.nodes()[index].metadata.ports.outputs {
+            if matches!(
+                job.context.output(&crate::output_id(
+                    plan.nodes()[index].definition_id.as_str(),
+                    &port.name
+                )),
+                Ok(crate::ContextValue::Value(_))
+            ) {
+                sink.ports.insert(port.name.to_string());
+            }
+        }
+    }
     if let Some(callback) = job.callback {
         match &result {
             Ok(()) => callback.succeeded(sink.emitted, sink.ports.into_iter().collect()),
             Err(error) => callback.failed(
-                if publication_failed || sink.publication_failed {
+                if sink.publication_failed {
                     FailurePhase::Publication
                 } else {
                     FailurePhase::Execution
@@ -582,6 +606,7 @@ fn workflow_error_node(error: &crate::WorkflowRunError) -> String {
         | crate::WorkflowRunError::Context { definition_id, .. }
         | crate::WorkflowRunError::NodeExecution { definition_id, .. } => definition_id.to_string(),
         crate::WorkflowRunError::WorkflowInputs { .. }
+        | crate::WorkflowRunError::LiveOutput { .. }
         | crate::WorkflowRunError::NodeTarget { .. }
         | crate::WorkflowRunError::WorkerPool { .. } => "<workflow>".to_owned(),
     }
@@ -709,12 +734,6 @@ impl PreparedStream {
             );
         }
         let (prepared, operator_states) = self.into_parts();
-        ensure!(
-            (0..prepared.nodes().len()).all(|index| prepared.stream_output_domain(index).is_none()),
-            ConfigurationSnafu {
-                message: "combined stream domains require producer-bound execution"
-            }
-        );
         let domain_limit = prepared
             .execution()
             .limits
@@ -723,6 +742,9 @@ impl PreparedStream {
         let worker_limit = std::num::NonZeroUsize::new(domain_limit)
             .expect("validated stream worker limit is positive");
         let mut context = ExecutionContext::default();
+        if let Some(publisher) = &options.live {
+            context.set_live_publisher(publisher.clone());
+        }
         if let Some(capture) = &options.snapshots {
             context.set_snapshot_recorder(capture.clone());
         }
@@ -756,11 +778,16 @@ impl PreparedStream {
                     executor: match state {
                         NodeExecution::Event(state) => OperatorExecutor::Event(state),
                         NodeExecution::Stream(node) => OperatorExecutor::Producer(Producer {
-                            node: Some(node),
+                            node: Some(ProducerNode::Stream(node)),
                             worker: None,
                             active: false,
                         }),
-                        NodeExecution::Task(_) | NodeExecution::TaskStream(_) => {
+                        NodeExecution::TaskStream(node) => OperatorExecutor::Producer(Producer {
+                            node: Some(ProducerNode::TaskStream(node)),
+                            worker: None,
+                            active: false,
+                        }),
+                        NodeExecution::Task(_) => {
                             unreachable!("tasks remain in the plan")
                         }
                     },
@@ -793,6 +820,7 @@ impl PreparedStream {
             execution: plan.execution().clone(),
             observation: options.observation,
             snapshots: options.snapshots,
+            live: Mutex::new(options.live),
             cancellation,
             worker_limit,
         });
@@ -1028,7 +1056,7 @@ fn coordinate(
                 if let OperatorExecutor::Producer(producer) = &mut operator.executor {
                     producer.active = false;
                 }
-                if completion.detached {
+                if completion.message.domain == 0 {
                     operator.closed = true;
                 }
             }
@@ -1172,15 +1200,17 @@ fn tick<'a>(
             continue;
         };
         let mut context =
-            ExecutionContext::for_message(&plan.nodes()[source], queued.emission.result).context(
-                WorkflowSnafu {
+            ExecutionContext::for_message(plan.emission_node(source), queued.emission.result)
+                .context(WorkflowSnafu {
                     message: queued.message,
-                },
-            )?;
+                })?;
         #[cfg(feature = "async")]
         context.set_future_executor(future_executor.clone());
         if let Some(capture) = &shared.snapshots {
             context.set_snapshot_recorder(capture.clone());
+        }
+        if let Some(publisher) = shared.live.lock().unwrap().clone() {
+            context.set_live_publisher(publisher);
         }
         context.set_cancellation(shared.cancellation.clone());
         context.configure_worker_limit(shared.worker_limit);
@@ -1303,7 +1333,8 @@ fn tick<'a>(
                             }
                         });
                         let context = frame.context.fork_stream(observation);
-                        let detached = message_domain == 0;
+                        let detached =
+                            message_domain == 0 && plan.stream_output_domain(index).is_none();
                         let operator = guard.operators[index].as_mut().unwrap();
                         let OperatorExecutor::Producer(producer) = &mut operator.executor else {
                             unreachable!("producer kind was checked above")
@@ -1668,8 +1699,10 @@ fn enqueue_emission(
     index: usize,
     emission: EventEmission,
 ) -> Result<MessageId, StreamError> {
-    let domain = plan.output_domain(index);
-    crate::ExecutionOutputs::validate_result(&plan.nodes()[index], &emission.result).context(
+    let domain = plan
+        .stream_output_domain(index)
+        .unwrap_or_else(|| plan.output_domain(index));
+    crate::ExecutionOutputs::validate_result(plan.emission_node(index), &emission.result).context(
         WorkflowSnafu {
             message: MessageId {
                 domain,
@@ -1679,6 +1712,9 @@ fn enqueue_emission(
     )?;
     let sequence = take_sequence(&mut state.sequences[domain])?;
     take_sequence(&mut state.summary.emitted_messages)?;
+    if !plan.has_emission_consumers(index) {
+        return Ok(MessageId { domain, sequence });
+    }
     state.operators[index]
         .as_mut()
         .unwrap()
@@ -1700,11 +1736,12 @@ fn apply_effects(
 ) -> Result<(), StreamError> {
     let operator = state.operators[index].as_mut().unwrap();
     ensure!(
-        effects
-            .emissions
-            .len()
-            .saturating_add(operator.pending.len())
-            <= plan.execution().limits.max_pending_messages,
+        !plan.has_emission_consumers(index)
+            || effects
+                .emissions
+                .len()
+                .saturating_add(operator.pending.len())
+                <= plan.execution().limits.max_pending_messages,
         ResourceSnafu {
             message: format!(
                 "node `{}` emitted too many pending messages",
@@ -1803,6 +1840,17 @@ fn finish_instance(shared: &Shared) {
         domain.closed = true;
     }
     state.active_workers = 0;
+    let flush = state.failure.is_none();
+    drop(state);
+    let publisher = shared.live.lock().unwrap().take();
+    if flush
+        && let Some(publisher) = &publisher
+        && let Err(error) = publisher.flush(&shared.cancellation)
+    {
+        shared.fail(error);
+    }
+    drop(publisher);
+    let mut state = shared.state.lock().unwrap();
     state.done = true;
     let summary = state.summary.clone();
     let failure = state.failure.clone();
@@ -1820,7 +1868,7 @@ fn take_sequence(sequence: &mut u64) -> Result<u64, StreamError> {
     Ok(current)
 }
 
-fn panic_error(payload: Box<dyn std::any::Any + Send>) -> StreamError {
+pub(super) fn panic_error(payload: Box<dyn std::any::Any + Send>) -> StreamError {
     let message = payload
         .downcast_ref::<String>()
         .cloned()

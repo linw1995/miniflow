@@ -806,7 +806,9 @@ to its host without changing to `execution.mode = stream`:
 This fragment assumes a combined provider named `group.count` with a stream port `delta`, such as the counting
 provider described in [node development](node-development.md#combined-task-and-stream-execution).
 Every path element is a complete node ID; dots are not split. A path such as `["repeat", "count"]` selects
-`count` inside a Loop or Iteration. Compilation validates the exact source and reflects its value contract.
+`count` inside a Loop or Iteration. Compilation validates the exact producer source and reflects its value contract. Direct live exports support combined
+and pure Stream producers. Event callback results retain ordinary selected stream output delivery, so host
+backpressure cannot block the coordinator through a direct Event export.
 Nested exports preserve distinct dynamic invocation identities, including parallel iteration items.
 
 Attach a `mf_runtime::LivePublisher` to the execution context before running a finite Flow to consume its

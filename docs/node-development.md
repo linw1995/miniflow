@@ -664,6 +664,41 @@ send error cannot turn the invocation into success. A terminal result is returne
 reconstructed by collecting deltas. Existing pure producers keep their exclusive mutable state contract;
 combined executors use the Task `Send + Sync` ownership contract.
 
+### Buffered live delivery
+
+A finite Flow exports selected producer ports through an optional `LivePublisher` on its execution context.
+`live_channel(LiveLimits::default())` supplies a bounded publisher and receiver. Defaults are 64 pending records,
+4 MiB pending encoded data, a 1 MiB event body, and 64 MiB cumulative encoded event data. Invalid limits and exceeded
+bounds fail explicitly. No channel is created for a host that does not subscribe.
+
+Drain an explicitly subscribed receiver concurrently with execution. This fragment assumes a prepared finite
+`flow`, resolved `arguments`, and an event handler:
+
+```rust
+let (publisher, receiver) = mf_runtime::live_channel(Default::default())?;
+let worker = std::thread::spawn(move || {
+    let mut context = mf_runtime::ExecutionContext::default();
+    context.set_workflow_arguments(arguments);
+    context.set_live_publisher(publisher);
+    flow.execute_in_context(&mut context)
+});
+while let Some(event) = receiver.recv()? {
+    handle_event(event);
+}
+let final_outputs = worker.join().expect("workflow worker panicked")?;
+```
+
+`LiveReceiver::try_recv` distinguishes empty, closed, and failed delivery. Receiver drop fails pending delivery;
+blocked senders and final drain honor cancellation. Terminal dependents can execute after the combined node
+returns, while whole-Flow success waits for live delivery to drain. The publisher is released at stream-instance
+completion, so receiver EOF does not require dropping an otherwise finished instance.
+
+`LivePublisher::new` is for synchronous application callbacks. A callback buffering its own output must use
+`with_flush` and implement a cancellation-aware flush. Live records identify the static source path and dynamic
+node invocation. Open/close controls exist even with zero values; close ends production, while final Task and
+workflow results determine success. Snapshot capture stays optional and redacts secret values independently of
+explicit business delivery. Diagnostic capture does not make an otherwise unconnected producer connected.
+
 ## Workflow observation context
 
 Observed execution activates the workflow's OTel context and a node span around dependency resolution, invocation, and output publication. A node using an application-provided OTel tracer can create child spans through the current context without changing its execution interface. The runtime does not install a global provider or configure a plugin's tracer. Threads created by plugins require explicit context propagation.

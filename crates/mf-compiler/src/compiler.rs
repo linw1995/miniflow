@@ -637,6 +637,16 @@ fn prepare_graph(
             .filter(|output| output.path == path)
         {
             let execution = node.node.as_ref().expect("prepared executor");
+            ensure!(
+                matches!(
+                    execution,
+                    mf_runtime::NodeExecution::TaskStream(_) | mf_runtime::NodeExecution::Stream(_)
+                ),
+                InvalidLiveExportSnafu {
+                    name: &output.name,
+                    message: "live exports require a combined or Stream producer; Event results use ordinary stream output selection",
+                }
+            );
             let port = execution
                 .stream_outputs(&node.metadata)
                 .iter()

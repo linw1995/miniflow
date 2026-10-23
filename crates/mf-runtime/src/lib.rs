@@ -10,6 +10,7 @@ mod flow;
 mod future_execution;
 mod iteration;
 mod live;
+mod live_channel;
 mod loop_node;
 mod message_domain;
 mod node;
@@ -67,6 +68,7 @@ pub use iteration::{
     iteration_input_flow_node,
 };
 pub use live::{LiveOutputEvent, LiveOutputKind, LivePublisher};
+pub use live_channel::{LiveLimits, LiveMetrics, LiveReceiveError, LiveReceiver, live_channel};
 pub use loop_node::{
     loop_variable_types, prepared_loop_assign, prepared_loop_exit, prepared_loop_source_types,
     prepared_scope_source,

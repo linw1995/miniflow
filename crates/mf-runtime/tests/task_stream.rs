@@ -380,3 +380,58 @@ fn invocation_paths_survive_body_and_domain_context_forks() {
         })
         .unwrap();
 }
+
+#[derive(NodeValue)]
+struct SensitiveDelta {
+    delta: mf_runtime::ValueRef,
+}
+
+struct Sensitive;
+
+impl TypedTaskStreamNode for Sensitive {
+    type Input = Input;
+    type Output = Output;
+    type Emission = SensitiveDelta;
+
+    fn execute(
+        &self,
+        _: Input,
+        _: &mut ExecutionContext,
+        emitter: &mut TypedEmitter<'_, '_, SensitiveDelta>,
+    ) -> Result<TypedNodeResult<Output>, NodeExecutionError> {
+        emitter.send(SensitiveDelta {
+            delta: mf_runtime::ValueRef::from("credential").into_secret(),
+        })?;
+        Ok(Output {
+            text: "complete".into(),
+        }
+        .into())
+    }
+}
+
+#[test]
+fn combined_emission_snapshots_are_redacted_independently_of_business_delivery() {
+    let prepared = PreparedNode::typed_task_stream(Sensitive, NodeMetadata::default()).unwrap();
+    let NodeExecution::TaskStream(executor) = prepared.execution else {
+        panic!("expected combined executor")
+    };
+    let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let captured = events.clone();
+    let mut context = ExecutionContext::default();
+    context.set_snapshot_recorder(mf_runtime::SnapshotRecorder::new(move |event| {
+        captured.lock().unwrap().push(event)
+    }));
+    let mut sink = Collect::default();
+    executor
+        .execute_with_sink(inputs(1), &mut context, &mut sink)
+        .unwrap();
+    assert_eq!(sink.values[0].outputs["delta"].as_str(), Some("credential"));
+    assert_eq!(
+        events.lock().unwrap()[0].snapshot.outputs["delta"].as_str(),
+        Some("[REDACTED]")
+    );
+    assert!(matches!(
+        events.lock().unwrap()[0].snapshot.outcome,
+        mf_runtime::SnapshotOutcome::Emitted
+    ));
+}

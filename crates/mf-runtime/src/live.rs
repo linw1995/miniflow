@@ -23,9 +23,15 @@ pub enum LiveOutputKind {
 
 type Publish =
     dyn Fn(LiveOutputEvent, &StreamCancellation) -> Result<(), StreamError> + Send + Sync;
+type Flush = dyn Fn(&StreamCancellation) -> Result<(), StreamError> + Send + Sync;
+
+struct Callbacks {
+    publish: Box<Publish>,
+    flush: Box<Flush>,
+}
 
 #[derive(Clone)]
-pub struct LivePublisher(Arc<Publish>);
+pub struct LivePublisher(Arc<Callbacks>);
 
 impl std::fmt::Debug for LivePublisher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -40,7 +46,20 @@ impl LivePublisher {
         + Sync
         + 'static,
     ) -> Self {
-        Self(Arc::new(publish))
+        Self::with_flush(publish, |_| Ok(()))
+    }
+
+    pub fn with_flush(
+        publish: impl Fn(LiveOutputEvent, &StreamCancellation) -> Result<(), StreamError>
+        + Send
+        + Sync
+        + 'static,
+        flush: impl Fn(&StreamCancellation) -> Result<(), StreamError> + Send + Sync + 'static,
+    ) -> Self {
+        Self(Arc::new(Callbacks {
+            publish: Box::new(publish),
+            flush: Box::new(flush),
+        }))
     }
 
     pub fn publish(
@@ -51,7 +70,60 @@ impl LivePublisher {
         if let Some(error) = cancellation.failure() {
             return Err(error);
         }
-        (self.0)(event, cancellation)
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.0.publish)(event, cancellation)
+        }))
+        .unwrap_or_else(|payload| Err(crate::stream_instance::panic_error(payload)))
+    }
+
+    pub fn flush(&self, cancellation: &StreamCancellation) -> Result<(), StreamError> {
+        if let Some(error) = cancellation.failure() {
+            return Err(error);
+        }
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.0.flush)(cancellation)
+        }))
+        .unwrap_or_else(|payload| Err(crate::stream_instance::panic_error(payload)))
+    }
+}
+
+pub(super) fn with_exports<T>(
+    exports: &[StreamOutputContract],
+    context: &mut crate::ExecutionContext,
+    sink: &mut dyn EmissionSink,
+    invoke: impl FnOnce(
+        &mut crate::ExecutionContext,
+        &mut dyn EmissionSink,
+    ) -> Result<T, crate::NodeExecutionError>,
+) -> Result<T, crate::NodeExecutionError> {
+    let Some(publisher) = context
+        .live_publisher()
+        .filter(|_| !exports.is_empty())
+        .cloned()
+    else {
+        return invoke(context, sink);
+    };
+    let mut exported = ExportSink {
+        publisher,
+        exports,
+        invocation: StreamInvocation::new(context)?,
+        cancellation: context.cancellation(),
+    };
+    exported.open()?;
+    let result = invoke(
+        context,
+        &mut FanoutSink {
+            first: sink,
+            second: &mut exported,
+        },
+    );
+    let closed = exported.close(result.is_ok());
+    match result {
+        Ok(result) => {
+            closed?;
+            Ok(result)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -117,5 +189,27 @@ impl EmissionSink for ExportSink<'_> {
             }
             .into_error(error.into()),
         );
+    }
+}
+
+pub(super) struct FanoutSink<'a> {
+    pub first: &'a mut dyn EmissionSink,
+    pub second: &'a mut dyn EmissionSink,
+}
+
+impl EmissionSink for FanoutSink<'_> {
+    fn is_connected(&self) -> bool {
+        self.first.is_connected() || self.second.is_connected()
+    }
+
+    fn send(&mut self, result: NodeResult) -> Result<(), StreamError> {
+        self.first.send(result.clone())?;
+        self.second.send(result)?;
+        Ok(())
+    }
+
+    fn fail(&mut self, error: EmissionError) {
+        self.first.fail(error.clone());
+        self.second.fail(error);
     }
 }

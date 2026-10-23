@@ -57,6 +57,7 @@ pub struct StreamPlan {
     input_schema: crate::WorkflowInputSchema,
     generated_domains: BTreeMap<usize, Arc<GeneratedStreamDomainExecutor>>,
     schedules: Vec<MessageSchedule>,
+    emission_nodes: Vec<Option<FlowNode<()>>>,
 }
 
 pub struct PreparedStream {
@@ -85,14 +86,43 @@ impl PreparedStream {
         input_schema: crate::WorkflowInputSchema,
     ) -> Self {
         let mut operator_states = Vec::with_capacity(nodes.len());
+        let emission_nodes = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| {
+                if !matches!(
+                    node.node,
+                    Some(NodeExecution::Event(_) | NodeExecution::Stream(_))
+                ) && domains.stream_output_domain(index).is_none()
+                {
+                    return None;
+                }
+                let mut metadata = node.metadata.clone();
+                if !metadata.stream_outputs.is_empty() {
+                    metadata.ports.outputs = std::mem::take(&mut metadata.stream_outputs);
+                    metadata.exclusive_outputs.clear();
+                }
+                Some(FlowNode {
+                    definition_id: node.definition_id.clone(),
+                    node: (),
+                    metadata,
+                    output_keys: Default::default(),
+                })
+            })
+            .collect();
         let nodes = nodes
             .into_iter()
-            .map(|node| {
+            .enumerate()
+            .map(|(index, node)| {
                 let (task, state) = match node.node {
                     Some(NodeExecution::Task(task)) => (Some(task), None),
                     Some(NodeExecution::TaskStream(mut task)) => {
                         task.set_stream_contract(&node.metadata.stream_outputs);
-                        (Some(task as Box<dyn TaskNode>), None)
+                        if domains.stream_output_domain(index).is_some() {
+                            (None, Some(NodeExecution::TaskStream(task)))
+                        } else {
+                            (Some(task as Box<dyn TaskNode>), None)
+                        }
                     }
                     Some(state @ (NodeExecution::Event(_) | NodeExecution::Stream(_))) => {
                         (None, Some(state))
@@ -118,6 +148,7 @@ impl PreparedStream {
             input_schema,
             generated_domains: BTreeMap::new(),
             schedules,
+            emission_nodes,
         };
         Self {
             plan,
@@ -143,6 +174,22 @@ impl PreparedStream {
 }
 
 impl StreamPlan {
+    pub(super) fn emission_node(&self, node: usize) -> &FlowNode<()> {
+        self.emission_nodes[node]
+            .as_ref()
+            .expect("message source has an emission contract")
+    }
+
+    pub fn has_emission_consumers(&self, node: usize) -> bool {
+        if self.nodes[node].node.is_some() {
+            return false;
+        }
+        let domain = self
+            .stream_output_domain(node)
+            .unwrap_or_else(|| self.output_domain(node));
+        self.selected_domain() == Some(domain)
+            || !self.execution_domains_for_message(domain).is_empty()
+    }
     pub fn input_schema(&self) -> &crate::WorkflowInputSchema {
         &self.input_schema
     }

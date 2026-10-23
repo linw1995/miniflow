@@ -21,6 +21,7 @@ Goals:
 Non-goals:
 
 - Arbitrary cross-domain joins, implicit broadcast, stream replay, reconnect, or durable partial replies.
+- Direct live exports from coordinator-owned Event callbacks; Event results retain ordinary stream output selection.
 - Event nodes inside synchronous bodies, autonomous producers inside those bodies, or a separate background title job.
 - Tool execution, multimodal streaming, provider API migration, or deriving final text/usage by collecting hidden node outputs.
 - Replacing the existing top-level stream-runner output protocol with the finite live-result protocol.

@@ -14,6 +14,10 @@ use std::{
 
 /// One business invocation with incremental values and an authoritative final result.
 pub trait TaskStreamNode: Send + Sync {
+    fn supports_success_dependencies(&self) -> bool {
+        true
+    }
+
     fn execute(
         &self,
         inputs: Inputs,
@@ -23,6 +27,10 @@ pub trait TaskStreamNode: Send + Sync {
 }
 
 pub trait TypedTaskStreamNode: Send + Sync {
+    fn supports_success_dependencies(&self) -> bool {
+        true
+    }
+
     type Input: crate::NodeInputs;
     type Output: crate::NodeOutputs;
     type Emission: crate::NodeOutputs;
@@ -60,6 +68,15 @@ impl EmissionSink for DiscardSink {
 
 #[derive(Clone, Debug, Snafu)]
 pub enum EmissionError {
+    #[snafu(
+        display("invalid terminal output from `{node}`: {source}"),
+        visibility(pub(super))
+    )]
+    Terminal {
+        node: String,
+        #[snafu(source(from(crate::WorkflowRunError, Arc::new)))]
+        source: Arc<crate::WorkflowRunError>,
+    },
     #[snafu(display("invalid stream output from `{node}`: {source}"))]
     Validation {
         node: String,
@@ -80,7 +97,7 @@ pub enum EmissionError {
 
 impl From<EmissionError> for NodeExecutionError {
     fn from(error: EmissionError) -> Self {
-        Box::<dyn std::error::Error + Send + Sync>::from(Box::new(error)).into()
+        Box::<dyn std::error::Error + Send + Sync>::from(error).into()
     }
 }
 
@@ -90,6 +107,7 @@ pub struct Emitter<'a> {
     cancellation: StreamCancellation,
     sink: &'a mut dyn EmissionSink,
     failure: Option<EmissionError>,
+    snapshot: Option<(crate::SnapshotRecorder, Vec<LoopPathEntry>)>,
 }
 
 impl<'a> Emitter<'a> {
@@ -112,6 +130,7 @@ impl<'a> Emitter<'a> {
             cancellation,
             sink,
             failure: None,
+            snapshot: None,
         }
     }
 
@@ -120,8 +139,29 @@ impl<'a> Emitter<'a> {
     }
 
     pub fn send(&mut self, result: NodeResult) -> Result<(), NodeExecutionError> {
+        let snapshot = self.snapshot.as_ref().map(|_| result.outputs.clone());
         let outcome = self.admit(result);
-        self.remember(outcome)
+        self.remember(outcome)?;
+        if let (Some((recorder, scope)), Some(outputs)) = (&self.snapshot, snapshot) {
+            recorder.record(crate::SnapshotEvent {
+                scope: scope.clone(),
+                node: self.contract.definition_id.as_str().into(),
+                snapshot: crate::NodeSnapshot {
+                    inputs: crate::snapshot::ports_snapshot(&Inputs::new()),
+                    outputs: crate::snapshot::ports_snapshot(&outputs),
+                    skipped: Arc::from([]),
+                    outcome: crate::SnapshotOutcome::Emitted,
+                    error: None,
+                },
+            });
+        }
+        Ok(())
+    }
+
+    pub fn set_snapshot_context(&mut self, context: &ExecutionContext) {
+        self.snapshot = context
+            .snapshot_recorder()
+            .map(|recorder| (recorder.clone(), context.invocation_path()));
     }
 
     fn admit(&mut self, result: NodeResult) -> Result<(), EmissionError> {
@@ -273,12 +313,24 @@ impl TaskStreamExecutor {
         context: &mut ExecutionContext,
         sink: &mut dyn EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
+        crate::live::with_exports(&self.exports, context, sink, |context, sink| {
+            self.invoke(inputs, context, sink)
+        })
+    }
+
+    fn invoke(
+        &self,
+        inputs: Inputs,
+        context: &mut ExecutionContext,
+        sink: &mut dyn EmissionSink,
+    ) -> Result<NodeResult, NodeExecutionError> {
         let mut emitter = Emitter::new(
             context.current_node().unwrap_or("<task-stream>"),
             &self.outputs,
             context.cancellation(),
             sink,
         );
+        emitter.set_snapshot_context(context);
         emitter.finish()?;
         let result = self.node.execute(inputs, context, &mut emitter);
         emitter.finish()?;
@@ -287,40 +339,26 @@ impl TaskStreamExecutor {
 }
 
 impl TaskNode for TaskStreamExecutor {
+    fn supports_success_dependencies(&self) -> bool {
+        self.node.supports_success_dependencies()
+    }
+
     fn execute(
         &self,
         inputs: Inputs,
         context: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
-        let Some(publisher) = context
-            .live_publisher()
-            .filter(|_| !self.exports.is_empty())
-            .cloned()
-        else {
-            return self.execute_with_sink(inputs, context, &mut DiscardSink);
-        };
-        let mut sink = crate::live::ExportSink {
-            publisher,
-            exports: &self.exports,
-            invocation: StreamInvocation::new(context)?,
-            cancellation: context.cancellation(),
-        };
-        sink.open()?;
-        let result = self.execute_with_sink(inputs, context, &mut sink);
-        let closed = sink.close(result.is_ok());
-        match result {
-            Ok(result) => {
-                closed?;
-                Ok(result)
-            }
-            Err(error) => Err(error),
-        }
+        self.execute_with_sink(inputs, context, &mut DiscardSink)
     }
 }
 
 pub(super) struct TypedTaskStreamAdapter<N>(pub N);
 
 impl<N: TypedTaskStreamNode> TaskStreamNode for TypedTaskStreamAdapter<N> {
+    fn supports_success_dependencies(&self) -> bool {
+        self.0.supports_success_dependencies()
+    }
+
     fn execute(
         &self,
         inputs: Inputs,

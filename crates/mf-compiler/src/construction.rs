@@ -46,6 +46,10 @@ pub enum FlowBuildError {
     #[snafu(display("node `{definition_id}` cannot execute in a synchronous flow"))]
     NonTaskNode { definition_id: DefinitionId },
     #[snafu(display(
+        "node `{definition_id}` declares separate stream ports without a combined executor"
+    ))]
+    InvalidStreamPorts { definition_id: DefinitionId },
+    #[snafu(display(
         "stream dependency `{from_node}`.`{port}` -> `{to_node}` requires streaming execution"
     ))]
     SynchronousStreamEdge {
@@ -452,6 +456,13 @@ impl FlowBuilder {
         crate::validate_exclusive_inputs(&connections)?;
         let mut definition_indices = BTreeMap::new();
         for (index, node) in nodes.iter().enumerate() {
+            ensure!(
+                node.metadata.stream_outputs.is_empty()
+                    || matches!(node.node, Some(NodeExecution::TaskStream(_))),
+                InvalidStreamPortsSnafu {
+                    definition_id: node.definition_id.clone()
+                }
+            );
             if definition_indices
                 .insert(node.definition_id.clone(), NodeId::new(index))
                 .is_some()
@@ -1570,12 +1581,19 @@ pub fn prepare_stream(
             dependencies.iter().map(crate::FlowDependency::borrowed),
         )
     }))?;
+    let reserved_domains = 1
+        + (1..domains.sources().len())
+            .filter(|domain| {
+                domains.selected_domain() == Some(*domain)
+                    || !domains.execution_domains_for_message(*domain).is_empty()
+            })
+            .count();
     ensure!(
-        execution.limits.max_pending_messages >= domains.sources().len(),
+        execution.limits.max_pending_messages >= reserved_domains,
         InvalidPlanSnafu {
             message: format!(
                 "max_pending_messages must reserve at least {} domain slots",
-                domains.sources().len()
+                reserved_domains
             )
         }
     );

@@ -2,6 +2,7 @@ use crate::definition::DefinitionId;
 use crate::execution_domains::{ExecutionDomain, ExecutionDomains};
 use crate::{NodeMetadata, PreparedNode, TaskNode};
 use serde::{Deserialize, Serialize};
+use snafu::ResultExt;
 use std::any::Any;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
@@ -467,6 +468,11 @@ impl Flow {
             {
                 workflow_outputs.insert(output.name.clone().into_owned(), value);
             }
+        }
+        if let Some(publisher) = state.live_publisher() {
+            publisher
+                .flush(&state.cancellation())
+                .context(crate::runner::LiveOutputSnafu)?;
         }
         Ok(workflow_outputs)
     }

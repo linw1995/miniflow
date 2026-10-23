@@ -586,6 +586,67 @@ impl ExecutionContext {
         self.live.as_ref()
     }
 
+    pub(super) fn execute_task_stream<N>(
+        &mut self,
+        node: &FlowNode<N>,
+        executor: &crate::TaskStreamExecutor,
+        inputs: Inputs,
+        sink: &mut dyn crate::EmissionSink,
+    ) -> Result<(), crate::NodeExecutionError> {
+        let snapshot_inputs = self.snapshots.as_ref().map(|_| inputs.clone());
+        self.capture_node(node, &inputs, None, crate::SnapshotOutcome::Started, None);
+        let result = self.with_node(node.definition_id.clone(), |context| {
+            executor.execute_with_sink(inputs, context, sink)
+        });
+        let result = result.and_then(|result| {
+            let snapshot = self.snapshots.as_ref().map(|_| result.clone());
+            let published =
+                self.publish(node, Some(result))
+                    .context(crate::task_stream::TerminalSnafu {
+                        node: node.definition_id.as_str(),
+                    });
+            if let Err(error) = published {
+                sink.fail(error.clone());
+                return Err(error.into());
+            }
+            if let Some(inputs) = &snapshot_inputs {
+                self.capture_node(
+                    node,
+                    inputs,
+                    snapshot.as_ref(),
+                    crate::SnapshotOutcome::Succeeded,
+                    None,
+                );
+            }
+            Ok(())
+        });
+        if let Err(error) = &result
+            && let Some(inputs) = &snapshot_inputs
+        {
+            self.capture_node(
+                node,
+                inputs,
+                None,
+                crate::SnapshotOutcome::Failed,
+                Some(error),
+            );
+        }
+        result
+    }
+
+    pub(super) fn with_node<T, E>(
+        &mut self,
+        node: crate::DefinitionId,
+        invoke: impl FnOnce(&mut Self) -> Result<T, E>,
+    ) -> Result<T, E> {
+        let previous = self.current_node.replace(node);
+        let guard = NodeInvocationGuard {
+            context: self,
+            previous,
+        };
+        invoke(guard.context)
+    }
+
     pub fn snapshot_recorder(&self) -> Option<&crate::SnapshotRecorder> {
         self.snapshots.as_ref()
     }
@@ -746,6 +807,7 @@ impl ExecutionContext {
             WorkflowRunError::WorkflowInputs { .. } => (None, FailurePhase::Dependency),
             WorkflowRunError::NodeTarget { .. } => (None, FailurePhase::Dependency),
             WorkflowRunError::WorkerPool { .. } => (None, FailurePhase::Execution),
+            WorkflowRunError::LiveOutput { .. } => (None, FailurePhase::Publication),
         };
         observation.select_failure(node, phase, error.to_string());
     }

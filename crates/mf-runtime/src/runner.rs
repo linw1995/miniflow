@@ -5,6 +5,11 @@ use snafu::Snafu;
 #[derive(Debug, Snafu)]
 pub enum WorkflowRunError {
     #[snafu(
+        display("live output delivery failed: {source}"),
+        visibility(pub(super))
+    )]
+    LiveOutput { source: crate::StreamError },
+    #[snafu(
         display("node `{definition_id}` requires successful node `{source_node}`: {source}"),
         visibility(pub)
     )]

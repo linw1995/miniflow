@@ -2,7 +2,7 @@
 
 ### Requirement: Compile explicit scoped live exports
 
-Workflow definitions SHALL support a separate live-export list naming external streams and exact source paths/ports. Compilation SHALL resolve export routes and value contracts before execution, reject ambiguous or non-stream sources, and include them in versioned manifest/interface evidence. Inspection and code generation MUST NOT execute providers or read credentials.
+Workflow definitions SHALL support a separate live-export list naming external streams and exact source paths/ports. Compilation SHALL resolve export routes and value contracts before execution, reject ambiguous or non-producer sources, and include them in versioned manifest/interface evidence. Inspection and code generation MUST NOT execute providers or read credentials.
 
 #### Scenario: Export a nested answer
 
@@ -75,3 +75,12 @@ Generated and in-memory execution SHALL use the same combined-node contracts, ro
 
 - **WHEN** isolated Task execution selects a top-level combined node without a live subscription
 - **THEN** only that business invocation runs and returns its terminal result without requiring a stream consumer
+
+### Requirement: Preserve coordinator progress at live-export boundaries
+
+Direct live exports SHALL target combined Task/Stream or pure Stream producers. Coordinator-owned Event callback results SHALL retain ordinary selected stream output delivery. Unsupported direct Event exports MUST fail preparation before invocation rather than blocking coordinator progress on host backpressure.
+
+#### Scenario: Reject a direct Event export
+
+- **WHEN** a live-export declaration selects an Event callback output
+- **THEN** preparation rejects that route and identifies ordinary stream output selection as the supported delivery path

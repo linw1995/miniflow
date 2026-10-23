@@ -17,13 +17,13 @@
 
 ## 3. Runtime scheduling, delivery, and closure
 
-- [ ] 3.1 Schedule combined invocations once with producer-capable progress where graph-local streams exist; verify consumers and timers progress while the invocation remains active with one ordinary Task worker.
-- [ ] 3.2 Validate and commit terminal results to their originating frame independently of live acknowledgement; verify terminal dependents can run before live drain and invalid terminal output never publishes.
-- [ ] 3.3 Add per-invocation open/close controls and preserve whole-operator closure; verify empty invocation followed by nonempty invocation, skipped branches, and upstream closure with queued messages.
-- [ ] 3.4 Apply record/byte bounded queues and ordered fan-out with interruptible waits; verify a slow connected consumer applies pressure, disconnected consumers fail, and unconnected streams allocate no queue.
-- [ ] 3.5 Preserve typed execution/publication failures, panic attribution, and cancellation through teardown; verify delivered prefixes remain provisional, ignored errors fail, and blocked publishers wake and join.
-- [ ] 3.6 Keep business delivery independent from observation and redact combined snapshots through existing policy; verify live delivery works with telemetry disabled and secret diagnostics remain redacted.
-- [ ] 3.7 Document completion, connected-receiver lifetime, and drain semantics in node development docs; verify examples explicitly drain subscribed streams concurrently.
+- [x] 3.1 Schedule combined invocations once with producer-capable progress where graph-local streams exist; verify consumers and timers progress while the invocation remains active with one ordinary Task worker.
+- [x] 3.2 Validate and commit terminal results to their originating frame independently of live acknowledgement; verify terminal dependents can run before live drain and invalid terminal output never publishes.
+- [x] 3.3 Add per-invocation open/close controls and preserve whole-operator closure; verify empty invocation followed by nonempty invocation, skipped branches, and upstream closure with queued messages.
+- [x] 3.4 Apply record/byte bounded queues and ordered fan-out with interruptible waits; verify a slow connected consumer applies pressure, disconnected consumers fail, and unconnected streams allocate no queue.
+- [x] 3.5 Preserve typed execution/publication failures, panic attribution, and cancellation through teardown; verify delivered prefixes remain provisional, ignored errors fail, and blocked publishers wake and join.
+- [x] 3.6 Keep business delivery independent from observation and redact combined snapshots through existing policy; verify live delivery works with telemetry disabled and secret diagnostics remain redacted.
+- [x] 3.7 Document completion, connected-receiver lifetime, and drain semantics in node development docs; verify examples explicitly drain subscribed streams concurrently.
 
 ## 4. Generated runners, manifests, and bounded transport
 
