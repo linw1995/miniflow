@@ -190,7 +190,7 @@ fn interact(binary: &Path, database: &Path, restart: bool) -> String {
     fcntl(&pty.master, FcntlArg::F_SETFD(flags | FdFlag::FD_CLOEXEC)).unwrap();
     let original = tcgetattr(&pty.slave).unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_mf"))
-        .args(["run", "--tui", "--chat", "--chat-db"])
+        .args(["run", "--chat", "--chat-db"])
         .arg(database)
         .arg(binary)
         .args(["--params.model", "fixture-model"])
@@ -235,7 +235,11 @@ fn interact(binary: &Path, database: &Path, restart: bool) -> String {
                         0 if text.contains("What would you like") => {
                             Some("\x1b[200~hello 🦀\r\nsecond line\x1b[201~\x1b\r".as_bytes())
                         }
-                        1 if text.contains("first reply") => Some(b"\x0e"),
+                        1 if text.contains("first reply") => {
+                            assert!(text.contains("Flow execution"), "{text}");
+                            assert!(text.contains("Flow: Succeeded"), "{text}");
+                            Some(b"\x0e")
+                        }
                         2 if text.contains("New chat") => Some(b"session B prompt\x1b\r"),
                         3 if text.contains("second reply") => Some(b"failed prompt\x1b\r"),
                         4 if text.contains("[failed]") => Some(b"\x10\x1b[B\x1b[B\r"),

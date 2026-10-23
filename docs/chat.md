@@ -111,7 +111,7 @@ compiled and used directly with `--chat`:
 
 ```sh
 mf compile examples/chat-title-flow.json --output chat-title-flow
-mf run ./chat-title-flow --tui --chat --chat-db state/chat.sqlite --input.model your-model
+mf run ./chat-title-flow --chat --chat-db state/chat.sqlite --input.model your-model
 ```
 
 Both model configurations belong to this user flow; change `title_model.config` to use a different model
@@ -382,11 +382,12 @@ and unknown counters are preserved. Legacy columns remain compatibility data. No
 Compile a conversation workflow, then launch it with explicit local storage:
 
 ```bash
-mf run ./chat-flow --tui --chat --chat-db ./chat.sqlite --chat-profile default --params.model your-model
+mf run ./chat-flow --chat --chat-db ./chat.sqlite --chat-profile default --params.model your-model
 ```
 
-The terminal presents one conversation above an input area that grows with its content. The initial empty chat is
-saved only when its first prompt is sent; that prompt supplies its name. Existing conversations remain available
+`--chat` implies `--tui`; passing both flags remains supported. The terminal presents one conversation above an input
+area that grows with its content. The initial empty chat is saved only when its first prompt is sent; that prompt
+supplies its name. Existing conversations remain available
 through the session picker. New chats use no terminal-supplied system instructions; resumed sessions retain their
 stored instructions. Provider configuration remains in the workflow and its declared parameters.
 
@@ -407,8 +408,12 @@ Session switching and new chats wait until the current turn finishes, is cancell
 Additional submissions are rejected instead of queued. Drafts survive switching between idle conversations.
 
 Session history opens at the latest bounded page. Earlier messages and Latest messages are available from the command
-menu. Inspect current run opens the shared graph, trace, log, and data views; Esc returns to chat. Only the current
-turn's observation is retained, and changing conversation or starting another turn releases it.
+menu. Each execution opens a live Flow panel: wide terminals place the graph beside the conversation, narrower tall
+terminals place it below, and small terminals show a single status line. Resizing updates the layout automatically.
+The graph follows the latest executing node and shows node progress, elapsed time, and observation completeness. The
+last run remains visible until another turn starts or the conversation changes. Inspect current run opens the shared
+graph, trace, log, and data views; Esc returns to chat. Only the current turn's observation is retained, and changing
+conversation or starting another turn releases it.
 
 The terminal has no rename, archive/restore, usage dashboard, automatic-title, or parallel-execution controls.
 Storage and programmatic usage queries continue through `mf-chat`. Every submission executes the complete workflow,

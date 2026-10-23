@@ -6,7 +6,7 @@ use crate::{
     logs::LogSnapshot,
     manifest::{ManifestReadError, read_manifest},
     receiver::{LoopbackReceiver, ObservationReader, ReceiverError},
-    state::{LoopPassObservation, NodeObservation, StateSnapshot},
+    state::{LoopPassObservation, NodeObservation, NodeStatus, StateSnapshot},
     traces::{TraceSnapshot, TraceView, TraceViewSnapshot},
 };
 use crossterm::{
@@ -1764,6 +1764,75 @@ impl ObservationView {
         } else {
             false
         }
+    }
+    pub fn render_execution(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        observation: &LocalObservation,
+    ) {
+        let snapshot = observation.reader.snapshot_shared();
+        let elapsed = observation.elapsed();
+        let phase = match snapshot.workflow_outcome {
+            Some(mf_telemetry::event::Outcome::Succeeded) => "Succeeded".to_owned(),
+            Some(mf_telemetry::event::Outcome::Failed) => "Failed".to_owned(),
+            None => observation.status().map_or_else(
+                || "Running".to_owned(),
+                |status| format!("Exited {}", exit_code(status)),
+            ),
+        };
+        let completed = snapshot
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.status,
+                    NodeStatus::Succeeded
+                        | NodeStatus::Failed
+                        | NodeStatus::Skipped
+                        | NodeStatus::NotRun
+                )
+            })
+            .count();
+        // Follow root execution independently of the full inspector's navigation state.
+        let mut state = ViewState::default();
+        state.follow_latest(&snapshot, &self.root);
+        let current = self
+            .root
+            .nodes()
+            .get(state.selected)
+            .map_or("", |node| node.id.as_str());
+        let [header, graph, footer] = Layout::vertical([
+            Constraint::Length(1),
+            Constraint::Min(0),
+            Constraint::Length(u16::from(area.height > 2)),
+        ])
+        .areas(area);
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Flow: {phase} | {completed}/{} | {current} | {:.1}s",
+                snapshot.nodes.len(),
+                elapsed.as_secs_f64(),
+            )),
+            header,
+        );
+        state.reveal(&self.root, graph);
+        frame.render_widget(
+            GraphView::new(&self.root)
+                .snapshot(&snapshot)
+                .selected(state.selected)
+                .offset(state.offset.0, state.offset.1)
+                .elapsed_ns(elapsed.as_nanos().min(u64::MAX as u128) as u64),
+            graph,
+        );
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Observation: {:?}",
+                snapshot.lifecycle.completeness
+            ))
+            .style(Style::default().fg(Color::DarkGray)),
+            footer,
+        );
     }
     pub fn draw(
         &mut self,

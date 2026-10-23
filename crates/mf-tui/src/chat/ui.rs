@@ -21,6 +21,26 @@ use std::{
 };
 const MAX_EDITOR_BYTES: usize = 256 * 1024;
 
+fn execution_areas(body: Rect) -> (Rect, Rect) {
+    if body.width >= 120 && body.height >= 12 {
+        let [chat, panel] =
+            Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .areas(body);
+        (chat, panel)
+    } else if body.height >= 18 {
+        let [chat, panel] = Layout::vertical([
+            Constraint::Min(10),
+            Constraint::Length((body.height / 3).clamp(8, 14)),
+        ])
+        .areas(body);
+        (chat, panel)
+    } else {
+        let [chat, panel] =
+            Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(body);
+        (chat, panel)
+    }
+}
+
 pub fn run_chat(path: &Path, options: ChatOptions) -> Result<u8, ChatRunError> {
     let launch = ChatLaunch::prepare(path, options)?;
     ensure!(
@@ -465,6 +485,7 @@ impl ChatView {
                     && self.send(controller, ChatCommand::Retry { turn_id })
                 {
                     self.pending = Some(None);
+                    self.observation = None;
                     self.notice = "Starting retry...".into();
                 }
             }
@@ -502,6 +523,7 @@ impl ChatView {
             },
         ) {
             self.pending = Some(Some(self.editor.revision));
+            self.observation = None;
             self.mode = Mode::Input;
             self.notice = "Starting...".into();
             self.earlier = false;
@@ -668,6 +690,26 @@ impl ChatView {
                 .style(Style::default().fg(Color::DarkGray)),
             header,
         );
+        let body = if self.pending.is_some() || self.active.is_some() || self.observation.is_some()
+        {
+            let (chat, panel) = execution_areas(body);
+            let inner = if panel.height > 1 {
+                let block = Block::bordered().title(" Flow execution ");
+                let inner = block.inner(panel);
+                frame.render_widget(block, panel);
+                inner
+            } else {
+                panel
+            };
+            if let Some(observation) = &self.observation {
+                self.inspector.render_execution(frame, inner, observation);
+            } else {
+                frame.render_widget(Paragraph::new("Flow: Starting..."), inner);
+            }
+            chat
+        } else {
+            body
+        };
         let mut lines = vec![];
         if let Some(page) = &self.page {
             for record in &page.messages {
@@ -856,6 +898,62 @@ mod tests {
         );
         assert_eq!(view.editor.text, "e");
         controller.close().unwrap();
+    }
+
+    #[test]
+    fn execution_panel_adapts_to_resizing_and_preserves_the_editor() {
+        let root = tempfile::tempdir().unwrap();
+        let launch = super::super::tests::launch(root.path());
+        let mut view = ChatView::new(&launch.manifest.description().unwrap()).unwrap();
+        view.editor.insert("Draft for the next turn");
+        assert!(!render(&view, 180, 40).contains("Flow execution"));
+        view.pending = Some(None);
+        assert!(render(&view, 180, 40).contains("Flow: Starting..."));
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 0.1"]);
+        let mut run = LocalRun::start(
+            command,
+            launch.manifest.description().unwrap(),
+            mf_telemetry::identity::RunId::new(),
+            1024,
+        )
+        .unwrap();
+        view.observation = Some(run.observation());
+        for (width, height, side_by_side) in [(180, 40, true), (80, 32, false)] {
+            let text = render(&view, width, height);
+            let rows: Vec<_> = text.lines().collect();
+            let panel = rows
+                .iter()
+                .position(|row| row.contains("Flow execution"))
+                .unwrap();
+            let chat = rows
+                .iter()
+                .position(|row| row.contains("What would you like"))
+                .unwrap();
+            assert_eq!(panel == chat, side_by_side, "{text}");
+            assert!(text.contains("Flow: Running"), "{text}");
+            assert!(text.contains("start"), "{text}");
+            assert!(text.contains("Observation: Collecting"), "{text}");
+            assert!(text.contains("Draft for the next turn"), "{text}");
+        }
+        let compact = render(&view, 60, 18);
+        assert!(compact.contains("Flow: Running"), "{compact}");
+        assert!(!compact.contains("Flow execution"), "{compact}");
+        assert!(compact.contains("Draft for the next turn"), "{compact}");
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
+        while run.poll().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(10));
+        }
+        view.pending = None;
+        let finished = render(&view, 180, 40);
+        assert!(finished.contains("Flow: Exited 0"), "{finished}");
+        assert!(finished.contains("UnverifiedTail"), "{finished}");
+        for (width, height) in [(1, 1), (20, 6), (180, 10)] {
+            render(&view, width, height);
+        }
+        view.switch(None);
+        assert!(!render(&view, 180, 40).contains("Flow execution"));
     }
 
     #[test]
