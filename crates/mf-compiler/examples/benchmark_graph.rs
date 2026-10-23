@@ -8,7 +8,7 @@ use mf_runtime::{
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, hint::black_box, time::Instant};
 
-fn definition(count: usize, payload: usize) -> WorkflowDefinition {
+pub fn definition(count: usize, payload: usize) -> WorkflowDefinition {
     assert!(count > 0);
     let id = |index| format!("n{index:06}");
     let value = if payload == 0 {

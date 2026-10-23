@@ -9,17 +9,8 @@ use mf_telemetry::{
 use mf_tui::graph::GraphLayout;
 use std::time::Instant;
 
-fn main() {
-    let mut arguments = std::env::args().skip(1);
-    let mode = arguments.next().unwrap_or_else(|| "chain".into());
-    let size: usize = arguments
-        .next()
-        .as_deref()
-        .unwrap_or("256")
-        .parse()
-        .expect("size must be an integer");
-    assert!(size >= 2);
-    let mut graph = WorkflowDescription {
+pub fn description(size: usize) -> WorkflowDescription {
+    WorkflowDescription {
         order_edges: Vec::new(),
         version: WorkflowDescriptionVersion::V2026_09_27,
         workflow_id: WorkflowId::try_from(format!("sha256:{}", "d".repeat(64))).unwrap(),
@@ -35,7 +26,20 @@ fn main() {
         execution: None,
         loop_bodies: Vec::new(),
         clusters: Vec::new(),
-    };
+    }
+}
+
+fn main() {
+    let mut arguments = std::env::args().skip(1);
+    let mode = arguments.next().unwrap_or_else(|| "chain".into());
+    let size: usize = arguments
+        .next()
+        .as_deref()
+        .unwrap_or("256")
+        .parse()
+        .expect("size must be an integer");
+    assert!(size >= 2);
+    let mut graph = description(size);
     let edge = |from: usize, to: usize, port: usize| DataEdge {
         exclusive: false,
         from_node: format!("node-{from:05}"),
