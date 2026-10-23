@@ -121,6 +121,50 @@ class ValidationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'checkout'):
             validation.evaluate_coverage(self.root, current, comparison, plan, report)
 
+    def test_declaration_changes_preserve_all_unknown_executable_items(self):
+        sources = [
+            'fn run() { let value = "}; pub use hidden::*;"; }',
+            'macro_rules! generate { () => { pub fn run() {} }; }',
+            'inventory::submit! { Registration { factory: run } }',
+            'fn run() { /* { /* nested */ } */ println!(r###"};"###); }',
+            "fn run<'a>(value: &'a str) { let brace = '}'; }",
+        ]
+        for source in sources:
+            with self.subTest(source=source):
+                before = source + '\npub use model::{Old, Shared};\n'
+                after = source + '\npub use model::{New, Shared};\nmod live;\n'
+                self.assertEqual(validation.executable_items(before), validation.executable_items(after))
+                self.assertIsNotNone(validation.executable_items(after))
+        for before, after in [
+            ('fn run() { use old::*; }', 'fn run() { use new::*; }'),
+            ('custom! { use old::*; }', 'custom! { use new::*; }'),
+            ('#[custom(old)] mod item;', '#[custom(new)] mod item;'),
+            ('fn run() { let text = r#"use old::*;"#; }',
+             'fn run() { let text = r#"use new::*;"#; }'),
+            ('fn run() { /* use old::*; */ }', 'fn run() { /* use new::*; */ }'),
+        ]:
+            with self.subTest(before=before):
+                self.assertNotEqual(validation.executable_items(before), validation.executable_items(after))
+        for source in ['fn run() {', 'fn run() { /* unterminated', 'fn run() { r##"missing"# }',
+                       'fn run() { "missing }', 'fn run() { ] }']:
+            with self.subTest(source=source): self.assertIsNone(validation.executable_items(source))
+
+    def test_unmapped_declaration_edits_require_unchanged_executable_items(self):
+        source = 'macro_rules! generated { () => { fn run() {} }; }\n'
+        base = self.commit(source + 'pub use model::Old;')
+        head = self.commit(source + 'pub use model::New;\nmod live;')
+        merge = self.git('commit-tree', self.git('rev-parse', 'HEAD^{tree}'), '-p', base, '-p', head, '-m', 'merge')
+        self.git('checkout', '-q', '--detach', merge)
+        self.current = validation.current_context(self.root, 'owner/repo', 7,
+            {'id': 9, 'run_attempt': 1, 'workflow_id': 2}, {'coverage_target': 95, 'policy': validation.POLICY})
+        current, comparison, plan, report = self.coverage_inputs()
+        report.write_text('SF:other.rs\nDA:1,1\nend_of_record\n')
+        result = validation.evaluate_coverage(self.root, current, comparison, plan, report)
+        self.assertEqual(result['status'], 'not_applicable')
+        self.assertEqual(result['non_executable_files'], ['source.rs'])
+        self.assertFalse(validation.declaration_changes_only(self.root, base, 'missing.rs', 'fn new() {}'))
+        self.assertFalse(validation.declaration_changes_only(self.root, base, 'source.rs', source.replace('run', 'changed')))
+
     def test_new_renamed_deleted_and_comment_only_sources(self):
         previous = self.current['merge']
         self.git('mv', 'source.rs', 'renamed source.rs')
