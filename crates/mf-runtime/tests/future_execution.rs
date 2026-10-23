@@ -21,8 +21,8 @@ impl Drop for DropProbe {
     }
 }
 
-async fn waiting(dropped: Arc<AtomicBool>) {
-    let _probe = DropProbe(dropped);
+// Capture the probe before polling: backend startup can outlast the deadline.
+async fn waiting(_probe: DropProbe) {
     pending().await
 }
 
@@ -44,9 +44,21 @@ fn a_deadline_wakes_and_drops_a_pending_operation() {
     let context = ExecutionContext::default();
     let dropped = Arc::new(AtomicBool::new(false));
     let result = context.execute_future(
-        waiting(dropped.clone()),
+        waiting(DropProbe(dropped.clone())),
         Some(Instant::now() + Duration::from_millis(25)),
     );
+    assert!(matches!(
+        result,
+        Err(FutureExecutionError::DeadlineExceeded)
+    ));
+    assert!(dropped.load(Ordering::SeqCst));
+}
+
+#[test]
+fn an_expired_deadline_drops_an_unpolled_operation() {
+    let context = ExecutionContext::default();
+    let dropped = Arc::new(AtomicBool::new(false));
+    let result = context.execute_future(waiting(DropProbe(dropped.clone())), Some(Instant::now()));
     assert!(matches!(
         result,
         Err(FutureExecutionError::DeadlineExceeded)
