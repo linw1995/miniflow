@@ -379,11 +379,18 @@ and unknown counters are preserved. Legacy columns remain compatibility data. No
 
 ## Executable chat terminal
 
-Compile a conversation workflow, then launch it with explicit local storage:
+Compile a conversation workflow, then launch it:
 
 ```bash
-mf run ./chat-flow --chat --chat-db ./chat.sqlite --chat-profile default --params.model your-model
+mf run ./chat-flow --chat --chat-profile default --params.model your-model
 ```
+
+Chat storage defaults to `~/Library/Application Support/miniflow/chat.sqlite` on macOS and
+`$XDG_DATA_HOME/miniflow/chat.sqlite` on Linux, falling back to `~/.local/share/miniflow/chat.sqlite` when
+`XDG_DATA_HOME` is unset, empty, or relative. Missing parent directories are created automatically.
+Use `--chat-db <PATH>` to select another database. If the user data directory cannot be resolved,
+an explicit path is required. Run help displays the resolved absolute default path without creating
+the storage directory; if resolution fails, help remains available and asks for an explicit path.
 
 `--chat` implies `--tui`; passing both flags remains supported. The terminal presents one conversation above an input
 area that grows with its content. The initial empty chat is saved only when its first prompt is sent; that prompt

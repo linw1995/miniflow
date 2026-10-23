@@ -189,15 +189,19 @@ fn interact(binary: &Path, database: &Path, restart: bool) -> String {
     let flags = FdFlag::from_bits_truncate(fcntl(&pty.master, FcntlArg::F_GETFD).unwrap());
     fcntl(&pty.master, FcntlArg::F_SETFD(flags | FdFlag::FD_CLOEXEC)).unwrap();
     let original = tcgetattr(&pty.slave).unwrap();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_mf"))
-        .args(["run", "--chat", "--chat-db"])
-        .arg(database)
+    let mut command = Command::new(env!("CARGO_BIN_EXE_mf"));
+    command.args(["run", "--chat"]).env_clear();
+    if restart {
+        command.arg("--chat-db").arg(database);
+    } else {
+        command.env("HOME", binary.parent().unwrap().join("home"));
+    }
+    let mut child = command
         .arg(binary)
         .args(["--params.model", "fixture-model"])
         .stdin(Stdio::from(pty.slave.try_clone().unwrap()))
         .stderr(Stdio::from(pty.slave.try_clone().unwrap()))
         .stdout(Stdio::piped())
-        .env_clear()
         .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
         .env("PATH", "")
         .env("MF_CHAT_TUI_KEY", "synthetic-key")
@@ -330,18 +334,24 @@ fn executable_chat_preserves_sessions_retry_save_usage_and_source_free_restart()
     ]);
     let root = tempfile::tempdir().unwrap();
     let binary = compiled(root.path(), &server, "chat-flow.json");
-    let path = root.path().join("chat.sqlite");
+    #[cfg(target_os = "macos")]
+    let path = root
+        .path()
+        .join("home/Library/Application Support/miniflow/chat.sqlite");
+    #[cfg(not(target_os = "macos"))]
+    let path = root.path().join("home/.local/share/miniflow/chat.sqlite");
     let nonterminal = Command::new(env!("CARGO_BIN_EXE_mf"))
-        .args(["run", "--tui", "--chat", "--chat-db"])
-        .arg(&path)
+        .args(["run", "--tui", "--chat"])
         .arg(&binary)
         .args(["--params.api_key", "synthetic-key"])
+        .env("HOME", root.path().join("home"))
+        .env_remove("XDG_DATA_HOME")
         .stdin(Stdio::null())
         .output()
         .unwrap();
     assert!(!nonterminal.status.success());
     assert!(String::from_utf8_lossy(&nonterminal.stderr).contains("requires terminal"));
-    assert!(!path.exists());
+    assert!(!root.path().join("home").exists());
     let observed = interact(&binary, &path, false);
     assert!(!observed.contains("synthetic-key"));
     assert_eq!(server.requests().len(), 5);

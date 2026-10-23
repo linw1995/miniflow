@@ -2,6 +2,8 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use mf_compiler::{
     CompileRequest, PipelineError, RunnerOptions, SupportPackages, compile_project_with_options,
 };
+#[cfg(unix)]
+use snafu::OptionExt;
 use snafu::{ResultExt, Snafu};
 #[cfg(feature = "development-support")]
 use std::env;
@@ -46,10 +48,9 @@ enum Command {
         #[arg(long)]
         tui: bool,
         /// Keep an interactive conversation using this executable (implies --tui).
-        #[arg(long, requires = "chat_db")]
+        #[arg(long)]
         chat: bool,
-        /// SQLite database owned by this chat application.
-        #[arg(long, value_name = "PATH", requires = "chat")]
+        #[arg(long, value_name = "PATH", requires = "chat", help = chat_database_help())]
         chat_db: Option<PathBuf>,
         /// Session profile label; model configuration stays in the executable.
         #[arg(long, value_name = "NAME", requires = "chat")]
@@ -86,6 +87,9 @@ enum CliError {
     #[cfg(unix)]
     #[snafu(transparent)]
     Chat { source: mf_tui::chat::ChatRunError },
+    #[cfg(unix)]
+    #[snafu(display("could not determine the user data directory; specify --chat-db <PATH>"))]
+    ChatDataDirectory,
     #[cfg(not(unix))]
     #[snafu(display("TUI execution is supported on Linux and macOS"))]
     UnsupportedTui,
@@ -264,10 +268,17 @@ fn run(cli: Cli) -> Result<u8, CliError> {
                     arguments,
                 };
                 if chat {
+                    let database_path = match chat_db {
+                        Some(path) => path,
+                        None => default_chat_database(
+                            std::env::var_os("HOME"),
+                            std::env::var_os("XDG_DATA_HOME"),
+                        )?,
+                    };
                     Ok(mf_tui::chat::run_chat(
                         &executable,
                         mf_tui::chat::ChatOptions {
-                            database_path: chat_db.expect("clap requires chat database"),
+                            database_path,
                             profile: chat_profile.unwrap_or_else(|| "default".into()),
                             run: options,
                         },
@@ -294,6 +305,38 @@ fn run(cli: Cli) -> Result<u8, CliError> {
             }
         }
     }
+}
+
+#[cfg(unix)]
+fn default_chat_database(
+    home: Option<OsString>,
+    data_home: Option<OsString>,
+) -> Result<PathBuf, CliError> {
+    let home = home.map(PathBuf::from).filter(|path| path.is_absolute());
+    #[cfg(target_os = "macos")]
+    let directory = {
+        let _ = data_home;
+        home.map(|home| home.join("Library/Application Support"))
+    };
+    #[cfg(not(target_os = "macos"))]
+    let directory = data_home
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| home.map(|home| home.join(".local/share")));
+    Ok(directory
+        .context(ChatDataDirectorySnafu)?
+        .join("miniflow/chat.sqlite"))
+}
+
+fn chat_database_help() -> String {
+    let help = String::from("SQLite database owned by this chat application.");
+    #[cfg(unix)]
+    let help =
+        match default_chat_database(std::env::var_os("HOME"), std::env::var_os("XDG_DATA_HOME")) {
+            Ok(path) => format!("{help} [default: {}]", path.display()),
+            Err(_) => format!("{help} User data directory unavailable; specify --chat-db."),
+        };
+    help
 }
 
 fn compile(options: CompileOptions, verbose: bool) -> Result<(), CliError> {
@@ -567,9 +610,8 @@ mod tests {
 mod chat_tests {
     use super::*;
     #[test]
-    fn chat_options_require_database_and_explicit_chat() {
+    fn chat_options_require_explicit_chat() {
         for args in [
-            vec!["mf", "run", "flow", "--chat"],
             vec!["mf", "run", "flow", "--tui", "--chat-db", "chat.sqlite"],
             vec!["mf", "run", "flow", "--chat-profile", "default"],
         ] {
@@ -603,6 +645,67 @@ mod chat_tests {
             assert_eq!(chat_db, Some(PathBuf::from("chat.sqlite")));
             assert_eq!(chat_profile.as_deref(), Some("work"));
             assert_eq!(arguments.len(), 2);
+        }
+    }
+
+    #[test]
+    fn chat_accepts_default_storage_with_workflow_parameters() {
+        let cli = Cli::try_parse_from([
+            "mf",
+            "run",
+            "flow",
+            "--chat",
+            "--chat-profile",
+            "work",
+            "--params.model",
+            "model",
+        ])
+        .unwrap();
+        let Command::Run {
+            chat,
+            chat_db,
+            arguments,
+            ..
+        } = cli.command
+        else {
+            panic!("expected run");
+        };
+        assert!(chat);
+        assert!(chat_db.is_none());
+        assert_eq!(arguments, ["--params.model", "model"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn default_storage_uses_the_platform_user_data_directory() {
+        #[cfg(target_os = "macos")]
+        let expected = "/home/user/Library/Application Support/miniflow/chat.sqlite";
+        #[cfg(not(target_os = "macos"))]
+        let expected = "/home/user/.local/share/miniflow/chat.sqlite";
+        for data_home in [None, Some(""), Some("relative/data")] {
+            assert_eq!(
+                default_chat_database(Some("/home/user".into()), data_home.map(Into::into))
+                    .unwrap(),
+                PathBuf::from(expected),
+            );
+        }
+        for home in [None, Some(""), Some("relative/home")] {
+            assert!(matches!(
+                default_chat_database(home.map(Into::into), None),
+                Err(CliError::ChatDataDirectory),
+            ));
+        }
+        let custom =
+            default_chat_database(Some("/home/user".into()), Some("/data".into())).unwrap();
+        #[cfg(target_os = "macos")]
+        assert_eq!(custom, PathBuf::from(expected));
+        #[cfg(not(target_os = "macos"))]
+        {
+            assert_eq!(custom, PathBuf::from("/data/miniflow/chat.sqlite"));
+            assert_eq!(
+                default_chat_database(None, Some("/data".into())).unwrap(),
+                custom,
+            );
         }
     }
 }

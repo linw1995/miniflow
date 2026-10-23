@@ -104,6 +104,73 @@ fn combines_help_from_a_nonexecutable_binary_without_running_or_reading_inputs()
 }
 
 #[test]
+fn chat_database_help_displays_the_resolved_path_without_creating_storage() {
+    let directory = tempfile::tempdir().unwrap();
+    let runner = directory.path().join("runner");
+    write_runner(&runner, Some(&manifest().to_bytes().unwrap()));
+    let home = directory.path().join("home with spaces");
+    let data = directory.path().join("custom data");
+    for data_home in [
+        None,
+        Some(Path::new("")),
+        Some(Path::new("relative")),
+        Some(data.as_path()),
+    ] {
+        #[cfg(target_os = "macos")]
+        let expected = home.join("Library/Application Support/miniflow/chat.sqlite");
+        #[cfg(not(target_os = "macos"))]
+        let expected = data_home
+            .filter(|path| path.is_absolute())
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| home.join(".local/share"))
+            .join("miniflow/chat.sqlite");
+        for args in [
+            vec!["run".as_ref(), "--help".as_ref()],
+            vec!["run".as_ref(), "-h".as_ref()],
+            vec!["help".as_ref(), "run".as_ref()],
+            vec!["run".as_ref(), runner.as_os_str(), "--help".as_ref()],
+        ] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_mf"));
+            command
+                .args(args)
+                .env("HOME", &home)
+                .env_remove("XDG_DATA_HOME");
+            if let Some(data_home) = data_home {
+                command.env("XDG_DATA_HOME", data_home);
+            }
+            let output = command.output().unwrap();
+            assert!(output.status.success(), "{output:?}");
+            assert!(output.stderr.is_empty(), "{output:?}");
+            let help = String::from_utf8(output.stdout).unwrap();
+            assert!(
+                help.contains(&format!("[default: {}]", expected.display())),
+                "{help}"
+            );
+        }
+    }
+    assert!(!home.exists());
+    assert!(!data.exists());
+}
+
+#[test]
+fn chat_database_help_remains_available_without_a_user_data_directory() {
+    let output = Command::new(env!("CARGO_BIN_EXE_mf"))
+        .args(["run", "--help"])
+        .env_remove("HOME")
+        .env_remove("XDG_DATA_HOME")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let help = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        help.contains("User data directory unavailable; specify --chat-db."),
+        "{help}"
+    );
+    assert!(!help.contains("[default:"), "{help}");
+}
+
+#[test]
 fn missing_or_invalid_manifests_fail_without_executing_the_file() {
     let directory = tempfile::tempdir().unwrap();
     let runner = directory.path().join("runner");
