@@ -82,7 +82,11 @@ impl FlowNode {
     }
 
     pub fn into_task(self) -> Option<TaskFlowNode> {
-        let task = self.node.and_then(crate::NodeExecution::into_task_node)?;
+        let mut execution = self.node?;
+        if let crate::NodeExecution::TaskStream(task) = &mut execution {
+            task.set_stream_contract(&self.metadata.stream_outputs);
+        }
+        let task = execution.into_task_node()?;
         Some(FlowNode {
             definition_id: self.definition_id,
             metadata: self.metadata,

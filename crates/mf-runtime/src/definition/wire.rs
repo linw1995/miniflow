@@ -21,7 +21,12 @@ impl<'de> Deserialize<'de> for WorkflowDefinition {
         let version: WorkflowDefinitionVersion =
             serde_json::from_value(value.get("version").cloned().unwrap_or(Value::Null))
                 .map_err(de::Error::custom)?;
-        let modern = version == WorkflowDefinitionVersion::V2026_10_19;
+        if !version.supports_live_outputs() && value.get("stream_outputs").is_some() {
+            return Err(de::Error::custom(
+                "stream_outputs requires version 2026-10-23",
+            ));
+        }
+        let modern = version.supports_order_edges();
         decode_scope(&mut value, modern, "workflow").map_err(de::Error::custom)?;
         DefinitionFields::deserialize(value).map_err(de::Error::custom)
     }
@@ -36,12 +41,8 @@ impl Serialize for WorkflowDefinition {
             }
         }
         let mut value = serde_json::to_value(Canonical(self)).map_err(ser::Error::custom)?;
-        encode_scope(
-            &mut value,
-            self.version == WorkflowDefinitionVersion::V2026_10_19,
-            "workflow",
-        )
-        .map_err(ser::Error::custom)?;
+        encode_scope(&mut value, self.version.supports_order_edges(), "workflow")
+            .map_err(ser::Error::custom)?;
         value.serialize(serializer)
     }
 }

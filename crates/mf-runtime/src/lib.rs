@@ -9,6 +9,7 @@ mod flow;
 #[cfg(feature = "async")]
 mod future_execution;
 mod iteration;
+mod live;
 mod loop_node;
 mod message_domain;
 mod node;
@@ -49,7 +50,7 @@ pub use definition::{
     LoopVariableDefinition, MAX_LOOP_DEPTH, MAX_LOOP_ITERATIONS, MAX_SCHEDULED_STEPS,
     NodeDefinition, NodeDependency, OrderEdgeDefinition, OutputReferenceDefinition,
     WorkflowDefinition, WorkflowDefinitionVersion, WorkflowOutputDefinition,
-    validate_exclusive_inputs,
+    WorkflowStreamOutputDefinition, validate_exclusive_inputs,
 };
 pub use execution_domains::{ExecutionDomain, ExecutionDomains};
 pub use execution_inputs::{ExecutionInputs, InputResolution, resolve_workflow_inputs};
@@ -65,6 +66,7 @@ pub use iteration::{
     IterationConfig, IterationErrorPolicy, IterationMode, IterationResultDefinition,
     iteration_input_flow_node,
 };
+pub use live::{LiveOutputEvent, LiveOutputKind, LivePublisher};
 pub use loop_node::{
     loop_variable_types, prepared_loop_assign, prepared_loop_exit, prepared_loop_source_types,
     prepared_scope_source,
@@ -110,8 +112,8 @@ pub use stream_plan::{
 };
 pub use subgraph::PreparedSubgraph;
 pub use task_stream::{
-    DiscardSink, EmissionError, EmissionSink, Emitter, StreamInvocation, TaskStreamExecutor,
-    TaskStreamNode, TypedEmitter, TypedTaskStreamNode,
+    DiscardSink, EmissionError, EmissionSink, Emitter, StreamInvocation, StreamOutputContract,
+    TaskStreamExecutor, TaskStreamNode, TypedEmitter, TypedTaskStreamNode,
 };
 pub use typed_inputs::{
     InputDecodeError, InputField, InputValue, NodeInputs, Nullable, Shared, decode_default_input,

@@ -37,6 +37,8 @@ impl fmt::Display for CyclePath {
 
 #[derive(Debug, Snafu)]
 pub enum WorkflowCompileError {
+    #[snafu(display("invalid live export `{name}`: {message}"))]
+    InvalidLiveExport { name: String, message: String },
     #[snafu(display("invalid node-success dependency: {message}"))]
     InvalidSuccessDependency { message: String },
     #[snafu(transparent)]
@@ -275,12 +277,14 @@ impl TypeInferenceState {
     ) -> Result<(), WorkflowCompileError> {
         let id = &node.definition_id;
         let derivations = node.metadata.output_derivations.clone();
-        node.metadata
-            .ports
-            .validate_derivations(id.as_str(), &derivations)
-            .with_context(|_| OutputDerivationSnafu {
-                definition_id: id.clone(),
-            })?;
+        mf_runtime::NodePorts {
+            inputs: node.metadata.ports.inputs.clone(),
+            outputs: node.metadata.output_ports().cloned().collect(),
+        }
+        .validate_derivations(id.as_str(), &derivations)
+        .with_context(|_| OutputDerivationSnafu {
+            definition_id: id.clone(),
+        })?;
 
         let mut inputs: BTreeMap<&str, TypeFact> = BTreeMap::new();
         for dependency in dependencies {
@@ -374,7 +378,13 @@ impl TypeInferenceState {
             .into_iter()
             .map(|derivation| (derivation.output().to_owned(), derivation))
             .collect();
-        for output in &mut node.metadata.ports.outputs {
+        for output in node
+            .metadata
+            .ports
+            .outputs
+            .iter_mut()
+            .chain(&mut node.metadata.stream_outputs)
+        {
             let declared = output.value_type.clone();
             let mut fact = match derivations.get(output.name.as_ref()) {
                 Some(OutputDerivation::KnownType { value_type, .. }) => TypeFact {
@@ -477,22 +487,63 @@ pub fn prepare_definition_with_layouts(
 ) -> Result<(Vec<FlowNode>, Vec<DefinitionId>), WorkflowCompileError> {
     crate::loops::validate_structure(definition)?;
     crate::validate_execution(definition).context(StreamConstructionSnafu)?;
-    prepare_graph(
+    let mut names = BTreeSet::new();
+    for output in &definition.stream_outputs {
+        ensure!(
+            definition.version.supports_live_outputs(),
+            InvalidLiveExportSnafu {
+                name: &output.name,
+                message: "stream_outputs requires version 2026-10-23",
+            }
+        );
+        ensure!(
+            !output.name.trim().is_empty() && names.insert(&output.name),
+            InvalidLiveExportSnafu {
+                name: &output.name,
+                message: "export names must be nonempty and unique",
+            }
+        );
+        ensure!(
+            !output.path.is_empty()
+                && output.path.iter().all(|id| !id.as_str().is_empty())
+                && !output.port.is_empty(),
+            InvalidLiveExportSnafu {
+                name: &output.name,
+                message: "source path and port must be nonempty",
+            }
+        );
+    }
+    let mut resolved = BTreeSet::new();
+    let result = prepare_graph(
         definition,
         &mut GraphPreparation {
             registry,
             body_layouts,
             path: Vec::new(),
+            exports: &definition.stream_outputs,
+            resolved: &mut resolved,
         },
         None,
         false,
-    )
+    )?;
+    for output in &definition.stream_outputs {
+        ensure!(
+            resolved.contains(&output.name),
+            InvalidLiveExportSnafu {
+                name: &output.name,
+                message: "source path does not identify a prepared node",
+            }
+        );
+    }
+    Ok(result)
 }
 
 struct GraphPreparation<'a> {
     registry: &'a NodeRegistry,
     body_layouts: Option<&'a mut BTreeMap<Vec<DefinitionId>, mf_runtime::ExecutionDomains>>,
     path: Vec<DefinitionId>,
+    exports: &'a [mf_runtime::WorkflowStreamOutputDefinition],
+    resolved: &'a mut BTreeSet<String>,
 }
 
 fn prepare_graph(
@@ -576,6 +627,39 @@ fn prepare_graph(
         let dependencies = incoming.get(id.as_str()).map_or(&[][..], Vec::as_slice);
         inference.resolve_node(&mut nodes[indices[id]], dependencies)?;
     }
+    for node in &mut nodes {
+        let mut path = preparation.path.clone();
+        path.push(node.definition_id.clone());
+        let mut exports = Vec::new();
+        for output in preparation
+            .exports
+            .iter()
+            .filter(|output| output.path == path)
+        {
+            let execution = node.node.as_ref().expect("prepared executor");
+            let port = execution
+                .stream_outputs(&node.metadata)
+                .iter()
+                .find(|port| port.name == output.port)
+                .with_context(|| InvalidLiveExportSnafu {
+                    name: &output.name,
+                    message: format!("source port `{}` is not a stream output", output.port),
+                })?;
+            exports.push(mf_runtime::StreamOutputContract {
+                name: output.name.clone(),
+                path: path.clone(),
+                port: output.port.clone(),
+                value_type: port.value_type.clone(),
+                required: port.required,
+            });
+            preparation.resolved.insert(output.name.clone());
+        }
+        if let Some(mf_runtime::NodeExecution::TaskStream(executor)) = &mut node.node {
+            executor.set_stream_contract(&node.metadata.stream_outputs);
+            executor.set_exports(exports.clone());
+        }
+        node.metadata.stream_exports.extend(exports);
+    }
     crate::construction::validate_exclusive_branches(order.iter().map(|id| {
         (
             &nodes[indices[id]],
@@ -631,7 +715,7 @@ fn validate_base_metadata(
 ) -> Result<(), WorkflowCompileError> {
     let registrations: BTreeMap<_, _> = nodes
         .iter()
-        .map(|node| (node.definition_id.clone(), &node.metadata.ports))
+        .map(|node| (node.definition_id.clone(), &node.metadata))
         .collect();
     let invalid = |id: &DefinitionId, message: String| WorkflowCompileError::InvalidNodeMetadata {
         definition_id: id.clone(),
@@ -640,6 +724,14 @@ fn validate_base_metadata(
     let mut output_index = BTreeMap::new();
     for node in nodes {
         let ports = registrations[&node.definition_id];
+        if !ports.stream_outputs.is_empty()
+            && !matches!(node.node, Some(mf_runtime::NodeExecution::TaskStream(_)))
+        {
+            return Err(invalid(
+                &node.definition_id,
+                "separate stream outputs require a combined executor".into(),
+            ));
+        }
         if !node.metadata.input_bindings.is_empty()
             && (!startup || incoming.contains_key(node.definition_id.as_str()))
         {
@@ -650,12 +742,15 @@ fn validate_base_metadata(
         }
         if let Some(generation) = &node.metadata.typed_generation {
             generation
-                .validate(ports)
+                .validate(&ports.ports)
                 .with_context(|_| TypedGenerationSnafu {
                     definition_id: node.definition_id.clone(),
                 })?;
         }
-        for (direction, specs) in [("input", &ports.inputs), ("output", &ports.outputs)] {
+        for (direction, specs) in [
+            ("input", ports.ports.inputs.iter().collect::<Vec<_>>()),
+            ("output", ports.output_ports().collect()),
+        ] {
             let mut names = BTreeSet::new();
             for port in specs {
                 if port.name.is_empty() || !names.insert(&port.name) {
@@ -673,7 +768,7 @@ fn validate_base_metadata(
                     })?;
             }
         }
-        for port in &ports.outputs {
+        for port in ports.output_ports() {
             let key = crate::output_id(node.definition_id.as_str(), &port.name);
             if let Some((previous_node, previous_port)) =
                 output_index.insert(key.clone(), (&node.definition_id, &port.name))
@@ -725,8 +820,7 @@ fn validate_base_metadata(
     }
     for edge in &definition.control_edges {
         if !registrations[&edge.from_node]
-            .outputs
-            .iter()
+            .output_ports()
             .any(|port| port.name == edge.from_output)
         {
             return Err(control_error(edge, "unknown source output"));
@@ -737,11 +831,7 @@ fn validate_base_metadata(
     for edge in definition.edges.iter() {
         let source = registrations[&edge.from_node];
         let target = registrations[&edge.to_node];
-        let Some(_) = source
-            .outputs
-            .iter()
-            .find(|port| port.name == edge.from_output)
-        else {
+        let Some(_) = source.output_port(&edge.from_output) else {
             return UnknownOutputPortSnafu {
                 from_node: edge.from_node.clone(),
                 from_output: edge.from_output.clone(),
@@ -750,7 +840,12 @@ fn validate_base_metadata(
             }
             .fail();
         };
-        let Some(_) = target.inputs.iter().find(|port| port.name == edge.to_input) else {
+        let Some(_) = target
+            .ports
+            .inputs
+            .iter()
+            .find(|port| port.name == edge.to_input)
+        else {
             return UnknownInputPortSnafu {
                 from_node: edge.from_node.clone(),
                 from_output: edge.from_output.clone(),
@@ -767,7 +862,12 @@ fn validate_base_metadata(
         if startup && !incoming.contains_key(node.id.as_str()) {
             continue;
         }
-        for port in registration.inputs.iter().filter(|port| port.required) {
+        for port in registration
+            .ports
+            .inputs
+            .iter()
+            .filter(|port| port.required)
+        {
             if !connected_inputs.contains(&(node.id.clone(), port.name.to_string())) {
                 return MissingRequiredInputSnafu {
                     node_id: node.id.clone(),
@@ -781,8 +881,7 @@ fn validate_base_metadata(
     for output in &definition.outputs {
         let registration = registrations[&output.node];
         if !registration
-            .outputs
-            .iter()
+            .output_ports()
             .any(|port| port.name == output.port)
         {
             return UnknownWorkflowOutputPortSnafu {
@@ -805,9 +904,7 @@ pub fn topological_order(
 }
 
 fn validate_structure(definition: &WorkflowDefinition) -> Result<(), WorkflowCompileError> {
-    if definition.has_order_edges()
-        && definition.version != crate::WorkflowDefinitionVersion::V2026_10_19
-    {
+    if definition.has_order_edges() && !definition.version.supports_order_edges() {
         return InvalidSuccessDependencySnafu {
             message: "node-success edges require version 2026-10-19",
         }
@@ -1118,6 +1215,11 @@ pub fn normalize_plan(
                 edges
             },
             outputs,
+            stream_outputs: {
+                let mut outputs = definition.stream_outputs.clone();
+                outputs.sort_by(|left, right| left.name.cmp(&right.name));
+                outputs
+            },
         },
         execution_order,
     })
@@ -1369,14 +1471,20 @@ pub fn resolve_nodes(
     definition: &WorkflowDefinition,
     registry: &NodeRegistry,
 ) -> Result<Vec<FlowNode>, WorkflowCompileError> {
+    if !definition.stream_outputs.is_empty() {
+        return prepare_definition(definition, registry).map(|(nodes, _)| nodes);
+    }
     crate::loops::validate_structure(definition)?;
     crate::validate_execution(definition).context(StreamConstructionSnafu)?;
+    let mut resolved = BTreeSet::new();
     resolve_nodes_in_scope(
         definition,
         &mut GraphPreparation {
             registry,
             body_layouts: None,
             path: Vec::new(),
+            exports: &[],
+            resolved: &mut resolved,
         },
         None,
         false,
@@ -1454,6 +1562,10 @@ fn bind_subgraph_node(
             path: Vec::new(),
         })
         .collect();
+    let stream_exports = nodes
+        .iter()
+        .flat_map(|node| node.metadata.stream_exports.iter().cloned())
+        .collect();
     let flow = crate::FlowBuilder::prepare(nodes, body.edges.clone(), order, body.outputs.clone())
         .and_then(|flow| flow.with_control_edges(body.control_edges.clone()))
         .and_then(|flow| flow.with_order_edges(body.order_edges.clone()))
@@ -1468,12 +1580,13 @@ fn bind_subgraph_node(
     let body = PreparedSubgraph::new(identities, outputs, move |state| {
         flow.execute_in_context(state)
     });
-    let instance = registration
+    let mut instance = registration
         .instantiate_subgraph(node.id.as_str(), node.config.clone(), options, body)
         .context(NodeConstructionSnafu {
             definition_id: node.id.clone(),
             kind: node.kind.clone(),
         })?;
+    instance.metadata.stream_exports = stream_exports;
     Ok(FlowNode::new(node.id.clone(), instance))
 }
 

@@ -1005,6 +1005,11 @@ impl CompiledWorkflow {
             });
             let outputs = self.definition.outputs.iter().map(output_definition_tokens);
             let output_domains = (0..order.len()).map(|index| message.output_domain(index));
+            let stream_domains =
+                (0..order.len()).map(|index| match message.stream_output_domain(index) {
+                    Some(domain) => quote! { Some(#domain) },
+                    None => quote! { None },
+                });
             let selected = match message.selected_domain() {
                 Some(selected) => quote! { Some(#selected) },
                 None => quote! { None },
@@ -1020,9 +1025,10 @@ impl CompiledWorkflow {
             layouts.push(quote! {
                 pub static STREAM_DEPENDENCIES: &[std::borrow::Cow<'static, [mf_runtime::FlowDependency]>] = &[#(#dependencies),*];
                 pub static STREAM_OUTPUTS: &[mf_runtime::WorkflowOutputDefinition] = &[#(#outputs),*];
-                pub static STREAM_MESSAGE_DOMAINS: mf_runtime::MessageDomains = mf_runtime::MessageDomains::from_parts(
+                pub static STREAM_MESSAGE_DOMAINS: mf_runtime::MessageDomains = mf_runtime::MessageDomains::from_parts_with_streams(
                     std::borrow::Cow::Borrowed(&[#(#sources),*]),
                     std::borrow::Cow::Borrowed(&[#(#output_domains),*]),
+                    std::borrow::Cow::Borrowed(&[#(#stream_domains),*]),
                     #selected, #executions,
                     std::borrow::Cow::Borrowed(&[#(#by_message),*]),
                     std::borrow::Cow::Borrowed(&[#(#by_execution),*]),

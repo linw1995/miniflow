@@ -48,3 +48,34 @@ fn prepare(config: serde_json::Value) -> Result<PreparedNode, NodeBuildError> {
 inventory::submit! {
     NodeRegistration { kind: "fixture.task_stream", factory: NodeFactory::Plain(prepare) }
 }
+
+#[derive(NodeValue)]
+struct JoinInput {
+    delta: usize,
+    total: usize,
+}
+
+struct Join;
+
+impl mf_runtime::TypedTaskNode for Join {
+    type Input = JoinInput;
+    type Output = Reply;
+
+    fn execute(
+        &self,
+        input: JoinInput,
+        _: &mut ExecutionContext,
+    ) -> Result<TypedNodeResult<Reply>, NodeExecutionError> {
+        Ok(Reply {
+            total: input.delta + input.total,
+        }
+        .into())
+    }
+}
+
+inventory::submit! {
+    NodeRegistration {
+        kind: "fixture.task_stream_join",
+        factory: NodeFactory::Plain(|_| PreparedNode::typed_task(Join, NodeMetadata::default())),
+    }
+}

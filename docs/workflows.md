@@ -2,7 +2,7 @@
 
 ## JSON format
 
-Use version `2026-10-19` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
+Use version `2026-10-23` for new workflows. Each node has a unique nonblank `id`, a registered `kind`, optional
 `config`, and optional `inputs`. Inputs reference producer outputs; `edges` declare execution prerequisites. An
 `outputs` entry selects a node port and names the executable's JSON result.
 
@@ -788,9 +788,42 @@ between invocations. `describe_workflow_inputs` inspects configured requirements
 
 Older single-run schemas keep their required-edge rules.
 
+## Combined terminal results and live output
+
+Version `2026-10-23` adds `stream_outputs` without changing the `2026-10-19` input-reference and prerequisite
+syntax. A combined provider declares its terminal and incremental ports separately and executes once. Its
+terminal values remain ordinary workflow results. A finite workflow can explicitly export incremental values
+to its host without changing to `execution.mode = stream`:
+
+```json
+{
+  "stream_outputs": [
+    {"name": "increments", "path": ["group.count"], "port": "delta"}
+  ]
+}
+```
+
+This fragment assumes a combined provider named `group.count` with a stream port `delta`, such as the counting
+provider described in [node development](node-development.md#combined-task-and-stream-execution).
+Every path element is a complete node ID; dots are not split. A path such as `["repeat", "count"]` selects
+`count` inside a Loop or Iteration. Compilation validates the exact source and reflects its value contract.
+Nested exports preserve distinct dynamic invocation identities, including parallel iteration items.
+
+Attach a `mf_runtime::LivePublisher` to the execution context before running a finite Flow to consume its
+exports. Each invoked exported node produces open/close controls, with zero or more values between them.
+Live delivery is independent of telemetry. A node in a skipped branch produces no invocation controls.
+A host without a publisher is not a consumer: exports are automatically discarded and no unread queue is
+created. A provider can check consumer presence and avoid constructing incremental output entirely.
+
+Graph-local stream consumers require streaming execution. A combined node's terminal ports stay in its
+input domain; its incremental ports create a separate ordered domain. Mixing a delta and terminal answer
+in one consumer is rejected rather than implicitly correlated. Synchronous Loop/Iteration bodies support
+explicit host exports while retaining ordinary Task result ordering; graph-local stream edges remain unsupported
+inside those bodies. Required emission fields constrain actual values and do not require at least one emission.
+
 ## Streaming through the in-memory API
 
-Schemas `2026-10-03` and `2026-10-19` enable streams with `execution: {"mode": "stream"}` and optional limits. Initial
+Schemas `2026-10-03`, `2026-10-19`, and `2026-10-23` enable streams with `execution: {"mode": "stream"}` and optional limits. Initial
 nodes receive their workflow parameters once. Initial tasks and their ordinary dependencies execute in one
 startup frame; producers execute independently and emit messages into their own domains. An empty graph or a
 task-only graph finishes without external input. A producer reached through startup tasks also starts once.

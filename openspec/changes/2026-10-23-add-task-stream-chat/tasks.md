@@ -8,12 +8,12 @@
 
 ## 2. Workflow schema, exports, and output ownership
 
-- [ ] 2.1 Add a workflow schema revision and explicit `stream_outputs` selections with exact path elements; verify definition round trips, dotted IDs, duplicate aliases, unknown paths, and terminal-port rejection.
-- [ ] 2.2 Resolve and freeze terminal versus stream types, routes, and refinements before execution; verify incompatible edge diagnostics and source category preservation through inference.
-- [ ] 2.3 Replace node-only output ownership in compiler/runtime domain tables with category-aware ownership; verify combined terminal results stay in the input domain and emissions create a new domain.
-- [ ] 2.4 Preserve success prerequisites and selected-output rules while rejecting implicit cross-domain joins; verify terminal success edges, delta-plus-answer rejection, and existing producer/event restrictions.
-- [ ] 2.5 Route finite live exports through Loop/Iteration context forks without graph-local stream consumers in synchronous bodies; verify sequential/parallel scope identities, branch skips, and preserved variable/result ordering.
-- [ ] 2.6 Document live-export syntax and finite/stream distinctions in `docs/workflows.md`; verify examples resolve exact source paths without execution-mode selectors.
+- [x] 2.1 Add a workflow schema revision and explicit `stream_outputs` selections with exact path elements; verify definition round trips, dotted IDs, duplicate aliases, unknown paths, and terminal-port rejection.
+- [x] 2.2 Resolve and freeze terminal versus stream types, routes, and refinements before execution; verify incompatible edge diagnostics and source category preservation through inference.
+- [x] 2.3 Replace node-only output ownership in compiler/runtime domain tables with category-aware ownership; verify combined terminal results stay in the input domain and emissions create a new domain.
+- [x] 2.4 Preserve success prerequisites and selected-output rules while rejecting implicit cross-domain joins; verify terminal success edges, delta-plus-answer rejection, and existing producer/event restrictions.
+- [x] 2.5 Route finite live exports through Loop/Iteration context forks without graph-local stream consumers in synchronous bodies; verify sequential/parallel scope identities, branch skips, and preserved variable/result ordering.
+- [x] 2.6 Document live-export syntax and finite/stream distinctions in `docs/workflows.md`; verify examples resolve exact source paths without execution-mode selectors.
 
 ## 3. Runtime scheduling, delivery, and closure
 

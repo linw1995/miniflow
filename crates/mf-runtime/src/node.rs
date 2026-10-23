@@ -822,6 +822,8 @@ pub struct NodeMetadata {
     pub ports: NodePorts,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub stream_outputs: Vec<PortSpec>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub stream_exports: Vec<crate::StreamOutputContract>,
     /// At most one listed output may produce a value per task invocation.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub exclusive_outputs: Vec<String>,
@@ -833,6 +835,14 @@ pub struct NodeMetadata {
 }
 
 impl NodeMetadata {
+    pub fn output_ports(&self) -> impl Iterator<Item = &PortSpec> {
+        self.ports.outputs.iter().chain(&self.stream_outputs)
+    }
+
+    pub fn output_port(&self, name: &str) -> Option<&PortSpec> {
+        self.output_ports().find(|port| port.name == name)
+    }
+
     pub fn new(ports: NodePorts) -> Self {
         Self {
             ports,

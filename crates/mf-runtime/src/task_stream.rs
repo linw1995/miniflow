@@ -213,6 +213,16 @@ pub struct StreamInvocation {
     pub path: Vec<LoopPathEntry>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamOutputContract {
+    pub name: String,
+    pub path: Vec<crate::DefinitionId>,
+    pub port: String,
+    pub value_type: crate::ValueType,
+    pub required: bool,
+}
+
 impl StreamInvocation {
     pub fn new(context: &ExecutionContext) -> Result<Self, StreamError> {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
@@ -233,11 +243,28 @@ impl StreamInvocation {
 pub struct TaskStreamExecutor {
     node: Box<dyn TaskStreamNode>,
     outputs: Vec<PortSpec>,
+    exports: Vec<StreamOutputContract>,
 }
 
 impl TaskStreamExecutor {
     pub fn new(node: Box<dyn TaskStreamNode>, outputs: Vec<PortSpec>) -> Self {
-        Self { node, outputs }
+        Self {
+            node,
+            outputs,
+            exports: Vec::new(),
+        }
+    }
+
+    pub fn set_exports(&mut self, exports: Vec<StreamOutputContract>) {
+        self.exports = exports;
+    }
+
+    pub fn set_stream_contract(&mut self, outputs: &[PortSpec]) {
+        self.outputs = outputs.to_vec();
+    }
+
+    pub fn exports(&self) -> &[StreamOutputContract] {
+        &self.exports
     }
 
     pub fn execute_with_sink(
@@ -246,9 +273,12 @@ impl TaskStreamExecutor {
         context: &mut ExecutionContext,
         sink: &mut dyn EmissionSink,
     ) -> Result<NodeResult, NodeExecutionError> {
-        let invocation = StreamInvocation::new(context)?;
-        let mut emitter =
-            Emitter::new(invocation.node, &self.outputs, context.cancellation(), sink);
+        let mut emitter = Emitter::new(
+            context.current_node().unwrap_or("<task-stream>"),
+            &self.outputs,
+            context.cancellation(),
+            sink,
+        );
         emitter.finish()?;
         let result = self.node.execute(inputs, context, &mut emitter);
         emitter.finish()?;
@@ -262,7 +292,29 @@ impl TaskNode for TaskStreamExecutor {
         inputs: Inputs,
         context: &mut ExecutionContext,
     ) -> Result<NodeResult, NodeExecutionError> {
-        self.execute_with_sink(inputs, context, &mut DiscardSink)
+        let Some(publisher) = context
+            .live_publisher()
+            .filter(|_| !self.exports.is_empty())
+            .cloned()
+        else {
+            return self.execute_with_sink(inputs, context, &mut DiscardSink);
+        };
+        let mut sink = crate::live::ExportSink {
+            publisher,
+            exports: &self.exports,
+            invocation: StreamInvocation::new(context)?,
+            cancellation: context.cancellation(),
+        };
+        sink.open()?;
+        let result = self.execute_with_sink(inputs, context, &mut sink);
+        let closed = sink.close(result.is_ok());
+        match result {
+            Ok(result) => {
+                closed?;
+                Ok(result)
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 

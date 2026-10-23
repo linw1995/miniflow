@@ -204,6 +204,7 @@ pub struct ExecutionContext {
     scope_exit_cutoff: Arc<AtomicUsize>,
     remaining_steps: StepBudget,
     snapshots: Option<crate::SnapshotRecorder>,
+    live: Option<crate::LivePublisher>,
     scope_prefix: Vec<LoopPathEntry>,
     inputs: crate::ExecutionInputs,
     stdin: Option<std::sync::Arc<std::sync::Mutex<crate::TextInput>>>,
@@ -228,6 +229,7 @@ impl Default for ExecutionContext {
             scope_exit_cutoff: Arc::new(AtomicUsize::new(usize::MAX)),
             remaining_steps: StepBudget::new(crate::MAX_SCHEDULED_STEPS),
             snapshots: None,
+            live: None,
             scope_prefix: Vec::new(),
             inputs: crate::ExecutionInputs::default(),
             stdin: None,
@@ -315,6 +317,7 @@ impl ExecutionContext {
             current_node: None,
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             snapshots: self.snapshots.clone(),
+            live: self.live.clone(),
             scope_prefix: self.scope_prefix.clone(),
             inputs: crate::ExecutionInputs::default(),
             worker_handle: self.worker_handle.clone(),
@@ -507,6 +510,7 @@ impl ExecutionContext {
             scope_exit_cutoff: self.scope_exit_cutoff.clone(),
             remaining_steps: self.remaining_steps.clone(),
             snapshots: self.snapshots.clone(),
+            live: self.live.clone(),
             scope_prefix: self.scope_prefix.clone(),
             inputs: self.inputs.clone(),
             stdin: self.stdin.clone(),
@@ -574,6 +578,14 @@ impl ExecutionContext {
         self.snapshots = Some(recorder);
     }
 
+    pub fn set_live_publisher(&mut self, publisher: crate::LivePublisher) {
+        self.live = Some(publisher);
+    }
+
+    pub fn live_publisher(&self) -> Option<&crate::LivePublisher> {
+        self.live.as_ref()
+    }
+
     pub fn snapshot_recorder(&self) -> Option<&crate::SnapshotRecorder> {
         self.snapshots.as_ref()
     }
@@ -589,6 +601,7 @@ impl ExecutionContext {
             child.future_executor = self.future_executor.clone();
         }
         child.snapshots = self.snapshots.clone();
+        child.live = self.live.clone();
         child.scope_prefix = self.invocation_path();
         child
     }

@@ -45,6 +45,14 @@ pub enum FlowBuildError {
     WorkflowInputs { source: crate::WorkflowInputError },
     #[snafu(display("node `{definition_id}` cannot execute in a synchronous flow"))]
     NonTaskNode { definition_id: DefinitionId },
+    #[snafu(display(
+        "stream dependency `{from_node}`.`{port}` -> `{to_node}` requires streaming execution"
+    ))]
+    SynchronousStreamEdge {
+        from_node: String,
+        port: String,
+        to_node: String,
+    },
     #[snafu(display("execution plan entry {position} references unknown node `{definition_id}`"))]
     UnknownNodeInExecutionOrder {
         definition_id: DefinitionId,
@@ -215,8 +223,17 @@ where
             activation.clear();
         }
         successes.insert(id, activation.clone());
-        for port in &node.metadata.ports.outputs {
-            let mut facts = activation.clone();
+        for port in node.metadata.output_ports() {
+            let mut facts = if node
+                .metadata
+                .stream_outputs
+                .iter()
+                .any(|stream| stream.name == port.name)
+            {
+                Facts::new()
+            } else {
+                activation.clone()
+            };
             if exclusive.iter().any(|name| *name == port.name) {
                 facts.insert((id, port.name.as_ref()));
             }
@@ -239,6 +256,65 @@ pub struct FlowBuilder {
 
 impl FlowBuilder {
     pub fn into_tasks(self) -> Result<mf_runtime::Flow, FlowBuildError> {
+        for target in &self.nodes {
+            for reference in &target.metadata.context_references {
+                for source in &self.nodes {
+                    for port in &source.metadata.stream_outputs {
+                        ensure!(
+                            output_id(source.definition_id.as_str(), &port.name)
+                                != reference.output,
+                            SynchronousStreamEdgeSnafu {
+                                from_node: source.definition_id.as_str(),
+                                port: port.name.as_ref(),
+                                to_node: target.definition_id.as_str(),
+                            }
+                        );
+                    }
+                }
+            }
+        }
+        for output in &self.outputs {
+            let source = &self.nodes[output.node_id.index()];
+            ensure!(
+                !source
+                    .metadata
+                    .stream_outputs
+                    .iter()
+                    .any(|port| port.name == output.port),
+                SynchronousStreamEdgeSnafu {
+                    from_node: source.definition_id.as_str(),
+                    port: output.port.as_ref(),
+                    to_node: "<workflow output>",
+                }
+            );
+        }
+        for (target, dependencies) in self.dependencies.iter().enumerate() {
+            for dependency in dependencies {
+                let edge = dependency.borrowed();
+                let Some(port) = edge.source_output() else {
+                    continue;
+                };
+                let source = self
+                    .nodes
+                    .iter()
+                    .find(|node| node.definition_id.as_str() == edge.source_node())
+                    .expect("validated source");
+                ensure!(
+                    !source
+                        .metadata
+                        .stream_outputs
+                        .iter()
+                        .any(|output| output.name == port),
+                    SynchronousStreamEdgeSnafu {
+                        from_node: edge.source_node(),
+                        port,
+                        to_node: self.nodes[self.execution_order[target].index()]
+                            .definition_id
+                            .as_str(),
+                    }
+                );
+            }
+        }
         validate_exclusive_branches(self.execution_order.iter().zip(&self.dependencies).map(
             |(id, dependencies)| {
                 (
@@ -389,7 +465,7 @@ impl FlowBuilder {
 
         let mut output_ids = BTreeMap::new();
         for node in &nodes {
-            for port in &node.metadata.ports.outputs {
+            for port in node.metadata.output_ports() {
                 let output_id = crate::output_id(node.definition_id.as_str(), &port.name);
                 if let Some((first_node, first_port)) =
                     output_ids.insert(output_id.clone(), (&node.definition_id, &port.name))
@@ -473,9 +549,7 @@ impl FlowBuilder {
             ensure!(
                 nodes[from_node.index()]
                     .metadata
-                    .ports
-                    .outputs
-                    .iter()
+                    .output_ports()
                     .any(|port| port.name == connection.from_output),
                 UnknownPortSnafu {
                     definition_id: connection.from_node.clone(),
@@ -522,9 +596,7 @@ impl FlowBuilder {
             ensure!(
                 nodes[node_id.index()]
                     .metadata
-                    .ports
-                    .outputs
-                    .iter()
+                    .output_ports()
                     .any(|port| port.name == output.port),
                 UnknownPortSnafu {
                     definition_id: output.node.clone(),
@@ -636,9 +708,7 @@ impl FlowBuilder {
             ensure!(
                 source
                     .metadata
-                    .ports
-                    .outputs
-                    .iter()
+                    .output_ports()
                     .any(|port| port.name == edge.from_output),
                 UnknownPortSnafu {
                     definition_id: edge.from_node.clone(),
@@ -1003,7 +1073,7 @@ pub fn bind_domain_snapshots<N>(
                 .chain(message_source(domain.id).map(NodeId::new))
                 .flat_map(|id| {
                     let node = &nodes[id.index()];
-                    node.metadata.ports.outputs.iter().map(move |port| {
+                    node.metadata.output_ports().map(move |port| {
                         mf_runtime::output_id(node.definition_id.as_str(), &port.name)
                     })
                 })
@@ -1029,10 +1099,15 @@ pub fn build_message_domains(
                 message: format!("duplicate node `{}`", node.definition_id),
             }
         );
-        for port in &node.metadata.ports.outputs {
+        for port in node.metadata.output_ports() {
             let name = output_id(node.definition_id.as_str(), &port.name);
+            let stream = node
+                .metadata
+                .stream_outputs
+                .iter()
+                .any(|output| output.name == port.name);
             ensure!(
-                output_index.insert(name.clone(), index).is_none(),
+                output_index.insert(name.clone(), (index, stream)).is_none(),
                 InvalidPlanSnafu {
                     message: format!("ambiguous output `{name}`"),
                 }
@@ -1041,6 +1116,7 @@ pub fn build_message_domains(
     }
     let mut sources = vec![None];
     let mut output_domains = vec![0; nodes.len()];
+    let mut stream_output_domains = vec![None; nodes.len()];
     let mut node_message_domains = vec![0; nodes.len()];
     for (index, node) in nodes.iter().enumerate() {
         let mut incoming_domains = BTreeSet::new();
@@ -1069,9 +1145,7 @@ pub fn build_message_domains(
                 ensure!(
                     nodes[source]
                         .metadata
-                        .ports
-                        .outputs
-                        .iter()
+                        .output_ports()
                         .any(|port| port.name == port_name),
                     InvalidPlanSnafu {
                         message: format!(
@@ -1101,7 +1175,18 @@ pub fn build_message_domains(
                     }
                 );
             }
-            incoming_domains.insert(output_domains[source]);
+            let stream = dependency.borrowed().source_output().is_some_and(|port| {
+                nodes[source]
+                    .metadata
+                    .stream_outputs
+                    .iter()
+                    .any(|output| output.name == port)
+            });
+            incoming_domains.insert(if stream {
+                stream_output_domains[source].expect("connected stream source was planned")
+            } else {
+                output_domains[source]
+            });
         }
         ensure!(incoming_domains.len() <= 1, {
             let edges = dependencies[index]
@@ -1151,18 +1236,37 @@ pub fn build_message_domains(
                 new_domain
             }
         };
+        let stream_connected = node.metadata.stream_outputs.iter().any(|port| {
+            dependencies.iter().flatten().any(|dependency| {
+                let edge = dependency.borrowed();
+                edge.source_node() == node.definition_id.as_str()
+                    && edge.source_output() == Some(port.name.as_ref())
+            }) || outputs
+                .iter()
+                .any(|output| output.node == node.definition_id && output.port == port.name)
+        });
+        if stream_connected {
+            stream_output_domains[index] = Some(sources.len());
+            sources.push(Some(index));
+        }
         for reference in &node.metadata.context_references {
-            let producer = output_index
-                .get(&reference.output)
-                .copied()
-                .with_context(|| InvalidPlanSnafu {
-                    message: format!(
-                        "node `{}` references unknown output `{}`",
-                        node.definition_id, reference.output
-                    ),
-                })?;
+            let (producer, stream) =
+                output_index
+                    .get(&reference.output)
+                    .copied()
+                    .with_context(|| InvalidPlanSnafu {
+                        message: format!(
+                            "node `{}` references unknown output `{}`",
+                            node.definition_id, reference.output
+                        ),
+                    })?;
             ensure!(
-                output_domains[producer] == domain && producer < index,
+                (if stream {
+                    stream_output_domains[producer]
+                } else {
+                    Some(output_domains[producer])
+                }) == Some(domain)
+                    && producer < index,
                 InvalidPlanSnafu {
                     message: format!(
                         "node `{}` context reference `{}` crosses a message boundary",
@@ -1183,9 +1287,7 @@ pub fn build_message_domains(
         ensure!(
             nodes[index]
                 .metadata
-                .ports
-                .outputs
-                .iter()
+                .output_ports()
                 .any(|port| port.name == output.port),
             InvalidPlanSnafu {
                 message: format!(
@@ -1194,7 +1296,16 @@ pub fn build_message_domains(
                 ),
             }
         );
-        let domain = output_domains[index];
+        let domain = if nodes[index]
+            .metadata
+            .stream_outputs
+            .iter()
+            .any(|port| port.name == output.port)
+        {
+            stream_output_domains[index].expect("selected stream source was planned")
+        } else {
+            output_domains[index]
+        };
         ensure!(
             selected_domain.is_none_or(|selected| selected == domain),
             InvalidPlanSnafu {
@@ -1219,11 +1330,12 @@ pub fn build_message_domains(
     let order: Vec<_> = (0..nodes.len()).map(NodeId::new).collect();
     let boundaries: Vec<_> = nodes
         .iter()
-        .map(|node| {
+        .enumerate()
+        .map(|(index, node)| {
             matches!(
                 node.node,
                 Some(NodeExecution::Event(_) | NodeExecution::Stream(_))
-            )
+            ) || stream_output_domains[index].is_some()
         })
         .collect();
     let execution_domains = partition_execution_domains(&order, &execution_edges, &boundaries);
@@ -1238,9 +1350,10 @@ pub fn build_message_domains(
     let execution_domains = bind_domain_snapshots(execution_domains, nodes, |id| {
         sources[message_domain_by_execution[id]]
     });
-    Ok(mf_runtime::MessageDomains::from_parts(
+    Ok(mf_runtime::MessageDomains::from_parts_with_streams(
         sources.into(),
         output_domains.into(),
+        stream_output_domains.into(),
         selected_domain,
         execution_domains,
         execution_domains_by_message

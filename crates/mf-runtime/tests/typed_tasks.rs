@@ -121,6 +121,7 @@ fn preparation_derives_ports_and_never_decodes_or_executes() {
         typed_generation: None,
         ports: NodePorts::default(),
         stream_outputs: Vec::new(),
+        stream_exports: Vec::new(),
         exclusive_outputs: Vec::new(),
         input_bindings: [(
             "input".into(),

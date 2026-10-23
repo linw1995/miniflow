@@ -91,7 +91,10 @@ pub enum StreamError {
         #[snafu(source(from(crate::NodeExecutionError, Arc::new)))]
         source: Arc<crate::NodeExecutionError>,
     },
-    #[snafu(display("stream producer node `{definition_id}` failed: {source}"))]
+    #[snafu(
+        display("stream producer node `{definition_id}` failed: {source}"),
+        visibility(pub(super))
+    )]
     Producer {
         definition_id: crate::DefinitionId,
         #[snafu(source(from(NodeExecutionError, Arc::new)))]
@@ -706,6 +709,12 @@ impl PreparedStream {
             );
         }
         let (prepared, operator_states) = self.into_parts();
+        ensure!(
+            (0..prepared.nodes().len()).all(|index| prepared.stream_output_domain(index).is_none()),
+            ConfigurationSnafu {
+                message: "combined stream domains require producer-bound execution"
+            }
+        );
         let domain_limit = prepared
             .execution()
             .limits

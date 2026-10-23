@@ -90,7 +90,8 @@ impl PreparedStream {
             .map(|node| {
                 let (task, state) = match node.node {
                     Some(NodeExecution::Task(task)) => (Some(task), None),
-                    Some(NodeExecution::TaskStream(task)) => {
+                    Some(NodeExecution::TaskStream(mut task)) => {
+                        task.set_stream_contract(&node.metadata.stream_outputs);
                         (Some(task as Box<dyn TaskNode>), None)
                     }
                     Some(state @ (NodeExecution::Event(_) | NodeExecution::Stream(_))) => {
@@ -177,6 +178,10 @@ impl StreamPlan {
     }
     pub fn output_domain(&self, node: usize) -> usize {
         self.domains.output_domain(node)
+    }
+
+    pub fn stream_output_domain(&self, node: usize) -> Option<usize> {
+        self.domains.stream_output_domain(node)
     }
     pub fn outputs(&self) -> &[WorkflowOutputDefinition] {
         &self.outputs

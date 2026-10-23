@@ -6,6 +6,7 @@ use std::borrow::Cow;
 pub struct MessageDomains {
     sources: Cow<'static, [Option<usize>]>,
     output_domains: Cow<'static, [usize]>,
+    stream_output_domains: Cow<'static, [Option<usize>]>,
     selected_domain: Option<usize>,
     execution_domains: ExecutionDomains,
     execution_domains_by_message: Cow<'static, [Cow<'static, [usize]>]>,
@@ -22,9 +23,30 @@ impl MessageDomains {
         execution_domains_by_message: Cow<'static, [Cow<'static, [usize]>]>,
         message_domain_by_execution: Cow<'static, [usize]>,
     ) -> Self {
+        Self::from_parts_with_streams(
+            sources,
+            output_domains,
+            Cow::Borrowed(&[]),
+            selected_domain,
+            execution_domains,
+            execution_domains_by_message,
+            message_domain_by_execution,
+        )
+    }
+
+    pub const fn from_parts_with_streams(
+        sources: Cow<'static, [Option<usize>]>,
+        output_domains: Cow<'static, [usize]>,
+        stream_output_domains: Cow<'static, [Option<usize>]>,
+        selected_domain: Option<usize>,
+        execution_domains: ExecutionDomains,
+        execution_domains_by_message: Cow<'static, [Cow<'static, [usize]>]>,
+        message_domain_by_execution: Cow<'static, [usize]>,
+    ) -> Self {
         Self {
             sources,
             output_domains,
+            stream_output_domains,
             selected_domain,
             execution_domains,
             execution_domains_by_message,
@@ -39,6 +61,10 @@ impl MessageDomains {
 
     pub fn output_domain(&self, node: usize) -> usize {
         self.output_domains[node]
+    }
+
+    pub fn stream_output_domain(&self, node: usize) -> Option<usize> {
+        self.stream_output_domains.get(node).copied().flatten()
     }
 
     pub fn selected_domain(&self) -> Option<usize> {
