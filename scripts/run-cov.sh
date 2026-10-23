@@ -153,7 +153,8 @@ import shutil
 import sys
 
 build, extra, destination = map(Path, sys.argv[1:])
-for name, source in [("deps", build / "deps"), ("build", build / "build"), ("fixtures", extra)]:
+for name, source in [("deps", build / "deps"), ("build", build / "build"),
+                     ("examples", build / "examples"), ("fixtures", extra)]:
     if source.is_dir():
         shutil.copytree(source, destination / name, copy_function=os.link,
                         ignore=shutil.ignore_patterns(".kache-prestage-*"))
@@ -280,7 +281,7 @@ fi
 prepare_coverage
 # Preserve feature unification and reuse one instrumented build for inventory and execution.
 cargo metadata --offline --locked --all-features --format-version 1 > "${coverage_dir}/cargo-metadata.json"
-cargo nextest list --locked --all-features "${test_packages[@]}" \
+cargo nextest list --locked --all-targets --all-features "${test_packages[@]}" \
   --list-type binaries-only --message-format json > "${coverage_dir}/binaries.json"
 cargo nextest list --cargo-metadata "${coverage_dir}/cargo-metadata.json" \
   --binaries-metadata "${coverage_dir}/binaries.json" \
