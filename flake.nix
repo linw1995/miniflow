@@ -52,6 +52,7 @@
               ./scripts/nextest-build-cache.py
               ./scripts/cargo_cache.py
               ./scripts/nextest-cargo.sh
+              ./scripts/profraw-wrapper.sh
               ./scripts/pr_validation.py
               ./scripts/coverage_selection.py
               ./LICENSE
@@ -120,7 +121,7 @@
           test = craneLib.cargoNextest (cargoArgs // {
             inherit cargoArtifacts;
             postPatch = ''
-              patchShebangs scripts/nextest-cargo.sh
+              patchShebangs scripts/nextest-cargo.sh scripts/profraw-wrapper.sh
             '';
             cargoNextestExtraArgs = "--locked --workspace --all-targets --all-features --profile ci"
               + pkgs.lib.optionalString pkgs.stdenv.hostPlatform.isLinux " --no-fail-fast";
