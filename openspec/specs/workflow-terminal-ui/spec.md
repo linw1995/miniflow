@@ -715,20 +715,32 @@ caller-owned without stream-only eviction or omission policies.
 
 ### Requirement: Launch chat mode explicitly
 
-`mf run <executable> --tui --chat --chat-db <path>` SHALL validate the shared chat contract, terminal-owned
+`mf run <executable> --chat [--chat-db <path>]` SHALL imply `--tui` and validate the shared chat contract, terminal-owned
 inputs, and terminal requirements before opening storage. Each turn SHALL run the complete supplied executable
 with fresh invocation and run identities, using shared storage and recovery APIs. The CLI MUST NOT substitute
 an embedded flow, infer model identities from the graph, or override provider configuration.
+
+Without `--chat-db`, storage SHALL default to `~/Library/Application Support/miniflow/chat.sqlite` on macOS
+and `$XDG_DATA_HOME/miniflow/chat.sqlite` on Linux, falling back to `~/.local/share/miniflow/chat.sqlite` when
+`XDG_DATA_HOME` is unset, empty, or relative. An explicit path SHALL take precedence without requiring
+a resolvable user data directory. Default path resolution SHALL NOT create storage before chat validation.
+Run help SHALL display the resolved absolute default path without creating storage. If the user data
+directory cannot be resolved, help SHALL remain available and request an explicit `--chat-db` path.
 
 #### Scenario: Execute repeated model calls
 
 - **WHEN** a compatible conversation workflow contains a loop with multiple model calls
 - **THEN** chat mode executes the entire workflow and persists its reported message metadata and individual usage facts
 
-#### Scenario: Reject chat without terminal mode
+#### Scenario: Launch chat with default storage
 
 - **WHEN** the user supplies `--chat` without `--tui`
-- **THEN** CLI validation fails before opening storage or starting a runner
+- **THEN** chat mode enables terminal observation and uses the user data directory unless `--chat-db` is supplied
+
+#### Scenario: Missing user data directory
+
+- **WHEN** chat mode has neither `--chat-db` nor a resolvable user data directory
+- **THEN** the CLI fails with a diagnostic requesting `--chat-db` before opening storage or starting a runner
 
 #### Scenario: Keep ordinary observation available
 
