@@ -1,5 +1,5 @@
 {
-  "version": "2026-09-26",
+  "version": "2026-10-23",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -20,6 +20,13 @@
       "name": "answer",
       "node": "answer",
       "port": "value"
+    }
+  ],
+  "clusters": [
+    {
+      "label": "Answer",
+      "annotation": "Return a constant integer as the workflow result.",
+      "nodes": ["answer"]
     }
   ]
 }

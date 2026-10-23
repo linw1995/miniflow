@@ -472,7 +472,6 @@ fn body_invocations_keep_success_conditions_local_and_containers_are_rejected() 
         let root = tempfile::tempdir().unwrap();
         let path = root.path().join("trace");
         let mut graph: WorkflowDefinition = serde_json::from_str(source).unwrap();
-        graph.version = mf_compiler::WorkflowDefinitionVersion::V2026_10_19;
         let container = graph.nodes[1].id.clone();
         if let Some(loop_definition) = &mut graph.nodes[1].loop_definition {
             loop_definition.body.nodes.extend([
@@ -727,7 +726,6 @@ fn standalone_success_dependencies_match_memory_and_preserve_manifests() {
         include_str!("../../../examples/iteration.json"),
     ] {
         let mut graph: WorkflowDefinition = serde_json::from_str(source).unwrap();
-        graph.version = mf_compiler::WorkflowDefinitionVersion::V2026_10_19;
         if let Some(definition) = &mut graph.nodes[1].loop_definition {
             definition.body.nodes.extend([
                 serde_json::from_value(task("a", &path)).unwrap(),

@@ -810,7 +810,7 @@ fn subgraph_preparation(
                 })?;
         body_static_scope.push(node.id.to_string());
         (
-            crate::loops::body_definition(&definition.body, &parent.dependencies),
+            crate::loops::body_definition(&definition.body, &parent.dependencies, parent.version),
             serde_json::json!({
                 "max_iterations": definition.max_iterations,
                 "variables": definition.variables,
@@ -1511,7 +1511,11 @@ fn collect_body_layouts(
             .find(|node| &node.id == id)
             .expect("validated node ID");
         let body = if let Some(loop_definition) = &node.loop_definition {
-            crate::loops::body_definition(&loop_definition.body, &definition.dependencies)
+            crate::loops::body_definition(
+                &loop_definition.body,
+                &definition.dependencies,
+                definition.version,
+            )
         } else if node.kind == ITERATION_KIND {
             let invalid = |message| {
                 IterationSnafu {

@@ -136,6 +136,7 @@ pub struct GraphLayout {
     sources: Vec<Vec<usize>>,
     display_of_node: Vec<usize>,
     node_clusters: Vec<Option<usize>>,
+    node_annotations: Vec<Vec<String>>,
     all_nodes: Vec<NodeDescription>,
     clusters: Vec<GraphCluster>,
     edges: Vec<GraphEdge>,
@@ -337,6 +338,11 @@ impl GraphLayout {
         for id in &description.execution_order {
             let node_index = node_index[id.as_str()];
             let node = &description.nodes[node_index];
+            let width = node_cluster[node_index].map_or(NODE_WIDTH, |cluster| {
+                let label_width =
+                    ratatui::text::Span::raw(&description.clusters[cluster].label).width() as u32;
+                NODE_WIDTH.max(label_width + 4)
+            });
             if let Some(cluster) = node_cluster[node_index]
                 && collapsed.contains(&cluster)
             {
@@ -350,7 +356,7 @@ impl GraphLayout {
                             rect: GraphRect {
                                 x: 0,
                                 y: 0,
-                                width: NODE_WIDTH,
+                                width,
                                 height: NODE_HEIGHT,
                             },
                         });
@@ -370,7 +376,7 @@ impl GraphLayout {
                 rect: GraphRect {
                     x: 0,
                     y: 0,
-                    width: NODE_WIDTH,
+                    width,
                     height: NODE_HEIGHT,
                 },
             });
@@ -378,6 +384,42 @@ impl GraphLayout {
             node_clusters.push(node_cluster[node_index]);
             display_of_node[node_index] = display;
         }
+        let mut annotated = BTreeSet::new();
+        let mut node_annotations: Vec<_> = node_clusters
+            .iter()
+            .enumerate()
+            .map(|(index, cluster)| {
+                cluster
+                    .filter(|cluster| annotated.insert(*cluster))
+                    .map_or_else(Vec::new, |cluster| {
+                        wrap_annotation(
+                            &description.clusters[cluster].annotation,
+                            nodes[index].rect.width - 2,
+                        )
+                    })
+            })
+            .collect();
+        let annotation_heights: Vec<_> = node_annotations
+            .iter()
+            .map(|lines| {
+                if lines.is_empty() {
+                    0
+                } else {
+                    lines.len() as u32 + 1
+                }
+            })
+            .collect();
+        let mut header_heights: Vec<_> = nodes
+            .iter()
+            .enumerate()
+            .map(|(index, node)| {
+                if node.kind == CLUSTER_KIND {
+                    0
+                } else {
+                    annotation_heights[index]
+                }
+            })
+            .collect();
         let mut edges: Vec<GraphEdge> = Vec::new();
         let mut bundles: BTreeMap<(usize, usize, EdgeKind), usize> = BTreeMap::new();
         let mut topology = BTreeSet::new();
@@ -541,14 +583,20 @@ impl GraphLayout {
                         attachment_spacing / 2 + 3
                     }
             });
-            node.rect.height = NODE_HEIGHT.max(outgoing_height).max(incoming_height);
+            // Annotation rows stay inside the routing obstacle, above the first expanded member
+            // or below the collapsed title, so connections cannot overwrite cluster text.
+            node.rect.height =
+                NODE_HEIGHT.max(outgoing_height).max(incoming_height) + annotation_heights[index];
         }
 
         let vertices: Vec<_> = (0..nodes.len())
             .map(|index| {
                 (
                     index as u32,
-                    (nodes[index].rect.height as f64, NODE_WIDTH as f64),
+                    (
+                        nodes[index].rect.height as f64,
+                        nodes[index].rect.width as f64,
+                    ),
                 )
             })
             .collect();
@@ -589,6 +637,11 @@ impl GraphLayout {
         let mut node_components = vec![0; nodes.len()];
         let mut component_bottoms = Vec::new();
         let mut component_top = MARGIN;
+        let column_width = nodes
+            .iter()
+            .map(|node| node.rect.width)
+            .max()
+            .unwrap_or(NODE_WIDTH);
         for (vertices, _, _) in components {
             let mut vertices = vertices;
             vertices.sort_by(|left, right| {
@@ -635,7 +688,7 @@ impl GraphLayout {
                 let mut row_y = component_top + centering;
                 for (id, _) in layer.iter() {
                     if let Some(node) = nodes.get_mut(*id) {
-                        node.rect.x = MARGIN + column as u32 * (NODE_WIDTH + COLUMN_GAP);
+                        node.rect.x = MARGIN + column as u32 * (column_width + COLUMN_GAP);
                         node.rect.y = row_y;
                         row_y += row_stride(node, attachment_spacing);
                         node_components[*id] = component_bottoms.len();
@@ -655,10 +708,44 @@ impl GraphLayout {
                 component_top += node.rect.height + ROW_GAP;
             }
         }
+        if description
+            .clusters
+            .iter()
+            .enumerate()
+            .any(|(index, _)| !collapsed.contains(&index))
+        {
+            let mut anchors = BTreeMap::new();
+            for (index, cluster) in node_clusters.iter().enumerate() {
+                if let Some(cluster) = cluster {
+                    let anchor = anchors.entry(*cluster).or_insert(index);
+                    if (nodes[index].rect.x, index) < (nodes[*anchor].rect.x, *anchor) {
+                        *anchor = index;
+                    }
+                }
+            }
+            for index in 0..nodes.len() {
+                if header_heights[index] == 0 {
+                    continue;
+                }
+                let anchor = anchors[&node_clusters[index].expect("annotated cluster member")];
+                if anchor != index {
+                    let height = std::mem::take(&mut header_heights[index]);
+                    header_heights[anchor] = height;
+                    node_annotations[anchor] = std::mem::take(&mut node_annotations[index]);
+                    nodes[index].rect.height -= height;
+                    nodes[anchor].rect.height += height;
+                }
+            }
+            let bottom =
+                arrange_cluster_bands(&mut nodes, &node_clusters, &topology, attachment_spacing);
+            node_components.fill(0);
+            component_bottoms = vec![bottom];
+        }
         for attachments in &mut outgoing {
             attachments.sort_by_key(|&edge| (nodes[edges[edge].to].rect.y, &edges[edge].key));
             for (row, &edge) in attachments.iter().enumerate() {
-                edges[edge].from_row = 1 + row as u32 * attachment_spacing;
+                edges[edge].from_row =
+                    header_heights[edges[edge].from] + 1 + row as u32 * attachment_spacing;
             }
         }
         for attachments in &mut incoming {
@@ -666,11 +753,13 @@ impl GraphLayout {
             for (row, &edge) in attachments.iter().enumerate() {
                 let aligned = attachments.len() == 1 && outgoing[edges[edge].from].len() == 1;
                 // Stagger fan/join arrivals so channel crossings stay clear of their turns.
-                edges[edge].to_row = if aligned {
-                    1
-                } else {
-                    attachment_spacing / 2 + 1
-                } + row as u32 * attachment_spacing;
+                edges[edge].to_row = header_heights[edges[edge].to]
+                    + if aligned {
+                        1
+                    } else {
+                        attachment_spacing / 2 + 1
+                    }
+                    + row as u32 * attachment_spacing;
             }
         }
         let estimate = nodes
@@ -777,6 +866,7 @@ impl GraphLayout {
             sources,
             display_of_node,
             node_clusters,
+            node_annotations,
             all_nodes: description.nodes.clone(),
             clusters,
             edges,
@@ -947,25 +1037,111 @@ fn transitive_dependencies(
     for &(from, to) in topology {
         outgoing[from as usize].push(to as usize);
     }
-    let mut reachable = vec![vec![0_u64; node_count.div_ceil(64)]; node_count];
+    // A folded group can introduce a display cycle even though execution remains acyclic.
+    let Some(order) = topological_order(&outgoing) else {
+        return BTreeSet::new();
+    };
+    let mut ranks = vec![0; node_count];
+    for (rank, &node) in order.iter().enumerate() {
+        ranks[node] = rank;
+    }
+    for successors in &mut outgoing {
+        successors.sort_by_key(|&node| ranks[node]);
+    }
+    let words = node_count.div_ceil(64);
+    let mut reachable = vec![vec![0_u64; words]; node_count];
     let mut redundant = BTreeSet::new();
-    // Validation guarantees topological indices; the sorted successors expose shorter steps first.
-    for from in (0..node_count).rev() {
-        let (processed, descendants) = reachable.split_at_mut(from + 1);
-        let current = &mut processed[from];
+    // Aggregate display indices follow their first member, not the projected dependency order.
+    for &from in order.iter().rev() {
         for &to in &outgoing[from] {
             let mask = 1_u64 << (to % 64);
-            if current[to / 64] & mask != 0 {
+            if reachable[from][to / 64] & mask != 0 {
                 redundant.insert((from, to));
                 continue;
             }
+            let (current, inherited) = if from < to {
+                let (before, after) = reachable.split_at_mut(to);
+                (&mut before[from], &after[0])
+            } else {
+                let (before, after) = reachable.split_at_mut(from);
+                (&mut after[0], &before[to])
+            };
             current[to / 64] |= mask;
-            for (word, inherited) in current.iter_mut().zip(&descendants[to - from - 1]) {
+            for (word, inherited) in current.iter_mut().zip(inherited) {
                 *word |= inherited;
             }
         }
     }
     redundant
+}
+
+fn topological_order(outgoing: &[Vec<usize>]) -> Option<Vec<usize>> {
+    let node_count = outgoing.len();
+    let mut incoming = vec![0; node_count];
+    for &next in outgoing.iter().flatten() {
+        incoming[next] += 1;
+    }
+    let mut ready: BTreeSet<_> = (0..node_count)
+        .filter(|&node| incoming[node] == 0)
+        .collect();
+    let mut order = Vec::with_capacity(node_count);
+    while let Some(node) = ready.pop_first() {
+        order.push(node);
+        for &next in &outgoing[node] {
+            incoming[next] -= 1;
+            if incoming[next] == 0 {
+                ready.insert(next);
+            }
+        }
+    }
+    (order.len() == node_count).then_some(order)
+}
+
+fn arrange_cluster_bands(
+    nodes: &mut [GraphNode],
+    clusters: &[Option<usize>],
+    topology: &[(u32, u32)],
+    attachment_spacing: u32,
+) -> u32 {
+    let mut groups = BTreeMap::<Option<usize>, Vec<usize>>::new();
+    for (index, cluster) in clusters.iter().enumerate() {
+        groups.entry(*cluster).or_default().push(index);
+    }
+    let mut groups: Vec<_> = groups.into_values().collect();
+    groups.sort_by_key(|members| members[0]);
+    let mut group_of = vec![0; nodes.len()];
+    for (group, members) in groups.iter().enumerate() {
+        for &node in members {
+            group_of[node] = group;
+        }
+    }
+    let mut outgoing = vec![Vec::new(); groups.len()];
+    for &(from, to) in topology {
+        let (from, to) = (group_of[from as usize], group_of[to as usize]);
+        if from != to {
+            outgoing[from].push(to);
+        }
+    }
+    let order = topological_order(&outgoing).unwrap_or_else(|| (0..groups.len()).collect());
+    let mut top = MARGIN;
+    let mut bottom = MARGIN;
+    for group in order {
+        let mut columns = BTreeMap::<u32, Vec<usize>>::new();
+        for &index in &groups[group] {
+            columns.entry(nodes[index].rect.x).or_default().push(index);
+        }
+        for column in columns.values_mut() {
+            column.sort_by_key(|&index| (nodes[index].rect.y, index));
+            let mut y = top;
+            for &index in column.iter() {
+                nodes[index].rect.y = y;
+                y += row_stride(&nodes[index], attachment_spacing);
+            }
+            bottom = bottom.max(y);
+        }
+        top = bottom + COMPONENT_GAP;
+    }
+    bottom
 }
 
 fn row_stride(node: &GraphNode, attachment_spacing: u32) -> u32 {
@@ -1375,20 +1551,29 @@ impl<'a> GraphView<'a> {
         let label_rect = GraphRect {
             x: rect.x + 2,
             y: rect.y,
-            width: rect.width.saturating_sub(4),
+            width: (ratatui::text::Span::raw(&label).width() as u32)
+                .min(rect.width.saturating_sub(4)),
             height: 1,
         };
         self.text(area, buffer, label_rect, &label, style);
     }
 
     fn draw_node(&self, area: Rect, buffer: &mut Buffer, index: usize, node: &GraphNode) {
-        let rect = node.rect;
+        let mut rect = node.rect;
         if rect.x >= self.offset.0.saturating_add(u32::from(area.width))
             || rect.x.saturating_add(rect.width) <= self.offset.0
             || rect.y >= self.offset.1.saturating_add(u32::from(area.height))
             || rect.y.saturating_add(rect.height) <= self.offset.1
         {
             return;
+        }
+        let annotation = &self.layout.node_annotations[index];
+        let collapsed = self.layout.is_collapsed_cluster(index);
+        let annotation_y = if collapsed { rect.y + 3 } else { rect.y };
+        if !collapsed && !annotation.is_empty() {
+            let header = annotation.len() as u32 + 1;
+            rect.y += header;
+            rect.height -= header;
         }
         let observed = self
             .layout
@@ -1473,6 +1658,20 @@ impl<'a> GraphView<'a> {
             &detail,
             Style::default().fg(Color::Gray),
         );
+        for (row, line) in annotation.iter().enumerate() {
+            self.text(
+                area,
+                buffer,
+                GraphRect {
+                    x: rect.x + 1,
+                    y: annotation_y + row as u32,
+                    width: rect.width - 2,
+                    height: 1,
+                },
+                line,
+                Style::default().fg(Color::Gray),
+            );
+        }
     }
 }
 
@@ -1590,6 +1789,26 @@ fn display_line(value: &str) -> String {
         .collect()
 }
 
+fn wrap_annotation(text: &str, width: u32) -> Vec<String> {
+    let mut lines = Vec::new();
+    for source in text.split('\n') {
+        let span = ratatui::text::Span::raw(source.replace('\t', "    "));
+        let mut line = String::new();
+        let mut used = 0;
+        for grapheme in span.styled_graphemes(Style::default()) {
+            let cells = ratatui::text::Span::raw(grapheme.symbol).width() as u32;
+            if used + cells > width && !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+                used = 0;
+            }
+            line.push_str(grapheme.symbol);
+            used += cells;
+        }
+        lines.push(line);
+    }
+    lines
+}
+
 #[cfg(test)]
 mod rendering_tests {
     use super::*;
@@ -1662,6 +1881,7 @@ mod rendering_tests {
             sources: vec![vec![0], vec![1]],
             display_of_node: vec![0, 1],
             node_clusters: vec![None, None],
+            node_annotations: vec![Vec::new(), Vec::new()],
             all_nodes: nodes
                 .iter()
                 .map(|node| NodeDescription {

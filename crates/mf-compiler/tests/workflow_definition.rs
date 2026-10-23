@@ -183,6 +183,45 @@ fn iteration_body_clusters_are_preserved_in_descriptions() {
     );
 }
 #[test]
+fn nested_iteration_clusters_inherit_the_root_definition_version() {
+    use serde_json::json;
+    let mut node = json!({
+        "id":"iterate", "kind":"builtin.iteration", "config":{"body":{
+            "nodes":[{"id":"step","kind":"fixture.task"}],
+            "result":{"node":"step","port":"value"},
+            "clusters":[{"label":"Nested item","annotation":"Transform every nested item.","nodes":["step"]}]
+        }}
+    });
+    for id in ["inner", "outer"] {
+        node = json!({
+            "id":id,"kind":"workflow.loop","loop":{
+                "max_iterations":1,"variables":[{"name":"count","type":"int"}],
+                "body":{"nodes":[node]}
+            }
+        });
+    }
+    let definition = serde_json::from_value(json!({
+        "version":"2026-10-23","dependencies":{},"nodes":[node]
+    }))
+    .unwrap();
+    let plan = plan_definition(&definition).unwrap();
+    let description = mf_compiler::describe_compiled(&plan).unwrap();
+    let body = description
+        .body(&["outer".into(), "inner".into(), "iterate".into()])
+        .unwrap();
+    assert_eq!(body.clusters.len(), 1);
+    assert_eq!(body.clusters[0].label, "Nested item");
+    assert_eq!(body.clusters[0].nodes, ["step"]);
+    assert!(
+        description
+            .loop_bodies
+            .iter()
+            .filter(|body| body.path.len() < 3)
+            .all(|body| body.clusters.is_empty())
+    );
+}
+
+#[test]
 fn old_schema_explains_migration() {
     let error =
         WorkflowDefinition::from_json(r#"{"version":"2026-09-24","nodes":[]}"#).unwrap_err();

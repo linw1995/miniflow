@@ -9,7 +9,8 @@ container node or an execution boundary.
 - **Definition metadata, not graph structure.** A `clusters` array accompanies `nodes` in the root, Loop bodies, and
   Iteration bodies. Clusters never create scheduling dependencies, input bindings, ports, or synthetic execution nodes.
 - **Short and long text are separate.** `label` is the required single-line graph title. `annotation` is the required
-  longer explanation shown in Details.
+  longer explanation wrapped inside expanded and collapsed clusters and repeated in Details. Graph widths reserve the
+  complete label, and annotation rows occupy routing obstacles so connections cannot overwrite the text.
 - **No definition-side identifier.** Declaration order identifies a cluster within its immutable scope. The TUI assigns
   an internal `ClusterKey` from the scope path and declaration ordinal for folding, selection, and edge remapping.
 - **Flat clusters.** A node belongs to at most one cluster, and clusters cannot nest. Nested folding can be added later
@@ -27,10 +28,17 @@ container node or an execution boundary.
 
 ## Tradeoffs
 
-Expanded cluster frames are drawn over the existing routed geometry instead of reserving a compound-layout gutter, so
-long labels are truncated and dense crossings may touch a frame. Flat clusters keep folding deterministic; nesting
+Expanded clusters occupy separate vertical bands while retaining dependency columns, so their frames cannot overlap
+or enclose unrelated nodes. Bands follow group dependencies when their projection is acyclic. Dense connections can
+still cross a frame between groups. Labels overwrite only their own text cells, preserving the rest of the top border.
+The leftmost expanded member reserves annotation rows above its visible box; folded
+vertices reserve those rows below their summary. This keeps the text inside existing routing obstacles without adding
+display vertices or execution edges. Flat clusters keep folding deterministic; nesting
 would require hierarchical layout and selection mapping. Recompiling a `2026-10-23` workflow selects a new description
 version even when it declares no clusters, which is acceptable because the schema version is explicit.
+
+Transitive reduction uses the projected graph's topological order rather than aggregate display indices. Folding can
+also introduce a display cycle through nodes outside a cluster; in that case all projected dependencies are retained.
 
 ## Current interfaces
 

@@ -7,8 +7,8 @@ Use version `2026-10-23` for new workflows. Each node has a unique nonblank `id`
 `outputs` entry selects a node port and names the executable's JSON result. Version `2026-10-23` also supports
 display-only [node clusters](#node-clusters).
 
-The [conditional convergence example](../examples/exclusive-inputs.json) uses the new format. The [basic
-example](../examples/hello-workflow.json) retains legacy `2026-09-26` syntax. Existing supported versions keep their
+The [conditional convergence example](../examples/exclusive-inputs.json) and the [basic
+example](../examples/hello-workflow.json) use this format with annotated clusters. Existing supported versions keep their
 original field meanings and feature restrictions; new fields are not inferred from their shape.
 
 ### Input references
@@ -54,15 +54,19 @@ nodes. The [clustered example](../examples/clustered-workflow.json) compiles to 
 }
 ```
 
-`label` is the short single-line title shown in the graph. `annotation` is the longer explanation shown in Details.
+`label` is the short single-line title shown in the graph. `annotation` is the longer explanation shown inside the
+cluster and in Details. Cluster geometry reserves the title's full terminal-cell width in both expanded and collapsed
+views. Annotations wrap above the leftmost expanded member or below the collapsed node's summary, with space reserved so
+connections cannot overwrite the text. Both views preserve line breaks and indentation. Details wraps annotations to
+the pane width and scrolls by the visible page height.
 Both are required and bounded. Members belong to the containing scope, must be unique, and a node can belong to at most
 one cluster. Clusters are flat and cannot contain `%loop` or `%iteration` synthetic sources. A cluster may contain a
 Loop or Iteration node as an opaque member.
 
 In the terminal UI, `c` collapses or expands the cluster containing the selected node. A collapsed cluster is drawn as
 one node with the short label and an aggregate status; connections to its members attach to that node and internal
-connections are hidden. Expanding restores the member nodes and the cluster annotation. Cluster state is local to the
-TUI session and never changes workflow results. Older TUI readers reject the new description version before execution.
+connections are hidden. Expanding restores the member nodes while keeping the annotation visible. Cluster state is
+local to the TUI session and never changes workflow results. Older TUI readers reject the new description version before execution.
 
 ## Node dependencies
 

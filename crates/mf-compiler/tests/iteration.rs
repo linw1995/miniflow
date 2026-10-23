@@ -761,9 +761,7 @@ fn generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node(
     let body = &mut value["nodes"][1]["config"]["body"];
     body["nodes"][0]["config"]["inputs"]["key"] = json!("string");
     body["nodes"][0]["config"]["code"]["value"] = json!("key + ':' + string(10 / item + position)");
-    body["edges"].as_array_mut().unwrap().push(json!({
-        "from_node": "%iteration", "from_output": "key", "to_node": "transform", "to_input": "key"
-    }));
+    body["nodes"][0]["inputs"]["key"] = json!({"from":{"node":"%iteration","port":"key"}});
     let expected = execute(value.clone()).unwrap();
     assert_eq!(expected, json!({"results": ["a:10", null, "c:7"]}));
     fs::write(&path, value.to_string()).unwrap();
@@ -794,7 +792,7 @@ fn generated_parallel_runner_matches_in_memory_and_describes_one_iteration_node(
         "nodes":[],
         "result":{"node":"%iteration","port":"item"}
     });
-    value["edges"][0]["from_output"] = json!("values");
+    value["nodes"][1]["inputs"]["items"]["from"]["port"] = json!("values");
     fs::write(&path, value.to_string()).unwrap();
     let error = compile_project(&request).unwrap_err();
     assert_eq!(error.stage, "Cargo build");
@@ -816,10 +814,10 @@ fn loop_and_iteration_share_a_workflow_in_memory_and_generated_runners() {
         .as_array_mut()
         .unwrap()
         .extend(iteration["nodes"].as_array().unwrap().iter().cloned());
-    flow["edges"]
+    flow["clusters"]
         .as_array_mut()
         .unwrap()
-        .extend(iteration["edges"].as_array().unwrap().iter().cloned());
+        .extend(iteration["clusters"].as_array().unwrap().iter().cloned());
     flow["outputs"]
         .as_array_mut()
         .unwrap()
@@ -858,17 +856,16 @@ fn loop_and_iteration_share_a_workflow_in_memory_and_generated_runners() {
     nested["nodes"][1]["loop"]["max_iterations"] = json!(2);
     nested["nodes"][1]["loop"]["variables"] = json!([{"name": "items", "type": "array"}]);
     nested["nodes"][1]["loop"]["until"] = Value::Null;
+    let mut nested_iteration = iteration["nodes"][1].clone();
+    nested_iteration["inputs"]["items"] = json!({"from":{"node":"%loop","port":"items"}});
     nested["nodes"][1]["loop"]["body"] = json!({
         "nodes": [
-            iteration["nodes"][1].clone(),
-            {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "items"}}
-        ],
-        "edges": [
-            {"from_node": "%loop", "from_output": "items", "to_node": "iteration", "to_input": "items"},
-            {"from_node": "iteration", "from_output": "results", "to_node": "assign", "to_input": "value"}
+            nested_iteration,
+            {"id": "assign", "kind": "workflow.loop_assign", "config": {"variable": "items"},
+             "inputs":{"value":{"from":{"node":"iteration","port":"results"}}}}
         ]
     });
-    nested["edges"][0]["to_input"] = json!("items");
+    nested["nodes"][1]["inputs"] = json!({"items":{"from":{"node":"seed","port":"value"}}});
     nested["outputs"][0]["name"] = json!("items");
     nested["outputs"][0]["port"] = json!("items");
     let nested_expected = json!({"items": [4, 11, 18]});

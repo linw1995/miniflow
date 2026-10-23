@@ -1147,7 +1147,7 @@ pub fn normalize_plan(
         .map(|id| (*nodes_by_id[id]).clone())
         .collect();
     for node in &mut nodes {
-        normalize_loop_node(node, &definition.dependencies)?;
+        normalize_loop_node(node, &definition.dependencies, definition.version)?;
         if node.kind == ITERATION_KIND {
             node.config = normalize_config(definition, node)?;
         }
@@ -1197,11 +1197,12 @@ pub fn normalize_plan(
 fn normalize_loop_node(
     node: &mut crate::NodeDefinition,
     dependencies: &BTreeMap<String, crate::NodeDependency>,
+    version: crate::WorkflowDefinitionVersion,
 ) -> Result<(), WorkflowCompileError> {
     let Some(loop_definition) = &mut node.loop_definition else {
         return Ok(());
     };
-    let body = crate::loops::body_definition(&loop_definition.body, dependencies);
+    let body = crate::loops::body_definition(&loop_definition.body, dependencies, version);
     let mut normalized = normalize_plan(&body, structural_order_graph(&body)?)?.definition;
     normalized
         .nodes
@@ -1381,7 +1382,11 @@ fn collect_loop_execution_orders(
 ) -> Result<(), DescriptionError> {
     for node in &definition.nodes {
         let body = if let Some(loop_definition) = &node.loop_definition {
-            crate::loops::body_definition(&loop_definition.body, &definition.dependencies)
+            crate::loops::body_definition(
+                &loop_definition.body,
+                &definition.dependencies,
+                definition.version,
+            )
         } else if include_iterations && node.kind == ITERATION_KIND {
             let config = parse_config(node)
                 .with_context(|_| DescriptionOrderSnafu { path: path.clone() })?;
@@ -1567,6 +1572,7 @@ fn resolve_nodes_in_scope(
                     let body = crate::loops::body_definition(
                         &loop_definition.body,
                         &definition.dependencies,
+                        definition.version,
                     );
                     let options = serde_json::json!({
                         "max_iterations": loop_definition.max_iterations,

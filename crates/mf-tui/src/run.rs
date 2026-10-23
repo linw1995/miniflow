@@ -734,6 +734,7 @@ struct ViewState {
     selected: usize,
     pass_offset: usize,
     details_offset: usize,
+    details_height: usize,
 }
 
 impl ViewState {
@@ -845,10 +846,14 @@ impl ViewState {
             KeyCode::Char('d') => self.details_visible = !self.details_visible,
             KeyCode::Esc if self.details_visible => self.details_visible = false,
             KeyCode::PageDown if self.details_visible => {
-                self.details_offset = self.details_offset.saturating_add(10)
+                self.details_offset = self
+                    .details_offset
+                    .saturating_add(self.details_height.max(1))
             }
             KeyCode::PageUp if self.details_visible => {
-                self.details_offset = self.details_offset.saturating_sub(10)
+                self.details_offset = self
+                    .details_offset
+                    .saturating_sub(self.details_height.max(1))
             }
             KeyCode::Char('l') => {
                 if let Some(node) = self.layout(root, bodies).nodes().get(self.selected)
@@ -1083,6 +1088,7 @@ fn draw(
         }
         frame.render_widget(graph_view, graph);
         if let Some(details) = details {
+            view_state.details_height = usize::from(details.height.saturating_sub(2));
             let observations = display_nodes.as_deref().unwrap_or(&snapshot.nodes);
             let selected = view_state.selected;
             let collapsed_cluster = layout.is_collapsed_cluster(selected);
@@ -1228,16 +1234,15 @@ fn connection_summary(layout: &GraphLayout) -> String {
 }
 
 fn display_text(value: &str) -> String {
-    value
-        .chars()
-        .map(|ch| {
-            if ch.is_control() && ch != '\n' && ch != '\t' {
-                ' '
-            } else {
-                ch
-            }
-        })
-        .collect()
+    let mut text = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '\t' => text.push_str("    "),
+            ch if ch.is_control() && ch != '\n' => text.push(' '),
+            ch => text.push(ch),
+        }
+    }
+    text
 }
 
 fn collapsed_cluster_details(
@@ -2121,6 +2126,34 @@ mod tests {
     }
 
     #[test]
+    fn chat_title_usage_folding_and_view_changes_preserve_selection() {
+        let definition = mf_compiler::WorkflowDefinition::from_json(include_str!(
+            "../../../examples/chat-title-flow.json"
+        ))
+        .unwrap();
+        let plan = mf_compiler::plan_definition(&definition).unwrap();
+        let description = mf_compiler::describe_compiled(&plan).unwrap();
+        let snapshot = crate::state::SessionState::new(description.clone(), RunId::new())
+            .unwrap()
+            .snapshot();
+        let mut view = ObservationView::new(&description).unwrap();
+        let traces = TraceSnapshot::default();
+        let logs = LogSnapshot::default();
+        view.state.selected = view.root.display_index_for_node_id("usages").unwrap();
+        view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+        assert!(view.state.graph_notice.is_none());
+        assert!(view.root.is_collapsed_cluster(view.state.selected));
+        for _ in 0..3 {
+            view.handle_navigation(KeyCode::Char('e'), &snapshot, &traces, &logs);
+            assert!(view.state.graph_notice.is_none());
+            assert!(view.root.is_collapsed_cluster(view.state.selected));
+        }
+        view.handle_navigation(KeyCode::Char('c'), &snapshot, &traces, &logs);
+        assert!(view.state.graph_notice.is_none());
+        assert_eq!(view.root.nodes()[view.state.selected].id, "usages");
+    }
+
+    #[test]
     fn scrolling_reveals_nodes_with_minimal_movement_and_handles_small_viewports() {
         let node = GraphRect {
             x: 40,
@@ -2528,6 +2561,60 @@ mod tests {
     }
 
     #[test]
+    fn short_details_pages_preserve_the_complete_cluster_annotation() {
+        let description = scope_fixture();
+        let layout = GraphLayout::new(&description).unwrap();
+        let session = crate::state::SessionState::new(description, RunId::new()).unwrap();
+        let cluster = GraphCluster {
+            label: "Read and validate the complete configuration".into(),
+            annotation: "Read every configuration field.\n\tPreserve a\u{301} and 🦀 across narrow pages.\nFinish with the complete annotation.".into(),
+            members: vec![0],
+            rect: GraphRect { x: 0, y: 0, width: 24, height: 4 },
+            collapsed: true,
+        };
+        let text = collapsed_cluster_details(&cluster, &[0], &session.snapshot().nodes);
+        assert!(text.contains("    Preserve"));
+        let mut state = ViewState {
+            details_visible: true,
+            details_height: 2,
+            ..Default::default()
+        };
+        let mut rows = BTreeMap::new();
+        loop {
+            let (page, offset) =
+                details_window(&text, 12, state.details_height, state.details_offset);
+            for (row, line) in page.split('\n').enumerate() {
+                rows.insert(offset + row, line.to_owned());
+            }
+            if offset < state.details_offset {
+                break;
+            }
+            state.handle_key(
+                KeyCode::PageDown,
+                &session.snapshot(),
+                &layout,
+                &BTreeMap::new(),
+                &TraceSnapshot::default(),
+                &LogSnapshot::default(),
+            );
+        }
+        assert_eq!(
+            rows.into_values().collect::<String>(),
+            text.replace('\n', "")
+        );
+        let previous_offset = state.details_offset;
+        state.handle_key(
+            KeyCode::PageUp,
+            &session.snapshot(),
+            &layout,
+            &BTreeMap::new(),
+            &TraceSnapshot::default(),
+            &LogSnapshot::default(),
+        );
+        assert_eq!(state.details_offset, previous_offset - state.details_height);
+    }
+
+    #[test]
     fn shortcut_help_consumes_navigation_until_dismissed() {
         let mut state = ViewState::default();
         assert!(!state.help_visible);
@@ -2608,6 +2695,7 @@ mod tests {
             &LogSnapshot::default(),
         );
         assert!(view.details_visible);
+        view.details_height = 10;
         view.handle_key(
             KeyCode::PageDown,
             &session.snapshot(),

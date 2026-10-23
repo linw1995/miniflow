@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-19",
+  "version": "2026-10-23",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -80,24 +80,9 @@
         }
       },
       "inputs": {
-        "prompt": {
-          "from": {
-            "node": "input",
-            "port": "prompt"
-          }
-        },
-        "system": {
-          "from": {
-            "node": "input",
-            "port": "system"
-          }
-        },
-        "history": {
-          "from": {
-            "node": "input",
-            "port": "history"
-          }
-        }
+        "prompt": { "from": { "node": "input", "port": "prompt" } },
+        "system": { "from": { "node": "input", "port": "system" } },
+        "history": { "from": { "node": "input", "port": "history" } }
       }
     },
     {
@@ -114,18 +99,8 @@
         }
       },
       "inputs": {
-        "context": {
-          "from": {
-            "node": "input",
-            "port": "context"
-          }
-        },
-        "status": {
-          "from": {
-            "node": "model",
-            "port": "status"
-          }
-        }
+        "context": { "from": { "node": "input", "port": "context" } },
+        "status": { "from": { "node": "model", "port": "status" } }
       }
     },
     {
@@ -161,18 +136,8 @@
         }
       },
       "inputs": {
-        "prompt": {
-          "from": {
-            "node": "input",
-            "port": "prompt"
-          }
-        },
-        "text": {
-          "from": {
-            "node": "model",
-            "port": "text"
-          }
-        }
+        "prompt": { "from": { "node": "input", "port": "prompt" } },
+        "text": { "from": { "node": "model", "port": "text" } }
       }
     },
     {
@@ -201,18 +166,8 @@
         }
       },
       "inputs": {
-        "prompt": {
-          "from": {
-            "node": "title_prompt",
-            "port": "value"
-          }
-        },
-        "system": {
-          "from": {
-            "node": "title_system",
-            "port": "value"
-          }
-        }
+        "prompt": { "from": { "node": "title_prompt", "port": "value" } },
+        "system": { "from": { "node": "title_system", "port": "value" } }
       }
     },
     {
@@ -233,30 +188,15 @@
         }
       },
       "inputs": {
-        "left": {
-          "from": {
-            "node": "model",
-            "port": "usages"
-          }
-        },
-        "right": {
-          "from": {
-            "node": "title_model",
-            "port": "usages"
-          }
-        }
+        "left": { "from": { "node": "model", "port": "usages" } },
+        "right": { "from": { "node": "title_model", "port": "usages" } }
       }
     },
     {
       "id": "conversation_usages",
       "kind": "builtin.identity",
       "inputs": {
-        "input": {
-          "from": {
-            "node": "model",
-            "port": "usages"
-          }
-        }
+        "input": { "from": { "node": "model", "port": "usages" } }
       }
     },
     {
@@ -300,12 +240,7 @@
       "id": "title",
       "kind": "builtin.identity",
       "inputs": {
-        "input": {
-          "from": {
-            "node": "title_model",
-            "port": "text"
-          }
-        }
+        "input": { "from": { "node": "title_model", "port": "text" } }
       }
     }
   ],
@@ -373,6 +308,28 @@
       "node": "title",
       "port": "value",
       "optional": true
+    }
+  ],
+  "clusters": [
+    {
+      "label": "Conversation",
+      "annotation": "Resolve inputs and generate the primary response before deciding whether a title is needed.",
+      "nodes": ["input", "model"]
+    },
+    {
+      "label": "Title eligibility",
+      "annotation": "Generate a title only after a successful response when the provisional title allows an attempt.",
+      "nodes": ["eligible", "title_route"]
+    },
+    {
+      "label": "Title generation",
+      "annotation": "Build the title prompt, call the title model, and expose the title only when that call succeeds.",
+      "nodes": ["title_prompt", "title_system", "title_model", "title_success", "title"]
+    },
+    {
+      "label": "Usage accounting",
+      "annotation": "Combine conversation and title usage, or preserve conversation usage when title generation is skipped.",
+      "nodes": ["combined_usages", "conversation_usages", "usages"]
     }
   ]
 }

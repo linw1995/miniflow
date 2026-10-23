@@ -51,6 +51,7 @@ pub fn assignment_target(
 pub fn body_definition(
     body: &LoopBodyDefinition,
     dependencies: &BTreeMap<String, mf_runtime::NodeDependency>,
+    version: WorkflowDefinitionVersion,
 ) -> WorkflowDefinition {
     let mut nodes = Vec::with_capacity(body.nodes.len() + 1);
     nodes.push(NodeDefinition {
@@ -61,13 +62,7 @@ pub fn body_definition(
     });
     nodes.extend(body.nodes.iter().cloned());
     WorkflowDefinition {
-        version: if !body.clusters.is_empty() {
-            WorkflowDefinitionVersion::V2026_10_23
-        } else if !body.has_order_edges() {
-            WorkflowDefinitionVersion::V2026_09_29
-        } else {
-            WorkflowDefinitionVersion::V2026_10_19
-        },
+        version,
         execution: None,
         dependencies: dependencies.clone(),
         nodes,
@@ -255,7 +250,7 @@ fn validate_loop(
     if loop_definition.body.nodes.is_empty() {
         return Err(invalid(path, "Loop body must contain at least one node"));
     }
-    let body = body_definition(&loop_definition.body, dependencies);
+    let body = body_definition(&loop_definition.body, dependencies, version);
     crate::compiler::structural_order_graph(&body).with_context(|_| {
         crate::compiler::LoopBodySnafu {
             path: path_label(path),

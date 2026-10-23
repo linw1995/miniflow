@@ -518,11 +518,21 @@ pub fn channel_routes(
     components: &[usize],
     component_bottoms: &mut [u32],
 ) -> Vec<EdgeRoute> {
+    let column_positions: BTreeSet<_> = nodes.iter().map(|node| node.rect.x).collect();
+    let column_indices: BTreeMap<_, _> = column_positions
+        .into_iter()
+        .enumerate()
+        .map(|(index, x)| (x, index as u32))
+        .collect();
     let columns: Vec<_> = nodes
         .iter()
-        .map(|node| (node.rect.x - super::MARGIN) / (super::NODE_WIDTH + super::COLUMN_GAP))
+        .map(|node| column_indices[&node.rect.x])
         .collect();
     let column_count = columns.iter().copied().max().map_or(0, |last| last + 1) as usize;
+    let mut column_widths = vec![super::NODE_WIDTH; column_count];
+    for (node, column) in nodes.iter().zip(&columns) {
+        column_widths[*column as usize] = column_widths[*column as usize].max(node.rect.width);
+    }
     let mut order: Vec<_> = (0..edges.len()).collect();
     order.sort_by_key(|&index| &edges[index].key);
     let mut pass_rows = vec![None; edges.len()];
@@ -644,7 +654,7 @@ pub fn channel_routes(
     let mut column_x = vec![super::MARGIN; column_count];
     for column in 1..column_count {
         let gap = (stubs[column - 1] + capacities[column - 1] * TRACK_SPACING + 4).max(10);
-        column_x[column] = column_x[column - 1] + super::NODE_WIDTH + gap;
+        column_x[column] = column_x[column - 1] + column_widths[column - 1] + gap;
     }
     for (node, column) in nodes.iter_mut().zip(&columns) {
         node.rect.x = column_x[*column as usize];
@@ -662,7 +672,7 @@ pub fn channel_routes(
             let mut route = if let Some(pass) = pass_rows[index] {
                 let last_column = columns[edge.to] - 1;
                 let last_x = column_x[last_column as usize]
-                    + 24
+                    + column_widths[last_column as usize]
                     + stubs[last_column as usize]
                     + target_tracks[index] * TRACK_SPACING;
                 EdgeRoute::from_points([
