@@ -178,7 +178,7 @@ impl Sender {
         let mut state = self.0.state.lock().unwrap();
         state
             .cancellation
-            .get_or_insert_with(|| cancellation.clone());
+            .get_or_insert_with(|| cancellation.without_deadline());
         loop {
             if let Some(error) = &state.failure {
                 return Err(error.clone());

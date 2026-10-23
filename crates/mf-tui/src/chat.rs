@@ -621,19 +621,19 @@ impl mf_chat::ConversationBackend for ExternalBackend {
             context.cancellation().cancel(failure.as_ref().clone());
         }
         let result = if outcome.live_final {
-            mf_chat::ConversationResult::from_json(&outcome.stdout)
+            mf_chat::ConversationResult::from_json(&outcome.stdout).boxed()
+        } else if let Some(failure) = &outcome.capture_failure {
+            Err(Box::new(failure.clone()) as Box<dyn std::error::Error + Send + Sync>)
         } else if let Some(message) = &outcome.capture_error {
-            mf_chat::CaptureSnafu { message }.fail()
+            mf_chat::CaptureSnafu { message }.fail().boxed()
         } else {
-            mf_chat::ConversationResult::from_json(&outcome.stdout)
+            mf_chat::ConversationResult::from_json(&outcome.stdout).boxed()
         };
         *self
             .captured
             .lock()
             .expect("capture state was not poisoned") = Some(outcome);
-        result
-            .boxed()
-            .context(mf_chat::BackendSnafu { outcome: reason })
+        result.context(mf_chat::BackendSnafu { outcome: reason })
     }
 }
 

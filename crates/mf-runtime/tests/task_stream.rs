@@ -480,4 +480,18 @@ fn publication_deadlines_interrupt_bounded_delivery_without_a_timer_thread() {
     assert!(error.to_string().contains("publication deadline exceeded"));
     assert!(emitter.finish().is_err());
     assert!(cancellation.failure().is_none());
+    let (publisher, receiver) = mf_runtime::live_channel(Default::default()).unwrap();
+    let mut sink = QueueSink(publisher);
+    let mut emitter = Emitter::new("llm", &Delta::ports(), cancellation, &mut sink);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(20);
+    emitter.send_with_deadline(result(), deadline).unwrap();
+    receiver.recv().unwrap().unwrap();
+    std::thread::sleep(
+        deadline.saturating_duration_since(std::time::Instant::now())
+            + std::time::Duration::from_millis(2),
+    );
+    emitter.finish().unwrap();
+    drop(emitter);
+    drop(sink);
+    assert!(receiver.recv().unwrap().is_none());
 }

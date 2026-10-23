@@ -2,11 +2,7 @@
 
 ### Requirement: Send one text generation request
 
-Each invocation SHALL accept required nonempty string `prompt`, optional string `system`, and optional message-list
-`history`, and send one Chat Completions request. Connected live output SHALL use streaming; unconnected output SHALL
-permit the existing nonstreaming request with zero emissions. Request order SHALL be system instructions, supplied
-history, and the current prompt. The node MUST NOT execute tools, retain node-owned conversation state, follow
-redirects, or automatically retry requests.
+Each invocation SHALL accept nonempty string `prompt`, optional string `system`, and optional message-list `history`, then send one Chat Completions request ordered as system, history, prompt. Connected output SHALL stream; unconnected output SHALL permit unary execution with zero emissions. The node MUST NOT execute tools, retain conversation state, follow redirects, or retry requests.
 
 #### Scenario: Use an explicit compatible endpoint
 
@@ -37,11 +33,7 @@ redirects, or automatically retry requests.
 
 ### Requirement: Publish a terminal text result atomically
 
-A successful invocation SHALL publish exactly one terminal result containing complete string `text`, updated
-message-list `history`, succeeded status, a one-call usages list, and optional scalar `usage` and `finish_reason`. Text
-blocks SHALL retain response order. Conversion and validation MUST finish before terminal publication. Empty text,
-unsupported output content, invalid usage counts, and excessive output text SHALL fail without terminal outputs by
-default or transcript mutation. Earlier live increments SHALL remain provisional.
+Success SHALL publish one terminal result with complete string `text`, updated message-list `history`, succeeded status, one-call `usages`, and optional `usage` and `finish_reason`. Text blocks SHALL retain response order. Conversion and validation MUST precede publication. Empty or excessive text, unsupported content, and invalid counts SHALL fail without terminal outputs or transcript mutation by default. Earlier increments SHALL remain provisional.
 
 #### Scenario: Receive a complete text answer
 

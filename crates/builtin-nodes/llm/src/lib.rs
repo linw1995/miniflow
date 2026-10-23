@@ -506,7 +506,8 @@ impl LlmNode {
             );
             key
         };
-        let transport = transport::TerminalTransport::new(self.client()?);
+        let transport =
+            transport::TerminalTransport::new(self.client()?, context.cancellation(), deadline);
         let model = OpenAIConfig::new(key)
             .with_base_url(&config.base_url)
             .connect(transport.clone())
@@ -562,6 +563,7 @@ impl LlmNode {
                         &usage.call_id,
                         config.max_output_bytes,
                         deadline,
+                        context,
                     ),
                     Some(deadline),
                 )

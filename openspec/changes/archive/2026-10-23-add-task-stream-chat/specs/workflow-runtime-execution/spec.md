@@ -2,11 +2,7 @@
 
 ### Requirement: Prepare one executable Flow for both modes
 
-The compiler and in-memory APIs SHALL prepare both modes into one Flow containing mode, prepared executors, execution
-domains, message-domain metadata, dependencies, outputs, and limits. One runtime SHALL execute both modes in memory and
-generated runners. Missing stream configuration selects oneshot; mode MUST NOT be inferred from executor kind. Combined
-Task/Stream nodes SHALL be supported in either mode, with host-facing live exports in oneshot mode. Preparation MUST
-reject unsupported node kinds before invocation.
+Both modes SHALL prepare one Flow with mode, executors, execution and message domains, dependencies, outputs, and limits. In-memory and generated runners SHALL use one runtime. Missing stream configuration selects oneshot; executor kind MUST NOT select the mode. Combined nodes SHALL work in both modes and expose host live exports in oneshot. Preparation MUST reject unsupported executors before invocation.
 
 #### Scenario: Prepare a oneshot workflow
 
@@ -35,11 +31,7 @@ reject unsupported node kinds before invocation.
 
 ### Requirement: Partition task graphs into synchronous execution domains
 
-The planner SHALL assign every ordinary task node to exactly one execution domain. Each domain SHALL be a maximal serial
-region in validated topological order, split at forks, joins, and event or stream boundaries. Combined nodes SHALL
-introduce an execution boundary where graph-local stream consumers require independent progress. Fork branches SHALL
-become separate dependent domains; a fan-in domain SHALL depend on every incoming branch. The domain DAG MUST preserve
-all data and control dependencies.
+Every ordinary Task SHALL belong to one maximal serial execution domain in validated topological order, split at forks, joins, and Event/Stream boundaries. Combined nodes SHALL split where graph-local consumers need independent progress. Fork branches SHALL become separate dependent domains; fan-in SHALL depend on all incoming branches. The domain DAG MUST preserve data and control dependencies.
 
 #### Scenario: Keep a linear chain in one domain
 

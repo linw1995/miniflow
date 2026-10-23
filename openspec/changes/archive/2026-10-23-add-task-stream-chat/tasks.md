@@ -59,10 +59,10 @@
 
 ## 8. Integration and repository validation
 
-- [ ] 8.1 Recompile the shared affected-test planning Flow after changing node/runtime implementations using the repository command; verify the rebuilt runner plans against the current worktree with telemetry enabled.
-- [ ] 8.2 Run planning and selected tests together with package precision, plus affected non-Rust checks; verify an empty Rust selection does not become an unfiltered nextest run.
-- [ ] 8.3 Run pinned `prek install` and `prek -a`, and focused runtime/compiler/LLM/chat/TUI tests required by new failures or unresolved concerns; verify checks complete without a local `nix flake check` full-suite rerun.
-- [ ] 8.4 Run strict OpenSpec validation and review fixture parity across zero/many emissions, unconnected/connected streams, scoped execution, capture faults, and persistence recovery; verify every new scenario has an implementation check before archival.
+- [x] 8.1 Recompile the shared affected-test planning Flow after changing node/runtime implementations using the repository command; verify the rebuilt runner plans against the current worktree with telemetry enabled.
+- [x] 8.2 Run planning and selected tests together with package precision, plus affected non-Rust checks; verify an empty Rust selection does not become an unfiltered nextest run.
+- [x] 8.3 Run pinned `prek install` and `prek -a`, and focused runtime/compiler/LLM/chat/TUI tests required by new failures or unresolved concerns; verify checks complete without a local `nix flake check` full-suite rerun.
+- [x] 8.4 Run strict OpenSpec validation and review fixture parity across zero/many emissions, unconnected/connected streams, scoped execution, capture faults, and persistence recovery; verify every new scenario has an implementation check before archival.
 
 ## Workflow follow-up
 

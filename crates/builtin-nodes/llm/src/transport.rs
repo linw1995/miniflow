@@ -22,13 +22,21 @@ use std::{
 pub struct TerminalTransport {
     inner: ReqwestClient,
     usage: Arc<Mutex<Option<Usage>>>,
+    cancellation: mf_runtime::StreamCancellation,
+    deadline: std::time::Instant,
 }
 
 impl TerminalTransport {
-    pub fn new(inner: ReqwestClient) -> Self {
+    pub fn new(
+        inner: ReqwestClient,
+        cancellation: mf_runtime::StreamCancellation,
+        deadline: std::time::Instant,
+    ) -> Self {
         Self {
             inner,
             usage: Arc::new(Mutex::new(None)),
+            cancellation,
+            deadline,
         }
     }
 
@@ -132,12 +140,14 @@ impl HttpClientExt for TerminalTransport {
     {
         let response = self.inner.send_streaming(request);
         let usage = self.usage.clone();
+        let cancellation = self.cancellation.clone();
+        let deadline = self.deadline;
         async move {
             let response = response.await?;
             if !response.status().is_success() {
                 return Ok(response);
             }
-            Ok(response.map(|body| streaming::bounded(body, usage)))
+            Ok(response.map(|body| streaming::bounded(body, usage, cancellation, deadline)))
         }
     }
 }

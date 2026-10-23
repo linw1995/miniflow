@@ -536,7 +536,7 @@ fn executable_live_previews_arrive_before_authoritative_settlement() {
 
 #[test]
 fn valid_live_final_survives_late_diagnostics_and_prefix_death_never_saves_text() {
-    for mode in ["late", "prefix", "empty"] {
+    for mode in ["late", "prefix", "empty"].into_iter().cycle().take(24) {
         let root = tempfile::tempdir().unwrap();
         let (launch, _) = live_launch(root.path(), mode);
         let controller = ChatController::open(launch).unwrap();
@@ -547,13 +547,33 @@ fn valid_live_final_survives_late_diagnostics_and_prefix_death_never_saves_text(
             })
             .unwrap();
         loop {
+            let event = next(&controller);
+            if let ChatEvent::Error { source, .. } = &event {
+                panic!("{mode} failed before settlement: {source}");
+            }
             if let ChatEvent::Finished {
                 resolution,
                 capture_error,
                 ..
-            } = next(&controller)
+            } = event
             {
-                match resolution.unwrap().state {
+                let resolution = resolution.unwrap();
+                if mode == "prefix" {
+                    let mut typed_capture = false;
+                    for diagnostic in &resolution.diagnostics {
+                        let mut source: Option<&(dyn std::error::Error + 'static)> =
+                            Some(diagnostic);
+                        while let Some(error) = source {
+                            typed_capture |= error.is::<Arc<crate::run::CaptureFailure>>();
+                            source = error.source();
+                        }
+                    }
+                    assert!(
+                        typed_capture,
+                        "capture failures must retain their typed source"
+                    );
+                }
+                match resolution.state {
                     CompletionState::Committed(completion) => {
                         assert!(matches!(mode, "late" | "empty"));
                         assert_eq!(completion.result.text, "canonical");

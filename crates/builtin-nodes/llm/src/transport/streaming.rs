@@ -9,6 +9,10 @@ const MAX_STREAM_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug, Snafu)]
 pub enum StreamingTransportError {
     #[snafu(transparent)]
+    Future {
+        source: mf_runtime::FutureExecutionError,
+    },
+    #[snafu(transparent)]
     Http {
         #[snafu(source(from(Error, Box::new)))]
         source: Box<Error>,
@@ -31,6 +35,8 @@ struct Frames {
     frame: Vec<u8>,
     total: usize,
     usage: Arc<Mutex<Option<Usage>>>,
+    cancellation: mf_runtime::StreamCancellation,
+    deadline: std::time::Instant,
 }
 
 fn normalize_event(
@@ -59,7 +65,12 @@ fn normalize_event(
     Ok(Bytes::from(event))
 }
 
-pub fn bounded(body: BoxedStream, usage: Arc<Mutex<Option<Usage>>>) -> BoxedStream {
+pub fn bounded(
+    body: BoxedStream,
+    usage: Arc<Mutex<Option<Usage>>>,
+    cancellation: mf_runtime::StreamCancellation,
+    deadline: std::time::Instant,
+) -> BoxedStream {
     Box::pin(futures::stream::try_unfold(
         Frames {
             body,
@@ -67,10 +78,13 @@ pub fn bounded(body: BoxedStream, usage: Arc<Mutex<Option<Usage>>>) -> BoxedStre
             frame: Vec::new(),
             total: 0,
             usage,
+            cancellation,
+            deadline,
         },
         |mut state| async move {
             let next = async move {
                 loop {
+                    mf_runtime::check_future_limits(&state.cancellation, Some(state.deadline))?;
                     if state.pending.is_empty() {
                         let Some(chunk) = state.body.next().await else {
                             ensure!(state.frame.is_empty(), TruncatedEventSnafu);
@@ -111,4 +125,70 @@ pub fn bounded(body: BoxedStream, usage: Arc<Mutex<Option<Usage>>>) -> BoxedStre
             next.await.map_err(Error::instance)
         },
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error as _;
+
+    #[test]
+    fn metadata_only_frames_check_cancellation_between_deliveries() {
+        let cancellation = mf_runtime::StreamCancellation::default();
+        let body = Box::pin(futures::stream::iter([
+            Ok(Bytes::from_static(b": heartbeat\n\n")),
+            Ok(Bytes::from_static(b": heartbeat\n\n")),
+        ]));
+        let mut frames = bounded(
+            body,
+            Arc::new(Mutex::new(None)),
+            cancellation.clone(),
+            std::time::Instant::now() + std::time::Duration::from_secs(5),
+        );
+        let result = mf_runtime::ExecutionContext::default()
+            .execute_future(
+                async {
+                    assert!(frames.next().await.unwrap().is_ok());
+                    cancellation.cancel_with_message("stop metadata stream");
+                    frames.next().await.unwrap().unwrap_err()
+                },
+                None,
+            )
+            .unwrap();
+        assert!(result.source().unwrap().is::<StreamingTransportError>());
+        assert!(matches!(
+            result
+                .source()
+                .unwrap()
+                .downcast_ref::<StreamingTransportError>(),
+            Some(StreamingTransportError::Future {
+                source: mf_runtime::FutureExecutionError::Cancelled { .. }
+            })
+        ));
+    }
+
+    #[test]
+    fn metadata_only_frames_check_the_total_deadline_before_reading() {
+        let body = Box::pin(futures::stream::iter([Ok(Bytes::from_static(
+            b": heartbeat\n\n",
+        ))]));
+        let mut frames = bounded(
+            body,
+            Arc::new(Mutex::new(None)),
+            Default::default(),
+            std::time::Instant::now() - std::time::Duration::from_millis(1),
+        );
+        let result = mf_runtime::ExecutionContext::default()
+            .execute_future(async { frames.next().await.unwrap().unwrap_err() }, None)
+            .unwrap();
+        assert!(matches!(
+            result
+                .source()
+                .unwrap()
+                .downcast_ref::<StreamingTransportError>(),
+            Some(StreamingTransportError::Future {
+                source: mf_runtime::FutureExecutionError::DeadlineExceeded
+            })
+        ));
+    }
 }

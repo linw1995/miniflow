@@ -16,6 +16,7 @@ pub async fn complete(
     call_id: &str,
     limit: usize,
     deadline: Instant,
+    context: &mf_runtime::ExecutionContext,
 ) -> Result<CompletionResponse, LlmExecutionError> {
     let mut response = response.with_context(|source| crate::ProviderSnafu {
         kind: source.kind().code(),
@@ -25,6 +26,7 @@ pub async fn complete(
     })?;
     let mut bytes = 0usize;
     while let Some(item) = response.next().await {
+        context.check_future_limits(Some(deadline))?;
         let item = item.with_context(|source| crate::ProviderSnafu {
             kind: source.kind().code(),
             status: source

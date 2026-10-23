@@ -93,8 +93,11 @@ pub enum RunError {
     Terminal { source: io::Error },
     #[snafu(display("could not launch workflow {path:?}: {source}"))]
     Spawn { path: PathBuf, source: io::Error },
-    #[snafu(display("could not supervise workflow: {source}"))]
-    Supervise { source: io::Error },
+    #[snafu(display("could not {operation}: {source}"))]
+    Supervise {
+        operation: &'static str,
+        source: io::Error,
+    },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -348,6 +351,7 @@ pub struct LocalRun {
     exited: Option<(ExitStatus, Instant)>,
     interrupted_at: Option<Instant>,
     killed: bool,
+    kill_error: Option<(io::Error, Instant)>,
     finished: bool,
     completion: Arc<Mutex<Option<(ExitStatus, Instant)>>>,
 }
@@ -432,7 +436,9 @@ impl LocalRun {
             .lock()
             .expect("capture lock was not poisoned")
             .attach(&mut child.child)
-            .context(SuperviseSnafu)?;
+            .context(SuperviseSnafu {
+                operation: "attach workflow output pipes",
+            })?;
         Ok(Self {
             child,
             capture: match live {
@@ -444,6 +450,7 @@ impl LocalRun {
             exited: None,
             interrupted_at: None,
             killed: false,
+            kill_error: None,
             finished: false,
             completion: Arc::new(Mutex::new(None)),
         })
@@ -474,9 +481,23 @@ impl LocalRun {
             self.cancel();
         }
         if self.exited.is_none()
-            && let Some(status) = self.child.child.try_wait().context(SuperviseSnafu)?
+            && let Some(status) = self.child.child.try_wait().context(SuperviseSnafu {
+                operation: "poll workflow process group",
+            })?
         {
             self.exited = Some((status, Instant::now()));
+        }
+        if self.exited.is_some() {
+            self.kill_error = None;
+        } else if self
+            .kill_error
+            .as_ref()
+            .is_some_and(|(_, at)| at.elapsed() >= DRAIN_TIMEOUT)
+        {
+            let (source, _) = self.kill_error.take().expect("termination failure exists");
+            return Err(source).context(SuperviseSnafu {
+                operation: "terminate workflow process group",
+            });
         }
         let view = self.capture.view();
         if ((view.error.is_some() && self.interrupted_at.is_none())
@@ -484,16 +505,11 @@ impl LocalRun {
                 .interrupted_at
                 .is_some_and(|at| at.elapsed() >= INTERRUPT_TIMEOUT))
             && !self.killed
+            && self.exited.is_none()
         {
             if let Err(error) = self.child.child.start_kill() {
-                if error.raw_os_error() != Some(nix::libc::ESRCH) {
-                    return Err(error).context(SuperviseSnafu);
-                }
-                if let Some(status) = self.child.child.try_wait().context(SuperviseSnafu)? {
-                    self.exited = Some((status, Instant::now()));
-                } else {
-                    return Err(error).context(SuperviseSnafu);
-                }
+                // Signalling a disappearing group can fail before its leader is ready to reap.
+                self.kill_error = Some((error, Instant::now()));
             }
             self.killed = true;
         }
@@ -526,12 +542,16 @@ impl LocalRun {
             capture
                 .spool
                 .seek(SeekFrom::Start(0))
-                .context(SuperviseSnafu)?;
+                .context(SuperviseSnafu {
+                    operation: "seek captured workflow output",
+                })?;
             let mut stdout = Vec::new();
             capture
                 .spool
                 .read_to_end(&mut stdout)
-                .context(SuperviseSnafu)?;
+                .context(SuperviseSnafu {
+                    operation: "read captured workflow output",
+                })?;
             stdout
         };
         let outcome = LocalOutcome {
@@ -2301,6 +2321,106 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&outcome.stdout).unwrap(),
             serde_json::json!({"text":"complete"})
+        );
+    }
+
+    #[test]
+    fn failed_live_final_drain_retains_the_reply_and_typed_delivery_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let run_id = RunId::new();
+        let (schema, records) = live_wire(run_id);
+        let input = root.path().join("wire");
+        std::fs::write(&input, records.concat()).unwrap();
+        let mut command = Command::new("cat");
+        command.arg(input);
+        let mut run = LocalRun::start_live(
+            command,
+            scope_fixture(),
+            run_id,
+            LiveCaptureOptions {
+                contracts: schema,
+                publisher: mf_runtime::LivePublisher::with_flush(
+                    |_, _| Ok(()),
+                    |_| {
+                        Err(mf_runtime::StreamError::Execution {
+                            message: "receiver drain failed".into(),
+                        })
+                    },
+                ),
+                cancellation: Default::default(),
+                limits: Default::default(),
+            },
+        )
+        .unwrap();
+        let outcome = wait_for_outcome(&mut run);
+        assert!(outcome.live_final);
+        assert!(matches!(
+            outcome.live_delivery_failure.as_deref(),
+            Some(mf_runtime::StreamError::Execution { .. })
+        ));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&outcome.stdout).unwrap(),
+            serde_json::json!({"text":"complete"})
+        );
+    }
+
+    #[test]
+    fn a_transient_signal_failure_keeps_the_reaped_authoritative_final() {
+        let root = tempfile::tempdir().unwrap();
+        let run_id = RunId::new();
+        let (schema, records) = live_wire(run_id);
+        let input = root.path().join("wire");
+        let gate = root.path().join("release");
+        std::fs::write(&input, records.concat()).unwrap();
+        let mut command = Command::new("python3");
+        command.args(["-c", "import os,sys,time; sys.stdout.buffer.write(open(sys.argv[1],'rb').read()); sys.stdout.flush();\nwhile not os.path.exists(sys.argv[2]): time.sleep(0.001)"]).arg(input).arg(&gate);
+        let mut run = LocalRun::start_live(
+            command,
+            scope_fixture(),
+            run_id,
+            LiveCaptureOptions {
+                contracts: schema,
+                publisher: mf_runtime::LivePublisher::new(|_, _| Ok(())),
+                cancellation: Default::default(),
+                limits: Default::default(),
+            },
+        )
+        .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while run.capture.capture.lock().unwrap().final_json.is_none() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        run.killed = true;
+        run.kill_error = Some((
+            io::Error::from_raw_os_error(nix::libc::EPERM),
+            Instant::now(),
+        ));
+        assert!(run.poll().unwrap().is_none());
+        std::fs::write(gate, "release").unwrap();
+        let outcome = wait_for_outcome(&mut run);
+        assert!(outcome.live_final);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&outcome.stdout).unwrap(),
+            serde_json::json!({"text":"complete"})
+        );
+    }
+
+    #[test]
+    fn a_persistent_signal_failure_remains_a_typed_supervision_error() {
+        let mut command = Command::new("sleep");
+        command.arg("20");
+        let mut run = LocalRun::start(command, scope_fixture(), RunId::new(), 1024).unwrap();
+        run.killed = true;
+        run.kill_error = Some((
+            io::Error::from_raw_os_error(nix::libc::EPERM),
+            Instant::now() - DRAIN_TIMEOUT,
+        ));
+        let Err(error) = run.poll() else {
+            panic!("expected a persistent supervision error")
+        };
+        assert!(
+            matches!(error, RunError::Supervise { source, .. } if source.kind() == io::ErrorKind::PermissionDenied)
         );
     }
 

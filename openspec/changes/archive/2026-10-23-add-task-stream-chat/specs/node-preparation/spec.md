@@ -2,13 +2,7 @@
 
 ### Requirement: Select execution kind during preparation
 
-A prepared node SHALL contain a task, event, stream, or combined Task/Stream executor alongside its metadata. Combined
-executors SHALL expose both output categories for one invocation. Event and pure stream providers SHALL construct their
-state directly and MUST NOT require a task execution method. Tasks and combined executors SHALL retain `Send + Sync`;
-event and pure stream state MAY be `Send` without `Sync` and SHALL be invoked through exclusive mutable access. The
-event contract SHALL accept input, timer, and upstream-close events and return complete emissions and deadline updates.
-Stream executors SHALL emit results incrementally during each startup or input invocation. An initial EventNode without
-upstream dependencies MUST be rejected because the event contract does not define autonomous startup.
+Prepared nodes SHALL pair metadata with a Task, Event, Stream, or combined executor. Combined executors SHALL expose both output categories for one invocation. Tasks and combined executors SHALL be `Send + Sync`. Event and Stream state MAY be `Send` without `Sync`, SHALL use exclusive mutable access, and MUST NOT require a Task method. Event nodes without upstream activation MUST be rejected.
 
 #### Scenario: Construct event state directly
 
@@ -29,6 +23,16 @@ upstream dependencies MUST be rejected because the event contract does not defin
 
 - **WHEN** a provider constructs a combined executor
 - **THEN** preparation reflects terminal and stream contracts without selecting one capability or invoking business logic
+
+#### Scenario: Handle stateful events
+
+- **WHEN** an Event executor receives input, a timer, or upstream closure
+- **THEN** it returns complete emissions and deadline updates
+
+#### Scenario: Invoke incremental producers
+
+- **WHEN** a Stream executor starts or receives an input invocation
+- **THEN** it emits results incrementally during that invocation
 
 ### Requirement: Restrict synchronous execution to tasks
 
