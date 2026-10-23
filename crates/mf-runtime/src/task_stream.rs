@@ -51,6 +51,19 @@ pub trait EmissionSink {
 
     fn send(&mut self, result: NodeResult) -> Result<(), StreamError>;
 
+    fn send_with_cancellation(
+        &mut self,
+        result: NodeResult,
+        cancellation: &StreamCancellation,
+    ) -> Result<(), StreamError> {
+        if let Some(error) = cancellation.failure() {
+            return Err(error);
+        }
+        self.send(result)
+    }
+
+    fn set_deadline(&mut self, _deadline: std::time::Instant) {}
+
     fn fail(&mut self, _error: EmissionError) {}
 }
 
@@ -158,6 +171,19 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
+    pub fn send_with_deadline(
+        &mut self,
+        result: NodeResult,
+        deadline: std::time::Instant,
+    ) -> Result<(), NodeExecutionError> {
+        self.sink.set_deadline(deadline);
+        let original = self.cancellation.clone();
+        self.cancellation = original.with_deadline(deadline);
+        let result = self.send(result);
+        self.cancellation = original;
+        result
+    }
+
     pub fn set_snapshot_context(&mut self, context: &ExecutionContext) {
         self.snapshot = context
             .snapshot_recorder()
@@ -178,7 +204,9 @@ impl<'a> Emitter<'a> {
                 }
             );
         }
-        self.sink.send(result).context(DeliverySnafu { node })
+        self.sink
+            .send_with_cancellation(result, &self.cancellation)
+            .context(DeliverySnafu { node })
     }
 
     fn check(&self) -> Result<(), EmissionError> {
@@ -234,6 +262,16 @@ impl<'a, 'sink, O: crate::NodeOutputs> TypedEmitter<'a, 'sink, O> {
 
     pub fn is_connected(&self) -> bool {
         self.emitter.is_connected()
+    }
+
+    pub fn send_with_deadline(
+        &mut self,
+        result: impl Into<TypedNodeResult<O>>,
+        deadline: std::time::Instant,
+    ) -> Result<(), NodeExecutionError> {
+        let result = crate::encode_typed_result(result.into())
+            .map_err(|error| self.emitter.encoding_failed(error))?;
+        self.emitter.send_with_deadline(result, deadline)
     }
 
     pub fn send(

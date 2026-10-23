@@ -307,7 +307,7 @@ and outputs are also redacted. Literal configuration and parameter defaults rema
 
 ### LLM configuration and conversation values
 
-The opt-in `mfn-llm` package registers `builtin.llm`, an ordinary task producing one terminal result:
+The opt-in `mfn-llm` package registers `builtin.llm`, a combined node producing one authoritative terminal result and optional text deltas:
 
 | Direction | Port | Type | Required |
 | --- | --- | --- | --- |
@@ -318,6 +318,25 @@ The opt-in `mfn-llm` package registers `builtin.llm`, an ordinary task producing
 | Output | `history` | `List(Object)` | Yes |
 | Output | `usage` | `Map(Int64)` | No |
 | Output | `finish_reason` | `string` | No |
+| Stream output | `delta` | `Object` | Yes, per emission |
+
+The `delta` payload contains `text` and `model_call_id`. A connected graph edge or subscribed host export
+selects one streaming request; an unconsumed invocation sends one ordinary request and emits nothing.
+There is no per-node streaming flag or fallback request. Terminal text, history, finish reason, and usages
+come from the completed provider response. Delivered prefixes remain provisional on failure or cancellation.
+
+The [answer-and-title example](../examples/chat-title-flow.json) declares only the answer as public:
+
+```json
+"stream_outputs": [{"name": "answer", "path": ["model"], "port": "delta"}]
+```
+
+Run the compiled example with `--output-format events-jsonl --stream-output answer`. The title call stays
+terminal-only, and the final `usages` includes both calls when title generation runs. Ordinary JSON invocation
+keeps both calls terminal-only. Loop and Iteration exports use their full source paths and per-invocation identities.
+Streaming SSE events are limited to 1 MiB each and 64 MiB cumulatively. The configured text-byte limit applies
+incrementally to UTF-8 text. The total deadline also interrupts connected delivery under backpressure.
+Sparse and absent usage stay sparse or absent; omitted counters are never synthesized as zero.
 
 Each history object has exactly two required string fields, `role` and `content`. Conversation roles are `user`
 and `assistant`, with nonempty text. The current `prompt` is also nonempty. System instructions use the separate

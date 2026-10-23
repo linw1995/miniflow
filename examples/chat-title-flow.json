@@ -1,5 +1,5 @@
 {
-  "version": "2026-10-19",
+  "version": "2026-10-23",
   "dependencies": {
     "core": {
       "package": "mfn-core",
@@ -373,6 +373,15 @@
       "node": "title",
       "port": "value",
       "optional": true
+    }
+  ],
+  "stream_outputs": [
+    {
+      "name": "answer",
+      "path": [
+        "model"
+      ],
+      "port": "delta"
     }
   ]
 }

@@ -19,6 +19,8 @@ pub struct Reply {
     pub headers: Vec<(String, String)>,
     pub header_delay: Duration,
     pub body_delay: Duration,
+    pub fragments: Option<Vec<Vec<u8>>>,
+    pub fragment_delay: Duration,
 }
 
 impl Reply {
@@ -29,6 +31,8 @@ impl Reply {
             headers: vec![],
             header_delay: Duration::ZERO,
             body_delay: Duration::ZERO,
+            fragments: None,
+            fragment_delay: Duration::ZERO,
         }
     }
 
@@ -118,8 +122,17 @@ impl Server {
                 });
                 index += 1;
                 thread::sleep(reply.header_delay);
+                let content_type = if reply
+                    .headers
+                    .iter()
+                    .any(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+                {
+                    ""
+                } else {
+                    "Content-Type: application/json\r\n"
+                };
                 let mut headers = format!(
-                    "HTTP/1.1 {} Mock\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n",
+                    "HTTP/1.1 {} Mock\r\n{content_type}Content-Length: {}\r\nConnection: close\r\n",
                     reply.status,
                     reply.body.len()
                 );
@@ -129,7 +142,16 @@ impl Server {
                 headers.push_str("\r\n");
                 let _ = socket.write_all(headers.as_bytes());
                 thread::sleep(reply.body_delay);
-                let _ = socket.write_all(reply.body.as_bytes());
+                if let Some(fragments) = reply.fragments {
+                    for fragment in fragments {
+                        if socket.write_all(&fragment).is_err() {
+                            break;
+                        }
+                        thread::sleep(reply.fragment_delay);
+                    }
+                } else {
+                    let _ = socket.write_all(reply.body.as_bytes());
+                }
             }
         });
         Self {

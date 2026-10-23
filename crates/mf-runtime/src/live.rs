@@ -136,6 +136,7 @@ pub(super) fn with_exports<T>(
         exports: &selected,
         invocation: StreamInvocation::new(context)?,
         cancellation: context.cancellation(),
+        deadline: None,
     };
     exported.open()?;
     let result = invoke(
@@ -160,6 +161,7 @@ pub(super) struct ExportSink<'a> {
     pub exports: &'a [StreamOutputContract],
     pub invocation: StreamInvocation,
     pub cancellation: StreamCancellation,
+    pub deadline: Option<std::time::Instant>,
 }
 
 impl ExportSink<'_> {
@@ -168,6 +170,19 @@ impl ExportSink<'_> {
         export: &StreamOutputContract,
         event: LiveOutputKind,
     ) -> Result<(), StreamError> {
+        let cancellation = self.deadline.map_or_else(
+            || self.cancellation.clone(),
+            |deadline| self.cancellation.with_deadline(deadline),
+        );
+        self.publish_with_cancellation(export, event, &cancellation)
+    }
+
+    fn publish_with_cancellation(
+        &self,
+        export: &StreamOutputContract,
+        event: LiveOutputKind,
+        cancellation: &StreamCancellation,
+    ) -> Result<(), StreamError> {
         self.publisher.publish(
             LiveOutputEvent {
                 export: export.name.clone(),
@@ -175,7 +190,7 @@ impl ExportSink<'_> {
                 invocation: self.invocation.clone(),
                 event,
             },
-            &self.cancellation,
+            cancellation,
         )
     }
 
@@ -195,14 +210,29 @@ impl ExportSink<'_> {
 }
 
 impl EmissionSink for ExportSink<'_> {
+    fn set_deadline(&mut self, deadline: std::time::Instant) {
+        self.deadline = Some(
+            self.deadline
+                .map_or(deadline, |current| current.min(deadline)),
+        );
+    }
     fn send(&mut self, result: NodeResult) -> Result<(), StreamError> {
+        self.send_with_cancellation(result, &self.cancellation.clone())
+    }
+
+    fn send_with_cancellation(
+        &mut self,
+        result: NodeResult,
+        cancellation: &StreamCancellation,
+    ) -> Result<(), StreamError> {
         for export in self.exports {
             if let Some(value) = result.outputs.get(&export.port) {
-                self.publish(
+                self.publish_with_cancellation(
                     export,
                     LiveOutputKind::Value {
                         value: value.clone(),
                     },
+                    cancellation,
                 )?;
             }
         }
@@ -226,6 +256,10 @@ pub(super) struct FanoutSink<'a> {
 }
 
 impl EmissionSink for FanoutSink<'_> {
+    fn set_deadline(&mut self, deadline: std::time::Instant) {
+        self.first.set_deadline(deadline);
+        self.second.set_deadline(deadline);
+    }
     fn is_connected(&self) -> bool {
         self.first.is_connected() || self.second.is_connected()
     }
@@ -234,6 +268,16 @@ impl EmissionSink for FanoutSink<'_> {
         self.first.send(result.clone())?;
         self.second.send(result)?;
         Ok(())
+    }
+
+    fn send_with_cancellation(
+        &mut self,
+        result: NodeResult,
+        cancellation: &StreamCancellation,
+    ) -> Result<(), StreamError> {
+        self.first
+            .send_with_cancellation(result.clone(), cancellation)?;
+        self.second.send_with_cancellation(result, cancellation)
     }
 
     fn fail(&mut self, error: EmissionError) {

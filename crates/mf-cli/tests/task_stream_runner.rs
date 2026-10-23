@@ -270,3 +270,95 @@ fn compiled_live_contract_drift_and_unknown_subscriptions_fail_before_business_w
     assert!(String::from_utf8_lossy(&output.stderr).contains("not declared"));
     assert!(!marker.exists());
 }
+
+#[test]
+fn answer_and_title_share_one_result_while_only_answer_is_streamed() {
+    use mfn_llm::test_support::{Reply, Server};
+    let text = json!({"id":"answer", "object":"chat.completion.chunk", "created":0, "model":"example-model", "choices":[{"index":0,"delta":{"content":"Live answer"},"finish_reason":null}]});
+    let finish = json!({"id":"answer", "object":"chat.completion.chunk", "created":0, "model":"example-model", "choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}});
+    let mut streamed = Reply::text("unused");
+    streamed
+        .headers
+        .push(("Content-Type".into(), "text/event-stream".into()));
+    streamed.body = format!("data: {text}\n\ndata: {finish}\n\ndata: [DONE]\n\n");
+    let server = Server::start(vec![
+        streamed,
+        Reply::text("Generated title"),
+        Reply::text("Live answer"),
+        Reply::text("Generated title"),
+    ]);
+    let root = tempfile::tempdir().unwrap();
+    let mut definition: serde_json::Value =
+        serde_json::from_str(include_str!("../../../examples/chat-title-flow.json")).unwrap();
+    for (alias, path) in [("core", "core"), ("code", "code"), ("llm", "llm")] {
+        definition["dependencies"][alias]["path"] =
+            json!(crates_dir().join("builtin-nodes").join(path));
+    }
+    let executable = compile(root.path(), definition);
+    let manifest = mf_tui::manifest::read_manifest(&executable).unwrap();
+    assert_eq!(manifest.stream_outputs.len(), 1);
+    let mut canonical = None;
+    for live in [true, false] {
+        let run = RunId::new();
+        let mut command = Command::new(&executable);
+        command
+            .args([
+                "--input.prompt",
+                "Hello",
+                "--input.base_url",
+                &server.base_url,
+            ])
+            .env("MODEL_API_KEY", "synthetic-key")
+            .env("MF_RUN_ID", run.to_string())
+            .env("NO_PROXY", "127.0.0.1,localhost")
+            .env("no_proxy", "127.0.0.1,localhost");
+        if live {
+            command.args([
+                "--output-format",
+                "events-jsonl",
+                "--stream-output",
+                "answer",
+            ]);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result = if live {
+            let mut decoder =
+                LiveOutputDecoder::new(run, &manifest.stream_outputs, Default::default()).unwrap();
+            let mut values = 0;
+            decoder
+                .feed(&output.stdout, |event| {
+                    assert_eq!(event.export, "answer");
+                    if let LiveOutputKind::Value { value } = event.event {
+                        assert_eq!(value["text"].as_str(), Some("Live answer"));
+                        values += 1;
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            decoder.finish(|_| Ok(())).unwrap();
+            assert_eq!(values, 1);
+            serde_json::to_value(decoder.take_final_outputs().unwrap()).unwrap()
+        } else {
+            serde_json::from_slice(&output.stdout).unwrap()
+        };
+        assert_eq!(result["text"], "Live answer");
+        assert_eq!(result["title"], "Generated title");
+        assert_eq!(result["usages"].as_array().unwrap().len(), 2);
+        if live {
+            canonical = Some(result["text"].clone());
+        } else {
+            assert_eq!(canonical.as_ref().unwrap(), &result["text"]);
+        }
+    }
+    let requests = server.requests();
+    assert_eq!(requests.len(), 4);
+    assert_eq!(requests[0].body["stream"], true);
+    for request in &requests[1..] {
+        assert_ne!(request.body["stream"], true);
+    }
+}

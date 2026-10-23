@@ -5,7 +5,7 @@ use std::{
 };
 
 #[derive(Clone, Debug, Default)]
-pub struct StreamCancellation(Arc<Mutex<CancellationState>>);
+pub struct StreamCancellation(Arc<Mutex<CancellationState>>, Option<std::time::Instant>);
 
 #[derive(Debug, Default)]
 struct CancellationState {
@@ -25,8 +25,19 @@ impl StreamCancellation {
             target: Arc::downgrade(&target.0),
         })));
     }
+    pub(super) fn with_deadline(&self, deadline: std::time::Instant) -> Self {
+        Self(
+            self.0.clone(),
+            Some(self.1.map_or(deadline, |current| current.min(deadline))),
+        )
+    }
+
     pub fn failure(&self) -> Option<StreamError> {
-        self.0.lock().unwrap().failure.clone()
+        self.0.lock().unwrap().failure.clone().or_else(|| {
+            self.1
+                .filter(|deadline| std::time::Instant::now() >= *deadline)
+                .map(|_| crate::stream_instance::PublicationDeadlineSnafu.build())
+        })
     }
 
     pub fn cancel(&self, failure: StreamError) {
@@ -92,7 +103,7 @@ impl Wake for CancellationRelay {
             .upgrade()
             .and_then(|source| source.lock().unwrap().failure.clone());
         if let (Some(failure), Some(target)) = (failure, self.target.upgrade()) {
-            StreamCancellation(target).cancel(failure);
+            StreamCancellation(target, None).cancel(failure);
         }
     }
 }

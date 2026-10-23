@@ -1,3 +1,5 @@
+mod streaming;
+
 use crate::{LlmExecutionError, NormalizeResponseSnafu, UsageMetadataSnafu};
 use bytes::Bytes;
 use rig_core::{
@@ -13,25 +15,25 @@ use serde_json::Value;
 use snafu::ResultExt;
 use std::{
     future::Future,
-    sync::{Arc, OnceLock},
+    sync::{Arc, Mutex},
 };
 
 #[derive(Clone)]
 pub struct TerminalTransport {
     inner: ReqwestClient,
-    usage: Arc<OnceLock<Usage>>,
+    usage: Arc<Mutex<Option<Usage>>>,
 }
 
 impl TerminalTransport {
     pub fn new(inner: ReqwestClient) -> Self {
         Self {
             inner,
-            usage: Arc::new(OnceLock::new()),
+            usage: Arc::new(Mutex::new(None)),
         }
     }
 
     pub fn usage(&self) -> Option<Usage> {
-        self.usage.get().copied()
+        *self.usage.lock().unwrap()
     }
 }
 
@@ -44,7 +46,7 @@ struct WireUsage {
 
 fn normalize(
     bytes: Bytes,
-    usage: &OnceLock<Usage>,
+    usage: &Mutex<Option<Usage>>,
 ) -> std::result::Result<Bytes, LlmExecutionError> {
     let Ok(mut reply) = serde_json::from_slice::<Value>(&bytes) else {
         return Ok(bytes);
@@ -66,7 +68,7 @@ fn normalize(
         total_tokens: counters.total_tokens,
         ..Default::default()
     };
-    usage.get_or_init(|| normalized);
+    *usage.lock().unwrap() = Some(normalized);
     if counters.prompt_tokens.is_some()
         && counters.completion_tokens.is_some()
         && counters.total_tokens.is_some()
@@ -128,6 +130,14 @@ impl HttpClientExt for TerminalTransport {
     where
         T: Into<Bytes> + WasmCompatSend,
     {
-        self.inner.send_streaming(request)
+        let response = self.inner.send_streaming(request);
+        let usage = self.usage.clone();
+        async move {
+            let response = response.await?;
+            if !response.status().is_success() {
+                return Ok(response);
+            }
+            Ok(response.map(|body| streaming::bounded(body, usage)))
+        }
     }
 }

@@ -435,3 +435,49 @@ fn combined_emission_snapshots_are_redacted_independently_of_business_delivery()
         mf_runtime::SnapshotOutcome::Emitted
     ));
 }
+
+#[test]
+fn publication_deadlines_interrupt_bounded_delivery_without_a_timer_thread() {
+    struct QueueSink(mf_runtime::LivePublisher);
+    impl EmissionSink for QueueSink {
+        fn send(&mut self, _: NodeResult) -> Result<(), StreamError> {
+            unreachable!()
+        }
+        fn send_with_cancellation(
+            &mut self,
+            result: NodeResult,
+            cancellation: &StreamCancellation,
+        ) -> Result<(), StreamError> {
+            self.0.publish(
+                mf_runtime::LiveOutputEvent {
+                    export: "answer".into(),
+                    source: vec!["llm".into()],
+                    invocation: StreamInvocation {
+                        id: 0,
+                        node: "llm".into(),
+                        path: vec![],
+                    },
+                    event: mf_runtime::LiveOutputKind::Value {
+                        value: result.outputs["delta"].clone(),
+                    },
+                },
+                cancellation,
+            )
+        }
+    }
+    let (publisher, _receiver) = mf_runtime::live_channel(mf_runtime::LiveLimits {
+        max_pending_records: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let mut sink = QueueSink(publisher);
+    let cancellation = StreamCancellation::default();
+    let mut emitter = Emitter::new("llm", &Delta::ports(), cancellation.clone(), &mut sink);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(40);
+    let result = || Delta { delta: 1.0 }.into_values().unwrap().into();
+    emitter.send_with_deadline(result(), deadline).unwrap();
+    let error = emitter.send_with_deadline(result(), deadline).unwrap_err();
+    assert!(error.to_string().contains("publication deadline exceeded"));
+    assert!(emitter.finish().is_err());
+    assert!(cancellation.failure().is_none());
+}

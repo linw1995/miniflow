@@ -64,7 +64,8 @@ fn failure(error: mf_runtime::NodeExecutionError) -> Value {
     while let Some(next) = source.source() {
         typed_provider |= next.is::<rig_core::error::ProviderError>()
             || next.is::<Box<rig_core::error::ProviderError>>();
-        typed_runtime |= next.is::<mf_runtime::FutureExecutionError>()
+        typed_runtime |= next.is::<StreamError>()
+            || next.is::<mf_runtime::FutureExecutionError>()
             || matches!(
                 next.downcast_ref::<LlmExecutionError>(),
                 Some(LlmExecutionError::Future { .. })
@@ -73,6 +74,46 @@ fn failure(error: mf_runtime::NodeExecutionError) -> Value {
         source = next;
     }
     json!({"ok": false, "error": error.to_string(), "debug": format!("{error:?}"), "cause": source.to_string(), "typed_provider": typed_provider, "typed_runtime": typed_runtime, "typed_credentials": typed_credentials})
+}
+
+struct DeltaSink {
+    values: Vec<Value>,
+    block: bool,
+    disconnect: bool,
+    cancel_after_prefix: bool,
+}
+
+impl mf_runtime::EmissionSink for DeltaSink {
+    fn send(&mut self, result: mf_runtime::NodeResult) -> Result<(), StreamError> {
+        self.values
+            .push(serde_json::to_value(result.outputs).unwrap());
+        if self.disconnect {
+            return Err(StreamError::Execution {
+                message: "receiver disconnected".into(),
+            });
+        }
+        Ok(())
+    }
+
+    fn send_with_cancellation(
+        &mut self,
+        result: mf_runtime::NodeResult,
+        cancellation: &StreamCancellation,
+    ) -> Result<(), StreamError> {
+        self.send(result)?;
+        if self.cancel_after_prefix {
+            cancellation.cancel_with_message("cancelled after prefix");
+        }
+        if self.block {
+            loop {
+                if let Some(error) = cancellation.failure() {
+                    return Err(error);
+                }
+                thread::sleep(Duration::from_millis(2));
+            }
+        }
+        Ok(())
+    }
 }
 
 #[test]
@@ -128,13 +169,31 @@ fn execution_probe() {
             {
                 input["history"] = history.clone();
             }
-            match node.execute(values(&input), &mut context) {
+            let mut sink = DeltaSink {
+                values: vec![],
+                block: parameters["block_delivery"] == true,
+                disconnect: parameters["disconnect"] == true,
+                cancel_after_prefix: parameters["cancel_after_prefix"] == true,
+            };
+            let executed = if parameters["stream"] == true {
+                let mf_runtime::NodeExecution::TaskStream(combined) = &prepared.execution else {
+                    panic!("expected combined executor")
+                };
+                combined.execute_with_sink(values(&input), &mut context, &mut sink)
+            } else {
+                node.execute(values(&input), &mut context)
+            };
+            match executed {
                 Ok(result) => {
                     let output = serde_json::to_value(result.outputs).unwrap();
                     history = Some(output["history"].clone());
-                    results.push(json!({"ok": true, "outputs": output}));
+                    results.push(json!({"ok": true, "outputs": output, "deltas": sink.values}));
                 }
-                Err(error) => results.push(failure(error)),
+                Err(error) => {
+                    let mut result = failure(error);
+                    result["deltas"] = json!(sink.values);
+                    results.push(result);
+                }
             }
         }
     }
@@ -583,5 +642,205 @@ fn attribution_is_reported_for_success_and_captured_failure_without_entering_pro
     for request in server.requests() {
         assert!(request.body.get("attribution").is_none());
         assert!(!request.body.to_string().contains("summary-profile"));
+    }
+}
+
+fn streaming_reply(parts: &[&str], usage: Value, finish: Option<&str>, done: bool) -> Reply {
+    let mut body = String::new();
+    for text in parts {
+        body.push_str(&format!("data: {}\n\n", json!({"id":"stream-response", "object":"chat.completion.chunk", "created":0,"model":"example-model","choices":[{"index":0,"delta":{"content":text},"finish_reason":null}]})));
+    }
+    if let Some(finish) = finish {
+        body.push_str(&format!("data: {}\n\n", json!({"id":"stream-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[{"index":0,"delta":{},"finish_reason":finish}]})));
+    }
+    if !usage.is_null() {
+        body.push_str(&format!("data: {}\n\n", json!({"id":"stream-response","object":"chat.completion.chunk","created":0,"model":"example-model","choices":[],"usage":usage})));
+    }
+    if done {
+        body.push_str("data: [DONE]\n\n");
+    }
+    let mut reply = Reply::text("unused");
+    reply.body = body;
+    reply
+        .headers
+        .push(("Content-Type".into(), "text/event-stream".into()));
+    reply
+}
+
+#[test]
+fn subscribed_streams_use_one_request_and_preserve_sparse_terminal_facts() {
+    for (usage, expected) in [
+        (Value::Null, Value::Null),
+        (json!({"completion_tokens":0}), json!({"output_tokens":0})),
+        (
+            json!({"prompt_tokens":2,"completion_tokens":1,"total_tokens":3}),
+            json!({"input_tokens":2,"output_tokens":1,"total_tokens":3}),
+        ),
+    ] {
+        let server = Server::start(vec![streaming_reply(
+            &["first ", "caf\u{e9}"],
+            usage,
+            Some("length"),
+            true,
+        )]);
+        let result = probe(
+            &server,
+            json!({"stream":true,"inputs":[{"prompt":"hello"}]}),
+            json!({}),
+        );
+        let result = &result["results"][0];
+        assert_eq!(result["ok"], true, "{result}");
+        assert_eq!(result["outputs"]["text"], "first caf\u{e9}");
+        assert_eq!(result["outputs"]["finish_reason"], "length");
+        assert_eq!(result["outputs"]["usage"], expected);
+        assert_eq!(
+            result["outputs"]["history"][1]["content"],
+            result["outputs"]["text"]
+        );
+        let deltas = result["deltas"].as_array().unwrap();
+        assert_eq!(deltas.len(), 2);
+        for delta in deltas {
+            assert_eq!(
+                delta["delta"]["model_call_id"],
+                result["outputs"]["usages"][0]["call_id"]
+            );
+        }
+        assert_eq!(server.requests().len(), 1);
+        assert_eq!(server.requests()[0].body["stream"], true);
+    }
+}
+
+#[test]
+fn streaming_limits_failures_and_capture_policy_never_retry_as_unary() {
+    let mut malformed = streaming_reply(&["prefix"], Value::Null, None, false);
+    malformed.body.push_str("data: invalid-json\n\n");
+    let mut incomplete = streaming_reply(&["prefix"], Value::Null, None, false);
+    incomplete.body.push_str("data: {");
+    let huge = "x".repeat(1024 * 1024 + 1);
+    for (reply, config, captured, prefix) in [
+        (
+            streaming_reply(&["prefix"], Value::Null, None, false),
+            json!({"capture_errors":true}),
+            true,
+            true,
+        ),
+        (malformed, json!({}), false, true),
+        (incomplete, json!({}), false, true),
+        (
+            streaming_reply(&["a", "b", "c"], Value::Null, Some("stop"), true),
+            json!({"max_output_bytes":2}),
+            false,
+            true,
+        ),
+        (
+            streaming_reply(&[&huge], Value::Null, Some("stop"), true),
+            json!({}),
+            false,
+            false,
+        ),
+        (
+            streaming_reply(&["\u{e9}"], Value::Null, Some("stop"), true),
+            json!({"max_output_bytes":1}),
+            false,
+            false,
+        ),
+    ] {
+        let server = Server::start(vec![reply]);
+        let result = probe(
+            &server,
+            json!({"stream":true,"inputs":[{"prompt":"hello"}]}),
+            config,
+        );
+        let result = &result["results"][0];
+        assert_eq!(result["ok"], captured, "{result}");
+        if captured {
+            assert_eq!(result["outputs"]["status"], "failed");
+            assert_eq!(result["outputs"]["text"], "");
+        }
+        assert_eq!(!result["deltas"].as_array().unwrap().is_empty(), prefix);
+        assert_eq!(server.requests().len(), 1);
+    }
+}
+
+#[test]
+fn delivery_deadline_and_cancellation_cannot_become_captured_success() {
+    for parameters in [
+        json!({"block_delivery":true}),
+        json!({"disconnect":true}),
+        json!({"block_delivery":true,"cancel":true}),
+    ] {
+        let server = Server::start(vec![streaming_reply(
+            &["prefix"],
+            Value::Null,
+            Some("stop"),
+            true,
+        )]);
+        let mut input = json!({"stream":true,"inputs":[{"prompt":"hello"}]});
+        input
+            .as_object_mut()
+            .unwrap()
+            .extend(parameters.as_object().unwrap().clone());
+        let result = probe(
+            &server,
+            input,
+            json!({"timeout_ms":3000,"capture_errors":true}),
+        );
+        assert_eq!(result["results"][0]["ok"], false, "{result}");
+        assert_eq!(server.requests().len(), 1);
+    }
+}
+
+#[test]
+fn streaming_byte_boundaries_and_many_small_frames_preserve_one_final_text() {
+    let parts = vec!["\u{e9}"; 100];
+    let mut reply = streaming_reply(&parts, json!({"completion_tokens":5}), Some("stop"), true);
+    reply.fragments = Some(
+        reply
+            .body
+            .as_bytes()
+            .chunks(1)
+            .map(<[u8]>::to_vec)
+            .collect(),
+    );
+    let server = Server::start(vec![reply]);
+    let result = probe(
+        &server,
+        json!({"stream":true,"inputs":[{"prompt":"hello"}]}),
+        json!({"max_output_bytes":200}),
+    );
+    assert_eq!(result["results"][0]["ok"], true, "{result}");
+    assert_eq!(result["results"][0]["outputs"]["text"], parts.concat());
+    assert_eq!(
+        result["results"][0]["deltas"].as_array().unwrap().len(),
+        100
+    );
+}
+
+#[test]
+fn stalled_streams_are_bounded_and_cancellation_after_a_prefix_keeps_call_facts() {
+    for cancel in [false, true] {
+        let mut reply = streaming_reply(&["prefix"], json!({"completion_tokens":0}), None, false);
+        reply.fragments = Some(vec![reply.body.as_bytes().to_vec()]);
+        reply.body.push_str("data: [DONE]\n\n");
+        reply.fragment_delay = Duration::from_millis(1500);
+        let server = Server::start(vec![reply]);
+        let result = probe(
+            &server,
+            json!({"stream":true,"cancel_after_prefix":cancel,"inputs":[{"prompt":"hello"}]}),
+            json!({"capture_errors":true,"timeout_ms":1000}),
+        );
+        let result = &result["results"][0];
+        if cancel {
+            assert_eq!(result["ok"], false, "{result}");
+        } else {
+            assert_eq!(result["outputs"]["status"], "failed", "{result}");
+            assert_eq!(result["outputs"]["usage"], json!({"output_tokens":0}));
+            assert_eq!(
+                result["outputs"]["usages"][0]["usage"],
+                json!({"output_tokens":0})
+            );
+        }
+        assert!(!result["deltas"].as_array().unwrap().is_empty(), "{result}");
+        assert_eq!(server.requests().len(), 1);
     }
 }

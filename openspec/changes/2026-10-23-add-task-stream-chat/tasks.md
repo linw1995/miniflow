@@ -36,11 +36,11 @@
 
 ## 5. LLM combined execution
 
-- [ ] 5.1 Verify pinned Rig 0.43.0 streaming support with loopback fixtures before selecting its adapter; cover text fragments, finish reasons, sparse/absent usage, terminal-only metadata frames, malformed/truncated termination, and cancellation without a dependency upgrade assumption.
-- [ ] 5.2 Migrate `builtin.llm` to combined execution with its existing terminal outputs and typed `{text, model_call_id}` delta payload; verify connected streaming and unconnected unary paths each send exactly one request and preserve terminal history/usages.
-- [ ] 5.3 Enforce the total deadline, incremental UTF-8 text limit, and streaming-frame bounds; verify many small frames, an oversized frame, multibyte boundary splits, stalled streams, and cancellation after a prefix.
-- [ ] 5.4 Preserve captured-provider-error policy and typed source chains without unary fallback; verify failed terminal results retain available call facts and publication/cancellation failures cannot become success.
-- [ ] 5.5 Add an answer-plus-title streaming example and update LLM documentation; verify only the selected answer export is public and both model calls appear in final usages.
+- [x] 5.1 Verify pinned Rig 0.43.0 streaming support with loopback fixtures before selecting its adapter; cover text fragments, finish reasons, sparse/absent usage, terminal-only metadata frames, malformed/truncated termination, and cancellation without a dependency upgrade assumption.
+- [x] 5.2 Migrate `builtin.llm` to combined execution with its existing terminal outputs and typed `{text, model_call_id}` delta payload; verify connected streaming and unconnected unary paths each send exactly one request and preserve terminal history/usages.
+- [x] 5.3 Enforce the total deadline, incremental UTF-8 text limit, and streaming-frame bounds; verify many small frames, an oversized frame, multibyte boundary splits, stalled streams, and cancellation after a prefix.
+- [x] 5.4 Preserve captured-provider-error policy and typed source chains without unary fallback; verify failed terminal results retain available call facts and publication/cancellation failures cannot become success.
+- [x] 5.5 Add an answer-plus-title streaming example and update LLM documentation; verify only the selected answer export is public and both model calls appear in final usages.
 
 ## 6. Chat backends and settlement
 
