@@ -1,10 +1,10 @@
 ## 1. Combined execution and reflected contracts
 
-- [ ] 1.1 Add dynamic and typed combined execution traits with one invocation, separate terminal/emission results, and reflecting preparation constructors; verify contract tests count one business call and preparation performs no I/O.
-- [ ] 1.2 Extend prepared execution and metadata accessors to distinguish combined terminal/stream outputs while retaining existing provider constructors; verify duplicate-name and competing-declaration failures and rebuild external provider fixtures.
-- [ ] 1.3 Decouple emitter validation/lifetime from the stream-specific queue and add discard/connected sink implementations; verify absent-consumer queries, valid discard, invalid discarded output, and ignored-publication-error behavior.
-- [ ] 1.4 Add terminal Task adaptation for combined executors and scope-aware invocation identities; verify no-receiver execution and repeated invocations return one independent terminal result each.
-- [ ] 1.5 Document combined provider preparation and zero-emission behavior in `docs/node-development.md`; verify its example through a deterministic fixture in the runtime/compiler tests.
+- [x] 1.1 Add dynamic and typed combined execution traits with one invocation, separate terminal/emission results, and reflecting preparation constructors; verify contract tests count one business call and preparation performs no I/O.
+- [x] 1.2 Extend prepared execution and metadata accessors to distinguish combined terminal/stream outputs while retaining existing provider constructors; verify duplicate-name and competing-declaration failures and rebuild external provider fixtures.
+- [x] 1.3 Decouple emitter validation/lifetime from the stream-specific queue and add discard/connected sink implementations; verify absent-consumer queries, valid discard, invalid discarded output, and ignored-publication-error behavior.
+- [x] 1.4 Add terminal Task adaptation for combined executors and scope-aware invocation identities; verify no-receiver execution and repeated invocations return one independent terminal result each.
+- [x] 1.5 Document combined provider preparation and zero-emission behavior in `docs/node-development.md`; verify its example through a deterministic fixture in the runtime/compiler tests.
 
 ## 2. Workflow schema, exports, and output ownership
 

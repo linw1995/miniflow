@@ -161,7 +161,7 @@ impl CompiledWorkflow {
             let id = node.definition_id.to_string();
             ensure!(self.execution_order.get(index) == Some(&node.definition_id), InvalidExecutionOrderSnafu);
             let kind = match node.node.as_ref() {
-                Some(mf_runtime::NodeExecution::Task(_)) => mf_runtime::NodeTargetKind::Task,
+                Some(mf_runtime::NodeExecution::Task(_) | mf_runtime::NodeExecution::TaskStream(_)) => mf_runtime::NodeTargetKind::Task,
                 Some(mf_runtime::NodeExecution::Event(_)) => mf_runtime::NodeTargetKind::Event,
                 Some(mf_runtime::NodeExecution::Stream(_)) => mf_runtime::NodeTargetKind::Stream,
                 None => return UnknownNodeSnafu { definition_id: node.definition_id.clone() }.fail(),

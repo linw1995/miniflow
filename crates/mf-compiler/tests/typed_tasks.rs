@@ -228,9 +228,13 @@ fn typed_producer_rejects_invalid_unobserved_outputs_before_publication() {
         panic!("expected an attributed producer failure");
     };
     assert_eq!(definition_id.as_str(), "source");
-    let NodeExecutionError::OutputEncode { source } = source.as_ref() else {
-        panic!("expected a typed encoding cause");
-    };
-    assert_eq!(source.pointer(), "/metric.~1~0");
+    let mut cause: &dyn std::error::Error = source.as_ref();
+    loop {
+        if let Some(source) = cause.downcast_ref::<Box<mf_runtime::OutputEncodeError>>() {
+            assert_eq!(source.pointer(), "/metric.~1~0");
+            break;
+        }
+        cause = cause.source().expect("expected a typed encoding cause");
+    }
     assert!(instance.join().is_err());
 }

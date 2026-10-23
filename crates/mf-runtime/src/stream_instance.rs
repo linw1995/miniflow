@@ -1,7 +1,7 @@
 use crate::{
-    EventContext, EventEffects, EventEmission, EventNode, ExecutionContext, FlowOutputs, Inputs,
-    MessageSchedule, NodeEvent, NodeExecution, NodeExecutionError, NodeResult, PreparedStream,
-    StreamExecution, StreamNode, StreamPlan, TimerUpdate, WorkerPool,
+    Emitter, EventContext, EventEffects, EventEmission, EventNode, ExecutionContext, FlowOutputs,
+    Inputs, MessageSchedule, NodeEvent, NodeExecution, NodeExecutionError, NodeResult,
+    PreparedStream, StreamExecution, StreamNode, StreamPlan, TimerUpdate, WorkerPool,
 };
 use mf_telemetry::{
     event::FailurePhase,
@@ -9,7 +9,7 @@ use mf_telemetry::{
     stream::{StreamCounts, StreamFailure, StreamMessage, StreamTrigger},
 };
 use serde::Serialize;
-use snafu::{OptionExt, ResultExt, Snafu, ensure};
+use snafu::{IntoError, OptionExt, ResultExt, Snafu, ensure};
 use std::{
     collections::{BTreeSet, VecDeque},
     error::Error,
@@ -117,6 +117,9 @@ impl StreamError {
                 if let NodeExecutionError::PluginFailed { source } = source.as_ref() {
                     let mut cause: &dyn Error = source.as_ref();
                     loop {
+                        if cause.is::<crate::EmissionError>() {
+                            return "output";
+                        }
                         if let Some(error) = cause.downcast_ref::<Self>() {
                             return error.phase();
                         }
@@ -344,7 +347,7 @@ impl Shared {
 }
 
 /// A borrowed, non-cloneable output sink for one producer invocation.
-pub struct Emitter<'a> {
+struct ProducerEmitter<'a> {
     shared: &'a Shared,
     plan: &'a StreamPlan,
     index: usize,
@@ -375,13 +378,25 @@ fn capture_snapshot(
     }
 }
 
-impl Emitter<'_> {
+impl crate::EmissionSink for ProducerEmitter<'_> {
     /// Wait for queue capacity and transfer one validated result to the runtime.
     /// Failure wakes waiting senders. Success does not imply downstream completion.
-    pub fn send(&mut self, result: NodeResult) -> Result<(), NodeExecutionError> {
-        Ok(self.admit(result)?)
+    fn send(&mut self, result: NodeResult) -> Result<(), StreamError> {
+        self.admit(result)
     }
 
+    fn fail(&mut self, error: crate::EmissionError) {
+        self.publication_failed = true;
+        self.shared.fail(
+            ProducerSnafu {
+                definition_id: self.plan.nodes()[self.index].definition_id.clone(),
+            }
+            .into_error(error.into()),
+        );
+    }
+}
+
+impl ProducerEmitter<'_> {
     fn admit(&mut self, result: NodeResult) -> Result<(), StreamError> {
         let mut state = self.shared.state.lock().unwrap();
         loop {
@@ -469,7 +484,7 @@ fn run_producer(
 ) {
     let index = plan.execution_domain(job.execution_domain).nodes[0].index();
     let _span = job.callback.as_ref().map(StreamCallback::enter);
-    let mut emitter = Emitter {
+    let mut sink = ProducerEmitter {
         shared,
         plan,
         index,
@@ -478,6 +493,12 @@ fn run_producer(
         publication_failed: false,
     };
     let failure = shared.state.lock().unwrap().failure.clone();
+    let mut emitter = Emitter::new(
+        plan.nodes()[index].definition_id.clone(),
+        &plan.nodes()[index].metadata.ports.outputs,
+        job.context.cancellation(),
+        &mut sink,
+    );
     let result = if let Some(error) = failure {
         Err(error)
     } else {
@@ -492,7 +513,9 @@ fn run_producer(
             crate::SnapshotOutcome::Started,
         );
         catch_unwind(AssertUnwindSafe(|| {
-            node.execute(job.inputs, &mut job.context, &mut emitter)
+            let result = node.execute(job.inputs, &mut job.context, &mut emitter);
+            emitter.finish()?;
+            result
         }))
         .unwrap_or_else(|payload| Err(panic_error(payload).into()))
         .context(ProducerSnafu {
@@ -508,11 +531,13 @@ fn run_producer(
                 .map_or(Ok(()), Err)
         })
     };
+    let publication_failed = emitter.failure().is_some();
+    drop(emitter);
     if let Some(callback) = job.callback {
         match &result {
-            Ok(()) => callback.succeeded(emitter.emitted, emitter.ports.into_iter().collect()),
+            Ok(()) => callback.succeeded(sink.emitted, sink.ports.into_iter().collect()),
             Err(error) => callback.failed(
-                if emitter.publication_failed {
+                if publication_failed || sink.publication_failed {
                     FailurePhase::Publication
                 } else {
                     FailurePhase::Execution
@@ -726,7 +751,9 @@ impl PreparedStream {
                             worker: None,
                             active: false,
                         }),
-                        NodeExecution::Task(_) => unreachable!("tasks remain in the plan"),
+                        NodeExecution::Task(_) | NodeExecution::TaskStream(_) => {
+                            unreachable!("tasks remain in the plan")
+                        }
                     },
                     deadline: None,
                     pending: VecDeque::new(),
