@@ -88,17 +88,6 @@ fn generates_layouts_and_configured_interfaces_from_one_preparation() {
         assert_eq!(PREPARATIONS.load(Ordering::SeqCst), before + 1);
         syn::parse_file(&artifacts.rust_source).unwrap();
         let manifest = WorkflowManifest::from_bytes(&artifacts.manifest_bytes).unwrap();
-        let targets: Vec<mf_runtime::NodeTarget> =
-            serde_json::from_str(&artifacts.node_targets_json).unwrap();
-        assert_eq!(
-            manifest.task_inputs,
-            targets
-                .into_iter()
-                .filter(|target| target.kind == mf_runtime::NodeTargetKind::Task)
-                .map(|target| (target.id, target.inputs))
-                .collect()
-        );
-        assert_eq!(manifest.task_inputs.contains_key("source./~"), !stream);
         let before = PREPARATIONS.load(Ordering::SeqCst);
         assert_eq!(plan.manifest(&registry).unwrap(), manifest);
         assert_eq!(PREPARATIONS.load(Ordering::SeqCst), before + 1);

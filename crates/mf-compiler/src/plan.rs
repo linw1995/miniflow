@@ -102,48 +102,20 @@ pub enum PlanError {
     },
 }
 
-fn task_input_schemas<'a, N: 'a>(
-    nodes: impl IntoIterator<Item = &'a mf_runtime::FlowNode<N>>,
-) -> Result<BTreeMap<String, mf_runtime::WorkflowInputSchema>, PlanError> {
-    nodes
-        .into_iter()
-        .map(|node| {
-            Ok((
-                node.definition_id.to_string(),
-                crate::workflow_input_schema([(node, true)], |_, _| false)?,
-            ))
-        })
-        .collect()
-}
-
 impl CompiledWorkflow {
     pub fn manifest(
         &self,
         registry: &mf_runtime::NodeRegistry,
     ) -> Result<mf_runtime::WorkflowManifest, PlanError> {
-        if self.definition.execution.is_some() {
-            let stream = crate::instantiate_stream(self, registry)?;
-            let plan = stream.plan();
-            self.manifest_with_schema(
-                plan.input_schema().clone(),
-                task_input_schemas(plan.nodes().iter().filter(|node| node.node.is_some()))?,
-            )
-        } else {
-            let flow = crate::instantiate_compiled(self, registry)?;
-            self.manifest_with_schema(
-                flow.input_schema().clone(),
-                task_input_schemas(flow.nodes())?,
-            )
-        }
+        self.manifest_with_schema(crate::describe_workflow_inputs(self, registry)?)
     }
 
     fn manifest_with_schema(
         &self,
         input_schema: mf_runtime::WorkflowInputSchema,
-        task_inputs: BTreeMap<String, mf_runtime::WorkflowInputSchema>,
     ) -> Result<mf_runtime::WorkflowManifest, PlanError> {
         let manifest = mf_runtime::WorkflowManifest {
-            version: mf_runtime::WorkflowManifestVersion::V2026_10_23,
+            version: mf_runtime::WorkflowManifestVersion::V2026_10_16,
             definition: self.definition.clone(),
             execution_order: self
                 .execution_order
@@ -152,7 +124,6 @@ impl CompiledWorkflow {
                 .collect(),
             loop_orders: crate::compiler::loop_execution_orders(&self.definition)?,
             input_schema,
-            task_inputs,
         };
         manifest.validate()?;
         Ok(manifest)
@@ -987,13 +958,8 @@ impl CompiledWorkflow {
         if order != self.execution_order {
             return InvalidExecutionOrderSnafu.fail();
         }
-        let targets = self.node_targets(&nodes)?;
-        let node_targets_json = serde_json::to_string(&targets).context(SerializeSnafu)?;
-        let task_inputs = targets
-            .into_iter()
-            .filter(|target| target.kind == mf_runtime::NodeTargetKind::Task)
-            .map(|target| (target.id, target.inputs))
-            .collect();
+        let node_targets_json =
+            serde_json::to_string(&self.node_targets(&nodes)?).context(SerializeSnafu)?;
         let flow = crate::FlowBuilder::prepare(
             nodes,
             self.definition.edges.clone(),
@@ -1098,7 +1064,7 @@ impl CompiledWorkflow {
         }
         let syntax: syn::File =
             syn::parse2(quote! { #(#layouts)* }).context(GeneratedSyntaxSnafu)?;
-        let manifest = self.manifest_with_schema(schema, task_inputs)?;
+        let manifest = self.manifest_with_schema(schema)?;
         Ok(GeneratedExecutionArtifacts {
             rust_source: prettyplease::unparse(&syntax),
             manifest_bytes: manifest.to_bytes()?,

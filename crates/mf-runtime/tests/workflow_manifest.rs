@@ -18,15 +18,14 @@ fn compiled_manifests_derive_views_from_original_facts() {
     }))
     .unwrap();
     let manifest = WorkflowManifest {
-        version: WorkflowManifestVersion::V2026_10_23,
+        version: WorkflowManifestVersion::V2026_10_16,
         definition,
         execution_order: vec!["root.a/~".into()],
         loop_orders: vec![],
-        task_inputs: Default::default(),
         input_schema: sample().input_schema,
     };
     let payload = serde_json::to_value(&manifest).unwrap();
-    assert_eq!(payload["version"], "2026-10-23");
+    assert_eq!(payload["version"], "2026-10-16");
     for derived in ["description", "interface", "workflow_id"] {
         assert!(payload.get(derived).is_none());
     }
@@ -77,12 +76,7 @@ fn compiled_manifests_derive_views_from_original_facts() {
         WorkflowInterfaceVersion::V2026_10_16
     );
 
-    for missing in [
-        "definition",
-        "execution_order",
-        "input_schema",
-        "task_inputs",
-    ] {
+    for missing in ["definition", "execution_order", "input_schema"] {
         let mut invalid = payload.clone();
         invalid.as_object_mut().unwrap().remove(missing);
         assert!(matches!(
@@ -90,7 +84,7 @@ fn compiled_manifests_derive_views_from_original_facts() {
             Err(WorkflowManifestError::Json { .. })
         ));
     }
-    for version in ["2026-10-07", "2026-10-16", "2099-01-01"] {
+    for version in ["2026-10-07", "2099-01-01"] {
         let mut invalid = payload.clone();
         invalid["version"] = version.into();
         assert!(
@@ -100,79 +94,6 @@ fn compiled_manifests_derive_views_from_original_facts() {
     let mut invalid = payload;
     invalid["description"] = serde_json::to_value(expected_graph).unwrap();
     assert!(WorkflowManifest::from_bytes(&frame(&serde_json::to_vec(&invalid).unwrap())).is_err());
-}
-
-#[test]
-fn task_inputs_preserve_connected_ports_and_reject_invalid_scopes_and_contracts() {
-    let mut manifest = sample();
-    manifest.definition.nodes.push(
-        serde_json::from_value(serde_json::json!({"id": "downstream", "kind": "fixture.task"}))
-            .unwrap(),
-    );
-    manifest.execution_order.push("downstream".into());
-    manifest.definition.edges.push(
-        serde_json::from_value(serde_json::json!({
-            "from_node": "root.a/~", "from_output": "value",
-            "to_node": "downstream", "to_input": "input"
-        }))
-        .unwrap(),
-    );
-    let schema: WorkflowInputSchema = serde_json::from_value(serde_json::json!({
-        "inputs": {"downstream": {"input": {"type": "string", "required": true}}},
-        "stdin": {}
-    }))
-    .unwrap();
-    manifest.task_inputs.insert("downstream".into(), schema);
-    assert_eq!(
-        WorkflowManifest::from_bytes(&manifest.to_bytes().unwrap()).unwrap(),
-        manifest
-    );
-    for case in [
-        "unknown",
-        "wrong_scope",
-        "empty",
-        "stdin",
-        "binding",
-        "port",
-    ] {
-        let mut invalid = serde_json::to_value(&manifest).unwrap();
-        let schema = &mut invalid["task_inputs"]["downstream"];
-        match case {
-            "unknown" => {
-                let schema = invalid["task_inputs"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("downstream")
-                    .unwrap();
-                invalid["task_inputs"]["unknown"] = schema;
-            }
-            "wrong_scope" => {
-                let ports = schema["inputs"]
-                    .as_object_mut()
-                    .unwrap()
-                    .remove("downstream")
-                    .unwrap();
-                schema["inputs"]["root.a/~"] = ports;
-            }
-            "empty" => schema["inputs"] = serde_json::json!({}),
-            "stdin" => {
-                schema["stdin"] = serde_json::json!({"downstream": {"unless_input": "missing"}})
-            }
-            "binding" => {
-                schema["inputs"]["downstream"]["input"]["binding"] =
-                    serde_json::json!({"default": 42})
-            }
-            "port" => {
-                schema["inputs"]["downstream"][""] =
-                    serde_json::json!({"type": "string", "required": true})
-            }
-            _ => unreachable!(),
-        }
-        assert!(
-            WorkflowManifest::from_bytes(&frame(&serde_json::to_vec(&invalid).unwrap())).is_err(),
-            "{case}"
-        );
-    }
 }
 
 #[test]
@@ -189,10 +110,9 @@ fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
     }))
     .unwrap();
     let manifest = WorkflowManifest {
-        version: WorkflowManifestVersion::V2026_10_23,
+        version: WorkflowManifestVersion::V2026_10_16,
         definition,
         execution_order: vec!["repeat".into()],
-        task_inputs: Default::default(),
         loop_orders: vec![
             mf_runtime::LoopExecutionOrder {
                 path: vec!["repeat".into()],
@@ -286,7 +206,7 @@ fn nested_loop_views_use_frozen_orders_and_reject_inconsistent_facts() {
 
 fn sample() -> WorkflowManifest {
     WorkflowManifest {
-        version: WorkflowManifestVersion::V2026_10_23,
+        version: WorkflowManifestVersion::V2026_10_16,
         definition: serde_json::from_value(serde_json::json!({
             "version": "2026-10-03", "dependencies": {},
             "nodes": [{"id": "root.a/~", "kind": "fixture.input"}]
@@ -294,7 +214,6 @@ fn sample() -> WorkflowManifest {
         .unwrap(),
         execution_order: vec!["root.a/~".into()],
         loop_orders: vec![],
-        task_inputs: Default::default(),
         input_schema: WorkflowInputSchema {
             inputs: [(
                 "root.a/~".into(),
@@ -386,7 +305,7 @@ fn rejects_corrupt_framing_and_lengths_without_allocating_declared_payloads() {
 fn rejects_invalid_versions_and_duplicate_members_with_json_sources() {
     let payload = serde_json::to_string(&sample()).unwrap();
     for invalid in [
-        payload.replace("2026-10-23", "2099-01-01"),
+        payload.replace("2026-10-16", "2099-01-01"),
         payload.replacen("{", "{\"version\":\"2026-10-16\",", 1),
         payload.replace("\"required\":false", "\"required\":false,\"required\":true"),
         format!("{payload}{{}}"),

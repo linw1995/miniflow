@@ -124,11 +124,18 @@ fn compiles_a_runner_without_telemetry_and_preserves_execution() {
             .unwrap();
         assert!(combined.status.success(), "{combined:?}");
         assert!(combined.stderr.is_empty());
-        let help = String::from_utf8(combined.stdout).unwrap();
-        assert_eq!(
-            help.split_once("Runner help:\n").unwrap().1.trim_end(),
-            String::from_utf8(direct.stdout).unwrap().trim_end()
-        );
+        if flags.len() == 1 {
+            let help = String::from_utf8(combined.stdout).unwrap();
+            let runner_help = help.split_once("Runner help:\n").unwrap().1.trim_end();
+            // The native runner additionally lists Task targets from its execution metadata.
+            assert!(
+                String::from_utf8(direct.stdout)
+                    .unwrap()
+                    .starts_with(runner_help)
+            );
+        } else {
+            assert_eq!(combined.stdout, direct.stdout);
+        }
     }
     let result = compile_command(&definition, &output)
         .args(["--no-telemetry", "--locked", "--verbose"])

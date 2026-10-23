@@ -29,8 +29,8 @@ pub struct LoopExecutionOrder {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum WorkflowManifestVersion {
-    #[serde(rename = "2026-10-23")]
-    V2026_10_23,
+    #[serde(rename = "2026-10-16")]
+    V2026_10_16,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -42,7 +42,6 @@ pub struct WorkflowManifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub loop_orders: Vec<LoopExecutionOrder>,
     pub input_schema: WorkflowInputSchema,
-    pub task_inputs: BTreeMap<String, WorkflowInputSchema>,
 }
 
 #[derive(Debug, Snafu)]
@@ -64,8 +63,6 @@ pub enum WorkflowManifestError {
     Graph { source: ContractError },
     #[snafu(display("invalid workflow manifest interface: {source}"))]
     Interface { source: WorkflowInputError },
-    #[snafu(display("invalid embedded Task input schema for node `{id}`"))]
-    TaskInputs { id: String },
 }
 
 impl WorkflowManifest {
@@ -159,31 +156,10 @@ impl WorkflowManifest {
     }
 
     pub fn validate(&self) -> Result<(), WorkflowManifestError> {
-        let mut description = self.description()?;
+        let description = self.description()?;
         self.interface_for(description.workflow_id.clone())
             .validate_for_description(&description)
-            .context(InterfaceSnafu)?;
-        // Isolated Tasks accept inputs that are connected in the original workflow.
-        description.data_edges.clear();
-        description.control_edges.clear();
-        description.order_edges.clear();
-        description.execution = None;
-        for (id, schema) in &self.task_inputs {
-            ensure!(
-                self.node_definition(id).is_some()
-                    && schema.inputs.len() == 1
-                    && schema.inputs.contains_key(id),
-                TaskInputsSnafu { id }
-            );
-            WorkflowInterface {
-                version: crate::WorkflowInterfaceVersion::for_schema(schema),
-                workflow_id: description.workflow_id.clone(),
-                schema: schema.clone(),
-            }
-            .validate_for_description(&description)
-            .context(InterfaceSnafu)?;
-        }
-        Ok(())
+            .context(InterfaceSnafu)
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, WorkflowManifestError> {

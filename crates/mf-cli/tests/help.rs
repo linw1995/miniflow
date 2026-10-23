@@ -5,7 +5,7 @@ use std::{fs, os::unix::fs::PermissionsExt, path::Path, process::Command};
 
 fn manifest() -> WorkflowManifest {
     serde_json::from_value(serde_json::json!({
-        "version": "2026-10-23",
+        "version": "2026-10-16",
         "definition": {
             "version": "2026-10-03", "dependencies": {},
             "nodes": [
@@ -18,11 +18,7 @@ fn manifest() -> WorkflowManifest {
         "input_schema": {"inputs": {"source": {"path": {
             "type": "string", "required": true,
             "binding": {"env": "FLOW_PATH", "default": "hidden-default", "secret": true}
-        }}}, "stdin": {}},
-        "task_inputs": {
-            "source": {"inputs": {"source": {"path": {"type": "string", "required": true}}}, "stdin": {}},
-            "transform": {"inputs": {"transform": {"amount": {"type": "number", "required": true}}}, "stdin": {}}
-        }
+        }}}, "stdin": {}}
     }))
     .unwrap()
 }
@@ -101,44 +97,10 @@ fn combines_help_from_a_nonexecutable_binary_without_running_or_reading_inputs()
         assert!(runner_help.contains("--source.path <VALUE>"), "{help}");
         assert!(runner_help.contains("env: FLOW_PATH"), "{help}");
         assert!(runner_help.contains("default configured; secret"), "{help}");
-        assert!(runner_help.contains("source\n  transform"), "{help}");
         assert!(!runner_help.contains("--transform.amount"), "{help}");
         assert!(!help.contains("hidden-default"), "{help}");
         assert!(!help.contains("hidden-environment"), "{help}");
     }
-}
-
-#[test]
-fn node_help_selects_the_frozen_task_schema_in_either_argument_order() {
-    let directory = tempfile::tempdir().unwrap();
-    let runner = directory.path().join("runner");
-    let payload = manifest().to_bytes().unwrap();
-    write_runner(&runner, Some(&payload));
-    for flags in [
-        vec!["--node", "transform", "--help"],
-        vec!["--help", "--node", "transform"],
-        vec!["--node=transform", "-h"],
-        vec!["--tui", "--node=transform", "--help"],
-    ] {
-        let output = command(&runner).args(&flags).output().unwrap();
-        assert!(output.status.success(), "{flags:?}: {output:?}");
-        assert!(output.stderr.is_empty());
-        let help = String::from_utf8(output.stdout).unwrap();
-        let (_, runner_help) = help.split_once("Runner help:\n").unwrap();
-        assert!(
-            runner_help.contains("Run workflow node transform"),
-            "{help}"
-        );
-        assert!(runner_help.contains("--transform.amount <VALUE>"), "{help}");
-        assert!(!runner_help.contains("--source.path"), "{help}");
-    }
-    let output = command(&runner)
-        .args(["--node", "missing", "--help"])
-        .output()
-        .unwrap();
-    assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("node target `missing`"));
 }
 
 #[test]
@@ -187,6 +149,11 @@ fn explicit_separator_and_named_input_values_keep_their_forwarding_semantics() {
     for (flags, expected) in [
         (vec!["--", "--help"], "--help\n"),
         (vec!["--read.path", "-h"], "--read.path\n-h\n"),
+        (
+            vec!["--node", "transform", "--help"],
+            "--node\ntransform\n--help\n",
+        ),
+        (vec!["--node=transform", "-h"], "--node=transform\n-h\n"),
         (vec!["--read.path=--help"], "--read.path=--help\n"),
         (vec!["--inputs=--help"], "--inputs\n--help\n"),
         (vec!["--inputs-file=--help"], "--inputs-file\n--help\n"),

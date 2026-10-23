@@ -188,15 +188,18 @@ Help lists qualified input names, types, required flags, JSON transports, and ve
 constructing providers, reading input/context files, or executing nodes. CLI syntax errors write to stderr
 and exit with status 2; input, context, and execution validation errors remain failures.
 
-`mf run ./flow --help` (or `-h`) combines the CLI help with runner help derived from the embedded
-manifest. Add `--node transform` before or after the help flag to inspect one Task. This reads the
-binary without executing it, preparing providers, reading input files, or entering TUI/chat mode;
-executable permission and a terminal are not required. Both Linux ELF64 and macOS Mach-O64 files can
-be inspected. Recompile older runners to embed the current manifest and Task input schemas.
-`mf run --help` shows only CLI help. Put help and node selection before named workflow arguments;
-once a named workflow argument starts, the remaining arguments belong to the runner. An explicit
-separator, such as `mf run ./flow -- --help`, also forwards arguments directly and shows only runner
-help. Missing, invalid, or unsupported manifests produce a diagnostic and a nonzero exit status.
+`mf run ./flow --help` (or `-h`) combines CLI help with workflow help generated from the existing
+embedded `input_schema`. It reads the binary without executing it, preparing providers, reading
+input files, or entering TUI/chat mode; executable permission and a terminal are not required.
+Both Linux ELF64 and macOS Mach-O64 files can be inspected, with no manifest format changes.
+The native runner's Task target list comes from separate execution metadata and is omitted from
+this schema-based help. `mf run --help` shows only CLI help.
+
+Put help before runner arguments. Once a runner argument starts, the remaining arguments belong to
+the runner: `mf run ./flow --node transform --help` launches the runner to display its node help.
+An explicit separator, such as `mf run ./flow -- --help`, also forwards arguments directly and shows
+only runner help. Missing, invalid, or unsupported manifests produce a diagnostic and a nonzero
+exit status.
 
 JSON and file transports also accept inline values, such as `--inputs='{"read.path":"data.txt"}'` and
 `--inputs-file=parameters.json`. A named string value starting with `--` must use inline syntax, such as

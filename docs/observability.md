@@ -125,11 +125,8 @@ Graph-relative event validation checks workflow/node identity, position, sequenc
 
 ## Embedded manifest format
 
-Manifest payload version `2026-10-23` stores the compiled `definition`, root `execution_order`, optional nested
-`loop_orders`, prepared workflow `input_schema`, and `task_inputs` keyed by top-level Task ID. Each Task schema
-describes its isolated inputs, including ports connected in the full workflow. These frozen contracts let
-`mf run ./runner --help` and `--node ID --help` generate help without launching the runner. Graph descriptions,
-interface wrappers, and workflow IDs are not duplicated
+Manifest payload version `2026-10-16` stores only the compiled `definition`, root `execution_order`, optional nested
+`loop_orders`, and prepared `input_schema`. Graph descriptions, interface wrappers, and workflow IDs are not duplicated
 in the payload. `description()`, `interface()`, and `workflow_id()` derive those views from the stored facts without
 planning a DAG or preparing providers. Original definition and input schema are directly accessible fields;
 `node_definition(id)` borrows a root node by exact ID. Input contracts remain stored because provider-declared ports,

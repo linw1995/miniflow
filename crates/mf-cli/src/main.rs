@@ -2,7 +2,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use mf_compiler::{
     CompileRequest, PipelineError, RunnerOptions, SupportPackages, compile_project_with_options,
 };
-use snafu::{OptionExt, ResultExt, Snafu};
+use snafu::{ResultExt, Snafu};
 #[cfg(feature = "development-support")]
 use std::env;
 use std::ffi::OsString;
@@ -78,9 +78,6 @@ enum CliError {
     },
     #[snafu(display("could not write command help: {source}"))]
     HelpOutput { source: io::Error },
-    #[cfg(unix)]
-    #[snafu(display("node target `{node}` is not a supported top-level Task"))]
-    HelpTarget { node: String },
     #[snafu(transparent)]
     Build { source: PipelineError },
     #[cfg(unix)]
@@ -99,7 +96,6 @@ enum CliError {
 
 struct RunHelp {
     executable: Option<PathBuf>,
-    node: Option<String>,
 }
 
 impl RunHelp {
@@ -119,11 +115,6 @@ impl RunHelp {
                         .long("help")
                         .action(clap::ArgAction::SetTrue),
                 )
-                .arg(
-                    clap::Arg::new("node")
-                        .long("node")
-                        .value_parser(clap::builder::NonEmptyStringValueParser::new()),
-                )
         });
         // A failed probe goes through the unchanged parser for its normal diagnostics.
         let matches = command.try_get_matches_from(arguments).ok()?;
@@ -133,7 +124,6 @@ impl RunHelp {
         }
         Some(Self {
             executable: matches.get_one::<PathBuf>("executable").cloned(),
-            node: matches.get_one::<String>("node").cloned(),
         })
     }
 
@@ -152,22 +142,7 @@ impl RunHelp {
         {
             let manifest = mf_tui::manifest::read_manifest(&executable)
                 .context(InspectSnafu { path: executable })?;
-            let schema = if let Some(node) = &self.node {
-                manifest
-                    .task_inputs
-                    .get(node)
-                    .context(HelpTargetSnafu { node })?
-            } else {
-                &manifest.input_schema
-            };
-            let tasks: Vec<_> = manifest
-                .execution_order
-                .iter()
-                .filter(|id| manifest.task_inputs.contains_key(*id))
-                .map(String::as_str)
-                .collect();
-            let runner_help =
-                mf_runtime::runner_help_command(schema, &tasks, self.node.as_deref()).render_help();
+            let runner_help = mf_runtime::runner_help_command(&manifest.input_schema).render_help();
             writeln!(
                 io::stdout().lock(),
                 "CLI help:\n{cli_help}\n\nRunner help:\n{runner_help}"
@@ -177,7 +152,7 @@ impl RunHelp {
         }
         #[cfg(not(unix))]
         {
-            let _ = (executable, self.node);
+            let _ = executable;
             UnsupportedInspectionSnafu.fail()
         }
     }
