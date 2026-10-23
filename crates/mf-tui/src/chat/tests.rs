@@ -428,3 +428,143 @@ fn event_backpressure_does_not_prevent_cancellation_or_shutdown_before_launch() 
         );
     }
 }
+
+fn live_launch(directory: &Path, mode: &str) -> (ChatLaunch, std::path::PathBuf) {
+    let mut launch = launch(directory);
+    launch.manifest.version = mf_runtime::WorkflowManifestVersion::V2026_10_23;
+    let mut definition = serde_json::to_value(&launch.manifest.definition).unwrap();
+    definition["version"] = json!("2026-10-23");
+    definition["stream_outputs"] = json!([{"name":"answer","path":["start"],"port":"delta"}]);
+    launch.manifest.definition = serde_json::from_value(definition).unwrap();
+    launch.manifest.stream_outputs = vec![mf_runtime::StreamOutputContract {
+        name: "answer".into(),
+        path: vec!["start".into()],
+        port: "delta".into(),
+        value_type: mf_runtime::ValueType::Object,
+        required: true,
+    }];
+    launch.contract = ChatContract::from_manifest(&launch.manifest).unwrap();
+    let gate = directory.join("release");
+    let event = |kind| json!({"export":"answer","source":["start"],"invocation":{"id":1,"node":"start","path":[]},"event":kind});
+    let kinds = [
+        json!({"kind":"event","event":event(json!({"kind":"open"}))}),
+        json!({"kind":"event","event":event(json!({"kind":"value","value":{"text":"provisional","model_call_id":"model-call"}}))}),
+        json!({"kind":"event","event":event(json!({"kind":"close","completed":true}))}),
+        json!({"kind":"final","outputs":{"status":"succeeded","text":"canonical","usages":[]}}),
+    ];
+    let records: Vec<_> = kinds.into_iter().enumerate().map(|(sequence, record)| json!({"version":1,"run_id":"RUN_ID","sequence":sequence,"record":record})).collect();
+    let script = format!(
+        r#"#!/usr/bin/env python3
+import json, os, sys, time
+records = json.loads({records:?})
+mode = {mode:?}
+for record in records[:2]:
+    record['run_id'] = os.environ['MF_RUN_ID']
+    print(json.dumps(record), flush=True)
+if mode == 'gated':
+    while not os.path.exists({gate:?}):
+        time.sleep(0.01)
+if mode == 'prefix':
+    sys.exit(2)
+for record in records[2:]:
+    record['run_id'] = os.environ['MF_RUN_ID']
+    print(json.dumps(record), flush=True)
+if mode == 'late':
+    print('late diagnostic', flush=True)
+    sys.exit(13)
+"#,
+        records = serde_json::to_string(&records).unwrap(),
+        gate = gate.to_str().unwrap()
+    );
+    fs::write(&launch.executable, script).unwrap();
+    (launch, gate)
+}
+
+#[test]
+fn executable_live_previews_arrive_before_authoritative_settlement() {
+    let root = tempfile::tempdir().unwrap();
+    let (launch, gate) = live_launch(root.path(), "gated");
+    let controller = ChatController::open(launch).unwrap();
+    controller
+        .send(ChatCommand::Submit {
+            session_id: None,
+            prompt: "hello".into(),
+        })
+        .unwrap();
+    let invocation = loop {
+        if let ChatEvent::Live { invocation, event } = next(&controller)
+            && matches!(event.event, mf_runtime::LiveOutputKind::Value { .. })
+        {
+            break invocation;
+        }
+    };
+    assert!(controller.busy());
+    assert_eq!(
+        controller
+            ._database
+            .messages(&invocation.session_id, 50, None)
+            .unwrap()
+            .messages
+            .len(),
+        1
+    );
+    fs::write(gate, "release").unwrap();
+    loop {
+        if let ChatEvent::Finished { resolution, .. } = next(&controller) {
+            let CompletionState::Committed(completion) = resolution.unwrap().state else {
+                panic!("expected saved final")
+            };
+            assert_eq!(completion.result.text, "canonical");
+            break;
+        }
+    }
+    controller.close().unwrap();
+}
+
+#[test]
+fn valid_live_final_survives_late_diagnostics_and_prefix_death_never_saves_text() {
+    for mode in ["late", "prefix"] {
+        let root = tempfile::tempdir().unwrap();
+        let (launch, _) = live_launch(root.path(), mode);
+        let controller = ChatController::open(launch).unwrap();
+        controller
+            .send(ChatCommand::Submit {
+                session_id: None,
+                prompt: "hello".into(),
+            })
+            .unwrap();
+        loop {
+            if let ChatEvent::Finished {
+                resolution,
+                capture_error,
+                ..
+            } = next(&controller)
+            {
+                match resolution.unwrap().state {
+                    CompletionState::Committed(completion) => {
+                        assert_eq!(mode, "late");
+                        assert_eq!(completion.result.text, "canonical");
+                        assert!(capture_error.is_some());
+                    }
+                    CompletionState::Finished(turn) => {
+                        assert_eq!(mode, "prefix");
+                        assert_eq!(turn.state, "failed");
+                    }
+                    _ => panic!("unexpected settlement"),
+                }
+                break;
+            }
+        }
+        controller.close().unwrap();
+    }
+}
+
+#[test]
+fn incompatible_public_answer_contract_is_rejected_without_launching() {
+    let root = tempfile::tempdir().unwrap();
+    let (mut launch, _) = live_launch(root.path(), "prefix");
+    launch.manifest.stream_outputs[0].value_type = mf_runtime::ValueType::String;
+    assert!(ChatContract::from_manifest(&launch.manifest).is_err());
+    launch.manifest.version = mf_runtime::WorkflowManifestVersion::V2026_10_16;
+    assert!(ChatContract::from_manifest(&launch.manifest).is_err());
+}

@@ -136,6 +136,10 @@ pub enum ChatEvent {
         prompt: String,
     },
     Observing(LocalObservation),
+    Live {
+        invocation: Invocation,
+        event: mf_runtime::LiveOutputEvent,
+    },
     Finished {
         invocation: Invocation,
         resolution: Result<ReconciledCompletion, mf_chat::ChatError>,
@@ -403,13 +407,51 @@ impl Controller {
             retry_of,
             max_history_bytes: mf_chat::DEFAULT_HISTORY_BYTES,
         };
-        let resolution = mf_chat::workflow::run_conversation(
+        let live = self.launch.contract.answer_stream.as_ref().map(|_| {
+            let output = self.output.clone();
+            let closed = self.closed.clone();
+            let cancel = self.cancel.clone();
+            let invocation = invocation.clone();
+            mf_runtime::LivePublisher::new(move |event, cancellation| {
+                if let mf_runtime::LiveOutputKind::Value { value } = &event.event {
+                    mf_chat::contract::decode_answer_delta(value)
+                        .context(mf_runtime::StreamOutputDecodeSnafu)?;
+                }
+                let mut event = ChatEvent::Live {
+                    invocation: invocation.clone(),
+                    event,
+                };
+                loop {
+                    if let Some(error) = cancellation.failure() {
+                        return Err(error);
+                    }
+                    if cancel.load(Ordering::Acquire) || closed.load(Ordering::Acquire) {
+                        return Err(mf_runtime::StreamError::Execution {
+                            message: "chat live delivery cancelled".into(),
+                        });
+                    }
+                    match output.try_send(event) {
+                        Ok(()) => return Ok(()),
+                        Err(TrySendError::Full(pending)) => event = pending,
+                        Err(TrySendError::Disconnected(_)) => {
+                            return Err(mf_runtime::StreamError::Execution {
+                                message: "chat live receiver disconnected".into(),
+                            });
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(5));
+                }
+            })
+            .select(["answer".into()])
+        });
+        let resolution = mf_chat::workflow::run_conversation_with_live(
             &self.database,
             request,
             Arc::new(backend),
             Default::default(),
             true,
             None,
+            live,
         );
         let outcome = captured
             .lock()
@@ -512,7 +554,7 @@ impl mf_chat::ConversationBackend for ExternalBackend {
         &self,
         invocation: &Invocation,
         request: mf_chat::ConversationInputs,
-        _: &mut mf_runtime::ExecutionContext,
+        context: &mut mf_runtime::ExecutionContext,
         _: Option<&mf_telemetry::observation::Observer>,
     ) -> Result<mf_chat::ConversationResult, mf_chat::ChatError> {
         emit(
@@ -524,7 +566,7 @@ impl mf_chat::ConversationBackend for ExternalBackend {
                 prompt: request.prompt.clone(),
             },
         );
-        let execution = self.execute(request);
+        let execution = self.execute(request, context);
         let failure = match execution.as_ref().err() {
             Some(ChatRunError::Cancelled) => TurnExit::Cancelled,
             Some(ChatRunError::Observation {
@@ -536,7 +578,12 @@ impl mf_chat::ConversationBackend for ExternalBackend {
             .boxed()
             .context(mf_chat::BackendSnafu { outcome: failure })?;
         let reason = exit_reason(&outcome);
-        let result = if let Some(message) = &outcome.capture_error {
+        if let Some(failure) = &outcome.live_delivery_failure {
+            context.cancellation().cancel(failure.as_ref().clone());
+        }
+        let result = if outcome.live_final {
+            mf_chat::ConversationResult::from_json(&outcome.stdout)
+        } else if let Some(message) = &outcome.capture_error {
             mf_chat::CaptureSnafu { message }.fail()
         } else {
             mf_chat::ConversationResult::from_json(&outcome.stdout)
@@ -552,7 +599,11 @@ impl mf_chat::ConversationBackend for ExternalBackend {
 }
 
 impl ExternalBackend {
-    fn execute(&self, request: mf_chat::ConversationInputs) -> Result<LocalOutcome, ChatRunError> {
+    fn execute(
+        &self,
+        request: mf_chat::ConversationInputs,
+        context: &mut mf_runtime::ExecutionContext,
+    ) -> Result<LocalOutcome, ChatRunError> {
         let arguments = self
             .launch
             .contract
@@ -588,12 +639,36 @@ impl ExternalBackend {
             .manifest
             .description()
             .map_err(mf_chat::ChatError::from)?;
-        let mut run = LocalRun::start(
-            command,
-            description,
-            mf_telemetry::identity::RunId::new(),
-            mf_chat::contract::MAX_RECOVERY_BYTES as u64,
-        )?;
+        let run_id = mf_telemetry::identity::RunId::new();
+        let mut run = if let (Some(publisher), Some(contract)) = (
+            context.live_publisher(),
+            self.launch.contract.answer_stream.as_ref(),
+        ) {
+            command.args([
+                "--output-format",
+                "events-jsonl",
+                "--stream-output",
+                &contract.name,
+            ]);
+            LocalRun::start_live(
+                command,
+                description,
+                run_id,
+                crate::run::LiveCaptureOptions {
+                    contracts: vec![contract.clone()],
+                    publisher: publisher.clone(),
+                    cancellation: context.cancellation(),
+                    limits: Default::default(),
+                },
+            )?
+        } else {
+            LocalRun::start(
+                command,
+                description,
+                run_id,
+                mf_chat::contract::MAX_RECOVERY_BYTES as u64,
+            )?
+        };
         emit(
             &self.output,
             &self.closed,
@@ -601,6 +676,12 @@ impl ExternalBackend {
         );
         loop {
             if self.cancel.load(Ordering::Acquire) || self.closed.load(Ordering::Acquire) {
+                context
+                    .cancellation()
+                    .cancel_with_message("chat request cancelled");
+                run.cancel();
+            }
+            if context.cancellation().failure().is_some() {
                 run.cancel();
             }
             if let Some(outcome) = run.poll()? {
@@ -632,7 +713,8 @@ fn reconcile_turn(
         stdout: outcome
             .capture_error
             .is_none()
-            .then_some(outcome.stdout.as_slice()),
+            .then_some(outcome.stdout.as_slice())
+            .or_else(|| outcome.live_final.then_some(outcome.stdout.as_slice())),
         outcome: reason,
         summary: if outcome.stderr.is_empty() {
             "runner exited without completion"

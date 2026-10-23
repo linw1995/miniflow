@@ -184,6 +184,35 @@ Each token counter exposes `known_subtotal`, `reported_calls`, and `missing_call
 
 SQL computes aggregate facts without loading raw call history. Integer overflow fails explicitly. Calls from title generation remain attributed to `title`, including valid replies whose title update was stale or whose application title was rejected. Monetary estimates require separate pricing data and are not provided by the core.
 
+## Optional live answer subscriptions
+
+`ChatHost::submit` and `retry` return terminal-only jobs and allocate no stream receiver. Subscribe before
+launch with `submit_stream` or `retry_stream`; drain the returned receiver concurrently with completion:
+
+```rust
+let (job, events) = host.submit_stream(&session.id, "Hello", Default::default())?;
+let reader = std::thread::spawn(move || {
+    while let Some(event) = events.recv()? {
+        render_provisional(event);
+    }
+    Ok::<_, mf_runtime::StreamError>(())
+});
+let completion = job.join()?;
+reader.join().expect("reader panicked")?;
+```
+
+The public `answer` export carries objects with string `text` and `model_call_id` fields. It is selected from
+reflected export contracts, independently of node kinds or graph topology. A node may emit zero fragments.
+Each open/value/close sequence belongs to one scoped stream invocation; repeated Loop calls stay separate.
+Chat `Invocation.call_id` identifies the application turn. A delta's `model_call_id` identifies its model request
+and matches that request's terminal usage entry; a turn can contain several model calls.
+
+Subscribed queues apply bounded backpressure. Dropping a receiver with pending output fails delivery, and
+host shutdown interrupts blocked publishers. A completed job's `join` or drop does not cancel closed output.
+Only authoritative terminal results enter settlement. Preview fragments never become database messages or
+usage records. The application retains a valid reply before its mandatory final drain; a failed drain leaves
+that complete reply available for save-only retry without invoking the backend again.
+
 ## Executable conversation backend
 
 `mf_chat::contract::ChatContract` validates a finite executable's external conversation contract. Internal node kinds,
@@ -193,7 +222,14 @@ workflow; there is no isolated-model execution mode or assumption that a workflo
 The startup interface supplies an unambiguous `prompt` string and optionally `system`, `history`, and `context`.
 Their qualified names can belong to any startup node. Remaining declared inputs form `contract.parameters`;
 resolve them with `mf_runtime::resolve_workflow_inputs` before admission. The contract rejects ambiguous or
-mistyped conversation ports, stdin-dependent execution, and streaming output protocols.
+mistyped conversation ports, stdin-dependent execution, and top-level native stream execution.
+
+Executables advertising finite live output and a compatible public `answer` export use `events-jsonl` with
+that export explicitly selected. Older JSON executables keep their existing transport. The capture worker
+validates bounded protocol records independently of rendering and retains only the final JSON result.
+A valid final remains authoritative if the process later reports diagnostics or exits unsuccessfully.
+A prefix without a final cannot be saved as a reply. Connected-delivery failures retain an available final
+for explicit recovery instead of silently committing it.
 
 The [single-call example](../examples/chat-flow.json), the
 [conversation and title example](../examples/chat-title-flow.json), and the

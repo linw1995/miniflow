@@ -127,6 +127,7 @@ pub use recovery::{
 #[derive(Clone, Debug)]
 pub struct ChatContract {
     pub parameters: WorkflowInputSchema,
+    pub answer_stream: Option<mf_runtime::StreamOutputContract>,
     inputs: BTreeMap<String, String>,
 }
 
@@ -190,8 +191,24 @@ impl ChatContract {
                 }
             );
         }
+        let answer_stream = manifest
+            .stream_outputs
+            .iter()
+            .find(|output| output.name == "answer")
+            .cloned();
+        if let Some(answer) = &answer_stream {
+            ensure!(
+                manifest.supports_live_output()
+                    && answer.value_type == mf_runtime::ValueType::Object,
+                InvalidSnafu {
+                    field: "answer stream",
+                    reason: "requires finite live output with object text deltas"
+                }
+            );
+        }
         Ok(Self {
             parameters: configuration,
+            answer_stream,
             inputs,
         })
     }
@@ -311,4 +328,22 @@ impl crate::ChatDatabase {
         );
         Ok((original.turn, original.prompt))
     }
+}
+
+/// Decodes a public answer fragment without treating it as authoritative conversation state.
+pub fn decode_answer_delta(
+    value: &mf_runtime::ValueRef,
+) -> Result<mfn_llm::TextDelta, mf_runtime::InputDecodeError> {
+    <mfn_llm::TextDelta as mf_runtime::InputField>::decode_field("answer", Some(value.clone()))
+}
+
+pub fn publish_answer(
+    publisher: &mf_runtime::LivePublisher,
+    event: mf_runtime::LiveOutputEvent,
+    cancellation: &mf_runtime::StreamCancellation,
+) -> Result<(), mf_runtime::StreamError> {
+    if let mf_runtime::LiveOutputKind::Value { value } = &event.event {
+        decode_answer_delta(value).context(mf_runtime::StreamOutputDecodeSnafu)?;
+    }
+    publisher.publish(event, cancellation)
 }

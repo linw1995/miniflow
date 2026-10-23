@@ -347,6 +347,7 @@ impl ChatView {
                 self.notice = "Working... Ctrl+C to cancel".into();
                 self.scroll = 0;
             }
+            ChatEvent::Live { .. } => {}
             ChatEvent::Observing(observation) => self.observation = Some(observation),
             ChatEvent::Finished {
                 resolution,

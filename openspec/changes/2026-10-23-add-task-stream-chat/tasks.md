@@ -44,11 +44,11 @@
 
 ## 6. Chat backends and settlement
 
-- [ ] 6.1 Add explicit subscription-at-submission and optional backend live sinks while keeping ordinary jobs terminal-only; verify direct `join()` without a subscriber, startup emission delivery, receiver-drop failure, and host shutdown under pressure.
-- [ ] 6.2 Bind embedded user-flow exports without exposing application context; verify scoped streams and application/user node-ID collisions retain existing isolation.
-- [ ] 6.3 Negotiate executable event mode from advertised public contracts and adapt bounded capture to the shared events; verify JSON-only fallback, incompatible answer types, unsupported versions, and no topology-based model selection.
-- [ ] 6.4 Reconcile only authoritative final results through existing settlement and recovery; verify answer-close-before-title, process death after a prefix, late diagnostics after valid capture, failed-result accounting, and save-only retry with no second backend call.
-- [ ] 6.5 Document optional subscriptions and the distinction between chat invocation IDs and model-call IDs in `docs/chat.md`; verify the programmatic example drains events concurrently with completion.
+- [x] 6.1 Add explicit subscription-at-submission and optional backend live sinks while keeping ordinary jobs terminal-only; verify direct `join()` without a subscriber, startup emission delivery, receiver-drop failure, and host shutdown under pressure.
+- [x] 6.2 Bind embedded user-flow exports without exposing application context; verify scoped streams and application/user node-ID collisions retain existing isolation.
+- [x] 6.3 Negotiate executable event mode from advertised public contracts and adapt bounded capture to the shared events; verify JSON-only fallback, incompatible answer types, unsupported versions, and no topology-based model selection.
+- [x] 6.4 Reconcile only authoritative final results through existing settlement and recovery; verify answer-close-before-title, process death after a prefix, late diagnostics after valid capture, failed-result accounting, and save-only retry with no second backend call.
+- [x] 6.5 Document optional subscriptions and the distinction between chat invocation IDs and model-call IDs in `docs/chat.md`; verify the programmatic example drains events concurrently with completion.
 
 ## 7. Terminal presentation
 

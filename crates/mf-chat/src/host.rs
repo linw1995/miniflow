@@ -9,6 +9,7 @@ use snafu::{IntoError, OptionExt, ResultExt, ensure};
 use std::{
     collections::BTreeMap,
     path::Path,
+    sync::atomic::{AtomicBool, Ordering},
     sync::{
         Arc, Mutex,
         mpsc::{self, Receiver, TryRecvError},
@@ -67,6 +68,7 @@ pub struct ChatJob {
     cancellation: StreamCancellation,
     receiver: Receiver<Result<Completion, ChatError>>,
     ready: Option<Result<Completion, ChatError>>,
+    completed: Arc<AtomicBool>,
 }
 
 impl ChatJob {
@@ -75,6 +77,9 @@ impl ChatJob {
     }
 
     pub fn cancel(&self) {
+        if self.completed.load(Ordering::Acquire) {
+            return;
+        }
         self.cancellation.cancel(StreamError::Execution {
             message: "chat request cancelled".into(),
         });
@@ -152,12 +157,44 @@ impl ChatHost {
     }
 
     pub fn submit(&self, session_id: &str, prompt: &str) -> Result<ChatJob, ChatError> {
-        self.start(session_id, prompt, None)
+        self.start(session_id, prompt, None, None)
+    }
+
+    pub fn submit_stream(
+        &self,
+        session_id: &str,
+        prompt: &str,
+        limits: mf_runtime::LiveLimits,
+    ) -> Result<(ChatJob, mf_runtime::LiveReceiver), ChatError> {
+        let (publisher, receiver) = mf_runtime::live_channel(limits)?;
+        let job = self.start(
+            session_id,
+            prompt,
+            None,
+            Some(publisher.select(["answer".into()])),
+        )?;
+        Ok((job, receiver))
+    }
+
+    pub fn retry_stream(
+        &self,
+        turn_id: &str,
+        limits: mf_runtime::LiveLimits,
+    ) -> Result<(ChatJob, mf_runtime::LiveReceiver), ChatError> {
+        let (original, prompt) = self.database().retry_prompt(turn_id)?;
+        let (publisher, receiver) = mf_runtime::live_channel(limits)?;
+        let job = self.start(
+            &original.session_id,
+            &prompt,
+            Some(turn_id.into()),
+            Some(publisher.select(["answer".into()])),
+        )?;
+        Ok((job, receiver))
     }
 
     pub fn retry(&self, turn_id: &str) -> Result<ChatJob, ChatError> {
         let (original, prompt) = self.database().retry_prompt(turn_id)?;
-        self.start(&original.session_id, &prompt, Some(turn_id.into()))
+        self.start(&original.session_id, &prompt, Some(turn_id.into()), None)
     }
 
     fn start(
@@ -165,6 +202,7 @@ impl ChatHost {
         session_id: &str,
         prompt: &str,
         retry_of: Option<String>,
+        live: Option<mf_runtime::LivePublisher>,
     ) -> Result<ChatJob, ChatError> {
         ensure!(
             !prompt.is_empty(),
@@ -244,13 +282,15 @@ impl ChatHost {
             retry_of,
             max_history_bytes: self.inner.config.max_history_bytes,
         };
+        let completed = Arc::new(AtomicBool::new(false));
+        let worker_completed = completed.clone();
         let job_invocation = invocation.clone();
         let job_cancellation = cancellation.clone();
         let worker = thread::Builder::new()
             .name(format!("mf-chat-{}", invocation.call_id))
             .spawn(move || {
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    inner.conversation(request, profile, job_cancellation)
+                    inner.conversation(request, profile, job_cancellation, live)
                 }));
                 let result = match result {
                     Ok(result) => result,
@@ -292,6 +332,7 @@ impl ChatHost {
                     .expect("worker state was not poisoned")
                     .active
                     .remove(&job_invocation.call_id);
+                worker_completed.store(true, Ordering::Release);
                 let _ = sender.send(result);
             });
         match worker {
@@ -306,6 +347,7 @@ impl ChatHost {
             cancellation,
             receiver,
             ready: None,
+            completed,
         })
     }
 
@@ -390,19 +432,21 @@ impl Inner {
         request: BeginTurnInputs,
         profile: crate::WorkflowProfile,
         cancellation: StreamCancellation,
+        live: Option<mf_runtime::LivePublisher>,
     ) -> Result<Completion, ChatError> {
         let invocation = Invocation {
             session_id: request.session_id.clone(),
             turn_id: request.turn_id.clone(),
             call_id: request.call_id.clone(),
         };
-        let resolution = crate::workflow::run_conversation(
+        let resolution = crate::workflow::run_conversation_with_live(
             &self.database,
             request,
             profile.backend(),
             cancellation,
             self.config.automatic_titles,
             self.config.observer.as_ref(),
+            live,
         )?;
         match resolution.state {
             crate::contract::CompletionState::Committed(completion) => Ok(completion),

@@ -4,6 +4,8 @@ use std::{error::Error, io, path::PathBuf};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum ChatError {
+    #[snafu(transparent)]
+    Live { source: mf_runtime::StreamError },
     #[snafu(display("conversation workflow failed: {message}"))]
     WorkflowFailure { message: String },
     #[snafu(transparent)]

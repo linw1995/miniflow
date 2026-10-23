@@ -23,6 +23,14 @@ use std::{
 #[derive(Clone, Debug, Snafu)]
 pub enum StreamError {
     #[snafu(
+        display("stream output has an invalid payload: {source}"),
+        visibility(pub)
+    )]
+    OutputDecode {
+        #[snafu(source(from(crate::InputDecodeError, Arc::new)))]
+        source: Arc<crate::InputDecodeError>,
+    },
+    #[snafu(
         display("live output protocol failed: {source}"),
         visibility(pub(super))
     )]
@@ -127,7 +135,8 @@ impl StreamError {
             Self::InputFailure { .. } | Self::InputRecord { .. } | Self::InputValidation { .. } => {
                 "input"
             }
-            Self::Output { .. }
+            Self::OutputDecode { .. }
+            | Self::Output { .. }
             | Self::OutputWrite { .. }
             | Self::OutputEncode { .. }
             | Self::LiveProtocol { .. }

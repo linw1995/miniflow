@@ -166,3 +166,5 @@ pub use workflow_manifest::{
     MAX_MANIFEST_PADDING_BYTES, MAX_MANIFEST_PAYLOAD_BYTES, MAX_MANIFEST_SECTION_BYTES,
     WorkflowManifest, WorkflowManifestError, WorkflowManifestVersion, describe_definition,
 };
+
+pub use stream_instance::OutputDecodeSnafu as StreamOutputDecodeSnafu;

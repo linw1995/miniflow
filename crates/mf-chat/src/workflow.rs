@@ -96,6 +96,20 @@ impl ConversationBackend for EmbeddedBackend {
         // Application and user graphs may reuse node IDs; expose only protocol inputs.
         let mut child =
             context.fork_domain_snapshot(observation, mf_runtime::OutputVisibility::Borrowed(&[]));
+        if let Some(publisher) = context.live_publisher().cloned() {
+            // The application settles and flushes after retaining the authoritative reply.
+            child.set_live_publisher(
+                mf_runtime::LivePublisher::new(move |event, cancellation| {
+                    crate::contract::publish_answer(&publisher, event, cancellation)
+                })
+                .select(
+                    self.contract
+                        .answer_stream
+                        .iter()
+                        .map(|output| output.name.clone()),
+                ),
+            );
+        }
         let _span = child.observation().map(mf_runtime::RunObservation::enter);
         let result = (|| -> Result<_, ChatError> {
             child.set_workflow_arguments(self.contract.arguments(request, &self.parameters)?);
@@ -226,6 +240,12 @@ impl TypedTaskNode for InvokeWorkflow {
             .delivered
             .lock()
             .expect("delivery state was not poisoned") = Some(response.clone());
+        if let Some(publisher) = context.live_publisher() {
+            publisher.flush(&context.cancellation())?;
+        }
+        if let Some(error) = context.cancellation().failure() {
+            return Err(error.into());
+        }
         Ok(CompleteTurnInputs {
             database_path: input.database_path,
             invocation: input.invocation,
@@ -243,6 +263,26 @@ pub fn run_conversation(
     cancellation: StreamCancellation,
     automatic_titles: bool,
     observer: Option<&Observer>,
+) -> Result<ReconciledCompletion, ChatError> {
+    run_conversation_with_live(
+        database,
+        request,
+        backend,
+        cancellation,
+        automatic_titles,
+        observer,
+        None,
+    )
+}
+
+pub fn run_conversation_with_live(
+    database: &ChatDatabase,
+    request: BeginTurnInputs,
+    backend: Arc<dyn ConversationBackend>,
+    cancellation: StreamCancellation,
+    automatic_titles: bool,
+    observer: Option<&Observer>,
+    live: Option<mf_runtime::LivePublisher>,
 ) -> Result<ReconciledCompletion, ChatError> {
     ensure!(
         std::path::Path::new(&request.database_path) == database.path(),
@@ -297,6 +337,9 @@ pub fn run_conversation(
         .transpose()?;
     let result = ExecutionContext::run(observation, |context| -> Result<_, ChatError> {
         context.set_cancellation(cancellation.clone());
+        if let Some(publisher) = live {
+            context.set_live_publisher(publisher);
+        }
         context.set_workflow_arguments(arguments);
         Ok(FlowRuntime::default().execute_in_context(&flow, context)?)
     });
