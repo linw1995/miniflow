@@ -183,6 +183,27 @@ fn descriptions_validate_cluster_metadata_and_version() {
     synthetic["clusters"][0]["nodes"] = json!(["%loop"]);
     assert!(WorkflowDescription::from_json(&serde_json::to_vec(&synthetic).unwrap()).is_err());
 
+    let mut empty = value.clone();
+    empty["clusters"][0]["nodes"] = json!([]);
+    let error = WorkflowDescription::from_json(&serde_json::to_vec(&empty).unwrap())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("node cluster must not be empty"), "{error}");
+
+    let count = mf_telemetry::description::MAX_CLUSTERS_PER_SCOPE + 1;
+    let mut oversized = value.clone();
+    oversized["nodes"] = (0..count)
+        .map(|index| json!({"id":format!("node-{index}"),"kind":"fixture.read"}))
+        .collect();
+    oversized["execution_order"] = (0..count)
+        .map(|index| json!(format!("node-{index}")))
+        .collect();
+    oversized["clusters"] = (0..count).map(|index| json!({"label":"Load","annotation":"Read the input.","nodes":[format!("node-{index}")]})).collect();
+    let error = WorkflowDescription::from_json(&serde_json::to_vec(&oversized).unwrap())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("too many node clusters"), "{error}");
+
     value["clusters"][0]["label"] = json!("");
     assert!(WorkflowDescription::from_json(&serde_json::to_vec(&value).unwrap()).is_err());
 }

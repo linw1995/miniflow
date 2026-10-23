@@ -146,6 +146,19 @@ fn loop_body_clusters_are_preserved_in_descriptions() {
         description.loop_bodies[0].clusters[0].nodes,
         vec!["step".to_owned()]
     );
+    let mut legacy = definition;
+    legacy.version = WorkflowDefinitionVersion::V2026_10_19;
+    let error = plan_definition(&legacy).unwrap_err().to_string();
+    assert!(
+        error.contains("node clusters require version 2026-10-23"),
+        "{error}"
+    );
+    assert!(
+        serde_json::to_string(&legacy)
+            .unwrap_err()
+            .to_string()
+            .contains("node clusters require version 2026-10-23")
+    );
 }
 
 #[test]
@@ -322,4 +335,95 @@ fn cluster_validation_rejects_unknown_duplicate_and_synthetic_members() {
     let empty_label = WorkflowDefinition::from_json(&value.to_string()).unwrap();
     let error = plan_definition(&empty_label).unwrap_err().to_string();
     assert!(error.contains("cluster label"), "{error}");
+}
+
+#[test]
+fn programmatic_clusters_enforce_versions_and_metadata_limits() {
+    use mf_telemetry::description::{
+        MAX_CLUSTER_ANNOTATION_BYTES, MAX_CLUSTER_LABEL_BYTES, MAX_CLUSTERS_PER_SCOPE,
+    };
+    use serde_json::json;
+    let mut base: WorkflowDefinition = serde_json::from_value(json!({
+        "version":"2026-10-23","dependencies":{},
+        "nodes":[{"id":"read","kind":"fixture.read"}],
+        "clusters":[{"label":"Load","annotation":"Read the input.","nodes":["read"]}]
+    }))
+    .unwrap();
+    base.clusters[0].label = "é".repeat(MAX_CLUSTER_LABEL_BYTES / 2);
+    base.clusters[0].annotation = format!("\n\t{}", "a".repeat(MAX_CLUSTER_ANNOTATION_BYTES - 2));
+    assert!(plan_definition(&base).is_ok());
+    assert_eq!(
+        base,
+        WorkflowDefinition::from_json(&serde_json::to_string(&base).unwrap()).unwrap()
+    );
+
+    for version in [
+        WorkflowDefinitionVersion::V2026_10_03,
+        WorkflowDefinitionVersion::V2026_10_19,
+    ] {
+        let mut invalid = base.clone();
+        invalid.version = version;
+        let error = plan_definition(&invalid).unwrap_err().to_string();
+        assert!(
+            error.contains("node clusters require version 2026-10-23"),
+            "{error}"
+        );
+        let error = serde_json::to_string(&invalid).unwrap_err().to_string();
+        assert!(
+            error.contains("node clusters require version 2026-10-23"),
+            "{error}"
+        );
+    }
+    for label in [
+        format!("{}!", base.clusters[0].label),
+        "two\nlines".into(),
+        "escape\x1b".into(),
+    ] {
+        let mut invalid = base.clone();
+        invalid.clusters[0].label = label;
+        let error = plan_definition(&invalid).unwrap_err().to_string();
+        assert!(error.contains("cluster label"), "{error}");
+    }
+    for annotation in [
+        " \n\t".into(),
+        "escape\x1b".into(),
+        "a".repeat(MAX_CLUSTER_ANNOTATION_BYTES + 1),
+    ] {
+        let mut invalid = base.clone();
+        invalid.clusters[0].annotation = annotation;
+        let error = plan_definition(&invalid).unwrap_err().to_string();
+        assert!(error.contains("cluster annotation"), "{error}");
+    }
+    let mut empty = base.clone();
+    empty.clusters[0].nodes.clear();
+    assert!(
+        plan_definition(&empty)
+            .unwrap_err()
+            .to_string()
+            .contains("at least one node")
+    );
+
+    let mut oversized = base.clone();
+    oversized.nodes = (0..=MAX_CLUSTERS_PER_SCOPE)
+        .map(|index| {
+            let mut node = base.nodes[0].clone();
+            node.id = format!("node-{index}").into();
+            node
+        })
+        .collect();
+    oversized.clusters = oversized
+        .nodes
+        .iter()
+        .map(|node| {
+            let mut cluster = base.clusters[0].clone();
+            cluster.nodes = vec![node.id.clone()];
+            cluster
+        })
+        .collect();
+    assert!(
+        plan_definition(&oversized)
+            .unwrap_err()
+            .to_string()
+            .contains("too many node clusters")
+    );
 }
