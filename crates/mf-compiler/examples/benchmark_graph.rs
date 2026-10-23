@@ -89,3 +89,23 @@ fn main() {
         })
     );
 }
+
+#[test]
+fn task_only_benchmark_preserves_numeric_and_string_payloads() {
+    let registry = NodeRegistry::from_inventory().unwrap();
+    for payload in [0, 16] {
+        let definition = definition(3, payload);
+        assert!(definition.stream_outputs.is_empty());
+        let plan = plan_definition(&definition).unwrap();
+        let output = instantiate_compiled(&plan, &registry)
+            .unwrap()
+            .execute()
+            .unwrap();
+        let expected = if payload == 0 {
+            json!(42)
+        } else {
+            json!("x".repeat(payload))
+        };
+        assert_eq!(output["result"], expected);
+    }
+}

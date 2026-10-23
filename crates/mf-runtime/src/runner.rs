@@ -71,3 +71,27 @@ pub enum WorkflowRunError {
         definition_id: DefinitionId,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::error::Error;
+
+    #[test]
+    fn live_delivery_failure_preserves_its_runtime_source() {
+        let error = WorkflowRunError::LiveOutput {
+            source: crate::StreamError::Execution {
+                message: "transport disconnected".into(),
+            },
+        };
+        assert!(error.to_string().contains("live output delivery failed"));
+        let source = error
+            .source()
+            .unwrap()
+            .downcast_ref::<crate::StreamError>()
+            .unwrap();
+        assert!(
+            matches!(source, crate::StreamError::Execution { message } if message == "transport disconnected")
+        );
+    }
+}

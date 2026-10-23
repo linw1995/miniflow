@@ -254,3 +254,79 @@ fn writer_limits_are_sticky_and_never_publish_a_final_after_failure() {
     let bytes = bytes.lock().unwrap();
     assert_eq!(bytes.iter().filter(|byte| **byte == b'\n').count(), 1);
 }
+
+#[test]
+fn invocation_identity_cannot_change_between_open_values_and_close() {
+    for kind in [
+        LiveOutputKind::Value {
+            value: "preview".into(),
+        },
+        LiveOutputKind::Close { completed: true },
+    ] {
+        let run = RunId::new();
+        let records = [event(LiveOutputKind::Open), {
+            let mut changed = event(kind);
+            changed
+                .invocation
+                .path
+                .push(mf_telemetry::event::LoopPathEntry {
+                    loop_id: "nested".into(),
+                    index: mf_telemetry::Count::try_from(1).unwrap(),
+                });
+            changed
+        }];
+        let mut decoder = LiveOutputDecoder::new(run, &schema(), Default::default()).unwrap();
+        for (sequence, event) in records.into_iter().enumerate() {
+            let mut bytes = serde_json::to_vec(&LiveRecord {
+                version: 1,
+                run_id: run.to_string(),
+                sequence: sequence as u64,
+                record: LiveRecordKind::Event { event },
+            })
+            .unwrap();
+            bytes.push(b'\n');
+            let result = decoder.feed(&bytes, |_| Ok(()));
+            if sequence == 0 {
+                result.unwrap();
+            } else {
+                assert!(matches!(result, Err(LiveProtocolError::Lifecycle { .. })));
+            }
+        }
+        assert!(decoder.final_outputs().is_none());
+        assert!(decoder.finish(|_| Ok(())).is_err());
+    }
+}
+
+#[test]
+fn delivery_failures_preserve_sources_and_prevent_further_writes() {
+    use std::error::Error;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let captured = attempts.clone();
+    let writer = LiveOutputWriter::new(RunId::new(), &schema(), Default::default(), move |_, _| {
+        captured.fetch_add(1, Ordering::SeqCst);
+        Err(mf_runtime::StreamError::Execution {
+            message: "transport disconnected".into(),
+        })
+    })
+    .unwrap();
+    let cancellation = StreamCancellation::default();
+    assert!(
+        writer
+            .publisher()
+            .publish(event(LiveOutputKind::Open), &cancellation)
+            .is_err()
+    );
+    let error = writer
+        .finish(&NodeValues::new(), &cancellation)
+        .unwrap_err();
+    let source = error
+        .source()
+        .unwrap()
+        .downcast_ref::<Arc<mf_runtime::StreamError>>()
+        .unwrap();
+    assert!(
+        matches!(source.as_ref(), mf_runtime::StreamError::Execution { message } if message == "transport disconnected")
+    );
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+}
