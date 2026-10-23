@@ -131,7 +131,9 @@ pub use workflow_inputs::{
     WorkflowInputError, WorkflowInputSchema,
 };
 
-pub use runner_arguments::{RunnerArgumentError, RunnerArguments, RunnerInvocation};
+pub use runner_arguments::{
+    RunnerArgumentError, RunnerArguments, RunnerInvocation, runner_help_command,
+};
 #[cfg(unix)]
 pub use runner_signals::{RunnerSignalError, RunnerSignals};
 

@@ -16,6 +16,7 @@ development-support = []
 [dependencies]
 # Workflow compilation and terminal observation.
 mf-compiler = { workspace = true, features = ["codegen"] }
+mf-runtime.workspace = true
 mf-tui.workspace = true
 
 # Command parsing and error reporting.
@@ -36,7 +37,6 @@ tar.workspace = true
 tempfile.workspace = true
 
 # Pseudo-terminal integration tests and embedded manifest fixtures.
-mf-runtime.workspace = true
 nix = { workspace = true, features = ["fs", "term"] }
 
 # OTLP export assertions.

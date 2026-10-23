@@ -113,6 +113,30 @@ fn compiles_a_runner_without_telemetry_and_preserves_execution() {
         String::from_utf8_lossy(&requested.stderr)
             .contains("recompile the runner without --no-telemetry")
     );
+    for flags in [vec!["--help"], vec!["--node", "echo", "--help"]] {
+        let direct = Command::new(&output).args(&flags).output().unwrap();
+        assert!(direct.status.success(), "{direct:?}");
+        let combined = Command::new(env!("CARGO_BIN_EXE_mf"))
+            .arg("run")
+            .arg(&output)
+            .args(&flags)
+            .output()
+            .unwrap();
+        assert!(combined.status.success(), "{combined:?}");
+        assert!(combined.stderr.is_empty());
+        if flags.len() == 1 {
+            let help = String::from_utf8(combined.stdout).unwrap();
+            let runner_help = help.split_once("Runner help:\n").unwrap().1.trim_end();
+            // The native runner additionally lists Task targets from its execution metadata.
+            assert!(
+                String::from_utf8(direct.stdout)
+                    .unwrap()
+                    .starts_with(runner_help)
+            );
+        } else {
+            assert_eq!(combined.stdout, direct.stdout);
+        }
+    }
     let result = compile_command(&definition, &output)
         .args(["--no-telemetry", "--locked", "--verbose"])
         .output()

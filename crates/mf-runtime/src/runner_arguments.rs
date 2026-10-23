@@ -106,6 +106,11 @@ impl RunnerInvocation {
     }
 }
 
+/// Builds workflow help from the embedded input schema without preparing providers.
+pub fn runner_help_command(schema: &WorkflowInputSchema) -> Command {
+    argument_command([schema], true, Some(&[]))
+}
+
 fn read_context_file(path: &Path) -> Result<Vec<u8>, RunnerArgumentError> {
     let read = || -> io::Result<Vec<u8>> {
         let mut options = File::options();
