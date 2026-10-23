@@ -397,6 +397,7 @@ stored instructions. Provider configuration remains in the workflow and its decl
 | Insert a newline | Enter while editing |
 | Browse messages / return to editing | Esc / i |
 | Open commands | Ctrl+P |
+| Toggle the execution panel | Ctrl+E |
 | New chat / switch saved chat | Ctrl+N / Ctrl+S |
 | Cancel the current execution | Ctrl+C |
 | Quit after cleanup | Ctrl+Q |
@@ -408,7 +409,9 @@ Session switching and new chats wait until the current turn finishes, is cancell
 Additional submissions are rejected instead of queued. Drafts survive switching between idle conversations.
 
 Session history opens at the latest bounded page. Earlier messages and Latest messages are available from the command
-menu. Each execution opens a live Flow panel: wide terminals place the graph beside the conversation, narrower tall
+menu. The Flow panel is enabled by default; Ctrl+E or the command menu toggles it without stopping observation.
+This preference lasts for the current application run, including new turns and conversation switches.
+When enabled, each execution shows a live Flow panel: wide terminals place the graph beside the conversation, narrower tall
 terminals place it below, and small terminals show a single status line. Resizing updates the layout automatically.
 The graph follows the latest executing node and shows node progress, elapsed time, and observation completeness. The
 last run remains visible until another turn starts or the conversation changes. Inspect current run opens the shared
